@@ -1,0 +1,42 @@
+name = "parquet-fortran"
+version = "VERSION.txt"
+license = "BSD-3-Clause"
+author = "Elmo Tempel"
+maintainer = "elmo.tempel@ut.ee"
+copyright = "Copyright 2026, Elmo Tempel"
+description = "Parquet Fortran is a Fortran library for reading and writing Parquet files."
+
+[[executable]]
+name = "run_parquet_fortran"
+source-dir = "app"
+main = "program.f90"
+
+#[dependencies]
+#qfeet.git = "../qfeet"
+
+[dev-dependencies]
+test-drive.git = "https://github.com/fortran-lang/test-drive"
+
+openmp = "*"
+
+[fortran]
+implicit-typing = false
+implicit-external = false
+source-form = "free"
+
+[build]
+auto-executables = true
+auto-tests = true
+auto-examples = true
+module-naming = false
+link = ["arrow", "parquet", "stdc++"]
+#link = ["cfitsio", "healpix"]
+#external-modules = ["pix_tools"]
+
+[install]
+library = false
+test = false
+
+[preprocess]
+[preprocess.cpp]
+macros=["RELEASE_VERSION={version}"]

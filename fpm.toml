@@ -29,7 +29,7 @@ auto-executables = true
 auto-tests = true
 auto-examples = true
 module-naming = false
-link = ["arrow", "parquet", "stdc++"]
+link = ["arrow", "parquet", "c++"]
 #link = ["cfitsio", "healpix"]
 #external-modules = ["pix_tools"]
 

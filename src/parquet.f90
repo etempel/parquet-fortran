@@ -10,12 +10,17 @@ contains
     character(len=*), intent(in) :: filename
     real(c_double), intent(in) :: data(:)
     character(len=*), intent(in) :: unit, description
+    type(c_ptr) :: writer
 
-    call write_parquet_double_meta( &
-        trim(filename)//char(0), &
-        data, size(data, kind=c_long_long), &
-        trim(unit)//char(0), &
-        trim(description)//char(0) )
+    writer = create_parquet_double_writer(trim(filename)//char(0))
+    call write_parquet_double_data( &
+      writer, &
+      data, size(data, kind=c_long_long) )
+    call write_parquet_votable_metadata( &
+      writer, &
+      trim(unit)//char(0), &
+      trim(description)//char(0) )
+    call close_parquet_writer(writer)
   end subroutine
 
 

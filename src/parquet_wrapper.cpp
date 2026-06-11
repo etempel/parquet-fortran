@@ -1,14 +1,27 @@
 #include <arrow/api.h>
 #include <arrow/io/api.h>
-#include <parquet/arrow/writer.h>
 #include <parquet/arrow/reader.h>
+#include <parquet/arrow/writer.h>
 
+#include <ctime>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
 extern "C"
 {
+	struct ParquetWriterHandle
+	{
+		std::unique_ptr<parquet::arrow::FileWriter> writer;
+		std::shared_ptr<arrow::Schema> schema;
+	};
+
+	static ParquetWriterHandle *as_handle(void *handle)
+	{
+		return static_cast<ParquetWriterHandle *>(handle);
+	}
 
 	static std::string xml_escape(const std::string &s)
 	{
@@ -27,7 +40,7 @@ extern "C"
 			case '>':
 				out += "&gt;";
 				break;
-			case '\"':
+			case '"':
 				out += "&quot;";
 				break;
 			case '\'':
@@ -41,16 +54,30 @@ extern "C"
 		return out;
 	}
 
+	static std::string current_utc_timestamp()
+	{
+		std::time_t now = std::time(nullptr);
+		std::tm tm = *std::gmtime(&now);
+		char buffer[32];
+		std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%S", &tm);
+		return std::string(buffer);
+	}
+
 	static std::string build_votable_xml(const std::string &table_name,
 									const std::string &field_name,
 									const std::string &unit,
-									const std::string &description)
+									const std::string &description,
+									const std::string &date)
 	{
 		std::ostringstream xml;
 		xml << "<?xml version='1.0'?>\n"
 			<< "<VOTABLE version=\"1.4\" xmlns=\"http://www.ivoa.net/xml/VOTable/v1.3\">\n"
 			<< "<RESOURCE>\n"
 			<< "<TABLE name=\"" << xml_escape(table_name) << "\">\n"
+			<< "<PARAM arraysize=\"19\" datatype=\"char\" name=\"DATE\" value=\""
+			<< xml_escape(date) << "\">\n"
+			<< "<DESCRIPTION>file creation date (YYYY-MM-DDThh:mm:ss UT)</DESCRIPTION>\n"
+			<< "</PARAM>\n"
 			<< "<FIELD datatype=\"double\" name=\"" << xml_escape(field_name)
 			<< "\" unit=\"" << xml_escape(unit) << "\">\n"
 			<< "<DESCRIPTION>" << xml_escape(description) << "</DESCRIPTION>\n"
@@ -62,40 +89,11 @@ extern "C"
 		return xml.str();
 	}
 
-	// ---------- WRITE ----------
-	void write_parquet_double_meta(
-		const char *filename,
-		double *data,
-		int64_t n,
-		const char *unit,
-		const char *description)
+	void *create_parquet_double_writer(const char *filename)
 	{
-		arrow::DoubleBuilder builder;
-
-		auto status = builder.AppendValues(data, n);
-		if (!status.ok())
-			throw std::runtime_error(status.ToString());
-
-		std::shared_ptr<arrow::Array> array;
-		status = builder.Finish(&array);
-		if (!status.ok())
-			throw std::runtime_error(status.ToString());
-
-		// Keep per-column metadata on the Arrow field.
-		std::vector<std::string> keys = {"unit", "description"};
-		std::vector<std::string> values = {unit, description};
-		auto metadata = std::make_shared<arrow::KeyValueMetadata>(keys, values);
-
-		auto field = arrow::field("mycol", arrow::float64(), false, metadata);
-
-		std::vector<std::string> schema_keys = {"mycol.unit", "mycol.description"};
-		std::vector<std::string> schema_values = {unit, description};
-		auto schema_metadata = std::make_shared<arrow::KeyValueMetadata>(schema_keys, schema_values);
-
-		auto schema = arrow::schema({field}, schema_metadata);
-		auto table = arrow::Table::Make(schema, {array});
-
 		auto outfile = arrow::io::FileOutputStream::Open(filename).ValueOrDie();
+		auto field = arrow::field("mycol", arrow::float64(), false);
+		auto schema = arrow::schema({field});
 
 		parquet::ArrowWriterProperties::Builder arrow_writer_builder;
 		arrow_writer_builder.store_schema();
@@ -111,23 +109,51 @@ extern "C"
 		if (!maybe_writer.ok())
 			throw std::runtime_error(maybe_writer.status().ToString());
 
-		auto writer = std::move(maybe_writer).ValueOrDie();
+		auto *handle = new ParquetWriterHandle{};
+		handle->writer = std::move(maybe_writer).ValueOrDie();
+		handle->schema = schema;
+		return handle;
+	}
 
-		auto votable_xml = build_votable_xml("table", "mycol", unit, description);
+	void write_parquet_double_data(void *handle, const double *data, int64_t n)
+	{
+		auto writer_handle = as_handle(handle);
+		arrow::DoubleBuilder builder;
+
+		auto status = builder.AppendValues(data, n);
+		if (!status.ok())
+			throw std::runtime_error(status.ToString());
+
+		std::shared_ptr<arrow::Array> array;
+		status = builder.Finish(&array);
+		if (!status.ok())
+			throw std::runtime_error(status.ToString());
+
+		auto table = arrow::Table::Make(writer_handle->schema, {array});
+		status = writer_handle->writer->WriteTable(*table, 1024);
+		if (!status.ok())
+			throw std::runtime_error(status.ToString());
+	}
+
+	void write_parquet_votable_metadata(void *handle, const char *unit, const char *description)
+	{
+		auto writer_handle = as_handle(handle);
+		auto date = current_utc_timestamp();
+		auto votable_xml = build_votable_xml("table", "mycol", unit, description, date);
 		auto file_metadata = std::make_shared<arrow::KeyValueMetadata>(
-			std::vector<std::string>{"IVOA.VOTable-Parquet.content", "IVOA.VOTable-Parquet.version", "name"},
-			std::vector<std::string>{votable_xml, "1.0", "table"});
+			std::vector<std::string>{"IVOA.VOTable-Parquet.content", "IVOA.VOTable-Parquet.version", "DATE", "name"},
+			std::vector<std::string>{votable_xml, "1.0", date, "table"});
 
-		status = writer->AddKeyValueMetadata(file_metadata);
+		auto status = writer_handle->writer->AddKeyValueMetadata(file_metadata);
 		if (!status.ok())
 			throw std::runtime_error(status.ToString());
+	}
 
-		status = writer->WriteTable(*table, 1024);
-		if (!status.ok())
-			throw std::runtime_error(status.ToString());
-
-		status = writer->Close();
-
+	void close_parquet_writer(void *handle)
+	{
+		auto writer_handle = as_handle(handle);
+		auto status = writer_handle->writer->Close();
+		delete writer_handle;
 		if (!status.ok())
 			throw std::runtime_error(status.ToString());
 	}
@@ -141,9 +167,9 @@ extern "C"
 		auto infile = arrow::io::ReadableFile::Open(filename).ValueOrDie();
 
 		auto reader = parquet::arrow::OpenFile(
-						  infile,
-						  arrow::default_memory_pool())
-						  .ValueOrDie();
+					  infile,
+					  arrow::default_memory_pool())
+					  .ValueOrDie();
 
 		auto table = reader->ReadTable().ValueOrDie();
 

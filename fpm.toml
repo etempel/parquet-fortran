@@ -30,8 +30,6 @@ auto-tests = true
 auto-examples = true
 module-naming = false
 link = ["arrow", "parquet", "c++"]
-#link = ["cfitsio", "healpix"]
-#external-modules = ["pix_tools"]
 
 [install]
 library = false

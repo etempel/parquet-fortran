@@ -36,5 +36,6 @@ library = false
 test = false
 
 [preprocess]
-[preprocess.cpp]
+[preprocess.fypp]
+suffixes = ["f90"]
 macros=["RELEASE_VERSION={version}"]

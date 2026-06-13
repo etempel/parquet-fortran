@@ -1,8 +1,11 @@
 
 module parquet
-  use iso_c_binding
-  use parquet_bindings
-  implicit none
+    use iso_c_binding
+    use parquet_bindings
+    implicit none
+    !
+    character(len=*),parameter:: cversion = "v0.1dev1 (2026-03-03)" !< version info
+    logical,protected :: creleased_version = .false. !< is this a released version? (will be set automatically)
 
 contains
 
@@ -33,5 +36,18 @@ contains
         trim(filename)//char(0), &
         data, n )
   end subroutine
+
+  function get_released_version() result(ver_string)
+    implicit none
+    character (len=:), allocatable :: ver_string
+    character(len=128) :: line
+    integer :: unit, ios
+    !
+    ver_string = "${RELEASE_VERSION}$"
+    if (index(ver_string, "${") /= 0) then
+      ver_string = "0.0.0"
+    end if
+    !
+end function get_released_version
 
 end module

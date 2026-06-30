@@ -87,6 +87,17 @@ module parquet_bindings
       integer(c_long_long), value :: nrows
     end subroutine
 
+    subroutine parquet_append_string_array_column(writer, name, data, item_len, nrows, array_size) &
+        bind(C, name="parquet_append_string_array_column")
+      import
+      type(c_ptr), value :: writer
+      character(kind=c_char) :: name(*)
+      character(kind=c_char) :: data(*)
+      integer(c_long_long), value :: item_len
+      integer(c_long_long), value :: nrows
+      integer(c_long_long), value :: array_size
+    end subroutine
+
     function create_parquet_double_writer(filename) &
         bind(C, name="create_parquet_double_writer") result(writer)
       import

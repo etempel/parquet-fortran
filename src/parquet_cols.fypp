@@ -1,0 +1,75 @@
+#:def _dtype_is_string(dtype)
+${str(dtype).startswith("string")}
+#:enddef
+
+#:def _dtype_string_len(dtype)
+#:set _d = str(dtype)
+#:if _d.startswith("string") and "_" in _d
+${int(_d.split("_")[1])}
+#:else
+16
+#:endif
+#:enddef
+
+#:def _dtype_base(dtype)
+#:set _d = str(dtype)
+#:if _d.startswith("string")
+string
+#:else
+${_d}
+#:endif
+#:enddef
+
+#:def emit_type_fields(cols)
+#:for col in cols
+#:set _var = col[1]
+#:set _dtype = col[2]
+#:set _asize = col[3] if len(col) > 3 else 1
+#:set _is_string = str(_dtype).startswith("string")
+#:set _strlen = int(str(_dtype).split("_")[1]) if (_is_string and "_" in str(_dtype)) else 16
+#:if _is_string and _asize == 1
+        character(len=${_strlen}) :: ${_var}
+#:elif _is_string and _asize > 1
+        character(len=${_strlen}), dimension(1:${_asize}) :: ${_var}
+#:elif _dtype == "int32" and _asize == 1
+        integer(int32) :: ${_var}
+#:elif _dtype == "int32" and _asize > 1
+        integer(int32), dimension(1:${_asize}) :: ${_var}
+#:elif _dtype == "int64" and _asize == 1
+        integer(int64) :: ${_var}
+#:elif _dtype == "int64" and _asize > 1
+        integer(int64), dimension(1:${_asize}) :: ${_var}
+#:elif _dtype == "float32" and _asize == 1
+        real(real32) :: ${_var}
+#:elif _dtype == "float32" and _asize > 1
+        real(real32), dimension(1:${_asize}) :: ${_var}
+#:elif _dtype == "float64" and _asize == 1
+        real(real64) :: ${_var}
+#:elif _dtype == "float64" and _asize > 1
+        real(real64), dimension(1:${_asize}) :: ${_var}
+#:elif _dtype == "boolean" and _asize == 1
+        logical :: ${_var}
+#:elif _dtype == "boolean" and _asize > 1
+        logical, dimension(1:${_asize}) :: ${_var}
+#:else
+#:raise ValueError("Unsupported data_type in cols: {}".format(_dtype))
+#:endif
+#:endfor
+#:enddef
+
+#:def emit_cinfo_init(cinfo_name, cols)
+        allocate(${cinfo_name}(${len(cols)}))
+#:for i, col in enumerate(cols, start=1)
+#:set _name = col[0]
+#:set _var = col[1]
+#:set _dtype = col[2]
+#:set _asize = col[3] if len(col) > 3 else 1
+#:set _unit = col[4] if len(col) > 4 else ""
+#:set _info = col[5] if len(col) > 5 else "Generated from cols"
+#:set _ucd = col[6] if len(col) > 6 else ""
+#:set _is_string = str(_dtype).startswith("string")
+#:set _base_dtype = "string" if _is_string else _dtype
+#:set _strlen = int(str(_dtype).split("_")[1]) if (_is_string and "_" in str(_dtype)) else 0
+        ${cinfo_name}(${i}) = column_info(.true., '${_name}', '${_unit}', '${_info}', '${_ucd}', '${_base_dtype}', '${_var}', ${_asize}, ${_strlen})
+#:endfor
+#:enddef

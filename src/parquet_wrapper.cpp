@@ -456,6 +456,34 @@ extern "C"
 		append_column(writer_handle, name, build_field(name, arrow::utf8(), 1), array);
 	}
 
+	void parquet_append_string_array_column(void *handle, const char *name, const char *data, int64_t item_len, int64_t nrows, int64_t array_size)
+	{
+		auto writer_handle = as_handle(handle);
+		auto value_builder = std::make_shared<arrow::StringBuilder>();
+		arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(array_size));
+
+		auto status = list_builder.AppendValues(nrows);
+		if (!status.ok())
+			throw std::runtime_error(status.ToString());
+
+		for (int64_t i = 0; i < nrows * array_size; ++i)
+		{
+			const char *raw = data + i * item_len;
+			std::string value(raw, static_cast<size_t>(item_len));
+			value = trim_right_spaces_and_nuls(value);
+			status = value_builder->Append(value);
+			if (!status.ok())
+				throw std::runtime_error(status.ToString());
+		}
+
+		std::shared_ptr<arrow::Array> array;
+		status = list_builder.Finish(&array);
+		if (!status.ok())
+			throw std::runtime_error(status.ToString());
+
+		append_column(writer_handle, name, build_field(name, arrow::utf8(), array_size), array);
+	}
+
 	void *create_parquet_double_writer(const char *filename)
 	{
 		return create_parquet_writer(filename);

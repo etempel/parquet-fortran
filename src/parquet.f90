@@ -15,7 +15,9 @@ module parquet
       character(len=:), allocatable :: info
       character(len=:), allocatable :: ucd
       character(len=:), allocatable :: data_type
+      character(len=:), allocatable :: variable_name
       integer :: array_size
+      integer :: string_length
     end type column_info
 
     type parquet_writer
@@ -379,7 +381,7 @@ contains
     character(len=*), intent(in) :: name
     character(len=*), intent(in) :: data(:)
     character(kind=c_char), allocatable :: packed(:)
-    integer :: i, j, k, nrows, item_len, idx
+    integer :: i, j, k, nrows, item_len, idx, asize, nitems
 
     if (writer%enforce_schema) then
       idx = parquet_get_defined_column_index(writer, name)
@@ -392,26 +394,40 @@ contains
     if (.not. parquet_is_column_enabled(writer, name)) return
     call parquet_mark_column_written(writer, name)
 
-    nrows = size(data)
-    if (nrows <= 0) return
+    asize = parquet_get_column_array_size(writer, name)
+    nitems = size(data)
+    if (nitems <= 0) return
+    if (mod(nitems, asize) /= 0) stop "parquet_write_string_column: data size is not divisible by array_size"
+
+    nrows = nitems / asize
 
     item_len = len(data(1))
-    allocate(packed(item_len*nrows))
+    allocate(packed(item_len*nitems))
 
     k = 0
-    do i = 1, nrows
+    do i = 1, nitems
       do j = 1, item_len
         k = k + 1
         packed(k) = achar(iachar(data(i)(j:j)), kind=c_char)
       end do
     end do
 
-    call parquet_append_string_column(&
-      writer%handle, &
-      trim(name)//char(0), &
-      packed, &
-      int(item_len, kind=c_long_long), &
-      int(nrows, kind=c_long_long) )
+    if (asize == 1) then
+      call parquet_append_string_column(&
+        writer%handle, &
+        trim(name)//char(0), &
+        packed, &
+        int(item_len, kind=c_long_long), &
+        int(nrows, kind=c_long_long) )
+    else
+      call parquet_append_string_array_column(&
+        writer%handle, &
+        trim(name)//char(0), &
+        packed, &
+        int(item_len, kind=c_long_long), &
+        int(nrows, kind=c_long_long), &
+        int(asize, kind=c_long_long) )
+    end if
   end subroutine parquet_write_string_column
 
   subroutine parquet_close_writer(writer)

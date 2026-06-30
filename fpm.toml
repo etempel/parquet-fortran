@@ -11,8 +11,8 @@ name = "run_parquet_fortran"
 source-dir = "app"
 main = "program.f90"
 
-#[dependencies]
-#qfeet.git = "../qfeet"
+[dependencies]
+qfeet.git = "../qfeet"
 
 [dev-dependencies]
 test-drive.git = "https://github.com/fortran-lang/test-drive"

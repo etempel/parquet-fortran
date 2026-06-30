@@ -1,29 +1,449 @@
 
 module parquet
     use iso_c_binding
+    use iso_fortran_env, only: int8, int32, int64, real32, real64
     use parquet_bindings
     implicit none
     !
     character(len=*),parameter:: cversion = "v0.1dev1 (2026-03-03)" !< version info
     logical,protected :: creleased_version = .false. !< is this a released version? (will be set automatically)
 
+    type column_info
+      logical :: is_set = .false.
+      character(len=:), allocatable :: name
+      character(len=:), allocatable :: unit
+      character(len=:), allocatable :: info
+      character(len=:), allocatable :: ucd
+      character(len=:), allocatable :: data_type
+      integer :: array_size
+    end type column_info
+
+    type parquet_writer
+      type(c_ptr) :: handle = c_null_ptr
+      type(column_info), allocatable :: all_columns(:)
+      type(column_info), allocatable :: enabled_columns(:)
+      integer, allocatable :: write_counts(:)
+      logical :: enforce_schema = .false.
+    end type parquet_writer
+
+    interface parquet_write_column
+      module procedure parquet_write_int32_column
+      module procedure parquet_write_int64_column
+      module procedure parquet_write_float32_column
+      module procedure parquet_write_float64_column
+      module procedure parquet_write_logical_column
+      module procedure parquet_write_string_column
+    end interface parquet_write_column
+
+    public :: parquet_writer
+    public :: column_info
+    public :: parquet_open_writer
+    public :: parquet_add_column_info
+    public :: parquet_write_int32_column
+    public :: parquet_write_int64_column
+    public :: parquet_write_float32_column
+    public :: parquet_write_float64_column
+    public :: parquet_write_logical_column
+    public :: parquet_write_string_column
+    public :: parquet_write_column
+    public :: parquet_close_writer
+    public :: write_column
+    public :: read_column
+    public :: get_released_version
+
 contains
+
+  integer function parquet_get_enabled_column_index(writer, name)
+    type(parquet_writer), intent(in) :: writer
+    character(len=*), intent(in) :: name
+    integer :: i
+
+    parquet_get_enabled_column_index = 0
+    if (.not. allocated(writer%enabled_columns)) return
+
+    do i = 1, size(writer%enabled_columns)
+      if (trim(writer%enabled_columns(i)%name) == trim(name)) then
+        parquet_get_enabled_column_index = i
+        return
+      end if
+    end do
+  end function parquet_get_enabled_column_index
+
+  integer function parquet_get_defined_column_index(writer, name)
+    type(parquet_writer), intent(in) :: writer
+    character(len=*), intent(in) :: name
+    integer :: i
+
+    parquet_get_defined_column_index = 0
+    if (.not. allocated(writer%all_columns)) return
+
+    do i = 1, size(writer%all_columns)
+      if (trim(writer%all_columns(i)%name) == trim(name)) then
+        parquet_get_defined_column_index = i
+        return
+      end if
+    end do
+  end function parquet_get_defined_column_index
+
+  logical function parquet_is_type_compatible(actual_type, expected_type)
+    character(len=*), intent(in) :: actual_type
+    character(len=*), intent(in) :: expected_type
+
+    select case (trim(expected_type))
+    case ("boolean")
+      parquet_is_type_compatible = trim(actual_type) == "boolean" .or. trim(actual_type) == "bool8"
+    case default
+      parquet_is_type_compatible = trim(actual_type) == trim(expected_type)
+    end select
+  end function parquet_is_type_compatible
+
+  subroutine parquet_assert_column_type(writer, name, expected_type)
+    type(parquet_writer), intent(in) :: writer
+    character(len=*), intent(in) :: name
+    character(len=*), intent(in) :: expected_type
+    integer :: idx
+
+    if (.not. writer%enforce_schema) return
+
+    idx = parquet_get_defined_column_index(writer, name)
+    if (idx == 0) then
+      error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name)
+    end if
+
+    if (.not. parquet_is_type_compatible(writer%all_columns(idx)%data_type, expected_type)) then
+      error stop "parquet_write_column: type mismatch for column " // trim(name) // &
+                 " (expected " // trim(expected_type) // ", got " // trim(writer%all_columns(idx)%data_type) // ")"
+    end if
+  end subroutine parquet_assert_column_type
+
+  subroutine parquet_mark_column_written(writer, name)
+    type(parquet_writer), intent(inout) :: writer
+    character(len=*), intent(in) :: name
+    integer :: idx
+
+    if (.not. allocated(writer%enabled_columns)) return
+
+    idx = parquet_get_enabled_column_index(writer, name)
+    if (idx == 0) return
+
+    if (writer%write_counts(idx) > 0) then
+      error stop "parquet_write_column: column written more than once: " // trim(name)
+    end if
+    writer%write_counts(idx) = writer%write_counts(idx) + 1
+  end subroutine parquet_mark_column_written
+
+  logical function parquet_is_column_enabled(writer, name)
+    type(parquet_writer), intent(in) :: writer
+    character(len=*), intent(in) :: name
+
+    parquet_is_column_enabled = .true.
+    if (.not. allocated(writer%enabled_columns)) return
+
+    parquet_is_column_enabled = parquet_get_enabled_column_index(writer, name) > 0
+  end function parquet_is_column_enabled
+
+  integer function parquet_get_column_array_size(writer, name)
+    type(parquet_writer), intent(in) :: writer
+    character(len=*), intent(in) :: name
+    integer :: i
+
+    parquet_get_column_array_size = 1
+    if (.not. allocated(writer%enabled_columns)) return
+
+    do i = 1, size(writer%enabled_columns)
+      if (trim(writer%enabled_columns(i)%name) == trim(name)) then
+        parquet_get_column_array_size = max(1, writer%enabled_columns(i)%array_size)
+        return
+      end if
+    end do
+  end function parquet_get_column_array_size
+
+  subroutine parquet_open_writer(writer, filename, cinfo)
+    type(parquet_writer), intent(out) :: writer
+    character(len=*), intent(in) :: filename
+    type(column_info), intent(in), optional :: cinfo(:)
+    integer :: i, k, n_enabled
+
+    writer%handle = create_parquet_writer(trim(filename)//char(0))
+    writer%enforce_schema = present(cinfo)
+
+    if (present(cinfo)) then
+      allocate(writer%all_columns(size(cinfo)))
+      writer%all_columns = cinfo
+
+      n_enabled = 0
+      do i = 1, size(cinfo)
+        if (cinfo(i)%is_set) n_enabled = n_enabled + 1
+      end do
+
+      if (n_enabled > 0) then
+        allocate(writer%enabled_columns(n_enabled))
+        allocate(writer%write_counts(n_enabled))
+        writer%write_counts = 0
+        k = 0
+      end if
+
+      do i = 1, size(cinfo)
+        if (cinfo(i)%is_set) then
+          k = k + 1
+          writer%enabled_columns(k) = cinfo(i)
+          call parquet_add_column_info(&
+            writer, &
+            cinfo(i)%name, &
+            cinfo(i)%unit, &
+            cinfo(i)%info, &
+            cinfo(i)%ucd, &
+            cinfo(i)%data_type, &
+            cinfo(i)%array_size )
+        end if
+      end do
+    end if
+  end subroutine parquet_open_writer
+
+  subroutine parquet_add_column_info(writer, name, unit, description, ucd, data_type, array_size)
+    type(parquet_writer), intent(inout) :: writer
+    character(len=*), intent(in) :: name
+    character(len=*), intent(in) :: unit
+    character(len=*), intent(in) :: description
+    character(len=*), intent(in) :: ucd
+    character(len=*), intent(in) :: data_type
+    integer, intent(in) :: array_size
+
+    call parquet_add_column_metadata(&
+      writer%handle, &
+      trim(name)//char(0), &
+      trim(unit)//char(0), &
+      trim(description)//char(0), &
+      trim(ucd)//char(0), &
+      trim(data_type)//char(0), &
+      int(array_size, kind=c_long_long) )
+  end subroutine parquet_add_column_info
+
+  subroutine parquet_write_int32_column(writer, name, data)
+    type(parquet_writer), intent(inout) :: writer
+    character(len=*), intent(in) :: name
+    integer(int32), intent(in) :: data(:)
+    integer :: asize, nrows, idx
+
+    if (writer%enforce_schema) then
+      idx = parquet_get_defined_column_index(writer, name)
+      if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name)
+      if (.not. writer%all_columns(idx)%is_set) return
+    end if
+
+    call parquet_assert_column_type(writer, name, "int32")
+
+    if (.not. parquet_is_column_enabled(writer, name)) return
+    call parquet_mark_column_written(writer, name)
+
+    asize = parquet_get_column_array_size(writer, name)
+    if (mod(size(data), asize) /= 0) stop "parquet_write_int32_column: data size is not divisible by array_size"
+    nrows = size(data) / asize
+
+    call parquet_append_int32_column(&
+      writer%handle, &
+      trim(name)//char(0), &
+      data, &
+      int(nrows, kind=c_long_long), &
+      int(asize, kind=c_long_long) )
+  end subroutine parquet_write_int32_column
+
+  subroutine parquet_write_int64_column(writer, name, data)
+    type(parquet_writer), intent(inout) :: writer
+    character(len=*), intent(in) :: name
+    integer(int64), intent(in) :: data(:)
+    integer :: asize, nrows, idx
+
+    if (writer%enforce_schema) then
+      idx = parquet_get_defined_column_index(writer, name)
+      if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name)
+      if (.not. writer%all_columns(idx)%is_set) return
+    end if
+
+    call parquet_assert_column_type(writer, name, "int64")
+
+    if (.not. parquet_is_column_enabled(writer, name)) return
+    call parquet_mark_column_written(writer, name)
+
+    asize = parquet_get_column_array_size(writer, name)
+    if (mod(size(data), asize) /= 0) stop "parquet_write_int64_column: data size is not divisible by array_size"
+    nrows = size(data) / asize
+
+    call parquet_append_int64_column(&
+      writer%handle, &
+      trim(name)//char(0), &
+      data, &
+      int(nrows, kind=c_long_long), &
+      int(asize, kind=c_long_long) )
+  end subroutine parquet_write_int64_column
+
+  subroutine parquet_write_float32_column(writer, name, data)
+    type(parquet_writer), intent(inout) :: writer
+    character(len=*), intent(in) :: name
+    real(real32), intent(in) :: data(:)
+    integer :: asize, nrows, idx
+
+    if (writer%enforce_schema) then
+      idx = parquet_get_defined_column_index(writer, name)
+      if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name)
+      if (.not. writer%all_columns(idx)%is_set) return
+    end if
+
+    call parquet_assert_column_type(writer, name, "float32")
+
+    if (.not. parquet_is_column_enabled(writer, name)) return
+    call parquet_mark_column_written(writer, name)
+
+    asize = parquet_get_column_array_size(writer, name)
+    if (mod(size(data), asize) /= 0) stop "parquet_write_float32_column: data size is not divisible by array_size"
+    nrows = size(data) / asize
+
+    call parquet_append_float32_column(&
+      writer%handle, &
+      trim(name)//char(0), &
+      data, &
+      int(nrows, kind=c_long_long), &
+      int(asize, kind=c_long_long) )
+  end subroutine parquet_write_float32_column
+
+  subroutine parquet_write_float64_column(writer, name, data)
+    type(parquet_writer), intent(inout) :: writer
+    character(len=*), intent(in) :: name
+    real(real64), intent(in) :: data(:)
+    integer :: asize, nrows, idx
+
+    if (writer%enforce_schema) then
+      idx = parquet_get_defined_column_index(writer, name)
+      if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name)
+      if (.not. writer%all_columns(idx)%is_set) return
+    end if
+
+    call parquet_assert_column_type(writer, name, "float64")
+
+    if (.not. parquet_is_column_enabled(writer, name)) return
+    call parquet_mark_column_written(writer, name)
+
+    asize = parquet_get_column_array_size(writer, name)
+    if (mod(size(data), asize) /= 0) stop "parquet_write_float64_column: data size is not divisible by array_size"
+    nrows = size(data) / asize
+
+    call parquet_append_float64_column(&
+      writer%handle, &
+      trim(name)//char(0), &
+      data, &
+      int(nrows, kind=c_long_long), &
+      int(asize, kind=c_long_long) )
+  end subroutine parquet_write_float64_column
+
+  subroutine parquet_write_logical_column(writer, name, data)
+    type(parquet_writer), intent(inout) :: writer
+    character(len=*), intent(in) :: name
+    logical, intent(in) :: data(:)
+    integer :: asize, nrows, i, idx
+    integer(c_int8_t), allocatable :: bool_data(:)
+
+    if (writer%enforce_schema) then
+      idx = parquet_get_defined_column_index(writer, name)
+      if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name)
+      if (.not. writer%all_columns(idx)%is_set) return
+    end if
+
+    call parquet_assert_column_type(writer, name, "boolean")
+
+    if (.not. parquet_is_column_enabled(writer, name)) return
+    call parquet_mark_column_written(writer, name)
+
+    asize = parquet_get_column_array_size(writer, name)
+    if (mod(size(data), asize) /= 0) stop "parquet_write_logical_column: data size is not divisible by array_size"
+    nrows = size(data) / asize
+
+    allocate(bool_data(size(data)))
+    do i = 1, size(data)
+      if (data(i)) then
+        bool_data(i) = 1_c_int8_t
+      else
+        bool_data(i) = 0_c_int8_t
+      end if
+    end do
+
+    call parquet_append_bool8_column(&
+      writer%handle, &
+      trim(name)//char(0), &
+      bool_data, &
+      int(nrows, kind=c_long_long), &
+      int(asize, kind=c_long_long) )
+  end subroutine parquet_write_logical_column
+
+  subroutine parquet_write_string_column(writer, name, data)
+    type(parquet_writer), intent(inout) :: writer
+    character(len=*), intent(in) :: name
+    character(len=*), intent(in) :: data(:)
+    character(kind=c_char), allocatable :: packed(:)
+    integer :: i, j, k, nrows, item_len, idx
+
+    if (writer%enforce_schema) then
+      idx = parquet_get_defined_column_index(writer, name)
+      if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name)
+      if (.not. writer%all_columns(idx)%is_set) return
+    end if
+
+    call parquet_assert_column_type(writer, name, "string")
+
+    if (.not. parquet_is_column_enabled(writer, name)) return
+    call parquet_mark_column_written(writer, name)
+
+    nrows = size(data)
+    if (nrows <= 0) return
+
+    item_len = len(data(1))
+    allocate(packed(item_len*nrows))
+
+    k = 0
+    do i = 1, nrows
+      do j = 1, item_len
+        k = k + 1
+        packed(k) = achar(iachar(data(i)(j:j)), kind=c_char)
+      end do
+    end do
+
+    call parquet_append_string_column(&
+      writer%handle, &
+      trim(name)//char(0), &
+      packed, &
+      int(item_len, kind=c_long_long), &
+      int(nrows, kind=c_long_long) )
+  end subroutine parquet_write_string_column
+
+  subroutine parquet_close_writer(writer)
+    type(parquet_writer), intent(inout) :: writer
+    integer :: i
+
+    if (writer%enforce_schema .and. allocated(writer%enabled_columns)) then
+      do i = 1, size(writer%enabled_columns)
+        if (writer%write_counts(i) == 0) then
+          error stop "parquet_close_writer: missing write for enabled column: " // trim(writer%enabled_columns(i)%name)
+        end if
+      end do
+    end if
+
+    call close_parquet_writer(writer%handle)
+    writer%handle = c_null_ptr
+    if (allocated(writer%all_columns)) deallocate(writer%all_columns)
+    if (allocated(writer%write_counts)) deallocate(writer%write_counts)
+    if (allocated(writer%enabled_columns)) deallocate(writer%enabled_columns)
+    writer%enforce_schema = .false.
+  end subroutine parquet_close_writer
 
   subroutine write_column(filename, data, unit, description)
     character(len=*), intent(in) :: filename
     real(c_double), intent(in) :: data(:)
     character(len=*), intent(in) :: unit, description
-    type(c_ptr) :: writer
+    type(parquet_writer) :: writer
 
-    writer = create_parquet_double_writer(trim(filename)//char(0))
-    call write_parquet_double_data( &
-      writer, &
-      data, size(data, kind=c_long_long) )
-    call write_parquet_votable_metadata( &
-      writer, &
-      trim(unit)//char(0), &
-      trim(description)//char(0) )
-    call close_parquet_writer(writer)
+    call parquet_open_writer(writer, filename)
+    call parquet_add_column_info(writer, "mycol", unit, description, "", "float64", 1)
+    call parquet_write_float64_column(writer, "mycol", data)
+    call parquet_close_writer(writer)
   end subroutine
 
 

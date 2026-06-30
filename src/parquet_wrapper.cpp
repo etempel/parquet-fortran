@@ -28,6 +28,7 @@ extern "C"
 		std::vector<std::shared_ptr<arrow::Field>> fields;
 		std::vector<std::shared_ptr<arrow::Array>> arrays;
 		std::vector<ColumnMetadata> column_metadata;
+		std::vector<std::pair<std::string, std::string>> table_metadata;
 	};
 
 	static ParquetWriterHandle *as_handle(void *handle)
@@ -69,7 +70,12 @@ extern "C"
 	static std::string current_utc_timestamp()
 	{
 		std::time_t now = std::time(nullptr);
-		std::tm tm = *std::gmtime(&now);
+		std::tm tm{};
+#if defined(_WIN32)
+		gmtime_s(&tm, &now);
+#else
+		gmtime_r(&now, &tm);
+#endif
 		char buffer[32];
 		std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%S", &tm);
 		return std::string(buffer);
@@ -87,6 +93,7 @@ extern "C"
 
 	static std::string build_votable_xml(const std::string &table_name,
 									const std::vector<ColumnMetadata> &columns,
+									const std::vector<std::pair<std::string, std::string>> &table_metadata,
 									const std::string &date)
 	{
 		std::ostringstream xml;
@@ -99,6 +106,15 @@ extern "C"
 			<< "<DESCRIPTION>file creation date (YYYY-MM-DDThh:mm:ss UT)</DESCRIPTION>\n"
 			<< "</PARAM>\n"
 		;
+
+		for (const auto &kv : table_metadata)
+		{
+			xml << "<PARAM datatype=\"char\" arraysize=\"*\" name=\""
+				<< xml_escape(kv.first)
+				<< "\" value=\""
+				<< xml_escape(kv.second)
+				<< "\"/>\n";
+		}
 
 		for (const auto &col : columns)
 		{
@@ -184,10 +200,11 @@ extern "C"
 	}
 
 	static std::shared_ptr<arrow::KeyValueMetadata> build_file_metadata(
-		const std::vector<ColumnMetadata> &column_metadata)
+		const std::vector<ColumnMetadata> &column_metadata,
+		const std::vector<std::pair<std::string, std::string>> &table_metadata)
 	{
 		auto date = current_utc_timestamp();
-		auto votable_xml = build_votable_xml("table", column_metadata, date);
+		auto votable_xml = build_votable_xml("table", column_metadata, table_metadata, date);
 
 		std::vector<std::string> keys{
 			"IVOA.VOTable-Parquet.content",
@@ -195,6 +212,12 @@ extern "C"
 			"DATE",
 			"name"};
 		std::vector<std::string> values{votable_xml, "1.0", date, "table"};
+
+		for (const auto &kv : table_metadata)
+		{
+			keys.push_back(kv.first);
+			values.push_back(kv.second);
+		}
 
 		for (const auto &col : column_metadata)
 		{
@@ -248,6 +271,14 @@ extern "C"
 		{
 			writer_handle->arrays.resize(target_size);
 		}
+	}
+
+	void parquet_add_table_metadata(void *handle, const char *key, const char *value)
+	{
+		auto writer_handle = as_handle(handle);
+		writer_handle->table_metadata.emplace_back(
+			std::string(key),
+			std::string(value));
 	}
 
 	void parquet_append_int32_column(void *handle, const char *name, const int32_t *data, int64_t nrows, int64_t array_size)
@@ -484,35 +515,6 @@ extern "C"
 		append_column(writer_handle, name, build_field(name, arrow::utf8(), array_size), array);
 	}
 
-	void *create_parquet_double_writer(const char *filename)
-	{
-		return create_parquet_writer(filename);
-	}
-
-	void write_parquet_double_data(void *handle, const double *data, int64_t n)
-	{
-		parquet_append_float64_column(handle, "mycol", data, n, 1);
-	}
-
-	void write_parquet_votable_metadata(void *handle, const char *unit, const char *description)
-	{
-		auto writer_handle = as_handle(handle);
-		if (writer_handle->column_metadata.empty())
-		{
-			writer_handle->column_metadata.push_back(ColumnMetadata{
-				"mycol",
-				unit,
-				description,
-				"",
-				"float64",
-				1});
-		}
-		else
-		{
-			writer_handle->column_metadata[0].unit = unit;
-			writer_handle->column_metadata[0].description = description;
-		}
-	}
 
 	void close_parquet_writer(void *handle)
 	{
@@ -538,7 +540,7 @@ extern "C"
 			}
 		}
 
-		auto metadata = build_file_metadata(writer_handle->column_metadata);
+		auto metadata = build_file_metadata(writer_handle->column_metadata, writer_handle->table_metadata);
 		auto schema = arrow::schema(writer_handle->fields, metadata);
 		auto table = arrow::Table::Make(schema, writer_handle->arrays);
 
@@ -566,29 +568,4 @@ extern "C"
 			throw std::runtime_error(status.ToString());
 	}
 
-	// ---------- READ ----------
-	void read_parquet_double(
-		const char *filename,
-		double *data,
-		int64_t *n)
-	{
-		auto infile = arrow::io::ReadableFile::Open(filename).ValueOrDie();
-
-		auto reader = parquet::arrow::OpenFile(
-					  infile,
-					  arrow::default_memory_pool())
-					  .ValueOrDie();
-
-		auto table = reader->ReadTable().ValueOrDie();
-
-		auto column = table->column(0)->chunk(0);
-		auto arr = std::static_pointer_cast<arrow::DoubleArray>(column);
-
-		*n = arr->length();
-
-		for (int64_t i = 0; i < *n; i++)
-		{
-			data[i] = arr->Value(i);
-		}
-	}
 }

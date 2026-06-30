@@ -7,7 +7,7 @@ module test_parquet
     type test_output_type
         integer(int32)         :: id
         integer(int64),dimension(1:2) :: idarr
-        character(len=16)      :: name
+        character(len=8)       :: name
         integer(int64)         :: idlong
         real(real32)           :: value
         real(real64)           :: value2
@@ -104,7 +104,7 @@ contains
         allocate(cinfo(12))
         cinfo(1)  = column_info(.true., "id0", "", "ID of the object", "meta.id;meta.main", "int32", 1)
         cinfo(2)  = column_info(.true., "idarr", "", "Array of IDs", "meta.id;meta.main", "int64", 2)
-        cinfo(3)  = column_info(.true., "name_ok", "", "Name of the object", "meta.id;meta.main", "string", 16)
+        cinfo(3)  = column_info(.true., "name_ok", "", "Name of the object", "meta.id;meta.main", "string", 1)
         cinfo(4)  = column_info(.true., "idlong", "count", "Long ID of the object", "meta.id;meta.main", "int64", 1)
         cinfo(5)  = column_info(.true., "value_true", "m/s", "Value of the object", "phys.veloc;phys.speed", "float32", 1)
         cinfo(6)  = column_info(.true., "value2", "m/s", "Second value of the object", "phys.veloc;phys.speed", "float64", 1)

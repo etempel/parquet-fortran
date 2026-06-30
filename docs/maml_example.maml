@@ -1,0 +1,65 @@
+dataset: input_data
+table: input_table
+author: Dave Smith <dave_smith_is_not_here@gmail.com>
+description: Just an example. Probably do not write tonnes here. A few sentences is usually about right.
+comments:
+- This is an example. Remember comments are lists.
+- zeropoint: 1.00
+license: Copyright [Private]
+fields:
+- name: id0
+  unit: unitless
+  info: ID field.
+  ucd: meta.id;meta.main
+  data_type: int32
+- name: idarr
+  unit: unitless
+  info: ID field.
+  ucd: meta.id
+  data_type: int64
+  array_size: 2
+- name: name
+  unit: unitless
+  info: Name of the object.
+  ucd: meta.main
+  data_type: string
+- name: idlong
+  unit: count
+  info: Long ID field.
+  ucd: meta.id
+  data_type: int64
+- name: value
+  unit: m/s
+  info: Value of the object.
+  ucd: phys.veloc;phys.speed
+  data_type: float32
+- name: value_64
+  unit: m/s
+  info: Second value of the object.
+  ucd: phys.veloc;phys.speed
+  data_type: float64
+- name: arr
+  unit: unitless
+  info: Array of values.
+  ucd: 
+  data_type: float32
+  array_size: 5
+- name: arrlong
+  unit: unitless
+  info: Array of values.
+  data_type: float64
+  array_size: 5
+- name: val
+  info: Value of the object.
+  data_type: float32
+- name: iarr
+  info: Array of values.
+  data_type: int32
+  array_size: 3
+- name: myflag
+  info: Flag for the object.
+  data_type: boolean
+- name: flag_array
+  info: Flag for the object.
+  data_type: boolean
+  array_size: 6

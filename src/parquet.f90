@@ -8,6 +8,7 @@ module parquet
     use parquet_bindings
     use parquet_maml, only: parquet_maml_file
     implicit none
+    private
     !
     character(len=*),parameter:: cversion = "v0.2 (2026-06-30)" !< version info
 #ifndef RELEASE_VERSION
@@ -84,6 +85,24 @@ module parquet
         module procedure parquet_read_string_array_full
     end interface parquet_read_column
 
+    interface parquet_read_array_row_mode
+        module procedure parquet_read_int32_array_row_mode
+        module procedure parquet_read_int64_array_row_mode
+        module procedure parquet_read_float32_array_row_mode
+        module procedure parquet_read_float64_array_row_mode
+        module procedure parquet_read_logical_array_row_mode
+        module procedure parquet_read_string_array_row_mode
+    end interface parquet_read_array_row_mode
+
+    interface parquet_read_array_element_mode
+        module procedure parquet_read_int32_array_element_mode
+        module procedure parquet_read_int64_array_element_mode
+        module procedure parquet_read_float32_array_element_mode
+        module procedure parquet_read_float64_array_element_mode
+        module procedure parquet_read_logical_array_element_mode
+        module procedure parquet_read_string_array_element_mode
+    end interface parquet_read_array_element_mode
+
     public :: parquet_writer
     public :: parquet_reader
     public :: parquet_column_info
@@ -96,23 +115,12 @@ module parquet
     public :: parquet_open_reader
     public :: parquet_close_reader
     public :: parquet_get_nrows
-    public :: parquet_get_column_col_size_read
-    public :: parquet_get_column_array_size_read
+    public :: parquet_get_col_size
     public :: parquet_get_column_total_elements
     public :: parquet_get_string_length
     public :: parquet_read_column
-    public :: parquet_read_int32_array_row_mode
-    public :: parquet_read_int64_array_row_mode
-    public :: parquet_read_float32_array_row_mode
-    public :: parquet_read_float64_array_row_mode
-    public :: parquet_read_logical_array_row_mode
-    public :: parquet_read_string_array_row_mode
-    public :: parquet_read_int32_array_element_mode
-    public :: parquet_read_int64_array_element_mode
-    public :: parquet_read_float32_array_element_mode
-    public :: parquet_read_float64_array_element_mode
-    public :: parquet_read_logical_array_element_mode
-    public :: parquet_read_string_array_element_mode
+    public :: parquet_read_array_row_mode
+    public :: parquet_read_array_element_mode
 
     interface
         module integer function parquet_get_enabled_column_index(writer, name)
@@ -317,17 +325,11 @@ module parquet
             integer(int64), intent(out) :: nrows
         end subroutine parquet_get_nrows
 
-        module subroutine parquet_get_column_col_size_read(reader, name, col_size)
+        module subroutine parquet_get_col_size(reader, name, col_size)
             type(parquet_reader), intent(in) :: reader
             character(len=*), intent(in) :: name
             integer, intent(out) :: col_size
-        end subroutine parquet_get_column_col_size_read
-
-        module subroutine parquet_get_column_array_size_read(reader, name, array_size)
-            type(parquet_reader), intent(in) :: reader
-            character(len=*), intent(in) :: name
-            integer, intent(out) :: array_size
-        end subroutine parquet_get_column_array_size_read
+        end subroutine parquet_get_col_size
 
         module subroutine parquet_get_column_total_elements(reader, name, nelem)
             type(parquet_reader), intent(in) :: reader

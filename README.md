@@ -1,6 +1,6 @@
 # Fortran parquet library for WAVES/4HS
 
-Library to read/write parquet files and handle MAML files.
+Library to read/write parquet files and handle MAML files. The parquet file metadata can be defined using the [MAML-format](https://github.com/asgr/MAML-Format).
 
 ## Prerequisites
 
@@ -10,7 +10,7 @@ The code compiles successfully with the following compilers and libraries. It mi
     - Intel Fortran (ifx) v2025.3.0
     - Gfortran v15.2.0
 - FPM ([Fortran Package Manager](https://fpm.fortran-lang.org/))
-- apache-arrow (C++ library for reading/writing parquet files)
+- [apache-arrow](https://arrow.apache.org) (C++ library for parquet)
 
 Unit testing is handled using test-drive, which is automatically installed by FPM.
 
@@ -18,17 +18,18 @@ Unit testing is handled using test-drive, which is automatically installed by FP
 
 To build the code with intel compiles, the following environment variables should be set:
 
-- LIBRARY_PATH should point to the Healpix and cfitsio lib directories.
-- CPATH should point to the Healpix and cfitsio include directories.
-- LD_LIBRARY_PATH should point to the cfitsio lib directory
+- LIBRARY_PATH should point to the parquet and arrow library.
+- FPM_FFLAGS should point to arrows include directory
+- FPM_CXXFLAGS should add relevant C++ flags
+- FPM_LDFLAGS should point to arrow and parquet library
 - FPM_FC can be used to set fortran compiler for FPM (e.g. FPM_FC=ifx)
 
 In bash you can initialise them as follows:
 
-    export PKG_CONFIG_PATH=path_healpix/lib/pkgconfig:$PKG_CONFIG_PATH
-    export LIBRARY_PATH=path_healpix/lib:path_cfitsio/lib:$LIBRARY_PATH
-    export CPATH=path_healpix/include:path_cfitsio/include:$CPATH
-    export LD_LIBRARY_PATH=path_cfitsio/lib:$LD_LIBRARY_PATH
+    export LIBRARY_PATH=path_arrow/lib:$LIBRARY_PATH
+    export FPM_FFLAGS="-Ipath_arrow/include"
+    export FPM_CXXFLAGS="-std=c++20 -stdlib=libc++ -Ipath_arrow/include"
+    export FPM_LDFLAGS="-Lpath_arrow/lib"
     export FPM_FC=ifx
 
 NB! It might depend on the operating system and fortran compiler what environment variables are needed.
@@ -51,7 +52,7 @@ To generate the executable:
 
     fpm install --prefix my_path
 
-The executable is placed in the my_path/bin directory.
+The executable is placed in the my_path/bin directory. Executable only prints the parquet-fortran library version number.
 
 ## Reading parquet files from your fortran code
 
@@ -60,6 +61,11 @@ To use this library in another Fortran project, add it as an FPM dependency in y
 ```toml
 [dependencies]
 parquet-fortran = { path = "/path/to/parquet-fortran" }
+# or provide a relative path to the parquet-fortran git repository, e.g.
+parquet-fortran.git = "../parquet-fortran"
+
+[build]
+link = ["arrow", "parquet", "c++"]
 ```
 
 Then `use parquet` in your code.
@@ -133,5 +139,39 @@ Notes:
 - All columns in one file must contain the same number of rows.
 - Close the writer with `parquet_close_writer` to flush data and finalize the file.
 
-The parquet file metadata can be defined using the [MAML-format](https://github.com/asgr/MAML-Format).
+## parquet module API (functions/subroutines)
 
+List of public callable procedures available with `use parquet`:
+
+### Utility
+
+- `get_parquet_fortran_version()`
+
+### MAML and metadata
+
+- `parquet_read_maml(maml_filename_or_maml, cinfo, metadata)`
+
+The public derived type `parquet_table_metadata` provides:
+
+- `metadata%add_metadata(key, value[, fmt])`
+
+### Writer
+
+- `parquet_open_writer(writer, filename[, cinfo, metadata])`
+- `parquet_write_column(writer, name, data)`
+- `parquet_close_writer(writer)`
+
+### Reader (table and column info)
+
+- `parquet_open_reader(reader, filename)`
+- `parquet_close_reader(reader)`
+- `parquet_get_nrows(reader, nrows)`
+- `parquet_get_col_size(reader, name, col_size)`
+- `parquet_get_column_total_elements(reader, name, nelem)`
+- `parquet_get_string_length(reader, name, strlen_max)`
+
+### Reader (reads column data)
+
+- `parquet_read_column(reader, name, values)`
+- `parquet_read_array_row_mode(reader, name, values, row_index)`
+- `parquet_read_array_element_mode(reader, name, values, col_index)`

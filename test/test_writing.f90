@@ -66,6 +66,9 @@ contains
         call metadata%add_metadata("creator", "Parquet Fortran Test")
         call metadata%add_metadata("PI", 3.14, fmt='F6.1')
         call metadata%add_metadata("PI2", 3.14_rk, fmt='F0.2')
+        call metadata%add_metadata("row_count", 20_int32)
+        call metadata%add_metadata("row_count_long", 20_int64)
+        call metadata%add_metadata("is_test", .true.)
 
         call init_test_data(test_data, 20)
         call write_test_data(out_file, test_data, cinfo, metadata)

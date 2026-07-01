@@ -13,8 +13,8 @@
 program tester
     use, intrinsic :: iso_fortran_env, only : error_unit
     use testdrive, only : run_testsuite, new_testsuite, testsuite_type, select_suite, run_selected,get_argument,init_color_output
-    use parameters, only : activate_unit_testing_run
-    use test_dummy, only : collect_tests_parquet_fortran
+    use test_writing, only : collect_tests_parquet_writing
+    use test_reading, only : collect_tests_parquet_reading
     !
     implicit none
     integer :: stat, is
@@ -24,11 +24,10 @@ program tester
     !
     stat = 0
     !
-    call activate_unit_testing_run()
-    !
     ! Add all testsuites here as a comma separated list
     testsuites = [ &
-        new_testsuite("dummy", collect_tests_parquet_fortran) &
+        new_testsuite("writing", collect_tests_parquet_writing), &
+        new_testsuite("reading", collect_tests_parquet_reading) &
         ]
     !
     ! command line argument for a specific testsuite and test
@@ -43,14 +42,13 @@ program tester
             if (allocated(test_name)) then
                 write(error_unit, fmt) "Suite:", testsuites(is)%name
                 call run_selected(testsuites(is)%collect, test_name, error_unit, stat)
-                call cleanup_testsuites()
                 if (stat < 0) then
+                    call cleanup_testsuites()
                     error stop 1
                 end if
             else
                 write(error_unit, fmt) "Testing:", testsuites(is)%name
                 call run_testsuite(testsuites(is)%collect, error_unit, stat)
-                call cleanup_testsuites()
             end if
         else
             write(error_unit, fmt) "Available testsuites"
@@ -63,22 +61,23 @@ program tester
         do is = 1, size(testsuites)
             write(error_unit, fmt) "Testing:", testsuites(is)%name
             call run_testsuite(testsuites(is)%collect, error_unit, stat)
-            call cleanup_testsuites()
         end do
     end if
     !
     if (stat > 0) then
+        call cleanup_testsuites()
         write(error_unit, '(i0, 1x, a)') stat, "test(s) failed!"
         error stop 1
     end if
+
+    call cleanup_testsuites()
     !
 contains
     !
     subroutine cleanup_testsuites()
         integer :: status
         !
-        call execute_command_line("rm -f run_status.txt",wait=.true.,cmdstat=status)
-        call execute_command_line("rm -rf test_run",wait=.true.,cmdstat=status)
+        !call execute_command_line("rm -f test_parquet.parquet",wait=.true.,cmdstat=status)
         !
     end subroutine cleanup_testsuites
     !

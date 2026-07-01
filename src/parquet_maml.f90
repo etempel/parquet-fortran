@@ -39,11 +39,14 @@ contains
         type(parquet_maml_file) :: maml
 
         maml%name = "maml_example.maml"
-        allocate(character(len=104) :: maml%lines(71))
+        allocate(character(len=104) :: maml%lines(76))
         maml%lines = [ character(len=104) :: &
             "dataset: input_data", &
             "table: input_table", &
             "author: Dave Smith <dave_smith_is_not_here@gmail.com>", &
+            "coauthors:", &
+            "- Joe Bloggs <joe_bloggs_is_not_here@gmail.com>", &
+            "- Jane Doe <jane_doe_is_not_here@gmail.com>", &
             "description: Just an example. Probably do not write tonnes here. A few sentences is usually about right.", &
             "comments:", &
             "- This is an example. Remember comments are lists.", &
@@ -59,13 +62,15 @@ contains
             "- name: idarr", &
             "  unit: unitless", &
             "  info: ID field.", &
-            "  ucd: meta.id", &
+            "  ucd: meta.id;meta.main", &
             "  data_type: int64", &
             "  col_size: 2", &
             "- name: name", &
             "  unit: unitless", &
             "  info: Name of the object.", &
-            "  ucd: meta.main", &
+            "  ucd:", &
+            "  - meta.id", &
+            "  - meta.main", &
             "  data_type: string", &
             "  array_size: 18", &
             "- name: name_arr", &

@@ -97,7 +97,7 @@ contains
 
             if (index(tline, "- ") /= 1 .and. index(tline, ":") > 0 .and. line(1:1) /= " ") exit
 
-            if (index(tline, "-") == 1) then
+            if (index(tline, "-") == 1 .and. line(1:1) /= " ") then
                 call parquet_append_empty_cinfo(tmp, n)
                 have_current = .true.
                 tline = trim(adjustl(tline(2:)))

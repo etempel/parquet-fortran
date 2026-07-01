@@ -50,6 +50,10 @@ module parquet
         logical :: enforce_schema = .false.
     end type parquet_writer
 
+    type parquet_reader
+        type(c_ptr) :: handle = c_null_ptr
+    end type parquet_reader
+
     interface parquet_write_column
         module procedure parquet_write_int32_column
         module procedure parquet_write_int64_column
@@ -64,7 +68,23 @@ module parquet
         module procedure parquet_read_maml_internal
     end interface parquet_read_maml
 
+    interface parquet_read_column
+        module procedure parquet_read_int32_column_1d
+        module procedure parquet_read_int64_column_1d
+        module procedure parquet_read_float32_column_1d
+        module procedure parquet_read_float64_column_1d
+        module procedure parquet_read_logical_column_1d
+        module procedure parquet_read_string_column_1d
+        module procedure parquet_read_int32_array_full
+        module procedure parquet_read_int64_array_full
+        module procedure parquet_read_float32_array_full
+        module procedure parquet_read_float64_array_full
+        module procedure parquet_read_logical_array_full
+        module procedure parquet_read_string_array_full
+    end interface parquet_read_column
+
     public :: parquet_writer
+    public :: parquet_reader
     public :: parquet_column_info
     public :: parquet_table_metadata
     public :: parquet_open_writer
@@ -72,6 +92,25 @@ module parquet
     public :: parquet_close_writer
     public :: get_parquet_fortran_version
     public :: parquet_read_maml
+    public :: parquet_open_reader
+    public :: parquet_close_reader
+    public :: parquet_get_nrows
+    public :: parquet_get_column_array_size_read
+    public :: parquet_get_column_total_elements
+    public :: parquet_get_string_length
+    public :: parquet_read_column
+    public :: parquet_read_int32_array_row_mode
+    public :: parquet_read_int64_array_row_mode
+    public :: parquet_read_float32_array_row_mode
+    public :: parquet_read_float64_array_row_mode
+    public :: parquet_read_logical_array_row_mode
+    public :: parquet_read_string_array_row_mode
+    public :: parquet_read_int32_array_element_mode
+    public :: parquet_read_int64_array_element_mode
+    public :: parquet_read_float32_array_element_mode
+    public :: parquet_read_float64_array_element_mode
+    public :: parquet_read_logical_array_element_mode
+    public :: parquet_read_string_array_element_mode
 
     interface
         module integer function parquet_get_enabled_column_index(writer, name)
@@ -255,6 +294,194 @@ module parquet
             character(len=*), intent(in) :: s
             character(len=:), allocatable :: out
         end function parquet_to_lower
+
+        module subroutine parquet_open_reader(reader, filename)
+            type(parquet_reader), intent(out) :: reader
+            character(len=*), intent(in) :: filename
+        end subroutine parquet_open_reader
+
+        module subroutine parquet_close_reader(reader)
+            type(parquet_reader), intent(inout) :: reader
+        end subroutine parquet_close_reader
+
+        module subroutine parquet_get_nrows(reader, nrows)
+            type(parquet_reader), intent(in) :: reader
+            integer(int64), intent(out) :: nrows
+        end subroutine parquet_get_nrows
+
+        module subroutine parquet_get_column_array_size_read(reader, name, array_size)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            integer, intent(out) :: array_size
+        end subroutine parquet_get_column_array_size_read
+
+        module subroutine parquet_get_column_total_elements(reader, name, nelem)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            integer(int64), intent(out) :: nelem
+        end subroutine parquet_get_column_total_elements
+
+        module subroutine parquet_get_string_length(reader, name, strlen_max)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            integer, intent(out) :: strlen_max
+        end subroutine parquet_get_string_length
+
+        module subroutine parquet_read_int32_column_1d(reader, name, values)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            integer(int32), intent(out) :: values(:)
+        end subroutine parquet_read_int32_column_1d
+
+        module subroutine parquet_read_int64_column_1d(reader, name, values)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            integer(int64), intent(out) :: values(:)
+        end subroutine parquet_read_int64_column_1d
+
+        module subroutine parquet_read_float32_column_1d(reader, name, values)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            real(real32), intent(out) :: values(:)
+        end subroutine parquet_read_float32_column_1d
+
+        module subroutine parquet_read_float64_column_1d(reader, name, values)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            real(real64), intent(out) :: values(:)
+        end subroutine parquet_read_float64_column_1d
+
+        module subroutine parquet_read_logical_column_1d(reader, name, values)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            logical, intent(out) :: values(:)
+        end subroutine parquet_read_logical_column_1d
+
+        module subroutine parquet_read_string_column_1d(reader, name, values)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            character(len=*), intent(out) :: values(:)
+        end subroutine parquet_read_string_column_1d
+
+        module subroutine parquet_read_int32_array_full(reader, name, values)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            integer(int32), intent(out) :: values(:, :)
+        end subroutine parquet_read_int32_array_full
+
+        module subroutine parquet_read_int64_array_full(reader, name, values)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            integer(int64), intent(out) :: values(:, :)
+        end subroutine parquet_read_int64_array_full
+
+        module subroutine parquet_read_float32_array_full(reader, name, values)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            real(real32), intent(out) :: values(:, :)
+        end subroutine parquet_read_float32_array_full
+
+        module subroutine parquet_read_float64_array_full(reader, name, values)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            real(real64), intent(out) :: values(:, :)
+        end subroutine parquet_read_float64_array_full
+
+        module subroutine parquet_read_logical_array_full(reader, name, values)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            logical, intent(out) :: values(:, :)
+        end subroutine parquet_read_logical_array_full
+
+        module subroutine parquet_read_string_array_full(reader, name, values)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            character(len=*), intent(out) :: values(:, :)
+        end subroutine parquet_read_string_array_full
+
+        module subroutine parquet_read_int32_array_row_mode(reader, name, values, row_index)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            integer(int32), intent(out) :: values(:)
+            integer, intent(in) :: row_index
+        end subroutine parquet_read_int32_array_row_mode
+
+        module subroutine parquet_read_int64_array_row_mode(reader, name, values, row_index)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            integer(int64), intent(out) :: values(:)
+            integer, intent(in) :: row_index
+        end subroutine parquet_read_int64_array_row_mode
+
+        module subroutine parquet_read_float32_array_row_mode(reader, name, values, row_index)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            real(real32), intent(out) :: values(:)
+            integer, intent(in) :: row_index
+        end subroutine parquet_read_float32_array_row_mode
+
+        module subroutine parquet_read_float64_array_row_mode(reader, name, values, row_index)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            real(real64), intent(out) :: values(:)
+            integer, intent(in) :: row_index
+        end subroutine parquet_read_float64_array_row_mode
+
+        module subroutine parquet_read_logical_array_row_mode(reader, name, values, row_index)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            logical, intent(out) :: values(:)
+            integer, intent(in) :: row_index
+        end subroutine parquet_read_logical_array_row_mode
+
+        module subroutine parquet_read_string_array_row_mode(reader, name, values, row_index)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            character(len=*), intent(out) :: values(:)
+            integer, intent(in) :: row_index
+        end subroutine parquet_read_string_array_row_mode
+
+        module subroutine parquet_read_int32_array_element_mode(reader, name, values, col_index)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            integer(int32), intent(out) :: values(:)
+            integer, intent(in) :: col_index
+        end subroutine parquet_read_int32_array_element_mode
+
+        module subroutine parquet_read_int64_array_element_mode(reader, name, values, col_index)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            integer(int64), intent(out) :: values(:)
+            integer, intent(in) :: col_index
+        end subroutine parquet_read_int64_array_element_mode
+
+        module subroutine parquet_read_float32_array_element_mode(reader, name, values, col_index)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            real(real32), intent(out) :: values(:)
+            integer, intent(in) :: col_index
+        end subroutine parquet_read_float32_array_element_mode
+
+        module subroutine parquet_read_float64_array_element_mode(reader, name, values, col_index)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            real(real64), intent(out) :: values(:)
+            integer, intent(in) :: col_index
+        end subroutine parquet_read_float64_array_element_mode
+
+        module subroutine parquet_read_logical_array_element_mode(reader, name, values, col_index)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            logical, intent(out) :: values(:)
+            integer, intent(in) :: col_index
+        end subroutine parquet_read_logical_array_element_mode
+
+        module subroutine parquet_read_string_array_element_mode(reader, name, values, col_index)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            character(len=*), intent(out) :: values(:)
+            integer, intent(in) :: col_index
+        end subroutine parquet_read_string_array_element_mode
     end interface
 
 contains

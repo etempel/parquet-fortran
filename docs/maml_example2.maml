@@ -1,0 +1,12 @@
+dataset: input_data
+table: input_table
+author: Dave Smith <dave_smith_is_not_here@gmail.com>
+description: Just an example. Probably do not write tonnes here. A few sentences is usually about right.
+license: Copyright [Private]
+fields:
+- name: id
+  info: ID field.
+  data_type: int32
+- name: name
+  info: Name of the object.
+  data_type: string

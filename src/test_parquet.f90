@@ -1,5 +1,6 @@
 module test_parquet
     use parquet
+    use parquet_maml
     use iso_fortran_env, only: int32, int64, real32, real64
     implicit none
     integer,parameter :: rk = kind(1.0D0)  !< RealKind: double
@@ -25,12 +26,14 @@ module test_parquet
     type(parquet_table_metadata) :: metadata
     !
     type(test_output_type),dimension(:),allocatable :: test_data
+    type(test_output_type),dimension(:),allocatable :: mydata
     !
 contains
     !
     subroutine start_parquet_test()
         implicit none
         character(len=:), allocatable :: ver_string
+        type(parquet_maml_file) :: maml
         !
         print*, "Starting Parquet Fortran test..."
         !
@@ -38,10 +41,14 @@ contains
         print*, ver_string
         !
         !call init_column_info()
-        call parquet_read_maml("/Users/elmo/gitlab/parquet-fortran/docs/maml_example.maml", cinfo, metadata)
+        !maml = parquet_maml_maml_example()
+        maml = get_parquet_maml("maml_example.maml")
+        !
+        call parquet_read_maml(maml, cinfo, metadata)
         !
         call metadata%add_metadata("creator", "Parquet Fortran Test")
-        call metadata%add_metadata("PI", 3.14)
+        call metadata%add_metadata("PI", 3.14, fmt='F6.1')
+        call metadata%add_metadata("PI2", 3.14_rk, fmt='F0.2')
         !
         call init_test_data(20)
         !

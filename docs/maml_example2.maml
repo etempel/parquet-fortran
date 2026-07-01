@@ -10,3 +10,4 @@ fields:
 - name: name
   info: Name of the object.
   data_type: string
+  array_size: 24

@@ -21,6 +21,7 @@ extern "C"
 		std::string ucd;
 		std::string data_type;
 		int64_t array_size;
+		int64_t col_size;
 	};
 
 	struct ParquetWriterHandle
@@ -284,6 +285,8 @@ extern "C"
 			values.push_back(col.data_type);
 			keys.push_back(prefix + "array_size");
 			values.push_back(std::to_string(col.array_size));
+			keys.push_back(prefix + "col_size");
+			values.push_back(std::to_string(col.col_size));
 		}
 
 		return std::make_shared<arrow::KeyValueMetadata>(keys, values);
@@ -705,7 +708,8 @@ extern "C"
 		const char *description,
 		const char *ucd,
 		const char *data_type,
-		int64_t array_size)
+		int64_t array_size,
+		int64_t col_size)
 	{
 		auto writer_handle = as_handle(handle);
 		writer_handle->column_metadata.push_back(ColumnMetadata{
@@ -714,7 +718,8 @@ extern "C"
 			description,
 			ucd,
 			data_type,
-			array_size});
+			array_size,
+			col_size});
 
 		const auto target_size = writer_handle->column_metadata.size();
 		if (writer_handle->fields.size() < target_size)

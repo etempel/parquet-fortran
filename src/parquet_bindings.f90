@@ -21,7 +21,7 @@ module parquet_bindings
             type(c_ptr) :: reader
         end function
 
-        subroutine parquet_add_column_metadata(writer, name, unit, description, ucd, data_type, array_size) &
+        subroutine parquet_add_column_metadata(writer, name, unit, description, ucd, data_type, array_size, col_size) &
                 bind(C, name="parquet_add_column_metadata")
             import
             type(c_ptr), value :: writer
@@ -31,6 +31,7 @@ module parquet_bindings
             character(kind=c_char) :: ucd(*)
             character(kind=c_char) :: data_type(*)
             integer(c_long_long), value :: array_size
+            integer(c_long_long), value :: col_size
         end subroutine
 
         subroutine parquet_add_table_metadata(writer, key, value) &

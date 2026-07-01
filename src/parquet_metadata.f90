@@ -35,17 +35,19 @@ contains
         type(parquet_column_info), allocatable :: tmp(:)
         character(len=1024) :: line
         character(len=:), allocatable :: tline, key, cvalue
-        logical :: in_fields, have_current, in_list
-        character(len=:), allocatable :: list_key
+        logical :: in_fields, have_current, in_list, in_field_list
+        character(len=:), allocatable :: list_key, field_list_key, list_item
         integer :: ios, n, i, list_item_idx
         character(len=32) :: idx_buf
 
         in_fields = .false.
         have_current = .false.
         in_list = .false.
+        in_field_list = .false.
         list_item_idx = 0
         n = 0
         list_key = ""
+        field_list_key = ""
         if (allocated(metadata%items)) deallocate(metadata%items)
 
         do i = 1, size(lines)
@@ -104,6 +106,24 @@ contains
 
             if (.not. have_current) cycle
 
+            if (in_field_list) then
+                if (index(tline, "- ") == 1 .and. line(1:1) == " ") then
+                    list_item = parquet_unquote(tline(3:))
+                    select case (field_list_key)
+                    case ("ucd")
+                        if (.not. allocated(tmp(n)%ucd) .or. len_trim(tmp(n)%ucd) == 0) then
+                            tmp(n)%ucd = trim(list_item)
+                        else
+                            tmp(n)%ucd = trim(tmp(n)%ucd) // ";" // trim(list_item)
+                        end if
+                    end select
+                    cycle
+                else
+                    in_field_list = .false.
+                    field_list_key = ""
+                end if
+            end if
+
             call parquet_split_key_value(tline, key, cvalue)
             if (len_trim(key) == 0) cycle
 
@@ -116,7 +136,13 @@ contains
             case ("info")
                 tmp(n)%info = parquet_unquote(cvalue)
             case ("ucd")
-                tmp(n)%ucd = parquet_unquote(cvalue)
+                if (len_trim(cvalue) > 0) then
+                    tmp(n)%ucd = parquet_unquote(cvalue)
+                else
+                    tmp(n)%ucd = ""
+                    in_field_list = .true.
+                    field_list_key = "ucd"
+                end if
             case ("data_type")
                 cvalue = parquet_to_lower(parquet_unquote(cvalue))
                 if (index(cvalue, "string") == 1) then
@@ -126,6 +152,9 @@ contains
             case ("array_size")
                 read(cvalue, *, iostat=ios) tmp(n)%array_size
                 if (ios /= 0) tmp(n)%array_size = 1
+            case ("col_size")
+                read(cvalue, *, iostat=ios) tmp(n)%col_size
+                if (ios /= 0) tmp(n)%col_size = 1
             end select
         end do
 
@@ -141,6 +170,7 @@ contains
             if (.not. allocated(tmp(i)%info)) tmp(i)%info = ""
             if (.not. allocated(tmp(i)%ucd)) tmp(i)%ucd = ""
             if (tmp(i)%array_size <= 0) tmp(i)%array_size = 1
+            if (tmp(i)%col_size <= 0) tmp(i)%col_size = 1
             tmp(i)%is_set = .true.
         end do
 
@@ -246,6 +276,7 @@ contains
 
         cinfo(n)%is_set = .true.
         cinfo(n)%array_size = 1
+        cinfo(n)%col_size = 1
     end procedure parquet_append_empty_cinfo
 
     module procedure parquet_split_key_value

@@ -79,18 +79,22 @@ contains
         parquet_is_column_enabled = parquet_get_enabled_column_index(writer, name) > 0
     end procedure parquet_is_column_enabled
 
-    module procedure parquet_get_column_array_size
+    module procedure parquet_get_column_col_size
         integer :: i
 
-        parquet_get_column_array_size = 1
+        parquet_get_column_col_size = 1
         if (.not. allocated(writer%enabled_columns)) return
 
         do i = 1, size(writer%enabled_columns)
             if (trim(writer%enabled_columns(i)%name) == trim(name)) then
-                parquet_get_column_array_size = max(1, writer%enabled_columns(i)%array_size)
+                parquet_get_column_col_size = max(1, writer%enabled_columns(i)%col_size)
                 return
             end if
         end do
+    end procedure parquet_get_column_col_size
+
+    module procedure parquet_get_column_array_size
+        parquet_get_column_array_size = parquet_get_column_col_size(writer, name)
     end procedure parquet_get_column_array_size
 
     module procedure parquet_open_writer
@@ -126,7 +130,8 @@ contains
                         cinfo(i)%info, &
                         cinfo(i)%ucd, &
                         cinfo(i)%data_type, &
-                        cinfo(i)%array_size )
+                        cinfo(i)%array_size, &
+                        cinfo(i)%col_size )
                 end if
             end do
         end if
@@ -150,7 +155,8 @@ contains
             trim(description)//char(0), &
             trim(ucd)//char(0), &
             trim(data_type)//char(0), &
-            int(array_size, kind=c_long_long) )
+            int(array_size, kind=c_long_long), &
+            int(col_size, kind=c_long_long) )
     end procedure parquet_add_column_info
 
     module procedure parquet_write_int32_column
@@ -167,8 +173,8 @@ contains
         if (.not. parquet_is_column_enabled(writer, name)) return
         call parquet_mark_column_written(writer, name)
 
-        asize = parquet_get_column_array_size(writer, name)
-        if (mod(size(data), asize) /= 0) stop "parquet_write_int32_column: data size is not divisible by array_size"
+        asize = parquet_get_column_col_size(writer, name)
+        if (mod(size(data), asize) /= 0) stop "parquet_write_int32_column: data size is not divisible by col_size"
         nrows = size(data) / asize
 
         call parquet_append_int32_column(&
@@ -193,8 +199,8 @@ contains
         if (.not. parquet_is_column_enabled(writer, name)) return
         call parquet_mark_column_written(writer, name)
 
-        asize = parquet_get_column_array_size(writer, name)
-        if (mod(size(data), asize) /= 0) stop "parquet_write_int64_column: data size is not divisible by array_size"
+        asize = parquet_get_column_col_size(writer, name)
+        if (mod(size(data), asize) /= 0) stop "parquet_write_int64_column: data size is not divisible by col_size"
         nrows = size(data) / asize
 
         call parquet_append_int64_column(&
@@ -219,8 +225,8 @@ contains
         if (.not. parquet_is_column_enabled(writer, name)) return
         call parquet_mark_column_written(writer, name)
 
-        asize = parquet_get_column_array_size(writer, name)
-        if (mod(size(data), asize) /= 0) stop "parquet_write_float32_column: data size is not divisible by array_size"
+        asize = parquet_get_column_col_size(writer, name)
+        if (mod(size(data), asize) /= 0) stop "parquet_write_float32_column: data size is not divisible by col_size"
         nrows = size(data) / asize
 
         call parquet_append_float32_column(&
@@ -245,8 +251,8 @@ contains
         if (.not. parquet_is_column_enabled(writer, name)) return
         call parquet_mark_column_written(writer, name)
 
-        asize = parquet_get_column_array_size(writer, name)
-        if (mod(size(data), asize) /= 0) stop "parquet_write_float64_column: data size is not divisible by array_size"
+        asize = parquet_get_column_col_size(writer, name)
+        if (mod(size(data), asize) /= 0) stop "parquet_write_float64_column: data size is not divisible by col_size"
         nrows = size(data) / asize
 
         call parquet_append_float64_column(&
@@ -272,8 +278,8 @@ contains
         if (.not. parquet_is_column_enabled(writer, name)) return
         call parquet_mark_column_written(writer, name)
 
-        asize = parquet_get_column_array_size(writer, name)
-        if (mod(size(data), asize) /= 0) stop "parquet_write_logical_column: data size is not divisible by array_size"
+        asize = parquet_get_column_col_size(writer, name)
+        if (mod(size(data), asize) /= 0) stop "parquet_write_logical_column: data size is not divisible by col_size"
         nrows = size(data) / asize
 
         allocate(bool_data(size(data)))
@@ -295,7 +301,7 @@ contains
 
     module procedure parquet_write_string_column
         character(kind=c_char), allocatable :: packed(:)
-        integer :: i, j, k, nrows, item_len, idx, asize, nitems
+        integer :: i, j, k, nrows, item_len, idx, asize, nitems, max_item_len, max_string_len
 
         if (writer%enforce_schema) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -308,10 +314,18 @@ contains
         if (.not. parquet_is_column_enabled(writer, name)) return
         call parquet_mark_column_written(writer, name)
 
-        asize = parquet_get_column_array_size(writer, name)
+        asize = parquet_get_column_col_size(writer, name)
         nitems = size(data)
         if (nitems <= 0) return
-        if (mod(nitems, asize) /= 0) stop "parquet_write_string_column: data size is not divisible by array_size"
+        if (mod(nitems, asize) /= 0) stop "parquet_write_string_column: data size is not divisible by col_size"
+
+        if (writer%enforce_schema) then
+            max_string_len = max(1, writer%all_columns(idx)%array_size)
+            max_item_len = maxval([(len_trim(data(i)), i=1,nitems)])
+            if (max_item_len > max_string_len) then
+                error stop "parquet_write_string_column: string length exceeds declared array_size for column: " // trim(name)
+            end if
+        end if
 
         nrows = nitems / asize
 

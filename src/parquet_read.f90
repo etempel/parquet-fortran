@@ -20,8 +20,12 @@ contains
 		nrows = int(parquet_reader_get_nrows(reader%handle), kind=int64)
 	end procedure parquet_get_nrows
 
+	module procedure parquet_get_column_col_size_read
+		col_size = int(parquet_reader_get_column_array_size(reader%handle, trim(name)//char(0)))
+	end procedure parquet_get_column_col_size_read
+
 	module procedure parquet_get_column_array_size_read
-		array_size = int(parquet_reader_get_column_array_size(reader%handle, trim(name)//char(0)))
+		call parquet_get_column_col_size_read(reader, name, array_size)
 	end procedure parquet_get_column_array_size_read
 
 	module procedure parquet_get_column_total_elements

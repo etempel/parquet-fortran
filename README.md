@@ -10,11 +10,8 @@ The code compiles successfully with the following compilers and libraries. It mi
     - Intel Fortran (ifx) v2025.3.0
     - Gfortran v15.2.0
 - FPM ([Fortran Package Manager](https://fpm.fortran-lang.org/))
-- cfitsio v4.6.3
-- Healpix v3.82
-- qfeet library (should be located at the same level with this repository)
+- apache-arrow (C++ library for reading/writing parquet files)
 
-The code is extensively tested with Intel Fortran only.
 Unit testing is handled using test-drive, which is automatically installed by FPM.
 
 ### Environment variables
@@ -25,7 +22,6 @@ To build the code with intel compiles, the following environment variables shoul
 - CPATH should point to the Healpix and cfitsio include directories.
 - LD_LIBRARY_PATH should point to the cfitsio lib directory
 - FPM_FC can be used to set fortran compiler for FPM (e.g. FPM_FC=ifx)
-- (optional) PKG_CONFIG_PATH should point to Healpix lib/pkgconfig directory (for version number checking).
 
 In bash you can initialise them as follows:
 
@@ -35,11 +31,11 @@ In bash you can initialise them as follows:
     export LD_LIBRARY_PATH=path_cfitsio/lib:$LD_LIBRARY_PATH
     export FPM_FC=ifx
 
-NB! It might depend on the operating system and fortran compiler what environment variables are needed. The variables above should work with the Intel compiler.
+NB! It might depend on the operating system and fortran compiler what environment variables are needed.
 
 ## Building and installing instructions
 
-To test the QMOST_SELFIE code:
+To test the code:
 
     fpm test
 
@@ -56,3 +52,10 @@ To generate the executable:
     fpm install --prefix my_path
 
 The executable is placed in the my_path/bin directory.
+
+## Reading parquet files from your fortran code
+
+## Writing parquet files from your fortran code
+
+The parquet file metadata can be defined using the [MAML-format](https://github.com/asgr/MAML-Format).
+

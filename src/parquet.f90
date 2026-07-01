@@ -16,12 +16,13 @@ module parquet
 
     type parquet_column_info
         logical :: is_set = .false.
-        character(len=:), allocatable :: name
-        character(len=:), allocatable :: unit
-        character(len=:), allocatable :: info
-        character(len=:), allocatable :: ucd
-        character(len=:), allocatable :: data_type
-        integer :: array_size
+        character(len=:), allocatable :: name      ! The name of the field [required].
+        character(len=:), allocatable :: unit      ! The unit of measurement for the field.
+        character(len=:), allocatable :: info      ! A short description of the field.
+        character(len=:), allocatable :: ucd       ! Unified Content Descriptor for IVOA (can have many).
+        character(len=:), allocatable :: data_type ! The data type of the field [required].
+        integer :: array_size = 1 ! Maximum length of character strings.
+        integer :: col_size = 1   ! The number of elements in the vector column.
     end type parquet_column_info
 
     type parquet_metadata_entry
@@ -95,6 +96,7 @@ module parquet
     public :: parquet_open_reader
     public :: parquet_close_reader
     public :: parquet_get_nrows
+    public :: parquet_get_column_col_size_read
     public :: parquet_get_column_array_size_read
     public :: parquet_get_column_total_elements
     public :: parquet_get_string_length
@@ -144,6 +146,11 @@ module parquet
             character(len=*), intent(in) :: name
         end function parquet_is_column_enabled
 
+        module integer function parquet_get_column_col_size(writer, name)
+            type(parquet_writer), intent(in) :: writer
+            character(len=*), intent(in) :: name
+        end function parquet_get_column_col_size
+
         module integer function parquet_get_column_array_size(writer, name)
             type(parquet_writer), intent(in) :: writer
             character(len=*), intent(in) :: name
@@ -156,7 +163,7 @@ module parquet
             type(parquet_table_metadata), intent(in), optional :: metadata
         end subroutine parquet_open_writer
 
-        module subroutine parquet_add_column_info(writer, name, unit, description, ucd, data_type, array_size)
+        module subroutine parquet_add_column_info(writer, name, unit, description, ucd, data_type, array_size, col_size)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
             character(len=*), intent(in) :: unit
@@ -164,6 +171,7 @@ module parquet
             character(len=*), intent(in) :: ucd
             character(len=*), intent(in) :: data_type
             integer, intent(in) :: array_size
+            integer, intent(in) :: col_size
         end subroutine parquet_add_column_info
 
         module subroutine parquet_write_int32_column(writer, name, data)
@@ -308,6 +316,12 @@ module parquet
             type(parquet_reader), intent(in) :: reader
             integer(int64), intent(out) :: nrows
         end subroutine parquet_get_nrows
+
+        module subroutine parquet_get_column_col_size_read(reader, name, col_size)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            integer, intent(out) :: col_size
+        end subroutine parquet_get_column_col_size_read
 
         module subroutine parquet_get_column_array_size_read(reader, name, array_size)
             type(parquet_reader), intent(in) :: reader

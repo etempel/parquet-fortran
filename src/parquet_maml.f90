@@ -39,7 +39,7 @@ contains
         type(parquet_maml_file) :: maml
 
         maml%name = "maml_example.maml"
-        allocate(character(len=104) :: maml%lines(69))
+        allocate(character(len=104) :: maml%lines(71))
         maml%lines = [ character(len=104) :: &
             "dataset: input_data", &
             "table: input_table", &
@@ -61,16 +61,18 @@ contains
             "  info: ID field.", &
             "  ucd: meta.id", &
             "  data_type: int64", &
-            "  array_size: 2", &
+            "  col_size: 2", &
             "- name: name", &
             "  unit: unitless", &
             "  info: Name of the object.", &
             "  ucd: meta.main", &
             "  data_type: string", &
+            "  array_size: 18", &
             "- name: name_arr", &
             "  info: Name of the object.", &
             "  data_type: string", &
-            "  array_size: 3", &
+            "  array_size: 8", &
+            "  col_size: 3", &
             "- name: idlong", &
             "  unit: count", &
             "  info: Long ID field.", &
@@ -91,31 +93,31 @@ contains
             "  info: Array of values.", &
             "  ucd: ", &
             "  data_type: float32", &
-            "  array_size: 5", &
+            "  col_size: 5", &
             "- name: arrlong", &
             "  unit: unitless", &
             "  info: Array of values.", &
             "  data_type: float64", &
-            "  array_size: 5", &
+            "  col_size: 5", &
             "- name: val", &
             "  info: Value of the object.", &
             "  data_type: float32", &
             "- name: iarr", &
             "  info: Array of values.", &
             "  data_type: int32", &
-            "  array_size: 3", &
+            "  col_size: 3", &
             "- name: myflag", &
             "  data_type: boolean", &
             "- name: flag_array", &
             "  info: Flag for the object.", &
             "  data_type: boolean", &
-            "  array_size: 6" ]
+            "  col_size: 6" ]
     end function parquet_maml_maml_example
     function parquet_maml_maml_example2() result(maml)
         type(parquet_maml_file) :: maml
 
         maml%name = "maml_example2.maml"
-        allocate(character(len=104) :: maml%lines(12))
+        allocate(character(len=104) :: maml%lines(13))
         maml%lines = [ character(len=104) :: &
             "dataset: input_data", &
             "table: input_table", &
@@ -128,7 +130,8 @@ contains
             "  data_type: int32", &
             "- name: name", &
             "  info: Name of the object.", &
-            "  data_type: string" ]
+            "  data_type: string", &
+            "  array_size: 24" ]
     end function parquet_maml_maml_example2
 
 end module parquet_maml

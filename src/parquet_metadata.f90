@@ -3,6 +3,7 @@
 !========================
 !
 submodule (parquet) parquet_metadata
+    implicit none
 contains
 
     module procedure parquet_read_maml_file

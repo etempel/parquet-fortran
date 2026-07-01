@@ -1,6 +1,6 @@
-!========================
+!===========================================
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
-!========================
+!===========================================
 !
 submodule (parquet) parquet_metadata
     implicit none

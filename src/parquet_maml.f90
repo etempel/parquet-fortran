@@ -1,3 +1,7 @@
+!=========================
+! Author: Elmo Tempel (elmo.tempel@ut.ee)
+!=========================
+!
 module parquet_maml
     implicit none
     private
@@ -7,7 +11,9 @@ module parquet_maml
         character(len=:), allocatable :: lines(:)
     end type parquet_maml_file
 
-    public :: get_parquet_maml, parquet_maml_maml_example, parquet_maml_maml_example2
+    public :: get_parquet_maml
+    public :: parquet_maml_maml_example
+    public :: parquet_maml_maml_example2
 
 contains
 

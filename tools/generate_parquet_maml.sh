@@ -31,6 +31,10 @@ def fstr(s: str) -> str:
     return '"' + s.replace('"', '""') + '"'
 
 lines = []
+lines.append('!=========================')
+lines.append('! Author: Elmo Tempel (elmo.tempel@ut.ee)')
+lines.append('!=========================')
+lines.append('!')
 lines.append('module parquet_maml')
 lines.append('    implicit none')
 lines.append('    private')
@@ -72,7 +76,8 @@ for path in maml_files:
     case_blocks.append(f'        case ({fstr(Path(rel_name).stem)})')
     case_blocks.append(f'            maml = {identifier}()')
 
-lines.append('    public :: ' + ', '.join(public_names))
+for public_name in public_names:
+    lines.append(f'    public :: {public_name}')
 lines.append('')
 lines.append('contains')
 lines.append('')

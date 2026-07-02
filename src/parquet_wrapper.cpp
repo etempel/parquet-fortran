@@ -6,6 +6,7 @@
 #include <ctime>
 #include <cstring>
 #include <memory>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -444,10 +445,16 @@ extern "C"
 }
 
 	template <typename ArrowArrayType, typename CType>
-	static void read_scalar_primitive(void *handle, const char *name, CType *data, int64_t nrows)
+	static void read_scalar_primitive(void *handle, const char *name, CType *data, int64_t nrows, arrow::Type::type expected_type, const char *expected_name)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
+		if (array->type_id() != expected_type)
+		{
+			throw std::runtime_error(std::string("type mismatch for column: ") + name +
+				" (expected " + expected_name +
+				", got " + array->type()->ToString() + ")");
+		}
 		auto arr = std::static_pointer_cast<ArrowArrayType>(array);
 		if (arr->length() != nrows)
 		{
@@ -460,10 +467,15 @@ extern "C"
 	}
 
 	template <typename ArrowArrayType, typename CType>
-	static void read_list_primitive_full(void *handle, const char *name, CType *data, int64_t nrows, int64_t array_size)
+	static void read_list_primitive_full(void *handle, const char *name, CType *data, int64_t nrows, int64_t array_size, arrow::Type::type expected_value_type, const char *expected_name)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
+		if (array->type_id() != arrow::Type::FIXED_SIZE_LIST)
+		{
+			throw std::runtime_error(std::string("type mismatch for column: ") + name +
+				" (expected fixed_size_list, got " + array->type()->ToString() + ")");
+		}
 		auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
 		auto value_len = static_cast<int64_t>(list_arr->value_length());
 		if (value_len != array_size)
@@ -474,6 +486,12 @@ extern "C"
 		{
 			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
 		}
+		if (list_arr->values()->type_id() != expected_value_type)
+		{
+			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
+				" (expected " + expected_name +
+				", got " + list_arr->values()->type()->ToString() + ")");
+		}
 		auto vals = std::static_pointer_cast<ArrowArrayType>(list_arr->values());
 		for (int64_t i = 0; i < nrows * array_size; ++i)
 		{
@@ -482,10 +500,15 @@ extern "C"
 	}
 
 	template <typename ArrowArrayType, typename CType>
-	static void read_list_primitive_row(void *handle, const char *name, int64_t row_index, CType *data, int64_t array_size)
+	static void read_list_primitive_row(void *handle, const char *name, int64_t row_index, CType *data, int64_t array_size, arrow::Type::type expected_value_type, const char *expected_name)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
+		if (array->type_id() != arrow::Type::FIXED_SIZE_LIST)
+		{
+			throw std::runtime_error(std::string("type mismatch for column: ") + name +
+				" (expected fixed_size_list, got " + array->type()->ToString() + ")");
+		}
 		auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
 		auto nrows = list_arr->length();
 		if (row_index < 1 || row_index > nrows)
@@ -497,6 +520,12 @@ extern "C"
 		{
 			throw std::runtime_error(std::string("array_size mismatch for column: ") + name);
 		}
+		if (list_arr->values()->type_id() != expected_value_type)
+		{
+			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
+				" (expected " + expected_name +
+				", got " + list_arr->values()->type()->ToString() + ")");
+		}
 		auto vals = std::static_pointer_cast<ArrowArrayType>(list_arr->values());
 		auto start = (row_index - 1) * array_size;
 		for (int64_t j = 0; j < array_size; ++j)
@@ -506,10 +535,15 @@ extern "C"
 	}
 
 	template <typename ArrowArrayType, typename CType>
-	static void read_list_primitive_element(void *handle, const char *name, int64_t col_index, CType *data, int64_t nrows)
+	static void read_list_primitive_element(void *handle, const char *name, int64_t col_index, CType *data, int64_t nrows, arrow::Type::type expected_value_type, const char *expected_name)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
+		if (array->type_id() != arrow::Type::FIXED_SIZE_LIST)
+		{
+			throw std::runtime_error(std::string("type mismatch for column: ") + name +
+				" (expected fixed_size_list, got " + array->type()->ToString() + ")");
+		}
 		auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
 		auto array_size = static_cast<int64_t>(list_arr->value_length());
 		if (col_index < 1 || col_index > array_size)
@@ -519,6 +553,12 @@ extern "C"
 		if (list_arr->length() != nrows)
 		{
 			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
+		}
+		if (list_arr->values()->type_id() != expected_value_type)
+		{
+			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
+				" (expected " + expected_name +
+				", got " + list_arr->values()->type()->ToString() + ")");
 		}
 		auto vals = std::static_pointer_cast<ArrowArrayType>(list_arr->values());
 		auto offset = col_index - 1;
@@ -533,28 +573,194 @@ extern "C"
 
 	void parquet_read_int32_column(void *handle, const char *name, int32_t *data, int64_t nrows)
 	{
-		read_scalar_primitive<arrow::Int32Array, int32_t>(handle, name, data, nrows);
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_single_chunk_array(reader_handle, name);
+		if (array->length() != nrows)
+		{
+			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
+		}
+
+		switch (array->type_id())
+		{
+		case arrow::Type::INT32:
+		{
+			auto arr = std::static_pointer_cast<arrow::Int32Array>(array);
+			for (int64_t i = 0; i < nrows; ++i)
+			{
+				data[i] = arr->Value(i);
+			}
+			break;
+		}
+		case arrow::Type::INT64:
+		{
+			auto arr = std::static_pointer_cast<arrow::Int64Array>(array);
+			for (int64_t i = 0; i < nrows; ++i)
+			{
+				auto v = arr->Value(i);
+				if (v < std::numeric_limits<int32_t>::min() || v > std::numeric_limits<int32_t>::max())
+				{
+					throw std::runtime_error(std::string("int64->int32 overflow for column: ") + name);
+				}
+				data[i] = static_cast<int32_t>(v);
+			}
+			break;
+		}
+		default:
+			throw std::runtime_error(std::string("type mismatch for column: ") + name +
+				" (expected int32/int64, got " + array->type()->ToString() + ")");
+		}
 	}
 
 	void parquet_read_int64_column(void *handle, const char *name, int64_t *data, int64_t nrows)
 	{
-		read_scalar_primitive<arrow::Int64Array, int64_t>(handle, name, data, nrows);
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_single_chunk_array(reader_handle, name);
+		if (array->length() != nrows)
+		{
+			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
+		}
+
+		switch (array->type_id())
+		{
+		case arrow::Type::INT64:
+		{
+			auto arr = std::static_pointer_cast<arrow::Int64Array>(array);
+			for (int64_t i = 0; i < nrows; ++i)
+			{
+				data[i] = arr->Value(i);
+			}
+			break;
+		}
+		case arrow::Type::INT32:
+		{
+			auto arr = std::static_pointer_cast<arrow::Int32Array>(array);
+			for (int64_t i = 0; i < nrows; ++i)
+			{
+				data[i] = static_cast<int64_t>(arr->Value(i));
+			}
+			break;
+		}
+		default:
+			throw std::runtime_error(std::string("type mismatch for column: ") + name +
+				" (expected int64/int32, got " + array->type()->ToString() + ")");
+		}
 	}
 
 	void parquet_read_float32_column(void *handle, const char *name, float *data, int64_t nrows)
 	{
-		read_scalar_primitive<arrow::FloatArray, float>(handle, name, data, nrows);
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_single_chunk_array(reader_handle, name);
+		if (array->length() != nrows)
+		{
+			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
+		}
+
+		switch (array->type_id())
+		{
+		case arrow::Type::FLOAT:
+		{
+			auto arr = std::static_pointer_cast<arrow::FloatArray>(array);
+			for (int64_t i = 0; i < nrows; ++i)
+			{
+				data[i] = arr->Value(i);
+			}
+			break;
+		}
+		case arrow::Type::DOUBLE:
+		{
+			auto arr = std::static_pointer_cast<arrow::DoubleArray>(array);
+			for (int64_t i = 0; i < nrows; ++i)
+			{
+				data[i] = static_cast<float>(arr->Value(i));
+			}
+			break;
+		}
+		case arrow::Type::INT32:
+		{
+			auto arr = std::static_pointer_cast<arrow::Int32Array>(array);
+			for (int64_t i = 0; i < nrows; ++i)
+			{
+				data[i] = static_cast<float>(arr->Value(i));
+			}
+			break;
+		}
+		case arrow::Type::INT64:
+		{
+			auto arr = std::static_pointer_cast<arrow::Int64Array>(array);
+			for (int64_t i = 0; i < nrows; ++i)
+			{
+				data[i] = static_cast<float>(arr->Value(i));
+			}
+			break;
+		}
+		default:
+			throw std::runtime_error(std::string("type mismatch for column: ") + name +
+				" (expected float32/float64/int32/int64, got " + array->type()->ToString() + ")");
+		}
 	}
 
 	void parquet_read_float64_column(void *handle, const char *name, double *data, int64_t nrows)
 	{
-		read_scalar_primitive<arrow::DoubleArray, double>(handle, name, data, nrows);
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_single_chunk_array(reader_handle, name);
+		if (array->length() != nrows)
+		{
+			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
+		}
+
+		switch (array->type_id())
+		{
+		case arrow::Type::DOUBLE:
+		{
+			auto arr = std::static_pointer_cast<arrow::DoubleArray>(array);
+			for (int64_t i = 0; i < nrows; ++i)
+			{
+				data[i] = arr->Value(i);
+			}
+			break;
+		}
+		case arrow::Type::FLOAT:
+		{
+			auto arr = std::static_pointer_cast<arrow::FloatArray>(array);
+			for (int64_t i = 0; i < nrows; ++i)
+			{
+				data[i] = static_cast<double>(arr->Value(i));
+			}
+			break;
+		}
+		case arrow::Type::INT32:
+		{
+			auto arr = std::static_pointer_cast<arrow::Int32Array>(array);
+			for (int64_t i = 0; i < nrows; ++i)
+			{
+				data[i] = static_cast<double>(arr->Value(i));
+			}
+			break;
+		}
+		case arrow::Type::INT64:
+		{
+			auto arr = std::static_pointer_cast<arrow::Int64Array>(array);
+			for (int64_t i = 0; i < nrows; ++i)
+			{
+				data[i] = static_cast<double>(arr->Value(i));
+			}
+			break;
+		}
+		default:
+			throw std::runtime_error(std::string("type mismatch for column: ") + name +
+				" (expected float64/float32/int32/int64, got " + array->type()->ToString() + ")");
+		}
 	}
 
 	void parquet_read_bool8_column(void *handle, const char *name, int8_t *data, int64_t nrows)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
+		if (array->type_id() != arrow::Type::BOOL)
+		{
+			throw std::runtime_error(std::string("type mismatch for column: ") + name +
+				" (expected bool, got " + array->type()->ToString() + ")");
+		}
 		auto arr = std::static_pointer_cast<arrow::BooleanArray>(array);
 		if (arr->length() != nrows)
 		{
@@ -570,6 +776,11 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
+		if (array->type_id() != arrow::Type::STRING)
+		{
+			throw std::runtime_error(std::string("type mismatch for column: ") + name +
+				" (expected string, got " + array->type()->ToString() + ")");
+		}
 		auto arr = std::static_pointer_cast<arrow::StringArray>(array);
 		if (arr->length() != nrows)
 		{
@@ -584,29 +795,195 @@ extern "C"
 
 	void parquet_read_int32_array_column(void *handle, const char *name, int32_t *data, int64_t nrows, int64_t array_size)
 	{
-		read_list_primitive_full<arrow::Int32Array, int32_t>(handle, name, data, nrows, array_size);
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_single_chunk_array(reader_handle, name);
+		if (array->type_id() != arrow::Type::FIXED_SIZE_LIST)
+		{
+			throw std::runtime_error(std::string("type mismatch for column: ") + name +
+				" (expected fixed_size_list, got " + array->type()->ToString() + ")");
+		}
+		auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
+		if (list_arr->length() != nrows || static_cast<int64_t>(list_arr->value_length()) != array_size)
+		{
+			throw std::runtime_error(std::string("shape mismatch for column: ") + name);
+		}
+		auto vals_any = list_arr->values();
+		int64_t total = nrows * array_size;
+		switch (vals_any->type_id())
+		{
+		case arrow::Type::INT32:
+		{
+			auto vals = std::static_pointer_cast<arrow::Int32Array>(vals_any);
+			for (int64_t i = 0; i < total; ++i) data[i] = vals->Value(i);
+			break;
+		}
+		case arrow::Type::INT64:
+		{
+			auto vals = std::static_pointer_cast<arrow::Int64Array>(vals_any);
+			for (int64_t i = 0; i < total; ++i)
+			{
+				auto v = vals->Value(i);
+				if (v < std::numeric_limits<int32_t>::min() || v > std::numeric_limits<int32_t>::max())
+				{
+					throw std::runtime_error(std::string("int64->int32 overflow for column: ") + name);
+				}
+				data[i] = static_cast<int32_t>(v);
+			}
+			break;
+		}
+		default:
+			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
+				" (expected int32/int64, got " + vals_any->type()->ToString() + ")");
+		}
 	}
 
 	void parquet_read_int64_array_column(void *handle, const char *name, int64_t *data, int64_t nrows, int64_t array_size)
 	{
-		read_list_primitive_full<arrow::Int64Array, int64_t>(handle, name, data, nrows, array_size);
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_single_chunk_array(reader_handle, name);
+		if (array->type_id() != arrow::Type::FIXED_SIZE_LIST)
+		{
+			throw std::runtime_error(std::string("type mismatch for column: ") + name +
+				" (expected fixed_size_list, got " + array->type()->ToString() + ")");
+		}
+		auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
+		if (list_arr->length() != nrows || static_cast<int64_t>(list_arr->value_length()) != array_size)
+		{
+			throw std::runtime_error(std::string("shape mismatch for column: ") + name);
+		}
+		auto vals_any = list_arr->values();
+		int64_t total = nrows * array_size;
+		switch (vals_any->type_id())
+		{
+		case arrow::Type::INT64:
+		{
+			auto vals = std::static_pointer_cast<arrow::Int64Array>(vals_any);
+			for (int64_t i = 0; i < total; ++i) data[i] = vals->Value(i);
+			break;
+		}
+		case arrow::Type::INT32:
+		{
+			auto vals = std::static_pointer_cast<arrow::Int32Array>(vals_any);
+			for (int64_t i = 0; i < total; ++i) data[i] = static_cast<int64_t>(vals->Value(i));
+			break;
+		}
+		default:
+			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
+				" (expected int64/int32, got " + vals_any->type()->ToString() + ")");
+		}
 	}
 
 	void parquet_read_float32_array_column(void *handle, const char *name, float *data, int64_t nrows, int64_t array_size)
 	{
-		read_list_primitive_full<arrow::FloatArray, float>(handle, name, data, nrows, array_size);
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_single_chunk_array(reader_handle, name);
+		if (array->type_id() != arrow::Type::FIXED_SIZE_LIST)
+		{
+			throw std::runtime_error(std::string("type mismatch for column: ") + name +
+				" (expected fixed_size_list, got " + array->type()->ToString() + ")");
+		}
+		auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
+		if (list_arr->length() != nrows || static_cast<int64_t>(list_arr->value_length()) != array_size)
+		{
+			throw std::runtime_error(std::string("shape mismatch for column: ") + name);
+		}
+		auto vals_any = list_arr->values();
+		int64_t total = nrows * array_size;
+		switch (vals_any->type_id())
+		{
+		case arrow::Type::FLOAT:
+		{
+			auto vals = std::static_pointer_cast<arrow::FloatArray>(vals_any);
+			for (int64_t i = 0; i < total; ++i) data[i] = vals->Value(i);
+			break;
+		}
+		case arrow::Type::DOUBLE:
+		{
+			auto vals = std::static_pointer_cast<arrow::DoubleArray>(vals_any);
+			for (int64_t i = 0; i < total; ++i) data[i] = static_cast<float>(vals->Value(i));
+			break;
+		}
+		case arrow::Type::INT32:
+		{
+			auto vals = std::static_pointer_cast<arrow::Int32Array>(vals_any);
+			for (int64_t i = 0; i < total; ++i) data[i] = static_cast<float>(vals->Value(i));
+			break;
+		}
+		case arrow::Type::INT64:
+		{
+			auto vals = std::static_pointer_cast<arrow::Int64Array>(vals_any);
+			for (int64_t i = 0; i < total; ++i) data[i] = static_cast<float>(vals->Value(i));
+			break;
+		}
+		default:
+			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
+				" (expected float32/float64/int32/int64, got " + vals_any->type()->ToString() + ")");
+		}
 	}
 
 	void parquet_read_float64_array_column(void *handle, const char *name, double *data, int64_t nrows, int64_t array_size)
 	{
-		read_list_primitive_full<arrow::DoubleArray, double>(handle, name, data, nrows, array_size);
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_single_chunk_array(reader_handle, name);
+		if (array->type_id() != arrow::Type::FIXED_SIZE_LIST)
+		{
+			throw std::runtime_error(std::string("type mismatch for column: ") + name +
+				" (expected fixed_size_list, got " + array->type()->ToString() + ")");
+		}
+		auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
+		if (list_arr->length() != nrows || static_cast<int64_t>(list_arr->value_length()) != array_size)
+		{
+			throw std::runtime_error(std::string("shape mismatch for column: ") + name);
+		}
+		auto vals_any = list_arr->values();
+		int64_t total = nrows * array_size;
+		switch (vals_any->type_id())
+		{
+		case arrow::Type::DOUBLE:
+		{
+			auto vals = std::static_pointer_cast<arrow::DoubleArray>(vals_any);
+			for (int64_t i = 0; i < total; ++i) data[i] = vals->Value(i);
+			break;
+		}
+		case arrow::Type::FLOAT:
+		{
+			auto vals = std::static_pointer_cast<arrow::FloatArray>(vals_any);
+			for (int64_t i = 0; i < total; ++i) data[i] = static_cast<double>(vals->Value(i));
+			break;
+		}
+		case arrow::Type::INT32:
+		{
+			auto vals = std::static_pointer_cast<arrow::Int32Array>(vals_any);
+			for (int64_t i = 0; i < total; ++i) data[i] = static_cast<double>(vals->Value(i));
+			break;
+		}
+		case arrow::Type::INT64:
+		{
+			auto vals = std::static_pointer_cast<arrow::Int64Array>(vals_any);
+			for (int64_t i = 0; i < total; ++i) data[i] = static_cast<double>(vals->Value(i));
+			break;
+		}
+		default:
+			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
+				" (expected float64/float32/int32/int64, got " + vals_any->type()->ToString() + ")");
+		}
 	}
 
 	void parquet_read_bool8_array_column(void *handle, const char *name, int8_t *data, int64_t nrows, int64_t array_size)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
+		if (array->type_id() != arrow::Type::FIXED_SIZE_LIST)
+		{
+			throw std::runtime_error(std::string("type mismatch for column: ") + name +
+				" (expected fixed_size_list, got " + array->type()->ToString() + ")");
+		}
 		auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
+		if (list_arr->values()->type_id() != arrow::Type::BOOL)
+		{
+			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
+				" (expected bool, got " + list_arr->values()->type()->ToString() + ")");
+		}
 		if (list_arr->length() != nrows || static_cast<int64_t>(list_arr->value_length()) != array_size)
 		{
 			throw std::runtime_error(std::string("shape mismatch for column: ") + name);
@@ -622,7 +999,17 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
+		if (array->type_id() != arrow::Type::FIXED_SIZE_LIST)
+		{
+			throw std::runtime_error(std::string("type mismatch for column: ") + name +
+				" (expected fixed_size_list, got " + array->type()->ToString() + ")");
+		}
 		auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
+		if (list_arr->values()->type_id() != arrow::Type::STRING)
+		{
+			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
+				" (expected string, got " + list_arr->values()->type()->ToString() + ")");
+		}
 		if (list_arr->length() != nrows || static_cast<int64_t>(list_arr->value_length()) != array_size)
 		{
 			throw std::runtime_error(std::string("shape mismatch for column: ") + name);
@@ -636,34 +1023,43 @@ extern "C"
 
 	void parquet_read_int32_array_row(void *handle, const char *name, int64_t row_index, int32_t *data, int64_t array_size)
 	{
-		read_list_primitive_row<arrow::Int32Array, int32_t>(handle, name, row_index, data, array_size);
+		read_list_primitive_row<arrow::Int32Array, int32_t>(handle, name, row_index, data, array_size, arrow::Type::INT32, "int32");
 	}
 
 	void parquet_read_int64_array_row(void *handle, const char *name, int64_t row_index, int64_t *data, int64_t array_size)
 	{
-		read_list_primitive_row<arrow::Int64Array, int64_t>(handle, name, row_index, data, array_size);
+		read_list_primitive_row<arrow::Int64Array, int64_t>(handle, name, row_index, data, array_size, arrow::Type::INT64, "int64");
 	}
 
 	void parquet_read_float32_array_row(void *handle, const char *name, int64_t row_index, float *data, int64_t array_size)
 	{
-		read_list_primitive_row<arrow::FloatArray, float>(handle, name, row_index, data, array_size);
+		read_list_primitive_row<arrow::FloatArray, float>(handle, name, row_index, data, array_size, arrow::Type::FLOAT, "float32");
 	}
 
 	void parquet_read_float64_array_row(void *handle, const char *name, int64_t row_index, double *data, int64_t array_size)
 	{
-		read_list_primitive_row<arrow::DoubleArray, double>(handle, name, row_index, data, array_size);
+		read_list_primitive_row<arrow::DoubleArray, double>(handle, name, row_index, data, array_size, arrow::Type::DOUBLE, "float64");
 	}
 
 	void parquet_read_bool8_array_row(void *handle, const char *name, int64_t row_index, int8_t *data, int64_t array_size)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
+		if (array->type_id() != arrow::Type::FIXED_SIZE_LIST)
+		{
+			throw std::runtime_error(std::string("type mismatch for column: ") + name +
+				" (expected fixed_size_list, got " + array->type()->ToString() + ")");
+		}
 		auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
 		auto nrows = list_arr->length();
 		if (row_index < 1 || row_index > nrows)
 			throw std::runtime_error("row_index out of bounds");
 		if (static_cast<int64_t>(list_arr->value_length()) != array_size)
 			throw std::runtime_error(std::string("array_size mismatch for column: ") + name);
+		if (list_arr->values()->type_id() != arrow::Type::BOOL)
+			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
+				" (expected bool, got " + list_arr->values()->type()->ToString() + ")");
+
 		auto vals = std::static_pointer_cast<arrow::BooleanArray>(list_arr->values());
 		auto start = (row_index - 1) * array_size;
 		for (int64_t j = 0; j < array_size; ++j)
@@ -676,12 +1072,21 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
+		if (array->type_id() != arrow::Type::FIXED_SIZE_LIST)
+		{
+			throw std::runtime_error(std::string("type mismatch for column: ") + name +
+				" (expected fixed_size_list, got " + array->type()->ToString() + ")");
+		}
 		auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
 		auto nrows = list_arr->length();
 		if (row_index < 1 || row_index > nrows)
 			throw std::runtime_error("row_index out of bounds");
 		if (static_cast<int64_t>(list_arr->value_length()) != array_size)
 			throw std::runtime_error(std::string("array_size mismatch for column: ") + name);
+		if (list_arr->values()->type_id() != arrow::Type::STRING)
+			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
+				" (expected string, got " + list_arr->values()->type()->ToString() + ")");
+
 		auto vals = std::static_pointer_cast<arrow::StringArray>(list_arr->values());
 		auto start = (row_index - 1) * array_size;
 		for (int64_t j = 0; j < array_size; ++j)
@@ -692,34 +1097,43 @@ extern "C"
 
 	void parquet_read_int32_array_element(void *handle, const char *name, int64_t col_index, int32_t *data, int64_t nrows, int64_t)
 	{
-		read_list_primitive_element<arrow::Int32Array, int32_t>(handle, name, col_index, data, nrows);
+		read_list_primitive_element<arrow::Int32Array, int32_t>(handle, name, col_index, data, nrows, arrow::Type::INT32, "int32");
 	}
 
 	void parquet_read_int64_array_element(void *handle, const char *name, int64_t col_index, int64_t *data, int64_t nrows, int64_t)
 	{
-		read_list_primitive_element<arrow::Int64Array, int64_t>(handle, name, col_index, data, nrows);
+		read_list_primitive_element<arrow::Int64Array, int64_t>(handle, name, col_index, data, nrows, arrow::Type::INT64, "int64");
 	}
 
 	void parquet_read_float32_array_element(void *handle, const char *name, int64_t col_index, float *data, int64_t nrows, int64_t)
 	{
-		read_list_primitive_element<arrow::FloatArray, float>(handle, name, col_index, data, nrows);
+		read_list_primitive_element<arrow::FloatArray, float>(handle, name, col_index, data, nrows, arrow::Type::FLOAT, "float32");
 	}
 
 	void parquet_read_float64_array_element(void *handle, const char *name, int64_t col_index, double *data, int64_t nrows, int64_t)
 	{
-		read_list_primitive_element<arrow::DoubleArray, double>(handle, name, col_index, data, nrows);
+		read_list_primitive_element<arrow::DoubleArray, double>(handle, name, col_index, data, nrows, arrow::Type::DOUBLE, "float64");
 	}
 
 	void parquet_read_bool8_array_element(void *handle, const char *name, int64_t col_index, int8_t *data, int64_t nrows, int64_t)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
+		if (array->type_id() != arrow::Type::FIXED_SIZE_LIST)
+		{
+			throw std::runtime_error(std::string("type mismatch for column: ") + name +
+				" (expected fixed_size_list, got " + array->type()->ToString() + ")");
+		}
 		auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
 		auto array_size = static_cast<int64_t>(list_arr->value_length());
 		if (col_index < 1 || col_index > array_size)
 			throw std::runtime_error("col_index out of bounds");
 		if (list_arr->length() != nrows)
 			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
+		if (list_arr->values()->type_id() != arrow::Type::BOOL)
+			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
+				" (expected bool, got " + list_arr->values()->type()->ToString() + ")");
+
 		auto vals = std::static_pointer_cast<arrow::BooleanArray>(list_arr->values());
 		auto offset = col_index - 1;
 		for (int64_t i = 0; i < nrows; ++i)
@@ -732,12 +1146,21 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
+		if (array->type_id() != arrow::Type::FIXED_SIZE_LIST)
+		{
+			throw std::runtime_error(std::string("type mismatch for column: ") + name +
+				" (expected fixed_size_list, got " + array->type()->ToString() + ")");
+		}
 		auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
 		auto array_size = static_cast<int64_t>(list_arr->value_length());
 		if (col_index < 1 || col_index > array_size)
 			throw std::runtime_error("col_index out of bounds");
 		if (list_arr->length() != nrows)
 			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
+		if (list_arr->values()->type_id() != arrow::Type::STRING)
+			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
+				" (expected string, got " + list_arr->values()->type()->ToString() + ")");
+
 		auto vals = std::static_pointer_cast<arrow::StringArray>(list_arr->values());
 		auto offset = col_index - 1;
 		for (int64_t i = 0; i < nrows; ++i)

@@ -31,6 +31,7 @@ contains
         type(error_type), allocatable, intent(out) :: error
         type(parquet_reader) :: reader
         real(real64), dimension(:),allocatable :: xdata
+        real(real32), dimension(:),allocatable :: xdata32
         real(real64), dimension(:,:),allocatable :: arr
         logical :: exists
         character(len=*), parameter :: in_file = "test_run/test_simple.parquet"
@@ -54,12 +55,21 @@ contains
         end if
         !
         allocate(xdata(nrows))
+        allocate(xdata32(nrows))
         !
         call parquet_read_column(reader, "colx", xdata)
         call check(error, xdata(1) == 1.0_real64 .and. xdata(size(xdata)) == real(nrows, kind=real64))
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "colx column contents do not match expected values")
+            return
+        end if
+
+        call parquet_read_column(reader, "colx", xdata32)
+        call check(error, xdata32(1) == 1.0_real32 .and. xdata32(size(xdata32)) == real(nrows, kind=real32))
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "colx column contents do not match expected values (xdata32)")
             return
         end if
 
@@ -92,6 +102,8 @@ contains
         integer(int64) :: nrows
         integer :: n
         integer(int32), allocatable :: ids(:)
+        real(real32), allocatable :: ids_r32(:)
+        real(real64), allocatable :: ids_r64(:)
         integer(int64), allocatable :: idarr(:,:)
         integer(int64), allocatable :: idlong(:)
         real(real32), allocatable :: value(:), val(:), arr(:,:)
@@ -129,6 +141,26 @@ contains
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "id0 column contents do not match expected values")
+            return
+        end if
+
+        allocate(ids_r32(n), ids_r64(n))
+        call parquet_read_column(reader, "id0", ids_r32)
+        call parquet_read_column(reader, "id0", ids_r64)
+
+        call check(error, abs(ids_r32(1) - 1.0_real32) < 1.0e-6_real32 .and. &
+                          abs(ids_r32(size(ids_r32)) - real(nrows, kind=real32)) < 1.0e-6_real32)
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "id0 int32->real32 conversion failed")
+            return
+        end if
+
+        call check(error, abs(ids_r64(1) - 1.0_real64) < 1.0d-12 .and. &
+                          abs(ids_r64(size(ids_r64)) - real(nrows, kind=real64)) < 1.0d-12)
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "id0 int32->real64 conversion failed")
             return
         end if
 

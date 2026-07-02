@@ -474,20 +474,32 @@ extern "C"
 			return max_len;
 		}
 
+		std::shared_ptr<arrow::Array> list_values;
 		if (array->type_id() == arrow::Type::FIXED_SIZE_LIST)
 		{
-			auto larr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
-			auto vals = std::static_pointer_cast<arrow::StringArray>(larr->values());
-			for (int64_t i = 0; i < vals->length(); ++i)
-			{
-				if (vals->IsNull(i))
-					continue;
-				max_len = std::max(max_len, static_cast<int64_t>(vals->GetView(i).size()));
-			}
-			return max_len;
+			list_values = std::static_pointer_cast<arrow::FixedSizeListArray>(array)->values();
+		}
+		else if (array->type_id() == arrow::Type::LIST)
+		{
+			list_values = std::static_pointer_cast<arrow::ListArray>(array)->values();
+		}
+		else if (array->type_id() == arrow::Type::LARGE_LIST)
+		{
+			list_values = std::static_pointer_cast<arrow::LargeListArray>(array)->values();
+		}
+		else
+		{
+			throw std::runtime_error(std::string("Column is not string-like: ") + name);
 		}
 
-		throw std::runtime_error(std::string("Column is not string-like: ") + name);
+		auto vals = std::static_pointer_cast<arrow::StringArray>(list_values);
+		for (int64_t i = 0; i < vals->length(); ++i)
+		{
+			if (vals->IsNull(i))
+				continue;
+			max_len = std::max(max_len, static_cast<int64_t>(vals->GetView(i).size()));
+		}
+		return max_len;
 	}
 
 }
@@ -514,36 +526,67 @@ extern "C"
 		}
 	}
 
-	template <typename ArrowArrayType, typename CType>
-	static void read_list_primitive_full(void *handle, const char *name, CType *data, int64_t nrows, int64_t array_size, arrow::Type::type expected_value_type, const char *expected_name)
+	static std::shared_ptr<arrow::Array> get_row_list_values(const std::shared_ptr<arrow::Array> &array,
+		const std::string &name, int64_t row_index, int64_t array_size)
 	{
-		auto reader_handle = as_reader_handle(handle);
-		auto array = get_single_chunk_array(reader_handle, name);
-		if (array->type_id() != arrow::Type::FIXED_SIZE_LIST)
+		if (array->type_id() == arrow::Type::FIXED_SIZE_LIST)
 		{
-			throw std::runtime_error(std::string("type mismatch for column: ") + name +
-				" (expected fixed_size_list, got " + array->type()->ToString() + ")");
+			auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
+			if (row_index < 1 || row_index > list_arr->length())
+			{
+				throw std::runtime_error("row_index out of bounds");
+			}
+			if (static_cast<int64_t>(list_arr->value_length()) != array_size)
+			{
+				throw std::runtime_error(std::string("array_size mismatch for column: ") + name);
+			}
+			return list_arr->values()->Slice(list_arr->value_offset(row_index - 1), array_size);
 		}
-		auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
-		auto value_len = static_cast<int64_t>(list_arr->value_length());
-		if (value_len != array_size)
+		if (array->type_id() == arrow::Type::LIST)
 		{
-			throw std::runtime_error(std::string("array_size mismatch for column: ") + name);
+			auto list_arr = std::static_pointer_cast<arrow::ListArray>(array);
+			if (row_index < 1 || row_index > list_arr->length())
+			{
+				throw std::runtime_error("row_index out of bounds");
+			}
+			if (static_cast<int64_t>(list_arr->value_length(row_index - 1)) != array_size)
+			{
+				throw std::runtime_error(std::string("array_size mismatch for column: ") + name);
+			}
+			return list_arr->values()->Slice(list_arr->value_offset(row_index - 1), array_size);
 		}
-		if (list_arr->length() != nrows)
+		if (array->type_id() == arrow::Type::LARGE_LIST)
 		{
-			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
+			auto list_arr = std::static_pointer_cast<arrow::LargeListArray>(array);
+			if (row_index < 1 || row_index > list_arr->length())
+			{
+				throw std::runtime_error("row_index out of bounds");
+			}
+			if (list_arr->value_length(row_index - 1) != array_size)
+			{
+				throw std::runtime_error(std::string("array_size mismatch for column: ") + name);
+			}
+			return list_arr->values()->Slice(list_arr->value_offset(row_index - 1), array_size);
 		}
-		if (list_arr->values()->type_id() != expected_value_type)
+		throw std::runtime_error(std::string("type mismatch for column: ") + name +
+			" (expected fixed_size_list/list/large_list, got " + array->type()->ToString() + ")");
+	}
+
+	static double numeric_value_at(const std::shared_ptr<arrow::Array> &array, const std::string &name, int64_t idx)
+	{
+		switch (array->type_id())
 		{
+		case arrow::Type::DOUBLE:
+			return std::static_pointer_cast<arrow::DoubleArray>(array)->Value(idx);
+		case arrow::Type::FLOAT:
+			return static_cast<double>(std::static_pointer_cast<arrow::FloatArray>(array)->Value(idx));
+		case arrow::Type::INT32:
+			return static_cast<double>(std::static_pointer_cast<arrow::Int32Array>(array)->Value(idx));
+		case arrow::Type::INT64:
+			return static_cast<double>(std::static_pointer_cast<arrow::Int64Array>(array)->Value(idx));
+		default:
 			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
-				" (expected " + expected_name +
-				", got " + list_arr->values()->type()->ToString() + ")");
-		}
-		auto vals = std::static_pointer_cast<ArrowArrayType>(list_arr->values());
-		for (int64_t i = 0; i < nrows * array_size; ++i)
-		{
-			data[i] = static_cast<CType>(vals->Value(i));
+				" (expected numeric, got " + array->type()->ToString() + ")");
 		}
 	}
 
@@ -552,33 +595,10 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		if (array->type_id() != arrow::Type::FIXED_SIZE_LIST)
-		{
-			throw std::runtime_error(std::string("type mismatch for column: ") + name +
-				" (expected fixed_size_list, got " + array->type()->ToString() + ")");
-		}
-		auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
-		auto nrows = list_arr->length();
-		if (row_index < 1 || row_index > nrows)
-		{
-			throw std::runtime_error("row_index out of bounds");
-		}
-		auto value_len = static_cast<int64_t>(list_arr->value_length());
-		if (value_len != array_size)
-		{
-			throw std::runtime_error(std::string("array_size mismatch for column: ") + name);
-		}
-		if (list_arr->values()->type_id() != expected_value_type)
-		{
-			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
-				" (expected " + expected_name +
-				", got " + list_arr->values()->type()->ToString() + ")");
-		}
-		auto vals = std::static_pointer_cast<ArrowArrayType>(list_arr->values());
-		auto start = (row_index - 1) * array_size;
+		auto vals_any = get_row_list_values(array, name, row_index, array_size);
 		for (int64_t j = 0; j < array_size; ++j)
 		{
-			data[j] = static_cast<CType>(vals->Value(start + j));
+			data[j] = static_cast<CType>(numeric_value_at(vals_any, name, j));
 		}
 	}
 
@@ -587,32 +607,16 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		if (array->type_id() != arrow::Type::FIXED_SIZE_LIST)
-		{
-			throw std::runtime_error(std::string("type mismatch for column: ") + name +
-				" (expected fixed_size_list, got " + array->type()->ToString() + ")");
-		}
-		auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
-		auto array_size = static_cast<int64_t>(list_arr->value_length());
+		auto array_size = get_array_size(array);
 		if (col_index < 1 || col_index > array_size)
 		{
 			throw std::runtime_error("col_index out of bounds");
 		}
-		if (list_arr->length() != nrows)
-		{
-			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
-		}
-		if (list_arr->values()->type_id() != expected_value_type)
-		{
-			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
-				" (expected " + expected_name +
-				", got " + list_arr->values()->type()->ToString() + ")");
-		}
-		auto vals = std::static_pointer_cast<ArrowArrayType>(list_arr->values());
+		auto vals_any = get_uniform_list_values(array, name, nrows, array_size);
 		auto offset = col_index - 1;
 		for (int64_t i = 0; i < nrows; ++i)
 		{
-			data[i] = static_cast<CType>(vals->Value(i * array_size + offset));
+			data[i] = static_cast<CType>(numeric_value_at(vals_any, name, i * array_size + offset));
 		}
 	}
 
@@ -1035,26 +1039,15 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		if (array->type_id() != arrow::Type::FIXED_SIZE_LIST)
-		{
-			throw std::runtime_error(std::string("type mismatch for column: ") + name +
-				" (expected fixed_size_list, got " + array->type()->ToString() + ")");
-		}
-		auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
-		auto nrows = list_arr->length();
-		if (row_index < 1 || row_index > nrows)
-			throw std::runtime_error("row_index out of bounds");
-		if (static_cast<int64_t>(list_arr->value_length()) != array_size)
-			throw std::runtime_error(std::string("array_size mismatch for column: ") + name);
-		if (list_arr->values()->type_id() != arrow::Type::BOOL)
+		auto vals_any = get_row_list_values(array, name, row_index, array_size);
+		if (vals_any->type_id() != arrow::Type::BOOL)
 			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
-				" (expected bool, got " + list_arr->values()->type()->ToString() + ")");
+				" (expected bool, got " + vals_any->type()->ToString() + ")");
 
-		auto vals = std::static_pointer_cast<arrow::BooleanArray>(list_arr->values());
-		auto start = (row_index - 1) * array_size;
+		auto vals = std::static_pointer_cast<arrow::BooleanArray>(vals_any);
 		for (int64_t j = 0; j < array_size; ++j)
 		{
-			data[j] = vals->Value(start + j) ? 1 : 0;
+			data[j] = vals->Value(j) ? 1 : 0;
 		}
 	}
 
@@ -1062,26 +1055,15 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		if (array->type_id() != arrow::Type::FIXED_SIZE_LIST)
-		{
-			throw std::runtime_error(std::string("type mismatch for column: ") + name +
-				" (expected fixed_size_list, got " + array->type()->ToString() + ")");
-		}
-		auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
-		auto nrows = list_arr->length();
-		if (row_index < 1 || row_index > nrows)
-			throw std::runtime_error("row_index out of bounds");
-		if (static_cast<int64_t>(list_arr->value_length()) != array_size)
-			throw std::runtime_error(std::string("array_size mismatch for column: ") + name);
-		if (list_arr->values()->type_id() != arrow::Type::STRING)
+		auto vals_any = get_row_list_values(array, name, row_index, array_size);
+		if (vals_any->type_id() != arrow::Type::STRING)
 			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
-				" (expected string, got " + list_arr->values()->type()->ToString() + ")");
+				" (expected string, got " + vals_any->type()->ToString() + ")");
 
-		auto vals = std::static_pointer_cast<arrow::StringArray>(list_arr->values());
-		auto start = (row_index - 1) * array_size;
+		auto vals = std::static_pointer_cast<arrow::StringArray>(vals_any);
 		for (int64_t j = 0; j < array_size; ++j)
 		{
-			copy_string_with_padding(data + j * item_len, item_len, vals->GetView(start + j));
+			copy_string_with_padding(data + j * item_len, item_len, vals->GetView(j));
 		}
 	}
 
@@ -1109,22 +1091,15 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		if (array->type_id() != arrow::Type::FIXED_SIZE_LIST)
-		{
-			throw std::runtime_error(std::string("type mismatch for column: ") + name +
-				" (expected fixed_size_list, got " + array->type()->ToString() + ")");
-		}
-		auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
-		auto array_size = static_cast<int64_t>(list_arr->value_length());
+		auto array_size = get_array_size(array);
 		if (col_index < 1 || col_index > array_size)
 			throw std::runtime_error("col_index out of bounds");
-		if (list_arr->length() != nrows)
-			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
-		if (list_arr->values()->type_id() != arrow::Type::BOOL)
+		auto vals_any = get_uniform_list_values(array, name, nrows, array_size);
+		if (vals_any->type_id() != arrow::Type::BOOL)
 			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
-				" (expected bool, got " + list_arr->values()->type()->ToString() + ")");
+				" (expected bool, got " + vals_any->type()->ToString() + ")");
 
-		auto vals = std::static_pointer_cast<arrow::BooleanArray>(list_arr->values());
+		auto vals = std::static_pointer_cast<arrow::BooleanArray>(vals_any);
 		auto offset = col_index - 1;
 		for (int64_t i = 0; i < nrows; ++i)
 		{
@@ -1136,22 +1111,15 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		if (array->type_id() != arrow::Type::FIXED_SIZE_LIST)
-		{
-			throw std::runtime_error(std::string("type mismatch for column: ") + name +
-				" (expected fixed_size_list, got " + array->type()->ToString() + ")");
-		}
-		auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
-		auto array_size = static_cast<int64_t>(list_arr->value_length());
+		auto array_size = get_array_size(array);
 		if (col_index < 1 || col_index > array_size)
 			throw std::runtime_error("col_index out of bounds");
-		if (list_arr->length() != nrows)
-			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
-		if (list_arr->values()->type_id() != arrow::Type::STRING)
+		auto vals_any = get_uniform_list_values(array, name, nrows, array_size);
+		if (vals_any->type_id() != arrow::Type::STRING)
 			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
-				" (expected string, got " + list_arr->values()->type()->ToString() + ")");
+				" (expected string, got " + vals_any->type()->ToString() + ")");
 
-		auto vals = std::static_pointer_cast<arrow::StringArray>(list_arr->values());
+		auto vals = std::static_pointer_cast<arrow::StringArray>(vals_any);
 		auto offset = col_index - 1;
 		for (int64_t i = 0; i < nrows; ++i)
 		{

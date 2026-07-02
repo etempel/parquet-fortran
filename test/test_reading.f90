@@ -36,8 +36,6 @@ contains
         logical :: exists
         character(len=*), parameter :: in_file = "test_run/test_simple.parquet"
         integer:: nrows, nelem, ntot
-        real(real64), dimension(:,:), allocatable :: blob_data
-        real(real32), dimension(:,:), allocatable :: blob_data32
         !
         inquire(file=in_file, exist=exists)
         call check(error, exists)

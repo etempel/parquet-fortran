@@ -31,9 +31,10 @@ contains
         type(error_type), allocatable, intent(out) :: error
         type(parquet_reader) :: reader
         real(real64), dimension(:),allocatable :: xdata
+        real(real64), dimension(:,:),allocatable :: arr
         logical :: exists
         character(len=*), parameter :: in_file = "test_run/test_simple.parquet"
-        integer:: nrows
+        integer:: nrows, nelem, ntot
         !
         inquire(file=in_file, exist=exists)
         call check(error, exists)
@@ -59,6 +60,25 @@ contains
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "colx column contents do not match expected values")
+            return
+        end if
+
+        call parquet_get_col_size(reader, "arr", nelem)
+        call parquet_get_column_total_elements(reader, "arr", ntot)
+
+        call check(error, nelem == 3 .and. ntot == 15)
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "unexpected column size or total elements for arr")
+            return
+        end if
+
+        allocate(arr(3, nrows))
+        call parquet_read_column(reader, "arr", arr)
+        call check(error, arr(1,1) == 2.0_real64 .and. arr(3,nrows) == real(nrows + 3, kind=real64))
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "arr column contents do not match expected values")
             return
         end if
         !

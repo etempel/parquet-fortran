@@ -76,6 +76,46 @@ extern "C"
 			auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
 			return static_cast<int64_t>(list_arr->value_length());
 		}
+
+		if (array->type_id() == arrow::Type::LIST)
+		{
+			auto list_arr = std::static_pointer_cast<arrow::ListArray>(array);
+			if (list_arr->length() == 0)
+			{
+				return 0;
+			}
+
+			const auto *offsets = reinterpret_cast<const int32_t *>(list_arr->value_offsets()->data());
+			auto value_length = static_cast<int64_t>(offsets[1] - offsets[0]);
+			for (int64_t i = 1; i < list_arr->length(); ++i)
+			{
+				if (static_cast<int64_t>(offsets[i + 1] - offsets[i]) != value_length)
+				{
+					return 1;
+				}
+			}
+			return value_length;
+		}
+
+		if (array->type_id() == arrow::Type::LARGE_LIST)
+		{
+			auto list_arr = std::static_pointer_cast<arrow::LargeListArray>(array);
+			if (list_arr->length() == 0)
+			{
+				return 0;
+			}
+
+			const auto *offsets = reinterpret_cast<const int64_t *>(list_arr->value_offsets()->data());
+			auto value_length = offsets[1] - offsets[0];
+			for (int64_t i = 1; i < list_arr->length(); ++i)
+			{
+				if ((offsets[i + 1] - offsets[i]) != value_length)
+				{
+					return 1;
+				}
+			}
+			return value_length;
+		}
 		return 1;
 	}
 

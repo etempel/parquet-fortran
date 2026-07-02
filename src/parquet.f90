@@ -58,11 +58,17 @@ module parquet
 
     interface parquet_write_column
         module procedure parquet_write_int32_column
+        module procedure parquet_write_int32_matrix_column
         module procedure parquet_write_int64_column
+        module procedure parquet_write_int64_matrix_column
         module procedure parquet_write_float32_column
+        module procedure parquet_write_float32_matrix_column
         module procedure parquet_write_float64_column
+        module procedure parquet_write_float64_matrix_column
         module procedure parquet_write_logical_column
+        module procedure parquet_write_logical_matrix_column
         module procedure parquet_write_string_column
+        module procedure parquet_write_string_matrix_column
     end interface parquet_write_column
 
     interface parquet_read_maml
@@ -198,11 +204,23 @@ module parquet
             integer(int32), intent(in) :: data(:)
         end subroutine parquet_write_int32_column
 
+        module subroutine parquet_write_int32_matrix_column(writer, name, data)
+            type(parquet_writer), intent(inout) :: writer
+            character(len=*), intent(in) :: name
+            integer(int32), intent(in) :: data(:,:)
+        end subroutine parquet_write_int32_matrix_column
+
         module subroutine parquet_write_int64_column(writer, name, data)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
             integer(int64), intent(in) :: data(:)
         end subroutine parquet_write_int64_column
+
+        module subroutine parquet_write_int64_matrix_column(writer, name, data)
+            type(parquet_writer), intent(inout) :: writer
+            character(len=*), intent(in) :: name
+            integer(int64), intent(in) :: data(:,:)
+        end subroutine parquet_write_int64_matrix_column
 
         module subroutine parquet_write_float32_column(writer, name, data)
             type(parquet_writer), intent(inout) :: writer
@@ -210,11 +228,23 @@ module parquet
             real(real32), intent(in) :: data(:)
         end subroutine parquet_write_float32_column
 
+        module subroutine parquet_write_float32_matrix_column(writer, name, data)
+            type(parquet_writer), intent(inout) :: writer
+            character(len=*), intent(in) :: name
+            real(real32), intent(in) :: data(:,:)
+        end subroutine parquet_write_float32_matrix_column
+
         module subroutine parquet_write_float64_column(writer, name, data)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
             real(real64), intent(in) :: data(:)
         end subroutine parquet_write_float64_column
+
+        module subroutine parquet_write_float64_matrix_column(writer, name, data)
+            type(parquet_writer), intent(inout) :: writer
+            character(len=*), intent(in) :: name
+            real(real64), intent(in) :: data(:,:)
+        end subroutine parquet_write_float64_matrix_column
 
         module subroutine parquet_write_logical_column(writer, name, data)
             type(parquet_writer), intent(inout) :: writer
@@ -222,11 +252,23 @@ module parquet
             logical, intent(in) :: data(:)
         end subroutine parquet_write_logical_column
 
+        module subroutine parquet_write_logical_matrix_column(writer, name, data)
+            type(parquet_writer), intent(inout) :: writer
+            character(len=*), intent(in) :: name
+            logical, intent(in) :: data(:,:)
+        end subroutine parquet_write_logical_matrix_column
+
         module subroutine parquet_write_string_column(writer, name, data)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
             character(len=*), intent(in) :: data(:)
         end subroutine parquet_write_string_column
+
+        module subroutine parquet_write_string_matrix_column(writer, name, data)
+            type(parquet_writer), intent(inout) :: writer
+            character(len=*), intent(in) :: name
+            character(len=*), intent(in) :: data(:,:)
+        end subroutine parquet_write_string_matrix_column
 
         module subroutine parquet_close_writer(writer)
             type(parquet_writer), intent(inout) :: writer

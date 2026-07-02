@@ -143,6 +143,8 @@ Notes:
 
 List of public callable procedures available with `use parquet`:
 
+Some functions allow matxix entries. The definition is (nelem, nrows).
+
 ### Utility
 
 - `get_parquet_fortran_version()`

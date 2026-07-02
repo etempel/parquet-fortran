@@ -189,8 +189,8 @@ contains
         integer :: asize, nrows, idx
         integer(int32), allocatable :: packed(:)
 
-        nrows = size(data, 1)
-        asize = size(data, 2)
+        asize = size(data, 1)
+        nrows = size(data, 2)
 
         if (writer%enforce_schema) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -207,7 +207,7 @@ contains
         call parquet_mark_column_written(writer, name)
 
         allocate(packed(size(data)))
-        packed = reshape(transpose(data), [size(data)])
+        packed = reshape(data, [size(data)])
 
         call parquet_append_int32_column(&
             writer%handle, &
@@ -247,8 +247,8 @@ contains
         integer :: asize, nrows, idx
         integer(int64), allocatable :: packed(:)
 
-        nrows = size(data, 1)
-        asize = size(data, 2)
+        asize = size(data, 1)
+        nrows = size(data, 2)
 
         if (writer%enforce_schema) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -265,7 +265,7 @@ contains
         call parquet_mark_column_written(writer, name)
 
         allocate(packed(size(data)))
-        packed = reshape(transpose(data), [size(data)])
+        packed = reshape(data, [size(data)])
 
         call parquet_append_int64_column(&
             writer%handle, &
@@ -305,8 +305,8 @@ contains
         integer :: asize, nrows, idx
         real(real32), allocatable :: packed(:)
 
-        nrows = size(data, 1)
-        asize = size(data, 2)
+        asize = size(data, 1)
+        nrows = size(data, 2)
 
         if (writer%enforce_schema) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -323,7 +323,7 @@ contains
         call parquet_mark_column_written(writer, name)
 
         allocate(packed(size(data)))
-        packed = reshape(transpose(data), [size(data)])
+        packed = reshape(data, [size(data)])
 
         call parquet_append_float32_column(&
             writer%handle, &
@@ -363,8 +363,8 @@ contains
         integer :: asize, nrows, idx
         real(real64), allocatable :: packed(:)
 
-        nrows = size(data, 1)
-        asize = size(data, 2)
+        asize = size(data, 1)
+        nrows = size(data, 2)
 
         if (writer%enforce_schema) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -381,7 +381,7 @@ contains
         call parquet_mark_column_written(writer, name)
 
         allocate(packed(size(data)))
-        packed = reshape(transpose(data), [size(data)])
+        packed = reshape(data, [size(data)])
 
         call parquet_append_float64_column(&
             writer%handle, &
@@ -431,8 +431,8 @@ contains
         integer :: asize, nrows, idx
         integer(c_int8_t), allocatable :: bool_data(:)
 
-        nrows = size(data, 1)
-        asize = size(data, 2)
+        asize = size(data, 1)
+        nrows = size(data, 2)
 
         if (writer%enforce_schema) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -449,7 +449,7 @@ contains
         call parquet_mark_column_written(writer, name)
 
         allocate(bool_data(size(data)))
-        bool_data = merge(1_c_int8_t, 0_c_int8_t, reshape(transpose(data), [size(data)]))
+        bool_data = merge(1_c_int8_t, 0_c_int8_t, reshape(data, [size(data)]))
 
         call parquet_append_bool8_column(&
             writer%handle, &
@@ -523,8 +523,8 @@ contains
         integer :: i, j, k, l, nrows, asize, item_len, idx
         integer :: nitems
 
-        nrows = size(data, 1)
-        asize = size(data, 2)
+        asize = size(data, 1)
+        nrows = size(data, 2)
 
         if (writer%enforce_schema) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -551,7 +551,7 @@ contains
             do j = 1, asize
                 do l = 1, item_len
                     k = k + 1
-                    packed(k) = achar(iachar(data(i, j)(l:l)), kind=c_char)
+                    packed(k) = achar(iachar(data(j, i)(l:l)), kind=c_char)
                 end do
             end do
         end do

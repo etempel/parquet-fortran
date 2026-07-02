@@ -49,7 +49,7 @@ contains
         implicit none
         type(error_type), allocatable, intent(out) :: error
         real(rk), dimension(5) :: xdata = [1,2,3,4,5]
-        real(rk), dimension(5,3) :: xdata2
+        real(rk), dimension(3,5) :: xdata2
         type(parquet_writer) :: writer
         logical :: exists
         character(len=*), parameter :: out_file = "test_run/test_simple.parquet"
@@ -57,7 +57,7 @@ contains
         !
         do i = 1, 5
             do j = 1, 3
-                xdata2(i,j) = real(i+j, kind=rk)
+                xdata2(j,i) = real(i+j, kind=rk)
             end do
         end do
         !

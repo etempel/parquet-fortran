@@ -35,19 +35,29 @@ contains
         type(parquet_column_info), allocatable :: tmp(:)
         character(len=1024) :: line
         character(len=:), allocatable :: tline, key, cvalue
-        logical :: in_fields, have_current, in_list, in_field_list
+        logical :: in_fields, have_current, in_list, in_field_list, in_keyarray, in_doiarray
         character(len=:), allocatable :: list_key, field_list_key, list_item
-        integer :: ios, n, i, list_item_idx
+        character(len=:), allocatable :: ka_key, ka_value, ka_comment
+        character(len=:), allocatable :: doi_value, doi_type
+        integer :: ios, n, i, list_item_idx, doi_idx
         character(len=32) :: idx_buf
 
         in_fields = .false.
         have_current = .false.
         in_list = .false.
         in_field_list = .false.
+        in_keyarray = .false.
+        in_doiarray = .false.
         list_item_idx = 0
+        doi_idx = 0
         n = 0
         list_key = ""
         field_list_key = ""
+        ka_key = ""
+        ka_value = ""
+        ka_comment = ""
+        doi_value = ""
+        doi_type = ""
         if (allocated(metadata%items)) deallocate(metadata%items)
 
         do i = 1, size(lines)
@@ -58,6 +68,58 @@ contains
             if (tline(1:1) == "#") cycle
 
             if (.not. in_fields) then
+                if (in_keyarray) then
+                    if (index(tline, "-") == 1 .and. line(1:1) /= " ") then
+                        call parquet_flush_keyarray_item(metadata, ka_key, ka_value, ka_comment)
+                        tline = trim(adjustl(tline(2:)))
+                        if (len_trim(tline) > 0) then
+                            call parquet_split_key_value(tline, key, cvalue)
+                            if (parquet_to_lower(key) == "key") ka_key = parquet_unquote(cvalue)
+                        end if
+                        cycle
+                    else if (line(1:1) == " " .and. index(tline, ":") > 0) then
+                        call parquet_split_key_value(tline, key, cvalue)
+                        select case (parquet_to_lower(key))
+                        case ("key")
+                            ka_key = parquet_unquote(cvalue)
+                        case ("value")
+                            ka_value = parquet_unquote(cvalue)
+                        case ("comment")
+                            ka_comment = parquet_unquote(cvalue)
+                        end select
+                        cycle
+                    else
+                        call parquet_flush_keyarray_item(metadata, ka_key, ka_value, ka_comment)
+                        in_keyarray = .false.
+                    end if
+                end if
+
+                if (in_doiarray) then
+                    if (index(tline, "-") == 1 .and. line(1:1) /= " ") then
+                        call parquet_flush_doi_item(metadata, doi_idx, doi_value, doi_type)
+                        doi_value = ""
+                        doi_type = ""
+                        tline = trim(adjustl(tline(2:)))
+                        if (len_trim(tline) > 0) then
+                            call parquet_split_key_value(tline, key, cvalue)
+                            if (parquet_to_lower(key) == "doi") doi_value = parquet_unquote(cvalue)
+                        end if
+                        cycle
+                    else if (line(1:1) == " " .and. index(tline, ":") > 0) then
+                        call parquet_split_key_value(tline, key, cvalue)
+                        select case (parquet_to_lower(key))
+                        case ("doi")
+                            doi_value = parquet_unquote(cvalue)
+                        case ("type")
+                            doi_type = parquet_unquote(cvalue)
+                        end select
+                        cycle
+                    else
+                        call parquet_flush_doi_item(metadata, doi_idx, doi_value, doi_type)
+                        in_doiarray = .false.
+                    end if
+                end if
+
                 if (in_list) then
                     if (index(tline, "- ") == 1) then
                         list_item_idx = list_item_idx + 1
@@ -80,6 +142,22 @@ contains
 
                 if (tline == "fields:") in_fields = .true.
                 if (in_fields) cycle
+
+                if (tline == "keyarray:") then
+                    in_keyarray = .true.
+                    ka_key = ""
+                    ka_value = ""
+                    ka_comment = ""
+                    cycle
+                end if
+
+                if (parquet_to_lower(tline) == "dois:") then
+                    in_doiarray = .true.
+                    doi_idx = 0
+                    doi_value = ""
+                    doi_type = ""
+                    cycle
+                end if
 
                 call parquet_split_key_value(tline, key, cvalue)
                 if (len_trim(key) == 0) cycle
@@ -160,6 +238,9 @@ contains
                 if (ios /= 0) tmp(n)%col_size = 1
             end select
         end do
+
+        if (in_keyarray) call parquet_flush_keyarray_item(metadata, ka_key, ka_value, ka_comment)
+        if (in_doiarray) call parquet_flush_doi_item(metadata, doi_idx, doi_value, doi_type)
 
         if (n <= 0) then
             allocate(cinfo(0))
@@ -425,5 +506,28 @@ contains
             if (c >= iachar('A') .and. c <= iachar('Z')) out(i:i) = achar(c + 32)
         end do
     end procedure parquet_to_lower
+
+    subroutine parquet_flush_keyarray_item(metadata, ka_key, ka_value, ka_comment)
+        type(parquet_table_metadata), intent(inout) :: metadata
+        character(len=*), intent(in) :: ka_key
+        character(len=*), intent(in) :: ka_value
+        character(len=*), intent(in) :: ka_comment
+
+        if (len_trim(ka_key) == 0) return
+        call metadata%add_metadata(trim(ka_key), trim(ka_value), trim(ka_comment))
+    end subroutine parquet_flush_keyarray_item
+
+    subroutine parquet_flush_doi_item(metadata, doi_idx, doi_value, doi_type)
+        type(parquet_table_metadata), intent(inout) :: metadata
+        integer, intent(inout) :: doi_idx
+        character(len=*), intent(in) :: doi_value
+        character(len=*), intent(in) :: doi_type
+        character(len=32) :: idx_buf
+
+        if (len_trim(doi_value) == 0) return
+        doi_idx = doi_idx + 1
+        write(idx_buf, '(I0)') doi_idx
+        call metadata%add_metadata("DOI_" // trim(idx_buf), trim(doi_value), trim(doi_type))
+    end subroutine parquet_flush_doi_item
 
 end submodule parquet_metadata

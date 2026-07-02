@@ -41,7 +41,7 @@ contains
         type(parquet_maml_file) :: maml
 
         maml%name = "maml_example.maml"
-        allocate(character(len=104) :: maml%lines(86))
+        allocate(character(len=104) :: maml%lines(91))
         maml%lines = [ character(len=104) :: &
             "dataset: input_data", &
             "table: input_table", &
@@ -49,6 +49,11 @@ contains
             "coauthors:", &
             "- Joe Bloggs <joe_bloggs_is_not_here@gmail.com>", &
             "- Jane Doe <jane_doe_is_not_here@gmail.com>", &
+            "DOIs:", &
+            "- DOI: 10.1093/mnras/sty440", &
+            "  type: paper", &
+            "- DOI: 10.5281/zenodo.10059903", &
+            "  type: software", &
             "description: Just an example. Probably do not write tonnes here. A few sentences is usually about right.", &
             "comments:", &
             "- This is an example. Remember comments are lists.", &

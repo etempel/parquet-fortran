@@ -16,17 +16,35 @@ contains
 		end if
 	end procedure parquet_close_reader
 
-	module procedure parquet_get_nrows
+	module procedure parquet_get_nrows_int64
 		nrows = int(parquet_reader_get_nrows(reader%handle), kind=int64)
-	end procedure parquet_get_nrows
+	end procedure parquet_get_nrows_int64
+
+	module procedure parquet_get_nrows_int32
+		integer(int64) :: nrows64
+		nrows64 = int(parquet_reader_get_nrows(reader%handle), kind=int64)
+		if (nrows64 > huge(0_int32)) then
+			error stop "Number of rows exceeds int32 range"
+		end if
+		nrows = int(nrows64, kind=int32)
+	end procedure parquet_get_nrows_int32
 
 	module procedure parquet_get_col_size
 		col_size = int(parquet_reader_get_column_array_size(reader%handle, trim(name)//char(0)))
 	end procedure parquet_get_col_size
 
-	module procedure parquet_get_column_total_elements
+	module procedure parquet_get_column_total_elements_int64
 		nelem = int(parquet_reader_get_column_total_elements(reader%handle, trim(name)//char(0)), kind=int64)
-	end procedure parquet_get_column_total_elements
+	end procedure parquet_get_column_total_elements_int64
+
+	module procedure parquet_get_column_total_elements_int32
+		integer(int64) :: nelem64
+		nelem64 = int(parquet_reader_get_column_total_elements(reader%handle, trim(name)//char(0)), kind=int64)
+		if (nelem64 > huge(0_int32)) then
+			error stop "Number of elements exceeds int32 range"
+		end if
+		nelem = int(nelem64, kind=int32)
+	end procedure parquet_get_column_total_elements_int32
 
 	module procedure parquet_get_string_length
 		strlen_max = int(parquet_reader_get_string_length(reader%handle, trim(name)//char(0)))

@@ -18,6 +18,7 @@ contains
         type(unittest_type), allocatable, intent(out) :: testsuite(:)
 
         testsuite = [ &
+            new_unittest("read simple parquet file", test_read_simple_parquet_file), &
             new_unittest("read parquet file", test_read_parquet_file), &
             new_unittest("read column info", test_read_column_info), &
             new_unittest("read array modes", test_read_array_modes), &
@@ -25,6 +26,45 @@ contains
             new_unittest("get parquet maml examples", test_get_parquet_maml_examples) &
             ]
     end subroutine collect_tests_parquet_reading
+
+    subroutine test_read_simple_parquet_file(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        real(real64), dimension(:),allocatable :: xdata
+        logical :: exists
+        character(len=*), parameter :: in_file = "test_run/test_simple.parquet"
+        integer:: nrows
+        !
+        inquire(file=in_file, exist=exists)
+        call check(error, exists)
+        if (allocated(error)) then
+            call test_failed(error, "input parquet file missing: expected test_run/test_simple.parquet")
+            return
+        end if
+        !
+        call parquet_open_reader(reader, in_file)
+        call parquet_get_nrows(reader, nrows)
+        !
+        call check(error, nrows == 5)
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "unexpected number of rows in simple parquet file")
+            return
+        end if
+        !
+        allocate(xdata(nrows))
+        !
+        call parquet_read_column(reader, "colx", xdata)
+        call check(error, xdata(1) == 1.0_real64 .and. xdata(size(xdata)) == real(nrows, kind=real64))
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "colx column contents do not match expected values")
+            return
+        end if
+        !
+        call parquet_close_reader(reader)
+        !
+    end subroutine test_read_simple_parquet_file
 
     subroutine test_read_parquet_file(error)
         type(error_type), allocatable, intent(out) :: error

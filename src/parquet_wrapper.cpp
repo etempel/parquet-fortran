@@ -257,14 +257,19 @@ extern "C"
 		const std::vector<std::pair<std::string, std::string>> &table_metadata)
 	{
 		auto date = current_utc_timestamp();
-		auto votable_xml = build_votable_xml("table", column_metadata, table_metadata, date);
 
 		std::vector<std::string> keys{
-			"IVOA.VOTable-Parquet.content",
 			"IVOA.VOTable-Parquet.version",
 			"DATE",
 			"name"};
-		std::vector<std::string> values{votable_xml, "1.0", date, "table"};
+		std::vector<std::string> values{"1.0", date, "table"};
+
+		if (!column_metadata.empty())
+		{
+			auto votable_xml = build_votable_xml("table", column_metadata, table_metadata, date);
+			keys.insert(keys.begin(), "IVOA.VOTable-Parquet.content");
+			values.insert(values.begin(), votable_xml);
+		}
 
 		for (const auto &kv : table_metadata)
 		{

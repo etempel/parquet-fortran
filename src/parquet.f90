@@ -10,7 +10,7 @@ module parquet
     implicit none
     private
     !
-    character(len=*),parameter:: cversion = "v0.2 (2026-07-01)" !< version info
+    character(len=*),parameter:: cversion = "v0.2.1 (2026-07-02)" !< version info
 #ifndef RELEASE_VERSION
 #  define RELEASE_VERSION 0.1
 #endif
@@ -102,6 +102,16 @@ module parquet
         module procedure parquet_read_logical_array_element_mode
         module procedure parquet_read_string_array_element_mode
     end interface parquet_read_array_element_mode
+
+    interface parquet_get_nrows
+        module procedure parquet_get_nrows_int64
+        module procedure parquet_get_nrows_int32
+    end interface parquet_get_nrows
+
+    interface parquet_get_column_total_elements
+        module procedure parquet_get_column_total_elements_int64
+        module procedure parquet_get_column_total_elements_int32
+    end interface parquet_get_column_total_elements
 
     public :: parquet_writer
     public :: parquet_reader
@@ -320,10 +330,15 @@ module parquet
             type(parquet_reader), intent(inout) :: reader
         end subroutine parquet_close_reader
 
-        module subroutine parquet_get_nrows(reader, nrows)
+        module subroutine parquet_get_nrows_int64(reader, nrows)
             type(parquet_reader), intent(in) :: reader
             integer(int64), intent(out) :: nrows
-        end subroutine parquet_get_nrows
+        end subroutine parquet_get_nrows_int64
+
+        module subroutine parquet_get_nrows_int32(reader, nrows)
+            type(parquet_reader), intent(in) :: reader
+            integer(int32), intent(out) :: nrows
+        end subroutine parquet_get_nrows_int32
 
         module subroutine parquet_get_col_size(reader, name, col_size)
             type(parquet_reader), intent(in) :: reader
@@ -331,11 +346,17 @@ module parquet
             integer, intent(out) :: col_size
         end subroutine parquet_get_col_size
 
-        module subroutine parquet_get_column_total_elements(reader, name, nelem)
+        module subroutine parquet_get_column_total_elements_int64(reader, name, nelem)
             type(parquet_reader), intent(in) :: reader
             character(len=*), intent(in) :: name
             integer(int64), intent(out) :: nelem
-        end subroutine parquet_get_column_total_elements
+        end subroutine parquet_get_column_total_elements_int64
+
+        module subroutine parquet_get_column_total_elements_int32(reader, name, nelem)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            integer(int32), intent(out) :: nelem
+        end subroutine parquet_get_column_total_elements_int32
 
         module subroutine parquet_get_string_length(reader, name, strlen_max)
             type(parquet_reader), intent(in) :: reader

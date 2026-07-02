@@ -39,10 +39,32 @@ contains
         type(unittest_type), allocatable, intent(out) :: testsuite(:)
         !
         testsuite = [ &
-            new_unittest("write parquet file", test_write_parquet_file) &
+            new_unittest("write extensive parquet file", test_write_parquet_file), &
+            new_unittest("write simple parquet file", test_write_simple_parquet) &
             ]
         !
     end subroutine collect_tests_parquet_writing
+    !
+    subroutine test_write_simple_parquet(error)
+        implicit none
+        type(error_type), allocatable, intent(out) :: error
+        real(rk), dimension(5) :: xdata = [1,2,3,4,5]
+        type(parquet_writer) :: writer
+        logical :: exists
+        character(len=*), parameter :: out_file = "test_run/test_simple.parquet"
+        !
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "colx", xdata)
+        call parquet_close_writer(writer)
+        !
+        inquire(file=out_file, exist=exists)
+        call check(error, exists)
+        if (allocated(error)) then
+            call test_failed(error, "expected simple output parquet file was not created")
+            return
+        end if
+        !
+    end subroutine test_write_simple_parquet
     !
     subroutine test_write_parquet_file(error)
         type(error_type), allocatable, intent(out) :: error

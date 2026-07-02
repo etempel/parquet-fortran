@@ -34,12 +34,13 @@ module parquet_bindings
             integer(c_long_long), value :: col_size
         end subroutine
 
-        subroutine parquet_add_table_metadata(writer, key, value) &
+        subroutine parquet_add_table_metadata(writer, key, value, description) &
                 bind(C, name="parquet_add_table_metadata")
             import
             type(c_ptr), value :: writer
             character(kind=c_char) :: key(*)
             character(kind=c_char) :: value(*)
+            character(kind=c_char) :: description(*)
         end subroutine
 
         subroutine parquet_append_int32_column(writer, name, data, nrows, array_size) &

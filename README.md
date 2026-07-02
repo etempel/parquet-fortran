@@ -28,9 +28,20 @@ In bash you can initialise them as follows:
 
     export LIBRARY_PATH=path_arrow/lib:$LIBRARY_PATH
     export FPM_FFLAGS="-Ipath_arrow/include"
-    export FPM_CXXFLAGS="-std=c++20 -stdlib=libc++ -Ipath_arrow/include"
+    export FPM_CXXFLAGS="-std=c++20 -stdlib=libc++ -Ipath_arrow/include" # macOS
+    export FPM_CXXFLAGS="-std=c++20"
     export FPM_LDFLAGS="-Lpath_arrow/lib"
     export FPM_FC=ifx
+
+NB! `-std=c++20` is required on every platform (Arrow/Parquet headers use `std::span` unconditionally).
+`-stdlib=libc++` is macOS/Clang-specific and should be dropped on Linux.
+
+The build also links a C++ standard library at the final link step, since the executables/tests are
+linked by the Fortran compiler driver. This library is platform/toolchain-specific and must be added
+to FPM_LDFLAGS:
+
+- macOS (Clang/libc++): `export FPM_LDFLAGS="-Lpath_arrow/lib -lc++"`
+- Linux (GCC/libstdc++): `export FPM_LDFLAGS="-Lpath_arrow/lib -lstdc++"`
 
 NB! It might depend on the operating system and fortran compiler what environment variables are needed.
 

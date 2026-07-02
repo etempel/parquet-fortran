@@ -29,6 +29,7 @@ module parquet
     type parquet_metadata_entry
         character(len=:), allocatable :: key
         character(len=:), allocatable :: value
+        character(len=:), allocatable :: description
     end type parquet_metadata_entry
 
     type parquet_table_metadata
@@ -40,8 +41,16 @@ module parquet
         procedure :: add_metadata_float64
         procedure :: add_metadata_logical
         procedure :: add_metadata_string
+        procedure :: add_metadata_int32_array
+        procedure :: add_metadata_int64_array
+        procedure :: add_metadata_float32_array
+        procedure :: add_metadata_float64_array
+        procedure :: add_metadata_logical_array
+        procedure :: add_metadata_string_array
         generic :: add_metadata => add_metadata_int32, add_metadata_int64, add_metadata_float32, &
-                                    add_metadata_float64, add_metadata_logical, add_metadata_string
+                                    add_metadata_float64, add_metadata_logical, add_metadata_string, &
+                                    add_metadata_int32_array, add_metadata_int64_array, add_metadata_float32_array, &
+                                    add_metadata_float64_array, add_metadata_logical_array, add_metadata_string_array
     end type parquet_table_metadata
 
     type parquet_writer
@@ -298,49 +307,100 @@ module parquet
             character(len=*), intent(in) :: line
         end subroutine parquet_append_line
 
-        module subroutine parquet_metadata_append_entry(metadata, key, value)
+        module subroutine parquet_metadata_append_entry(metadata, key, value, description)
             class(parquet_table_metadata), intent(inout) :: metadata
             character(len=*), intent(in) :: key
             character(len=*), intent(in) :: value
+            character(len=*), intent(in), optional :: description
         end subroutine parquet_metadata_append_entry
 
-        module subroutine add_metadata_int32(this, key, val)
+        module subroutine add_metadata_int32(this, key, val, desc)
             class(parquet_table_metadata), intent(inout) :: this
             character(len=*), intent(in) :: key
             integer(int32), intent(in) :: val
+            character(len=*), intent(in), optional :: desc
         end subroutine add_metadata_int32
 
-        module subroutine add_metadata_int64(this, key, val)
+        module subroutine add_metadata_int64(this, key, val, desc)
             class(parquet_table_metadata), intent(inout) :: this
             character(len=*), intent(in) :: key
             integer(int64), intent(in) :: val
+            character(len=*), intent(in), optional :: desc
         end subroutine add_metadata_int64
 
-        module subroutine add_metadata_float32(this, key, val, fmt)
+        module subroutine add_metadata_float32(this, key, val, desc, fmt)
             class(parquet_table_metadata), intent(inout) :: this
             character(len=*), intent(in) :: key
             real(real32), intent(in) :: val
+            character(len=*), intent(in), optional :: desc
             character(len=*), intent(in), optional :: fmt
         end subroutine add_metadata_float32
 
-        module subroutine add_metadata_float64(this, key, val, fmt)
+        module subroutine add_metadata_float64(this, key, val, desc, fmt)
             class(parquet_table_metadata), intent(inout) :: this
             character(len=*), intent(in) :: key
             real(real64), intent(in) :: val
+            character(len=*), intent(in), optional :: desc
             character(len=*), intent(in), optional :: fmt
         end subroutine add_metadata_float64
 
-        module subroutine add_metadata_logical(this, key, val)
+        module subroutine add_metadata_logical(this, key, val, desc)
             class(parquet_table_metadata), intent(inout) :: this
             character(len=*), intent(in) :: key
             logical, intent(in) :: val
+            character(len=*), intent(in), optional :: desc
         end subroutine add_metadata_logical
 
-        module subroutine add_metadata_string(this, key, val)
+        module subroutine add_metadata_string(this, key, val, desc)
             class(parquet_table_metadata), intent(inout) :: this
             character(len=*), intent(in) :: key
             character(len=*), intent(in) :: val
+            character(len=*), intent(in), optional :: desc
         end subroutine add_metadata_string
+
+        module subroutine add_metadata_int32_array(this, key, val, desc)
+            class(parquet_table_metadata), intent(inout) :: this
+            character(len=*), intent(in) :: key
+            integer(int32), intent(in) :: val(:)
+            character(len=*), intent(in), optional :: desc
+        end subroutine add_metadata_int32_array
+
+        module subroutine add_metadata_int64_array(this, key, val, desc)
+            class(parquet_table_metadata), intent(inout) :: this
+            character(len=*), intent(in) :: key
+            integer(int64), intent(in) :: val(:)
+            character(len=*), intent(in), optional :: desc
+        end subroutine add_metadata_int64_array
+
+        module subroutine add_metadata_float32_array(this, key, val, desc, fmt)
+            class(parquet_table_metadata), intent(inout) :: this
+            character(len=*), intent(in) :: key
+            real(real32), intent(in) :: val(:)
+            character(len=*), intent(in), optional :: desc
+            character(len=*), intent(in), optional :: fmt
+        end subroutine add_metadata_float32_array
+
+        module subroutine add_metadata_float64_array(this, key, val, desc, fmt)
+            class(parquet_table_metadata), intent(inout) :: this
+            character(len=*), intent(in) :: key
+            real(real64), intent(in) :: val(:)
+            character(len=*), intent(in), optional :: desc
+            character(len=*), intent(in), optional :: fmt
+        end subroutine add_metadata_float64_array
+
+        module subroutine add_metadata_logical_array(this, key, val, desc)
+            class(parquet_table_metadata), intent(inout) :: this
+            character(len=*), intent(in) :: key
+            logical, intent(in) :: val(:)
+            character(len=*), intent(in), optional :: desc
+        end subroutine add_metadata_logical_array
+
+        module subroutine add_metadata_string_array(this, key, val, desc)
+            class(parquet_table_metadata), intent(inout) :: this
+            character(len=*), intent(in) :: key
+            character(len=*), intent(in) :: val(:)
+            character(len=*), intent(in), optional :: desc
+        end subroutine add_metadata_string_array
 
         module subroutine parquet_append_empty_cinfo(cinfo, n)
             type(parquet_column_info), allocatable, intent(inout) :: cinfo(:)

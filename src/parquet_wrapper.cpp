@@ -1,3 +1,8 @@
+#if __cplusplus < 202002L
+#error "parquet-fortran requires C++20 (Arrow/Parquet headers use std::span unconditionally, regardless of Arrow version). " \
+	"Set FPM_CXXFLAGS to include -std=c++20 (see README.md) before running fpm build/test."
+#endif
+
 #include <arrow/api.h>
 #include <arrow/io/api.h>
 #include <parquet/arrow/reader.h>
@@ -25,13 +30,20 @@ extern "C"
 		int64_t col_size;
 	};
 
+	struct TableMetadataEntry
+	{
+		std::string key;
+		std::string value;
+		std::string description;
+	};
+
 	struct ParquetWriterHandle
 	{
 		std::shared_ptr<arrow::io::FileOutputStream> outfile;
 		std::vector<std::shared_ptr<arrow::Field>> fields;
 		std::vector<std::shared_ptr<arrow::Array>> arrays;
 		std::vector<ColumnMetadata> column_metadata;
-		std::vector<std::pair<std::string, std::string>> table_metadata;
+		std::vector<TableMetadataEntry> table_metadata;
 	};
 
 	struct ParquetReaderHandle
@@ -235,7 +247,7 @@ extern "C"
 
 	static std::string build_votable_xml(const std::string &table_name,
 									const std::vector<ColumnMetadata> &columns,
-									const std::vector<std::pair<std::string, std::string>> &table_metadata,
+									const std::vector<TableMetadataEntry> &table_metadata,
 									const std::string &date)
 	{
 		std::ostringstream xml;
@@ -252,10 +264,18 @@ extern "C"
 		for (const auto &kv : table_metadata)
 		{
 			xml << "<PARAM datatype=\"char\" arraysize=\"*\" name=\""
-				<< xml_escape(kv.first)
+				<< xml_escape(kv.key)
 				<< "\" value=\""
-				<< xml_escape(kv.second)
-				<< "\"/>\n";
+				<< xml_escape(kv.value)
+				<< "\"";
+			if (!kv.description.empty())
+			{
+				xml << ">\n<DESCRIPTION>" << xml_escape(kv.description) << "</DESCRIPTION>\n</PARAM>\n";
+			}
+			else
+			{
+				xml << "/>\n";
+			}
 		}
 
 		for (const auto &col : columns)
@@ -343,27 +363,37 @@ extern "C"
 
 	static std::shared_ptr<arrow::KeyValueMetadata> build_file_metadata(
 		const std::vector<ColumnMetadata> &column_metadata,
-		const std::vector<std::pair<std::string, std::string>> &table_metadata)
+		const std::vector<TableMetadataEntry> &table_metadata)
 	{
 		auto date = current_utc_timestamp();
+
+		std::string table_name = "table";
+		for (const auto &kv : table_metadata)
+		{
+			if (kv.key == "table")
+			{
+				table_name = kv.value;
+				break;
+			}
+		}
 
 		std::vector<std::string> keys{
 			"IVOA.VOTable-Parquet.version",
 			"DATE",
 			"name"};
-		std::vector<std::string> values{"1.0", date, "table"};
+		std::vector<std::string> values{"1.0", date, table_name};
 
 		if (!column_metadata.empty())
 		{
-			auto votable_xml = build_votable_xml("table", column_metadata, table_metadata, date);
+			auto votable_xml = build_votable_xml(table_name, column_metadata, table_metadata, date);
 			keys.insert(keys.begin(), "IVOA.VOTable-Parquet.content");
 			values.insert(values.begin(), votable_xml);
 		}
 
 		for (const auto &kv : table_metadata)
 		{
-			keys.push_back(kv.first);
-			values.push_back(kv.second);
+			keys.push_back(kv.key);
+			values.push_back(kv.value);
 		}
 
 		for (const auto &col : column_metadata)
@@ -1158,12 +1188,13 @@ extern "C"
 		}
 	}
 
-	void parquet_add_table_metadata(void *handle, const char *key, const char *value)
+	void parquet_add_table_metadata(void *handle, const char *key, const char *value, const char *description)
 	{
 		auto writer_handle = as_handle(handle);
-		writer_handle->table_metadata.emplace_back(
+		writer_handle->table_metadata.push_back(TableMetadataEntry{
 			std::string(key),
-			std::string(value));
+			std::string(value),
+			std::string(description)});
 	}
 
 	void parquet_append_int32_column(void *handle, const char *name, const int32_t *data, int64_t nrows, int64_t array_size)

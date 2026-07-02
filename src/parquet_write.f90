@@ -141,7 +141,8 @@ contains
                 do i = 1, size(metadata%items)
                     call parquet_add_table_metadata(writer%handle, &
                         trim(metadata%items(i)%key)//char(0), &
-                        trim(metadata%items(i)%value)//char(0))
+                        trim(metadata%items(i)%value)//char(0), &
+                        trim(metadata%items(i)%description)//char(0))
                 end do
             end if
         end if

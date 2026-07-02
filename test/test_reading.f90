@@ -484,7 +484,7 @@ contains
         type(parquet_maml_file) :: maml
 
         maml = parquet_maml_maml_example()
-        call check(error, trim(maml%name) == "maml_example.maml" .and. size(maml%lines) == 76)
+        call check(error, trim(maml%name) == "maml_example.maml" .and. size(maml%lines) == 86)
         if (allocated(error)) then
             call test_failed(error, "parquet_maml_maml_example returned unexpected content")
             return

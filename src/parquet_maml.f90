@@ -41,7 +41,7 @@ contains
         type(parquet_maml_file) :: maml
 
         maml%name = "maml_example.maml"
-        allocate(character(len=104) :: maml%lines(76))
+        allocate(character(len=104) :: maml%lines(86))
         maml%lines = [ character(len=104) :: &
             "dataset: input_data", &
             "table: input_table", &
@@ -55,6 +55,16 @@ contains
             "- Another comment.", &
             "- zeropoint: 1.00", &
             "license: Copyright [Private]", &
+            "keyarray:", &
+            "- key: test_scalar", &
+            "  value: 8.1", &
+            "  comment: something", &
+            "- key: test_string", &
+            "  value: Fun times", &
+            "  comment: something else", &
+            "- key: test_vector", &
+            "  value: [1.8, 2, 5]", &
+            "  comment: something extra", &
             "fields:", &
             "- name: id0", &
             "  unit: unitless", &

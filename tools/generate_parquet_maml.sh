@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$repo_root"
+work_dir="$(pwd)"
 
-python3 - <<'PY'
+python3 - "$work_dir" <<'PY'
 from pathlib import Path
 import re
+import sys
 
-repo = Path('.').resolve()
-docs_dir = repo / 'docs'
-out_path = repo / 'src' / 'parquet_maml.f90'
+work_dir = Path(sys.argv[1]).resolve()
+docs_dir = work_dir / 'docs'
+out_path = work_dir / 'src' / 'parquet_maml.f90'
 
 maml_files = sorted(docs_dir.rglob('*.maml'))
 if not maml_files:

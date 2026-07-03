@@ -17,10 +17,12 @@ contains
 
         maml = parquet_load_maml_file(maml_filename)
         call parquet_parse_maml_lines(maml%lines, cinfo, metadata)
+        call parquet_merge_missing_columns(maml, cinfo)
     end procedure parquet_read_maml_file
 
     module procedure parquet_read_maml_internal
         call parquet_parse_maml_lines(maml%lines, cinfo, metadata)
+        call parquet_merge_missing_columns(maml, cinfo)
     end procedure parquet_read_maml_internal
 
     module procedure parquet_validate_user_maml
@@ -58,7 +60,85 @@ contains
         if (len_trim(bad_names) > 0) then
             error stop "parquet_validate_user_maml: columns not present in base MAML: " // trim(bad_names)
         end if
+
+        if (allocated(user_maml%missing_columns)) deallocate(user_maml%missing_columns)
+        user_maml%user_maml = .false.
+
+        if (allocated(base_cinfo%col)) then
+            do i = 1, size(base_cinfo%col)
+                found = .false.
+                if (allocated(user_cinfo%col)) then
+                    do j = 1, size(user_cinfo%col)
+                        if (trim(user_cinfo%col(j)%name) == trim(base_cinfo%col(i)%name)) then
+                            found = .true.
+                            exit
+                        end if
+                    end do
+                end if
+                if (.not. found) then
+                    user_maml%user_maml = .true.
+                    call parquet_append_missing_column(user_maml, base_cinfo%col(i))
+                end if
+            end do
+        end if
     end procedure parquet_validate_user_maml
+
+    subroutine parquet_append_missing_column(maml, col)
+        type(parquet_maml_file), intent(inout) :: maml
+        type(parquet_column_type), intent(in) :: col
+        type(parquet_maml_missing_column), allocatable :: tmp(:)
+        integer :: n
+
+        if (.not. allocated(maml%missing_columns)) then
+            allocate(maml%missing_columns(1))
+            n = 1
+        else
+            allocate(tmp(size(maml%missing_columns) + 1))
+            tmp(1:size(maml%missing_columns)) = maml%missing_columns
+            call move_alloc(tmp, maml%missing_columns)
+            n = size(maml%missing_columns)
+        end if
+
+        maml%missing_columns(n)%name = col%name
+        maml%missing_columns(n)%unit = col%unit
+        maml%missing_columns(n)%info = col%info
+        maml%missing_columns(n)%ucd = col%ucd
+        maml%missing_columns(n)%data_type = col%data_type
+        maml%missing_columns(n)%array_size = col%array_size
+        maml%missing_columns(n)%col_size = col%col_size
+    end subroutine parquet_append_missing_column
+
+    subroutine parquet_merge_missing_columns(maml, cinfo)
+        type(parquet_maml_file), intent(in) :: maml
+        type(parquet_column_info), intent(inout) :: cinfo
+        type(parquet_column_type), allocatable :: merged(:)
+        integer :: n_old, n_new, i
+
+        if (.not. maml%user_maml) return
+        if (.not. allocated(maml%missing_columns)) return
+        if (size(maml%missing_columns) == 0) return
+
+        n_old = 0
+        if (allocated(cinfo%col)) n_old = size(cinfo%col)
+        n_new = size(maml%missing_columns)
+
+        allocate(merged(n_old + n_new))
+        if (n_old > 0) merged(1:n_old) = cinfo%col
+
+        do i = 1, n_new
+            merged(n_old + i)%name = maml%missing_columns(i)%name
+            merged(n_old + i)%unit = maml%missing_columns(i)%unit
+            merged(n_old + i)%info = maml%missing_columns(i)%info
+            merged(n_old + i)%ucd = maml%missing_columns(i)%ucd
+            merged(n_old + i)%data_type = maml%missing_columns(i)%data_type
+            merged(n_old + i)%array_size = maml%missing_columns(i)%array_size
+            merged(n_old + i)%col_size = maml%missing_columns(i)%col_size
+            merged(n_old + i)%is_set = .false.
+            merged(n_old + i)%deactivated = .true.
+        end do
+
+        call move_alloc(merged, cinfo%col)
+    end subroutine parquet_merge_missing_columns
 
     module procedure parquet_validate_maml
         type(parquet_column_info) :: cinfo
@@ -596,18 +676,34 @@ contains
     end procedure get_column_index
 
     module procedure set_unavailable
+        integer :: idx, i
+
         if (present(name)) then
-            this%col(this%get_column_index(name))%is_set = .false.
+            idx = this%get_column_index(name)
+            if (this%col(idx)%deactivated) then
+                error stop "parquet_column_info%set_unavailable: column is deactivated: " // trim(name)
+            end if
+            this%col(idx)%is_set = .false.
         else if (allocated(this%col)) then
-            this%col(:)%is_set = .false.
+            do i = 1, size(this%col)
+                if (.not. this%col(i)%deactivated) this%col(i)%is_set = .false.
+            end do
         end if
     end procedure set_unavailable
 
     module procedure set_available
+        integer :: idx, i
+
         if (present(name)) then
-            this%col(this%get_column_index(name))%is_set = .true.
+            idx = this%get_column_index(name)
+            if (this%col(idx)%deactivated) then
+                error stop "parquet_column_info%set_available: column is deactivated: " // trim(name)
+            end if
+            this%col(idx)%is_set = .true.
         else if (allocated(this%col)) then
-            this%col(:)%is_set = .true.
+            do i = 1, size(this%col)
+                if (.not. this%col(i)%deactivated) this%col(i)%is_set = .true.
+            end do
         end if
     end procedure set_available
 

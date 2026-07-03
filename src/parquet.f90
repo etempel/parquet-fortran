@@ -6,7 +6,7 @@ module parquet
     use iso_c_binding
     use iso_fortran_env, only: int8, int32, int64, real32, real64
     use parquet_bindings
-    use parquet_maml_base, only: parquet_maml_file
+    use parquet_maml_base, only: parquet_maml_file, parquet_maml_missing_column
     implicit none
     private
     !
@@ -17,6 +17,8 @@ module parquet
 
     type parquet_column_type
         logical :: is_set = .false.
+        logical :: deactivated = .false. ! true for columns merged in from a base MAML that the user's MAML excluded;
+                                          ! protects is_set from being changed by set_available/set_unavailable (bulk or by name).
         character(len=:), allocatable :: name      ! The name of the field [required].
         character(len=:), allocatable :: unit      ! The unit of measurement for the field.
         character(len=:), allocatable :: info      ! A short description of the field.
@@ -309,7 +311,7 @@ module parquet
 
         module subroutine parquet_validate_user_maml(base_maml, user_maml)
             type(parquet_maml_file), intent(in) :: base_maml
-            type(parquet_maml_file), intent(in) :: user_maml
+            type(parquet_maml_file), intent(inout) :: user_maml
         end subroutine parquet_validate_user_maml
 
         module subroutine parquet_validate_maml(maml)

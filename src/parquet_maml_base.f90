@@ -8,9 +8,23 @@ module parquet_maml_base
     implicit none
     private
 
+    type, public :: parquet_maml_missing_column
+        character(len=:), allocatable :: name      ! The name of the field [required].
+        character(len=:), allocatable :: unit      ! The unit of measurement for the field.
+        character(len=:), allocatable :: info      ! A short description of the field.
+        character(len=:), allocatable :: ucd       ! Unified Content Descriptor for IVOA (can have many).
+        character(len=:), allocatable :: data_type ! The data type of the field [required].
+        integer :: array_size = 1 ! Maximum length of character strings.
+        integer :: col_size = 1   ! The number of elements in the vector column.
+    end type parquet_maml_missing_column
+
     type, public :: parquet_maml_file
+        logical :: user_maml = .false. !< true if this is a user defined MAML file
         character(len=:), allocatable :: name
         character(len=:), allocatable :: lines(:)
+        ! columns present in the base MAML but missing from this (user) MAML;
+        ! populated by parquet_validate_user_maml, consumed by parquet_read_maml
+        type(parquet_maml_missing_column), allocatable :: missing_columns(:)
     end type parquet_maml_file
 
     public :: get_parquet_maml

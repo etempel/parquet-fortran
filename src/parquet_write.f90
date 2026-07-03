@@ -34,13 +34,199 @@ contains
     end procedure parquet_get_defined_column_index
 
     module procedure parquet_is_type_compatible
-        select case (trim(expected_type))
+        character(len=:), allocatable :: schema_type, write_type
+
+        schema_type = trim(actual_type)
+        write_type = trim(expected_type)
+
+        select case (schema_type)
         case ("boolean")
-            parquet_is_type_compatible = trim(actual_type) == "boolean" .or. trim(actual_type) == "bool8"
+            parquet_is_type_compatible = write_type == "boolean" .or. write_type == "bool8"
+        case ("float32", "float64")
+            parquet_is_type_compatible = write_type == "float32" .or. write_type == "float64" .or. &
+                                          write_type == "int32" .or. write_type == "int64"
+        case ("int32", "int64")
+            parquet_is_type_compatible = write_type == "int32" .or. write_type == "int64" .or. &
+                                          write_type == "float32" .or. write_type == "float64"
         case default
-            parquet_is_type_compatible = trim(actual_type) == trim(expected_type)
+            parquet_is_type_compatible = write_type == schema_type
         end select
     end procedure parquet_is_type_compatible
+
+    function parquet_get_schema_type(writer, name) result(schema_type)
+        type(parquet_writer), intent(in) :: writer
+        character(len=*), intent(in) :: name
+        character(len=:), allocatable :: schema_type
+        integer :: idx
+
+        schema_type = ""
+        if (.not. writer%enforce_schema) return
+        idx = parquet_get_defined_column_index(writer, name)
+        if (idx == 0) return
+        schema_type = trim(writer%all_columns(idx)%data_type)
+    end function parquet_get_schema_type
+
+    function parquet_narrow_int64_to_int32(name, src) result(dst)
+        character(len=*), intent(in) :: name
+        integer(int64), intent(in) :: src(:)
+        integer(int32), allocatable :: dst(:)
+        integer :: i
+
+        allocate(dst(size(src)))
+        do i = 1, size(src)
+            if (src(i) < -2147483648_int64 .or. src(i) > 2147483647_int64) then
+                error stop "parquet_write_column: int64 value out of int32 range for column " // trim(name)
+            end if
+            dst(i) = int(src(i), kind=int32)
+        end do
+    end function parquet_narrow_int64_to_int32
+
+    function parquet_float64_to_int32(name, src) result(dst)
+        character(len=*), intent(in) :: name
+        real(real64), intent(in) :: src(:)
+        integer(int32), allocatable :: dst(:)
+        integer :: i
+
+        allocate(dst(size(src)))
+        do i = 1, size(src)
+            if (src(i) /= anint(src(i))) then
+                error stop "parquet_write_column: non-integral float value written to int column " // trim(name)
+            end if
+            if (src(i) < -2147483648.0_real64 .or. src(i) > 2147483647.0_real64) then
+                error stop "parquet_write_column: float value out of int32 range for column " // trim(name)
+            end if
+            dst(i) = int(src(i), kind=int32)
+        end do
+    end function parquet_float64_to_int32
+
+    function parquet_float64_to_int64(name, src) result(dst)
+        character(len=*), intent(in) :: name
+        real(real64), intent(in) :: src(:)
+        integer(int64), allocatable :: dst(:)
+        integer :: i
+
+        allocate(dst(size(src)))
+        do i = 1, size(src)
+            if (src(i) /= anint(src(i))) then
+                error stop "parquet_write_column: non-integral float value written to int column " // trim(name)
+            end if
+            if (src(i) < -9223372036854775808.0_real64 .or. src(i) >= 9223372036854775808.0_real64) then
+                error stop "parquet_write_column: float value out of int64 range for column " // trim(name)
+            end if
+            dst(i) = int(src(i), kind=int64)
+        end do
+    end function parquet_float64_to_int64
+
+    subroutine parquet_append_as_schema_int32(writer, name, values, nrows, asize)
+        type(parquet_writer), intent(in) :: writer
+        character(len=*), intent(in) :: name
+        integer(int32), intent(in) :: values(:)
+        integer(c_long_long), intent(in) :: nrows, asize
+        character(len=:), allocatable :: schema_type
+        integer(int64), allocatable :: i64values(:)
+        real(real32), allocatable :: f32values(:)
+        real(real64), allocatable :: f64values(:)
+
+        schema_type = parquet_get_schema_type(writer, name)
+        select case (schema_type)
+        case ("int64")
+            allocate(i64values(size(values)))
+            i64values = int(values, kind=int64)
+            call parquet_append_int64_column(writer%handle, trim(name)//char(0), i64values, nrows, asize)
+        case ("float32")
+            allocate(f32values(size(values)))
+            f32values = real(values, kind=real32)
+            call parquet_append_float32_column(writer%handle, trim(name)//char(0), f32values, nrows, asize)
+        case ("float64")
+            allocate(f64values(size(values)))
+            f64values = real(values, kind=real64)
+            call parquet_append_float64_column(writer%handle, trim(name)//char(0), f64values, nrows, asize)
+        case default
+            call parquet_append_int32_column(writer%handle, trim(name)//char(0), values, nrows, asize)
+        end select
+    end subroutine parquet_append_as_schema_int32
+
+    subroutine parquet_append_as_schema_int64(writer, name, values, nrows, asize)
+        type(parquet_writer), intent(in) :: writer
+        character(len=*), intent(in) :: name
+        integer(int64), intent(in) :: values(:)
+        integer(c_long_long), intent(in) :: nrows, asize
+        character(len=:), allocatable :: schema_type
+        integer(int32), allocatable :: i32values(:)
+        real(real32), allocatable :: f32values(:)
+        real(real64), allocatable :: f64values(:)
+
+        schema_type = parquet_get_schema_type(writer, name)
+        select case (schema_type)
+        case ("int32")
+            i32values = parquet_narrow_int64_to_int32(name, values)
+            call parquet_append_int32_column(writer%handle, trim(name)//char(0), i32values, nrows, asize)
+        case ("float32")
+            allocate(f32values(size(values)))
+            f32values = real(values, kind=real32)
+            call parquet_append_float32_column(writer%handle, trim(name)//char(0), f32values, nrows, asize)
+        case ("float64")
+            allocate(f64values(size(values)))
+            f64values = real(values, kind=real64)
+            call parquet_append_float64_column(writer%handle, trim(name)//char(0), f64values, nrows, asize)
+        case default
+            call parquet_append_int64_column(writer%handle, trim(name)//char(0), values, nrows, asize)
+        end select
+    end subroutine parquet_append_as_schema_int64
+
+    subroutine parquet_append_as_schema_float32(writer, name, values, nrows, asize)
+        type(parquet_writer), intent(in) :: writer
+        character(len=*), intent(in) :: name
+        real(real32), intent(in) :: values(:)
+        integer(c_long_long), intent(in) :: nrows, asize
+        character(len=:), allocatable :: schema_type
+        integer(int32), allocatable :: i32values(:)
+        integer(int64), allocatable :: i64values(:)
+        real(real64), allocatable :: f64values(:)
+
+        schema_type = parquet_get_schema_type(writer, name)
+        select case (schema_type)
+        case ("int32")
+            i32values = parquet_float64_to_int32(name, real(values, kind=real64))
+            call parquet_append_int32_column(writer%handle, trim(name)//char(0), i32values, nrows, asize)
+        case ("int64")
+            i64values = parquet_float64_to_int64(name, real(values, kind=real64))
+            call parquet_append_int64_column(writer%handle, trim(name)//char(0), i64values, nrows, asize)
+        case ("float64")
+            allocate(f64values(size(values)))
+            f64values = real(values, kind=real64)
+            call parquet_append_float64_column(writer%handle, trim(name)//char(0), f64values, nrows, asize)
+        case default
+            call parquet_append_float32_column(writer%handle, trim(name)//char(0), values, nrows, asize)
+        end select
+    end subroutine parquet_append_as_schema_float32
+
+    subroutine parquet_append_as_schema_float64(writer, name, values, nrows, asize)
+        type(parquet_writer), intent(in) :: writer
+        character(len=*), intent(in) :: name
+        real(real64), intent(in) :: values(:)
+        integer(c_long_long), intent(in) :: nrows, asize
+        character(len=:), allocatable :: schema_type
+        integer(int32), allocatable :: i32values(:)
+        integer(int64), allocatable :: i64values(:)
+        real(real32), allocatable :: f32values(:)
+
+        schema_type = parquet_get_schema_type(writer, name)
+        select case (schema_type)
+        case ("int32")
+            i32values = parquet_float64_to_int32(name, values)
+            call parquet_append_int32_column(writer%handle, trim(name)//char(0), i32values, nrows, asize)
+        case ("int64")
+            i64values = parquet_float64_to_int64(name, values)
+            call parquet_append_int64_column(writer%handle, trim(name)//char(0), i64values, nrows, asize)
+        case ("float32")
+            allocate(f32values(size(values)))
+            f32values = real(values, kind=real32)
+            call parquet_append_float32_column(writer%handle, trim(name)//char(0), f32values, nrows, asize)
+        case default
+            call parquet_append_float64_column(writer%handle, trim(name)//char(0), values, nrows, asize)
+        end select
+    end subroutine parquet_append_as_schema_float64
 
     module procedure parquet_assert_column_type
         integer :: idx
@@ -178,12 +364,7 @@ contains
         if (mod(size(data), asize) /= 0) stop "parquet_write_int32_column: data size is not divisible by col_size"
         nrows = size(data) / asize
 
-        call parquet_append_int32_column(&
-            writer%handle, &
-            trim(name)//char(0), &
-            data, &
-            int(nrows, kind=c_long_long), &
-            int(asize, kind=c_long_long) )
+        call parquet_append_as_schema_int32(writer, name, data, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
     end procedure parquet_write_int32_column
 
     module procedure parquet_write_int32_matrix_column
@@ -210,12 +391,7 @@ contains
         allocate(packed(size(data)))
         packed = reshape(data, [size(data)])
 
-        call parquet_append_int32_column(&
-            writer%handle, &
-            trim(name)//char(0), &
-            packed, &
-            int(nrows, kind=c_long_long), &
-            int(asize, kind=c_long_long) )
+        call parquet_append_as_schema_int32(writer, name, packed, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
     end procedure parquet_write_int32_matrix_column
 
     module procedure parquet_write_int64_column
@@ -236,12 +412,7 @@ contains
         if (mod(size(data), asize) /= 0) stop "parquet_write_int64_column: data size is not divisible by col_size"
         nrows = size(data) / asize
 
-        call parquet_append_int64_column(&
-            writer%handle, &
-            trim(name)//char(0), &
-            data, &
-            int(nrows, kind=c_long_long), &
-            int(asize, kind=c_long_long) )
+        call parquet_append_as_schema_int64(writer, name, data, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
     end procedure parquet_write_int64_column
 
     module procedure parquet_write_int64_matrix_column
@@ -268,12 +439,7 @@ contains
         allocate(packed(size(data)))
         packed = reshape(data, [size(data)])
 
-        call parquet_append_int64_column(&
-            writer%handle, &
-            trim(name)//char(0), &
-            packed, &
-            int(nrows, kind=c_long_long), &
-            int(asize, kind=c_long_long) )
+        call parquet_append_as_schema_int64(writer, name, packed, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
     end procedure parquet_write_int64_matrix_column
 
     module procedure parquet_write_float32_column
@@ -294,12 +460,7 @@ contains
         if (mod(size(data), asize) /= 0) stop "parquet_write_float32_column: data size is not divisible by col_size"
         nrows = size(data) / asize
 
-        call parquet_append_float32_column(&
-            writer%handle, &
-            trim(name)//char(0), &
-            data, &
-            int(nrows, kind=c_long_long), &
-            int(asize, kind=c_long_long) )
+        call parquet_append_as_schema_float32(writer, name, data, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
     end procedure parquet_write_float32_column
 
     module procedure parquet_write_float32_matrix_column
@@ -326,12 +487,7 @@ contains
         allocate(packed(size(data)))
         packed = reshape(data, [size(data)])
 
-        call parquet_append_float32_column(&
-            writer%handle, &
-            trim(name)//char(0), &
-            packed, &
-            int(nrows, kind=c_long_long), &
-            int(asize, kind=c_long_long) )
+        call parquet_append_as_schema_float32(writer, name, packed, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
     end procedure parquet_write_float32_matrix_column
 
     module procedure parquet_write_float64_column
@@ -352,12 +508,7 @@ contains
         if (mod(size(data), asize) /= 0) stop "parquet_write_float64_column: data size is not divisible by col_size"
         nrows = size(data) / asize
 
-        call parquet_append_float64_column(&
-            writer%handle, &
-            trim(name)//char(0), &
-            data, &
-            int(nrows, kind=c_long_long), &
-            int(asize, kind=c_long_long) )
+        call parquet_append_as_schema_float64(writer, name, data, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
     end procedure parquet_write_float64_column
 
     module procedure parquet_write_float64_matrix_column
@@ -384,12 +535,7 @@ contains
         allocate(packed(size(data)))
         packed = reshape(data, [size(data)])
 
-        call parquet_append_float64_column(&
-            writer%handle, &
-            trim(name)//char(0), &
-            packed, &
-            int(nrows, kind=c_long_long), &
-            int(asize, kind=c_long_long) )
+        call parquet_append_as_schema_float64(writer, name, packed, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
     end procedure parquet_write_float64_matrix_column
 
     module procedure parquet_write_logical_column

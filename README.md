@@ -6,6 +6,7 @@ Library to read/write parquet files and handle MAML files. The parquet file meta
 
 - [Prerequisites](#prerequisites)
 - [Building and installing instructions](#building-and-installing-instructions)
+  - [Running the error-path tests](#running-the-error-path-tests)
 - [Generating the built-in MAML module](#generating-the-built-in-maml-module)
 - [Reading parquet files from your fortran code](#reading-parquet-files-from-your-fortran-code)
 - [Writing parquet files from your fortran code](#writing-parquet-files-from-your-fortran-code)
@@ -78,6 +79,39 @@ To generate the executable:
     fpm install --prefix my_path
 
 The executable is placed in the my_path/bin directory. Executable only prints the parquet-fortran library version number.
+
+### Running the error-path tests
+
+Most of this library's failure modes (invalid MAML, unknown columns, type mismatches, etc.) are reported via Fortran's `error stop`, which aborts the whole process — see [Error handling](#error-handling). Since test-drive assertions can't survive an `error stop` in the same process, these paths are exercised out-of-process by a small helper program, `test/error_scenarios.f90`, which is built as its own `fpm` test target named `error_scenarios`.
+
+`error_scenarios` takes a single scenario name as a command-line argument and deliberately triggers the corresponding failure:
+
+```bash
+fpm test error_scenarios -- write_undeclared_column
+```
+
+Expected output for a failing scenario is an `ERROR STOP` message naming the violated precondition, followed by a Fortran backtrace, and a nonzero process exit code:
+
+```
+ERROR STOP parquet_write_column: column not defined in parquet_open_writer: not_a_real_column
+
+Error termination. Backtrace:
+...
+```
+
+Running it with the `ok` scenario (or no argument at all) does not trigger any failure and exits with status 0:
+
+```bash
+fpm test error_scenarios -- ok
+```
+
+The full list of scenario names is in the `select case` at the top of `test/error_scenarios.f90`. `test/test_errors.f90` drives every scenario automatically (as part of the `errors` test suite in `fpm test`) and asserts on the exit code; `tools/run_error_scenarios.sh` does the same thing standalone, without going through test-drive:
+
+```bash
+tools/run_error_scenarios.sh
+```
+
+This prints a `[PASS]`/`[FAIL]` line per scenario and exits nonzero if any scenario's exit code didn't match what was expected — useful for a quick manual check or a CI step that doesn't need the full `fpm test` output.
 
 ## Generating the built-in MAML module
 
@@ -229,7 +263,7 @@ This example ties together MAML-driven column definitions, a vector/matrix colum
 ```fortran
 program write_parquet_combined_example
     use parquet
-    use iso_fortran_env, only: int32, real64
+    use iso_fortran_env, only: int32, int64, real64
     implicit none
 
     type(parquet_writer) :: writer

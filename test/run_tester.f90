@@ -15,6 +15,9 @@ program tester
     use testdrive, only : run_testsuite, new_testsuite, testsuite_type, select_suite, run_selected,get_argument,init_color_output
     use test_writing, only : collect_tests_parquet_writing
     use test_reading, only : collect_tests_parquet_reading
+    use test_maml, only : collect_tests_parquet_maml
+    use test_errors, only : collect_tests_parquet_errors
+    use test_examples, only : collect_tests_parquet_examples
     !
     implicit none
     integer :: stat, is
@@ -27,7 +30,10 @@ program tester
     ! Add all testsuites here as a comma separated list
     testsuites = [ &
         new_testsuite("writing", collect_tests_parquet_writing), &
-        new_testsuite("reading", collect_tests_parquet_reading) &
+        new_testsuite("reading", collect_tests_parquet_reading), &
+        new_testsuite("maml", collect_tests_parquet_maml), &
+        new_testsuite("errors", collect_tests_parquet_errors), &
+        new_testsuite("examples", collect_tests_parquet_examples) &
         ]
     !
     ! command line argument for a specific testsuite and test

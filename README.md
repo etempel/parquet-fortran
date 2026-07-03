@@ -86,8 +86,8 @@ Every `.maml` file under `docs/` can be compiled directly into the library, so a
 Run it from the repository root:
 
 ```bash
-tools/generate_parquet_maml.sh base   # (re)generates src/parquet_maml_base.f90
-tools/generate_parquet_maml.sh        # (re)generates src/parquet_maml.f90
+tools/generate_parquet_maml.sh base   # (re)generates src/parquet_maml_base.f90 (for parquet-fortran)
+tools/generate_parquet_maml.sh        # (re)generates src/parquet_maml.f90 (for external codes)
 ```
 
 - `base` mode generates `parquet_maml_base`, which additionally defines the `parquet_maml_file`/`parquet_maml_missing_column` derived types used throughout the library. Run this first, or whenever those types change.
@@ -184,7 +184,7 @@ Notes:
 
 ## The MAML metadata format
 
-A MAML file is YAML. Table-level metadata (author, description, arbitrary key/value pairs, ...) is given as top-level keys, and column definitions are given as a list under the `fields:` key. A full worked example is checked into the repository at [docs/maml_example.maml](docs/maml_example.maml); an abridged version:
+A [MAML](https://github.com/asgr/MAML-Format) file is YAML. Table-level metadata (author, description, arbitrary key/value pairs, ...) is given as top-level keys, and column definitions are given as a list under the `fields:` key. A full worked example is checked into the repository at [docs/maml_example.maml](docs/maml_example.maml); an abridged version:
 
 ```yaml
 dataset: input_data
@@ -285,7 +285,7 @@ List of public callable procedures available with `use parquet`:
 
 ### Utility
 
-- `get_parquet_fortran_version()` — returns the library version as a `character` string, e.g. `"v0.3.1 (2026-07-03)"`.
+- `get_parquet_fortran_version()` — returns the library version as a `character` string, e.g. `"v0.3.1"`.
 
 ### MAML and metadata
 

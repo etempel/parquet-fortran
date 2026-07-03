@@ -104,12 +104,12 @@ contains
         writer%enforce_schema = present(cinfo)
 
         if (present(cinfo)) then
-            allocate(writer%all_columns(size(cinfo)))
-            writer%all_columns = cinfo
+            allocate(writer%all_columns(size(cinfo%col)))
+            writer%all_columns = cinfo%col
 
             n_enabled = 0
-            do i = 1, size(cinfo)
-                if (cinfo(i)%is_set) n_enabled = n_enabled + 1
+            do i = 1, size(cinfo%col)
+                if (cinfo%col(i)%is_set) n_enabled = n_enabled + 1
             end do
 
             if (n_enabled > 0) then
@@ -119,19 +119,19 @@ contains
                 k = 0
             end if
 
-            do i = 1, size(cinfo)
-                if (cinfo(i)%is_set) then
+            do i = 1, size(cinfo%col)
+                if (cinfo%col(i)%is_set) then
                     k = k + 1
-                    writer%enabled_columns(k) = cinfo(i)
+                    writer%enabled_columns(k) = cinfo%col(i)
                     call parquet_add_column_info(&
                         writer, &
-                        cinfo(i)%name, &
-                        cinfo(i)%unit, &
-                        cinfo(i)%info, &
-                        cinfo(i)%ucd, &
-                        cinfo(i)%data_type, &
-                        cinfo(i)%array_size, &
-                        cinfo(i)%col_size )
+                        cinfo%col(i)%name, &
+                        cinfo%col(i)%unit, &
+                        cinfo%col(i)%info, &
+                        cinfo%col(i)%ucd, &
+                        cinfo%col(i)%data_type, &
+                        cinfo%col(i)%array_size, &
+                        cinfo%col(i)%col_size )
                 end if
             end do
         end if

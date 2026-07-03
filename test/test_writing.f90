@@ -4,7 +4,7 @@
 !
 module test_writing
     use parquet
-    use parquet_maml
+    use parquet_maml_base
     use iso_fortran_env, only : int32, int64, real32, real64
     use testdrive, only : new_unittest, unittest_type, error_type, check, test_failed
     !
@@ -78,7 +78,7 @@ contains
     subroutine test_write_parquet_file(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_maml_file) :: maml
-        type(parquet_column_info), allocatable :: cinfo(:)
+        type(parquet_column_info) :: cinfo
         type(parquet_table_metadata) :: metadata
         type(test_output_type), allocatable :: test_data(:)
         logical :: exists
@@ -123,7 +123,7 @@ contains
     subroutine write_test_data(filename, data, col, tmeta)
         character(len=*), intent(in) :: filename
         type(test_output_type), dimension(:), intent(in) :: data
-        type(parquet_column_info), dimension(:), intent(in) :: col
+        type(parquet_column_info), intent(in) :: col
         type(parquet_table_metadata), intent(in), optional :: tmeta
         type(parquet_writer) :: writer
         integer :: i, j, n, name_len_max
@@ -135,7 +135,7 @@ contains
         integer(int32), allocatable :: iarr_col(:)
         logical, allocatable :: flag_arr_col(:)
 
-        if (size(col) < 13) error stop "write_test_data: expected at least 13 columns in col"
+        if (size(col%col) < 13) error stop "write_test_data: expected at least 13 columns in col"
 
         n = size(data)
         allocate(idarr_col(n*2), name_arr_col(n*3), arr_col(n*5), arrlong_col(n*5), iarr_col(n*3), flag_arr_col(n*6))
@@ -169,19 +169,19 @@ contains
 
         call parquet_open_writer(writer, filename, col, metadata=tmeta)
 
-        call parquet_write_column(writer, col(8)%name, arr_col)
+        call parquet_write_column(writer, col%col(8)%name, arr_col)
         call parquet_write_column(writer, "id0", data(:)%id)
-        call parquet_write_column(writer, col(12)%name, data(:)%flag)
-        call parquet_write_column(writer, col(2)%name, idarr_col)
+        call parquet_write_column(writer, col%col(12)%name, data(:)%flag)
+        call parquet_write_column(writer, col%col(2)%name, idarr_col)
         call parquet_write_column(writer, "name", name_col)
-        call parquet_write_column(writer, col(4)%name, name_arr_col)
-        call parquet_write_column(writer, col(13)%name, flag_arr_col)
-        call parquet_write_column(writer, col(7)%name, data(:)%value2)
-        call parquet_write_column(writer, col(5)%name, data(:)%idlong)
-        call parquet_write_column(writer, col(6)%name, data(:)%value)
-        call parquet_write_column(writer, col(10)%name, data(:)%val)
-        call parquet_write_column(writer, col(11)%name, iarr_col)
-        call parquet_write_column(writer, col(9)%name, arrlong_col)
+        call parquet_write_column(writer, col%col(4)%name, name_arr_col)
+        call parquet_write_column(writer, col%col(13)%name, flag_arr_col)
+        call parquet_write_column(writer, col%col(7)%name, data(:)%value2)
+        call parquet_write_column(writer, col%col(5)%name, data(:)%idlong)
+        call parquet_write_column(writer, col%col(6)%name, data(:)%value)
+        call parquet_write_column(writer, col%col(10)%name, data(:)%val)
+        call parquet_write_column(writer, col%col(11)%name, iarr_col)
+        call parquet_write_column(writer, col%col(9)%name, arrlong_col)
 
         call parquet_close_writer(writer)
     end subroutine write_test_data

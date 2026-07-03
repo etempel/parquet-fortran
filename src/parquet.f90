@@ -6,16 +6,16 @@ module parquet
     use iso_c_binding
     use iso_fortran_env, only: int8, int32, int64, real32, real64
     use parquet_bindings
-    use parquet_maml, only: parquet_maml_file
+    use parquet_maml_base, only: parquet_maml_file
     implicit none
     private
     !
-    character(len=*),parameter:: cversion = "v0.2.2 (2026-07-02)" !< version info
+    character(len=*),parameter:: cversion = "v0.3.0 (2026-07-03)" !< version info
 #ifndef RELEASE_VERSION
 #  define RELEASE_VERSION 0.1
 #endif
 
-    type parquet_column_info
+    type parquet_column_type
         logical :: is_set = .false.
         character(len=:), allocatable :: name      ! The name of the field [required].
         character(len=:), allocatable :: unit      ! The unit of measurement for the field.
@@ -24,6 +24,14 @@ module parquet
         character(len=:), allocatable :: data_type ! The data type of the field [required].
         integer :: array_size = 1 ! Maximum length of character strings.
         integer :: col_size = 1   ! The number of elements in the vector column.
+    end type parquet_column_type
+
+    type parquet_column_info
+        type(parquet_column_type), allocatable :: col(:)
+    contains
+        procedure :: get_column_index
+        procedure :: set_unavailable
+        procedure :: set_available
     end type parquet_column_info
 
     type parquet_metadata_entry
@@ -55,8 +63,8 @@ module parquet
 
     type parquet_writer
         type(c_ptr) :: handle = c_null_ptr
-        type(parquet_column_info), allocatable :: all_columns(:)
-        type(parquet_column_info), allocatable :: enabled_columns(:)
+        type(parquet_column_type), allocatable :: all_columns(:)
+        type(parquet_column_type), allocatable :: enabled_columns(:)
         integer, allocatable :: write_counts(:)
         logical :: enforce_schema = .false.
     end type parquet_writer
@@ -131,12 +139,17 @@ module parquet
     public :: parquet_writer
     public :: parquet_reader
     public :: parquet_column_info
+    public :: parquet_column_type
     public :: parquet_table_metadata
+    public :: parquet_maml_file
     public :: parquet_open_writer
     public :: parquet_write_column
     public :: parquet_close_writer
     public :: get_parquet_fortran_version
     public :: parquet_read_maml
+    public :: parquet_load_maml_file
+    public :: parquet_validate_maml
+    public :: parquet_validate_user_maml
     public :: parquet_open_reader
     public :: parquet_close_reader
     public :: parquet_get_nrows
@@ -192,7 +205,7 @@ module parquet
         module subroutine parquet_open_writer(writer, filename, cinfo, metadata)
             type(parquet_writer), intent(out) :: writer
             character(len=*), intent(in) :: filename
-            type(parquet_column_info), intent(in), optional :: cinfo(:)
+            type(parquet_column_info), intent(in), optional :: cinfo
             type(parquet_table_metadata), intent(in), optional :: metadata
         end subroutine parquet_open_writer
 
@@ -285,21 +298,50 @@ module parquet
 
         module subroutine parquet_read_maml_file(maml_filename, cinfo, metadata)
             character(len=*), intent(in) :: maml_filename
-            type(parquet_column_info), allocatable, intent(out) :: cinfo(:)
+            type(parquet_column_info), intent(out) :: cinfo
             type(parquet_table_metadata), intent(out) :: metadata
         end subroutine parquet_read_maml_file
 
+        module function parquet_load_maml_file(maml_filename) result(maml)
+            character(len=*), intent(in) :: maml_filename
+            type(parquet_maml_file) :: maml
+        end function parquet_load_maml_file
+
+        module subroutine parquet_validate_user_maml(base_maml, user_maml)
+            type(parquet_maml_file), intent(in) :: base_maml
+            type(parquet_maml_file), intent(in) :: user_maml
+        end subroutine parquet_validate_user_maml
+
+        module subroutine parquet_validate_maml(maml)
+            type(parquet_maml_file), intent(in) :: maml
+        end subroutine parquet_validate_maml
+
         module subroutine parquet_read_maml_internal(maml, cinfo, metadata)
             type(parquet_maml_file), intent(in) :: maml
-            type(parquet_column_info), allocatable, intent(out) :: cinfo(:)
+            type(parquet_column_info), intent(out) :: cinfo
             type(parquet_table_metadata), intent(out) :: metadata
         end subroutine parquet_read_maml_internal
 
         module subroutine parquet_parse_maml_lines(lines, cinfo, metadata)
             character(len=*), intent(in) :: lines(:)
-            type(parquet_column_info), allocatable, intent(out) :: cinfo(:)
+            type(parquet_column_info), intent(out) :: cinfo
             type(parquet_table_metadata), intent(out) :: metadata
         end subroutine parquet_parse_maml_lines
+
+        module integer function get_column_index(this, name)
+            class(parquet_column_info), intent(in) :: this
+            character(len=*), intent(in) :: name
+        end function get_column_index
+
+        module subroutine set_unavailable(this, name)
+            class(parquet_column_info), intent(inout) :: this
+            character(len=*), intent(in), optional :: name
+        end subroutine set_unavailable
+
+        module subroutine set_available(this, name)
+            class(parquet_column_info), intent(inout) :: this
+            character(len=*), intent(in), optional :: name
+        end subroutine set_available
 
         module subroutine parquet_append_line(lines, n, line)
             character(len=1024), allocatable, intent(inout) :: lines(:)
@@ -402,8 +444,8 @@ module parquet
             character(len=*), intent(in), optional :: desc
         end subroutine add_metadata_string_array
 
-        module subroutine parquet_append_empty_cinfo(cinfo, n)
-            type(parquet_column_info), allocatable, intent(inout) :: cinfo(:)
+        module subroutine parquet_append_empty_cinfo(columns, n)
+            type(parquet_column_type), allocatable, intent(inout) :: columns(:)
             integer, intent(inout) :: n
         end subroutine parquet_append_empty_cinfo
 

@@ -4,7 +4,7 @@
 !
 module test_reading
     use parquet
-    use parquet_maml
+    use parquet_maml_base
     use iso_fortran_env, only : int32, int64, real32, real64
     use testdrive, only : new_unittest, unittest_type, error_type, check, test_failed
     !

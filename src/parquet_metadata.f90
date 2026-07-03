@@ -4,16 +4,134 @@
 !
 submodule (parquet) parquet_metadata
     implicit none
+
+    ! Valid values for a field's data_type: in a MAML file, checked by parquet_validate_maml.
+    ! Add new supported types here as needed.
+    character(len=7), parameter :: valid_maml_data_types(6) = [character(len=7) :: &
+        "int32", "int64", "string", "boolean", "float32", "float64"]
+
 contains
 
     module procedure parquet_read_maml_file
+        type(parquet_maml_file) :: maml
+
+        maml = parquet_load_maml_file(maml_filename)
+        call parquet_parse_maml_lines(maml%lines, cinfo, metadata)
+    end procedure parquet_read_maml_file
+
+    module procedure parquet_read_maml_internal
+        call parquet_parse_maml_lines(maml%lines, cinfo, metadata)
+    end procedure parquet_read_maml_internal
+
+    module procedure parquet_validate_user_maml
+        type(parquet_column_info) :: base_cinfo, user_cinfo
+        type(parquet_table_metadata) :: base_metadata, user_metadata
+        character(len=:), allocatable :: bad_names
+        integer :: i, j
+        logical :: found
+
+        call parquet_validate_maml(base_maml)
+        call parquet_validate_maml(user_maml)
+
+        call parquet_parse_maml_lines(base_maml%lines, base_cinfo, base_metadata)
+        call parquet_parse_maml_lines(user_maml%lines, user_cinfo, user_metadata)
+
+        bad_names = ""
+        if (allocated(user_cinfo%col)) then
+            do i = 1, size(user_cinfo%col)
+                found = .false.
+                if (allocated(base_cinfo%col)) then
+                    do j = 1, size(base_cinfo%col)
+                        if (trim(base_cinfo%col(j)%name) == trim(user_cinfo%col(i)%name)) then
+                            found = .true.
+                            exit
+                        end if
+                    end do
+                end if
+                if (.not. found) then
+                    if (len_trim(bad_names) > 0) bad_names = bad_names // ", "
+                    bad_names = bad_names // trim(user_cinfo%col(i)%name)
+                end if
+            end do
+        end if
+
+        if (len_trim(bad_names) > 0) then
+            error stop "parquet_validate_user_maml: columns not present in base MAML: " // trim(bad_names)
+        end if
+    end procedure parquet_validate_user_maml
+
+    module procedure parquet_validate_maml
+        type(parquet_column_info) :: cinfo
+        type(parquet_table_metadata) :: metadata
+        character(len=:), allocatable :: errors
+        character(len=:), allocatable :: cur_name
+        character(len=32) :: idx_buf
+        integer :: i, j
+        logical :: type_ok, has_table
+
+        call parquet_parse_maml_lines(maml%lines, cinfo, metadata)
+
+        errors = ""
+
+        if (.not. allocated(cinfo%col)) then
+            errors = errors // "no fields defined; "
+        else if (size(cinfo%col) == 0) then
+            errors = errors // "no fields defined; "
+        else
+            do i = 1, size(cinfo%col)
+                cur_name = trim(cinfo%col(i)%name)
+
+                if (len_trim(cur_name) == 0) then
+                    write(idx_buf, '(I0)') i
+                    errors = errors // "field #" // trim(idx_buf) // " has an empty name; "
+                    cycle
+                end if
+
+                type_ok = .false.
+                do j = 1, size(valid_maml_data_types)
+                    if (trim(cinfo%col(i)%data_type) == trim(valid_maml_data_types(j))) then
+                        type_ok = .true.
+                        exit
+                    end if
+                end do
+                if (.not. type_ok) then
+                    errors = errors // "field '" // cur_name // "' has invalid data_type '" // &
+                        trim(cinfo%col(i)%data_type) // "'; "
+                end if
+
+                do j = 1, i - 1
+                    if (trim(cinfo%col(j)%name) == cur_name) then
+                        errors = errors // "duplicate field name '" // cur_name // "'; "
+                        exit
+                    end if
+                end do
+            end do
+        end if
+
+        has_table = .false.
+        if (allocated(metadata%items)) then
+            do i = 1, size(metadata%items)
+                if (trim(metadata%items(i)%key) == "table") then
+                    has_table = len_trim(metadata%items(i)%value) > 0
+                    exit
+                end if
+            end do
+        end if
+        if (.not. has_table) errors = errors // "missing required non-empty metadata: table; "
+
+        if (len_trim(errors) > 0) then
+            error stop "parquet_validate_maml: " // trim(errors)
+        end if
+    end procedure parquet_validate_maml
+
+    module procedure parquet_load_maml_file
         character(len=1024), allocatable :: lines(:)
         character(len=1024) :: line
-        integer :: unit, ios, nlines
+        integer :: unit, ios, nlines, i, max_len
 
         nlines = 0
         open(newunit=unit, file=trim(maml_filename), status="old", action="read", iostat=ios)
-        if (ios /= 0) error stop "parquet_read_maml: cannot open file: " // trim(maml_filename)
+        if (ios /= 0) error stop "parquet_load_maml_file: cannot open file: " // trim(maml_filename)
 
         do
             read(unit, '(A)', iostat=ios) line
@@ -24,15 +142,23 @@ contains
 
         close(unit)
 
-        call parquet_parse_maml_lines(lines, cinfo, metadata)
-    end procedure parquet_read_maml_file
+        maml%name = trim(maml_filename)
 
-    module procedure parquet_read_maml_internal
-        call parquet_parse_maml_lines(maml%lines, cinfo, metadata)
-    end procedure parquet_read_maml_internal
+        max_len = 1
+        do i = 1, nlines
+            max_len = max(max_len, len_trim(lines(i)))
+        end do
+
+        allocate(character(len=max_len) :: maml%lines(nlines))
+        do i = 1, nlines
+            maml%lines(i) = lines(i)(1:max_len)
+        end do
+
+        call parquet_validate_maml(maml)
+    end procedure parquet_load_maml_file
 
     module procedure parquet_parse_maml_lines
-        type(parquet_column_info), allocatable :: tmp(:)
+        type(parquet_column_type), allocatable :: tmp(:)
         character(len=1024) :: line
         character(len=:), allocatable :: tline, key, cvalue
         logical :: in_fields, have_current, in_list, in_field_list, in_keyarray, in_doiarray
@@ -243,7 +369,7 @@ contains
         if (in_doiarray) call parquet_flush_doi_item(metadata, doi_idx, doi_value, doi_type)
 
         if (n <= 0) then
-            allocate(cinfo(0))
+            allocate(cinfo%col(0))
             return
         end if
 
@@ -258,7 +384,7 @@ contains
             tmp(i)%is_set = .true.
         end do
 
-        call move_alloc(tmp, cinfo)
+        call move_alloc(tmp, cinfo%col)
     end procedure parquet_parse_maml_lines
 
     module procedure parquet_append_line
@@ -449,22 +575,58 @@ contains
         call parquet_metadata_append_entry(this, key, joined, desc)
     end procedure add_metadata_string_array
 
-    module procedure parquet_append_empty_cinfo
-        type(parquet_column_info), allocatable :: tmp(:)
+    module procedure get_column_index
+        integer :: i
 
-        if (.not. allocated(cinfo)) then
-            allocate(cinfo(1))
-            n = 1
-        else
-            allocate(tmp(size(cinfo) + 1))
-            if (size(cinfo) > 0) tmp(1:size(cinfo)) = cinfo
-            call move_alloc(tmp, cinfo)
-            n = size(cinfo)
+        get_column_index = 0
+        if (allocated(this%col)) then
+            do i = 1, size(this%col)
+                if (allocated(this%col(i)%name)) then
+                    if (trim(this%col(i)%name) == trim(name)) then
+                        get_column_index = i
+                        exit
+                    end if
+                end if
+            end do
         end if
 
-        cinfo(n)%is_set = .true.
-        cinfo(n)%array_size = 1
-        cinfo(n)%col_size = 1
+        if (get_column_index == 0) then
+            error stop "parquet_column_info%get_column_index: column not found: " // trim(name)
+        end if
+    end procedure get_column_index
+
+    module procedure set_unavailable
+        if (present(name)) then
+            this%col(this%get_column_index(name))%is_set = .false.
+        else if (allocated(this%col)) then
+            this%col(:)%is_set = .false.
+        end if
+    end procedure set_unavailable
+
+    module procedure set_available
+        if (present(name)) then
+            this%col(this%get_column_index(name))%is_set = .true.
+        else if (allocated(this%col)) then
+            this%col(:)%is_set = .true.
+        end if
+    end procedure set_available
+
+    module procedure parquet_append_empty_cinfo
+        type(parquet_column_type), allocatable :: tmp(:)
+
+        if (.not. allocated(columns)) then
+            allocate(columns(1))
+            n = 1
+        else
+            allocate(tmp(size(columns) + 1))
+            if (size(columns) > 0) tmp(1:size(columns)) = columns
+            call move_alloc(tmp, columns)
+            n = size(columns)
+        end if
+
+        columns(n)%is_set = .true.
+        columns(n)%array_size = 1
+        columns(n)%col_size = 1
     end procedure parquet_append_empty_cinfo
 
     module procedure parquet_split_key_value

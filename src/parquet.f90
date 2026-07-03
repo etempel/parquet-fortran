@@ -676,10 +676,11 @@ module parquet
 
 contains
 
-    function get_parquet_fortran_version() result(ver_string)
+    function get_parquet_fortran_version(internal) result(ver_string)
         implicit none
         character (len=:), allocatable :: ver_string
         integer :: i
+        logical, intent(in), optional :: internal
         !
 ! Accept solution from https://stackoverflow.com/questions/31649691/stringify-macro-with-gnu-gfortran
 ! which provides the easiest way to pass a macro to a string in Fortran complying with both
@@ -702,6 +703,14 @@ contains
             write(*,*) "WARNING: using developmentparquet-fortran library!"
             write(*,*) "         library version: ", trim(cversion)
             write(*,*) "         RELEASE_VERSION: ", trim(ver_string)
+        end if
+        !
+        if (present(internal)) then
+            if (internal) then
+                ver_string = trim(cversion)
+            else
+                ver_string = trim(ver_string)
+            end if
         end if
         !
     end function get_parquet_fortran_version

@@ -18,6 +18,7 @@ program tester
     use test_maml, only : collect_tests_parquet_maml
     use test_errors, only : collect_tests_parquet_errors
     use test_examples, only : collect_tests_parquet_examples
+    use test_openmp, only : collect_tests_parquet_openmp
     !
     implicit none
     integer :: stat, is
@@ -33,7 +34,8 @@ program tester
         new_testsuite("reading", collect_tests_parquet_reading), &
         new_testsuite("maml", collect_tests_parquet_maml), &
         new_testsuite("errors", collect_tests_parquet_errors), &
-        new_testsuite("examples", collect_tests_parquet_examples) &
+        new_testsuite("examples", collect_tests_parquet_examples), &
+        new_testsuite("openmp", collect_tests_parquet_openmp) &
         ]
     !
     ! command line argument for a specific testsuite and test

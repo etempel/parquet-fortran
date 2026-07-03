@@ -10,7 +10,7 @@ module parquet
     implicit none
     private
     !
-    character(len=*),parameter:: cversion = "v0.3.1 (2026-07-03)" !< version info
+    character(len=*),parameter:: cversion = "v0.3.2 (2026-07-03)" !< version info
 #ifndef RELEASE_VERSION
 #  define RELEASE_VERSION 0.1
 #endif
@@ -44,6 +44,12 @@ module parquet
 
     type parquet_table_metadata
         type(parquet_metadata_entry), allocatable :: items(:)
+        ! Verbatim source MAML lines, populated by parquet_read_maml; used by
+        ! parquet_open_writer(..., write_maml=.true.) to save a sidecar .maml
+        ! file next to the .parquet output. Not kept in sync with add_metadata
+        ! calls made after parquet_read_maml, nor with which columns end up
+        ! enabled/written: it always reflects the MAML source as parsed.
+        character(len=:), allocatable :: source_maml_lines(:)
     contains
         procedure :: add_metadata_int32
         procedure :: add_metadata_int64
@@ -204,11 +210,12 @@ module parquet
             character(len=*), intent(in) :: name
         end function parquet_get_column_array_size
 
-        module subroutine parquet_open_writer(writer, filename, cinfo, metadata)
+        module subroutine parquet_open_writer(writer, filename, cinfo, metadata, write_maml)
             type(parquet_writer), intent(out) :: writer
             character(len=*), intent(in) :: filename
             type(parquet_column_info), intent(in), optional :: cinfo
             type(parquet_table_metadata), intent(in), optional :: metadata
+            logical, intent(in), optional :: write_maml
         end subroutine parquet_open_writer
 
         module subroutine parquet_add_column_info(writer, name, unit, description, ucd, data_type, array_size, col_size)

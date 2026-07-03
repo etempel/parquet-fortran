@@ -332,7 +332,48 @@ contains
                 end do
             end if
         end if
+
+        if (present(write_maml)) then
+            if (write_maml) then
+                if (.not. present(metadata)) then
+                    error stop "parquet_open_writer: write_maml=.true. requires metadata " // &
+                        "(populated by parquet_read_maml) to be present"
+                end if
+                if (.not. allocated(metadata%source_maml_lines)) then
+                    error stop "parquet_open_writer: write_maml=.true. requires metadata " // &
+                        "obtained from parquet_read_maml (no source MAML content found)"
+                end if
+                call parquet_write_maml_sidecar(filename, metadata%source_maml_lines)
+            end if
+        end if
     end procedure parquet_open_writer
+
+    !> Writes `lines` to a sidecar .maml file next to `parquet_filename`: the same
+    !> path with a trailing ".parquet" replaced by ".maml", or ".maml" appended if
+    !> there is no ".parquet" suffix.
+    subroutine parquet_write_maml_sidecar(parquet_filename, lines)
+        character(len=*), intent(in) :: parquet_filename
+        character(len=*), intent(in) :: lines(:)
+        character(len=:), allocatable :: maml_filename
+        integer :: unit, i, n
+
+        n = len(parquet_filename)
+        if (n >= 8) then
+            if (parquet_filename(n-7:n) == ".parquet") then
+                maml_filename = parquet_filename(1:n-8) // ".maml"
+            else
+                maml_filename = parquet_filename // ".maml"
+            end if
+        else
+            maml_filename = parquet_filename // ".maml"
+        end if
+
+        open(newunit=unit, file=maml_filename, status="replace", action="write", form="formatted")
+        do i = 1, size(lines)
+            write(unit, '(a)') trim(lines(i))
+        end do
+        close(unit)
+    end subroutine parquet_write_maml_sidecar
 
     module procedure parquet_add_column_info
         call parquet_add_column_metadata(&

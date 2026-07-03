@@ -35,7 +35,8 @@ contains
             new_unittest("validating a MAML without table: aborts", test_validate_missing_table_aborts), &
             new_unittest("validating a MAML without fields aborts", test_validate_no_fields_aborts), &
             new_unittest("user MAML with unknown column aborts", test_validate_user_maml_unknown_column_aborts), &
-            new_unittest("get_column_index on unknown column aborts", test_get_column_index_not_found_aborts) &
+            new_unittest("get_column_index on unknown column aborts", test_get_column_index_not_found_aborts), &
+            new_unittest("write_maml without metadata aborts", test_write_maml_without_metadata_aborts) &
             ]
     end subroutine collect_tests_parquet_errors
 
@@ -108,6 +109,13 @@ contains
         call check_scenario_exit_status(error, "get_column_index_not_found", expect_abort=.true., &
             failure_message="get_column_index on an unknown column was expected to error stop")
     end subroutine test_get_column_index_not_found_aborts
+
+    subroutine test_write_maml_without_metadata_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_maml_without_metadata", expect_abort=.true., &
+            failure_message="write_maml=.true. without metadata was expected to error stop")
+    end subroutine test_write_maml_without_metadata_aborts
 
     subroutine check_scenario_exit_status(error, scenario, expect_abort, failure_message)
         type(error_type), allocatable, intent(out) :: error

@@ -48,6 +48,8 @@ program error_scenarios
         call scenario_validate_user_maml_unknown_column()
     case ("get_column_index_not_found")
         call scenario_get_column_index_not_found()
+    case ("write_maml_without_metadata")
+        call scenario_write_maml_without_metadata()
     case default
         print '(a)', "unknown scenario: "//trim(scenario)
         stop 1
@@ -103,6 +105,17 @@ contains
         call parquet_write_column(writer, "id0", data)
         call parquet_close_writer(writer)
     end subroutine scenario_write_column_twice
+
+    subroutine scenario_write_maml_without_metadata()
+        type(parquet_writer) :: writer
+        integer(int32) :: data(1) = [1_int32]
+
+        ! write_maml=.true. requires metadata populated by parquet_read_maml;
+        ! a schema-less writer has no source MAML content to save.
+        call parquet_open_writer(writer, "test_run/error_scenario_write_maml.parquet", write_maml=.true.)
+        call parquet_write_column(writer, "id", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_maml_without_metadata
 
     subroutine scenario_validate_bad_data_type()
         type(parquet_maml_file) :: maml

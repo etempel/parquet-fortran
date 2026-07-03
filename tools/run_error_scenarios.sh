@@ -20,6 +20,7 @@ scenarios=(
     "validate_no_fields:1"
     "validate_user_maml_unknown_column:1"
     "get_column_index_not_found:1"
+    "write_maml_without_metadata:1"
 )
 
 echo "Building error_scenarios..."

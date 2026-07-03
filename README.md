@@ -10,6 +10,7 @@ Library to read/write parquet files and handle MAML files. The parquet file meta
 - [Generating the built-in MAML module](#generating-the-built-in-maml-module)
 - [Reading parquet files from your fortran code](#reading-parquet-files-from-your-fortran-code)
 - [Writing parquet files from your fortran code](#writing-parquet-files-from-your-fortran-code)
+  - [Saving the source MAML alongside the parquet file](#saving-the-source-maml-alongside-the-parquet-file)
 - [The MAML metadata format](#the-maml-metadata-format)
 - [Combined example: MAML schema, matrices and metadata](#combined-example-maml-schema-matrices-and-metadata)
 - [Error handling](#error-handling)
@@ -210,6 +211,23 @@ call parquet_open_writer(writer, "data.parquet", cinfo, metadata)
 
 If `cinfo` is omitted, `parquet_open_writer` does not enforce a fixed schema: each column's type, string length and array size are inferred from the first `parquet_write_column` call that writes it. If `cinfo` is given, only columns marked `is_set = .true.` (see `set_available`/`set_unavailable` below) are written, and calling `parquet_write_column` with a name that is not in `cinfo` stops the program with an error.
 
+### Saving the source MAML alongside the parquet file
+
+Pass `write_maml=.true.` to `parquet_open_writer` to also save a sidecar `.maml` file next to the parquet output — same path, with a trailing `.parquet` replaced by `.maml` (or `.maml` appended if there is none):
+
+```fortran
+call parquet_read_maml("maml_example.maml", cinfo, metadata)
+call parquet_open_writer(writer, "data.parquet", cinfo, metadata, write_maml=.true.)
+! writes data.parquet and data.maml
+```
+
+This requires `metadata` to come from `parquet_read_maml` — it saves the verbatim MAML source that was parsed into `metadata`, not the parquet file's parquet/VOTable-style header. Two things follow from that:
+
+- Calls to `metadata%add_metadata` made *after* `parquet_read_maml` (to add extra runtime metadata, as in the [combined example](#combined-example-maml-schema-matrices-and-metadata) below) are **not** reflected in the saved `.maml` — it always reflects the MAML source as originally parsed.
+- The saved `.maml` reflects the full schema as parsed, not which columns ended up enabled/written (via `set_unavailable`/`set_available`) or which extra columns were merged in from a base MAML by `parquet_validate_user_maml` — it's a record of where the schema came from, not of what was actually written.
+
+Omitting `write_maml`, or passing `write_maml=.false.`, behaves exactly as before (no sidecar file). Passing `write_maml=.true.` without `metadata`, or with `metadata` that wasn't produced by `parquet_read_maml`, stops the program with an error.
+
 Notes:
 
 - Every call to `parquet_write_column` writes one full column.
@@ -340,7 +358,7 @@ The public derived type `parquet_table_metadata` provides:
 
 ### Writer
 
-- `parquet_open_writer(writer, filename[, cinfo, metadata])` — opens `filename` for writing. `cinfo`/`metadata` are optional; see the schema-enforcement note above.
+- `parquet_open_writer(writer, filename[, cinfo, metadata, write_maml])` — opens `filename` for writing. `cinfo`/`metadata` are optional; see the schema-enforcement note above. `write_maml` (default `.false.`) additionally saves a sidecar `.maml` file next to `filename` with the MAML source that produced `metadata`; see [Saving the source MAML alongside the parquet file](#saving-the-source-maml-alongside-the-parquet-file).
 - `parquet_write_column(writer, name, data)` — writes one full column named `name`. `data` may be any [supported type](#supported-data-types), passed as a 1D array (`data(:)`) for a plain column or a 2D array (`data(nelem, nrows)`) for a vector/array column.
 - `parquet_close_writer(writer)` — flushes buffered data and finalizes the file. Always call this before the program ends, or the file may be incomplete/unreadable.
 

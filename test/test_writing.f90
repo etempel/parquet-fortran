@@ -40,7 +40,8 @@ contains
         !
         testsuite = [ &
             new_unittest("write extensive parquet file", test_write_parquet_file), &
-            new_unittest("write simple parquet file", test_write_simple_parquet) &
+            new_unittest("write simple parquet file", test_write_simple_parquet), &
+            new_unittest("write_maml=.true. saves a sidecar .maml file", test_write_maml_sidecar) &
             ]
         !
     end subroutine collect_tests_parquet_writing
@@ -74,6 +75,45 @@ contains
         end if
         !
     end subroutine test_write_simple_parquet
+    !
+    subroutine test_write_maml_sidecar(error)
+        implicit none
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_column_info) :: cinfo
+        type(parquet_table_metadata) :: metadata
+        type(parquet_maml_file) :: source_maml, sidecar_maml
+        integer(int32) :: id0(3) = [1_int32, 2_int32, 3_int32]
+        logical :: exists
+        character(len=*), parameter :: out_file = "test_run/test_write_maml.parquet"
+        character(len=*), parameter :: sidecar_file = "test_run/test_write_maml.maml"
+        integer :: i
+
+        call parquet_read_maml("docs/maml_example.maml", cinfo, metadata)
+        call cinfo%set_unavailable()
+        call cinfo%set_available("id0")
+
+        call parquet_open_writer(writer, out_file, cinfo, metadata, write_maml=.true.)
+        call parquet_write_column(writer, "id0", id0)
+        call parquet_close_writer(writer)
+
+        inquire(file=sidecar_file, exist=exists)
+        call check(error, exists, "write_maml=.true. did not create the expected sidecar .maml file")
+        if (allocated(error)) return
+
+        source_maml = parquet_load_maml_file("docs/maml_example.maml")
+        sidecar_maml = parquet_load_maml_file(sidecar_file)
+
+        call check(error, size(sidecar_maml%lines) == size(source_maml%lines), &
+            "sidecar .maml file does not have the same number of lines as the source MAML")
+        if (allocated(error)) return
+
+        do i = 1, size(source_maml%lines)
+            call check(error, trim(sidecar_maml%lines(i)) == trim(source_maml%lines(i)), &
+                "sidecar .maml file content does not match the source MAML line-for-line")
+            if (allocated(error)) return
+        end do
+    end subroutine test_write_maml_sidecar
     !
     subroutine test_write_parquet_file(error)
         type(error_type), allocatable, intent(out) :: error

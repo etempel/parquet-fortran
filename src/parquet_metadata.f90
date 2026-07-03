@@ -18,11 +18,13 @@ contains
         maml = parquet_load_maml_file(maml_filename)
         call parquet_parse_maml_lines(maml%lines, cinfo, metadata)
         call parquet_merge_missing_columns(maml, cinfo)
+        metadata%source_maml_lines = maml%lines
     end procedure parquet_read_maml_file
 
     module procedure parquet_read_maml_internal
         call parquet_parse_maml_lines(maml%lines, cinfo, metadata)
         call parquet_merge_missing_columns(maml, cinfo)
+        metadata%source_maml_lines = maml%lines
     end procedure parquet_read_maml_internal
 
     module procedure parquet_validate_user_maml

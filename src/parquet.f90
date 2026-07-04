@@ -99,13 +99,13 @@ module parquet
         integer, allocatable :: write_counts(:)
         logical :: enforce_schema = .false.
     contains
-        final :: parquet_writer_finalize
+        final :: writer_finalize
     end type parquet_writer
 
     type parquet_reader
         type(c_ptr) :: handle = c_null_ptr
     contains
-        final :: parquet_reader_finalize
+        final :: reader_finalize
     end type parquet_reader
 
     interface parquet_write_column
@@ -188,7 +188,7 @@ module parquet
     public :: parquet_open_writer
     public :: parquet_write_column
     public :: parquet_close_writer
-    public :: get_parquet_fortran_version
+    public :: parquet_get_version
     public :: parquet_read_maml
     public :: parquet_load_maml_file
     public :: parquet_validate_maml
@@ -264,85 +264,85 @@ module parquet
             integer, intent(in) :: col_size
         end subroutine parquet_add_column_info
 
-        module subroutine parquet_write_int32_column(writer, name, data)
+        module subroutine parquet_write_int32_column(writer, name, values)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
-            integer(int32), intent(in) :: data(:)
+            integer(int32), intent(in) :: values(:)
         end subroutine parquet_write_int32_column
 
-        module subroutine parquet_write_int32_matrix_column(writer, name, data)
+        module subroutine parquet_write_int32_matrix_column(writer, name, values)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
-            integer(int32), intent(in) :: data(:,:)
+            integer(int32), intent(in) :: values(:,:)
         end subroutine parquet_write_int32_matrix_column
 
-        module subroutine parquet_write_int64_column(writer, name, data)
+        module subroutine parquet_write_int64_column(writer, name, values)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
-            integer(int64), intent(in) :: data(:)
+            integer(int64), intent(in) :: values(:)
         end subroutine parquet_write_int64_column
 
-        module subroutine parquet_write_int64_matrix_column(writer, name, data)
+        module subroutine parquet_write_int64_matrix_column(writer, name, values)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
-            integer(int64), intent(in) :: data(:,:)
+            integer(int64), intent(in) :: values(:,:)
         end subroutine parquet_write_int64_matrix_column
 
-        module subroutine parquet_write_float32_column(writer, name, data)
+        module subroutine parquet_write_float32_column(writer, name, values)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
-            real(real32), intent(in) :: data(:)
+            real(real32), intent(in) :: values(:)
         end subroutine parquet_write_float32_column
 
-        module subroutine parquet_write_float32_matrix_column(writer, name, data)
+        module subroutine parquet_write_float32_matrix_column(writer, name, values)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
-            real(real32), intent(in) :: data(:,:)
+            real(real32), intent(in) :: values(:,:)
         end subroutine parquet_write_float32_matrix_column
 
-        module subroutine parquet_write_float64_column(writer, name, data)
+        module subroutine parquet_write_float64_column(writer, name, values)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
-            real(real64), intent(in) :: data(:)
+            real(real64), intent(in) :: values(:)
         end subroutine parquet_write_float64_column
 
-        module subroutine parquet_write_float64_matrix_column(writer, name, data)
+        module subroutine parquet_write_float64_matrix_column(writer, name, values)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
-            real(real64), intent(in) :: data(:,:)
+            real(real64), intent(in) :: values(:,:)
         end subroutine parquet_write_float64_matrix_column
 
-        module subroutine parquet_write_logical_column(writer, name, data)
+        module subroutine parquet_write_logical_column(writer, name, values)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
-            logical, intent(in) :: data(:)
+            logical, intent(in) :: values(:)
         end subroutine parquet_write_logical_column
 
-        module subroutine parquet_write_logical_matrix_column(writer, name, data)
+        module subroutine parquet_write_logical_matrix_column(writer, name, values)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
-            logical, intent(in) :: data(:,:)
+            logical, intent(in) :: values(:,:)
         end subroutine parquet_write_logical_matrix_column
 
-        module subroutine parquet_write_string_column(writer, name, data)
+        module subroutine parquet_write_string_column(writer, name, values)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
-            character(len=*), intent(in) :: data(:)
+            character(len=*), intent(in) :: values(:)
         end subroutine parquet_write_string_column
 
-        module subroutine parquet_write_string_matrix_column(writer, name, data)
+        module subroutine parquet_write_string_matrix_column(writer, name, values)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
-            character(len=*), intent(in) :: data(:,:)
+            character(len=*), intent(in) :: values(:,:)
         end subroutine parquet_write_string_matrix_column
 
         module subroutine parquet_close_writer(writer)
             type(parquet_writer), intent(inout) :: writer
         end subroutine parquet_close_writer
 
-        module subroutine parquet_writer_finalize(this)
+        module subroutine writer_finalize(this)
             type(parquet_writer), intent(inout) :: this
-        end subroutine parquet_writer_finalize
+        end subroutine writer_finalize
 
         module subroutine parquet_read_maml_file(maml_filename, cinfo, metadata)
             character(len=*), intent(in) :: maml_filename
@@ -408,92 +408,92 @@ module parquet
             character(len=*), intent(in), optional :: description
         end subroutine parquet_metadata_append_entry
 
-        module subroutine add_metadata_int32(this, key, val, desc)
+        module subroutine add_metadata_int32(this, key, value, description)
             class(parquet_table_metadata), intent(inout) :: this
             character(len=*), intent(in) :: key
-            integer(int32), intent(in) :: val
-            character(len=*), intent(in), optional :: desc
+            integer(int32), intent(in) :: value
+            character(len=*), intent(in), optional :: description
         end subroutine add_metadata_int32
 
-        module subroutine add_metadata_int64(this, key, val, desc)
+        module subroutine add_metadata_int64(this, key, value, description)
             class(parquet_table_metadata), intent(inout) :: this
             character(len=*), intent(in) :: key
-            integer(int64), intent(in) :: val
-            character(len=*), intent(in), optional :: desc
+            integer(int64), intent(in) :: value
+            character(len=*), intent(in), optional :: description
         end subroutine add_metadata_int64
 
-        module subroutine add_metadata_float32(this, key, val, desc, fmt)
+        module subroutine add_metadata_float32(this, key, value, description, fmt)
             class(parquet_table_metadata), intent(inout) :: this
             character(len=*), intent(in) :: key
-            real(real32), intent(in) :: val
-            character(len=*), intent(in), optional :: desc
+            real(real32), intent(in) :: value
+            character(len=*), intent(in), optional :: description
             character(len=*), intent(in), optional :: fmt
         end subroutine add_metadata_float32
 
-        module subroutine add_metadata_float64(this, key, val, desc, fmt)
+        module subroutine add_metadata_float64(this, key, value, description, fmt)
             class(parquet_table_metadata), intent(inout) :: this
             character(len=*), intent(in) :: key
-            real(real64), intent(in) :: val
-            character(len=*), intent(in), optional :: desc
+            real(real64), intent(in) :: value
+            character(len=*), intent(in), optional :: description
             character(len=*), intent(in), optional :: fmt
         end subroutine add_metadata_float64
 
-        module subroutine add_metadata_logical(this, key, val, desc)
+        module subroutine add_metadata_logical(this, key, value, description)
             class(parquet_table_metadata), intent(inout) :: this
             character(len=*), intent(in) :: key
-            logical, intent(in) :: val
-            character(len=*), intent(in), optional :: desc
+            logical, intent(in) :: value
+            character(len=*), intent(in), optional :: description
         end subroutine add_metadata_logical
 
-        module subroutine add_metadata_string(this, key, val, desc)
+        module subroutine add_metadata_string(this, key, value, description)
             class(parquet_table_metadata), intent(inout) :: this
             character(len=*), intent(in) :: key
-            character(len=*), intent(in) :: val
-            character(len=*), intent(in), optional :: desc
+            character(len=*), intent(in) :: value
+            character(len=*), intent(in), optional :: description
         end subroutine add_metadata_string
 
-        module subroutine add_metadata_int32_array(this, key, val, desc)
+        module subroutine add_metadata_int32_array(this, key, value, description)
             class(parquet_table_metadata), intent(inout) :: this
             character(len=*), intent(in) :: key
-            integer(int32), intent(in) :: val(:)
-            character(len=*), intent(in), optional :: desc
+            integer(int32), intent(in) :: value(:)
+            character(len=*), intent(in), optional :: description
         end subroutine add_metadata_int32_array
 
-        module subroutine add_metadata_int64_array(this, key, val, desc)
+        module subroutine add_metadata_int64_array(this, key, value, description)
             class(parquet_table_metadata), intent(inout) :: this
             character(len=*), intent(in) :: key
-            integer(int64), intent(in) :: val(:)
-            character(len=*), intent(in), optional :: desc
+            integer(int64), intent(in) :: value(:)
+            character(len=*), intent(in), optional :: description
         end subroutine add_metadata_int64_array
 
-        module subroutine add_metadata_float32_array(this, key, val, desc, fmt)
+        module subroutine add_metadata_float32_array(this, key, value, description, fmt)
             class(parquet_table_metadata), intent(inout) :: this
             character(len=*), intent(in) :: key
-            real(real32), intent(in) :: val(:)
-            character(len=*), intent(in), optional :: desc
+            real(real32), intent(in) :: value(:)
+            character(len=*), intent(in), optional :: description
             character(len=*), intent(in), optional :: fmt
         end subroutine add_metadata_float32_array
 
-        module subroutine add_metadata_float64_array(this, key, val, desc, fmt)
+        module subroutine add_metadata_float64_array(this, key, value, description, fmt)
             class(parquet_table_metadata), intent(inout) :: this
             character(len=*), intent(in) :: key
-            real(real64), intent(in) :: val(:)
-            character(len=*), intent(in), optional :: desc
+            real(real64), intent(in) :: value(:)
+            character(len=*), intent(in), optional :: description
             character(len=*), intent(in), optional :: fmt
         end subroutine add_metadata_float64_array
 
-        module subroutine add_metadata_logical_array(this, key, val, desc)
+        module subroutine add_metadata_logical_array(this, key, value, description)
             class(parquet_table_metadata), intent(inout) :: this
             character(len=*), intent(in) :: key
-            logical, intent(in) :: val(:)
-            character(len=*), intent(in), optional :: desc
+            logical, intent(in) :: value(:)
+            character(len=*), intent(in), optional :: description
         end subroutine add_metadata_logical_array
 
-        module subroutine add_metadata_string_array(this, key, val, desc)
+        module subroutine add_metadata_string_array(this, key, value, description)
             class(parquet_table_metadata), intent(inout) :: this
             character(len=*), intent(in) :: key
-            character(len=*), intent(in) :: val(:)
-            character(len=*), intent(in), optional :: desc
+            character(len=*), intent(in) :: value(:)
+            character(len=*), intent(in), optional :: description
         end subroutine add_metadata_string_array
 
         module subroutine parquet_append_empty_cinfo(columns, n)
@@ -526,9 +526,9 @@ module parquet
             type(parquet_reader), intent(inout) :: reader
         end subroutine parquet_close_reader
 
-        module subroutine parquet_reader_finalize(this)
+        module subroutine reader_finalize(this)
             type(parquet_reader), intent(inout) :: this
-        end subroutine parquet_reader_finalize
+        end subroutine reader_finalize
 
         module subroutine parquet_get_nrows_int64(reader, nrows)
             type(parquet_reader), intent(in) :: reader
@@ -546,22 +546,22 @@ module parquet
             integer, intent(out) :: col_size
         end subroutine parquet_get_col_size
 
-        module subroutine parquet_get_column_total_elements_int64(reader, name, nelem)
+        module subroutine parquet_get_column_total_elements_int64(reader, name, total_elements)
             type(parquet_reader), intent(in) :: reader
             character(len=*), intent(in) :: name
-            integer(int64), intent(out) :: nelem
+            integer(int64), intent(out) :: total_elements
         end subroutine parquet_get_column_total_elements_int64
 
-        module subroutine parquet_get_column_total_elements_int32(reader, name, nelem)
+        module subroutine parquet_get_column_total_elements_int32(reader, name, total_elements)
             type(parquet_reader), intent(in) :: reader
             character(len=*), intent(in) :: name
-            integer(int32), intent(out) :: nelem
+            integer(int32), intent(out) :: total_elements
         end subroutine parquet_get_column_total_elements_int32
 
-        module subroutine parquet_get_string_length(reader, name, strlen_max)
+        module subroutine parquet_get_string_length(reader, name, max_string_length)
             type(parquet_reader), intent(in) :: reader
             character(len=*), intent(in) :: name
-            integer, intent(out) :: strlen_max
+            integer, intent(out) :: max_string_length
         end subroutine parquet_get_string_length
 
         module subroutine parquet_read_int32_column_1d(reader, name, values)
@@ -678,52 +678,52 @@ module parquet
             integer, intent(in) :: row_index
         end subroutine parquet_read_string_array_row_mode
 
-        module subroutine parquet_read_int32_array_element_mode(reader, name, values, col_index)
+        module subroutine parquet_read_int32_array_element_mode(reader, name, values, elem_index)
             type(parquet_reader), intent(in) :: reader
             character(len=*), intent(in) :: name
             integer(int32), intent(out) :: values(:)
-            integer, intent(in) :: col_index
+            integer, intent(in) :: elem_index
         end subroutine parquet_read_int32_array_element_mode
 
-        module subroutine parquet_read_int64_array_element_mode(reader, name, values, col_index)
+        module subroutine parquet_read_int64_array_element_mode(reader, name, values, elem_index)
             type(parquet_reader), intent(in) :: reader
             character(len=*), intent(in) :: name
             integer(int64), intent(out) :: values(:)
-            integer, intent(in) :: col_index
+            integer, intent(in) :: elem_index
         end subroutine parquet_read_int64_array_element_mode
 
-        module subroutine parquet_read_float32_array_element_mode(reader, name, values, col_index)
+        module subroutine parquet_read_float32_array_element_mode(reader, name, values, elem_index)
             type(parquet_reader), intent(in) :: reader
             character(len=*), intent(in) :: name
             real(real32), intent(out) :: values(:)
-            integer, intent(in) :: col_index
+            integer, intent(in) :: elem_index
         end subroutine parquet_read_float32_array_element_mode
 
-        module subroutine parquet_read_float64_array_element_mode(reader, name, values, col_index)
+        module subroutine parquet_read_float64_array_element_mode(reader, name, values, elem_index)
             type(parquet_reader), intent(in) :: reader
             character(len=*), intent(in) :: name
             real(real64), intent(out) :: values(:)
-            integer, intent(in) :: col_index
+            integer, intent(in) :: elem_index
         end subroutine parquet_read_float64_array_element_mode
 
-        module subroutine parquet_read_logical_array_element_mode(reader, name, values, col_index)
+        module subroutine parquet_read_logical_array_element_mode(reader, name, values, elem_index)
             type(parquet_reader), intent(in) :: reader
             character(len=*), intent(in) :: name
             logical, intent(out) :: values(:)
-            integer, intent(in) :: col_index
+            integer, intent(in) :: elem_index
         end subroutine parquet_read_logical_array_element_mode
 
-        module subroutine parquet_read_string_array_element_mode(reader, name, values, col_index)
+        module subroutine parquet_read_string_array_element_mode(reader, name, values, elem_index)
             type(parquet_reader), intent(in) :: reader
             character(len=*), intent(in) :: name
             character(len=*), intent(out) :: values(:)
-            integer, intent(in) :: col_index
+            integer, intent(in) :: elem_index
         end subroutine parquet_read_string_array_element_mode
     end interface
 
 contains
 
-    function get_parquet_fortran_version(internal) result(ver_string)
+    function parquet_get_version(internal) result(ver_string)
         implicit none
         character (len=:), allocatable :: ver_string
         integer :: i
@@ -760,6 +760,6 @@ contains
             end if
         end if
         !
-    end function get_parquet_fortran_version
+    end function parquet_get_version
 
 end module

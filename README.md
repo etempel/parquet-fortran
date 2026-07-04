@@ -369,7 +369,7 @@ The following intrinsic Fortran kinds (from `iso_fortran_env`) are supported thr
 | `logical`             | `boolean`         |
 | `character(len=*)`    | `string`          |
 
-Matrix (vector-column) entries use the shape convention `(nelem, nrows)` for `parquet_write_column`/`parquet_get_column_total_elements`-derived arrays, and `(col_size, nrows)` for arrays produced by `parquet_read_column`.
+Matrix (vector-column) entries use the shape convention `(col_size, nrows)` for arrays passed to `parquet_write_column` or produced by `parquet_read_column`.
 
 ## parquet module API (functions/subroutines)
 
@@ -377,7 +377,7 @@ List of public callable procedures available with `use parquet`:
 
 ### Utility
 
-- `get_parquet_fortran_version()` — returns the library version as a `character` string, e.g. `"v0.3.1"`.
+- `parquet_get_version()` — returns the library version as a `character` string, e.g. `"v0.3.1"`.
 
 ### MAML and metadata
 
@@ -394,12 +394,12 @@ List of public callable procedures available with `use parquet`:
 
 The public derived type `parquet_table_metadata` provides:
 
-- `metadata%add_metadata(key, value[, fmt])` — attaches a table-level key/value pair (e.g. provenance, units, free-text notes) that is written into the parquet file's VOTable-style header. `value` may be a scalar or 1D array of any [supported type](#supported-data-types) (`integer(int32/int64)`, `real(real32/real64)`, `logical`, `character`). The optional `fmt` (`character`) sets a display/print format string for the value, otherwise a type-appropriate default is used; it has no effect on how the value itself is stored.
+- `metadata%add_metadata(key, value[, description][, fmt])` — attaches a table-level key/value pair (e.g. provenance, units, free-text notes) that is written into the parquet file's VOTable-style header. `value` may be a scalar or 1D array of any [supported type](#supported-data-types) (`integer(int32/int64)`, `real(real32/real64)`, `logical`, `character`). The optional `description` (`character`) is a free-text note stored alongside the value. The optional `fmt` (`character`) sets a display/print format string for the value, otherwise a type-appropriate default is used; it has no effect on how the value itself is stored.
 
 ### Writer
 
 - `parquet_open_writer(writer, filename[, cinfo, metadata, write_maml])` — opens `filename` for writing. `cinfo`/`metadata` are optional; see the schema-enforcement note above. `write_maml` (default `.false.`) additionally saves a sidecar `.maml` file next to `filename` with the MAML source that produced `metadata`; see [Saving the source MAML alongside the parquet file](#saving-the-source-maml-alongside-the-parquet-file).
-- `parquet_write_column(writer, name, data)` — writes one full column named `name`. `data` may be any [supported type](#supported-data-types), passed as a 1D array (`data(:)`) for a plain column or a 2D array (`data(nelem, nrows)`) for a vector/array column.
+- `parquet_write_column(writer, name, values)` — writes one full column named `name`. `values` may be any [supported type](#supported-data-types), passed as a 1D array (`values(:)`) for a plain column or a 2D array (`values(col_size, nrows)`) for a vector/array column.
 - `parquet_close_writer(writer)` — flushes buffered data and finalizes the file. Always call this before the program ends, or the file may be incomplete/unreadable.
 
 ### Reader (table and column info)
@@ -408,14 +408,14 @@ The public derived type `parquet_table_metadata` provides:
 - `parquet_close_reader(reader)` — releases resources associated with `reader`.
 - `parquet_get_nrows(reader, nrows)` — returns the number of table rows in `nrows` (`integer(int32)` or `integer(int64)`).
 - `parquet_get_col_size(reader, name, col_size)` — returns the fixed vector length of an array/matrix column `name` in `col_size`. Call this before allocating the output array for `parquet_read_column`/`parquet_read_array_row_mode`/`parquet_read_array_element_mode` on that column.
-- `parquet_get_column_total_elements(reader, name, nelem)` — returns the total number of elements in column `name` across all rows (`nelem = col_size * nrows` for array columns), in `nelem` (`integer(int32)` or `integer(int64)`).
-- `parquet_get_string_length(reader, name, strlen_max)` — returns the longest string found in string column `name`. Call this before allocating a `character(len=...)` array for `parquet_read_column`, since the allocated length must be at least `strlen_max`.
+- `parquet_get_column_total_elements(reader, name, total_elements)` — returns the total number of elements in column `name` across all rows (`total_elements = col_size * nrows` for array columns), in `total_elements` (`integer(int32)` or `integer(int64)`).
+- `parquet_get_string_length(reader, name, max_string_length)` — returns the longest string found in string column `name`. Call this before allocating a `character(len=...)` array for `parquet_read_column`, since the allocated length must be at least `max_string_length`.
 
 ### Reader (reads column data)
 
 - `parquet_read_column(reader, name, values)` — reads the full column `name` into `values`, which may be any [supported type](#supported-data-types) as a 1D array (`values(nrows)`) for a plain column, or a 2D array (`values(col_size, nrows)`) for a vector/array column. Allocate `values` first, using `parquet_get_nrows`/`parquet_get_col_size`/`parquet_get_string_length` as needed.
 - `parquet_read_array_row_mode(reader, name, values, row_index)` — reads only row `row_index` of vector column `name` into the 1D array `values(col_size)`. Use this to fetch one row's vector at a time (e.g. when iterating row-by-row) without loading the whole column.
-- `parquet_read_array_element_mode(reader, name, values, col_index)` — reads only element `col_index` of vector column `name`, across all rows, into the 1D array `values(nrows)`. Use this to fetch one vector position across every row (e.g. "the 3rd element of every row's vector") without loading the whole column.
+- `parquet_read_array_element_mode(reader, name, values, elem_index)` — reads only element `elem_index` of vector column `name`, across all rows, into the 1D array `values(nrows)`. Use this to fetch one vector position across every row (e.g. "the 3rd element of every row's vector") without loading the whole column.
 
 ## Troubleshooting
 

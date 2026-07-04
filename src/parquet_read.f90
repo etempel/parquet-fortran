@@ -20,12 +20,12 @@ contains
 	!> scope or is overwritten -- frees the underlying C++ object so the
 	!> process doesn't leak it. Always prefer calling parquet_close_reader
 	!> explicitly.
-	module procedure parquet_reader_finalize
+	module procedure reader_finalize
 		if (c_associated(this%handle)) then
 			call close_parquet_reader(this%handle)
 			this%handle = c_null_ptr
 		end if
-	end procedure parquet_reader_finalize
+	end procedure reader_finalize
 
 	module procedure parquet_get_nrows_int64
 		nrows = int(parquet_reader_get_nrows(reader%handle), kind=int64)
@@ -45,7 +45,7 @@ contains
 	end procedure parquet_get_col_size
 
 	module procedure parquet_get_column_total_elements_int64
-		nelem = int(parquet_reader_get_column_total_elements(reader%handle, trim(name)//char(0)), kind=int64)
+		total_elements = int(parquet_reader_get_column_total_elements(reader%handle, trim(name)//char(0)), kind=int64)
 	end procedure parquet_get_column_total_elements_int64
 
 	module procedure parquet_get_column_total_elements_int32
@@ -54,11 +54,11 @@ contains
 		if (nelem64 > huge(0_int32)) then
 			error stop "Number of elements exceeds int32 range"
 		end if
-		nelem = int(nelem64, kind=int32)
+		total_elements = int(nelem64, kind=int32)
 	end procedure parquet_get_column_total_elements_int32
 
 	module procedure parquet_get_string_length
-		strlen_max = int(parquet_reader_get_string_length(reader%handle, trim(name)//char(0)))
+		max_string_length = int(parquet_reader_get_string_length(reader%handle, trim(name)//char(0)))
 	end procedure parquet_get_string_length
 
 	module procedure parquet_read_int32_column_1d
@@ -249,19 +249,19 @@ contains
 	end procedure parquet_read_string_array_row_mode
 
 	module procedure parquet_read_int32_array_element_mode
-		call parquet_read_int32_array_element(reader%handle, trim(name)//char(0), int(col_index, kind=c_long_long), values, int(size(values), kind=c_long_long), 0_c_long_long)
+		call parquet_read_int32_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), values, int(size(values), kind=c_long_long), 0_c_long_long)
 	end procedure parquet_read_int32_array_element_mode
 
 	module procedure parquet_read_int64_array_element_mode
-		call parquet_read_int64_array_element(reader%handle, trim(name)//char(0), int(col_index, kind=c_long_long), values, int(size(values), kind=c_long_long), 0_c_long_long)
+		call parquet_read_int64_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), values, int(size(values), kind=c_long_long), 0_c_long_long)
 	end procedure parquet_read_int64_array_element_mode
 
 	module procedure parquet_read_float32_array_element_mode
-		call parquet_read_float32_array_element(reader%handle, trim(name)//char(0), int(col_index, kind=c_long_long), values, int(size(values), kind=c_long_long), 0_c_long_long)
+		call parquet_read_float32_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), values, int(size(values), kind=c_long_long), 0_c_long_long)
 	end procedure parquet_read_float32_array_element_mode
 
 	module procedure parquet_read_float64_array_element_mode
-		call parquet_read_float64_array_element(reader%handle, trim(name)//char(0), int(col_index, kind=c_long_long), values, int(size(values), kind=c_long_long), 0_c_long_long)
+		call parquet_read_float64_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), values, int(size(values), kind=c_long_long), 0_c_long_long)
 	end procedure parquet_read_float64_array_element_mode
 
 	module procedure parquet_read_logical_array_element_mode
@@ -269,7 +269,7 @@ contains
 		integer :: i
 
 		allocate(tmp(size(values)))
-		call parquet_read_bool8_array_element(reader%handle, trim(name)//char(0), int(col_index, kind=c_long_long), tmp, int(size(values), kind=c_long_long), 0_c_long_long)
+		call parquet_read_bool8_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), tmp, int(size(values), kind=c_long_long), 0_c_long_long)
 		do i = 1, size(values)
 			values(i) = tmp(i) /= 0_c_int8_t
 		end do
@@ -281,7 +281,7 @@ contains
 
 		item_len = len(values(1))
 		allocate(packed(item_len*size(values)))
-		call parquet_read_string_array_element(reader%handle, trim(name)//char(0), int(col_index, kind=c_long_long), packed, int(item_len, kind=c_long_long), int(size(values), kind=c_long_long), 0_c_long_long)
+		call parquet_read_string_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), packed, int(item_len, kind=c_long_long), int(size(values), kind=c_long_long), 0_c_long_long)
 		p = 0
 		do i = 1, size(values)
 			values(i) = ''

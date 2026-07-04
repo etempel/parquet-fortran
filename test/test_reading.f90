@@ -470,7 +470,7 @@ contains
         type(error_type), allocatable, intent(out) :: error
         character(len=:), allocatable :: ver_string
 
-        ver_string = get_parquet_fortran_version()
+        ver_string = parquet_get_version()
 
         call check(error, len_trim(ver_string) > 0)
         if (allocated(error)) then

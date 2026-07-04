@@ -555,18 +555,18 @@ contains
         call parquet_mark_column_written(writer, name)
 
         asize = parquet_get_column_col_size(writer, name)
-        if (mod(size(data), asize) /= 0) stop "parquet_write_int32_column: data size is not divisible by col_size"
-        nrows = size(data) / asize
+        if (mod(size(values), asize) /= 0) stop "parquet_write_int32_column: values size is not divisible by col_size"
+        nrows = size(values) / asize
 
-        call parquet_append_as_schema_int32(writer, name, data, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
+        call parquet_append_as_schema_int32(writer, name, values, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
     end procedure parquet_write_int32_column
 
     module procedure parquet_write_int32_matrix_column
         integer :: asize, nrows, idx
         integer(int32), allocatable :: packed(:)
 
-        asize = size(data, 1)
-        nrows = size(data, 2)
+        asize = size(values, 1)
+        nrows = size(values, 2)
 
         if (writer%enforce_schema) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -582,8 +582,8 @@ contains
         if (.not. parquet_is_column_enabled(writer, name)) return
         call parquet_mark_column_written(writer, name)
 
-        allocate(packed(size(data)))
-        packed = reshape(data, [size(data)])
+        allocate(packed(size(values)))
+        packed = reshape(values, [size(values)])
 
         call parquet_append_as_schema_int32(writer, name, packed, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
     end procedure parquet_write_int32_matrix_column
@@ -603,18 +603,18 @@ contains
         call parquet_mark_column_written(writer, name)
 
         asize = parquet_get_column_col_size(writer, name)
-        if (mod(size(data), asize) /= 0) stop "parquet_write_int64_column: data size is not divisible by col_size"
-        nrows = size(data) / asize
+        if (mod(size(values), asize) /= 0) stop "parquet_write_int64_column: values size is not divisible by col_size"
+        nrows = size(values) / asize
 
-        call parquet_append_as_schema_int64(writer, name, data, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
+        call parquet_append_as_schema_int64(writer, name, values, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
     end procedure parquet_write_int64_column
 
     module procedure parquet_write_int64_matrix_column
         integer :: asize, nrows, idx
         integer(int64), allocatable :: packed(:)
 
-        asize = size(data, 1)
-        nrows = size(data, 2)
+        asize = size(values, 1)
+        nrows = size(values, 2)
 
         if (writer%enforce_schema) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -630,8 +630,8 @@ contains
         if (.not. parquet_is_column_enabled(writer, name)) return
         call parquet_mark_column_written(writer, name)
 
-        allocate(packed(size(data)))
-        packed = reshape(data, [size(data)])
+        allocate(packed(size(values)))
+        packed = reshape(values, [size(values)])
 
         call parquet_append_as_schema_int64(writer, name, packed, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
     end procedure parquet_write_int64_matrix_column
@@ -651,18 +651,18 @@ contains
         call parquet_mark_column_written(writer, name)
 
         asize = parquet_get_column_col_size(writer, name)
-        if (mod(size(data), asize) /= 0) stop "parquet_write_float32_column: data size is not divisible by col_size"
-        nrows = size(data) / asize
+        if (mod(size(values), asize) /= 0) stop "parquet_write_float32_column: values size is not divisible by col_size"
+        nrows = size(values) / asize
 
-        call parquet_append_as_schema_float32(writer, name, data, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
+        call parquet_append_as_schema_float32(writer, name, values, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
     end procedure parquet_write_float32_column
 
     module procedure parquet_write_float32_matrix_column
         integer :: asize, nrows, idx
         real(real32), allocatable :: packed(:)
 
-        asize = size(data, 1)
-        nrows = size(data, 2)
+        asize = size(values, 1)
+        nrows = size(values, 2)
 
         if (writer%enforce_schema) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -678,8 +678,8 @@ contains
         if (.not. parquet_is_column_enabled(writer, name)) return
         call parquet_mark_column_written(writer, name)
 
-        allocate(packed(size(data)))
-        packed = reshape(data, [size(data)])
+        allocate(packed(size(values)))
+        packed = reshape(values, [size(values)])
 
         call parquet_append_as_schema_float32(writer, name, packed, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
     end procedure parquet_write_float32_matrix_column
@@ -699,18 +699,18 @@ contains
         call parquet_mark_column_written(writer, name)
 
         asize = parquet_get_column_col_size(writer, name)
-        if (mod(size(data), asize) /= 0) stop "parquet_write_float64_column: data size is not divisible by col_size"
-        nrows = size(data) / asize
+        if (mod(size(values), asize) /= 0) stop "parquet_write_float64_column: values size is not divisible by col_size"
+        nrows = size(values) / asize
 
-        call parquet_append_as_schema_float64(writer, name, data, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
+        call parquet_append_as_schema_float64(writer, name, values, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
     end procedure parquet_write_float64_column
 
     module procedure parquet_write_float64_matrix_column
         integer :: asize, nrows, idx
         real(real64), allocatable :: packed(:)
 
-        asize = size(data, 1)
-        nrows = size(data, 2)
+        asize = size(values, 1)
+        nrows = size(values, 2)
 
         if (writer%enforce_schema) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -726,8 +726,8 @@ contains
         if (.not. parquet_is_column_enabled(writer, name)) return
         call parquet_mark_column_written(writer, name)
 
-        allocate(packed(size(data)))
-        packed = reshape(data, [size(data)])
+        allocate(packed(size(values)))
+        packed = reshape(values, [size(values)])
 
         call parquet_append_as_schema_float64(writer, name, packed, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
     end procedure parquet_write_float64_matrix_column
@@ -748,12 +748,12 @@ contains
         call parquet_mark_column_written(writer, name)
 
         asize = parquet_get_column_col_size(writer, name)
-        if (mod(size(data), asize) /= 0) stop "parquet_write_logical_column: data size is not divisible by col_size"
-        nrows = size(data) / asize
+        if (mod(size(values), asize) /= 0) stop "parquet_write_logical_column: values size is not divisible by col_size"
+        nrows = size(values) / asize
 
-        allocate(bool_data(size(data)))
-        do i = 1, size(data)
-            if (data(i)) then
+        allocate(bool_data(size(values)))
+        do i = 1, size(values)
+            if (values(i)) then
                 bool_data(i) = 1_c_int8_t
             else
                 bool_data(i) = 0_c_int8_t
@@ -772,8 +772,8 @@ contains
         integer :: asize, nrows, idx
         integer(c_int8_t), allocatable :: bool_data(:)
 
-        asize = size(data, 1)
-        nrows = size(data, 2)
+        asize = size(values, 1)
+        nrows = size(values, 2)
 
         if (writer%enforce_schema) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -789,8 +789,8 @@ contains
         if (.not. parquet_is_column_enabled(writer, name)) return
         call parquet_mark_column_written(writer, name)
 
-        allocate(bool_data(size(data)))
-        bool_data = merge(1_c_int8_t, 0_c_int8_t, reshape(data, [size(data)]))
+        allocate(bool_data(size(values)))
+        bool_data = merge(1_c_int8_t, 0_c_int8_t, reshape(values, [size(values)]))
 
         call parquet_append_bool8_column(&
             writer%handle, &
@@ -816,13 +816,13 @@ contains
         call parquet_mark_column_written(writer, name)
 
         asize = parquet_get_column_col_size(writer, name)
-        nitems = size(data)
+        nitems = size(values)
         if (nitems <= 0) return
-        if (mod(nitems, asize) /= 0) stop "parquet_write_string_column: data size is not divisible by col_size"
+        if (mod(nitems, asize) /= 0) stop "parquet_write_string_column: values size is not divisible by col_size"
 
         if (writer%enforce_schema) then
             max_string_len = max(1, writer%all_columns(idx)%array_size)
-            max_item_len = maxval([(len_trim(data(i)), i=1,nitems)])
+            max_item_len = maxval([(len_trim(values(i)), i=1,nitems)])
             if (max_item_len > max_string_len) then
                 error stop "parquet_write_string_column: string length exceeds declared array_size for column: " // trim(name)
             end if
@@ -830,14 +830,14 @@ contains
 
         nrows = nitems / asize
 
-        item_len = len(data(1))
+        item_len = len(values(1))
         allocate(packed(item_len*nitems))
 
         k = 0
         do i = 1, nitems
             do j = 1, item_len
                 k = k + 1
-                packed(k) = achar(iachar(data(i)(j:j)), kind=c_char)
+                packed(k) = achar(iachar(values(i)(j:j)), kind=c_char)
             end do
         end do
 
@@ -864,8 +864,8 @@ contains
         integer :: i, j, k, l, nrows, asize, item_len, idx
         integer :: nitems
 
-        asize = size(data, 1)
-        nrows = size(data, 2)
+        asize = size(values, 1)
+        nrows = size(values, 2)
 
         if (writer%enforce_schema) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -881,10 +881,10 @@ contains
         if (.not. parquet_is_column_enabled(writer, name)) return
         call parquet_mark_column_written(writer, name)
 
-        nitems = size(data)
+        nitems = size(values)
         if (nitems <= 0) return
 
-        item_len = len(data(1, 1))
+        item_len = len(values(1, 1))
         allocate(packed(item_len * nitems))
 
         k = 0
@@ -892,7 +892,7 @@ contains
             do j = 1, asize
                 do l = 1, item_len
                     k = k + 1
-                    packed(k) = achar(iachar(data(j, i)(l:l)), kind=c_char)
+                    packed(k) = achar(iachar(values(j, i)(l:l)), kind=c_char)
                 end do
             end do
         end do
@@ -934,11 +934,11 @@ contains
     !> parquet_close_writer's enforce_schema check (erroring from an implicit
     !> finalizer on an incompletely-written file would be surprising) --
     !> always prefer calling parquet_close_writer explicitly.
-    module procedure parquet_writer_finalize
+    module procedure writer_finalize
         if (c_associated(this%handle)) then
             call close_parquet_writer(this%handle)
             this%handle = c_null_ptr
         end if
-    end procedure parquet_writer_finalize
+    end procedure writer_finalize
 
 end submodule parquet_write

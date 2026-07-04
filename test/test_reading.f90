@@ -23,7 +23,12 @@ contains
             new_unittest("read column info", test_read_column_info), &
             new_unittest("read array modes", test_read_array_modes), &
             new_unittest("get library version", test_get_library_version), &
-            new_unittest("get parquet maml examples", test_get_parquet_maml_examples) &
+            new_unittest("get parquet maml examples", test_get_parquet_maml_examples), &
+            new_unittest("read scalar column with null_value", test_read_scalar_null_value), &
+            new_unittest("read scalar column with is_valid", test_read_scalar_is_valid), &
+            new_unittest("read scalar column with both null_value and is_valid", test_read_scalar_both), &
+            new_unittest("read string column with null_value and is_valid", test_read_string_null), &
+            new_unittest("read array column with null_value and is_valid", test_read_array_null) &
             ]
     end subroutine collect_tests_parquet_reading
 
@@ -525,5 +530,123 @@ contains
             return
         end if
     end subroutine test_get_parquet_maml_examples
+
+    subroutine test_read_scalar_null_value(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        integer(int32) :: values(3)
+        character(len=*), parameter :: in_file = "test/fixtures/has_null.parquet"
+
+        call parquet_open_reader(reader, in_file)
+        call parquet_read_column(reader, "id_with_null", values, null_value=-1_int32)
+        call parquet_close_reader(reader)
+
+        call check(error, values(1) == 1_int32 .and. values(2) == -1_int32 .and. values(3) == 3_int32)
+        if (allocated(error)) then
+            call test_failed(error, "null_value substitution did not replace the Null in row 2")
+            return
+        end if
+    end subroutine test_read_scalar_null_value
+
+    subroutine test_read_scalar_is_valid(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        integer(int32) :: values(3)
+        logical :: valid(3)
+        character(len=*), parameter :: in_file = "test/fixtures/has_null.parquet"
+
+        call parquet_open_reader(reader, in_file)
+        call parquet_read_column(reader, "id_with_null", values, is_valid=valid)
+        call parquet_close_reader(reader)
+
+        call check(error, valid(1) .and. (.not. valid(2)) .and. valid(3))
+        if (allocated(error)) then
+            call test_failed(error, "is_valid mask did not correctly flag the Null in row 2")
+            return
+        end if
+
+        ! Without null_value, the Null slot must still get a safe type-default
+        ! (0), never Arrow's undefined buffer content.
+        call check(error, values(2) == 0_int32)
+        if (allocated(error)) then
+            call test_failed(error, "is_valid-only read did not default the Null slot to 0")
+            return
+        end if
+    end subroutine test_read_scalar_is_valid
+
+    subroutine test_read_scalar_both(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        integer(int32) :: values(3)
+        logical :: valid(3)
+        character(len=*), parameter :: in_file = "test/fixtures/has_null.parquet"
+
+        call parquet_open_reader(reader, in_file)
+        call parquet_read_column(reader, "id_with_null", values, null_value=-99_int32, is_valid=valid)
+        call parquet_close_reader(reader)
+
+        call check(error, valid(1) .and. (.not. valid(2)) .and. valid(3))
+        if (allocated(error)) then
+            call test_failed(error, "is_valid mask incorrect when combined with null_value")
+            return
+        end if
+
+        call check(error, values(1) == 1_int32 .and. values(2) == -99_int32 .and. values(3) == 3_int32)
+        if (allocated(error)) then
+            call test_failed(error, "null_value substitution incorrect when combined with is_valid")
+            return
+        end if
+    end subroutine test_read_scalar_both
+
+    subroutine test_read_string_null(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        character(len=16) :: values(3)
+        logical :: valid(3)
+        character(len=*), parameter :: in_file = "test/fixtures/has_null.parquet"
+
+        call parquet_open_reader(reader, in_file)
+        call parquet_read_column(reader, "name_with_null", values, null_value="MISSING", is_valid=valid)
+        call parquet_close_reader(reader)
+
+        call check(error, valid(1) .and. (.not. valid(2)) .and. valid(3))
+        if (allocated(error)) then
+            call test_failed(error, "is_valid mask incorrect for string column with a Null")
+            return
+        end if
+
+        call check(error, trim(values(1)) == "first" .and. trim(values(2)) == "MISSING" .and. trim(values(3)) == "third")
+        if (allocated(error)) then
+            call test_failed(error, "null_value substitution incorrect for string column")
+            return
+        end if
+    end subroutine test_read_string_null
+
+    subroutine test_read_array_null(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        integer(int32) :: values(2, 3)
+        logical :: valid(2, 3)
+        character(len=*), parameter :: in_file = "test/fixtures/has_null.parquet"
+
+        call parquet_open_reader(reader, in_file)
+        call parquet_read_column(reader, "arr_with_null", values, null_value=-1_int32, is_valid=valid)
+        call parquet_close_reader(reader)
+
+        ! Row 1: [1, 2], row 2: [3, 4], row 3: [5, Null].
+        call check(error, all(valid(:, 1)) .and. all(valid(:, 2)) .and. valid(1, 3) .and. (.not. valid(2, 3)))
+        if (allocated(error)) then
+            call test_failed(error, "is_valid mask incorrect for array column with an element-level Null")
+            return
+        end if
+
+        call check(error, values(1,1) == 1_int32 .and. values(2,1) == 2_int32 .and. &
+                          values(1,2) == 3_int32 .and. values(2,2) == 4_int32 .and. &
+                          values(1,3) == 5_int32 .and. values(2,3) == -1_int32)
+        if (allocated(error)) then
+            call test_failed(error, "null_value substitution incorrect for array column")
+            return
+        end if
+    end subroutine test_read_array_null
     !
 end module test_reading

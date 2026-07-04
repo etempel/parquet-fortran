@@ -54,7 +54,9 @@ contains
             new_unittest("col_map: output name coincides with an existing base column aborts", &
                 test_validate_col_map_output_matches_other_field_aborts), &
             new_unittest("get_column_index on unknown column aborts", test_get_column_index_not_found_aborts), &
-            new_unittest("write_maml without metadata aborts", test_write_maml_without_metadata_aborts) &
+            new_unittest("write_maml without metadata aborts", test_write_maml_without_metadata_aborts), &
+            new_unittest("reading a column with genuine Null values aborts", &
+                test_read_column_with_nulls_aborts) &
             ]
     end subroutine collect_tests_parquet_errors
 
@@ -198,6 +200,13 @@ contains
         call check_scenario_exit_status(error, "write_maml_without_metadata", expect_abort=.true., &
             failure_message="write_maml=.true. without metadata was expected to error stop")
     end subroutine test_write_maml_without_metadata_aborts
+
+    subroutine test_read_column_with_nulls_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "read_column_with_nulls", expect_abort=.true., &
+            failure_message="reading a column with a genuine Parquet Null was expected to error stop")
+    end subroutine test_read_column_with_nulls_aborts
 
     subroutine check_scenario_exit_status(error, scenario, expect_abort, failure_message)
         type(error_type), allocatable, intent(out) :: error

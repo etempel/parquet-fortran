@@ -157,52 +157,57 @@ module parquet_bindings
             integer(c_long_long) :: strlen_max
         end function
 
-        subroutine parquet_read_int32_column(reader, name, data, nrows) &
+        subroutine parquet_read_int32_column(reader, name, data, nrows, valid_out) &
                 bind(C, name="parquet_read_int32_column")
             import
             type(c_ptr), value :: reader
             character(kind=c_char) :: name(*)
             integer(c_int32_t) :: data(*)
             integer(c_long_long), value :: nrows
+            type(c_ptr), value :: valid_out
         end subroutine
 
-        subroutine parquet_read_int64_column(reader, name, data, nrows) &
+        subroutine parquet_read_int64_column(reader, name, data, nrows, valid_out) &
                 bind(C, name="parquet_read_int64_column")
             import
             type(c_ptr), value :: reader
             character(kind=c_char) :: name(*)
             integer(c_int64_t) :: data(*)
             integer(c_long_long), value :: nrows
+            type(c_ptr), value :: valid_out
         end subroutine
 
-        subroutine parquet_read_float32_column(reader, name, data, nrows) &
+        subroutine parquet_read_float32_column(reader, name, data, nrows, valid_out) &
                 bind(C, name="parquet_read_float32_column")
             import
             type(c_ptr), value :: reader
             character(kind=c_char) :: name(*)
             real(c_float) :: data(*)
             integer(c_long_long), value :: nrows
+            type(c_ptr), value :: valid_out
         end subroutine
 
-        subroutine parquet_read_float64_column(reader, name, data, nrows) &
+        subroutine parquet_read_float64_column(reader, name, data, nrows, valid_out) &
                 bind(C, name="parquet_read_float64_column")
             import
             type(c_ptr), value :: reader
             character(kind=c_char) :: name(*)
             real(c_double) :: data(*)
             integer(c_long_long), value :: nrows
+            type(c_ptr), value :: valid_out
         end subroutine
 
-        subroutine parquet_read_bool8_column(reader, name, data, nrows) &
+        subroutine parquet_read_bool8_column(reader, name, data, nrows, valid_out) &
                 bind(C, name="parquet_read_bool8_column")
             import
             type(c_ptr), value :: reader
             character(kind=c_char) :: name(*)
             integer(c_int8_t) :: data(*)
             integer(c_long_long), value :: nrows
+            type(c_ptr), value :: valid_out
         end subroutine
 
-        subroutine parquet_read_string_column(reader, name, data, item_len, nrows) &
+        subroutine parquet_read_string_column(reader, name, data, item_len, nrows, valid_out) &
                 bind(C, name="parquet_read_string_column")
             import
             type(c_ptr), value :: reader
@@ -210,9 +215,10 @@ module parquet_bindings
             character(kind=c_char) :: data(*)
             integer(c_long_long), value :: item_len
             integer(c_long_long), value :: nrows
+            type(c_ptr), value :: valid_out
         end subroutine
 
-        subroutine parquet_read_int32_array_column(reader, name, data, nrows, array_size) &
+        subroutine parquet_read_int32_array_column(reader, name, data, nrows, array_size, valid_out) &
                 bind(C, name="parquet_read_int32_array_column")
             import
             type(c_ptr), value :: reader
@@ -220,9 +226,10 @@ module parquet_bindings
             integer(c_int32_t) :: data(*)
             integer(c_long_long), value :: nrows
             integer(c_long_long), value :: array_size
+            type(c_ptr), value :: valid_out
         end subroutine
 
-        subroutine parquet_read_int64_array_column(reader, name, data, nrows, array_size) &
+        subroutine parquet_read_int64_array_column(reader, name, data, nrows, array_size, valid_out) &
                 bind(C, name="parquet_read_int64_array_column")
             import
             type(c_ptr), value :: reader
@@ -230,9 +237,10 @@ module parquet_bindings
             integer(c_int64_t) :: data(*)
             integer(c_long_long), value :: nrows
             integer(c_long_long), value :: array_size
+            type(c_ptr), value :: valid_out
         end subroutine
 
-        subroutine parquet_read_float32_array_column(reader, name, data, nrows, array_size) &
+        subroutine parquet_read_float32_array_column(reader, name, data, nrows, array_size, valid_out) &
                 bind(C, name="parquet_read_float32_array_column")
             import
             type(c_ptr), value :: reader
@@ -240,9 +248,10 @@ module parquet_bindings
             real(c_float) :: data(*)
             integer(c_long_long), value :: nrows
             integer(c_long_long), value :: array_size
+            type(c_ptr), value :: valid_out
         end subroutine
 
-        subroutine parquet_read_float64_array_column(reader, name, data, nrows, array_size) &
+        subroutine parquet_read_float64_array_column(reader, name, data, nrows, array_size, valid_out) &
                 bind(C, name="parquet_read_float64_array_column")
             import
             type(c_ptr), value :: reader
@@ -250,9 +259,10 @@ module parquet_bindings
             real(c_double) :: data(*)
             integer(c_long_long), value :: nrows
             integer(c_long_long), value :: array_size
+            type(c_ptr), value :: valid_out
         end subroutine
 
-        subroutine parquet_read_bool8_array_column(reader, name, data, nrows, array_size) &
+        subroutine parquet_read_bool8_array_column(reader, name, data, nrows, array_size, valid_out) &
                 bind(C, name="parquet_read_bool8_array_column")
             import
             type(c_ptr), value :: reader
@@ -260,9 +270,10 @@ module parquet_bindings
             integer(c_int8_t) :: data(*)
             integer(c_long_long), value :: nrows
             integer(c_long_long), value :: array_size
+            type(c_ptr), value :: valid_out
         end subroutine
 
-        subroutine parquet_read_string_array_column(reader, name, data, item_len, nrows, array_size) &
+        subroutine parquet_read_string_array_column(reader, name, data, item_len, nrows, array_size, valid_out) &
                 bind(C, name="parquet_read_string_array_column")
             import
             type(c_ptr), value :: reader
@@ -271,9 +282,10 @@ module parquet_bindings
             integer(c_long_long), value :: item_len
             integer(c_long_long), value :: nrows
             integer(c_long_long), value :: array_size
+            type(c_ptr), value :: valid_out
         end subroutine
 
-        subroutine parquet_read_int32_array_row(reader, name, row_index, data, array_size) &
+        subroutine parquet_read_int32_array_row(reader, name, row_index, data, array_size, valid_out) &
                 bind(C, name="parquet_read_int32_array_row")
             import
             type(c_ptr), value :: reader
@@ -281,9 +293,10 @@ module parquet_bindings
             integer(c_long_long), value :: row_index
             integer(c_int32_t) :: data(*)
             integer(c_long_long), value :: array_size
+            type(c_ptr), value :: valid_out
         end subroutine
 
-        subroutine parquet_read_int64_array_row(reader, name, row_index, data, array_size) &
+        subroutine parquet_read_int64_array_row(reader, name, row_index, data, array_size, valid_out) &
                 bind(C, name="parquet_read_int64_array_row")
             import
             type(c_ptr), value :: reader
@@ -291,9 +304,10 @@ module parquet_bindings
             integer(c_long_long), value :: row_index
             integer(c_int64_t) :: data(*)
             integer(c_long_long), value :: array_size
+            type(c_ptr), value :: valid_out
         end subroutine
 
-        subroutine parquet_read_float32_array_row(reader, name, row_index, data, array_size) &
+        subroutine parquet_read_float32_array_row(reader, name, row_index, data, array_size, valid_out) &
                 bind(C, name="parquet_read_float32_array_row")
             import
             type(c_ptr), value :: reader
@@ -301,9 +315,10 @@ module parquet_bindings
             integer(c_long_long), value :: row_index
             real(c_float) :: data(*)
             integer(c_long_long), value :: array_size
+            type(c_ptr), value :: valid_out
         end subroutine
 
-        subroutine parquet_read_float64_array_row(reader, name, row_index, data, array_size) &
+        subroutine parquet_read_float64_array_row(reader, name, row_index, data, array_size, valid_out) &
                 bind(C, name="parquet_read_float64_array_row")
             import
             type(c_ptr), value :: reader
@@ -311,9 +326,10 @@ module parquet_bindings
             integer(c_long_long), value :: row_index
             real(c_double) :: data(*)
             integer(c_long_long), value :: array_size
+            type(c_ptr), value :: valid_out
         end subroutine
 
-        subroutine parquet_read_bool8_array_row(reader, name, row_index, data, array_size) &
+        subroutine parquet_read_bool8_array_row(reader, name, row_index, data, array_size, valid_out) &
                 bind(C, name="parquet_read_bool8_array_row")
             import
             type(c_ptr), value :: reader
@@ -321,9 +337,10 @@ module parquet_bindings
             integer(c_long_long), value :: row_index
             integer(c_int8_t) :: data(*)
             integer(c_long_long), value :: array_size
+            type(c_ptr), value :: valid_out
         end subroutine
 
-        subroutine parquet_read_string_array_row(reader, name, row_index, data, item_len, array_size) &
+        subroutine parquet_read_string_array_row(reader, name, row_index, data, item_len, array_size, valid_out) &
                 bind(C, name="parquet_read_string_array_row")
             import
             type(c_ptr), value :: reader
@@ -332,9 +349,10 @@ module parquet_bindings
             character(kind=c_char) :: data(*)
             integer(c_long_long), value :: item_len
             integer(c_long_long), value :: array_size
+            type(c_ptr), value :: valid_out
         end subroutine
 
-        subroutine parquet_read_int32_array_element(reader, name, col_index, data, nrows, array_size) &
+        subroutine parquet_read_int32_array_element(reader, name, col_index, data, nrows, array_size, valid_out) &
                 bind(C, name="parquet_read_int32_array_element")
             import
             type(c_ptr), value :: reader
@@ -343,9 +361,10 @@ module parquet_bindings
             integer(c_int32_t) :: data(*)
             integer(c_long_long), value :: nrows
             integer(c_long_long), value :: array_size
+            type(c_ptr), value :: valid_out
         end subroutine
 
-        subroutine parquet_read_int64_array_element(reader, name, col_index, data, nrows, array_size) &
+        subroutine parquet_read_int64_array_element(reader, name, col_index, data, nrows, array_size, valid_out) &
                 bind(C, name="parquet_read_int64_array_element")
             import
             type(c_ptr), value :: reader
@@ -354,9 +373,10 @@ module parquet_bindings
             integer(c_int64_t) :: data(*)
             integer(c_long_long), value :: nrows
             integer(c_long_long), value :: array_size
+            type(c_ptr), value :: valid_out
         end subroutine
 
-        subroutine parquet_read_float32_array_element(reader, name, col_index, data, nrows, array_size) &
+        subroutine parquet_read_float32_array_element(reader, name, col_index, data, nrows, array_size, valid_out) &
                 bind(C, name="parquet_read_float32_array_element")
             import
             type(c_ptr), value :: reader
@@ -365,9 +385,10 @@ module parquet_bindings
             real(c_float) :: data(*)
             integer(c_long_long), value :: nrows
             integer(c_long_long), value :: array_size
+            type(c_ptr), value :: valid_out
         end subroutine
 
-        subroutine parquet_read_float64_array_element(reader, name, col_index, data, nrows, array_size) &
+        subroutine parquet_read_float64_array_element(reader, name, col_index, data, nrows, array_size, valid_out) &
                 bind(C, name="parquet_read_float64_array_element")
             import
             type(c_ptr), value :: reader
@@ -376,9 +397,10 @@ module parquet_bindings
             real(c_double) :: data(*)
             integer(c_long_long), value :: nrows
             integer(c_long_long), value :: array_size
+            type(c_ptr), value :: valid_out
         end subroutine
 
-        subroutine parquet_read_bool8_array_element(reader, name, col_index, data, nrows, array_size) &
+        subroutine parquet_read_bool8_array_element(reader, name, col_index, data, nrows, array_size, valid_out) &
                 bind(C, name="parquet_read_bool8_array_element")
             import
             type(c_ptr), value :: reader
@@ -387,9 +409,10 @@ module parquet_bindings
             integer(c_int8_t) :: data(*)
             integer(c_long_long), value :: nrows
             integer(c_long_long), value :: array_size
+            type(c_ptr), value :: valid_out
         end subroutine
 
-        subroutine parquet_read_string_array_element(reader, name, col_index, data, item_len, nrows, array_size) &
+        subroutine parquet_read_string_array_element(reader, name, col_index, data, item_len, nrows, array_size, valid_out) &
                 bind(C, name="parquet_read_string_array_element")
             import
             type(c_ptr), value :: reader
@@ -399,6 +422,7 @@ module parquet_bindings
             integer(c_long_long), value :: item_len
             integer(c_long_long), value :: nrows
             integer(c_long_long), value :: array_size
+            type(c_ptr), value :: valid_out
         end subroutine
     end interface
 

@@ -68,6 +68,8 @@ program error_scenarios
         call scenario_get_column_index_not_found()
     case ("write_maml_without_metadata")
         call scenario_write_maml_without_metadata()
+    case ("read_column_with_nulls")
+        call scenario_read_column_with_nulls()
     case default
         print '(a)', "unknown scenario: "//trim(scenario)
         stop 1
@@ -418,5 +420,20 @@ contains
         idx = cinfo%get_column_index("not_a_real_column")
         print '(a,i0)', "unexpectedly found index: ", idx
     end subroutine scenario_get_column_index_not_found
+
+    !> test/fixtures/has_null.parquet is a fixture this library cannot write
+    !> itself (it never calls Arrow's AppendNull anywhere on the write path):
+    !> it was produced by a standalone Arrow/Parquet C++ program with a
+    !> genuine Null in row 2 of "id_with_null", to exercise the read-side
+    !> Null guard against a real Parquet Null (a validity-bitmap Null, not a
+    !> sentinel value) rather than just reasoning about it.
+    subroutine scenario_read_column_with_nulls()
+        type(parquet_reader) :: reader
+        integer(int32) :: values(3)
+
+        call parquet_open_reader(reader, "test/fixtures/has_null.parquet")
+        call parquet_read_column(reader, "id_with_null", values)
+        print '(a)', "unexpectedly read a column containing Null values without error"
+    end subroutine scenario_read_column_with_nulls
 
 end program error_scenarios

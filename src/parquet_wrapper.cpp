@@ -492,13 +492,17 @@ extern "C"
 		auto array = get_single_chunk_array(reader_handle, name);
 		int64_t max_len = 0;
 
+		// Sizing a read buffer doesn't depend on the caller's null policy
+		// (only the actual value read, elsewhere, does) -- so this always
+		// just reports the longest non-null string, silently ignoring
+		// Nulls, regardless of whether the eventual parquet_read_column
+		// call will be given null_value/is_valid or not.
 		if (array->type_id() == arrow::Type::STRING)
 		{
 			auto sarr = std::static_pointer_cast<arrow::StringArray>(array);
 			for (int64_t i = 0; i < sarr->length(); ++i)
 			{
-				if (sarr->IsNull(i))
-					continue;
+				if (sarr->IsNull(i)) continue;
 				max_len = std::max(max_len, static_cast<int64_t>(sarr->GetView(i).size()));
 			}
 			return max_len;
@@ -525,14 +529,133 @@ extern "C"
 		auto vals = std::static_pointer_cast<arrow::StringArray>(list_values);
 		for (int64_t i = 0; i < vals->length(); ++i)
 		{
-			if (vals->IsNull(i))
-				continue;
+			if (vals->IsNull(i)) continue;
 			max_len = std::max(max_len, static_cast<int64_t>(vals->GetView(i).size()));
 		}
 		return max_len;
 	}
 
 }
+
+	// This library has no representation for a per-element missing value
+	// unless the caller opts in via a validity-output buffer (`valid_out`,
+	// nullable): if valid_out is null and the array contains any Parquet
+	// Nulls, throws immediately (the default, strict behavior) rather than
+	// silently copying out whatever undefined bit pattern Arrow happens to
+	// leave in a null slot's data buffer. If valid_out is non-null, no
+	// exception is thrown regardless of nulls: valid_out[i] is filled with
+	// 1 (valid) / 0 (Null) for every i. The caller is then responsible for
+	// overwriting the corresponding data[i] with a safe default wherever
+	// valid_out[i] == 0 (see fill_null_default/fill_null_default_string
+	// below) -- these two responsibilities are deliberately kept separate
+	// so this function stays a simple, type-agnostic yes/no null report.
+	static void check_or_report_nulls(const std::shared_ptr<arrow::Array> &array, const std::string &name, int8_t *valid_out)
+	{
+		if (valid_out == nullptr)
+		{
+			if (array->null_count() != 0)
+			{
+				throw std::runtime_error(std::string("column contains Null value(s), which is not supported: ") + name);
+			}
+			return;
+		}
+		for (int64_t i = 0; i < array->length(); ++i)
+		{
+			valid_out[i] = array->IsValid(i) ? 1 : 0;
+		}
+	}
+
+	// Array/vector (list) columns carry two independent Arrow validity
+	// bitmaps: the outer list array's own (row-level: the whole row's vector
+	// is missing) and the flattened child values array's (element-level: one
+	// scalar entry within an otherwise-present row is missing). A slot is
+	// reported invalid if either is null. `list_array` is the outer list
+	// array (row-level nulls are looked up at row_offset + i); `vals_any` is
+	// the already-flattened/sliced child values array that data[] is about
+	// to be copied from, of length `nrows * array_size`, indexed the same
+	// way data[] is (k = i * array_size + j). Same throw-vs-report contract
+	// as check_or_report_nulls.
+	static void report_nulls_list_full(
+		const std::shared_ptr<arrow::Array> &list_array,
+		const std::shared_ptr<arrow::Array> &vals_any,
+		const std::string &name,
+		int64_t nrows, int64_t array_size, int64_t row_offset,
+		int8_t *valid_out)
+	{
+		bool any_null = (vals_any->null_count() != 0);
+		if (!any_null)
+		{
+			for (int64_t i = 0; i < nrows; ++i)
+			{
+				if (list_array->IsNull(row_offset + i)) { any_null = true; break; }
+			}
+		}
+		if (!any_null) return;
+
+		if (valid_out == nullptr)
+		{
+			throw std::runtime_error(std::string("column contains Null value(s), which is not supported: ") + name);
+		}
+
+		for (int64_t i = 0; i < nrows; ++i)
+		{
+			bool row_valid = list_array->IsValid(row_offset + i);
+			for (int64_t j = 0; j < array_size; ++j)
+			{
+				int64_t k = i * array_size + j;
+				valid_out[k] = (row_valid && vals_any->IsValid(k)) ? 1 : 0;
+			}
+		}
+	}
+
+	// Element-mode variant: valid_out has length `nrows` (one entry per
+	// row), every entry evaluated at the same fixed array position `offset`
+	// (0-based) within its row. `vals_any` is the full flattened child
+	// values array (length nrows * array_size); `list_array` is the outer
+	// list array.
+	static void report_nulls_list_element(
+		const std::shared_ptr<arrow::Array> &list_array,
+		const std::shared_ptr<arrow::Array> &vals_any,
+		const std::string &name,
+		int64_t nrows, int64_t array_size, int64_t offset,
+		int8_t *valid_out)
+	{
+		bool any_null = false;
+		for (int64_t i = 0; i < nrows; ++i)
+		{
+			if (!list_array->IsValid(i) || !vals_any->IsValid(i * array_size + offset)) { any_null = true; break; }
+		}
+		if (!any_null) return;
+
+		if (valid_out == nullptr)
+		{
+			throw std::runtime_error(std::string("column contains Null value(s), which is not supported: ") + name);
+		}
+
+		for (int64_t i = 0; i < nrows; ++i)
+		{
+			valid_out[i] = (list_array->IsValid(i) && vals_any->IsValid(i * array_size + offset)) ? 1 : 0;
+		}
+	}
+
+	template <typename T>
+	static void fill_null_default(T *data, const int8_t *valid_out, int64_t n)
+	{
+		if (!valid_out) return;
+		for (int64_t k = 0; k < n; ++k)
+		{
+			if (!valid_out[k]) data[k] = T{};
+		}
+	}
+
+	static void fill_null_default_string(char *data, int64_t item_len, const int8_t *valid_out, int64_t n)
+	{
+		if (!valid_out) return;
+		for (int64_t k = 0; k < n; ++k)
+		{
+			if (!valid_out[k]) copy_string_with_padding(data + k * item_len, item_len, std::string_view());
+		}
+	}
 
 	template <typename ArrowArrayType, typename CType>
 	static void read_scalar_primitive(void *handle, const char *name, CType *data, int64_t nrows, arrow::Type::type expected_type, const char *expected_name)
@@ -550,6 +673,7 @@ extern "C"
 		{
 			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
 		}
+		check_no_nulls(arr, name);
 		for (int64_t i = 0; i < nrows; ++i)
 		{
 			data[i] = static_cast<CType>(arr->Value(i));
@@ -621,19 +745,21 @@ extern "C"
 	}
 
 	template <typename ArrowArrayType, typename CType>
-	static void read_list_primitive_row(void *handle, const char *name, int64_t row_index, CType *data, int64_t array_size, arrow::Type::type expected_value_type, const char *expected_name)
+	static void read_list_primitive_row(void *handle, const char *name, int64_t row_index, CType *data, int64_t array_size, arrow::Type::type expected_value_type, const char *expected_name, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
 		auto vals_any = get_row_list_values(array, name, row_index, array_size);
+		report_nulls_list_full(array, vals_any, name, 1, array_size, row_index - 1, valid_out);
 		for (int64_t j = 0; j < array_size; ++j)
 		{
 			data[j] = static_cast<CType>(numeric_value_at(vals_any, name, j));
 		}
+		fill_null_default(data, valid_out, array_size);
 	}
 
 	template <typename ArrowArrayType, typename CType>
-	static void read_list_primitive_element(void *handle, const char *name, int64_t col_index, CType *data, int64_t nrows, arrow::Type::type expected_value_type, const char *expected_name)
+	static void read_list_primitive_element(void *handle, const char *name, int64_t col_index, CType *data, int64_t nrows, arrow::Type::type expected_value_type, const char *expected_name, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
@@ -644,16 +770,18 @@ extern "C"
 		}
 		auto vals_any = get_uniform_list_values(array, name, nrows, array_size);
 		auto offset = col_index - 1;
+		report_nulls_list_element(array, vals_any, name, nrows, array_size, offset, valid_out);
 		for (int64_t i = 0; i < nrows; ++i)
 		{
 			data[i] = static_cast<CType>(numeric_value_at(vals_any, name, i * array_size + offset));
 		}
+		fill_null_default(data, valid_out, nrows);
 	}
 
 extern "C"
 {
 
-	void parquet_read_int32_column(void *handle, const char *name, int32_t *data, int64_t nrows)
+	void parquet_read_int32_column(void *handle, const char *name, int32_t *data, int64_t nrows, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
@@ -661,6 +789,7 @@ extern "C"
 		{
 			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
 		}
+		check_or_report_nulls(array, name, valid_out);
 
 		switch (array->type_id())
 		{
@@ -691,9 +820,10 @@ extern "C"
 			throw std::runtime_error(std::string("type mismatch for column: ") + name +
 				" (expected int32/int64, got " + array->type()->ToString() + ")");
 		}
+		fill_null_default(data, valid_out, nrows);
 	}
 
-	void parquet_read_int64_column(void *handle, const char *name, int64_t *data, int64_t nrows)
+	void parquet_read_int64_column(void *handle, const char *name, int64_t *data, int64_t nrows, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
@@ -701,6 +831,7 @@ extern "C"
 		{
 			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
 		}
+		check_or_report_nulls(array, name, valid_out);
 
 		switch (array->type_id())
 		{
@@ -726,9 +857,10 @@ extern "C"
 			throw std::runtime_error(std::string("type mismatch for column: ") + name +
 				" (expected int64/int32, got " + array->type()->ToString() + ")");
 		}
+		fill_null_default(data, valid_out, nrows);
 	}
 
-	void parquet_read_float32_column(void *handle, const char *name, float *data, int64_t nrows)
+	void parquet_read_float32_column(void *handle, const char *name, float *data, int64_t nrows, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
@@ -736,6 +868,7 @@ extern "C"
 		{
 			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
 		}
+		check_or_report_nulls(array, name, valid_out);
 
 		switch (array->type_id())
 		{
@@ -779,9 +912,10 @@ extern "C"
 			throw std::runtime_error(std::string("type mismatch for column: ") + name +
 				" (expected float32/float64/int32/int64, got " + array->type()->ToString() + ")");
 		}
+		fill_null_default(data, valid_out, nrows);
 	}
 
-	void parquet_read_float64_column(void *handle, const char *name, double *data, int64_t nrows)
+	void parquet_read_float64_column(void *handle, const char *name, double *data, int64_t nrows, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
@@ -789,6 +923,7 @@ extern "C"
 		{
 			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
 		}
+		check_or_report_nulls(array, name, valid_out);
 
 		switch (array->type_id())
 		{
@@ -832,9 +967,10 @@ extern "C"
 			throw std::runtime_error(std::string("type mismatch for column: ") + name +
 				" (expected float64/float32/int32/int64, got " + array->type()->ToString() + ")");
 		}
+		fill_null_default(data, valid_out, nrows);
 	}
 
-	void parquet_read_bool8_column(void *handle, const char *name, int8_t *data, int64_t nrows)
+	void parquet_read_bool8_column(void *handle, const char *name, int8_t *data, int64_t nrows, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
@@ -848,13 +984,15 @@ extern "C"
 		{
 			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
 		}
+		check_or_report_nulls(arr, name, valid_out);
 		for (int64_t i = 0; i < nrows; ++i)
 		{
 			data[i] = arr->Value(i) ? 1 : 0;
 		}
+		fill_null_default(data, valid_out, nrows);
 	}
 
-	void parquet_read_string_column(void *handle, const char *name, char *data, int64_t item_len, int64_t nrows)
+	void parquet_read_string_column(void *handle, const char *name, char *data, int64_t item_len, int64_t nrows, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
@@ -868,18 +1006,21 @@ extern "C"
 		{
 			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
 		}
+		check_or_report_nulls(arr, name, valid_out);
 		for (int64_t i = 0; i < nrows; ++i)
 		{
 			auto view = arr->GetView(i);
 			copy_string_with_padding(data + i * item_len, item_len, view);
 		}
+		fill_null_default_string(data, item_len, valid_out, nrows);
 	}
 
-	void parquet_read_int32_array_column(void *handle, const char *name, int32_t *data, int64_t nrows, int64_t array_size)
+	void parquet_read_int32_array_column(void *handle, const char *name, int32_t *data, int64_t nrows, int64_t array_size, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
 		auto vals_any = get_uniform_list_values(array, name, nrows, array_size);
+		report_nulls_list_full(array, vals_any, name, nrows, array_size, 0, valid_out);
 		int64_t total = nrows * array_size;
 		switch (vals_any->type_id())
 		{
@@ -907,13 +1048,15 @@ extern "C"
 			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
 				" (expected int32/int64, got " + vals_any->type()->ToString() + ")");
 		}
+		fill_null_default(data, valid_out, total);
 	}
 
-	void parquet_read_int64_array_column(void *handle, const char *name, int64_t *data, int64_t nrows, int64_t array_size)
+	void parquet_read_int64_array_column(void *handle, const char *name, int64_t *data, int64_t nrows, int64_t array_size, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
 		auto vals_any = get_uniform_list_values(array, name, nrows, array_size);
+		report_nulls_list_full(array, vals_any, name, nrows, array_size, 0, valid_out);
 		int64_t total = nrows * array_size;
 		switch (vals_any->type_id())
 		{
@@ -933,13 +1076,15 @@ extern "C"
 			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
 				" (expected int64/int32, got " + vals_any->type()->ToString() + ")");
 		}
+		fill_null_default(data, valid_out, total);
 	}
 
-	void parquet_read_float32_array_column(void *handle, const char *name, float *data, int64_t nrows, int64_t array_size)
+	void parquet_read_float32_array_column(void *handle, const char *name, float *data, int64_t nrows, int64_t array_size, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
 		auto vals_any = get_uniform_list_values(array, name, nrows, array_size);
+		report_nulls_list_full(array, vals_any, name, nrows, array_size, 0, valid_out);
 		int64_t total = nrows * array_size;
 		switch (vals_any->type_id())
 		{
@@ -971,13 +1116,15 @@ extern "C"
 			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
 				" (expected float32/float64/int32/int64, got " + vals_any->type()->ToString() + ")");
 		}
+		fill_null_default(data, valid_out, total);
 	}
 
-	void parquet_read_float64_array_column(void *handle, const char *name, double *data, int64_t nrows, int64_t array_size)
+	void parquet_read_float64_array_column(void *handle, const char *name, double *data, int64_t nrows, int64_t array_size, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
 		auto vals_any = get_uniform_list_values(array, name, nrows, array_size);
+		report_nulls_list_full(array, vals_any, name, nrows, array_size, 0, valid_out);
 		int64_t total = nrows * array_size;
 		switch (vals_any->type_id())
 		{
@@ -1009,9 +1156,10 @@ extern "C"
 			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
 				" (expected float64/float32/int32/int64, got " + vals_any->type()->ToString() + ")");
 		}
+		fill_null_default(data, valid_out, total);
 	}
 
-	void parquet_read_bool8_array_column(void *handle, const char *name, int8_t *data, int64_t nrows, int64_t array_size)
+	void parquet_read_bool8_array_column(void *handle, const char *name, int8_t *data, int64_t nrows, int64_t array_size, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
@@ -1021,14 +1169,16 @@ extern "C"
 			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
 				" (expected bool, got " + vals_any->type()->ToString() + ")");
 		}
+		report_nulls_list_full(array, vals_any, name, nrows, array_size, 0, valid_out);
 		auto vals = std::static_pointer_cast<arrow::BooleanArray>(vals_any);
 		for (int64_t i = 0; i < nrows * array_size; ++i)
 		{
 			data[i] = vals->Value(i) ? 1 : 0;
 		}
+		fill_null_default(data, valid_out, nrows * array_size);
 	}
 
-	void parquet_read_string_array_column(void *handle, const char *name, char *data, int64_t item_len, int64_t nrows, int64_t array_size)
+	void parquet_read_string_array_column(void *handle, const char *name, char *data, int64_t item_len, int64_t nrows, int64_t array_size, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
@@ -1038,34 +1188,36 @@ extern "C"
 			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
 				" (expected string, got " + vals_any->type()->ToString() + ")");
 		}
+		report_nulls_list_full(array, vals_any, name, nrows, array_size, 0, valid_out);
 		auto vals = std::static_pointer_cast<arrow::StringArray>(vals_any);
 		for (int64_t i = 0; i < nrows * array_size; ++i)
 		{
 			copy_string_with_padding(data + i * item_len, item_len, vals->GetView(i));
 		}
+		fill_null_default_string(data, item_len, valid_out, nrows * array_size);
 	}
 
-	void parquet_read_int32_array_row(void *handle, const char *name, int64_t row_index, int32_t *data, int64_t array_size)
+	void parquet_read_int32_array_row(void *handle, const char *name, int64_t row_index, int32_t *data, int64_t array_size, int8_t *valid_out)
 	{
-		read_list_primitive_row<arrow::Int32Array, int32_t>(handle, name, row_index, data, array_size, arrow::Type::INT32, "int32");
+		read_list_primitive_row<arrow::Int32Array, int32_t>(handle, name, row_index, data, array_size, arrow::Type::INT32, "int32", valid_out);
 	}
 
-	void parquet_read_int64_array_row(void *handle, const char *name, int64_t row_index, int64_t *data, int64_t array_size)
+	void parquet_read_int64_array_row(void *handle, const char *name, int64_t row_index, int64_t *data, int64_t array_size, int8_t *valid_out)
 	{
-		read_list_primitive_row<arrow::Int64Array, int64_t>(handle, name, row_index, data, array_size, arrow::Type::INT64, "int64");
+		read_list_primitive_row<arrow::Int64Array, int64_t>(handle, name, row_index, data, array_size, arrow::Type::INT64, "int64", valid_out);
 	}
 
-	void parquet_read_float32_array_row(void *handle, const char *name, int64_t row_index, float *data, int64_t array_size)
+	void parquet_read_float32_array_row(void *handle, const char *name, int64_t row_index, float *data, int64_t array_size, int8_t *valid_out)
 	{
-		read_list_primitive_row<arrow::FloatArray, float>(handle, name, row_index, data, array_size, arrow::Type::FLOAT, "float32");
+		read_list_primitive_row<arrow::FloatArray, float>(handle, name, row_index, data, array_size, arrow::Type::FLOAT, "float32", valid_out);
 	}
 
-	void parquet_read_float64_array_row(void *handle, const char *name, int64_t row_index, double *data, int64_t array_size)
+	void parquet_read_float64_array_row(void *handle, const char *name, int64_t row_index, double *data, int64_t array_size, int8_t *valid_out)
 	{
-		read_list_primitive_row<arrow::DoubleArray, double>(handle, name, row_index, data, array_size, arrow::Type::DOUBLE, "float64");
+		read_list_primitive_row<arrow::DoubleArray, double>(handle, name, row_index, data, array_size, arrow::Type::DOUBLE, "float64", valid_out);
 	}
 
-	void parquet_read_bool8_array_row(void *handle, const char *name, int64_t row_index, int8_t *data, int64_t array_size)
+	void parquet_read_bool8_array_row(void *handle, const char *name, int64_t row_index, int8_t *data, int64_t array_size, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
@@ -1073,15 +1225,17 @@ extern "C"
 		if (vals_any->type_id() != arrow::Type::BOOL)
 			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
 				" (expected bool, got " + vals_any->type()->ToString() + ")");
+		report_nulls_list_full(array, vals_any, name, 1, array_size, row_index - 1, valid_out);
 
 		auto vals = std::static_pointer_cast<arrow::BooleanArray>(vals_any);
 		for (int64_t j = 0; j < array_size; ++j)
 		{
 			data[j] = vals->Value(j) ? 1 : 0;
 		}
+		fill_null_default(data, valid_out, array_size);
 	}
 
-	void parquet_read_string_array_row(void *handle, const char *name, int64_t row_index, char *data, int64_t item_len, int64_t array_size)
+	void parquet_read_string_array_row(void *handle, const char *name, int64_t row_index, char *data, int64_t item_len, int64_t array_size, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
@@ -1089,35 +1243,37 @@ extern "C"
 		if (vals_any->type_id() != arrow::Type::STRING)
 			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
 				" (expected string, got " + vals_any->type()->ToString() + ")");
+		report_nulls_list_full(array, vals_any, name, 1, array_size, row_index - 1, valid_out);
 
 		auto vals = std::static_pointer_cast<arrow::StringArray>(vals_any);
 		for (int64_t j = 0; j < array_size; ++j)
 		{
 			copy_string_with_padding(data + j * item_len, item_len, vals->GetView(j));
 		}
+		fill_null_default_string(data, item_len, valid_out, array_size);
 	}
 
-	void parquet_read_int32_array_element(void *handle, const char *name, int64_t col_index, int32_t *data, int64_t nrows, int64_t)
+	void parquet_read_int32_array_element(void *handle, const char *name, int64_t col_index, int32_t *data, int64_t nrows, int64_t unused_array_size, int8_t *valid_out)
 	{
-		read_list_primitive_element<arrow::Int32Array, int32_t>(handle, name, col_index, data, nrows, arrow::Type::INT32, "int32");
+		read_list_primitive_element<arrow::Int32Array, int32_t>(handle, name, col_index, data, nrows, arrow::Type::INT32, "int32", valid_out);
 	}
 
-	void parquet_read_int64_array_element(void *handle, const char *name, int64_t col_index, int64_t *data, int64_t nrows, int64_t)
+	void parquet_read_int64_array_element(void *handle, const char *name, int64_t col_index, int64_t *data, int64_t nrows, int64_t unused_array_size, int8_t *valid_out)
 	{
-		read_list_primitive_element<arrow::Int64Array, int64_t>(handle, name, col_index, data, nrows, arrow::Type::INT64, "int64");
+		read_list_primitive_element<arrow::Int64Array, int64_t>(handle, name, col_index, data, nrows, arrow::Type::INT64, "int64", valid_out);
 	}
 
-	void parquet_read_float32_array_element(void *handle, const char *name, int64_t col_index, float *data, int64_t nrows, int64_t)
+	void parquet_read_float32_array_element(void *handle, const char *name, int64_t col_index, float *data, int64_t nrows, int64_t unused_array_size, int8_t *valid_out)
 	{
-		read_list_primitive_element<arrow::FloatArray, float>(handle, name, col_index, data, nrows, arrow::Type::FLOAT, "float32");
+		read_list_primitive_element<arrow::FloatArray, float>(handle, name, col_index, data, nrows, arrow::Type::FLOAT, "float32", valid_out);
 	}
 
-	void parquet_read_float64_array_element(void *handle, const char *name, int64_t col_index, double *data, int64_t nrows, int64_t)
+	void parquet_read_float64_array_element(void *handle, const char *name, int64_t col_index, double *data, int64_t nrows, int64_t unused_array_size, int8_t *valid_out)
 	{
-		read_list_primitive_element<arrow::DoubleArray, double>(handle, name, col_index, data, nrows, arrow::Type::DOUBLE, "float64");
+		read_list_primitive_element<arrow::DoubleArray, double>(handle, name, col_index, data, nrows, arrow::Type::DOUBLE, "float64", valid_out);
 	}
 
-	void parquet_read_bool8_array_element(void *handle, const char *name, int64_t col_index, int8_t *data, int64_t nrows, int64_t)
+	void parquet_read_bool8_array_element(void *handle, const char *name, int64_t col_index, int8_t *data, int64_t nrows, int64_t, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
@@ -1128,16 +1284,18 @@ extern "C"
 		if (vals_any->type_id() != arrow::Type::BOOL)
 			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
 				" (expected bool, got " + vals_any->type()->ToString() + ")");
+		auto offset = col_index - 1;
+		report_nulls_list_element(array, vals_any, name, nrows, array_size, offset, valid_out);
 
 		auto vals = std::static_pointer_cast<arrow::BooleanArray>(vals_any);
-		auto offset = col_index - 1;
 		for (int64_t i = 0; i < nrows; ++i)
 		{
 			data[i] = vals->Value(i * array_size + offset) ? 1 : 0;
 		}
+		fill_null_default(data, valid_out, nrows);
 	}
 
-	void parquet_read_string_array_element(void *handle, const char *name, int64_t col_index, char *data, int64_t item_len, int64_t nrows, int64_t)
+	void parquet_read_string_array_element(void *handle, const char *name, int64_t col_index, char *data, int64_t item_len, int64_t nrows, int64_t, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
@@ -1148,13 +1306,15 @@ extern "C"
 		if (vals_any->type_id() != arrow::Type::STRING)
 			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
 				" (expected string, got " + vals_any->type()->ToString() + ")");
+		auto offset = col_index - 1;
+		report_nulls_list_element(array, vals_any, name, nrows, array_size, offset, valid_out);
 
 		auto vals = std::static_pointer_cast<arrow::StringArray>(vals_any);
-		auto offset = col_index - 1;
 		for (int64_t i = 0; i < nrows; ++i)
 		{
 			copy_string_with_padding(data + i * item_len, item_len, vals->GetView(i * array_size + offset));
 		}
+		fill_null_default_string(data, item_len, valid_out, nrows);
 	}
 
 	void parquet_add_column_metadata(

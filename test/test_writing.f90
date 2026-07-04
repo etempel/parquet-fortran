@@ -49,7 +49,19 @@ contains
             new_unittest("add_metadata inserts keyarray: before an existing extra:", &
                 test_add_metadata_inserts_before_extra), &
             new_unittest("col_map: renamed column is written/read under its output name", &
-                test_col_map_write_renames_output_column) &
+                test_col_map_write_renames_output_column), &
+            new_unittest("write scalar column with is_valid produces genuine Nulls", &
+                test_write_scalar_with_is_valid), &
+            new_unittest("write matrix column with is_valid produces element-level Nulls", &
+                test_write_matrix_with_is_valid), &
+            new_unittest("write string column with is_valid produces genuine Nulls", &
+                test_write_string_with_is_valid), &
+            new_unittest("write with is_valid all .true. keeps the column non-nullable", &
+                test_write_is_valid_all_true), &
+            new_unittest("protected_cols: allows writing a protected column with no Nulls", &
+                test_write_protected_column_without_null), &
+            new_unittest("protected_cols: semicolon and dash-list forms are equivalent", &
+                test_protected_cols_semicolon_and_dash_list_equivalent) &
             ]
         !
     end subroutine collect_tests_parquet_writing
@@ -349,6 +361,215 @@ contains
             "expected the sidecar .maml to round-trip the col_map: rename (name=id0, output_name=my_id)")
     end subroutine test_col_map_write_renames_output_column
     !
+    !> Writing a scalar int32 column with an is_valid mask containing a
+    !> .false. entry produces a genuine Parquet Null there (not a sentinel
+    !> value): confirmed by reading it back with is_valid, which must report
+    !> that slot invalid and default it to 0 (no null_value requested).
+    subroutine test_write_scalar_with_is_valid(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: values(3) = [1_int32, 2_int32, 3_int32]
+        logical :: is_valid_out(3), is_valid_in(3) = [.true., .false., .true.]
+        integer(int32) :: read_back(3)
+        character(len=*), parameter :: out_file = "test_run/test_write_is_valid_scalar.parquet"
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id_with_null", values, is_valid=is_valid_in)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "id_with_null", read_back, is_valid=is_valid_out)
+        call parquet_close_reader(reader)
+
+        call check(error, is_valid_out(1) .and. (.not. is_valid_out(2)) .and. is_valid_out(3), &
+            "is_valid mask not correctly round-tripped for a written scalar Null")
+        if (allocated(error)) return
+
+        call check(error, read_back(1) == 1_int32 .and. read_back(2) == 0_int32 .and. read_back(3) == 3_int32, &
+            "written scalar Null did not default to 0 on read-back")
+    end subroutine test_write_scalar_with_is_valid
+
+    !> Same as above but for a matrix (vector-column) write: is_valid is
+    !> element-level, shaped like values -- a single element within an
+    !> otherwise-present row can be Null without affecting its row's other
+    !> elements or any other row.
+    subroutine test_write_matrix_with_is_valid(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: values(2,3), read_back(2,3)
+        logical :: is_valid_in(2,3), is_valid_out(2,3)
+        character(len=*), parameter :: out_file = "test_run/test_write_is_valid_matrix.parquet"
+
+        values = reshape([1,2,3,4,5,6], [2,3])
+        is_valid_in = .true.
+        is_valid_in(2,3) = .false.
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "arr_with_null", values, is_valid=is_valid_in)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "arr_with_null", read_back, is_valid=is_valid_out)
+        call parquet_close_reader(reader)
+
+        call check(error, all(is_valid_out(:,1)) .and. all(is_valid_out(:,2)) .and. &
+            is_valid_out(1,3) .and. (.not. is_valid_out(2,3)), &
+            "is_valid mask not correctly round-tripped for a written array-column Null")
+        if (allocated(error)) return
+
+        call check(error, read_back(1,1) == 1_int32 .and. read_back(2,1) == 2_int32 .and. &
+            read_back(1,2) == 3_int32 .and. read_back(2,2) == 4_int32 .and. &
+            read_back(1,3) == 5_int32 .and. read_back(2,3) == 0_int32, &
+            "written array-column Null did not default to 0 on read-back")
+    end subroutine test_write_matrix_with_is_valid
+
+    subroutine test_write_string_with_is_valid(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=16) :: values(3), read_back(3)
+        logical :: is_valid_in(3) = [.true., .false., .true.], is_valid_out(3)
+        character(len=*), parameter :: out_file = "test_run/test_write_is_valid_string.parquet"
+
+        values = ["first ", "second", "third "]
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "name_with_null", values, is_valid=is_valid_in)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "name_with_null", read_back, is_valid=is_valid_out)
+        call parquet_close_reader(reader)
+
+        call check(error, is_valid_out(1) .and. (.not. is_valid_out(2)) .and. is_valid_out(3), &
+            "is_valid mask not correctly round-tripped for a written string Null")
+        if (allocated(error)) return
+
+        call check(error, trim(read_back(1)) == "first" .and. len_trim(read_back(2)) == 0 .and. &
+            trim(read_back(3)) == "third", &
+            "written string Null did not default to blank on read-back")
+    end subroutine test_write_string_with_is_valid
+
+    !> Passing is_valid with every entry .true. must not make the column
+    !> nullable or introduce a Null: reading it back with the default,
+    !> strict (no null_value/is_valid) call must succeed exactly as if
+    !> is_valid had never been passed at all.
+    subroutine test_write_is_valid_all_true(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: values(3) = [1_int32, 2_int32, 3_int32]
+        logical :: is_valid_in(3) = [.true., .true., .true.]
+        integer(int32) :: read_back(3)
+        character(len=*), parameter :: out_file = "test_run/test_write_is_valid_all_true.parquet"
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id_all_valid", values, is_valid=is_valid_in)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "id_all_valid", read_back)
+        call parquet_close_reader(reader)
+
+        call check(error, all(read_back == values), &
+            "strict (non-null-tolerant) read failed for a column written with an all-.true. is_valid mask")
+    end subroutine test_write_is_valid_all_true
+
+    !> A protected column with no Nulls at all (is_valid omitted) must write
+    !> and read back completely normally -- protection only blocks an actual
+    !> Null, never a plain write.
+    subroutine test_write_protected_column_without_null(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_maml_file) :: maml
+        type(parquet_column_info) :: cinfo
+        type(parquet_table_metadata) :: metadata
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: values(3) = [1_int32, 2_int32, 3_int32]
+        integer(int32) :: read_back(3)
+        character(len=*), parameter :: out_file = "test_run/test_protected_no_null.parquet"
+
+        maml%name = "protected_no_null.maml"
+        maml%lines = [character(len=40) :: &
+            "table: protected_table", &
+            "extra:", &
+            "  protected_cols: a", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32" ]
+
+        call parquet_validate_maml(maml)
+        call parquet_read_maml(maml, cinfo, metadata)
+
+        call check(error, cinfo%col(1)%is_protected, "expected column 'a' to be marked is_protected")
+        if (allocated(error)) return
+
+        call parquet_open_writer(writer, out_file, cinfo, metadata)
+        call parquet_write_column(writer, "a", values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "a", read_back)
+        call parquet_close_reader(reader)
+
+        call check(error, all(read_back == values), &
+            "writing/reading a protected column with no Nulls should behave exactly as normal")
+    end subroutine test_write_protected_column_without_null
+
+    !> extra: protected_cols: col1;col2 (semicolon-scalar form) and the
+    !> equivalent dash-list form must mark exactly the same columns
+    !> is_protected.
+    subroutine test_protected_cols_semicolon_and_dash_list_equivalent(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_maml_file) :: maml_semicolon, maml_dashlist
+        type(parquet_column_info) :: cinfo_semicolon, cinfo_dashlist
+        type(parquet_table_metadata) :: metadata
+
+        maml_semicolon%name = "protected_semicolon.maml"
+        maml_semicolon%lines = [character(len=40) :: &
+            "table: protected_table", &
+            "extra:", &
+            "  protected_cols: a;b", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32", &
+            "- name: b", &
+            "  data_type: int32", &
+            "- name: c", &
+            "  data_type: int32" ]
+
+        maml_dashlist%name = "protected_dashlist.maml"
+        maml_dashlist%lines = [character(len=40) :: &
+            "table: protected_table", &
+            "extra:", &
+            "  protected_cols:", &
+            "  - a", &
+            "  - b", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32", &
+            "- name: b", &
+            "  data_type: int32", &
+            "- name: c", &
+            "  data_type: int32" ]
+
+        call parquet_validate_maml(maml_semicolon)
+        call parquet_validate_maml(maml_dashlist)
+        call parquet_read_maml(maml_semicolon, cinfo_semicolon, metadata)
+        call parquet_read_maml(maml_dashlist, cinfo_dashlist, metadata)
+
+        call check(error, cinfo_semicolon%col(1)%is_protected .and. cinfo_semicolon%col(2)%is_protected .and. &
+            (.not. cinfo_semicolon%col(3)%is_protected), &
+            "semicolon-form protected_cols did not mark the expected columns")
+        if (allocated(error)) return
+
+        call check(error, cinfo_dashlist%col(1)%is_protected .and. cinfo_dashlist%col(2)%is_protected .and. &
+            (.not. cinfo_dashlist%col(3)%is_protected), &
+            "dash-list-form protected_cols did not mark the expected columns")
+    end subroutine test_protected_cols_semicolon_and_dash_list_equivalent
+
     subroutine test_write_parquet_file(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_maml_file) :: maml

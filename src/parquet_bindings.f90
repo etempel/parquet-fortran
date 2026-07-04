@@ -43,7 +43,7 @@ module parquet_bindings
             character(kind=c_char) :: description(*)
         end subroutine
 
-        subroutine parquet_append_int32_column(writer, name, data, nrows, array_size) &
+        subroutine parquet_append_int32_column(writer, name, data, nrows, array_size, valid_in) &
                 bind(C, name="parquet_append_int32_column")
             import
             type(c_ptr), value :: writer
@@ -51,9 +51,10 @@ module parquet_bindings
             integer(c_int32_t) :: data(*)
             integer(c_long_long), value :: nrows
             integer(c_long_long), value :: array_size
+            type(c_ptr), value :: valid_in
         end subroutine
 
-        subroutine parquet_append_int64_column(writer, name, data, nrows, array_size) &
+        subroutine parquet_append_int64_column(writer, name, data, nrows, array_size, valid_in) &
                 bind(C, name="parquet_append_int64_column")
             import
             type(c_ptr), value :: writer
@@ -61,9 +62,10 @@ module parquet_bindings
             integer(c_int64_t) :: data(*)
             integer(c_long_long), value :: nrows
             integer(c_long_long), value :: array_size
+            type(c_ptr), value :: valid_in
         end subroutine
 
-        subroutine parquet_append_float32_column(writer, name, data, nrows, array_size) &
+        subroutine parquet_append_float32_column(writer, name, data, nrows, array_size, valid_in) &
                 bind(C, name="parquet_append_float32_column")
             import
             type(c_ptr), value :: writer
@@ -71,9 +73,10 @@ module parquet_bindings
             real(c_float) :: data(*)
             integer(c_long_long), value :: nrows
             integer(c_long_long), value :: array_size
+            type(c_ptr), value :: valid_in
         end subroutine
 
-        subroutine parquet_append_float64_column(writer, name, data, nrows, array_size) &
+        subroutine parquet_append_float64_column(writer, name, data, nrows, array_size, valid_in) &
                 bind(C, name="parquet_append_float64_column")
             import
             type(c_ptr), value :: writer
@@ -81,9 +84,10 @@ module parquet_bindings
             real(c_double) :: data(*)
             integer(c_long_long), value :: nrows
             integer(c_long_long), value :: array_size
+            type(c_ptr), value :: valid_in
         end subroutine
 
-        subroutine parquet_append_bool8_column(writer, name, data, nrows, array_size) &
+        subroutine parquet_append_bool8_column(writer, name, data, nrows, array_size, valid_in) &
                 bind(C, name="parquet_append_bool8_column")
             import
             type(c_ptr), value :: writer
@@ -91,9 +95,10 @@ module parquet_bindings
             integer(c_int8_t) :: data(*)
             integer(c_long_long), value :: nrows
             integer(c_long_long), value :: array_size
+            type(c_ptr), value :: valid_in
         end subroutine
 
-        subroutine parquet_append_string_column(writer, name, data, item_len, nrows) &
+        subroutine parquet_append_string_column(writer, name, data, item_len, nrows, valid_in) &
                 bind(C, name="parquet_append_string_column")
             import
             type(c_ptr), value :: writer
@@ -101,9 +106,10 @@ module parquet_bindings
             character(kind=c_char) :: data(*)
             integer(c_long_long), value :: item_len
             integer(c_long_long), value :: nrows
+            type(c_ptr), value :: valid_in
         end subroutine
 
-        subroutine parquet_append_string_array_column(writer, name, data, item_len, nrows, array_size) &
+        subroutine parquet_append_string_array_column(writer, name, data, item_len, nrows, array_size, valid_in) &
                 bind(C, name="parquet_append_string_array_column")
             import
             type(c_ptr), value :: writer
@@ -112,6 +118,7 @@ module parquet_bindings
             integer(c_long_long), value :: item_len
             integer(c_long_long), value :: nrows
             integer(c_long_long), value :: array_size
+            type(c_ptr), value :: valid_in
         end subroutine
 
         subroutine close_parquet_writer(writer) &

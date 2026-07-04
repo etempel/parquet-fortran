@@ -56,7 +56,11 @@ contains
             new_unittest("get_column_index on unknown column aborts", test_get_column_index_not_found_aborts), &
             new_unittest("write_maml without metadata aborts", test_write_maml_without_metadata_aborts), &
             new_unittest("reading a column with genuine Null values aborts", &
-                test_read_column_with_nulls_aborts) &
+                test_read_column_with_nulls_aborts), &
+            new_unittest("protected_cols: referencing an unknown field aborts", &
+                test_validate_protected_cols_unknown_name_aborts), &
+            new_unittest("writing a Null into a protected column aborts", &
+                test_write_protected_column_with_null_aborts) &
             ]
     end subroutine collect_tests_parquet_errors
 
@@ -207,6 +211,21 @@ contains
         call check_scenario_exit_status(error, "read_column_with_nulls", expect_abort=.true., &
             failure_message="reading a column with a genuine Parquet Null was expected to error stop")
     end subroutine test_read_column_with_nulls_aborts
+
+    subroutine test_validate_protected_cols_unknown_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "validate_protected_cols_unknown_name", expect_abort=.true., &
+            failure_message="protected_cols: referencing a column not declared in fields: " // &
+                "was expected to error stop")
+    end subroutine test_validate_protected_cols_unknown_name_aborts
+
+    subroutine test_write_protected_column_with_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_protected_column_with_null", expect_abort=.true., &
+            failure_message="writing a Null (via is_valid) into a protected column was expected to error stop")
+    end subroutine test_write_protected_column_with_null_aborts
 
     subroutine check_scenario_exit_status(error, scenario, expect_abort, failure_message)
         type(error_type), allocatable, intent(out) :: error

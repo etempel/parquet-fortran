@@ -306,16 +306,37 @@ extern "C"
 		return xml.str();
 	}
 
+	// `nullable` only affects the scalar (array_size <= 1) case: the outer
+	// field there is the only place a Null can ever land for a scalar
+	// column, so it must say so in the schema whenever the caller actually
+	// wrote one (see has_any_null). For array/vector columns (array_size >
+	// 1), nulls are always element-level (never a whole missing row -- by
+	// design, see parquet_append_*_column's valid_in handling below), and
+	// arrow::fixed_size_list(value_type, size)'s convenience constructor
+	// already builds its inner child field with nullable=true unconditionally
+	// (confirmed empirically), so the outer list field itself stays
+	// nullable=false always: a row's vector is never itself missing.
 	static std::shared_ptr<arrow::Field> build_field(
 		const std::string &name,
 		const std::shared_ptr<arrow::DataType> &value_type,
-		int64_t array_size)
+		int64_t array_size,
+		bool nullable = false)
 	{
 		if (array_size > 1)
 		{
 			return arrow::field(name, arrow::fixed_size_list(value_type, static_cast<int32_t>(array_size)), false);
 		}
-		return arrow::field(name, value_type, false);
+		return arrow::field(name, value_type, nullable);
+	}
+
+	static bool has_any_null(const int8_t *valid_in, int64_t n)
+	{
+		if (valid_in == nullptr) return false;
+		for (int64_t i = 0; i < n; ++i)
+		{
+			if (valid_in[i] == 0) return true;
+		}
+		return false;
 	}
 
 	static void append_column(
@@ -1357,12 +1378,13 @@ extern "C"
 			std::string(description)});
 	}
 
-	void parquet_append_int32_column(void *handle, const char *name, const int32_t *data, int64_t nrows, int64_t array_size)
+	void parquet_append_int32_column(void *handle, const char *name, const int32_t *data, int64_t nrows, int64_t array_size, const int8_t *valid_in)
 	{
 		auto writer_handle = as_handle(handle);
 
 		std::shared_ptr<arrow::Array> array;
 		auto value_type = arrow::int32();
+		auto valid_bytes = reinterpret_cast<const uint8_t *>(valid_in);
 
 		if (array_size > 1)
 		{
@@ -1371,7 +1393,7 @@ extern "C"
 			auto status = list_builder.AppendValues(nrows);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
-			status = value_builder->AppendValues(data, nrows * array_size);
+			status = value_builder->AppendValues(data, nrows * array_size, valid_bytes);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
 			status = list_builder.Finish(&array);
@@ -1381,7 +1403,7 @@ extern "C"
 		else
 		{
 			arrow::Int32Builder builder;
-			auto status = builder.AppendValues(data, nrows);
+			auto status = builder.AppendValues(data, nrows, valid_bytes);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
 			status = builder.Finish(&array);
@@ -1389,15 +1411,16 @@ extern "C"
 				throw std::runtime_error(status.ToString());
 		}
 
-		append_column(writer_handle, name, build_field(name, value_type, array_size), array);
+		append_column(writer_handle, name, build_field(name, value_type, array_size, has_any_null(valid_in, nrows * array_size)), array);
 	}
 
-	void parquet_append_int64_column(void *handle, const char *name, const int64_t *data, int64_t nrows, int64_t array_size)
+	void parquet_append_int64_column(void *handle, const char *name, const int64_t *data, int64_t nrows, int64_t array_size, const int8_t *valid_in)
 	{
 		auto writer_handle = as_handle(handle);
 
 		std::shared_ptr<arrow::Array> array;
 		auto value_type = arrow::int64();
+		auto valid_bytes = reinterpret_cast<const uint8_t *>(valid_in);
 
 		if (array_size > 1)
 		{
@@ -1406,7 +1429,7 @@ extern "C"
 			auto status = list_builder.AppendValues(nrows);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
-			status = value_builder->AppendValues(data, nrows * array_size);
+			status = value_builder->AppendValues(data, nrows * array_size, valid_bytes);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
 			status = list_builder.Finish(&array);
@@ -1416,7 +1439,7 @@ extern "C"
 		else
 		{
 			arrow::Int64Builder builder;
-			auto status = builder.AppendValues(data, nrows);
+			auto status = builder.AppendValues(data, nrows, valid_bytes);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
 			status = builder.Finish(&array);
@@ -1424,15 +1447,16 @@ extern "C"
 				throw std::runtime_error(status.ToString());
 		}
 
-		append_column(writer_handle, name, build_field(name, value_type, array_size), array);
+		append_column(writer_handle, name, build_field(name, value_type, array_size, has_any_null(valid_in, nrows * array_size)), array);
 	}
 
-	void parquet_append_float32_column(void *handle, const char *name, const float *data, int64_t nrows, int64_t array_size)
+	void parquet_append_float32_column(void *handle, const char *name, const float *data, int64_t nrows, int64_t array_size, const int8_t *valid_in)
 	{
 		auto writer_handle = as_handle(handle);
 
 		std::shared_ptr<arrow::Array> array;
 		auto value_type = arrow::float32();
+		auto valid_bytes = reinterpret_cast<const uint8_t *>(valid_in);
 
 		if (array_size > 1)
 		{
@@ -1441,7 +1465,7 @@ extern "C"
 			auto status = list_builder.AppendValues(nrows);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
-			status = value_builder->AppendValues(data, nrows * array_size);
+			status = value_builder->AppendValues(data, nrows * array_size, valid_bytes);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
 			status = list_builder.Finish(&array);
@@ -1451,7 +1475,7 @@ extern "C"
 		else
 		{
 			arrow::FloatBuilder builder;
-			auto status = builder.AppendValues(data, nrows);
+			auto status = builder.AppendValues(data, nrows, valid_bytes);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
 			status = builder.Finish(&array);
@@ -1459,15 +1483,16 @@ extern "C"
 				throw std::runtime_error(status.ToString());
 		}
 
-		append_column(writer_handle, name, build_field(name, value_type, array_size), array);
+		append_column(writer_handle, name, build_field(name, value_type, array_size, has_any_null(valid_in, nrows * array_size)), array);
 	}
 
-	void parquet_append_float64_column(void *handle, const char *name, const double *data, int64_t nrows, int64_t array_size)
+	void parquet_append_float64_column(void *handle, const char *name, const double *data, int64_t nrows, int64_t array_size, const int8_t *valid_in)
 	{
 		auto writer_handle = as_handle(handle);
 
 		std::shared_ptr<arrow::Array> array;
 		auto value_type = arrow::float64();
+		auto valid_bytes = reinterpret_cast<const uint8_t *>(valid_in);
 
 		if (array_size > 1)
 		{
@@ -1476,7 +1501,7 @@ extern "C"
 			auto status = list_builder.AppendValues(nrows);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
-			status = value_builder->AppendValues(data, nrows * array_size);
+			status = value_builder->AppendValues(data, nrows * array_size, valid_bytes);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
 			status = list_builder.Finish(&array);
@@ -1486,7 +1511,7 @@ extern "C"
 		else
 		{
 			arrow::DoubleBuilder builder;
-			auto status = builder.AppendValues(data, nrows);
+			auto status = builder.AppendValues(data, nrows, valid_bytes);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
 			status = builder.Finish(&array);
@@ -1494,15 +1519,17 @@ extern "C"
 				throw std::runtime_error(status.ToString());
 		}
 
-		append_column(writer_handle, name, build_field(name, value_type, array_size), array);
+		append_column(writer_handle, name, build_field(name, value_type, array_size, has_any_null(valid_in, nrows * array_size)), array);
 	}
 
-	void parquet_append_bool8_column(void *handle, const char *name, const int8_t *data, int64_t nrows, int64_t array_size)
+	void parquet_append_bool8_column(void *handle, const char *name, const int8_t *data, int64_t nrows, int64_t array_size, const int8_t *valid_in)
 	{
 		auto writer_handle = as_handle(handle);
 
 		std::shared_ptr<arrow::Array> array;
 		auto value_type = arrow::boolean();
+		auto valid_bytes = reinterpret_cast<const uint8_t *>(valid_in);
+		auto values_bytes = reinterpret_cast<const uint8_t *>(data);
 
 		if (array_size > 1)
 		{
@@ -1511,12 +1538,9 @@ extern "C"
 			auto status = list_builder.AppendValues(nrows);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
-			for (int64_t i = 0; i < nrows * array_size; ++i)
-			{
-				status = value_builder->Append(data[i] != 0);
-				if (!status.ok())
-					throw std::runtime_error(status.ToString());
-			}
+			status = value_builder->AppendValues(values_bytes, nrows * array_size, valid_bytes);
+			if (!status.ok())
+				throw std::runtime_error(status.ToString());
 			status = list_builder.Finish(&array);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
@@ -1524,22 +1548,18 @@ extern "C"
 		else
 		{
 			arrow::BooleanBuilder builder;
-			auto status = arrow::Status::OK();
-			for (int64_t i = 0; i < nrows; ++i)
-			{
-				status = builder.Append(data[i] != 0);
-				if (!status.ok())
-					throw std::runtime_error(status.ToString());
-			}
+			auto status = builder.AppendValues(values_bytes, nrows, valid_bytes);
+			if (!status.ok())
+				throw std::runtime_error(status.ToString());
 			status = builder.Finish(&array);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
 		}
 
-		append_column(writer_handle, name, build_field(name, value_type, array_size), array);
+		append_column(writer_handle, name, build_field(name, value_type, array_size, has_any_null(valid_in, nrows * array_size)), array);
 	}
 
-	void parquet_append_string_column(void *handle, const char *name, const char *data, int64_t item_len, int64_t nrows)
+	void parquet_append_string_column(void *handle, const char *name, const char *data, int64_t item_len, int64_t nrows, const int8_t *valid_in)
 	{
 		auto writer_handle = as_handle(handle);
 		arrow::StringBuilder builder;
@@ -1547,10 +1567,17 @@ extern "C"
 		auto status = arrow::Status::OK();
 		for (int64_t i = 0; i < nrows; ++i)
 		{
-			const char *raw = data + i * item_len;
-			std::string value(raw, static_cast<size_t>(item_len));
-			value = trim_right_spaces_and_nuls(value);
-			status = builder.Append(value);
+			if (valid_in != nullptr && valid_in[i] == 0)
+			{
+				status = builder.AppendNull();
+			}
+			else
+			{
+				const char *raw = data + i * item_len;
+				std::string value(raw, static_cast<size_t>(item_len));
+				value = trim_right_spaces_and_nuls(value);
+				status = builder.Append(value);
+			}
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
 		}
@@ -1560,10 +1587,10 @@ extern "C"
 		if (!status.ok())
 			throw std::runtime_error(status.ToString());
 
-		append_column(writer_handle, name, build_field(name, arrow::utf8(), 1), array);
+		append_column(writer_handle, name, build_field(name, arrow::utf8(), 1, has_any_null(valid_in, nrows)), array);
 	}
 
-	void parquet_append_string_array_column(void *handle, const char *name, const char *data, int64_t item_len, int64_t nrows, int64_t array_size)
+	void parquet_append_string_array_column(void *handle, const char *name, const char *data, int64_t item_len, int64_t nrows, int64_t array_size, const int8_t *valid_in)
 	{
 		auto writer_handle = as_handle(handle);
 		auto value_builder = std::make_shared<arrow::StringBuilder>();
@@ -1575,10 +1602,17 @@ extern "C"
 
 		for (int64_t i = 0; i < nrows * array_size; ++i)
 		{
-			const char *raw = data + i * item_len;
-			std::string value(raw, static_cast<size_t>(item_len));
-			value = trim_right_spaces_and_nuls(value);
-			status = value_builder->Append(value);
+			if (valid_in != nullptr && valid_in[i] == 0)
+			{
+				status = value_builder->AppendNull();
+			}
+			else
+			{
+				const char *raw = data + i * item_len;
+				std::string value(raw, static_cast<size_t>(item_len));
+				value = trim_right_spaces_and_nuls(value);
+				status = value_builder->Append(value);
+			}
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
 		}

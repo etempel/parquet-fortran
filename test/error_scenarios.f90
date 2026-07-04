@@ -70,6 +70,10 @@ program error_scenarios
         call scenario_write_maml_without_metadata()
     case ("read_column_with_nulls")
         call scenario_read_column_with_nulls()
+    case ("validate_protected_cols_unknown_name")
+        call scenario_validate_protected_cols_unknown_name()
+    case ("write_protected_column_with_null")
+        call scenario_write_protected_column_with_null()
     case default
         print '(a)', "unknown scenario: "//trim(scenario)
         stop 1
@@ -435,5 +439,48 @@ contains
         call parquet_read_column(reader, "id_with_null", values)
         print '(a)', "unexpectedly read a column containing Null values without error"
     end subroutine scenario_read_column_with_nulls
+
+    subroutine scenario_validate_protected_cols_unknown_name()
+        type(parquet_maml_file) :: maml
+
+        maml%name = "protected_unknown.maml"
+        maml%lines = [character(len=40) :: &
+            "table: protected_table", &
+            "extra:", &
+            "  protected_cols: not_a_real_column", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32" ]
+
+        ! "not_a_real_column" is not declared under fields: in this same
+        ! MAML, so it must be rejected as a dangling reference.
+        call parquet_validate_maml(maml)
+    end subroutine scenario_validate_protected_cols_unknown_name
+
+    subroutine scenario_write_protected_column_with_null()
+        type(parquet_maml_file) :: maml
+        type(parquet_column_info) :: cinfo
+        type(parquet_table_metadata) :: metadata
+        type(parquet_writer) :: writer
+        integer(int32) :: values(3) = [1_int32, 2_int32, 3_int32]
+        logical :: is_valid(3) = [.true., .false., .true.]
+
+        maml%name = "protected_write.maml"
+        maml%lines = [character(len=40) :: &
+            "table: protected_table", &
+            "extra:", &
+            "  protected_cols: a", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32" ]
+
+        call parquet_validate_maml(maml)
+        call parquet_read_maml(maml, cinfo, metadata)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_protected_write.parquet", cinfo, metadata)
+        call parquet_write_column(writer, "a", values, is_valid=is_valid)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote a Null into a protected column without error"
+    end subroutine scenario_write_protected_column_with_null
 
 end program error_scenarios

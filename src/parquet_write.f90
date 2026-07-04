@@ -149,11 +149,12 @@ contains
         end do
     end function parquet_float64_to_int64
 
-    subroutine parquet_append_as_schema_int32(writer, name, values, nrows, asize)
+    subroutine parquet_append_as_schema_int32(writer, name, values, nrows, asize, valid_ptr)
         type(parquet_writer), intent(in) :: writer
         character(len=*), intent(in) :: name
         integer(int32), intent(in) :: values(:)
         integer(c_long_long), intent(in) :: nrows, asize
+        type(c_ptr), intent(in) :: valid_ptr
         character(len=:), allocatable :: schema_type
         integer(int64), allocatable :: i64values(:)
         real(real32), allocatable :: f32values(:)
@@ -164,25 +165,26 @@ contains
         case ("int64")
             allocate(i64values(size(values)))
             i64values = int(values, kind=int64)
-            call parquet_append_int64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), i64values, nrows, asize)
+            call parquet_append_int64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), i64values, nrows, asize, valid_ptr)
         case ("float32")
             allocate(f32values(size(values)))
             f32values = real(values, kind=real32)
-            call parquet_append_float32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), f32values, nrows, asize)
+            call parquet_append_float32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), f32values, nrows, asize, valid_ptr)
         case ("float64")
             allocate(f64values(size(values)))
             f64values = real(values, kind=real64)
-            call parquet_append_float64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), f64values, nrows, asize)
+            call parquet_append_float64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), f64values, nrows, asize, valid_ptr)
         case default
-            call parquet_append_int32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), values, nrows, asize)
+            call parquet_append_int32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), values, nrows, asize, valid_ptr)
         end select
     end subroutine parquet_append_as_schema_int32
 
-    subroutine parquet_append_as_schema_int64(writer, name, values, nrows, asize)
+    subroutine parquet_append_as_schema_int64(writer, name, values, nrows, asize, valid_ptr)
         type(parquet_writer), intent(in) :: writer
         character(len=*), intent(in) :: name
         integer(int64), intent(in) :: values(:)
         integer(c_long_long), intent(in) :: nrows, asize
+        type(c_ptr), intent(in) :: valid_ptr
         character(len=:), allocatable :: schema_type
         integer(int32), allocatable :: i32values(:)
         real(real32), allocatable :: f32values(:)
@@ -192,25 +194,26 @@ contains
         select case (schema_type)
         case ("int32")
             i32values = parquet_narrow_int64_to_int32(name, values)
-            call parquet_append_int32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), i32values, nrows, asize)
+            call parquet_append_int32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), i32values, nrows, asize, valid_ptr)
         case ("float32")
             allocate(f32values(size(values)))
             f32values = real(values, kind=real32)
-            call parquet_append_float32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), f32values, nrows, asize)
+            call parquet_append_float32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), f32values, nrows, asize, valid_ptr)
         case ("float64")
             allocate(f64values(size(values)))
             f64values = real(values, kind=real64)
-            call parquet_append_float64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), f64values, nrows, asize)
+            call parquet_append_float64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), f64values, nrows, asize, valid_ptr)
         case default
-            call parquet_append_int64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), values, nrows, asize)
+            call parquet_append_int64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), values, nrows, asize, valid_ptr)
         end select
     end subroutine parquet_append_as_schema_int64
 
-    subroutine parquet_append_as_schema_float32(writer, name, values, nrows, asize)
+    subroutine parquet_append_as_schema_float32(writer, name, values, nrows, asize, valid_ptr)
         type(parquet_writer), intent(in) :: writer
         character(len=*), intent(in) :: name
         real(real32), intent(in) :: values(:)
         integer(c_long_long), intent(in) :: nrows, asize
+        type(c_ptr), intent(in) :: valid_ptr
         character(len=:), allocatable :: schema_type
         integer(int32), allocatable :: i32values(:)
         integer(int64), allocatable :: i64values(:)
@@ -220,24 +223,25 @@ contains
         select case (schema_type)
         case ("int32")
             i32values = parquet_float64_to_int32(name, real(values, kind=real64))
-            call parquet_append_int32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), i32values, nrows, asize)
+            call parquet_append_int32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), i32values, nrows, asize, valid_ptr)
         case ("int64")
             i64values = parquet_float64_to_int64(name, real(values, kind=real64))
-            call parquet_append_int64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), i64values, nrows, asize)
+            call parquet_append_int64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), i64values, nrows, asize, valid_ptr)
         case ("float64")
             allocate(f64values(size(values)))
             f64values = real(values, kind=real64)
-            call parquet_append_float64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), f64values, nrows, asize)
+            call parquet_append_float64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), f64values, nrows, asize, valid_ptr)
         case default
-            call parquet_append_float32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), values, nrows, asize)
+            call parquet_append_float32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), values, nrows, asize, valid_ptr)
         end select
     end subroutine parquet_append_as_schema_float32
 
-    subroutine parquet_append_as_schema_float64(writer, name, values, nrows, asize)
+    subroutine parquet_append_as_schema_float64(writer, name, values, nrows, asize, valid_ptr)
         type(parquet_writer), intent(in) :: writer
         character(len=*), intent(in) :: name
         real(real64), intent(in) :: values(:)
         integer(c_long_long), intent(in) :: nrows, asize
+        type(c_ptr), intent(in) :: valid_ptr
         character(len=:), allocatable :: schema_type
         integer(int32), allocatable :: i32values(:)
         integer(int64), allocatable :: i64values(:)
@@ -247,16 +251,16 @@ contains
         select case (schema_type)
         case ("int32")
             i32values = parquet_float64_to_int32(name, values)
-            call parquet_append_int32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), i32values, nrows, asize)
+            call parquet_append_int32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), i32values, nrows, asize, valid_ptr)
         case ("int64")
             i64values = parquet_float64_to_int64(name, values)
-            call parquet_append_int64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), i64values, nrows, asize)
+            call parquet_append_int64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), i64values, nrows, asize, valid_ptr)
         case ("float32")
             allocate(f32values(size(values)))
             f32values = real(values, kind=real32)
-            call parquet_append_float32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), f32values, nrows, asize)
+            call parquet_append_float32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), f32values, nrows, asize, valid_ptr)
         case default
-            call parquet_append_float64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), values, nrows, asize)
+            call parquet_append_float64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), values, nrows, asize, valid_ptr)
         end select
     end subroutine parquet_append_as_schema_float64
 
@@ -540,8 +544,51 @@ contains
             int(col_size, kind=c_long_long) )
     end procedure parquet_add_column_info
 
+    !> Errors out if `name`'s column is listed under extra: protected_cols:
+    !> (see parquet_parse_protected_cols) and `is_valid_flat` contains any
+    !> .false. entry. A no-op for a schema-less writer or an unlisted column.
+    subroutine parquet_check_protected(writer, name, is_valid_flat)
+        type(parquet_writer), intent(in) :: writer
+        character(len=*), intent(in) :: name
+        logical, intent(in) :: is_valid_flat(:)
+        integer :: idx
+
+        if (.not. writer%enforce_schema) return
+        idx = parquet_get_defined_column_index(writer, name)
+        if (idx == 0) return
+        if (writer%all_columns(idx)%is_protected .and. .not. all(is_valid_flat)) then
+            error stop "parquet_write_column: column '" // trim(name) // &
+                "' is protected (extra: protected_cols:) and cannot contain Null values"
+        end if
+    end subroutine parquet_check_protected
+
+    !> Builds the int8 validity buffer and c_ptr passed down to the C++
+    !> append_* functions from a caller's flattened `is_valid` mask (1 =
+    !> valid, 0 = Null); `valid_ptr` stays c_null_ptr (no validity buffer
+    !> passed to C++ at all) when `is_valid` was not supplied by the caller,
+    !> which keeps every column non-nullable by default -- exactly today's
+    !> behavior.
+    subroutine parquet_make_valid_buf_write(is_valid_flat, valid_buf, valid_ptr)
+        logical, intent(in), optional :: is_valid_flat(:)
+        integer(c_int8_t), allocatable, target, intent(out) :: valid_buf(:)
+        type(c_ptr), intent(out) :: valid_ptr
+        integer :: i
+
+        if (present(is_valid_flat)) then
+            allocate(valid_buf(size(is_valid_flat)))
+            do i = 1, size(is_valid_flat)
+                valid_buf(i) = merge(1_c_int8_t, 0_c_int8_t, is_valid_flat(i))
+            end do
+            valid_ptr = c_loc(valid_buf)
+        else
+            valid_ptr = c_null_ptr
+        end if
+    end subroutine parquet_make_valid_buf_write
+
     module procedure parquet_write_int32_column
         integer :: asize, nrows, idx
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
 
         if (writer%enforce_schema) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -558,12 +605,19 @@ contains
         if (mod(size(values), asize) /= 0) stop "parquet_write_int32_column: values size is not divisible by col_size"
         nrows = size(values) / asize
 
-        call parquet_append_as_schema_int32(writer, name, values, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
+        if (present(is_valid)) call parquet_check_protected(writer, name, is_valid)
+        call parquet_make_valid_buf_write(is_valid, valid_buf, valid_ptr)
+
+        call parquet_append_as_schema_int32(&
+            writer, name, values, int(nrows, kind=c_long_long), int(asize, kind=c_long_long), valid_ptr)
     end procedure parquet_write_int32_column
 
     module procedure parquet_write_int32_matrix_column
         integer :: asize, nrows, idx
         integer(int32), allocatable :: packed(:)
+        logical, allocatable :: valid_flat(:)
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
 
         asize = size(values, 1)
         nrows = size(values, 2)
@@ -585,11 +639,22 @@ contains
         allocate(packed(size(values)))
         packed = reshape(values, [size(values)])
 
-        call parquet_append_as_schema_int32(writer, name, packed, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
+        if (present(is_valid)) then
+            valid_flat = reshape(is_valid, [size(is_valid)])
+            call parquet_check_protected(writer, name, valid_flat)
+            call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
+        else
+            call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
+        end if
+
+        call parquet_append_as_schema_int32(&
+            writer, name, packed, int(nrows, kind=c_long_long), int(asize, kind=c_long_long), valid_ptr)
     end procedure parquet_write_int32_matrix_column
 
     module procedure parquet_write_int64_column
         integer :: asize, nrows, idx
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
 
         if (writer%enforce_schema) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -606,12 +671,19 @@ contains
         if (mod(size(values), asize) /= 0) stop "parquet_write_int64_column: values size is not divisible by col_size"
         nrows = size(values) / asize
 
-        call parquet_append_as_schema_int64(writer, name, values, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
+        if (present(is_valid)) call parquet_check_protected(writer, name, is_valid)
+        call parquet_make_valid_buf_write(is_valid, valid_buf, valid_ptr)
+
+        call parquet_append_as_schema_int64(&
+            writer, name, values, int(nrows, kind=c_long_long), int(asize, kind=c_long_long), valid_ptr)
     end procedure parquet_write_int64_column
 
     module procedure parquet_write_int64_matrix_column
         integer :: asize, nrows, idx
         integer(int64), allocatable :: packed(:)
+        logical, allocatable :: valid_flat(:)
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
 
         asize = size(values, 1)
         nrows = size(values, 2)
@@ -633,11 +705,22 @@ contains
         allocate(packed(size(values)))
         packed = reshape(values, [size(values)])
 
-        call parquet_append_as_schema_int64(writer, name, packed, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
+        if (present(is_valid)) then
+            valid_flat = reshape(is_valid, [size(is_valid)])
+            call parquet_check_protected(writer, name, valid_flat)
+            call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
+        else
+            call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
+        end if
+
+        call parquet_append_as_schema_int64(&
+            writer, name, packed, int(nrows, kind=c_long_long), int(asize, kind=c_long_long), valid_ptr)
     end procedure parquet_write_int64_matrix_column
 
     module procedure parquet_write_float32_column
         integer :: asize, nrows, idx
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
 
         if (writer%enforce_schema) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -654,12 +737,19 @@ contains
         if (mod(size(values), asize) /= 0) stop "parquet_write_float32_column: values size is not divisible by col_size"
         nrows = size(values) / asize
 
-        call parquet_append_as_schema_float32(writer, name, values, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
+        if (present(is_valid)) call parquet_check_protected(writer, name, is_valid)
+        call parquet_make_valid_buf_write(is_valid, valid_buf, valid_ptr)
+
+        call parquet_append_as_schema_float32(&
+            writer, name, values, int(nrows, kind=c_long_long), int(asize, kind=c_long_long), valid_ptr)
     end procedure parquet_write_float32_column
 
     module procedure parquet_write_float32_matrix_column
         integer :: asize, nrows, idx
         real(real32), allocatable :: packed(:)
+        logical, allocatable :: valid_flat(:)
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
 
         asize = size(values, 1)
         nrows = size(values, 2)
@@ -681,11 +771,22 @@ contains
         allocate(packed(size(values)))
         packed = reshape(values, [size(values)])
 
-        call parquet_append_as_schema_float32(writer, name, packed, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
+        if (present(is_valid)) then
+            valid_flat = reshape(is_valid, [size(is_valid)])
+            call parquet_check_protected(writer, name, valid_flat)
+            call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
+        else
+            call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
+        end if
+
+        call parquet_append_as_schema_float32(&
+            writer, name, packed, int(nrows, kind=c_long_long), int(asize, kind=c_long_long), valid_ptr)
     end procedure parquet_write_float32_matrix_column
 
     module procedure parquet_write_float64_column
         integer :: asize, nrows, idx
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
 
         if (writer%enforce_schema) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -702,12 +803,19 @@ contains
         if (mod(size(values), asize) /= 0) stop "parquet_write_float64_column: values size is not divisible by col_size"
         nrows = size(values) / asize
 
-        call parquet_append_as_schema_float64(writer, name, values, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
+        if (present(is_valid)) call parquet_check_protected(writer, name, is_valid)
+        call parquet_make_valid_buf_write(is_valid, valid_buf, valid_ptr)
+
+        call parquet_append_as_schema_float64(&
+            writer, name, values, int(nrows, kind=c_long_long), int(asize, kind=c_long_long), valid_ptr)
     end procedure parquet_write_float64_column
 
     module procedure parquet_write_float64_matrix_column
         integer :: asize, nrows, idx
         real(real64), allocatable :: packed(:)
+        logical, allocatable :: valid_flat(:)
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
 
         asize = size(values, 1)
         nrows = size(values, 2)
@@ -729,12 +837,23 @@ contains
         allocate(packed(size(values)))
         packed = reshape(values, [size(values)])
 
-        call parquet_append_as_schema_float64(writer, name, packed, int(nrows, kind=c_long_long), int(asize, kind=c_long_long))
+        if (present(is_valid)) then
+            valid_flat = reshape(is_valid, [size(is_valid)])
+            call parquet_check_protected(writer, name, valid_flat)
+            call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
+        else
+            call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
+        end if
+
+        call parquet_append_as_schema_float64(&
+            writer, name, packed, int(nrows, kind=c_long_long), int(asize, kind=c_long_long), valid_ptr)
     end procedure parquet_write_float64_matrix_column
 
     module procedure parquet_write_logical_column
         integer :: asize, nrows, i, idx
         integer(c_int8_t), allocatable :: bool_data(:)
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
 
         if (writer%enforce_schema) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -760,17 +879,24 @@ contains
             end if
         end do
 
+        if (present(is_valid)) call parquet_check_protected(writer, name, is_valid)
+        call parquet_make_valid_buf_write(is_valid, valid_buf, valid_ptr)
+
         call parquet_append_bool8_column(&
             writer%handle, &
             trim(parquet_resolve_output_name(writer, name))//char(0), &
             bool_data, &
             int(nrows, kind=c_long_long), &
-            int(asize, kind=c_long_long) )
+            int(asize, kind=c_long_long), &
+            valid_ptr )
     end procedure parquet_write_logical_column
 
     module procedure parquet_write_logical_matrix_column
         integer :: asize, nrows, idx
         integer(c_int8_t), allocatable :: bool_data(:)
+        logical, allocatable :: valid_flat(:)
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
 
         asize = size(values, 1)
         nrows = size(values, 2)
@@ -792,17 +918,28 @@ contains
         allocate(bool_data(size(values)))
         bool_data = merge(1_c_int8_t, 0_c_int8_t, reshape(values, [size(values)]))
 
+        if (present(is_valid)) then
+            valid_flat = reshape(is_valid, [size(is_valid)])
+            call parquet_check_protected(writer, name, valid_flat)
+            call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
+        else
+            call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
+        end if
+
         call parquet_append_bool8_column(&
             writer%handle, &
             trim(parquet_resolve_output_name(writer, name))//char(0), &
             bool_data, &
             int(nrows, kind=c_long_long), &
-            int(asize, kind=c_long_long) )
+            int(asize, kind=c_long_long), &
+            valid_ptr )
     end procedure parquet_write_logical_matrix_column
 
     module procedure parquet_write_string_column
         character(kind=c_char), allocatable :: packed(:)
         integer :: i, j, k, nrows, item_len, idx, asize, nitems, max_item_len, max_string_len
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
 
         if (writer%enforce_schema) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -841,13 +978,17 @@ contains
             end do
         end do
 
+        if (present(is_valid)) call parquet_check_protected(writer, name, is_valid)
+        call parquet_make_valid_buf_write(is_valid, valid_buf, valid_ptr)
+
         if (asize == 1) then
             call parquet_append_string_column(&
                 writer%handle, &
                 trim(parquet_resolve_output_name(writer, name))//char(0), &
                 packed, &
                 int(item_len, kind=c_long_long), &
-                int(nrows, kind=c_long_long) )
+                int(nrows, kind=c_long_long), &
+                valid_ptr )
         else
             call parquet_append_string_array_column(&
                 writer%handle, &
@@ -855,7 +996,8 @@ contains
                 packed, &
                 int(item_len, kind=c_long_long), &
                 int(nrows, kind=c_long_long), &
-                int(asize, kind=c_long_long) )
+                int(asize, kind=c_long_long), &
+                valid_ptr )
         end if
     end procedure parquet_write_string_column
 
@@ -863,6 +1005,9 @@ contains
         character(kind=c_char), allocatable :: packed(:)
         integer :: i, j, k, l, nrows, asize, item_len, idx
         integer :: nitems
+        logical, allocatable :: valid_flat(:)
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
 
         asize = size(values, 1)
         nrows = size(values, 2)
@@ -897,13 +1042,22 @@ contains
             end do
         end do
 
+        if (present(is_valid)) then
+            valid_flat = reshape(is_valid, [size(is_valid)])
+            call parquet_check_protected(writer, name, valid_flat)
+            call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
+        else
+            call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
+        end if
+
         call parquet_append_string_array_column(&
             writer%handle, &
             trim(parquet_resolve_output_name(writer, name))//char(0), &
             packed, &
             int(item_len, kind=c_long_long), &
             int(nrows, kind=c_long_long), &
-            int(asize, kind=c_long_long) )
+            int(asize, kind=c_long_long), &
+            valid_ptr )
     end procedure parquet_write_string_matrix_column
 
     module procedure parquet_close_writer

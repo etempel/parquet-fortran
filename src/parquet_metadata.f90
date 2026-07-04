@@ -335,9 +335,10 @@ contains
         type(parquet_table_metadata) :: metadata
         character(len=:), allocatable :: errors
         character(len=:), allocatable :: cur_name
+        character(len=:), allocatable :: protected_names(:)
         character(len=32) :: idx_buf
         integer :: i, j
-        logical :: type_ok, has_table
+        logical :: type_ok, has_table, found
 
         call parquet_parse_maml_lines(maml%lines, cinfo, metadata)
 
@@ -388,6 +389,25 @@ contains
             end do
         end if
         if (.not. has_table) errors = errors // "missing required non-empty metadata: table; "
+
+        ! extra: protected_cols: may only name columns declared under this
+        ! same MAML's own fields: (matched by output_name -- see
+        ! parquet_parse_maml_lines); anything else is a typo/dangling reference.
+        protected_names = parquet_parse_protected_cols(maml%lines)
+        if (allocated(cinfo%col)) then
+            do i = 1, size(protected_names)
+                found = .false.
+                do j = 1, size(cinfo%col)
+                    if (trim(protected_names(i)) == trim(cinfo%col(j)%output_name)) then
+                        found = .true.
+                        exit
+                    end if
+                end do
+                if (.not. found) then
+                    errors = errors // "protected_cols: unknown column '" // trim(protected_names(i)) // "'; "
+                end if
+            end do
+        end if
 
         call parquet_validate_maml_sections(maml%lines, errors)
 
@@ -779,6 +799,24 @@ contains
                 end if
             end do
         end do
+
+        ! extra: protected_cols: names this MAML's own fields: (matched
+        ! by output_name, the name as literally declared under fields: in
+        ! this file, before any col_map: rename) -- marked here so
+        ! parquet_write_column can error stop if an is_valid mask with any
+        ! .false. entry is ever passed for one of these columns.
+        block
+            character(len=:), allocatable :: protected_names(:)
+            protected_names = parquet_parse_protected_cols(lines)
+            do i = 1, n
+                do j = 1, size(protected_names)
+                    if (trim(protected_names(j)) == trim(tmp(i)%output_name)) then
+                        tmp(i)%is_protected = .true.
+                        exit
+                    end if
+                end do
+            end do
+        end block
 
         call move_alloc(tmp, cinfo%col)
     end procedure parquet_parse_maml_lines
@@ -1309,6 +1347,107 @@ contains
             call move_alloc(tmp, col_map)
         end do
     end function parquet_parse_col_map
+
+    !> Parses a `protected_cols:` entry nested inside `extra:`, e.g.:
+    !>   extra:
+    !>     protected_cols: col1;col2; col3
+    !> or, equivalently:
+    !>   extra:
+    !>     protected_cols:
+    !>     - col1
+    !>     - col2
+    !>     - col3
+    !> Returns a zero-size array if there is no extra:/protected_cols:
+    !> section. Names are trimmed and unquoted; empty tokens (e.g. a stray
+    !> ";;" or trailing ";") are skipped. Matching against declared field
+    !> names (by output_name) is done by the caller -- this function only
+    !> extracts the raw name list.
+    function parquet_parse_protected_cols(lines) result(names)
+        character(len=*), intent(in) :: lines(:)
+        character(len=:), allocatable :: names(:)
+        character(len=:), allocatable :: tmp(:)
+        character(len=:), allocatable :: tline, key, cvalue, token
+        integer :: i, n, idx_extra, extra_end, idx_key, n_names, p, sep
+        integer :: maxlen
+
+        maxlen = 0
+        do i = 1, size(lines)
+            maxlen = max(maxlen, len_trim(lines(i)))
+        end do
+        allocate(character(len=max(maxlen,1)) :: names(0))
+
+        n = size(lines)
+        idx_extra = 0
+        do i = 1, n
+            if (lines(i)(1:1) /= " " .and. trim(adjustl(lines(i))) == "extra:") then
+                idx_extra = i
+                exit
+            end if
+        end do
+        if (idx_extra == 0) return
+
+        extra_end = n
+        do i = idx_extra + 1, n
+            if (len_trim(lines(i)) == 0) cycle
+            if (lines(i)(1:1) /= " ") then
+                extra_end = i - 1
+                exit
+            end if
+        end do
+
+        idx_key = 0
+        do i = idx_extra + 1, extra_end
+            if (len_trim(lines(i)) == 0) cycle
+            tline = trim(adjustl(lines(i)))
+            call parquet_split_key_value(tline, key, cvalue)
+            if (parquet_to_lower(trim(key)) == "protected_cols") then
+                idx_key = i
+                exit
+            end if
+        end do
+        if (idx_key == 0) return
+
+        if (len_trim(cvalue) > 0) then
+            ! Scalar semicolon-separated form: protected_cols: col1;col2; col3
+            cvalue = trim(adjustl(cvalue))
+            p = 1
+            do while (p <= len(cvalue))
+                sep = index(cvalue(p:), ";")
+                if (sep == 0) then
+                    token = cvalue(p:)
+                    p = len(cvalue) + 1
+                else
+                    token = cvalue(p:p+sep-2)
+                    p = p + sep
+                end if
+                token = trim(adjustl(parquet_unquote(token)))
+                if (len_trim(token) > 0) then
+                    n_names = size(names)
+                    allocate(character(len=len(names)) :: tmp(n_names + 1))
+                    if (n_names > 0) tmp(1:n_names) = names
+                    tmp(n_names + 1) = token
+                    call move_alloc(tmp, names)
+                end if
+            end do
+            return
+        end if
+
+        ! Dash-list form: protected_cols: (empty) followed by "- col1" lines.
+        do i = idx_key + 1, extra_end
+            if (len_trim(lines(i)) == 0) cycle
+            tline = trim(adjustl(lines(i)))
+            if (tline(1:1) /= "-") exit
+            tline = trim(adjustl(tline(2:)))
+            token = trim(adjustl(parquet_unquote(tline)))
+            if (len_trim(token) == 0) cycle
+
+            n_names = size(names)
+            allocate(character(len=len(names)) :: tmp(n_names + 1))
+            if (n_names > 0) tmp(1:n_names) = names
+            tmp(n_names + 1) = token
+            call move_alloc(tmp, names)
+        end do
+    end function parquet_parse_protected_cols
 
     !> Checks that every top-level section in `lines`, every sub-key found
     !> one level inside a map-list section's items (e.g. "name:"/"data_type:"/

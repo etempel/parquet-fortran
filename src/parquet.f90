@@ -19,6 +19,9 @@ module parquet
         logical :: is_set = .false.
         logical :: deactivated = .false. ! true for columns merged in from a base MAML that the user's MAML excluded;
                                           ! protects is_set from being changed by set_available/set_unavailable (bulk or by name).
+        logical :: is_protected = .false. ! true if this column's name is listed under extra: protected_cols: in
+                                           ! whichever MAML built this cinfo; parquet_write_column error stops if an
+                                           ! is_valid mask with any .false. entry is passed for such a column.
         character(len=:), allocatable :: name      ! The name of the field [required]; always the internal/canonical
                                                     ! name, i.e. what parquet_write_column/set_available/etc. use --
                                                     ! never affected by a col_map: rename (see output_name).
@@ -264,76 +267,88 @@ module parquet
             integer, intent(in) :: col_size
         end subroutine parquet_add_column_info
 
-        module subroutine parquet_write_int32_column(writer, name, values)
+        module subroutine parquet_write_int32_column(writer, name, values, is_valid)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
             integer(int32), intent(in) :: values(:)
+            logical, intent(in), optional :: is_valid(:)
         end subroutine parquet_write_int32_column
 
-        module subroutine parquet_write_int32_matrix_column(writer, name, values)
+        module subroutine parquet_write_int32_matrix_column(writer, name, values, is_valid)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
             integer(int32), intent(in) :: values(:,:)
+            logical, intent(in), optional :: is_valid(:,:)
         end subroutine parquet_write_int32_matrix_column
 
-        module subroutine parquet_write_int64_column(writer, name, values)
+        module subroutine parquet_write_int64_column(writer, name, values, is_valid)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
             integer(int64), intent(in) :: values(:)
+            logical, intent(in), optional :: is_valid(:)
         end subroutine parquet_write_int64_column
 
-        module subroutine parquet_write_int64_matrix_column(writer, name, values)
+        module subroutine parquet_write_int64_matrix_column(writer, name, values, is_valid)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
             integer(int64), intent(in) :: values(:,:)
+            logical, intent(in), optional :: is_valid(:,:)
         end subroutine parquet_write_int64_matrix_column
 
-        module subroutine parquet_write_float32_column(writer, name, values)
+        module subroutine parquet_write_float32_column(writer, name, values, is_valid)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
             real(real32), intent(in) :: values(:)
+            logical, intent(in), optional :: is_valid(:)
         end subroutine parquet_write_float32_column
 
-        module subroutine parquet_write_float32_matrix_column(writer, name, values)
+        module subroutine parquet_write_float32_matrix_column(writer, name, values, is_valid)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
             real(real32), intent(in) :: values(:,:)
+            logical, intent(in), optional :: is_valid(:,:)
         end subroutine parquet_write_float32_matrix_column
 
-        module subroutine parquet_write_float64_column(writer, name, values)
+        module subroutine parquet_write_float64_column(writer, name, values, is_valid)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
             real(real64), intent(in) :: values(:)
+            logical, intent(in), optional :: is_valid(:)
         end subroutine parquet_write_float64_column
 
-        module subroutine parquet_write_float64_matrix_column(writer, name, values)
+        module subroutine parquet_write_float64_matrix_column(writer, name, values, is_valid)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
             real(real64), intent(in) :: values(:,:)
+            logical, intent(in), optional :: is_valid(:,:)
         end subroutine parquet_write_float64_matrix_column
 
-        module subroutine parquet_write_logical_column(writer, name, values)
+        module subroutine parquet_write_logical_column(writer, name, values, is_valid)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
             logical, intent(in) :: values(:)
+            logical, intent(in), optional :: is_valid(:)
         end subroutine parquet_write_logical_column
 
-        module subroutine parquet_write_logical_matrix_column(writer, name, values)
+        module subroutine parquet_write_logical_matrix_column(writer, name, values, is_valid)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
             logical, intent(in) :: values(:,:)
+            logical, intent(in), optional :: is_valid(:,:)
         end subroutine parquet_write_logical_matrix_column
 
-        module subroutine parquet_write_string_column(writer, name, values)
+        module subroutine parquet_write_string_column(writer, name, values, is_valid)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
             character(len=*), intent(in) :: values(:)
+            logical, intent(in), optional :: is_valid(:)
         end subroutine parquet_write_string_column
 
-        module subroutine parquet_write_string_matrix_column(writer, name, values)
+        module subroutine parquet_write_string_matrix_column(writer, name, values, is_valid)
             type(parquet_writer), intent(inout) :: writer
             character(len=*), intent(in) :: name
             character(len=*), intent(in) :: values(:,:)
+            logical, intent(in), optional :: is_valid(:,:)
         end subroutine parquet_write_string_matrix_column
 
         module subroutine parquet_close_writer(writer)

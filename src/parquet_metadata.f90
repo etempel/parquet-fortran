@@ -150,7 +150,79 @@ contains
                     exit
                 end if
             end do
+
+            ! The renamed column must actually be declared in fields: under
+            ! its output_name -- parquet_parse_maml_lines only renames a
+            ! field it finds already declared as `output_name`; if none
+            ! exists, the rename silently has nothing to apply to.
+            found = .false.
+            if (allocated(user_cinfo%col)) then
+                do j = 1, size(user_cinfo%col)
+                    if (trim(user_cinfo%col(j)%output_name) == trim(user_maml%col_map(i)%output_name)) then
+                        found = .true.
+                        exit
+                    end if
+                end do
+            end if
+            if (.not. found) then
+                map_errors = map_errors // "col_map: renamed column '" // &
+                    trim(user_maml%col_map(i)%output_name) // "' is not declared in fields:; "
+            end if
+
+            ! A remapped internal column must not also appear directly
+            ! (un-renamed) in fields: -- that's ambiguous: was it meant to be
+            ! renamed, or used as-is? (A field whose declared name matches
+            ! internal_name but never got renamed keeps name == output_name
+            ! == internal_name, since only a field declared under
+            ! output_name is renamed.)
+            if (allocated(user_cinfo%col)) then
+                do j = 1, size(user_cinfo%col)
+                    if (trim(user_cinfo%col(j)%name) == trim(user_maml%col_map(i)%internal_name) .and. &
+                        trim(user_cinfo%col(j)%output_name) == trim(user_maml%col_map(i)%internal_name)) then
+                        map_errors = map_errors // "col_map: internal column '" // &
+                            trim(user_maml%col_map(i)%internal_name) // &
+                            "' is remapped but also appears directly (un-renamed) in fields:; "
+                        exit
+                    end if
+                end do
+            end if
+
+            ! The chosen output_name must not coincide with a *different*
+            ! existing (base) column's own name: if it did, that other base
+            ! column -- whether or not this user MAML mentions it -- would
+            ! collide with the renamed one the moment it's ever activated
+            ! (e.g. via set_available), since both would then share the same
+            ! output_name in the written schema.
+            if (allocated(base_cinfo%col)) then
+                do j = 1, size(base_cinfo%col)
+                    if (trim(base_cinfo%col(j)%name) == trim(user_maml%col_map(i)%output_name) .and. &
+                        trim(base_cinfo%col(j)%name) /= trim(user_maml%col_map(i)%internal_name)) then
+                        map_errors = map_errors // "col_map: output name '" // &
+                            trim(user_maml%col_map(i)%output_name) // &
+                            "' coincides with the existing base column of that name; "
+                        exit
+                    end if
+                end do
+            end if
         end do
+
+        ! Guards against a renamed column's output_name silently colliding
+        ! with another, unrelated field's own declared name (or with another
+        ! renamed column's output_name): every field ending up in the
+        ! schema must have a distinct output_name, since that's what
+        ! actually gets registered/written to the parquet file.
+        if (allocated(user_cinfo%col)) then
+            do i = 1, size(user_cinfo%col)
+                do j = 1, i - 1
+                    if (trim(user_cinfo%col(j)%output_name) == trim(user_cinfo%col(i)%output_name)) then
+                        map_errors = map_errors // "duplicate output name '" // &
+                            trim(user_cinfo%col(i)%output_name) // "' used by more than one field in fields:; "
+                        exit
+                    end if
+                end do
+            end do
+        end if
+
         if (len_trim(map_errors) > 0) then
             error stop "parquet_validate_user_maml: " // trim(map_errors)
         end if

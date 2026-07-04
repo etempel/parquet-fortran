@@ -288,7 +288,12 @@ fields:
   data_type: int32  # still declared in full, exactly like a non-renamed field
 ```
 
-- Each `col_map:` item is `<internal_name>: <output_name>`; `parquet_validate_user_maml` checks that `internal_name` actually exists in the base schema, that no two items share the same `internal_name`, and that no two items collide on the same `output_name`.
+- Each `col_map:` item is `<internal_name>: <output_name>`; `parquet_validate_user_maml` checks that:
+  - `internal_name` actually exists in the base schema;
+  - no two items share the same `internal_name`, and no two items collide on the same `output_name`;
+  - `output_name` is actually declared as a `name:` in this MAML's own `fields:` — otherwise the rename has nothing to apply to;
+  - `internal_name` does not *also* appear directly (un-renamed) in `fields:` — ambiguous: renamed, or used as-is?
+  - `output_name` does not coincide with a *different* existing base column's own name — otherwise that other column would collide with the renamed one the moment it's activated (e.g. via `set_available`), since both would then share the same output name in the written schema.
 - The renamed field's `fields:` entry (`my_id` above) is validated exactly like any other field entry (`data_type` required, etc.) — nothing is inherited from the base column's own attributes.
 - After `parquet_read_maml`, the resulting `parquet_column_type` always uses the internal name (`id0`) for `cinfo%col(:)%name` — the same name every other API (`parquet_write_column`, `set_available`, `get_column_index`, ...) already expects — with the rename available separately as `cinfo%col(:)%output_name` (`my_id`), which is what actually gets written to the `.parquet` file's schema/VOTable header and to a `write_maml=.true.` sidecar's `fields:` section.
 - `user_maml%col_map` (populated by `parquet_validate_user_maml`) exposes the parsed entries for inspection.

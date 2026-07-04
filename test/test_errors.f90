@@ -47,6 +47,12 @@ contains
                 test_validate_col_map_duplicate_internal_aborts), &
             new_unittest("col_map: two internal columns colliding on the same output name aborts", &
                 test_validate_col_map_output_collision_aborts), &
+            new_unittest("col_map: renamed output not declared in fields: aborts", &
+                test_validate_col_map_output_not_declared_aborts), &
+            new_unittest("col_map: remapped internal column also declared un-renamed in fields: aborts", &
+                test_validate_col_map_internal_also_in_fields_aborts), &
+            new_unittest("col_map: output name coincides with an existing base column aborts", &
+                test_validate_col_map_output_matches_other_field_aborts), &
             new_unittest("get_column_index on unknown column aborts", test_get_column_index_not_found_aborts), &
             new_unittest("write_maml without metadata aborts", test_write_maml_without_metadata_aborts) &
             ]
@@ -156,6 +162,28 @@ contains
         call check_scenario_exit_status(error, "validate_col_map_output_collision", expect_abort=.true., &
             failure_message="col_map: two internal columns mapped to the same output name was expected to error stop")
     end subroutine test_validate_col_map_output_collision_aborts
+
+    subroutine test_validate_col_map_output_not_declared_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "validate_col_map_output_not_declared", expect_abort=.true., &
+            failure_message="col_map: a renamed output not declared in fields: was expected to error stop")
+    end subroutine test_validate_col_map_output_not_declared_aborts
+
+    subroutine test_validate_col_map_internal_also_in_fields_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "validate_col_map_internal_also_in_fields", expect_abort=.true., &
+            failure_message="col_map: a remapped internal column also declared un-renamed in fields: " // &
+                "was expected to error stop")
+    end subroutine test_validate_col_map_internal_also_in_fields_aborts
+
+    subroutine test_validate_col_map_output_matches_other_field_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "validate_col_map_output_matches_other_field", expect_abort=.true., &
+            failure_message="col_map: output name coinciding with an existing base column was expected to error stop")
+    end subroutine test_validate_col_map_output_matches_other_field_aborts
 
     subroutine test_get_column_index_not_found_aborts(error)
         type(error_type), allocatable, intent(out) :: error

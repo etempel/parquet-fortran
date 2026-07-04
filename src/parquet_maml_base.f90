@@ -43,6 +43,7 @@ module parquet_maml_base
     public :: get_parquet_maml
     public :: parquet_maml_maml_example
     public :: parquet_maml_maml_example2
+    public :: parquet_maml_maml_example3
 
 contains
 
@@ -59,6 +60,10 @@ contains
             maml = parquet_maml_maml_example2()
         case ("maml_example2")
             maml = parquet_maml_maml_example2()
+        case ("maml_example3.maml")
+            maml = parquet_maml_maml_example3()
+        case ("maml_example3")
+            maml = parquet_maml_maml_example3()
         case default
             error stop "get_parquet_maml: unknown internal MAML file: " // trim(name)
         end select
@@ -254,5 +259,59 @@ contains
         maml%lines(82) = "    max: 90"
         maml%lines(83) = "    miss: 'Null'"
     end function parquet_maml_maml_example2
+    function parquet_maml_maml_example3() result(maml)
+        type(parquet_maml_file) :: maml
+
+        maml%name = "maml_example3.maml"
+        allocate(character(len=53) :: maml%lines(48))
+        maml%lines(1) = "survey: The Big Survey"
+        maml%lines(2) = "dataset: input_data"
+        maml%lines(3) = "table: input_table"
+        maml%lines(4) = "version: 1.3"
+        maml%lines(5) = "date: '2025-09-01'"
+        maml%lines(6) = "author: Dave Smith <dave_smith_is_not_here@gmail.com>"
+        maml%lines(7) = "description: Just an example."
+        maml%lines(8) = "MAML_version: 1.2"
+        maml%lines(9) = "extra:"
+        maml%lines(10) = "  whatever: ei midagi"
+        maml%lines(11) = "  col_map:"
+        maml%lines(12) = "  - id: uberid"
+        maml%lines(13) = "  - RA: ra_J2000"
+        maml%lines(14) = "  yet_another: testing"
+        maml%lines(15) = "fields:"
+        maml%lines(16) = "- name: uberid"
+        maml%lines(17) = "  ucd:"
+        maml%lines(18) = "  - meta.id"
+        maml%lines(19) = "  - meta.main"
+        maml%lines(20) = "  info: ID field."
+        maml%lines(21) = "  data_type: int32"
+        maml%lines(22) = "  qc:"
+        maml%lines(23) = "    min: 1"
+        maml%lines(24) = "    max: 1000"
+        maml%lines(25) = "    miss: 'Null'"
+        maml%lines(26) = "- name: ra_J2000"
+        maml%lines(27) = "  unit: deg"
+        maml%lines(28) = "  info: Right ascension (J2000)"
+        maml%lines(29) = "  ucd: pos.eq.ra"
+        maml%lines(30) = "  data_type: float64"
+        maml%lines(31) = "  array_size:"
+        maml%lines(32) = "  col_size:"
+        maml%lines(33) = "  qc:"
+        maml%lines(34) = "    min: '>= 0'"
+        maml%lines(35) = "    max: '< 360'"
+        maml%lines(36) = "    miss: 'Null'"
+        maml%lines(37) = "- name: Dec"
+        maml%lines(38) = "  unit: deg"
+        maml%lines(39) = "  info: Declination (J2000)"
+        maml%lines(40) = "  ucd:"
+        maml%lines(41) = "  - pos.eq.dec"
+        maml%lines(42) = "  data_type: float64"
+        maml%lines(43) = "  array_size:"
+        maml%lines(44) = "  col_size:"
+        maml%lines(45) = "  qc:"
+        maml%lines(46) = "    min: -90"
+        maml%lines(47) = "    max: 90"
+        maml%lines(48) = "    miss: 'Null'"
+    end function parquet_maml_maml_example3
 
 end module parquet_maml_base

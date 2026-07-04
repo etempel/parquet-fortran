@@ -58,6 +58,12 @@ program error_scenarios
         call scenario_validate_col_map_duplicate_internal()
     case ("validate_col_map_output_collision")
         call scenario_validate_col_map_output_collision()
+    case ("validate_col_map_output_not_declared")
+        call scenario_validate_col_map_output_not_declared()
+    case ("validate_col_map_internal_also_in_fields")
+        call scenario_validate_col_map_internal_also_in_fields()
+    case ("validate_col_map_output_matches_other_field")
+        call scenario_validate_col_map_output_matches_other_field()
     case ("get_column_index_not_found")
         call scenario_get_column_index_not_found()
     case ("write_maml_without_metadata")
@@ -318,6 +324,87 @@ contains
 
         call parquet_validate_user_maml(base_maml, user_maml)
     end subroutine scenario_validate_col_map_output_collision
+
+    subroutine scenario_validate_col_map_output_not_declared()
+        type(parquet_maml_file) :: base_maml, user_maml
+
+        base_maml%name = "base.maml"
+        base_maml%lines = [character(len=40) :: &
+            "table: base_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32" ]
+
+        user_maml%name = "user.maml"
+        user_maml%lines = [character(len=40) :: &
+            "table: user_table", &
+            "extra:", &
+            "  col_map:", &
+            "  - a: my_a", &
+            "fields:", &
+            "- name: not_my_a", &
+            "  data_type: int32" ]
+
+        ! col_map renames "a" to "my_a", but no field named "my_a" is
+        ! actually declared in fields: -- the rename has nothing to apply to.
+        call parquet_validate_user_maml(base_maml, user_maml)
+    end subroutine scenario_validate_col_map_output_not_declared
+
+    subroutine scenario_validate_col_map_internal_also_in_fields()
+        type(parquet_maml_file) :: base_maml, user_maml
+
+        base_maml%name = "base.maml"
+        base_maml%lines = [character(len=40) :: &
+            "table: base_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32" ]
+
+        user_maml%name = "user.maml"
+        user_maml%lines = [character(len=40) :: &
+            "table: user_table", &
+            "extra:", &
+            "  col_map:", &
+            "  - a: my_a", &
+            "fields:", &
+            "- name: my_a", &
+            "  data_type: int32", &
+            "- name: a", &
+            "  data_type: int32" ]
+
+        ! col_map remaps "a", but "a" is also directly (un-renamed) declared
+        ! as its own field in fields: -- ambiguous.
+        call parquet_validate_user_maml(base_maml, user_maml)
+    end subroutine scenario_validate_col_map_internal_also_in_fields
+
+    subroutine scenario_validate_col_map_output_matches_other_field()
+        type(parquet_maml_file) :: base_maml, user_maml
+
+        base_maml%name = "base.maml"
+        base_maml%lines = [character(len=40) :: &
+            "table: base_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32", &
+            "- name: b", &
+            "  data_type: int32" ]
+
+        user_maml%name = "user.maml"
+        user_maml%lines = [character(len=40) :: &
+            "table: user_table", &
+            "extra:", &
+            "  col_map:", &
+            "  - a: b", &
+            "fields:", &
+            "- name: b", &
+            "  data_type: int32" ]
+
+        ! col_map renames "a" to output name "b", but the base schema already
+        ! has a *different*, unrelated column genuinely named "b" -- even
+        ! though it isn't separately declared here, activating it later
+        ! (e.g. via set_available) would collide with the renamed field.
+        call parquet_validate_user_maml(base_maml, user_maml)
+    end subroutine scenario_validate_col_map_output_matches_other_field
 
     subroutine scenario_get_column_index_not_found()
         type(parquet_maml_file) :: maml

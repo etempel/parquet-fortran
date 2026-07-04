@@ -343,10 +343,124 @@ contains
                     error stop "parquet_open_writer: write_maml=.true. requires metadata " // &
                         "obtained from parquet_read_maml (no source MAML content found)"
                 end if
-                call parquet_write_maml_sidecar(filename, metadata%source_maml_lines)
+                block
+                    character(len=:), allocatable :: sidecar_lines(:)
+                    sidecar_lines = metadata%source_maml_lines
+                    if (present(cinfo)) call parquet_prune_disabled_fields(sidecar_lines, cinfo)
+                    call parquet_write_maml_sidecar(filename, sidecar_lines)
+                end block
             end if
         end if
     end procedure parquet_open_writer
+
+    !> Removes, from `lines` (a working copy of metadata%source_maml_lines),
+    !> the `fields:` entries whose column is disabled (is_set = .false.) in
+    !> `cinfo`, so that a sidecar .maml written via write_maml=.true. only
+    !> lists the columns actually present in the .parquet file. Matches source
+    !> MAML field blocks to cinfo%col by name; a block runs from its top-level
+    !> "- ..." line up to (but not including) the next top-level line. If every
+    !> column in cinfo is disabled, lines is left untouched instead of emptying
+    !> out fields: entirely, since a MAML file with no fields fails
+    !> parquet_validate_maml on the next read.
+    subroutine parquet_prune_disabled_fields(lines, cinfo)
+        character(len=:), allocatable, intent(inout) :: lines(:)
+        type(parquet_column_info), intent(in) :: cinfo
+        logical, allocatable :: keep(:)
+        character(len=:), allocatable :: tline, key, cvalue, field_name
+        character(len=:), allocatable :: new_lines(:)
+        integer :: i, j, k, n, idx_fields, block_start, block_end, col_idx, n_keep
+
+        if (.not. allocated(cinfo%col)) return
+        if (size(cinfo%col) == 0) return
+        if (.not. any(cinfo%col(:)%is_set)) return
+
+        n = size(lines)
+        idx_fields = 0
+        do i = 1, n
+            if (lines(i)(1:1) /= " " .and. trim(adjustl(lines(i))) == "fields:") then
+                idx_fields = i
+                exit
+            end if
+        end do
+        if (idx_fields == 0) return
+
+        allocate(keep(n))
+        keep = .true.
+
+        i = idx_fields + 1
+        do while (i <= n)
+            if (len_trim(lines(i)) == 0) then
+                i = i + 1
+                cycle
+            end if
+
+            if (lines(i)(1:1) /= " " .and. index(trim(adjustl(lines(i))), "-") /= 1) exit
+
+            if (lines(i)(1:1) /= " ") then
+                ! Top-level "- ..." line: start of a new field block. It runs
+                ! until the next top-level (non-indented) line.
+                block_start = i
+                block_end = i
+                j = i + 1
+                do while (j <= n)
+                    if (len_trim(lines(j)) == 0) exit
+                    if (lines(j)(1:1) /= " ") exit
+                    block_end = j
+                    j = j + 1
+                end do
+
+                field_name = ""
+                do k = block_start, block_end
+                    if (k == block_start) then
+                        tline = trim(adjustl(lines(k)))
+                        tline = trim(adjustl(tline(2:)))
+                        if (len_trim(tline) == 0) cycle
+                    else
+                        tline = trim(adjustl(lines(k)))
+                    end if
+                    call parquet_split_key_value(tline, key, cvalue)
+                    if (len_trim(key) == 0) cycle
+                    if (parquet_to_lower(trim(key)) == "name") then
+                        field_name = parquet_unquote(cvalue)
+                        exit
+                    end if
+                end do
+
+                col_idx = 0
+                if (len_trim(field_name) > 0) then
+                    do k = 1, size(cinfo%col)
+                        if (trim(cinfo%col(k)%name) == trim(field_name)) then
+                            col_idx = k
+                            exit
+                        end if
+                    end do
+                end if
+
+                if (col_idx > 0) then
+                    if (.not. cinfo%col(col_idx)%is_set) keep(block_start:block_end) = .false.
+                end if
+
+                i = block_end + 1
+                cycle
+            end if
+
+            i = i + 1
+        end do
+
+        n_keep = count(keep)
+        if (n_keep == n) return
+
+        allocate(character(len=len(lines)) :: new_lines(n_keep))
+        j = 0
+        do i = 1, n
+            if (keep(i)) then
+                j = j + 1
+                new_lines(j) = lines(i)
+            end if
+        end do
+
+        call move_alloc(new_lines, lines)
+    end subroutine parquet_prune_disabled_fields
 
     !> Writes `lines` to a sidecar .maml file next to `parquet_filename`: the same
     !> path with a trailing ".parquet" replaced by ".maml", or ".maml" appended if

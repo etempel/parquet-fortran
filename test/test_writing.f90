@@ -41,7 +41,13 @@ contains
         testsuite = [ &
             new_unittest("write extensive parquet file", test_write_parquet_file), &
             new_unittest("write simple parquet file", test_write_simple_parquet), &
-            new_unittest("write_maml=.true. saves a sidecar .maml file", test_write_maml_sidecar) &
+            new_unittest("write_maml=.true. saves a sidecar .maml file", test_write_maml_sidecar), &
+            new_unittest("write_maml=.true. does not prune when every column is enabled", &
+                test_write_maml_sidecar_no_pruning_when_all_enabled), &
+            new_unittest("add_metadata after parquet_read_maml is reflected in the sidecar", &
+                test_write_maml_sidecar_with_runtime_metadata), &
+            new_unittest("add_metadata inserts keyarray: before an existing extra:", &
+                test_add_metadata_inserts_before_extra) &
             ]
         !
     end subroutine collect_tests_parquet_writing
@@ -76,18 +82,20 @@ contains
         !
     end subroutine test_write_simple_parquet
     !
+    !> write_maml=.true. prunes the fields: entries of columns disabled via
+    !> set_unavailable, so the sidecar's field list matches what was actually
+    !> written to the .parquet file, while leaving every other MAML section
+    !> (dataset/author/keyarray/etc.) untouched.
     subroutine test_write_maml_sidecar(error)
         implicit none
         type(error_type), allocatable, intent(out) :: error
         type(parquet_writer) :: writer
-        type(parquet_column_info) :: cinfo
-        type(parquet_table_metadata) :: metadata
-        type(parquet_maml_file) :: source_maml, sidecar_maml
+        type(parquet_column_info) :: cinfo, sidecar_cinfo
+        type(parquet_table_metadata) :: metadata, sidecar_metadata
         integer(int32) :: id0(3) = [1_int32, 2_int32, 3_int32]
         logical :: exists
         character(len=*), parameter :: out_file = "test_run/test_write_maml.parquet"
         character(len=*), parameter :: sidecar_file = "test_run/test_write_maml.maml"
-        integer :: i
 
         call parquet_read_maml("docs/maml_example.maml", cinfo, metadata)
         call cinfo%set_unavailable()
@@ -101,19 +109,173 @@ contains
         call check(error, exists, "write_maml=.true. did not create the expected sidecar .maml file")
         if (allocated(error)) return
 
+        call parquet_read_maml(sidecar_file, sidecar_cinfo, sidecar_metadata)
+
+        call check(error, size(sidecar_cinfo%col) == 1, &
+            "expected the sidecar .maml to only list the one enabled column ('id0')")
+        if (allocated(error)) return
+        call check(error, trim(sidecar_cinfo%col(1)%name) == "id0", &
+            "expected the sidecar .maml's only field entry to be 'id0'")
+        if (allocated(error)) return
+
+        ! Non-field content (table-level metadata, keyarray) must be untouched.
+        call check(error, size(sidecar_metadata%items) == size(metadata%items), &
+            "pruning disabled fields should not affect table-level metadata items")
+    end subroutine test_write_maml_sidecar
+
+    !> When every column in cinfo stays enabled, nothing should be pruned:
+    !> the sidecar should still match the source MAML line-for-line.
+    subroutine test_write_maml_sidecar_no_pruning_when_all_enabled(error)
+        implicit none
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_column_info) :: cinfo
+        type(parquet_table_metadata) :: metadata
+        type(parquet_maml_file) :: source_maml, sidecar_maml
+        type(test_output_type), allocatable :: test_data(:)
+        logical :: exists
+        character(len=*), parameter :: out_file = "test_run/test_write_maml_full.parquet"
+        character(len=*), parameter :: sidecar_file = "test_run/test_write_maml_full.maml"
+        integer :: i
+
+        call parquet_read_maml("docs/maml_example.maml", cinfo, metadata)
+        call init_test_data(test_data, 5)
+        call write_test_data(out_file, test_data, cinfo, metadata, write_maml=.true.)
+
+        inquire(file=sidecar_file, exist=exists)
+        call check(error, exists, "write_maml=.true. did not create the expected sidecar .maml file")
+        if (allocated(error)) return
+
         source_maml = parquet_load_maml_file("docs/maml_example.maml")
         sidecar_maml = parquet_load_maml_file(sidecar_file)
 
         call check(error, size(sidecar_maml%lines) == size(source_maml%lines), &
-            "sidecar .maml file does not have the same number of lines as the source MAML")
+            "sidecar .maml file does not have the same number of lines as the source MAML " // &
+            "when no columns are disabled")
         if (allocated(error)) return
 
         do i = 1, size(source_maml%lines)
             call check(error, trim(sidecar_maml%lines(i)) == trim(source_maml%lines(i)), &
-                "sidecar .maml file content does not match the source MAML line-for-line")
+                "sidecar .maml file content does not match the source MAML line-for-line " // &
+                "when no columns are disabled")
             if (allocated(error)) return
         end do
-    end subroutine test_write_maml_sidecar
+    end subroutine test_write_maml_sidecar_no_pruning_when_all_enabled
+    !
+    subroutine test_write_maml_sidecar_with_runtime_metadata(error)
+        implicit none
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_column_info) :: cinfo
+        type(parquet_table_metadata) :: metadata, sidecar_metadata
+        type(parquet_column_info) :: sidecar_cinfo
+        integer(int32) :: id0(3) = [1_int32, 2_int32, 3_int32]
+        logical :: exists
+        character(len=*), parameter :: out_file = "test_run/test_write_maml_runtime.parquet"
+        character(len=*), parameter :: sidecar_file = "test_run/test_write_maml_runtime.maml"
+        integer :: i
+        logical :: found
+
+        call parquet_read_maml("docs/maml_example.maml", cinfo, metadata)
+        call cinfo%set_unavailable()
+        call cinfo%set_available("id0")
+
+        ! Added after parquet_read_maml: should now be reflected in the sidecar.
+        call metadata%add_metadata("generated_by", "unit_test", "added at runtime")
+
+        call parquet_open_writer(writer, out_file, cinfo, metadata, write_maml=.true.)
+        call parquet_write_column(writer, "id0", id0)
+        call parquet_close_writer(writer)
+
+        inquire(file=sidecar_file, exist=exists)
+        call check(error, exists, "write_maml=.true. did not create the expected sidecar .maml file")
+        if (allocated(error)) return
+
+        call parquet_read_maml(sidecar_file, sidecar_cinfo, sidecar_metadata)
+
+        found = .false.
+        do i = 1, size(sidecar_metadata%items)
+            if (trim(sidecar_metadata%items(i)%key) == "generated_by") then
+                call check(error, trim(sidecar_metadata%items(i)%value) == "unit_test", &
+                    "sidecar keyarray entry for 'generated_by' has an unexpected value")
+                if (allocated(error)) return
+                call check(error, trim(sidecar_metadata%items(i)%description) == "added at runtime", &
+                    "sidecar keyarray entry for 'generated_by' has an unexpected comment")
+                if (allocated(error)) return
+                found = .true.
+                exit
+            end if
+        end do
+
+        call check(error, found, &
+            "add_metadata call made after parquet_read_maml was not reflected in the written sidecar .maml")
+        if (allocated(error)) return
+
+        ! The keyarray entries already present in the source MAML must still be there too.
+        found = .false.
+        do i = 1, size(sidecar_metadata%items)
+            if (trim(sidecar_metadata%items(i)%key) == "test_scalar") found = .true.
+        end do
+        call check(error, found, &
+            "pre-existing keyarray entries from the source MAML were lost when appending runtime metadata")
+    end subroutine test_write_maml_sidecar_with_runtime_metadata
+    !
+    subroutine test_add_metadata_inserts_before_extra(error)
+        implicit none
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column_info) :: cinfo
+        type(parquet_table_metadata) :: metadata
+        type(parquet_maml_file) :: maml
+        integer :: idx_keyarray, idx_extra, i
+
+        ! Built in-memory (rather than loaded from docs/) so this test does not
+        ! depend on whether the on-disk fixture happens to have a keyarray:
+        ! block already: this specifically covers the "no existing keyarray:,
+        ! but an extra: section is present" case.
+        maml%name = "no_keyarray_with_extra.maml"
+        maml%lines = [character(len=40) :: &
+            "table: no_keyarray_table", &
+            "extra:", &
+            "  anything:", &
+            "    like: 1.3", &
+            "fields:", &
+            "- name: id0", &
+            "  data_type: int32" ]
+
+        call parquet_read_maml(maml, cinfo, metadata)
+
+        call metadata%add_metadata("added_key", "42", "added comment")
+
+        call check(error, allocated(metadata%source_maml_lines), &
+            "expected source_maml_lines to be populated after parquet_read_maml")
+        if (allocated(error)) return
+
+        idx_keyarray = 0
+        idx_extra = 0
+        do i = 1, size(metadata%source_maml_lines)
+            if (metadata%source_maml_lines(i)(1:1) /= " " .and. &
+                trim(adjustl(metadata%source_maml_lines(i))) == "keyarray:") idx_keyarray = i
+            if (metadata%source_maml_lines(i)(1:1) /= " " .and. &
+                trim(adjustl(metadata%source_maml_lines(i))) == "extra:") idx_extra = i
+        end do
+
+        call check(error, idx_keyarray > 0, "expected a synthesized 'keyarray:' header in source_maml_lines")
+        if (allocated(error)) return
+        call check(error, idx_extra > 0, "expected the pre-existing 'extra:' header to still be present")
+        if (allocated(error)) return
+        call check(error, idx_keyarray < idx_extra, &
+            "expected the synthesized 'keyarray:' block to be inserted before the existing 'extra:' section")
+        if (allocated(error)) return
+
+        call check(error, trim(adjustl(metadata%source_maml_lines(idx_keyarray+1))) == "- key: added_key", &
+            "expected the new keyarray entry right after the synthesized header")
+        if (allocated(error)) return
+        call check(error, trim(adjustl(metadata%source_maml_lines(idx_keyarray+2))) == "value: 42", &
+            "unexpected value line for the new keyarray entry")
+        if (allocated(error)) return
+        call check(error, trim(adjustl(metadata%source_maml_lines(idx_keyarray+3))) == "comment: added comment", &
+            "unexpected comment line for the new keyarray entry")
+    end subroutine test_add_metadata_inserts_before_extra
     !
     subroutine test_write_parquet_file(error)
         type(error_type), allocatable, intent(out) :: error
@@ -160,11 +322,12 @@ contains
         !
     end subroutine test_write_parquet_file
 
-    subroutine write_test_data(filename, data, col, tmeta)
+    subroutine write_test_data(filename, data, col, tmeta, write_maml)
         character(len=*), intent(in) :: filename
         type(test_output_type), dimension(:), intent(in) :: data
         type(parquet_column_info), intent(in) :: col
         type(parquet_table_metadata), intent(in), optional :: tmeta
+        logical, intent(in), optional :: write_maml
         type(parquet_writer) :: writer
         integer :: i, j, n, name_len_max
         integer(int64), allocatable :: idarr_col(:)
@@ -207,7 +370,7 @@ contains
             name_col(i) = "var_" // trim(adjustl(data(i)%name))
         end do
 
-        call parquet_open_writer(writer, filename, col, metadata=tmeta)
+        call parquet_open_writer(writer, filename, col, metadata=tmeta, write_maml=write_maml)
 
         call parquet_write_column(writer, col%col(8)%name, arr_col)
         call parquet_write_column(writer, "id0", data(:)%id)

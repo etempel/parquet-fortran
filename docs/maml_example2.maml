@@ -3,6 +3,17 @@ table: input_table
 author: Dave Smith <dave_smith_is_not_here@gmail.com>
 description: Just an example. Probably do not write tonnes here. A few sentences is usually about right.
 license: Copyright [Private]
+keyarray:
+- key: test_url
+  value: //example.com/data #new
+  comment: something: and else
+- key: test_url2
+  value: http://example.com/data :#new
+  comment: something: and else
+extra:
+  anything:
+    I:
+      like: 1.3
 fields:
 - name: id
   info: ID field.

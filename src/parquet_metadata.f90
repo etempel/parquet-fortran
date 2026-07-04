@@ -499,16 +499,24 @@ contains
             metadata%items(1)%key = trim(key)
             metadata%items(1)%value = trim(value)
             metadata%items(1)%description = desc_val
-            return
+        else
+            n = size(metadata%items)
+            allocate(tmp(n+1))
+            tmp(1:n) = metadata%items
+            tmp(n+1)%key = trim(key)
+            tmp(n+1)%value = trim(value)
+            tmp(n+1)%description = desc_val
+            call move_alloc(tmp, metadata%items)
         end if
 
-        n = size(metadata%items)
-        allocate(tmp(n+1))
-        tmp(1:n) = metadata%items
-        tmp(n+1)%key = trim(key)
-        tmp(n+1)%value = trim(value)
-        tmp(n+1)%description = desc_val
-        call move_alloc(tmp, metadata%items)
+        ! metadata%source_maml_lines is only allocated once parquet_read_maml has
+        ! finished parsing (see parquet_read_maml_file/_internal below), so this
+        ! never fires for the add_metadata calls the parser itself makes while
+        ! building up metadata%items above -- only for calls made by external
+        ! code after parquet_read_maml has returned.
+        if (allocated(metadata%source_maml_lines)) then
+            call parquet_append_keyarray_line(metadata%source_maml_lines, trim(key), trim(value), desc_val)
+        end if
     end procedure parquet_metadata_append_entry
 
     module procedure add_metadata_int32
@@ -766,6 +774,96 @@ contains
             if (c >= iachar('A') .and. c <= iachar('Z')) out(i:i) = achar(c + 32)
         end do
     end procedure parquet_to_lower
+
+    !> Appends a `- key: / value: / comment:` entry to the `keyarray:` block
+    !> inside `lines` (the verbatim source MAML content kept in
+    !> metadata%source_maml_lines), so that metadata added at runtime via
+    !> add_metadata after parquet_read_maml is reflected in a later
+    !> write_maml sidecar. Always appends; does not update an existing entry
+    !> that has the same key. Inserted before `extra:` if present, else
+    !> before `fields:`; synthesizes the `keyarray:` header itself if the
+    !> source MAML did not already have one.
+    subroutine parquet_append_keyarray_line(lines, key, value, desc)
+        character(len=:), allocatable, intent(inout) :: lines(:)
+        character(len=*), intent(in) :: key, value, desc
+        character(len=:), allocatable :: entries(:), new_lines(:)
+        integer :: insert_pos, n_old, n_new, new_len
+        logical :: need_header
+
+        call parquet_locate_keyarray_insert(lines, insert_pos, need_header)
+
+        new_len = max(len(lines), 7+len(key), 9+len(value), 11+len(desc))
+
+        if (need_header) then
+            allocate(character(len=new_len) :: entries(4))
+            entries(1) = "keyarray:"
+            entries(2) = "- key: " // key
+            entries(3) = "  value: " // value
+            entries(4) = "  comment: " // desc
+        else
+            allocate(character(len=new_len) :: entries(3))
+            entries(1) = "- key: " // key
+            entries(2) = "  value: " // value
+            entries(3) = "  comment: " // desc
+        end if
+
+        n_old = size(lines)
+        n_new = size(entries)
+
+        allocate(character(len=new_len) :: new_lines(n_old + n_new))
+        if (insert_pos > 1) new_lines(1:insert_pos-1) = lines(1:insert_pos-1)
+        new_lines(insert_pos:insert_pos+n_new-1) = entries
+        if (insert_pos <= n_old) new_lines(insert_pos+n_new:) = lines(insert_pos:n_old)
+
+        call move_alloc(new_lines, lines)
+    end subroutine parquet_append_keyarray_line
+
+    !> Locates where a new keyarray entry should be inserted in `lines`.
+    !> If a top-level `keyarray:` header already exists, `insert_pos` points
+    !> just past its last item (need_header = .false.). Otherwise, `insert_pos`
+    !> points at the top-level `extra:` line if present, else at the top-level
+    !> `fields:` line (always present), and need_header = .true.
+    subroutine parquet_locate_keyarray_insert(lines, insert_pos, need_header)
+        character(len=*), intent(in) :: lines(:)
+        integer, intent(out) :: insert_pos
+        logical, intent(out) :: need_header
+        integer :: i, n
+        character(len=:), allocatable :: tline
+
+        n = size(lines)
+        need_header = .true.
+        insert_pos = n + 1
+
+        do i = 1, n
+            tline = trim(adjustl(lines(i)))
+            if (lines(i)(1:1) /= " " .and. tline == "keyarray:") then
+                need_header = .false.
+                insert_pos = i + 1
+                do while (insert_pos <= n)
+                    if (len_trim(lines(insert_pos)) == 0) exit
+                    if (lines(insert_pos)(1:1) /= " " .and. lines(insert_pos)(1:1) /= "-") exit
+                    insert_pos = insert_pos + 1
+                end do
+                return
+            end if
+        end do
+
+        do i = 1, n
+            tline = trim(adjustl(lines(i)))
+            if (lines(i)(1:1) /= " " .and. tline == "extra:") then
+                insert_pos = i
+                return
+            end if
+        end do
+
+        do i = 1, n
+            tline = trim(adjustl(lines(i)))
+            if (lines(i)(1:1) /= " " .and. tline == "fields:") then
+                insert_pos = i
+                return
+            end if
+        end do
+    end subroutine parquet_locate_keyarray_insert
 
     subroutine parquet_flush_keyarray_item(metadata, ka_key, ka_value, ka_comment)
         type(parquet_table_metadata), intent(inout) :: metadata

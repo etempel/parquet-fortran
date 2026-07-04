@@ -10,7 +10,7 @@ module parquet
     implicit none
     private
     !
-    character(len=*),parameter:: cversion = "v0.3.2 (2026-07-03)" !< version info
+    character(len=*),parameter:: cversion = "v0.3.3 (2026-07-04)" !< version info
 #ifndef RELEASE_VERSION
 #  define RELEASE_VERSION 0.1
 #endif
@@ -46,9 +46,10 @@ module parquet
         type(parquet_metadata_entry), allocatable :: items(:)
         ! Verbatim source MAML lines, populated by parquet_read_maml; used by
         ! parquet_open_writer(..., write_maml=.true.) to save a sidecar .maml
-        ! file next to the .parquet output. Not kept in sync with add_metadata
-        ! calls made after parquet_read_maml, nor with which columns end up
-        ! enabled/written: it always reflects the MAML source as parsed.
+        ! file next to the .parquet output. add_metadata calls made after
+        ! parquet_read_maml append a new keyarray: entry to these lines (see
+        ! parquet_append_keyarray_line), so the sidecar reflects them; it is
+        ! NOT kept in sync with which columns end up enabled/written, though.
         character(len=:), allocatable :: source_maml_lines(:)
     contains
         procedure :: add_metadata_int32

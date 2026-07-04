@@ -28,7 +28,9 @@ contains
         testsuite = [ &
             new_unittest("README minimal writer/reader example", test_readme_minimal_example), &
             new_unittest("README MAML-schema writer example", test_readme_maml_schema_writer_example), &
-            new_unittest("README combined example", test_readme_combined_example) &
+            new_unittest("README combined example", test_readme_combined_example), &
+            new_unittest("maml_example2 writer produces a matching sidecar .maml", &
+                test_maml_example2_sidecar_keyarray) &
             ]
     end subroutine collect_tests_parquet_examples
 
@@ -159,5 +161,78 @@ contains
         call check(error, nrows == 3_int64 .and. all(id0_read == id0) .and. all(idarr_read == idarr), &
             "README combined example did not round-trip the 'id0'/'idarr' columns correctly")
     end subroutine test_readme_combined_example
+    !
+    !> Writes a two-column ("id", "name") table using docs/maml_example2.maml's
+    !> schema, with write_maml=.true. so a sidecar .maml is produced alongside
+    !> the parquet file. Checks that the two keyarray: entries already present
+    !> in that source MAML ("test_url"/"test_url2") come through correctly in
+    !> both the in-memory metadata and the written sidecar file.
+    subroutine test_maml_example2_sidecar_keyarray(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_column_info) :: cinfo
+        type(parquet_table_metadata) :: metadata, sidecar_metadata
+        type(parquet_column_info) :: sidecar_cinfo
+        integer(int32) :: id(3)
+        character(len=24) :: name(3)
+        logical :: exists
+        character(len=*), parameter :: out_file = "test_run/maml_example2.parquet"
+        character(len=*), parameter :: sidecar_file = "test_run/maml_example2.maml"
+
+        call parquet_read_maml("docs/maml_example2.maml", cinfo, metadata)
+
+        call check_keyarray_entries(error, metadata, "in-memory metadata parsed from docs/maml_example2.maml")
+        if (allocated(error)) return
+
+        id = [1_int32, 2_int32, 3_int32]
+        name = ["Alice", "Bob  ", "Carol"]
+
+        call parquet_open_writer(writer, out_file, cinfo, metadata, write_maml=.true.)
+        call parquet_write_column(writer, "id", id)
+        call parquet_write_column(writer, "name", name)
+        call parquet_close_writer(writer)
+
+        inquire(file=sidecar_file, exist=exists)
+        call check(error, exists, "write_maml=.true. did not create the expected sidecar .maml file")
+        if (allocated(error)) return
+
+        call parquet_read_maml(sidecar_file, sidecar_cinfo, sidecar_metadata)
+        call check_keyarray_entries(error, sidecar_metadata, "metadata reparsed from the written sidecar .maml")
+    end subroutine test_maml_example2_sidecar_keyarray
+
+    subroutine check_keyarray_entries(error, metadata, context)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table_metadata), intent(in) :: metadata
+        character(len=*), intent(in) :: context
+        integer :: i
+        logical :: found_url, found_url2
+
+        found_url = .false.
+        found_url2 = .false.
+
+        do i = 1, size(metadata%items)
+            if (trim(metadata%items(i)%key) == "test_url") then
+                found_url = .true.
+                call check(error, trim(metadata%items(i)%value) == "//example.com/data #new", &
+                    "unexpected value for keyarray entry 'test_url' (" // context // ")")
+                if (allocated(error)) return
+                call check(error, trim(metadata%items(i)%description) == "something: and else", &
+                    "unexpected comment for keyarray entry 'test_url' (" // context // ")")
+                if (allocated(error)) return
+            else if (trim(metadata%items(i)%key) == "test_url2") then
+                found_url2 = .true.
+                call check(error, trim(metadata%items(i)%value) == "http://example.com/data :#new", &
+                    "unexpected value for keyarray entry 'test_url2' (" // context // ")")
+                if (allocated(error)) return
+                call check(error, trim(metadata%items(i)%description) == "something: and else", &
+                    "unexpected comment for keyarray entry 'test_url2' (" // context // ")")
+                if (allocated(error)) return
+            end if
+        end do
+
+        call check(error, found_url, "keyarray entry 'test_url' not found (" // context // ")")
+        if (allocated(error)) return
+        call check(error, found_url2, "keyarray entry 'test_url2' not found (" // context // ")")
+    end subroutine check_keyarray_entries
     !
 end module test_examples

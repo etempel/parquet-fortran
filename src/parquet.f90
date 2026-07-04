@@ -6,7 +6,7 @@ module parquet
     use iso_c_binding
     use iso_fortran_env, only: int8, int32, int64, real32, real64
     use parquet_bindings
-    use parquet_maml_base, only: parquet_maml_file, parquet_maml_missing_column
+    use parquet_maml_base, only: parquet_maml_file, parquet_maml_missing_column, parquet_maml_col_map_entry
     implicit none
     private
     !
@@ -19,13 +19,21 @@ module parquet
         logical :: is_set = .false.
         logical :: deactivated = .false. ! true for columns merged in from a base MAML that the user's MAML excluded;
                                           ! protects is_set from being changed by set_available/set_unavailable (bulk or by name).
-        character(len=:), allocatable :: name      ! The name of the field [required].
+        character(len=:), allocatable :: name      ! The name of the field [required]; always the internal/canonical
+                                                    ! name, i.e. what parquet_write_column/set_available/etc. use --
+                                                    ! never affected by a col_map: rename (see output_name).
         character(len=:), allocatable :: unit      ! The unit of measurement for the field.
         character(len=:), allocatable :: info      ! A short description of the field.
         character(len=:), allocatable :: ucd       ! Unified Content Descriptor for IVOA (can have many).
         character(len=:), allocatable :: data_type ! The data type of the field [required].
         integer :: array_size = 1 ! Maximum length of character strings.
         integer :: col_size = 1   ! The number of elements in the vector column.
+        character(len=:), allocatable :: output_name ! The name actually written to the parquet file/VOTable header.
+                                                       ! Equal to `name` unless a col_map: entry in the MAML that
+                                                       ! declared this field renamed it (col_map: maps
+                                                       ! internal_name -> output_name; `name` is then set to the
+                                                       ! internal_name and `output_name` keeps the field's own
+                                                       ! declared name from that MAML's fields: section).
     end type parquet_column_type
 
     type parquet_column_info

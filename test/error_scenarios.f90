@@ -52,6 +52,12 @@ program error_scenarios
         call scenario_validate_unknown_qc_subkey()
     case ("validate_user_maml_unknown_column")
         call scenario_validate_user_maml_unknown_column()
+    case ("validate_col_map_unknown_internal")
+        call scenario_validate_col_map_unknown_internal()
+    case ("validate_col_map_duplicate_internal")
+        call scenario_validate_col_map_duplicate_internal()
+    case ("validate_col_map_output_collision")
+        call scenario_validate_col_map_output_collision()
     case ("get_column_index_not_found")
         call scenario_get_column_index_not_found()
     case ("write_maml_without_metadata")
@@ -237,6 +243,81 @@ contains
 
         call parquet_validate_user_maml(base_maml, user_maml)
     end subroutine scenario_validate_user_maml_unknown_column
+
+    subroutine scenario_validate_col_map_unknown_internal()
+        type(parquet_maml_file) :: base_maml, user_maml
+
+        base_maml%name = "base.maml"
+        base_maml%lines = [character(len=40) :: &
+            "table: base_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32" ]
+
+        user_maml%name = "user.maml"
+        user_maml%lines = [character(len=40) :: &
+            "table: user_table", &
+            "extra:", &
+            "  col_map:", &
+            "  - not_a_real_internal_column: b", &
+            "fields:", &
+            "- name: b", &
+            "  data_type: int32" ]
+
+        call parquet_validate_user_maml(base_maml, user_maml)
+    end subroutine scenario_validate_col_map_unknown_internal
+
+    subroutine scenario_validate_col_map_duplicate_internal()
+        type(parquet_maml_file) :: base_maml, user_maml
+
+        base_maml%name = "base.maml"
+        base_maml%lines = [character(len=40) :: &
+            "table: base_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32" ]
+
+        user_maml%name = "user.maml"
+        user_maml%lines = [character(len=40) :: &
+            "table: user_table", &
+            "extra:", &
+            "  col_map:", &
+            "  - a: b", &
+            "  - a: c", &
+            "fields:", &
+            "- name: b", &
+            "  data_type: int32", &
+            "- name: c", &
+            "  data_type: int32" ]
+
+        call parquet_validate_user_maml(base_maml, user_maml)
+    end subroutine scenario_validate_col_map_duplicate_internal
+
+    subroutine scenario_validate_col_map_output_collision()
+        type(parquet_maml_file) :: base_maml, user_maml
+
+        base_maml%name = "base.maml"
+        base_maml%lines = [character(len=40) :: &
+            "table: base_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32", &
+            "- name: b", &
+            "  data_type: int32" ]
+
+        user_maml%name = "user.maml"
+        user_maml%lines = [character(len=40) :: &
+            "table: user_table", &
+            "extra:", &
+            "  col_map:", &
+            "  - a: shared_name", &
+            "  - b: shared_name", &
+            "fields:", &
+            "- name: shared_name", &
+            "  data_type: int32" ]
+
+        call parquet_validate_user_maml(base_maml, user_maml)
+    end subroutine scenario_validate_col_map_output_collision
 
     subroutine scenario_get_column_index_not_found()
         type(parquet_maml_file) :: maml

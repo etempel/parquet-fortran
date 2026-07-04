@@ -491,7 +491,7 @@ contains
         end if
 
         maml = parquet_maml_maml_example2()
-        call check(error, trim(maml%name) == "maml_example2.maml" .and. size(maml%lines) == 13)
+        call check(error, trim(maml%name) == "maml_example2.maml" .and. size(maml%lines) == 83)
         if (allocated(error)) then
             call test_failed(error, "parquet_maml_maml_example2 returned unexpected content")
             return

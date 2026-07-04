@@ -4,43 +4,14 @@
 ! Generator script: parquet-fortran/tools/generate_parquet_maml.sh
 !===========================================
 !
-module parquet_maml_base
+module parquet_maml
+    use parquet, only: parquet_maml_file, parquet_load_maml_file
+    use parquet, only: parquet_validate_maml, parquet_validate_user_maml
     implicit none
     private
 
-    type, public :: parquet_maml_missing_column
-        character(len=:), allocatable :: name      ! The name of the field [required].
-        character(len=:), allocatable :: unit      ! The unit of measurement for the field.
-        character(len=:), allocatable :: info      ! A short description of the field.
-        character(len=:), allocatable :: ucd       ! Unified Content Descriptor for IVOA (can have many).
-        character(len=:), allocatable :: data_type ! The data type of the field [required].
-        integer :: array_size = 1 ! Maximum length of character strings.
-        integer :: col_size = 1   ! The number of elements in the vector column.
-    end type parquet_maml_missing_column
-
-    ! One col_map: entry: `- <internal_name>: <output_name>`, i.e. the field
-    ! declared as `output_name` in this MAML fields: actually corresponds to
-    ! the internal/canonical column named `internal_name`.
-    type, public :: parquet_maml_col_map_entry
-        character(len=:), allocatable :: internal_name
-        character(len=:), allocatable :: output_name
-    end type parquet_maml_col_map_entry
-
-    type, public :: parquet_maml_file
-        logical :: user_maml = .false. !< true if this is a user defined MAML file
-        character(len=:), allocatable :: name
-        character(len=:), allocatable :: lines(:)
-        ! columns present in the base MAML but missing from this (user) MAML;
-        ! populated by parquet_validate_user_maml, consumed by parquet_read_maml
-        type(parquet_maml_missing_column), allocatable :: missing_columns(:)
-        ! parsed col_map: section (see parquet_maml_col_map_entry): exposes the
-        ! renames this MAML declares, for inspection; populated by
-        ! parquet_validate_user_maml. Renames are applied automatically whenever
-        ! this MAML lines are parsed, independent of whether this is set.
-        type(parquet_maml_col_map_entry), allocatable :: col_map(:)
-    end type parquet_maml_file
-
     public :: get_parquet_maml
+    public :: set_maml
     public :: parquet_maml_maml_example
     public :: parquet_maml_maml_example2
 
@@ -62,7 +33,33 @@ contains
         case default
             error stop "get_parquet_maml: unknown internal MAML file: " // trim(name)
         end select
+        call parquet_validate_maml(maml)
     end function get_parquet_maml
+
+    function set_maml(maml_default, maml_file) result(maml)
+        character(len=*),intent(in) :: maml_default       ! < default MAML name (input to get_parquet_maml)
+        character(len=*),intent(in),optional :: maml_file ! < MAML file name (if provided, overrides default)
+        type(parquet_maml_file) :: maml
+        type(parquet_maml_file) :: maml_base
+        logical :: has_maml_file
+        !
+        has_maml_file = present(maml_file)
+        if (has_maml_file) then
+            has_maml_file = trim(maml_file) /= ''
+        end if
+        !
+        if (has_maml_file) then
+            ! read MAML from file
+            maml = parquet_load_maml_file(trim(maml_file))
+            ! validate user defined MAML file
+            maml_base = get_parquet_maml(trim(maml_default))
+            call parquet_validate_user_maml(maml_base, maml)
+        else
+            ! no MAML provided, use default MAML
+            maml = get_parquet_maml(trim(maml_default))
+        end if
+        !
+    end function set_maml
 
     function parquet_maml_maml_example() result(maml)
         type(parquet_maml_file) :: maml
@@ -255,4 +252,4 @@ contains
         maml%lines(83) = "    miss: 'Null'"
     end function parquet_maml_maml_example2
 
-end module parquet_maml_base
+end module parquet_maml

@@ -5,6 +5,38 @@
 submodule (parquet) parquet_write
 contains
 
+    !> The name actually written to the parquet file/VOTable header for
+    !> `col`: its output_name if set, else its (internal) name. Falling back
+    !> to name defensively handles a parquet_column_type built without going
+    !> through parquet_read_maml (output_name left unallocated).
+    function parquet_column_output_name(col) result(output_name)
+        type(parquet_column_type), intent(in) :: col
+        character(len=:), allocatable :: output_name
+
+        output_name = col%name
+        if (allocated(col%output_name)) then
+            if (len_trim(col%output_name) > 0) output_name = col%output_name
+        end if
+    end function parquet_column_output_name
+
+    !> Resolves the caller-facing (internal) column `name` used in a
+    !> parquet_write_column call to the name that should actually be passed
+    !> to the C++ append_* calls -- its col_map:-renamed output_name, or
+    !> `name` itself if there's no schema (schema-less writer) or no match.
+    function parquet_resolve_output_name(writer, name) result(output_name)
+        type(parquet_writer), intent(in) :: writer
+        character(len=*), intent(in) :: name
+        character(len=:), allocatable :: output_name
+        integer :: idx
+
+        idx = parquet_get_enabled_column_index(writer, name)
+        if (idx > 0) then
+            output_name = parquet_column_output_name(writer%enabled_columns(idx))
+        else
+            output_name = name
+        end if
+    end function parquet_resolve_output_name
+
     module procedure parquet_get_enabled_column_index
         integer :: i
 
@@ -132,17 +164,17 @@ contains
         case ("int64")
             allocate(i64values(size(values)))
             i64values = int(values, kind=int64)
-            call parquet_append_int64_column(writer%handle, trim(name)//char(0), i64values, nrows, asize)
+            call parquet_append_int64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), i64values, nrows, asize)
         case ("float32")
             allocate(f32values(size(values)))
             f32values = real(values, kind=real32)
-            call parquet_append_float32_column(writer%handle, trim(name)//char(0), f32values, nrows, asize)
+            call parquet_append_float32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), f32values, nrows, asize)
         case ("float64")
             allocate(f64values(size(values)))
             f64values = real(values, kind=real64)
-            call parquet_append_float64_column(writer%handle, trim(name)//char(0), f64values, nrows, asize)
+            call parquet_append_float64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), f64values, nrows, asize)
         case default
-            call parquet_append_int32_column(writer%handle, trim(name)//char(0), values, nrows, asize)
+            call parquet_append_int32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), values, nrows, asize)
         end select
     end subroutine parquet_append_as_schema_int32
 
@@ -160,17 +192,17 @@ contains
         select case (schema_type)
         case ("int32")
             i32values = parquet_narrow_int64_to_int32(name, values)
-            call parquet_append_int32_column(writer%handle, trim(name)//char(0), i32values, nrows, asize)
+            call parquet_append_int32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), i32values, nrows, asize)
         case ("float32")
             allocate(f32values(size(values)))
             f32values = real(values, kind=real32)
-            call parquet_append_float32_column(writer%handle, trim(name)//char(0), f32values, nrows, asize)
+            call parquet_append_float32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), f32values, nrows, asize)
         case ("float64")
             allocate(f64values(size(values)))
             f64values = real(values, kind=real64)
-            call parquet_append_float64_column(writer%handle, trim(name)//char(0), f64values, nrows, asize)
+            call parquet_append_float64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), f64values, nrows, asize)
         case default
-            call parquet_append_int64_column(writer%handle, trim(name)//char(0), values, nrows, asize)
+            call parquet_append_int64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), values, nrows, asize)
         end select
     end subroutine parquet_append_as_schema_int64
 
@@ -188,16 +220,16 @@ contains
         select case (schema_type)
         case ("int32")
             i32values = parquet_float64_to_int32(name, real(values, kind=real64))
-            call parquet_append_int32_column(writer%handle, trim(name)//char(0), i32values, nrows, asize)
+            call parquet_append_int32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), i32values, nrows, asize)
         case ("int64")
             i64values = parquet_float64_to_int64(name, real(values, kind=real64))
-            call parquet_append_int64_column(writer%handle, trim(name)//char(0), i64values, nrows, asize)
+            call parquet_append_int64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), i64values, nrows, asize)
         case ("float64")
             allocate(f64values(size(values)))
             f64values = real(values, kind=real64)
-            call parquet_append_float64_column(writer%handle, trim(name)//char(0), f64values, nrows, asize)
+            call parquet_append_float64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), f64values, nrows, asize)
         case default
-            call parquet_append_float32_column(writer%handle, trim(name)//char(0), values, nrows, asize)
+            call parquet_append_float32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), values, nrows, asize)
         end select
     end subroutine parquet_append_as_schema_float32
 
@@ -215,16 +247,16 @@ contains
         select case (schema_type)
         case ("int32")
             i32values = parquet_float64_to_int32(name, values)
-            call parquet_append_int32_column(writer%handle, trim(name)//char(0), i32values, nrows, asize)
+            call parquet_append_int32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), i32values, nrows, asize)
         case ("int64")
             i64values = parquet_float64_to_int64(name, values)
-            call parquet_append_int64_column(writer%handle, trim(name)//char(0), i64values, nrows, asize)
+            call parquet_append_int64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), i64values, nrows, asize)
         case ("float32")
             allocate(f32values(size(values)))
             f32values = real(values, kind=real32)
-            call parquet_append_float32_column(writer%handle, trim(name)//char(0), f32values, nrows, asize)
+            call parquet_append_float32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), f32values, nrows, asize)
         case default
-            call parquet_append_float64_column(writer%handle, trim(name)//char(0), values, nrows, asize)
+            call parquet_append_float64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), values, nrows, asize)
         end select
     end subroutine parquet_append_as_schema_float64
 
@@ -309,9 +341,14 @@ contains
                 if (cinfo%col(i)%is_set) then
                     k = k + 1
                     writer%enabled_columns(k) = cinfo%col(i)
+                    ! Registers the schema under output_name (the column's
+                    ! display/file name -- equal to name unless a col_map:
+                    ! entry renamed it), not the internal name, since that's
+                    ! what append_column's own arguments must also use for
+                    ! Arrow to line up the field with its data.
                     call parquet_add_column_info(&
                         writer, &
-                        cinfo%col(i)%name, &
+                        parquet_column_output_name(cinfo%col(i)), &
                         cinfo%col(i)%unit, &
                         cinfo%col(i)%info, &
                         cinfo%col(i)%ucd, &
@@ -357,7 +394,9 @@ contains
     !> the `fields:` entries whose column is disabled (is_set = .false.) in
     !> `cinfo`, so that a sidecar .maml written via write_maml=.true. only
     !> lists the columns actually present in the .parquet file. Matches source
-    !> MAML field blocks to cinfo%col by name; a block runs from its top-level
+    !> MAML field blocks to cinfo%col by output_name (the name the source MAML
+    !> text itself declares under fields:/name: -- equal to cinfo%col%name
+    !> unless a col_map: rename applies); a block runs from its top-level
     !> "- ..." line up to (but not including) the next top-level line. If every
     !> column in cinfo is disabled, lines is left untouched instead of emptying
     !> out fields: entirely, since a MAML file with no fields fails
@@ -429,7 +468,7 @@ contains
                 col_idx = 0
                 if (len_trim(field_name) > 0) then
                     do k = 1, size(cinfo%col)
-                        if (trim(cinfo%col(k)%name) == trim(field_name)) then
+                        if (trim(parquet_column_output_name(cinfo%col(k))) == trim(field_name)) then
                             col_idx = k
                             exit
                         end if
@@ -723,7 +762,7 @@ contains
 
         call parquet_append_bool8_column(&
             writer%handle, &
-            trim(name)//char(0), &
+            trim(parquet_resolve_output_name(writer, name))//char(0), &
             bool_data, &
             int(nrows, kind=c_long_long), &
             int(asize, kind=c_long_long) )
@@ -755,7 +794,7 @@ contains
 
         call parquet_append_bool8_column(&
             writer%handle, &
-            trim(name)//char(0), &
+            trim(parquet_resolve_output_name(writer, name))//char(0), &
             bool_data, &
             int(nrows, kind=c_long_long), &
             int(asize, kind=c_long_long) )
@@ -805,14 +844,14 @@ contains
         if (asize == 1) then
             call parquet_append_string_column(&
                 writer%handle, &
-                trim(name)//char(0), &
+                trim(parquet_resolve_output_name(writer, name))//char(0), &
                 packed, &
                 int(item_len, kind=c_long_long), &
                 int(nrows, kind=c_long_long) )
         else
             call parquet_append_string_array_column(&
                 writer%handle, &
-                trim(name)//char(0), &
+                trim(parquet_resolve_output_name(writer, name))//char(0), &
                 packed, &
                 int(item_len, kind=c_long_long), &
                 int(nrows, kind=c_long_long), &
@@ -860,7 +899,7 @@ contains
 
         call parquet_append_string_array_column(&
             writer%handle, &
-            trim(name)//char(0), &
+            trim(parquet_resolve_output_name(writer, name))//char(0), &
             packed, &
             int(item_len, kind=c_long_long), &
             int(nrows, kind=c_long_long), &

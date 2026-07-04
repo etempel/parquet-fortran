@@ -47,7 +47,9 @@ contains
             new_unittest("add_metadata after parquet_read_maml is reflected in the sidecar", &
                 test_write_maml_sidecar_with_runtime_metadata), &
             new_unittest("add_metadata inserts keyarray: before an existing extra:", &
-                test_add_metadata_inserts_before_extra) &
+                test_add_metadata_inserts_before_extra), &
+            new_unittest("col_map: renamed column is written/read under its output name", &
+                test_col_map_write_renames_output_column) &
             ]
         !
     end subroutine collect_tests_parquet_writing
@@ -276,6 +278,76 @@ contains
         call check(error, trim(adjustl(metadata%source_maml_lines(idx_keyarray+3))) == "comment: added comment", &
             "unexpected comment line for the new keyarray entry")
     end subroutine test_add_metadata_inserts_before_extra
+    !
+    !> A col_map:-renamed column ("id0" -> "my_id") is written/read using the
+    !> internal name ("id0", as parquet_write_column/parquet_read_column
+    !> always expect), but the actual file column, sidecar .maml fields:
+    !> entry, and read-back must all use the output/user-facing name
+    !> ("my_id") -- confirming the rename actually reaches the parquet file
+    !> itself, not just cinfo%col in memory.
+    subroutine test_col_map_write_renames_output_column(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_maml_file) :: base_maml, user_maml
+        type(parquet_column_info) :: cinfo
+        type(parquet_table_metadata) :: metadata, sidecar_metadata
+        type(parquet_column_info) :: sidecar_cinfo
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: id0(3) = [1_int32, 2_int32, 3_int32]
+        integer(int32), allocatable :: id_read(:)
+        integer(int64) :: nrows
+        logical :: exists
+        character(len=*), parameter :: out_file = "test_run/test_col_map.parquet"
+        character(len=*), parameter :: sidecar_file = "test_run/test_col_map.maml"
+
+        base_maml = get_parquet_maml("maml_example.maml")
+
+        user_maml%name = "user_col_map_write.maml"
+        user_maml%lines = [character(len=40) :: &
+            "table: user_table", &
+            "extra:", &
+            "  col_map:", &
+            "  - id0: my_id", &
+            "fields:", &
+            "- name: my_id", &
+            "  data_type: int32" ]
+
+        call parquet_validate_user_maml(base_maml, user_maml)
+        call parquet_read_maml(user_maml, cinfo, metadata)
+
+        ! parquet_write_column is called with the internal name ("id0"), not
+        ! the renamed output name ("my_id").
+        call parquet_open_writer(writer, out_file, cinfo, metadata, write_maml=.true.)
+        call parquet_write_column(writer, "id0", id0)
+        call parquet_close_writer(writer)
+
+        ! The actual file column must be named "my_id": reading it back by
+        ! its internal name ("id0") must fail to find a match, while reading
+        ! by "my_id" must return the written data.
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_nrows(reader, nrows)
+        allocate(id_read(nrows))
+        call parquet_read_column(reader, "my_id", id_read)
+        call parquet_close_reader(reader)
+
+        call check(error, nrows == 3_int64 .and. all(id_read == id0), &
+            "expected the renamed column to be readable (and match written data) under its output name 'my_id'")
+        if (allocated(error)) return
+
+        ! The sidecar .maml's fields: entry must also say "my_id" (the
+        ! source MAML's own declared name), not "id0". The sidecar keeps
+        ! col_map: verbatim too, so re-parsing it round-trips exactly like
+        ! the original: name is resolved back to "id0" (internal), with
+        ! output_name carrying "my_id" again.
+        inquire(file=sidecar_file, exist=exists)
+        call check(error, exists, "write_maml=.true. did not create the expected sidecar .maml file")
+        if (allocated(error)) return
+
+        call parquet_read_maml(sidecar_file, sidecar_cinfo, sidecar_metadata)
+        call check(error, size(sidecar_cinfo%col) == 1 .and. trim(sidecar_cinfo%col(1)%name) == "id0" .and. &
+            trim(sidecar_cinfo%col(1)%output_name) == "my_id", &
+            "expected the sidecar .maml to round-trip the col_map: rename (name=id0, output_name=my_id)")
+    end subroutine test_col_map_write_renames_output_column
     !
     subroutine test_write_parquet_file(error)
         type(error_type), allocatable, intent(out) :: error

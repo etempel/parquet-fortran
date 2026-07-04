@@ -274,6 +274,26 @@ Notes on the `fields:` entries:
 
 A second MAML file may be validated against a "base" MAML with `parquet_validate_user_maml`, to check it only reuses column names that already exist in the base schema — useful when different pipeline stages should write a subset of a shared schema.
 
+### Renaming columns for output with `col_map:`
+
+A user MAML's `fields:` names are normally required to match the base schema's column names exactly. `col_map:` relaxes that: it lets a user MAML give a column an arbitrary name of its own choosing for the `fields:` section (and the resulting `.parquet`/sidecar `.maml`), while Fortran code continues to call `parquet_write_column`/`set_available`/`get_column_index`/etc. with the stable, well-known internal name from the base schema. `col_map:` is **not** a top-level MAML section — it is only recognized nested inside `extra:` (a bare top-level `col_map:` is rejected as an unknown section):
+
+```yaml
+table: user_table
+extra:
+  col_map:
+  - id0: my_id
+fields:
+- name: my_id       # the user's own chosen name -- can differ freely from id0
+  data_type: int32  # still declared in full, exactly like a non-renamed field
+```
+
+- Each `col_map:` item is `<internal_name>: <output_name>`; `parquet_validate_user_maml` checks that `internal_name` actually exists in the base schema, that no two items share the same `internal_name`, and that no two items collide on the same `output_name`.
+- The renamed field's `fields:` entry (`my_id` above) is validated exactly like any other field entry (`data_type` required, etc.) — nothing is inherited from the base column's own attributes.
+- After `parquet_read_maml`, the resulting `parquet_column_type` always uses the internal name (`id0`) for `cinfo%col(:)%name` — the same name every other API (`parquet_write_column`, `set_available`, `get_column_index`, ...) already expects — with the rename available separately as `cinfo%col(:)%output_name` (`my_id`), which is what actually gets written to the `.parquet` file's schema/VOTable header and to a `write_maml=.true.` sidecar's `fields:` section.
+- `user_maml%col_map` (populated by `parquet_validate_user_maml`) exposes the parsed entries for inspection.
+- Since it lives inside `extra:`, `col_map:` does not produce any table-level metadata entry of its own — `extra:`'s content (including `col_map:`) is otherwise entirely opaque/discarded, just like the rest of `extra:`.
+
 Table-level top-level keys become one metadata entry each, with a few special cases:
 
 - `keyarray:` — a list of `key`/`value`/`comment` maps, each becomes one metadata entry named by its `key`.

@@ -35,6 +35,7 @@ contains
             new_unittest("validate maml_example2.maml by filename (parquet_validate_maml overload)", &
                 test_validate_maml_by_filename_ok), &
             new_unittest("validate a user MAML that is a valid subset", test_validate_user_maml_ok), &
+            new_unittest("col_map: renames a field to an internal name", test_validate_user_maml_col_map_ok), &
             new_unittest("load a MAML file from disk", test_load_maml_file), &
             new_unittest("get_column_index finds an existing column", test_get_column_index_found), &
             new_unittest("set_unavailable/set_available toggle is_set", test_set_available_unavailable) &
@@ -122,6 +123,59 @@ contains
         call check(error, (.not. user_cinfo%col(idx)%is_set) .and. user_cinfo%col(idx)%deactivated, &
             "expected 'idarr' to be merged in as a deactivated placeholder")
     end subroutine test_validate_user_maml_ok
+
+    !> col_map: renames a field's internal (base) name to whatever name the
+    !> user MAML's own fields: section declares. parquet_write_column etc.
+    !> still address the column by its internal name ("id0"); only the
+    !> resulting schema/parquet output uses the renamed name ("my_id").
+    subroutine test_validate_user_maml_col_map_ok(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_maml_file) :: base_maml, user_maml
+        type(parquet_column_info) :: user_cinfo
+        type(parquet_table_metadata) :: user_metadata
+        integer :: idx
+
+        base_maml = get_parquet_maml("maml_example.maml")
+
+        user_maml%name = "user_col_map.maml"
+        user_maml%lines = [character(len=40) :: &
+            "table: user_table", &
+            "extra:", &
+            "  col_map:", &
+            "  - id0: my_id", &
+            "fields:", &
+            "- name: my_id", &
+            "  data_type: int32", &
+            "  info: renamed via col_map" ]
+
+        ! Should not error stop: id0 (referenced by col_map) exists in base_maml.
+        call parquet_validate_user_maml(base_maml, user_maml)
+
+        call check(error, allocated(user_maml%col_map), "expected col_map to be populated on user_maml")
+        if (allocated(error)) return
+        call check(error, size(user_maml%col_map) == 1 .and. &
+            trim(user_maml%col_map(1)%internal_name) == "id0" .and. &
+            trim(user_maml%col_map(1)%output_name) == "my_id", &
+            "unexpected user_maml%col_map contents")
+        if (allocated(error)) return
+
+        call parquet_read_maml(user_maml, user_cinfo, user_metadata)
+
+        ! The renamed field is stored under its internal name ("id0"), same as
+        ! every other lookup (parquet_write_column, set_available, ...);
+        ! output_name carries the user-facing rename ("my_id").
+        idx = user_cinfo%get_column_index("id0")
+        call check(error, idx > 0, "expected 'id0' (internal name) to be found via get_column_index")
+        if (allocated(error)) return
+        call check(error, user_cinfo%col(idx)%is_set .and. .not. user_cinfo%col(idx)%deactivated, &
+            "expected the renamed field to be active")
+        if (allocated(error)) return
+        call check(error, trim(user_cinfo%col(idx)%output_name) == "my_id", &
+            "expected output_name to carry the col_map-declared name 'my_id'")
+        if (allocated(error)) return
+        call check(error, trim(user_cinfo%col(idx)%info) == "renamed via col_map", &
+            "expected the renamed field's own fields: attributes (info) to be preserved")
+    end subroutine test_validate_user_maml_col_map_ok
 
     subroutine test_load_maml_file(error)
         type(error_type), allocatable, intent(out) :: error

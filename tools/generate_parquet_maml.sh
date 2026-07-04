@@ -82,6 +82,14 @@ if is_base:
     lines.append('        integer :: col_size = 1   ! The number of elements in the vector column.')
     lines.append('    end type parquet_maml_missing_column')
     lines.append('')
+    lines.append('    ! One col_map: entry: `- <internal_name>: <output_name>`, i.e. the field')
+    lines.append('    ! declared as `output_name` in this MAML fields: actually corresponds to')
+    lines.append('    ! the internal/canonical column named `internal_name`.')
+    lines.append('    type, public :: parquet_maml_col_map_entry')
+    lines.append('        character(len=:), allocatable :: internal_name')
+    lines.append('        character(len=:), allocatable :: output_name')
+    lines.append('    end type parquet_maml_col_map_entry')
+    lines.append('')
     lines.append('    type, public :: parquet_maml_file')
     lines.append('        logical :: user_maml = .false. !< true if this is a user defined MAML file')
     lines.append('        character(len=:), allocatable :: name')
@@ -89,6 +97,15 @@ if is_base:
     lines.append('        ! columns present in the base MAML but missing from this (user) MAML;')
     lines.append('        ! populated by parquet_validate_user_maml, consumed by parquet_read_maml')
     lines.append('        type(parquet_maml_missing_column), allocatable :: missing_columns(:)')
+        # note: this MAML's own col_map: is applied internally whenever its
+        # lines are parsed (parquet_parse_maml_lines resolves column renames
+        # immediately); this component additionally exposes the parsed
+        # entries for inspection, populated by parquet_validate_user_maml.
+    lines.append('        ! parsed col_map: section (see parquet_maml_col_map_entry): exposes the')
+    lines.append('        ! renames this MAML declares, for inspection; populated by')
+    lines.append('        ! parquet_validate_user_maml. Renames are applied automatically whenever')
+    lines.append('        ! this MAML lines are parsed, independent of whether this is set.')
+    lines.append('        type(parquet_maml_col_map_entry), allocatable :: col_map(:)')
     lines.append('    end type parquet_maml_file')
     lines.append('')
 

@@ -73,6 +73,10 @@ submodule (parquet) parquet_metadata
         maml_section_schema("keyarray",    .false., &
             [character(len=32) :: "key", "value", "comment", "", "", "", "", ""]), &
         maml_section_schema("extra",       .true.,  [character(len=32) :: "", "", "", "", "", "", "", ""]), &
+        ! col_map: is deliberately NOT a top-level section: it is only valid
+        ! nested inside extra: (see parquet_parse_col_map), which is already
+        ! opaque/unvalidated here. A stray top-level "col_map:" is therefore
+        ! correctly flagged as an unknown top-level section.
         maml_section_schema("fields",      .false., &
             [character(len=32) :: "name", "unit", "info", "ucd", "data_type", "array_size", "col_size", "qc"]) &
         ]
@@ -97,7 +101,7 @@ contains
     module procedure parquet_validate_user_maml
         type(parquet_column_info) :: base_cinfo, user_cinfo
         type(parquet_table_metadata) :: base_metadata, user_metadata
-        character(len=:), allocatable :: bad_names
+        character(len=:), allocatable :: bad_names, map_errors
         integer :: i, j
         logical :: found
 
@@ -106,6 +110,50 @@ contains
 
         call parquet_parse_maml_lines(base_maml%lines, base_cinfo, base_metadata)
         call parquet_parse_maml_lines(user_maml%lines, user_cinfo, user_metadata)
+
+        ! col_map: renames (col_internal -> col_user) are already applied to
+        ! user_cinfo%col(:)%name by parquet_parse_maml_lines above -- every
+        ! check below that compares names against base_cinfo therefore
+        ! already operates on resolved internal names, with no changes
+        ! needed. What's checked here, specific to col_map itself: every
+        ! mapped internal name actually exists in the base schema, and the
+        ! map has no internal-name duplicates or output-name collisions.
+        user_maml%col_map = parquet_parse_col_map(user_maml%lines)
+        map_errors = ""
+        do i = 1, size(user_maml%col_map)
+            found = .false.
+            if (allocated(base_cinfo%col)) then
+                do j = 1, size(base_cinfo%col)
+                    if (trim(base_cinfo%col(j)%name) == trim(user_maml%col_map(i)%internal_name)) then
+                        found = .true.
+                        exit
+                    end if
+                end do
+            end if
+            if (.not. found) then
+                map_errors = map_errors // "col_map: internal column '" // &
+                    trim(user_maml%col_map(i)%internal_name) // "' not present in base MAML; "
+            end if
+
+            do j = 1, i - 1
+                if (trim(user_maml%col_map(j)%internal_name) == trim(user_maml%col_map(i)%internal_name)) then
+                    map_errors = map_errors // "col_map: duplicate internal column '" // &
+                        trim(user_maml%col_map(i)%internal_name) // "'; "
+                    exit
+                end if
+            end do
+
+            do j = 1, i - 1
+                if (trim(user_maml%col_map(j)%output_name) == trim(user_maml%col_map(i)%output_name)) then
+                    map_errors = map_errors // "col_map: output name '" // &
+                        trim(user_maml%col_map(i)%output_name) // "' used for more than one internal column; "
+                    exit
+                end if
+            end do
+        end do
+        if (len_trim(map_errors) > 0) then
+            error stop "parquet_validate_user_maml: " // trim(map_errors)
+        end if
 
         bad_names = ""
         if (allocated(user_cinfo%col)) then
@@ -204,6 +252,7 @@ contains
             merged(n_old + i)%col_size = maml%missing_columns(i)%col_size
             merged(n_old + i)%is_set = .false.
             merged(n_old + i)%deactivated = .true.
+            merged(n_old + i)%output_name = maml%missing_columns(i)%name
         end do
 
         call move_alloc(merged, cinfo%col)
@@ -322,13 +371,14 @@ contains
         type(parquet_column_type), allocatable :: tmp(:)
         character(len=1024) :: line
         character(len=:), allocatable :: tline, key, cvalue
-        logical :: in_fields, have_current, in_list, in_field_list, in_keyarray, in_doiarray, in_dependsarray
+        logical :: in_fields, have_current, in_list, in_field_list, in_keyarray, in_doiarray, in_dependsarray, in_extra
         character(len=:), allocatable :: list_key, field_list_key, list_item
         character(len=:), allocatable :: ka_key, ka_value, ka_comment
         character(len=:), allocatable :: doi_value, doi_type
         character(len=:), allocatable :: depends_survey, depends_dataset, depends_table, depends_version
         character(len=:), allocatable :: keywords_value
-        integer :: ios, n, i, list_item_idx, doi_idx, depends_idx
+        type(parquet_maml_col_map_entry), allocatable :: col_map(:)
+        integer :: ios, n, i, j, list_item_idx, doi_idx, depends_idx
         character(len=32) :: idx_buf
 
         in_fields = .false.
@@ -338,6 +388,7 @@ contains
         in_keyarray = .false.
         in_doiarray = .false.
         in_dependsarray = .false.
+        in_extra = .false.
         list_item_idx = 0
         doi_idx = 0
         depends_idx = 0
@@ -459,6 +510,20 @@ contains
                     end if
                 end if
 
+                if (in_extra) then
+                    ! extra:'s content is fully opaque/discarded: unlike the
+                    ! generic in_list handler below, no metadata entry is
+                    ! ever produced for it, whether its children are nested
+                    ! maps or a top-level dash list (col_map: parsing, which
+                    ! specifically looks inside extra:, works directly off
+                    ! `lines`, independent of this skip).
+                    if ((line(1:1) /= " " .and. index(tline, "-") /= 1)) then
+                        in_extra = .false.
+                    else
+                        cycle
+                    end if
+                end if
+
                 if (in_list) then
                     if (index(tline, "- ") == 1) then
                         list_item_idx = list_item_idx + 1
@@ -515,6 +580,11 @@ contains
                     depends_dataset = ""
                     depends_table = ""
                     depends_version = ""
+                    cycle
+                end if
+
+                if (parquet_to_lower(tline) == "extra:") then
+                    in_extra = .true.
                     cycle
                 end if
 
@@ -620,6 +690,22 @@ contains
             if (tmp(i)%array_size <= 0) tmp(i)%array_size = 1
             if (tmp(i)%col_size <= 0) tmp(i)%col_size = 1
             tmp(i)%is_set = .true.
+        end do
+
+        ! Apply this MAML's own col_map: (if any): a field declared under
+        ! `output_name` in fields: is renamed in place to `internal_name`,
+        ! keeping its originally-declared name as output_name. Unmapped
+        ! fields keep output_name == name (identity). See
+        ! parquet_column_type%output_name and parquet_parse_col_map.
+        col_map = parquet_parse_col_map(lines)
+        do i = 1, n
+            tmp(i)%output_name = tmp(i)%name
+            do j = 1, size(col_map)
+                if (trim(col_map(j)%output_name) == trim(tmp(i)%name)) then
+                    tmp(i)%name = col_map(j)%internal_name
+                    exit
+                end if
+            end do
         end do
 
         call move_alloc(tmp, cinfo%col)
@@ -1074,6 +1160,83 @@ contains
         if (len_trim(keywords_value) == 0) return
         call metadata%add_metadata("keywords", trim(keywords_value))
     end subroutine parquet_flush_keywords
+
+    !> Parses a `col_map:` block nested inside `extra:` (col_map: is NOT a
+    !> valid top-level MAML section) into (internal_name -> output_name)
+    !> entries. Each list item is a single "<internal_name>: <output_name>"
+    !> line (with its leading "- "), e.g.:
+    !>   extra:
+    !>     col_map:
+    !>     - col_internal: col_user
+    !> Unlike every other map-list section (fields:, keyarray:, ...), the key
+    !> here IS the data (an arbitrary internal column name) rather than a
+    !> fixed sub-key label, so this is a dedicated parser rather than a
+    !> generic one. extra:'s own content is otherwise entirely unvalidated
+    !> (see the "extra" entry in allowed_maml_sections), so this is a
+    !> narrow, specific lookup rather than a generically-validated section.
+    !> Returns a zero-size array if there is no extra:/col_map: section.
+    function parquet_parse_col_map(lines) result(col_map)
+        character(len=*), intent(in) :: lines(:)
+        type(parquet_maml_col_map_entry), allocatable :: col_map(:)
+        type(parquet_maml_col_map_entry), allocatable :: tmp(:)
+        character(len=:), allocatable :: tline, key, cvalue
+        integer :: i, n, idx_extra, extra_end, idx_col_map, n_entries
+
+        allocate(col_map(0))
+
+        ! col_map: is only valid nested inside extra: (extra:'s own internal
+        ! structure is otherwise entirely unvalidated/opaque -- see
+        ! allowed_maml_sections -- so this is a dedicated, narrow lookup
+        ! rather than a generically-validated section of its own).
+        n = size(lines)
+        idx_extra = 0
+        do i = 1, n
+            if (lines(i)(1:1) /= " " .and. trim(adjustl(lines(i))) == "extra:") then
+                idx_extra = i
+                exit
+            end if
+        end do
+        if (idx_extra == 0) return
+
+        ! extra:'s block runs until the next top-level (non-indented) line.
+        extra_end = n
+        do i = idx_extra + 1, n
+            if (len_trim(lines(i)) == 0) cycle
+            if (lines(i)(1:1) /= " ") then
+                extra_end = i - 1
+                exit
+            end if
+        end do
+
+        idx_col_map = 0
+        do i = idx_extra + 1, extra_end
+            if (len_trim(lines(i)) == 0) cycle
+            if (trim(adjustl(lines(i))) == "col_map:") then
+                idx_col_map = i
+                exit
+            end if
+        end do
+        if (idx_col_map == 0) return
+
+        do i = idx_col_map + 1, extra_end
+            if (len_trim(lines(i)) == 0) cycle
+
+            tline = trim(adjustl(lines(i)))
+            if (tline(1:1) /= "-") exit
+            tline = trim(adjustl(tline(2:)))
+            if (len_trim(tline) == 0) cycle
+
+            call parquet_split_key_value(tline, key, cvalue)
+            if (len_trim(key) == 0 .or. len_trim(cvalue) == 0) cycle
+
+            n_entries = size(col_map)
+            allocate(tmp(n_entries + 1))
+            if (n_entries > 0) tmp(1:n_entries) = col_map
+            tmp(n_entries + 1)%internal_name = parquet_unquote(key)
+            tmp(n_entries + 1)%output_name = parquet_unquote(cvalue)
+            call move_alloc(tmp, col_map)
+        end do
+    end function parquet_parse_col_map
 
     !> Checks that every top-level section in `lines`, every sub-key found
     !> one level inside a map-list section's items (e.g. "name:"/"data_type:"/

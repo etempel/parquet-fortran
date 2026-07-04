@@ -41,6 +41,12 @@ contains
             new_unittest("validating a MAML with an unknown qc: sub-key aborts", &
                 test_validate_unknown_qc_subkey_aborts), &
             new_unittest("user MAML with unknown column aborts", test_validate_user_maml_unknown_column_aborts), &
+            new_unittest("col_map: referencing an unknown internal column aborts", &
+                test_validate_col_map_unknown_internal_aborts), &
+            new_unittest("col_map: duplicate internal column key aborts", &
+                test_validate_col_map_duplicate_internal_aborts), &
+            new_unittest("col_map: two internal columns colliding on the same output name aborts", &
+                test_validate_col_map_output_collision_aborts), &
             new_unittest("get_column_index on unknown column aborts", test_get_column_index_not_found_aborts), &
             new_unittest("write_maml without metadata aborts", test_write_maml_without_metadata_aborts) &
             ]
@@ -129,6 +135,27 @@ contains
         call check_scenario_exit_status(error, "validate_user_maml_unknown_column", expect_abort=.true., &
             failure_message="validating a user MAML with an unknown column was expected to error stop")
     end subroutine test_validate_user_maml_unknown_column_aborts
+
+    subroutine test_validate_col_map_unknown_internal_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "validate_col_map_unknown_internal", expect_abort=.true., &
+            failure_message="col_map: referencing an internal column not in the base MAML was expected to error stop")
+    end subroutine test_validate_col_map_unknown_internal_aborts
+
+    subroutine test_validate_col_map_duplicate_internal_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "validate_col_map_duplicate_internal", expect_abort=.true., &
+            failure_message="col_map: a duplicate internal column key was expected to error stop")
+    end subroutine test_validate_col_map_duplicate_internal_aborts
+
+    subroutine test_validate_col_map_output_collision_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "validate_col_map_output_collision", expect_abort=.true., &
+            failure_message="col_map: two internal columns mapped to the same output name was expected to error stop")
+    end subroutine test_validate_col_map_output_collision_aborts
 
     subroutine test_get_column_index_not_found_aborts(error)
         type(error_type), allocatable, intent(out) :: error

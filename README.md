@@ -425,6 +425,16 @@ WARNING: qc violation for column 'ra': declared min >= 0, max < 360, data range 
 ```
 This only applies when writing against a MAML-derived schema (`parquet_open_writer(..., cinfo, ...)`) and only for columns that actually declare `qc: min:`/`max:`; omitting `qc=.true.` (the default) skips the check entirely, same as before this feature existed.
 
+### Compression and row group size
+
+`parquet_open_writer` also accepts:
+```fortran
+call parquet_open_writer(writer, "data.parquet", compression="zstd", compression_level=9, chunk_size=100000)
+```
+- `compression` — one of `"uncompressed"`, `"snappy"` (the default), `"gzip"`, `"zstd"`, `"brotli"`, `"lz4"` (case-insensitive); an unrecognized name errors out immediately. Note that Parquet-the-library's own built-in default is actually `"uncompressed"` — this library deliberately follows the ecosystem convention (pyarrow, Spark, ...) of defaulting to `"snappy"` instead, since writing uncompressed files was never an intentional choice, just an unset option. Rough guidance: `snappy`/`lz4` for fastest read/write at a modest size reduction; `gzip`/`brotli` for the smallest files at the cost of slower compression; `zstd` for the best all-round balance of the two (and the only one of these with a meaningfully tunable `compression_level`, roughly 1–22 for higher-ratio/slower).
+- `compression_level` — optional integer tuning the chosen codec's compression level (mainly meaningful for `zstd`/`gzip`/`brotli`); omitted means "use that codec's own default level".
+- `chunk_size` — the maximum number of rows per Parquet row group (default `1024`, matching this library's previous hardcoded behavior). Larger values reduce per-row-group overhead and can improve compression (more data for the compressor to find patterns in), at the cost of more memory needed to read/write one row group at a time; smaller values let readers that only need a few rows skip more of the file.
+
 ## parquet module API (functions/subroutines)
 
 List of public callable procedures available with `use parquet`:
@@ -452,7 +462,7 @@ The public derived type `parquet_table_metadata` provides:
 
 ### Writer
 
-- `parquet_open_writer(writer, filename[, cinfo, metadata, write_maml, qc])` — opens `filename` for writing. `cinfo`/`metadata` are optional; see the schema-enforcement note above. `write_maml` (default `.false.`) additionally saves a sidecar `.maml` file next to `filename` with the MAML source that produced `metadata`; see [Saving the source MAML alongside the parquet file](#saving-the-source-maml-alongside-the-parquet-file). `qc` (default `.false.`) turns on `qc: min:`/`max:` range-check warnings during writing; see [Quality control (qc:) range checks on write](#quality-control-qc-range-checks-on-write).
+- `parquet_open_writer(writer, filename[, cinfo, metadata, write_maml, qc, compression, compression_level, chunk_size])` — opens `filename` for writing. `cinfo`/`metadata` are optional; see the schema-enforcement note above. `write_maml` (default `.false.`) additionally saves a sidecar `.maml` file next to `filename` with the MAML source that produced `metadata`; see [Saving the source MAML alongside the parquet file](#saving-the-source-maml-alongside-the-parquet-file). `qc` (default `.false.`) turns on `qc: min:`/`max:` range-check warnings during writing; see [Quality control (qc:) range checks on write](#quality-control-qc-range-checks-on-write). `compression`/`compression_level`/`chunk_size` control the output file's compression codec and row group size; see [Compression and row group size](#compression-and-row-group-size).
 - `parquet_write_column(writer, name, values)` — writes one full column named `name`. `values` may be any [supported type](#supported-data-types), passed as a 1D array (`values(:)`) for a plain column or a 2D array (`values(col_size, nrows)`) for a vector/array column.
 - `parquet_close_writer(writer)` — flushes buffered data and finalizes the file. Always call this before the program ends, or the file may be incomplete/unreadable.
 

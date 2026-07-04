@@ -14,6 +14,15 @@ module parquet_bindings
             type(c_ptr) :: writer
         end function
 
+        subroutine parquet_set_writer_options(writer, compression_name, compression_level, chunk_size) &
+                bind(C, name="parquet_set_writer_options")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: compression_name(*)
+            integer(c_int), value :: compression_level
+            integer(c_long_long), value :: chunk_size
+        end subroutine
+
         function create_parquet_reader(filename) &
                 bind(C, name="create_parquet_reader") result(reader)
             import

@@ -86,6 +86,8 @@ program error_scenarios
         call scenario_qc_warning_string()
     case ("qc_silently_ignored_for_boolean")
         call scenario_qc_silently_ignored_for_boolean()
+    case ("write_unknown_compression")
+        call scenario_write_unknown_compression()
     case default
         print '(a)', "unknown scenario: "//trim(scenario)
         stop 1
@@ -621,5 +623,16 @@ contains
         call parquet_write_column(writer, "b", values)
         call parquet_close_writer(writer)
     end subroutine scenario_qc_silently_ignored_for_boolean
+
+    subroutine scenario_write_unknown_compression()
+        type(parquet_writer) :: writer
+        integer(int32) :: values(1) = [1_int32]
+
+        call parquet_open_writer(writer, "test_run/error_scenario_unknown_compression.parquet", &
+            compression="not_a_real_codec")
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly opened a writer with an unknown compression codec without error"
+    end subroutine scenario_write_unknown_compression
 
 end program error_scenarios

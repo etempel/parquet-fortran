@@ -69,7 +69,14 @@ contains
             new_unittest("qc=.true. prints a WARNING for an out-of-range string value", &
                 test_qc_warning_printed_for_string_violation), &
             new_unittest("qc: on a boolean field is accepted but never enforced", &
-                test_qc_silently_ignored_for_boolean) &
+                test_qc_silently_ignored_for_boolean), &
+            new_unittest("compression=gzip round-trips and shrinks a compressible file", &
+                test_compression_gzip_round_trip), &
+            new_unittest("compression=uncompressed writes a larger file than the snappy default", &
+                test_compression_uncompressed_larger_than_default), &
+            new_unittest("an unknown compression codec aborts", test_compression_unknown_aborts), &
+            new_unittest("chunk_size forces multiple row groups and still round-trips", &
+                test_chunk_size_round_trip) &
             ]
         !
     end subroutine collect_tests_parquet_writing
@@ -725,6 +732,128 @@ contains
         end do
         close(unit)
     end subroutine file_contains
+
+    subroutine test_compression_gzip_round_trip(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: values(2000), read_back(2000)
+        integer(int64) :: nrows
+        character(len=*), parameter :: out_file = "test_run/test_compression_gzip.parquet"
+
+        values = 42_int32
+
+        call parquet_open_writer(writer, out_file, compression="gzip")
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_read_column(reader, "v", read_back)
+        call parquet_close_reader(reader)
+
+        call check(error, nrows == 2000_int64 .and. all(read_back == values), &
+            "compression=gzip did not round-trip the written data correctly")
+    end subroutine test_compression_gzip_round_trip
+
+    !> A single repeated value is fully collapsed by Parquet's own default
+    !> dictionary encoding regardless of the compression codec on top, so
+    !> that can't be used to demonstrate a codec-driven size difference. This
+    !> test instead uses long, highly repetitive but mutually distinct
+    !> strings (a run of "A"s plus a distinguishing per-row suffix): too many
+    !> distinct values for dictionary encoding to collapse them away, but
+    !> still very compressible at the byte level, so compression="gzip"
+    !> (a strong, reliable ratio) must produce a smaller file than the same
+    !> data written with compression="uncompressed".
+    subroutine test_compression_uncompressed_larger_than_default(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        character(len=256) :: values(2000)
+        character(len=*), parameter :: gzip_file = "test_run/test_compression_gzip_size.parquet"
+        character(len=*), parameter :: uncompressed_file = "test_run/test_compression_uncompressed.parquet"
+        integer(int64) :: gzip_size, uncompressed_size
+        logical :: exists
+        integer :: i
+
+        do i = 1, size(values)
+            values(i) = repeat("A", 240)
+            write(values(i)(241:256), '(i16.16)') i
+        end do
+
+        call parquet_open_writer(writer, gzip_file, compression="gzip")
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_writer(writer, uncompressed_file, compression="uncompressed")
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+
+        inquire(file=gzip_file, exist=exists, size=gzip_size)
+        call check(error, exists, "gzip-compression output file was not created")
+        if (allocated(error)) return
+
+        inquire(file=uncompressed_file, exist=exists, size=uncompressed_size)
+        call check(error, exists, "uncompressed output file was not created")
+        if (allocated(error)) return
+
+        call check(error, uncompressed_size > gzip_size, &
+            "expected compression=uncompressed to produce a larger file than compression=gzip")
+    end subroutine test_compression_uncompressed_larger_than_default
+
+    subroutine test_compression_unknown_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_local(error, "write_unknown_compression", expect_abort=.true., &
+            failure_message="an unknown compression codec name was expected to error stop")
+    end subroutine test_compression_unknown_aborts
+
+    !> A small chunk_size (row group length) relative to the row count forces
+    !> multiple row groups; the file must still read back correctly.
+    subroutine test_chunk_size_round_trip(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: values(10)
+        integer(int32) :: read_back(10)
+        integer(int64) :: nrows
+        character(len=*), parameter :: out_file = "test_run/test_chunk_size.parquet"
+        integer :: i
+
+        values = [(i, i=1,10)]
+
+        call parquet_open_writer(writer, out_file, chunk_size=2)
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_read_column(reader, "v", read_back)
+        call parquet_close_reader(reader)
+
+        call check(error, nrows == 10_int64 .and. all(read_back == values), &
+            "chunk_size=2 (multiple row groups) did not round-trip the written data correctly")
+    end subroutine test_chunk_size_round_trip
+
+    !> Mirrors test_errors.f90's check_scenario_exit_status, duplicated here
+    !> (rather than exposed from test_errors) since it's test-module-private
+    !> plumbing, not part of that module's public collect_tests_* interface.
+    subroutine check_scenario_exit_status_local(error, scenario, expect_abort, failure_message)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), intent(in) :: scenario, failure_message
+        logical, intent(in) :: expect_abort
+        integer :: exitstat, cmdstat
+        logical :: aborted
+
+        call execute_command_line( &
+            "fpm test error_scenarios -- "//trim(scenario)//" > /dev/null 2>&1", &
+            wait=.true., exitstat=exitstat, cmdstat=cmdstat)
+
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper program via fpm")
+        if (allocated(error)) return
+
+        aborted = (exitstat /= 0)
+        call check(error, aborted .eqv. expect_abort, failure_message)
+    end subroutine check_scenario_exit_status_local
 
     subroutine test_write_parquet_file(error)
         type(error_type), allocatable, intent(out) :: error

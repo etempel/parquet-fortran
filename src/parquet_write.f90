@@ -320,11 +320,45 @@ contains
     end procedure parquet_get_column_array_size
 
     module procedure parquet_open_writer
-        integer :: i, k, n_enabled
+        integer :: i, k, n_enabled, jc
+        character(len=:), allocatable :: compression_name
+        integer :: level_value, chunk_size_value
+        logical :: comp_ok
+        character(len=12), parameter :: valid_compressions(6) = [character(len=12) :: &
+            "uncompressed", "snappy", "gzip", "zstd", "brotli", "lz4"]
 
         writer%handle = create_parquet_writer(trim(filename)//char(0))
         writer%enforce_schema = present(cinfo)
         if (present(qc)) writer%qc = qc
+
+        ! Defaults to "snappy" -- Parquet-the-library's own built-in default is
+        ! actually "uncompressed" (confirmed in parquet/properties.h), but the
+        ! ecosystem convention on top of it (pyarrow, Spark, ...) is snappy,
+        ! and this library intentionally follows that convention rather than
+        ! the raw library default.
+        compression_name = "snappy"
+        if (present(compression)) compression_name = parquet_to_lower(trim(compression))
+
+        comp_ok = .false.
+        do jc = 1, size(valid_compressions)
+            if (trim(compression_name) == trim(valid_compressions(jc))) then
+                comp_ok = .true.
+                exit
+            end if
+        end do
+        if (.not. comp_ok) then
+            error stop "parquet_open_writer: unknown compression codec '" // trim(compression_name) // &
+                "' (expected one of: uncompressed, snappy, gzip, zstd, brotli, lz4)"
+        end if
+
+        level_value = -huge(level_value) - 1 ! Arrow's kUseDefaultCompressionLevel sentinel (INT_MIN): "use the codec's own default".
+        if (present(compression_level)) level_value = compression_level
+
+        chunk_size_value = 1024
+        if (present(chunk_size)) chunk_size_value = chunk_size
+
+        call parquet_set_writer_options(writer%handle, trim(compression_name)//char(0), &
+            int(level_value, kind=c_int), int(chunk_size_value, kind=c_long_long))
 
         if (present(cinfo)) then
             allocate(writer%all_columns(size(cinfo%col)))

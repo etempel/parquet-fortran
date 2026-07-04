@@ -272,13 +272,17 @@ module parquet
             character(len=*), intent(in) :: name
         end function parquet_get_column_array_size
 
-        module subroutine parquet_open_writer(writer, filename, cinfo, metadata, write_maml, qc)
+        module subroutine parquet_open_writer(writer, filename, cinfo, metadata, write_maml, qc, &
+                compression, compression_level, chunk_size)
             type(parquet_writer), intent(out) :: writer
             character(len=*), intent(in) :: filename
             type(parquet_column_info), intent(in), optional :: cinfo
             type(parquet_table_metadata), intent(in), optional :: metadata
             logical, intent(in), optional :: write_maml
             logical, intent(in), optional :: qc
+            character(len=*), intent(in), optional :: compression
+            integer, intent(in), optional :: compression_level
+            integer, intent(in), optional :: chunk_size
         end subroutine parquet_open_writer
 
         module subroutine parquet_add_column_info(writer, name, unit, description, ucd, data_type, array_size, col_size)

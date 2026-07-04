@@ -44,6 +44,9 @@ extern "C"
 		std::vector<std::shared_ptr<arrow::Array>> arrays;
 		std::vector<ColumnMetadata> column_metadata;
 		std::vector<TableMetadataEntry> table_metadata;
+		arrow::Compression::type compression_codec = arrow::Compression::SNAPPY;
+		int compression_level = arrow::util::kUseDefaultCompressionLevel;
+		int64_t chunk_size = 1024;
 	};
 
 	struct ParquetReaderHandle
@@ -442,6 +445,29 @@ extern "C"
 		auto *handle = new ParquetWriterHandle{};
 		handle->outfile = arrow::io::FileOutputStream::Open(filename).ValueOrDie();
 		return handle;
+	}
+
+	// compression_name is expected already-lowercased (Fortran side does this via
+	// parquet_to_lower before calling). Only the mainstream, always-available
+	// codecs are exposed here; lzo/bz2/lz4_hadoop are niche and some Arrow builds
+	// don't even compile support for them in, so they're deliberately left out.
+	static arrow::Compression::type parse_compression_name(const std::string &compression_name)
+	{
+		if (compression_name == "uncompressed") return arrow::Compression::UNCOMPRESSED;
+		if (compression_name == "snappy") return arrow::Compression::SNAPPY;
+		if (compression_name == "gzip") return arrow::Compression::GZIP;
+		if (compression_name == "zstd") return arrow::Compression::ZSTD;
+		if (compression_name == "brotli") return arrow::Compression::BROTLI;
+		if (compression_name == "lz4") return arrow::Compression::LZ4_FRAME;
+		throw std::runtime_error("Unknown compression codec: " + compression_name);
+	}
+
+	void parquet_set_writer_options(void *handle, const char *compression_name, int compression_level, int64_t chunk_size)
+	{
+		auto writer_handle = as_handle(handle);
+		writer_handle->compression_codec = parse_compression_name(compression_name);
+		writer_handle->compression_level = compression_level;
+		writer_handle->chunk_size = chunk_size;
 	}
 
 	void *create_parquet_reader(const char *filename)
@@ -1657,13 +1683,16 @@ extern "C"
 		parquet::ArrowWriterProperties::Builder arrow_writer_builder;
 		arrow_writer_builder.store_schema();
 		auto arrow_writer_properties = arrow_writer_builder.build();
-		auto writer_properties = parquet::WriterProperties::Builder().build();
+		auto writer_properties = parquet::WriterProperties::Builder()
+			.compression(writer_handle->compression_codec)
+			->compression_level(writer_handle->compression_level)
+			->build();
 
 		auto status = parquet::arrow::WriteTable(
 			*table,
 			arrow::default_memory_pool(),
 			writer_handle->outfile,
-			1024,
+			writer_handle->chunk_size,
 			writer_properties,
 			arrow_writer_properties);
 		if (!status.ok())

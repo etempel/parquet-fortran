@@ -10,6 +10,73 @@ submodule (parquet) parquet_metadata
     character(len=7), parameter :: valid_maml_data_types(6) = [character(len=7) :: &
         "int32", "int64", "string", "boolean", "float32", "float64"]
 
+    ! Schema of allowed top-level MAML sections and, for sections whose list
+    ! items are maps (e.g. "fields:", "keyarray:"), the allowed sub-keys within
+    ! each item -- checked (presence only, not content) by parquet_validate_maml.
+    !
+    ! To allow a new top-level section, add an entry here. To allow a new
+    ! sub-key within an existing map-list section's items, add a name to that
+    ! entry's subkeys(:) (unused slots must stay ""). Section/sub-key names are
+    ! matched case-insensitively. Sections with an empty subkeys(:) are either
+    ! plain scalars (survey:, table:, ...) or plain string lists (comments:,
+    ! keywords:, ...): their list items (if any) are opaque strings, not maps,
+    ! so no sub-keys are validated for them.
+    !
+    ! "extra:" is the sole exception: opaque = .true. means its entire
+    ! internal structure (arbitrarily nested) is accepted unvalidated.
+    !
+    ! Sub-keys are only checked one level into a list item (e.g. fields:'s
+    ! "qc:"); anything nested deeper than that (e.g. qc:'s own min/max/miss)
+    ! is not descended into or validated, the same as extra:.
+    integer, parameter :: maml_max_subkeys = 8
+
+    type :: maml_section_schema
+        character(len=32) :: name = ""
+        logical :: opaque = .false.
+        character(len=32) :: subkeys(maml_max_subkeys) = ""
+    end type maml_section_schema
+
+    ! Schema for sub-keys allowed one level deeper than allowed_maml_sections,
+    ! i.e. inside a specific sub-key of a map-list item -- currently just
+    ! fields:'s "qc:" sub-block (min/max/miss). Add an entry here for any
+    ! other sub-key that itself has structured children needing validation;
+    ! anything not listed here is left unvalidated at that depth (see
+    ! parquet_validate_maml_sections).
+    integer, parameter :: maml_max_nested_subkeys = 4
+
+    type :: maml_nested_schema
+        character(len=32) :: parent_section = ""
+        character(len=32) :: parent_subkey = ""
+        character(len=32) :: subkeys(maml_max_nested_subkeys) = ""
+    end type maml_nested_schema
+
+    type(maml_nested_schema), parameter :: allowed_maml_nested_sections(1) = [ &
+        maml_nested_schema("fields", "qc", [character(len=32) :: "min", "max", "miss", ""]) &
+        ]
+
+    type(maml_section_schema), parameter :: allowed_maml_sections(17) = [ &
+        maml_section_schema("survey",      .false., [character(len=32) :: "", "", "", "", "", "", "", ""]), &
+        maml_section_schema("dataset",     .false., [character(len=32) :: "", "", "", "", "", "", "", ""]), &
+        maml_section_schema("table",       .false., [character(len=32) :: "", "", "", "", "", "", "", ""]), &
+        maml_section_schema("version",     .false., [character(len=32) :: "", "", "", "", "", "", "", ""]), &
+        maml_section_schema("date",        .false., [character(len=32) :: "", "", "", "", "", "", "", ""]), &
+        maml_section_schema("author",      .false., [character(len=32) :: "", "", "", "", "", "", "", ""]), &
+        maml_section_schema("coauthors",   .false., [character(len=32) :: "", "", "", "", "", "", "", ""]), &
+        maml_section_schema("dois",        .false., [character(len=32) :: "doi", "type", "", "", "", "", "", ""]), &
+        maml_section_schema("depends",     .false., &
+            [character(len=32) :: "survey", "dataset", "table", "version", "", "", "", ""]), &
+        maml_section_schema("description", .false., [character(len=32) :: "", "", "", "", "", "", "", ""]), &
+        maml_section_schema("comments",    .false., [character(len=32) :: "", "", "", "", "", "", "", ""]), &
+        maml_section_schema("license",     .false., [character(len=32) :: "", "", "", "", "", "", "", ""]), &
+        maml_section_schema("keywords",    .false., [character(len=32) :: "", "", "", "", "", "", "", ""]), &
+        maml_section_schema("maml_version", .false., [character(len=32) :: "", "", "", "", "", "", "", ""]), &
+        maml_section_schema("keyarray",    .false., &
+            [character(len=32) :: "key", "value", "comment", "", "", "", "", ""]), &
+        maml_section_schema("extra",       .true.,  [character(len=32) :: "", "", "", "", "", "", "", ""]), &
+        maml_section_schema("fields",      .false., &
+            [character(len=32) :: "name", "unit", "info", "ucd", "data_type", "array_size", "col_size", "qc"]) &
+        ]
+
 contains
 
     module procedure parquet_read_maml_file
@@ -142,7 +209,7 @@ contains
         call move_alloc(merged, cinfo%col)
     end subroutine parquet_merge_missing_columns
 
-    module procedure parquet_validate_maml
+    module procedure parquet_validate_maml_internal
         type(parquet_column_info) :: cinfo
         type(parquet_table_metadata) :: metadata
         character(len=:), allocatable :: errors
@@ -201,10 +268,22 @@ contains
         end if
         if (.not. has_table) errors = errors // "missing required non-empty metadata: table; "
 
+        call parquet_validate_maml_sections(maml%lines, errors)
+
         if (len_trim(errors) > 0) then
             error stop "parquet_validate_maml: " // trim(errors)
         end if
-    end procedure parquet_validate_maml
+    end procedure parquet_validate_maml_internal
+
+    !> Loads maml_filename from disk and validates it (parquet_load_maml_file
+    !> already validates internally, but this keeps that requirement explicit
+    !> and self-contained here rather than depending on that side effect).
+    module procedure parquet_validate_maml_file
+        type(parquet_maml_file) :: maml
+
+        maml = parquet_load_maml_file(maml_filename)
+        call parquet_validate_maml_internal(maml)
+    end procedure parquet_validate_maml_file
 
     module procedure parquet_load_maml_file
         character(len=1024), allocatable :: lines(:)
@@ -243,11 +322,13 @@ contains
         type(parquet_column_type), allocatable :: tmp(:)
         character(len=1024) :: line
         character(len=:), allocatable :: tline, key, cvalue
-        logical :: in_fields, have_current, in_list, in_field_list, in_keyarray, in_doiarray
+        logical :: in_fields, have_current, in_list, in_field_list, in_keyarray, in_doiarray, in_dependsarray
         character(len=:), allocatable :: list_key, field_list_key, list_item
         character(len=:), allocatable :: ka_key, ka_value, ka_comment
         character(len=:), allocatable :: doi_value, doi_type
-        integer :: ios, n, i, list_item_idx, doi_idx
+        character(len=:), allocatable :: depends_survey, depends_dataset, depends_table, depends_version
+        character(len=:), allocatable :: keywords_value
+        integer :: ios, n, i, list_item_idx, doi_idx, depends_idx
         character(len=32) :: idx_buf
 
         in_fields = .false.
@@ -256,8 +337,10 @@ contains
         in_field_list = .false.
         in_keyarray = .false.
         in_doiarray = .false.
+        in_dependsarray = .false.
         list_item_idx = 0
         doi_idx = 0
+        depends_idx = 0
         n = 0
         list_key = ""
         field_list_key = ""
@@ -266,6 +349,11 @@ contains
         ka_comment = ""
         doi_value = ""
         doi_type = ""
+        depends_survey = ""
+        depends_dataset = ""
+        depends_table = ""
+        depends_version = ""
+        keywords_value = ""
         if (allocated(metadata%items)) deallocate(metadata%items)
 
         do i = 1, size(lines)
@@ -328,6 +416,49 @@ contains
                     end if
                 end if
 
+                if (in_dependsarray) then
+                    if (index(tline, "-") == 1 .and. line(1:1) /= " ") then
+                        call parquet_flush_depends_item(metadata, depends_idx, &
+                            depends_survey, depends_dataset, depends_table, depends_version)
+                        depends_survey = ""
+                        depends_dataset = ""
+                        depends_table = ""
+                        depends_version = ""
+                        tline = trim(adjustl(tline(2:)))
+                        if (len_trim(tline) > 0) then
+                            call parquet_split_key_value(tline, key, cvalue)
+                            select case (parquet_to_lower(key))
+                            case ("survey")
+                                depends_survey = parquet_unquote(cvalue)
+                            case ("dataset")
+                                depends_dataset = parquet_unquote(cvalue)
+                            case ("table")
+                                depends_table = parquet_unquote(cvalue)
+                            case ("version")
+                                depends_version = parquet_unquote(cvalue)
+                            end select
+                        end if
+                        cycle
+                    else if (line(1:1) == " " .and. index(tline, ":") > 0) then
+                        call parquet_split_key_value(tline, key, cvalue)
+                        select case (parquet_to_lower(key))
+                        case ("survey")
+                            depends_survey = parquet_unquote(cvalue)
+                        case ("dataset")
+                            depends_dataset = parquet_unquote(cvalue)
+                        case ("table")
+                            depends_table = parquet_unquote(cvalue)
+                        case ("version")
+                            depends_version = parquet_unquote(cvalue)
+                        end select
+                        cycle
+                    else
+                        call parquet_flush_depends_item(metadata, depends_idx, &
+                            depends_survey, depends_dataset, depends_table, depends_version)
+                        in_dependsarray = .false.
+                    end if
+                end if
+
                 if (in_list) then
                     if (index(tline, "- ") == 1) then
                         list_item_idx = list_item_idx + 1
@@ -337,11 +468,21 @@ contains
                         else if (list_key == "coauthors" .or. list_key == "coauthor") then
                             write(idx_buf, '(I0)') list_item_idx
                             call metadata%add_metadata("coauthor_" // trim(idx_buf), parquet_unquote(tline(3:)))
+                        else if (list_key == "keywords" .or. list_key == "keyword") then
+                            if (len_trim(keywords_value) > 0) then
+                                keywords_value = trim(keywords_value) // ";" // trim(parquet_unquote(tline(3:)))
+                            else
+                                keywords_value = trim(parquet_unquote(tline(3:)))
+                            end if
                         else
                             call metadata%add_metadata(list_key, parquet_unquote(tline(3:)))
                         end if
                         cycle
                     else if (index(tline, ":") > 0 .and. line(1:1) /= " ") then
+                        if (list_key == "keywords" .or. list_key == "keyword") then
+                            call parquet_flush_keywords(metadata, keywords_value)
+                            keywords_value = ""
+                        end if
                         in_list = .false.
                     else
                         cycle
@@ -364,6 +505,16 @@ contains
                     doi_idx = 0
                     doi_value = ""
                     doi_type = ""
+                    cycle
+                end if
+
+                if (parquet_to_lower(tline) == "depends:") then
+                    in_dependsarray = .true.
+                    depends_idx = 0
+                    depends_survey = ""
+                    depends_dataset = ""
+                    depends_table = ""
+                    depends_version = ""
                     cycle
                 end if
 
@@ -449,6 +600,11 @@ contains
 
         if (in_keyarray) call parquet_flush_keyarray_item(metadata, ka_key, ka_value, ka_comment)
         if (in_doiarray) call parquet_flush_doi_item(metadata, doi_idx, doi_value, doi_type)
+        if (in_dependsarray) call parquet_flush_depends_item(metadata, depends_idx, &
+            depends_survey, depends_dataset, depends_table, depends_version)
+        if (in_list .and. (list_key == "keywords" .or. list_key == "keyword")) then
+            call parquet_flush_keywords(metadata, keywords_value)
+        end if
 
         if (n <= 0) then
             allocate(cinfo%col(0))
@@ -887,5 +1043,227 @@ contains
         write(idx_buf, '(I0)') doi_idx
         call metadata%add_metadata("DOI_" // trim(idx_buf), trim(doi_value), trim(doi_type))
     end subroutine parquet_flush_doi_item
+
+    !> Combines one `depends:` list entry's survey/dataset/table/version
+    !> sub-keys into a single "survey;dataset;table;version" string, stored
+    !> as table-level metadata "depends_N" (matching the coauthor_N/comment_N
+    !> naming already used for other simple list sections). Skipped entirely
+    !> if the entry had none of the four sub-keys set.
+    subroutine parquet_flush_depends_item(metadata, depends_idx, survey, dataset, table, version)
+        type(parquet_table_metadata), intent(inout) :: metadata
+        integer, intent(inout) :: depends_idx
+        character(len=*), intent(in) :: survey, dataset, table, version
+        character(len=32) :: idx_buf
+
+        if (len_trim(survey) == 0 .and. len_trim(dataset) == 0 .and. &
+            len_trim(table) == 0 .and. len_trim(version) == 0) return
+
+        depends_idx = depends_idx + 1
+        write(idx_buf, '(I0)') depends_idx
+        call metadata%add_metadata("depends_" // trim(idx_buf), &
+            trim(survey) // ";" // trim(dataset) // ";" // trim(table) // ";" // trim(version))
+    end subroutine parquet_flush_depends_item
+
+    !> Stores a `keywords:` (or `keyword:`) plain-string list as a single
+    !> semicolon-separated "keywords" metadata entry, rather than one entry
+    !> per item (which is what a generic plain-string list gets otherwise).
+    subroutine parquet_flush_keywords(metadata, keywords_value)
+        type(parquet_table_metadata), intent(inout) :: metadata
+        character(len=*), intent(in) :: keywords_value
+
+        if (len_trim(keywords_value) == 0) return
+        call metadata%add_metadata("keywords", trim(keywords_value))
+    end subroutine parquet_flush_keywords
+
+    !> Checks that every top-level section in `lines`, every sub-key found
+    !> one level inside a map-list section's items (e.g. "name:"/"data_type:"/
+    !> ... inside a fields: entry), and every sub-key one level deeper still
+    !> where allowed_maml_nested_sections declares one (currently just
+    !> fields:'s "qc:" sub-block), is declared in the schema. Presence only:
+    !> values are not inspected. Anything nested deeper than that, or
+    !> anywhere inside "extra:", is left unvalidated.
+    !> Appends one "; "-terminated message per unrecognized name to `errors`.
+    subroutine parquet_validate_maml_sections(lines, errors)
+        character(len=*), intent(in) :: lines(:)
+        character(len=:), allocatable, intent(inout) :: errors
+        character(len=:), allocatable :: tline, item_tline, key, cvalue
+        character(len=32) :: current_subkey
+        integer :: i, n, indent, item_indent, section_idx, nested_idx
+        logical :: have_item_indent, section_opaque
+
+        n = size(lines)
+        section_idx = 0
+        section_opaque = .false.
+        have_item_indent = .false.
+        item_indent = 0
+        current_subkey = ""
+
+        do i = 1, n
+            tline = trim(adjustl(lines(i)))
+            if (len_trim(tline) == 0) cycle
+            if (tline(1:1) == "#") cycle
+
+            indent = parquet_line_indent(lines(i))
+
+            if (indent == 0 .and. tline(1:1) /= "-") then
+                ! A new top-level section.
+                call parquet_split_key_value(tline, key, cvalue)
+                if (len_trim(key) == 0) cycle
+                section_idx = parquet_find_maml_section(key)
+                if (section_idx == 0) then
+                    errors = errors // "unknown top-level section '" // trim(key) // "'; "
+                    section_opaque = .true.
+                else
+                    section_opaque = allowed_maml_sections(section_idx)%opaque
+                end if
+                have_item_indent = .false.
+                current_subkey = ""
+                cycle
+            end if
+
+            if (section_opaque .or. section_idx == 0) cycle
+
+            if (indent == 0 .and. tline(1:1) == "-") then
+                ! Start of a new list item; the dash line may itself carry
+                ! the item's first sub-key, e.g. "- name: id0".
+                have_item_indent = .false.
+                current_subkey = ""
+                if (parquet_section_has_subkeys(section_idx)) then
+                    item_tline = trim(adjustl(tline(2:)))
+                    if (len_trim(item_tline) > 0) then
+                        call parquet_split_key_value(item_tline, key, cvalue)
+                        if (len_trim(key) > 0) then
+                            call parquet_check_maml_subkey(section_idx, key, errors)
+                            current_subkey = key
+                        end if
+                    end if
+                end if
+                cycle
+            end if
+
+            ! Indented continuation line.
+            if (.not. have_item_indent) then
+                item_indent = indent
+                have_item_indent = .true.
+            end if
+
+            if (indent > item_indent) then
+                ! Nested one level deeper than the item's direct sub-keys
+                ! (e.g. fields:'s "qc:" children): only validated where
+                ! allowed_maml_nested_sections declares a schema for the
+                ! enclosing sub-key; anything else is left unvalidated here.
+                nested_idx = parquet_find_maml_nested_section(allowed_maml_sections(section_idx)%name, current_subkey)
+                if (nested_idx == 0) cycle
+                if (index(tline, ":") == 0) cycle
+                call parquet_split_key_value(tline, key, cvalue)
+                if (len_trim(key) > 0) call parquet_check_maml_nested_subkey(nested_idx, key, errors)
+                cycle
+            end if
+
+            if (.not. parquet_section_has_subkeys(section_idx)) cycle
+            if (index(tline, ":") == 0) cycle
+
+            call parquet_split_key_value(tline, key, cvalue)
+            if (len_trim(key) > 0) then
+                call parquet_check_maml_subkey(section_idx, key, errors)
+                current_subkey = key
+            end if
+        end do
+    end subroutine parquet_validate_maml_sections
+
+    function parquet_line_indent(line) result(indent)
+        character(len=*), intent(in) :: line
+        integer :: indent, k
+
+        do k = 1, len(line)
+            if (line(k:k) /= " ") then
+                indent = k - 1
+                return
+            end if
+        end do
+        indent = len(line)
+    end function parquet_line_indent
+
+    function parquet_find_maml_section(key) result(idx)
+        character(len=*), intent(in) :: key
+        integer :: idx, k
+
+        idx = 0
+        do k = 1, size(allowed_maml_sections)
+            if (trim(parquet_to_lower(allowed_maml_sections(k)%name)) == trim(parquet_to_lower(key))) then
+                idx = k
+                return
+            end if
+        end do
+    end function parquet_find_maml_section
+
+    function parquet_section_has_subkeys(section_idx) result(has_subkeys)
+        integer, intent(in) :: section_idx
+        logical :: has_subkeys
+
+        has_subkeys = any(len_trim(allowed_maml_sections(section_idx)%subkeys) > 0)
+    end function parquet_section_has_subkeys
+
+    function parquet_find_maml_nested_section(parent_section, parent_subkey) result(idx)
+        character(len=*), intent(in) :: parent_section, parent_subkey
+        integer :: idx, k
+
+        idx = 0
+        if (len_trim(parent_subkey) == 0) return
+        do k = 1, size(allowed_maml_nested_sections)
+            if (trim(parquet_to_lower(allowed_maml_nested_sections(k)%parent_section)) == &
+                trim(parquet_to_lower(parent_section)) .and. &
+                trim(parquet_to_lower(allowed_maml_nested_sections(k)%parent_subkey)) == &
+                trim(parquet_to_lower(parent_subkey))) then
+                idx = k
+                return
+            end if
+        end do
+    end function parquet_find_maml_nested_section
+
+    subroutine parquet_check_maml_nested_subkey(nested_idx, key, errors)
+        integer, intent(in) :: nested_idx
+        character(len=*), intent(in) :: key
+        character(len=:), allocatable, intent(inout) :: errors
+        logical :: ok
+        integer :: k
+
+        ok = .false.
+        do k = 1, maml_max_nested_subkeys
+            if (len_trim(allowed_maml_nested_sections(nested_idx)%subkeys(k)) == 0) cycle
+            if (trim(parquet_to_lower(allowed_maml_nested_sections(nested_idx)%subkeys(k))) == &
+                trim(parquet_to_lower(key))) then
+                ok = .true.
+                exit
+            end if
+        end do
+        if (.not. ok) then
+            errors = errors // "unknown sub-key '" // trim(key) // "' in '" // &
+                trim(allowed_maml_nested_sections(nested_idx)%parent_subkey) // ":' block (inside section '" // &
+                trim(allowed_maml_nested_sections(nested_idx)%parent_section) // "'); "
+        end if
+    end subroutine parquet_check_maml_nested_subkey
+
+    subroutine parquet_check_maml_subkey(section_idx, key, errors)
+        integer, intent(in) :: section_idx
+        character(len=*), intent(in) :: key
+        character(len=:), allocatable, intent(inout) :: errors
+        logical :: ok
+        integer :: k
+
+        ok = .false.
+        do k = 1, maml_max_subkeys
+            if (len_trim(allowed_maml_sections(section_idx)%subkeys(k)) == 0) cycle
+            if (trim(parquet_to_lower(allowed_maml_sections(section_idx)%subkeys(k))) == &
+                trim(parquet_to_lower(key))) then
+                ok = .true.
+                exit
+            end if
+        end do
+        if (.not. ok) then
+            errors = errors // "unknown sub-key '" // trim(key) // "' in section '" // &
+                trim(allowed_maml_sections(section_idx)%name) // "'; "
+        end if
+    end subroutine parquet_check_maml_subkey
 
 end submodule parquet_metadata

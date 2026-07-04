@@ -270,9 +270,24 @@ Notes on the `fields:` entries:
 - `col_size` (default `1`) makes the column a fixed-length vector column, read/written as a matrix of shape `(col_size, nrows)`.
 - `array_size` sets the maximum string length for `string` columns; it is ignored for other types.
 - `unit`, `info` and `ucd` are optional and are carried through into the parquet file's VOTable-style header for that column.
-- Run `parquet_validate_maml` on a MAML file to catch structural mistakes (duplicate names, missing `data_type`, missing `table`, etc.) before using it to open a writer.
+- Run `parquet_validate_maml` on a MAML file to catch structural mistakes (duplicate names, missing `data_type`, missing `table`, unknown top-level sections or sub-keys, etc.) before using it to open a writer. It accepts either a `parquet_maml_file` (e.g. from `parquet_load_maml_file`, or built in memory) or a filename directly (`call parquet_validate_maml("docs/maml_example2.maml")`, loading it from disk internally).
 
 A second MAML file may be validated against a "base" MAML with `parquet_validate_user_maml`, to check it only reuses column names that already exist in the base schema — useful when different pipeline stages should write a subset of a shared schema.
+
+Table-level top-level keys become one metadata entry each, with a few special cases:
+
+- `keyarray:` — a list of `key`/`value`/`comment` maps, each becomes one metadata entry named by its `key`.
+- `DOIs:` — a list of `DOI`/`type` maps, becomes `DOI_1`, `DOI_2`, ... entries (value = DOI, description = type).
+- `depends:` — a list of `survey`/`dataset`/`table`/`version` maps (for referencing upstream datasets this table was built from), becomes `depends_1`, `depends_2`, ... entries, each value being those four fields joined with `;` in that fixed order (regardless of the order they appear in the file; any missing sub-key becomes an empty segment).
+- `comments:`/`coauthors:` — plain string lists, become `comment_1`, `comment_2`, ... / `coauthor_1`, `coauthor_2`, ... entries.
+- `keywords:` — a plain-string list, combined into a single `keywords` entry with its items joined by `;`.
+- Any other list of plain strings becomes several entries that all share that key's name (e.g. multiple `list_key` entries with the same name).
+- Any other list of *maps* (not one of the above) is **not** specially handled: only its first sub-key ends up captured as a raw, unparsed string, and the rest of that entry's sub-keys are silently dropped. Use `keyarray:` for arbitrary structured metadata instead.
+- `extra:` is reserved for future use and is currently ignored entirely (not even partially captured).
+
+`parquet_validate_maml` also checks that the MAML file only uses known sections: every top-level section name, and every sub-key one level inside a map-list section's items (e.g. `name:`/`data_type:`/... inside a `fields:` entry, or `key:`/`value:`/`comment:` inside a `keyarray:` entry), must be declared in the schema at the top of [src/parquet_metadata.f90](src/parquet_metadata.f90) (`allowed_maml_sections`). This checks presence only, not values. To allow a new top-level section, or a new sub-key within an existing map-list section, add an entry there.
+
+One level deeper still (e.g. a `fields:` entry's own `qc:` sub-block, with its `min:`/`max:`/`miss:` keys) is validated too, but only where a matching entry exists in the separate `allowed_maml_nested_sections` schema (also in `src/parquet_metadata.f90`) — add an entry there for any other sub-key that itself has structured children needing validation. `extra:` is the sole exception to all of this: its entire internal structure (however deeply nested) is accepted unvalidated. Anything nested deeper than `allowed_maml_nested_sections` covers is likewise left unvalidated.
 
 ## Combined example: MAML schema, matrices and metadata
 

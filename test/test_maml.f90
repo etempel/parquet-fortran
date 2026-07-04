@@ -30,6 +30,10 @@ contains
 
         testsuite = [ &
             new_unittest("validate a well-formed MAML file", test_validate_maml_ok), &
+            new_unittest("validate maml_example2.maml (extra top-level keys, depends:, extra:, " // &
+                "list-form ucd:, keyarray:)", test_validate_maml_example2_ok), &
+            new_unittest("validate maml_example2.maml by filename (parquet_validate_maml overload)", &
+                test_validate_maml_by_filename_ok), &
             new_unittest("validate a user MAML that is a valid subset", test_validate_user_maml_ok), &
             new_unittest("load a MAML file from disk", test_load_maml_file), &
             new_unittest("get_column_index finds an existing column", test_get_column_index_found), &
@@ -48,6 +52,35 @@ contains
 
         call check(error, .true.)
     end subroutine test_validate_maml_ok
+
+    !> docs/maml_example2.maml exercises several things maml_example.maml does
+    !> not: extra top-level keys (survey, version, date, depends:, keywords:,
+    !> MAML_version), an extra: block, list-form ucd: on some fields, and
+    !> blank array_size:/col_size: values -- none of which parquet_validate_maml
+    !> should object to, since it only checks field names/data_type/table:.
+    subroutine test_validate_maml_example2_ok(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_maml_file) :: maml
+
+        maml = parquet_load_maml_file("docs/maml_example2.maml")
+
+        ! Should not error stop: this is a well-formed MAML file.
+        call parquet_validate_maml(maml)
+
+        call check(error, .true.)
+    end subroutine test_validate_maml_example2_ok
+
+    !> parquet_validate_maml is generic: it also accepts a filename directly
+    !> (loading the file from disk internally), instead of requiring the
+    !> caller to first call parquet_load_maml_file themselves.
+    subroutine test_validate_maml_by_filename_ok(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        ! Should not error stop: this is a well-formed MAML file.
+        call parquet_validate_maml("docs/maml_example2.maml")
+
+        call check(error, .true.)
+    end subroutine test_validate_maml_by_filename_ok
 
     subroutine test_validate_user_maml_ok(error)
         type(error_type), allocatable, intent(out) :: error

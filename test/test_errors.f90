@@ -34,6 +34,12 @@ contains
             new_unittest("validating a duplicate field name aborts", test_validate_duplicate_name_aborts), &
             new_unittest("validating a MAML without table: aborts", test_validate_missing_table_aborts), &
             new_unittest("validating a MAML without fields aborts", test_validate_no_fields_aborts), &
+            new_unittest("validating a MAML with an unknown top-level section aborts", &
+                test_validate_unknown_top_level_section_aborts), &
+            new_unittest("validating a MAML with an unknown field sub-key aborts", &
+                test_validate_unknown_field_subkey_aborts), &
+            new_unittest("validating a MAML with an unknown qc: sub-key aborts", &
+                test_validate_unknown_qc_subkey_aborts), &
             new_unittest("user MAML with unknown column aborts", test_validate_user_maml_unknown_column_aborts), &
             new_unittest("get_column_index on unknown column aborts", test_get_column_index_not_found_aborts), &
             new_unittest("write_maml without metadata aborts", test_write_maml_without_metadata_aborts) &
@@ -95,6 +101,27 @@ contains
         call check_scenario_exit_status(error, "validate_no_fields", expect_abort=.true., &
             failure_message="validating a MAML file without fields was expected to error stop")
     end subroutine test_validate_no_fields_aborts
+
+    subroutine test_validate_unknown_top_level_section_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "validate_unknown_top_level_section", expect_abort=.true., &
+            failure_message="validating a MAML file with an unknown top-level section was expected to error stop")
+    end subroutine test_validate_unknown_top_level_section_aborts
+
+    subroutine test_validate_unknown_field_subkey_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "validate_unknown_field_subkey", expect_abort=.true., &
+            failure_message="validating a MAML file with an unknown field sub-key was expected to error stop")
+    end subroutine test_validate_unknown_field_subkey_aborts
+
+    subroutine test_validate_unknown_qc_subkey_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "validate_unknown_qc_subkey", expect_abort=.true., &
+            failure_message="validating a MAML file with an unknown qc: sub-key was expected to error stop")
+    end subroutine test_validate_unknown_qc_subkey_aborts
 
     subroutine test_validate_user_maml_unknown_column_aborts(error)
         type(error_type), allocatable, intent(out) :: error

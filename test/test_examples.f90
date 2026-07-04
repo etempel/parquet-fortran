@@ -162,19 +162,23 @@ contains
             "README combined example did not round-trip the 'id0'/'idarr' columns correctly")
     end subroutine test_readme_combined_example
     !
-    !> Writes a two-column ("id", "name") table using docs/maml_example2.maml's
-    !> schema, with write_maml=.true. so a sidecar .maml is produced alongside
-    !> the parquet file. Checks that the two keyarray: entries already present
-    !> in that source MAML ("test_url"/"test_url2") come through correctly in
-    !> both the in-memory metadata and the written sidecar file.
+    !> Writes a four-column ("id", "name", "RA", "Dec") table using
+    !> docs/maml_example2.maml's schema, with write_maml=.true. so a sidecar
+    !> .maml is produced alongside the parquet file. Checks that:
+    !> - the schema (including list-form `ucd:` on "id"/"Dec" and the blank
+    !>   array_size:/col_size: on "RA"/"Dec" defaulting to 1) parses correctly,
+    !> - the keyarray: entries ("test_url"/"test_url2") come through correctly,
+    !> - a few of the new top-level scalar metadata keys round-trip correctly,
+    !> both in the in-memory metadata/cinfo and after reparsing the sidecar
+    !> (with every field enabled and written, nothing should be pruned).
     subroutine test_maml_example2_sidecar_keyarray(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_writer) :: writer
-        type(parquet_column_info) :: cinfo
+        type(parquet_column_info) :: cinfo, sidecar_cinfo
         type(parquet_table_metadata) :: metadata, sidecar_metadata
-        type(parquet_column_info) :: sidecar_cinfo
         integer(int32) :: id(3)
         character(len=24) :: name(3)
+        real(real64) :: ra(3), dec(3)
         logical :: exists
         character(len=*), parameter :: out_file = "test_run/maml_example2.parquet"
         character(len=*), parameter :: sidecar_file = "test_run/maml_example2.maml"
@@ -184,12 +188,22 @@ contains
         call check_keyarray_entries(error, metadata, "in-memory metadata parsed from docs/maml_example2.maml")
         if (allocated(error)) return
 
+        call check_field_schema(error, cinfo, "in-memory cinfo parsed from docs/maml_example2.maml")
+        if (allocated(error)) return
+
+        call check_scalar_metadata(error, metadata, "in-memory metadata parsed from docs/maml_example2.maml")
+        if (allocated(error)) return
+
         id = [1_int32, 2_int32, 3_int32]
         name = ["Alice", "Bob  ", "Carol"]
+        ra = [10.5_real64, 45.2_real64, 190.0_real64]
+        dec = [-5.1_real64, 12.3_real64, 60.0_real64]
 
         call parquet_open_writer(writer, out_file, cinfo, metadata, write_maml=.true.)
         call parquet_write_column(writer, "id", id)
         call parquet_write_column(writer, "name", name)
+        call parquet_write_column(writer, "RA", ra)
+        call parquet_write_column(writer, "Dec", dec)
         call parquet_close_writer(writer)
 
         inquire(file=sidecar_file, exist=exists)
@@ -198,7 +212,128 @@ contains
 
         call parquet_read_maml(sidecar_file, sidecar_cinfo, sidecar_metadata)
         call check_keyarray_entries(error, sidecar_metadata, "metadata reparsed from the written sidecar .maml")
+        if (allocated(error)) return
+
+        call check_field_schema(error, sidecar_cinfo, "cinfo reparsed from the written sidecar .maml")
+        if (allocated(error)) return
+
+        ! Every field was enabled and written above, so write_maml's field
+        ! pruning should be a no-op here: all 4 fields should still be listed.
+        call check(error, size(sidecar_cinfo%col) == size(cinfo%col), &
+            "sidecar .maml should still list all 4 fields since none were disabled")
     end subroutine test_maml_example2_sidecar_keyarray
+
+    subroutine check_field_schema(error, cinfo, context)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column_info), intent(in) :: cinfo
+        character(len=*), intent(in) :: context
+        integer :: idx
+
+        call check(error, size(cinfo%col) == 4, "expected 4 fields (" // context // ")")
+        if (allocated(error)) return
+
+        idx = cinfo%get_column_index("id")
+        call check(error, trim(cinfo%col(idx)%data_type) == "int32" .and. &
+            trim(cinfo%col(idx)%ucd) == "meta.id;meta.main", &
+            "unexpected schema for field 'id' (list-form ucd: should join with ';') (" // context // ")")
+        if (allocated(error)) return
+
+        idx = cinfo%get_column_index("name")
+        call check(error, trim(cinfo%col(idx)%data_type) == "string" .and. cinfo%col(idx)%array_size == 24, &
+            "unexpected schema for field 'name' (" // context // ")")
+        if (allocated(error)) return
+
+        idx = cinfo%get_column_index("RA")
+        call check(error, trim(cinfo%col(idx)%data_type) == "float64" .and. trim(cinfo%col(idx)%unit) == "deg" .and. &
+            trim(cinfo%col(idx)%ucd) == "pos.eq.ra" .and. cinfo%col(idx)%array_size == 1 .and. &
+            cinfo%col(idx)%col_size == 1, &
+            "unexpected schema for field 'RA' (blank array_size:/col_size: should default to 1) (" // context // ")")
+        if (allocated(error)) return
+
+        idx = cinfo%get_column_index("Dec")
+        call check(error, trim(cinfo%col(idx)%data_type) == "float64" .and. trim(cinfo%col(idx)%ucd) == "pos.eq.dec", &
+            "unexpected schema for field 'Dec' (single-item list-form ucd:) (" // context // ")")
+    end subroutine check_field_schema
+
+    subroutine check_scalar_metadata(error, metadata, context)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table_metadata), intent(in) :: metadata
+        character(len=*), intent(in) :: context
+        integer :: i
+        logical :: found_survey, found_version, found_date, found_maml_version
+        logical :: found_depends_1, found_depends_2, found_keywords
+
+        found_survey = .false.
+        found_version = .false.
+        found_date = .false.
+        found_maml_version = .false.
+        found_depends_1 = .false.
+        found_depends_2 = .false.
+        found_keywords = .false.
+
+        do i = 1, size(metadata%items)
+            select case (trim(metadata%items(i)%key))
+            case ("survey")
+                found_survey = .true.
+                call check(error, trim(metadata%items(i)%value) == "The Big Survey", &
+                    "unexpected value for 'survey' (" // context // ")")
+                if (allocated(error)) return
+            case ("version")
+                found_version = .true.
+                call check(error, trim(metadata%items(i)%value) == "1.3", &
+                    "unexpected value for 'version' (" // context // ")")
+                if (allocated(error)) return
+            case ("date")
+                found_date = .true.
+                ! date: '2025-09-01' -- quoted in the source, so parquet_unquote
+                ! strips the wrapping quotes.
+                call check(error, trim(metadata%items(i)%value) == "2025-09-01", &
+                    "unexpected value for 'date' (" // context // ")")
+                if (allocated(error)) return
+            case ("maml_version")
+                ! Top-level keys are lower-cased while parsing, so "MAML_version:"
+                ! in the source becomes the "maml_version" metadata key.
+                found_maml_version = .true.
+                call check(error, trim(metadata%items(i)%value) == "1.2", &
+                    "unexpected value for 'maml_version' (" // context // ")")
+                if (allocated(error)) return
+            case ("depends_1")
+                ! Each depends: list entry's survey/dataset/table/version
+                ! sub-keys are combined into one semicolon-separated string.
+                found_depends_1 = .true.
+                call check(error, trim(metadata%items(i)%value) == "The Medium Survey;SpecZ;Spec_field_01;3.7", &
+                    "unexpected value for 'depends_1' (" // context // ")")
+                if (allocated(error)) return
+            case ("depends_2")
+                found_depends_2 = .true.
+                call check(error, trim(metadata%items(i)%value) == "The Tiny Survey;Stars;Phot_South;2", &
+                    "unexpected value for 'depends_2' (" // context // ")")
+                if (allocated(error)) return
+            case ("keywords")
+                ! keywords: is a plain-string list; all its items are combined
+                ! into a single semicolon-separated "keywords" entry, rather
+                ! than one entry per item.
+                found_keywords = .true.
+                call check(error, trim(metadata%items(i)%value) == "Optional keyword tag;TopCat", &
+                    "unexpected value for 'keywords' (" // context // ")")
+                if (allocated(error)) return
+            end select
+        end do
+
+        call check(error, found_survey, "metadata key 'survey' not found (" // context // ")")
+        if (allocated(error)) return
+        call check(error, found_version, "metadata key 'version' not found (" // context // ")")
+        if (allocated(error)) return
+        call check(error, found_date, "metadata key 'date' not found (" // context // ")")
+        if (allocated(error)) return
+        call check(error, found_maml_version, "metadata key 'maml_version' not found (" // context // ")")
+        if (allocated(error)) return
+        call check(error, found_depends_1, "metadata key 'depends_1' not found (" // context // ")")
+        if (allocated(error)) return
+        call check(error, found_depends_2, "metadata key 'depends_2' not found (" // context // ")")
+        if (allocated(error)) return
+        call check(error, found_keywords, "metadata key 'keywords' not found (" // context // ")")
+    end subroutine check_scalar_metadata
 
     subroutine check_keyarray_entries(error, metadata, context)
         type(error_type), allocatable, intent(out) :: error

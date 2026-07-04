@@ -44,6 +44,12 @@ program error_scenarios
         call scenario_validate_missing_table()
     case ("validate_no_fields")
         call scenario_validate_no_fields()
+    case ("validate_unknown_top_level_section")
+        call scenario_validate_unknown_top_level_section()
+    case ("validate_unknown_field_subkey")
+        call scenario_validate_unknown_field_subkey()
+    case ("validate_unknown_qc_subkey")
+        call scenario_validate_unknown_qc_subkey()
     case ("validate_user_maml_unknown_column")
         call scenario_validate_user_maml_unknown_column()
     case ("get_column_index_not_found")
@@ -166,6 +172,51 @@ contains
 
         call parquet_validate_maml(maml)
     end subroutine scenario_validate_no_fields
+
+    subroutine scenario_validate_unknown_top_level_section()
+        type(parquet_maml_file) :: maml
+
+        maml%name = "unknown_top_level_section.maml"
+        maml%lines = [character(len=40) :: &
+            "table: bad_table", &
+            "not_a_real_section: something", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32" ]
+
+        call parquet_validate_maml(maml)
+    end subroutine scenario_validate_unknown_top_level_section
+
+    subroutine scenario_validate_unknown_field_subkey()
+        type(parquet_maml_file) :: maml
+
+        maml%name = "unknown_field_subkey.maml"
+        maml%lines = [character(len=40) :: &
+            "table: bad_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32", &
+            "  not_a_real_subkey: something" ]
+
+        call parquet_validate_maml(maml)
+    end subroutine scenario_validate_unknown_field_subkey
+
+    subroutine scenario_validate_unknown_qc_subkey()
+        type(parquet_maml_file) :: maml
+
+        maml%name = "unknown_qc_subkey.maml"
+        maml%lines = [character(len=40) :: &
+            "table: bad_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32", &
+            "  qc:", &
+            "    min: 1", &
+            "    max: 100", &
+            "    not_a_real_qc_key: something" ]
+
+        call parquet_validate_maml(maml)
+    end subroutine scenario_validate_unknown_qc_subkey
 
     subroutine scenario_validate_user_maml_unknown_column()
         type(parquet_maml_file) :: base_maml, user_maml

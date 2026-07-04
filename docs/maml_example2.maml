@@ -1,8 +1,35 @@
+survey: The Big Survey
 dataset: input_data
 table: input_table
+version: 1.3
+date: '2025-09-01'
 author: Dave Smith <dave_smith_is_not_here@gmail.com>
+coauthors:
+- Joe Bloggs <joe_bloggs_is_not_here@gmail.com>
+- Jane Doe <jane_doe_is_not_here@gmail.com>
+DOIs:
+- DOI: 10.1093/mnras/sty440
+  type: paper
+- DOI: 10.5281/zenodo.10059903
+  type: software
+depends:
+- survey: The Medium Survey
+  dataset: SpecZ
+  table: Spec_field_01
+  version: 3.7
+- survey: The Tiny Survey
+  dataset: Stars
+  table: Phot_South
+  version: 2
 description: Just an example. Probably do not write tonnes here. A few sentences is usually about right.
+comments:
+- Optional comment or interesting fact
+- '...'
 license: Copyright [Private]
+keywords:
+- Optional keyword tag
+- TopCat
+MAML_version: 1.2
 keyarray:
 - key: test_url
   value: //example.com/data #new
@@ -16,9 +43,41 @@ extra:
       like: 1.3
 fields:
 - name: id
+  ucd:
+  - meta.id
+  - meta.main
   info: ID field.
   data_type: int32
+  qc:
+    min: 1
+    max: 1000
+    miss: 'Null'
 - name: name
+  unit: unitless
+  ucd: meta.id;meta.main
   info: Name of the object.
   data_type: string
   array_size: 24
+- name: RA
+  unit: deg
+  info: Right ascension (J2000)
+  ucd: pos.eq.ra
+  data_type: float64
+  array_size:
+  col_size:
+  qc:
+    min: '>= 0'
+    max: '< 360'
+    miss: 'Null'
+- name: Dec
+  unit: deg
+  info: Declination (J2000)
+  ucd:
+  - pos.eq.dec
+  data_type: float64
+  array_size:
+  col_size:
+  qc:
+    min: -90
+    max: 90
+    miss: 'Null'

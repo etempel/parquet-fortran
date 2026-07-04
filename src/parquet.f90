@@ -70,16 +70,34 @@ module parquet
                                     add_metadata_float64_array, add_metadata_logical_array, add_metadata_string_array
     end type parquet_table_metadata
 
+    ! parquet_writer/parquet_reader own a handle to a C++-side Arrow/Parquet
+    ! object with no automatic Fortran cleanup. Always prefer an explicit
+    ! parquet_close_writer/parquet_close_reader call; the FINAL procedures
+    ! below are only a safety net for a handle that's still open when its
+    ! variable goes out of scope or is overwritten (e.g. an early RETURN
+    ! between open and close), not a substitute for closing normally.
+    !
+    ! Do not copy a parquet_writer/parquet_reader (`w2 = w1`, passing one as
+    ! a function result, etc.): the handle is a plain c_ptr, so a copy
+    ! aliases the same underlying C++ object without any reference counting.
+    ! Whichever copy is finalized/closed first frees it out from under the
+    ! other, which would then double-free/use-after-free when it is itself
+    ! later closed or finalized. Always use a single named writer/reader,
+    ! passed by reference (as every procedure in this module already does).
     type parquet_writer
         type(c_ptr) :: handle = c_null_ptr
         type(parquet_column_type), allocatable :: all_columns(:)
         type(parquet_column_type), allocatable :: enabled_columns(:)
         integer, allocatable :: write_counts(:)
         logical :: enforce_schema = .false.
+    contains
+        final :: parquet_writer_finalize
     end type parquet_writer
 
     type parquet_reader
         type(c_ptr) :: handle = c_null_ptr
+    contains
+        final :: parquet_reader_finalize
     end type parquet_reader
 
     interface parquet_write_column
@@ -101,6 +119,14 @@ module parquet
         module procedure parquet_read_maml_file
         module procedure parquet_read_maml_internal
     end interface parquet_read_maml
+
+    !> Validates either a parquet_maml_file (already loaded, e.g. via
+    !> parquet_load_maml_file or built in memory) or a MAML filename (loaded
+    !> from disk first). See parquet_validate_maml_internal/_file for behavior.
+    interface parquet_validate_maml
+        module procedure parquet_validate_maml_internal
+        module procedure parquet_validate_maml_file
+    end interface parquet_validate_maml
 
     interface parquet_read_column
         module procedure parquet_read_int32_column_1d
@@ -306,6 +332,10 @@ module parquet
             type(parquet_writer), intent(inout) :: writer
         end subroutine parquet_close_writer
 
+        module subroutine parquet_writer_finalize(this)
+            type(parquet_writer), intent(inout) :: this
+        end subroutine parquet_writer_finalize
+
         module subroutine parquet_read_maml_file(maml_filename, cinfo, metadata)
             character(len=*), intent(in) :: maml_filename
             type(parquet_column_info), intent(out) :: cinfo
@@ -322,9 +352,13 @@ module parquet
             type(parquet_maml_file), intent(inout) :: user_maml
         end subroutine parquet_validate_user_maml
 
-        module subroutine parquet_validate_maml(maml)
+        module subroutine parquet_validate_maml_internal(maml)
             type(parquet_maml_file), intent(in) :: maml
-        end subroutine parquet_validate_maml
+        end subroutine parquet_validate_maml_internal
+
+        module subroutine parquet_validate_maml_file(maml_filename)
+            character(len=*), intent(in) :: maml_filename
+        end subroutine parquet_validate_maml_file
 
         module subroutine parquet_read_maml_internal(maml, cinfo, metadata)
             type(parquet_maml_file), intent(in) :: maml
@@ -483,6 +517,10 @@ module parquet
         module subroutine parquet_close_reader(reader)
             type(parquet_reader), intent(inout) :: reader
         end subroutine parquet_close_reader
+
+        module subroutine parquet_reader_finalize(this)
+            type(parquet_reader), intent(inout) :: this
+        end subroutine parquet_reader_finalize
 
         module subroutine parquet_get_nrows_int64(reader, nrows)
             type(parquet_reader), intent(in) :: reader

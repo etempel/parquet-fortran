@@ -878,12 +878,28 @@ contains
             end do
         end if
 
-        call close_parquet_writer(writer%handle)
-        writer%handle = c_null_ptr
+        if (c_associated(writer%handle)) then
+            call close_parquet_writer(writer%handle)
+            writer%handle = c_null_ptr
+        end if
         if (allocated(writer%all_columns)) deallocate(writer%all_columns)
         if (allocated(writer%write_counts)) deallocate(writer%write_counts)
         if (allocated(writer%enabled_columns)) deallocate(writer%enabled_columns)
         writer%enforce_schema = .false.
     end procedure parquet_close_writer
+
+    !> Safety net for a writer whose handle is still open when it goes out of
+    !> scope or is overwritten (e.g. reassigned, or an early RETURN between
+    !> parquet_open_writer and parquet_close_writer): frees the underlying
+    !> C++ object so the process doesn't leak it. This intentionally skips
+    !> parquet_close_writer's enforce_schema check (erroring from an implicit
+    !> finalizer on an incompletely-written file would be surprising) --
+    !> always prefer calling parquet_close_writer explicitly.
+    module procedure parquet_writer_finalize
+        if (c_associated(this%handle)) then
+            call close_parquet_writer(this%handle)
+            this%handle = c_null_ptr
+        end if
+    end procedure parquet_writer_finalize
 
 end submodule parquet_write

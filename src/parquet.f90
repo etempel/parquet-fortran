@@ -10,7 +10,7 @@ module parquet
     implicit none
     private
     !
-    character(len=*),parameter:: cversion = "v0.3.4 (2026-07-04)" !< version info
+    character(len=*),parameter:: cversion = "v0.4.0 (2026-07-05)" !< version info
 #ifndef RELEASE_VERSION
 #  define RELEASE_VERSION 0.1
 #endif
@@ -22,6 +22,13 @@ module parquet
         logical :: is_protected = .false. ! true if this column's name is listed under extra: protected_cols: in
                                            ! whichever MAML built this cinfo; parquet_write_column error stops if an
                                            ! is_valid mask with any .false. entry is passed for such a column.
+        logical :: has_qc_min = .false.
+        logical :: has_qc_max = .false.
+        character(len=2) :: qc_min_op = ">=" ! one of ">", "<", ">=", "<="; default when qc: min: has no operator prefix.
+        character(len=2) :: qc_max_op = "<=" ! default when qc: max: has no operator prefix.
+        character(len=:), allocatable :: qc_min_raw ! qc: min: bound text, operator prefix already stripped/trimmed;
+                                                     ! numeric for int32/int64/float32/float64, literal for string.
+        character(len=:), allocatable :: qc_max_raw ! qc: max: bound text, same convention as qc_min_raw.
         character(len=:), allocatable :: name      ! The name of the field [required]; always the internal/canonical
                                                     ! name, i.e. what parquet_write_column/set_available/etc. use --
                                                     ! never affected by a col_map: rename (see output_name).
@@ -101,6 +108,9 @@ module parquet
         type(parquet_column_type), allocatable :: enabled_columns(:)
         integer, allocatable :: write_counts(:)
         logical :: enforce_schema = .false.
+        logical :: qc = .false. ! set from parquet_open_writer(..., qc=); when true, parquet_write_column checks
+                                 ! each column's qc: min/max (if declared) against its valid (is_valid) elements
+                                 ! and prints a WARNING (never an error) on violation. No-op without a schema.
     contains
         final :: writer_finalize
     end type parquet_writer
@@ -222,6 +232,20 @@ module parquet
             character(len=*), intent(in) :: expected_type
         end function parquet_is_type_compatible
 
+        !> Parses `raw` (a qc: min:/max: bound, operator already stripped) as
+        !> a real64 number appropriate for `data_type`: for float32/float64,
+        !> just requires a finite (non-NaN/non-Inf) parse; for int32/int64,
+        !> additionally requires the parsed value to be an exact integer
+        !> within that type's representable range. Returns .false. (value
+        !> undefined) if parsing fails or any of these checks fail. Not
+        !> meaningful for "string" (no numeric bound) or "boolean" (qc: is
+        !> never enforced there) -- callers should not invoke this for those.
+        module logical function parquet_qc_numeric_bound(raw, data_type, value)
+            character(len=*), intent(in) :: raw
+            character(len=*), intent(in) :: data_type
+            real(real64), intent(out) :: value
+        end function parquet_qc_numeric_bound
+
         module subroutine parquet_assert_column_type(writer, name, expected_type)
             type(parquet_writer), intent(in) :: writer
             character(len=*), intent(in) :: name
@@ -248,12 +272,13 @@ module parquet
             character(len=*), intent(in) :: name
         end function parquet_get_column_array_size
 
-        module subroutine parquet_open_writer(writer, filename, cinfo, metadata, write_maml)
+        module subroutine parquet_open_writer(writer, filename, cinfo, metadata, write_maml, qc)
             type(parquet_writer), intent(out) :: writer
             character(len=*), intent(in) :: filename
             type(parquet_column_info), intent(in), optional :: cinfo
             type(parquet_table_metadata), intent(in), optional :: metadata
             logical, intent(in), optional :: write_maml
+            logical, intent(in), optional :: qc
         end subroutine parquet_open_writer
 
         module subroutine parquet_add_column_info(writer, name, unit, description, ucd, data_type, array_size, col_size)

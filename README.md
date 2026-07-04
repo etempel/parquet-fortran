@@ -403,6 +403,28 @@ extra:
 ```
 Every name listed must be one of this same MAML file's own declared `fields:` (checked by `parquet_validate_maml`; an unknown name errors out). If a user MAML overrides a base MAML, `protected_cols:` is taken from whichever MAML is actually used to build the writer's schema (the user MAML if one is provided, otherwise the base MAML) — not merged across both. Writing an `is_valid` mask with any `.false.` entry for a protected column errors out immediately. This only applies when writing against a MAML-derived schema (`parquet_open_writer(..., cinfo, ...)`); a schema-less writer has no `protected_cols:` to enforce.
 
+### Quality control (qc:) range checks on write
+
+A MAML field can declare a `qc:` block with `min:`/`max:` bounds:
+```
+- name: ra
+  data_type: float64
+  qc:
+    min: '>= 0'
+    max: '< 360'
+```
+A plain number (`min: 1`) is treated as inclusive (`>=` for `min:`, `<=` for `max:`); a quoted value with an explicit leading `>=`, `<=`, `>`, or `<` uses that comparison instead. Either bound may be omitted (only `min:` or only `max:` is fine). `parquet_validate_maml` checks that every declared bound actually converts to a value usable for that field's `data_type`: for `int32`/`int64` it must be an exact integer within that type's range; for `float32`/`float64` it must be finite (not `NaN`/`Infinity`); a `string` field's bound is used as a literal string (nothing to convert, so nothing can fail there); `qc:` on a `boolean` field is accepted but never enforced (silently ignored).
+
+Pass `qc=.true.` to `parquet_open_writer` to turn on the actual range check during writing:
+```fortran
+call parquet_open_writer(writer, "data.parquet", cinfo, metadata, qc=.true.)
+```
+With `qc=.true.`, every `parquet_write_column` call checks its column's declared bound(s) (if any) against every element for which `is_valid` is `.true.` (or every element, if `is_valid` wasn't passed at all — see [Null values](#null-values)). String columns are compared lexicographically using Fortran's native string comparison. Array/matrix columns are checked element-wise. A violation **never stops the write** — it prints one `WARNING` line to stdout naming the column, its declared bound(s), the observed data range among the checked elements, and how many of them are out of range, e.g.:
+```
+WARNING: qc violation for column 'ra': declared min >= 0, max < 360, data range [-1.5, 359.9], 3 of 1000 valid element(s) out of range
+```
+This only applies when writing against a MAML-derived schema (`parquet_open_writer(..., cinfo, ...)`) and only for columns that actually declare `qc: min:`/`max:`; omitting `qc=.true.` (the default) skips the check entirely, same as before this feature existed.
+
 ## parquet module API (functions/subroutines)
 
 List of public callable procedures available with `use parquet`:
@@ -430,7 +452,7 @@ The public derived type `parquet_table_metadata` provides:
 
 ### Writer
 
-- `parquet_open_writer(writer, filename[, cinfo, metadata, write_maml])` — opens `filename` for writing. `cinfo`/`metadata` are optional; see the schema-enforcement note above. `write_maml` (default `.false.`) additionally saves a sidecar `.maml` file next to `filename` with the MAML source that produced `metadata`; see [Saving the source MAML alongside the parquet file](#saving-the-source-maml-alongside-the-parquet-file).
+- `parquet_open_writer(writer, filename[, cinfo, metadata, write_maml, qc])` — opens `filename` for writing. `cinfo`/`metadata` are optional; see the schema-enforcement note above. `write_maml` (default `.false.`) additionally saves a sidecar `.maml` file next to `filename` with the MAML source that produced `metadata`; see [Saving the source MAML alongside the parquet file](#saving-the-source-maml-alongside-the-parquet-file). `qc` (default `.false.`) turns on `qc: min:`/`max:` range-check warnings during writing; see [Quality control (qc:) range checks on write](#quality-control-qc-range-checks-on-write).
 - `parquet_write_column(writer, name, values)` — writes one full column named `name`. `values` may be any [supported type](#supported-data-types), passed as a 1D array (`values(:)`) for a plain column or a 2D array (`values(col_size, nrows)`) for a vector/array column.
 - `parquet_close_writer(writer)` — flushes buffered data and finalizes the file. Always call this before the program ends, or the file may be incomplete/unreadable.
 

@@ -339,6 +339,7 @@ contains
         character(len=32) :: idx_buf
         integer :: i, j
         logical :: type_ok, has_table, found
+        real(real64) :: qc_bound_value
 
         call parquet_parse_maml_lines(maml%lines, cinfo, metadata)
 
@@ -376,6 +377,28 @@ contains
                         exit
                     end if
                 end do
+
+                ! qc: min:/max: numeric convertibility only applies to the
+                ! numeric types; string uses its bound as a literal (nothing
+                ! to convert, so it can't fail), and boolean's qc: is always
+                ! silently ignored (never enforced), so it isn't checked here.
+                select case (trim(cinfo%col(i)%data_type))
+                case ("int32", "int64", "float32", "float64")
+                    if (cinfo%col(i)%has_qc_min) then
+                        if (.not. parquet_qc_numeric_bound( &
+                                cinfo%col(i)%qc_min_raw, cinfo%col(i)%data_type, qc_bound_value)) then
+                            errors = errors // "field '" // cur_name // "' has an invalid qc: min value '" // &
+                                trim(cinfo%col(i)%qc_min_raw) // "' for data_type " // trim(cinfo%col(i)%data_type) // "; "
+                        end if
+                    end if
+                    if (cinfo%col(i)%has_qc_max) then
+                        if (.not. parquet_qc_numeric_bound( &
+                                cinfo%col(i)%qc_max_raw, cinfo%col(i)%data_type, qc_bound_value)) then
+                            errors = errors // "field '" // cur_name // "' has an invalid qc: max value '" // &
+                                trim(cinfo%col(i)%qc_max_raw) // "' for data_type " // trim(cinfo%col(i)%data_type) // "; "
+                        end if
+                    end if
+                end select
             end do
         end if
 
@@ -459,11 +482,76 @@ contains
         call parquet_validate_maml(maml)
     end procedure parquet_load_maml_file
 
+    !> Parses one qc: min:/max: value (already unquoted or not) into an
+    !> operator + bound-text pair: a leading ">=", "<=", ">", or "<" (checked
+    !> in that order, so the two-char operators are never mistaken for the
+    !> one-char ones) is stripped and used as the operator; otherwise
+    !> `default_op` applies (">=" for min:, "<=" for max:, matching the MAML
+    !> format's documented inclusive-by-default convention). The remaining
+    !> text is kept verbatim (not yet converted to a number) -- numeric
+    !> parsing/validity is deferred to parquet_validate_maml_internal and to
+    !> the write-time qc check, since it depends on the field's data_type,
+    !> which may not be known yet at this point in parsing.
+    subroutine parquet_set_qc_bound(has_flag, op, raw, cvalue, default_op)
+        logical, intent(out) :: has_flag
+        character(len=2), intent(out) :: op
+        character(len=:), allocatable, intent(out) :: raw
+        character(len=*), intent(in) :: cvalue
+        character(len=*), intent(in) :: default_op
+        character(len=:), allocatable :: text
+
+        text = trim(adjustl(parquet_unquote(cvalue)))
+        if (index(text, ">=") == 1) then
+            op = ">="
+            text = trim(adjustl(text(3:)))
+        else if (index(text, "<=") == 1) then
+            op = "<="
+            text = trim(adjustl(text(3:)))
+        else if (index(text, ">") == 1) then
+            op = "> "
+            text = trim(adjustl(text(2:)))
+        else if (index(text, "<") == 1) then
+            op = "< "
+            text = trim(adjustl(text(2:)))
+        else
+            op = default_op
+        end if
+        raw = text
+        has_flag = .true.
+    end subroutine parquet_set_qc_bound
+
+    module procedure parquet_qc_numeric_bound
+        integer :: ios
+        real(real64) :: rounded
+
+        value = 0.0_real64
+        parquet_qc_numeric_bound = .false.
+
+        read(raw, *, iostat=ios) value
+        if (ios /= 0) return
+        if (value /= value) return ! NaN (only value that is never equal to itself)
+        if (.not. (abs(value) <= huge(1.0_real64))) return ! Inf (or a magnitude beyond real64's finite range)
+
+        select case (trim(data_type))
+        case ("int32")
+            rounded = anint(value)
+            if (value /= rounded) return
+            if (rounded < -2147483648.0_real64 .or. rounded > 2147483647.0_real64) return
+        case ("int64")
+            rounded = anint(value)
+            if (value /= rounded) return
+            if (rounded < -9223372036854775808.0_real64 .or. rounded >= 9223372036854775808.0_real64) return
+        end select
+
+        parquet_qc_numeric_bound = .true.
+    end procedure parquet_qc_numeric_bound
+
     module procedure parquet_parse_maml_lines
         type(parquet_column_type), allocatable :: tmp(:)
         character(len=1024) :: line
         character(len=:), allocatable :: tline, key, cvalue
         logical :: in_fields, have_current, in_list, in_field_list, in_keyarray, in_doiarray, in_dependsarray, in_extra
+        logical :: in_qc
         character(len=:), allocatable :: list_key, field_list_key, list_item
         character(len=:), allocatable :: ka_key, ka_value, ka_comment
         character(len=:), allocatable :: doi_value, doi_type
@@ -481,6 +569,7 @@ contains
         in_doiarray = .false.
         in_dependsarray = .false.
         in_extra = .false.
+        in_qc = .false.
         list_item_idx = 0
         doi_idx = 0
         depends_idx = 0
@@ -726,6 +815,22 @@ contains
                 end if
             end if
 
+            if (in_qc) then
+                call parquet_split_key_value(tline, key, cvalue)
+                select case (parquet_to_lower(key))
+                case ("min")
+                    call parquet_set_qc_bound(tmp(n)%has_qc_min, tmp(n)%qc_min_op, tmp(n)%qc_min_raw, cvalue, ">=")
+                    cycle
+                case ("max")
+                    call parquet_set_qc_bound(tmp(n)%has_qc_max, tmp(n)%qc_max_op, tmp(n)%qc_max_raw, cvalue, "<=")
+                    cycle
+                case ("miss")
+                    cycle
+                case default
+                    in_qc = .false.
+                end select
+            end if
+
             call parquet_split_key_value(tline, key, cvalue)
             if (len_trim(key) == 0) cycle
 
@@ -757,6 +862,8 @@ contains
             case ("col_size")
                 read(cvalue, *, iostat=ios) tmp(n)%col_size
                 if (ios /= 0) tmp(n)%col_size = 1
+            case ("qc")
+                in_qc = .true.
             end select
         end do
 

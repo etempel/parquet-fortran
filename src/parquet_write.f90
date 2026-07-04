@@ -324,6 +324,7 @@ contains
 
         writer%handle = create_parquet_writer(trim(filename)//char(0))
         writer%enforce_schema = present(cinfo)
+        if (present(qc)) writer%qc = qc
 
         if (present(cinfo)) then
             allocate(writer%all_columns(size(cinfo%col)))
@@ -544,6 +545,197 @@ contains
             int(col_size, kind=c_long_long) )
     end procedure parquet_add_column_info
 
+    logical function parquet_qc_numeric_satisfies(value, bound, op) result(ok)
+        real(real64), intent(in) :: value, bound
+        character(len=*), intent(in) :: op
+
+        select case (trim(op))
+        case (">=")
+            ok = value >= bound
+        case ("<=")
+            ok = value <= bound
+        case (">")
+            ok = value > bound
+        case ("<")
+            ok = value < bound
+        case default
+            ok = .true.
+        end select
+    end function parquet_qc_numeric_satisfies
+
+    logical function parquet_qc_string_satisfies(value, bound, op) result(ok)
+        character(len=*), intent(in) :: value, bound
+        character(len=*), intent(in) :: op
+
+        select case (trim(op))
+        case (">=")
+            ok = value >= bound
+        case ("<=")
+            ok = value <= bound
+        case (">")
+            ok = value > bound
+        case ("<")
+            ok = value < bound
+        case default
+            ok = .true.
+        end select
+    end function parquet_qc_string_satisfies
+
+    function parquet_qc_format_real(value) result(text)
+        real(real64), intent(in) :: value
+        character(len=:), allocatable :: text
+        character(len=64) :: buf
+
+        if (value == anint(value) .and. abs(value) < 1.0e15_real64) then
+            write(buf, '(i0)') nint(value, kind=int64)
+        else
+            write(buf, '(g0.7)') value
+        end if
+        text = trim(adjustl(buf))
+    end function parquet_qc_format_real
+
+    function parquet_qc_format_int(value) result(text)
+        integer, intent(in) :: value
+        character(len=:), allocatable :: text
+        character(len=32) :: buf
+
+        write(buf, '(i0)') value
+        text = trim(adjustl(buf))
+    end function parquet_qc_format_int
+
+    !> If writer%qc is set and the column has a schema-declared qc: min:
+    !> and/or max:, checks every element of `values64` where `is_valid_flat`
+    !> is .true. against those bounds (absent is_valid means every element
+    !> counts, matching the write-side is_valid convention elsewhere) and
+    !> prints a single WARNING to stdout naming the column, its declared
+    !> bound(s), the observed data range among valid elements, and how many
+    !> of them violate at least one bound. Never errors -- writing proceeds
+    !> regardless. No-op for a schema-less writer, a column without qc:, or
+    !> when there are no valid elements to check at all.
+    subroutine parquet_check_qc_numeric(writer, name, values64, is_valid_flat)
+        type(parquet_writer), intent(in) :: writer
+        character(len=*), intent(in) :: name
+        real(real64), intent(in) :: values64(:)
+        logical, intent(in) :: is_valid_flat(:)
+        integer :: idx, i, n_valid, n_violate
+        real(real64) :: min_bound, max_bound, data_min, data_max
+        logical :: any_valid, have_min_bound, have_max_bound, ok
+        character(len=:), allocatable :: bounds_desc
+
+        if (.not. writer%qc) return
+        if (.not. writer%enforce_schema) return
+        idx = parquet_get_defined_column_index(writer, name)
+        if (idx == 0) return
+        if (.not. (writer%all_columns(idx)%has_qc_min .or. writer%all_columns(idx)%has_qc_max)) return
+
+        have_min_bound = .false.
+        have_max_bound = .false.
+        if (writer%all_columns(idx)%has_qc_min) then
+            have_min_bound = parquet_qc_numeric_bound( &
+                writer%all_columns(idx)%qc_min_raw, writer%all_columns(idx)%data_type, min_bound)
+        end if
+        if (writer%all_columns(idx)%has_qc_max) then
+            have_max_bound = parquet_qc_numeric_bound( &
+                writer%all_columns(idx)%qc_max_raw, writer%all_columns(idx)%data_type, max_bound)
+        end if
+        if (.not. (have_min_bound .or. have_max_bound)) return
+
+        any_valid = .false.
+        n_valid = 0
+        n_violate = 0
+        do i = 1, size(values64)
+            if (.not. is_valid_flat(i)) cycle
+            n_valid = n_valid + 1
+            if (.not. any_valid) then
+                data_min = values64(i)
+                data_max = values64(i)
+                any_valid = .true.
+            else
+                data_min = min(data_min, values64(i))
+                data_max = max(data_max, values64(i))
+            end if
+
+            ok = .true.
+            if (have_min_bound) ok = ok .and. parquet_qc_numeric_satisfies(values64(i), min_bound, writer%all_columns(idx)%qc_min_op)
+            if (have_max_bound) ok = ok .and. parquet_qc_numeric_satisfies(values64(i), max_bound, writer%all_columns(idx)%qc_max_op)
+            if (.not. ok) n_violate = n_violate + 1
+        end do
+        if (.not. any_valid .or. n_violate == 0) return
+
+        bounds_desc = ""
+        if (have_min_bound) bounds_desc = "min " // trim(writer%all_columns(idx)%qc_min_op) // " " // parquet_qc_format_real(min_bound)
+        if (have_max_bound) then
+            if (len_trim(bounds_desc) > 0) bounds_desc = bounds_desc // ", "
+            bounds_desc = bounds_desc // "max " // trim(writer%all_columns(idx)%qc_max_op) // " " // parquet_qc_format_real(max_bound)
+        end if
+
+        print '(a)', "WARNING: qc violation for column '" // trim(name) // "': declared " // bounds_desc // &
+            ", data range [" // parquet_qc_format_real(data_min) // ", " // parquet_qc_format_real(data_max) // "], " // &
+            parquet_qc_format_int(n_violate) // " of " // parquet_qc_format_int(n_valid) // " valid element(s) out of range"
+    end subroutine parquet_check_qc_numeric
+
+    !> Same as parquet_check_qc_numeric but for a "string" column: bounds are
+    !> compared as literal Fortran character strings (lexicographic, via the
+    !> intrinsic relational operators) rather than parsed as numbers.
+    subroutine parquet_check_qc_string(writer, name, values, is_valid_flat)
+        type(parquet_writer), intent(in) :: writer
+        character(len=*), intent(in) :: name
+        character(len=*), intent(in) :: values(:)
+        logical, intent(in) :: is_valid_flat(:)
+        integer :: idx, i, n_valid, n_violate
+        logical :: any_valid, ok
+        character(len=:), allocatable :: data_min, data_max, bounds_desc
+
+        if (.not. writer%qc) return
+        if (.not. writer%enforce_schema) return
+        idx = parquet_get_defined_column_index(writer, name)
+        if (idx == 0) return
+        if (.not. (writer%all_columns(idx)%has_qc_min .or. writer%all_columns(idx)%has_qc_max)) return
+
+        any_valid = .false.
+        n_valid = 0
+        n_violate = 0
+        do i = 1, size(values)
+            if (.not. is_valid_flat(i)) cycle
+            n_valid = n_valid + 1
+            if (.not. any_valid) then
+                data_min = trim(values(i))
+                data_max = trim(values(i))
+                any_valid = .true.
+            else
+                if (trim(values(i)) < data_min) data_min = trim(values(i))
+                if (trim(values(i)) > data_max) data_max = trim(values(i))
+            end if
+
+            ok = .true.
+            if (writer%all_columns(idx)%has_qc_min) then
+                ok = ok .and. parquet_qc_string_satisfies( &
+                    trim(values(i)), trim(writer%all_columns(idx)%qc_min_raw), writer%all_columns(idx)%qc_min_op)
+            end if
+            if (writer%all_columns(idx)%has_qc_max) then
+                ok = ok .and. parquet_qc_string_satisfies( &
+                    trim(values(i)), trim(writer%all_columns(idx)%qc_max_raw), writer%all_columns(idx)%qc_max_op)
+            end if
+            if (.not. ok) n_violate = n_violate + 1
+        end do
+        if (.not. any_valid .or. n_violate == 0) return
+
+        bounds_desc = ""
+        if (writer%all_columns(idx)%has_qc_min) then
+            bounds_desc = "min " // trim(writer%all_columns(idx)%qc_min_op) // " '" // &
+                trim(writer%all_columns(idx)%qc_min_raw) // "'"
+        end if
+        if (writer%all_columns(idx)%has_qc_max) then
+            if (len_trim(bounds_desc) > 0) bounds_desc = bounds_desc // ", "
+            bounds_desc = bounds_desc // "max " // trim(writer%all_columns(idx)%qc_max_op) // " '" // &
+                trim(writer%all_columns(idx)%qc_max_raw) // "'"
+        end if
+
+        print '(a)', "WARNING: qc violation for column '" // trim(name) // "': declared " // bounds_desc // &
+            ", data range ['" // data_min // "', '" // data_max // "'], " // &
+            parquet_qc_format_int(n_violate) // " of " // parquet_qc_format_int(n_valid) // " valid element(s) out of range"
+    end subroutine parquet_check_qc_string
+
     !> Errors out if `name`'s column is listed under extra: protected_cols:
     !> (see parquet_parse_protected_cols) and `is_valid_flat` contains any
     !> .false. entry. A no-op for a schema-less writer or an unlisted column.
@@ -605,7 +797,12 @@ contains
         if (mod(size(values), asize) /= 0) stop "parquet_write_int32_column: values size is not divisible by col_size"
         nrows = size(values) / asize
 
-        if (present(is_valid)) call parquet_check_protected(writer, name, is_valid)
+        if (present(is_valid)) then
+            call parquet_check_protected(writer, name, is_valid)
+            call parquet_check_qc_numeric(writer, name, real(values, kind=real64), is_valid)
+        else
+            call parquet_check_qc_numeric(writer, name, real(values, kind=real64), spread(.true., 1, size(values)))
+        end if
         call parquet_make_valid_buf_write(is_valid, valid_buf, valid_ptr)
 
         call parquet_append_as_schema_int32(&
@@ -642,8 +839,10 @@ contains
         if (present(is_valid)) then
             valid_flat = reshape(is_valid, [size(is_valid)])
             call parquet_check_protected(writer, name, valid_flat)
+            call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), valid_flat)
             call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
         else
+            call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), spread(.true., 1, size(packed)))
             call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
         end if
 
@@ -671,7 +870,12 @@ contains
         if (mod(size(values), asize) /= 0) stop "parquet_write_int64_column: values size is not divisible by col_size"
         nrows = size(values) / asize
 
-        if (present(is_valid)) call parquet_check_protected(writer, name, is_valid)
+        if (present(is_valid)) then
+            call parquet_check_protected(writer, name, is_valid)
+            call parquet_check_qc_numeric(writer, name, real(values, kind=real64), is_valid)
+        else
+            call parquet_check_qc_numeric(writer, name, real(values, kind=real64), spread(.true., 1, size(values)))
+        end if
         call parquet_make_valid_buf_write(is_valid, valid_buf, valid_ptr)
 
         call parquet_append_as_schema_int64(&
@@ -708,8 +912,10 @@ contains
         if (present(is_valid)) then
             valid_flat = reshape(is_valid, [size(is_valid)])
             call parquet_check_protected(writer, name, valid_flat)
+            call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), valid_flat)
             call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
         else
+            call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), spread(.true., 1, size(packed)))
             call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
         end if
 
@@ -737,7 +943,12 @@ contains
         if (mod(size(values), asize) /= 0) stop "parquet_write_float32_column: values size is not divisible by col_size"
         nrows = size(values) / asize
 
-        if (present(is_valid)) call parquet_check_protected(writer, name, is_valid)
+        if (present(is_valid)) then
+            call parquet_check_protected(writer, name, is_valid)
+            call parquet_check_qc_numeric(writer, name, real(values, kind=real64), is_valid)
+        else
+            call parquet_check_qc_numeric(writer, name, real(values, kind=real64), spread(.true., 1, size(values)))
+        end if
         call parquet_make_valid_buf_write(is_valid, valid_buf, valid_ptr)
 
         call parquet_append_as_schema_float32(&
@@ -774,8 +985,10 @@ contains
         if (present(is_valid)) then
             valid_flat = reshape(is_valid, [size(is_valid)])
             call parquet_check_protected(writer, name, valid_flat)
+            call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), valid_flat)
             call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
         else
+            call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), spread(.true., 1, size(packed)))
             call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
         end if
 
@@ -803,7 +1016,12 @@ contains
         if (mod(size(values), asize) /= 0) stop "parquet_write_float64_column: values size is not divisible by col_size"
         nrows = size(values) / asize
 
-        if (present(is_valid)) call parquet_check_protected(writer, name, is_valid)
+        if (present(is_valid)) then
+            call parquet_check_protected(writer, name, is_valid)
+            call parquet_check_qc_numeric(writer, name, real(values, kind=real64), is_valid)
+        else
+            call parquet_check_qc_numeric(writer, name, real(values, kind=real64), spread(.true., 1, size(values)))
+        end if
         call parquet_make_valid_buf_write(is_valid, valid_buf, valid_ptr)
 
         call parquet_append_as_schema_float64(&
@@ -840,8 +1058,10 @@ contains
         if (present(is_valid)) then
             valid_flat = reshape(is_valid, [size(is_valid)])
             call parquet_check_protected(writer, name, valid_flat)
+            call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), valid_flat)
             call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
         else
+            call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), spread(.true., 1, size(packed)))
             call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
         end if
 
@@ -978,7 +1198,12 @@ contains
             end do
         end do
 
-        if (present(is_valid)) call parquet_check_protected(writer, name, is_valid)
+        if (present(is_valid)) then
+            call parquet_check_protected(writer, name, is_valid)
+            call parquet_check_qc_string(writer, name, values, is_valid)
+        else
+            call parquet_check_qc_string(writer, name, values, spread(.true., 1, size(values)))
+        end if
         call parquet_make_valid_buf_write(is_valid, valid_buf, valid_ptr)
 
         if (asize == 1) then
@@ -1045,8 +1270,10 @@ contains
         if (present(is_valid)) then
             valid_flat = reshape(is_valid, [size(is_valid)])
             call parquet_check_protected(writer, name, valid_flat)
+            call parquet_check_qc_string(writer, name, reshape(values, [size(values)]), valid_flat)
             call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
         else
+            call parquet_check_qc_string(writer, name, reshape(values, [size(values)]), spread(.true., 1, size(values)))
             call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
         end if
 

@@ -61,7 +61,15 @@ contains
             new_unittest("protected_cols: allows writing a protected column with no Nulls", &
                 test_write_protected_column_without_null), &
             new_unittest("protected_cols: semicolon and dash-list forms are equivalent", &
-                test_protected_cols_semicolon_and_dash_list_equivalent) &
+                test_protected_cols_semicolon_and_dash_list_equivalent), &
+            new_unittest("qc: min/max parsed with and without an explicit operator", &
+                test_qc_parsing_plain_and_operator_forms), &
+            new_unittest("qc=.true. prints a WARNING for an out-of-range numeric value", &
+                test_qc_warning_printed_for_numeric_violation), &
+            new_unittest("qc=.true. prints a WARNING for an out-of-range string value", &
+                test_qc_warning_printed_for_string_violation), &
+            new_unittest("qc: on a boolean field is accepted but never enforced", &
+                test_qc_silently_ignored_for_boolean) &
             ]
         !
     end subroutine collect_tests_parquet_writing
@@ -569,6 +577,154 @@ contains
             (.not. cinfo_dashlist%col(3)%is_protected), &
             "dash-list-form protected_cols did not mark the expected columns")
     end subroutine test_protected_cols_semicolon_and_dash_list_equivalent
+
+    !> qc: min:/max: with a plain number (no operator) default to inclusive
+    !> (">="/"<=" respectively); a quoted value with an explicit operator
+    !> prefix (">=", "<=", ">", "<") uses that operator instead.
+    subroutine test_qc_parsing_plain_and_operator_forms(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_maml_file) :: maml
+        type(parquet_column_info) :: cinfo
+        type(parquet_table_metadata) :: metadata
+
+        maml%name = "qc_parsing.maml"
+        maml%lines = [character(len=40) :: &
+            "table: qc_table", &
+            "fields:", &
+            "- name: id", &
+            "  data_type: int32", &
+            "  qc:", &
+            "    min: 1", &
+            "    max: 1000", &
+            "- name: ra", &
+            "  data_type: float64", &
+            "  qc:", &
+            "    min: '>= 0'", &
+            "    max: '< 360'" ]
+
+        call parquet_validate_maml(maml)
+        call parquet_read_maml(maml, cinfo, metadata)
+
+        call check(error, cinfo%col(1)%has_qc_min .and. cinfo%col(1)%has_qc_max .and. &
+            trim(cinfo%col(1)%qc_min_op) == ">=" .and. trim(cinfo%col(1)%qc_max_op) == "<=" .and. &
+            trim(cinfo%col(1)%qc_min_raw) == "1" .and. trim(cinfo%col(1)%qc_max_raw) == "1000", &
+            "plain-number qc: min/max did not default to inclusive operators with the expected bound text")
+        if (allocated(error)) return
+
+        call check(error, cinfo%col(2)%has_qc_min .and. cinfo%col(2)%has_qc_max .and. &
+            trim(cinfo%col(2)%qc_min_op) == ">=" .and. trim(cinfo%col(2)%qc_max_op) == "<" .and. &
+            trim(cinfo%col(2)%qc_min_raw) == "0" .and. trim(cinfo%col(2)%qc_max_raw) == "360", &
+            "operator-prefixed qc: min/max did not parse the expected operator and bound text")
+    end subroutine test_qc_parsing_plain_and_operator_forms
+
+    !> qc=.true. never errors -- it only ever prints a WARNING to stdout and
+    !> lets the write proceed. Since test-drive can't observe an in-process
+    !> print statement's stdout reliably, the actual write (error_scenarios'
+    !> "qc_warning_numeric"/"qc_warning_string" scenarios) is run as a
+    !> subprocess with its stdout captured to a file, which is then checked
+    !> for the expected WARNING text.
+    subroutine test_qc_warning_printed_for_numeric_violation(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: exitstat, cmdstat
+
+        call check_qc_scenario_warns(error, "qc_warning_numeric", "a", exitstat, cmdstat)
+        if (allocated(error)) return
+
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper program via fpm")
+        if (allocated(error)) return
+        call check(error, exitstat == 0, &
+            "qc=.true. with an out-of-range numeric value should not error stop (warning only)")
+    end subroutine test_qc_warning_printed_for_numeric_violation
+
+    subroutine test_qc_warning_printed_for_string_violation(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: exitstat, cmdstat
+
+        call check_qc_scenario_warns(error, "qc_warning_string", "s", exitstat, cmdstat)
+        if (allocated(error)) return
+
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper program via fpm")
+        if (allocated(error)) return
+        call check(error, exitstat == 0, &
+            "qc=.true. with an out-of-range string value should not error stop (warning only)")
+    end subroutine test_qc_warning_printed_for_string_violation
+
+    subroutine test_qc_silently_ignored_for_boolean(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: exitstat, cmdstat
+        character(len=*), parameter :: out_file = "test_run/qc_boolean_output.txt"
+        logical :: found_warning
+
+        call execute_command_line("mkdir -p test_run", wait=.true.)
+        call execute_command_line( &
+            "fpm test error_scenarios -- qc_silently_ignored_for_boolean > " // out_file // " 2>&1", &
+            wait=.true., exitstat=exitstat, cmdstat=cmdstat)
+
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper program via fpm")
+        if (allocated(error)) return
+        call check(error, exitstat == 0, "qc: on a boolean field should never be enforced (no error expected)")
+        if (allocated(error)) return
+
+        call file_contains(out_file, "WARNING", found_warning)
+        call check(error, .not. found_warning, "qc: on a boolean field must never print a WARNING")
+    end subroutine test_qc_silently_ignored_for_boolean
+
+    !> Runs error_scenarios' `scenario_name` as a subprocess (its stdout
+    !> captured to test_run/<scenario_name>_output.txt) and asserts the
+    !> captured output contains a WARNING mentioning `column_name`.
+    subroutine check_qc_scenario_warns(error, scenario_name, column_name, exitstat, cmdstat)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), intent(in) :: scenario_name, column_name
+        integer, intent(out) :: exitstat, cmdstat
+        character(len=:), allocatable :: out_file
+        logical :: found_warning
+
+        out_file = "test_run/" // trim(scenario_name) // "_output.txt"
+
+        call execute_command_line("mkdir -p test_run", wait=.true.)
+        call execute_command_line( &
+            "fpm test error_scenarios -- " // trim(scenario_name) // " > " // out_file // " 2>&1", &
+            wait=.true., exitstat=exitstat, cmdstat=cmdstat)
+        if (cmdstat /= 0) return
+
+        call file_contains_warning_for_column(out_file, column_name, found_warning)
+        call check(error, found_warning, &
+            "expected a WARNING message mentioning column '" // trim(column_name) // "' in stdout")
+    end subroutine check_qc_scenario_warns
+
+    subroutine file_contains_warning_for_column(filename, column_name, found)
+        character(len=*), intent(in) :: filename, column_name
+        logical, intent(out) :: found
+        integer :: unit, ios
+        character(len=512) :: line
+
+        found = .false.
+        open(newunit=unit, file=filename, status="old", action="read", iostat=ios)
+        if (ios /= 0) return
+        do
+            read(unit, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            if (index(line, "WARNING") > 0 .and. index(line, "'" // trim(column_name) // "'") > 0) found = .true.
+        end do
+        close(unit)
+    end subroutine file_contains_warning_for_column
+
+    subroutine file_contains(filename, needle, found)
+        character(len=*), intent(in) :: filename, needle
+        logical, intent(out) :: found
+        integer :: unit, ios
+        character(len=512) :: line
+
+        found = .false.
+        open(newunit=unit, file=filename, status="old", action="read", iostat=ios)
+        if (ios /= 0) return
+        do
+            read(unit, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            if (index(line, needle) > 0) found = .true.
+        end do
+        close(unit)
+    end subroutine file_contains
 
     subroutine test_write_parquet_file(error)
         type(error_type), allocatable, intent(out) :: error

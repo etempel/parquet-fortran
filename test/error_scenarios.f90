@@ -74,6 +74,18 @@ program error_scenarios
         call scenario_validate_protected_cols_unknown_name()
     case ("write_protected_column_with_null")
         call scenario_write_protected_column_with_null()
+    case ("validate_qc_min_not_numeric")
+        call scenario_validate_qc_min_not_numeric()
+    case ("validate_qc_min_non_integral_for_int32")
+        call scenario_validate_qc_min_non_integral_for_int32()
+    case ("validate_qc_min_out_of_int32_range")
+        call scenario_validate_qc_min_out_of_int32_range()
+    case ("qc_warning_numeric")
+        call scenario_qc_warning_numeric()
+    case ("qc_warning_string")
+        call scenario_qc_warning_string()
+    case ("qc_silently_ignored_for_boolean")
+        call scenario_qc_silently_ignored_for_boolean()
     case default
         print '(a)', "unknown scenario: "//trim(scenario)
         stop 1
@@ -482,5 +494,132 @@ contains
         call parquet_close_writer(writer)
         print '(a)', "unexpectedly wrote a Null into a protected column without error"
     end subroutine scenario_write_protected_column_with_null
+
+    subroutine scenario_validate_qc_min_not_numeric()
+        type(parquet_maml_file) :: maml
+
+        maml%name = "qc_min_not_numeric.maml"
+        maml%lines = [character(len=40) :: &
+            "table: qc_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32", &
+            "  qc:", &
+            "    min: not_a_number" ]
+
+        call parquet_validate_maml(maml)
+    end subroutine scenario_validate_qc_min_not_numeric
+
+    subroutine scenario_validate_qc_min_non_integral_for_int32()
+        type(parquet_maml_file) :: maml
+
+        maml%name = "qc_min_non_integral.maml"
+        maml%lines = [character(len=40) :: &
+            "table: qc_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32", &
+            "  qc:", &
+            "    min: 1.5" ]
+
+        call parquet_validate_maml(maml)
+    end subroutine scenario_validate_qc_min_non_integral_for_int32
+
+    subroutine scenario_validate_qc_min_out_of_int32_range()
+        type(parquet_maml_file) :: maml
+
+        maml%name = "qc_min_out_of_range.maml"
+        maml%lines = [character(len=40) :: &
+            "table: qc_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32", &
+            "  qc:", &
+            "    min: 5000000000" ]
+
+        call parquet_validate_maml(maml)
+    end subroutine scenario_validate_qc_min_out_of_int32_range
+
+    !> Not an error scenario: qc=.true. only ever prints a WARNING and lets
+    !> the write proceed. This scenario exits cleanly (exit 0); the
+    !> corresponding test (test_writing.f90) captures stdout via a subprocess
+    !> and checks for the WARNING text, since test-drive itself can't
+    !> observe stdout produced by an in-process print statement reliably.
+    subroutine scenario_qc_warning_numeric()
+        type(parquet_maml_file) :: maml
+        type(parquet_column_info) :: cinfo
+        type(parquet_table_metadata) :: metadata
+        type(parquet_writer) :: writer
+        integer(int32) :: values(5) = [1_int32, 5_int32, 1500_int32, -3_int32, 10_int32]
+
+        maml%name = "qc_warning.maml"
+        maml%lines = [character(len=40) :: &
+            "table: qc_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32", &
+            "  qc:", &
+            "    min: 1", &
+            "    max: 1000" ]
+
+        call parquet_validate_maml(maml)
+        call parquet_read_maml(maml, cinfo, metadata)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_qc_warning.parquet", cinfo, metadata, qc=.true.)
+        call parquet_write_column(writer, "a", values)
+        call parquet_close_writer(writer)
+    end subroutine scenario_qc_warning_numeric
+
+    subroutine scenario_qc_warning_string()
+        type(parquet_maml_file) :: maml
+        type(parquet_column_info) :: cinfo
+        type(parquet_table_metadata) :: metadata
+        type(parquet_writer) :: writer
+        character(len=8) :: values(3) = ["banana  ", "apple   ", "cherry  "]
+
+        maml%name = "qc_warning_string.maml"
+        maml%lines = [character(len=40) :: &
+            "table: qc_table", &
+            "fields:", &
+            "- name: s", &
+            "  data_type: string", &
+            "  array_size: 10", &
+            "  qc:", &
+            "    min: 'banana'" ]
+
+        call parquet_validate_maml(maml)
+        call parquet_read_maml(maml, cinfo, metadata)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_qc_warning_string.parquet", cinfo, metadata, qc=.true.)
+        call parquet_write_column(writer, "s", values)
+        call parquet_close_writer(writer)
+    end subroutine scenario_qc_warning_string
+
+    !> qc: on a boolean field is accepted by validation but never enforced;
+    !> this must write/close without error and without printing a WARNING.
+    subroutine scenario_qc_silently_ignored_for_boolean()
+        type(parquet_maml_file) :: maml
+        type(parquet_column_info) :: cinfo
+        type(parquet_table_metadata) :: metadata
+        type(parquet_writer) :: writer
+        logical :: values(3) = [.true., .false., .true.]
+
+        maml%name = "qc_boolean.maml"
+        maml%lines = [character(len=40) :: &
+            "table: qc_table", &
+            "fields:", &
+            "- name: b", &
+            "  data_type: boolean", &
+            "  qc:", &
+            "    min: 0", &
+            "    max: 0" ]
+
+        call parquet_validate_maml(maml)
+        call parquet_read_maml(maml, cinfo, metadata)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_qc_boolean.parquet", cinfo, metadata, qc=.true.)
+        call parquet_write_column(writer, "b", values)
+        call parquet_close_writer(writer)
+    end subroutine scenario_qc_silently_ignored_for_boolean
 
 end program error_scenarios

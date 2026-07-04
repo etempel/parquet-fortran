@@ -60,7 +60,13 @@ contains
             new_unittest("protected_cols: referencing an unknown field aborts", &
                 test_validate_protected_cols_unknown_name_aborts), &
             new_unittest("writing a Null into a protected column aborts", &
-                test_write_protected_column_with_null_aborts) &
+                test_write_protected_column_with_null_aborts), &
+            new_unittest("qc: min value that does not parse as a number aborts", &
+                test_validate_qc_min_not_numeric_aborts), &
+            new_unittest("qc: min value with a fractional part on an int32 field aborts", &
+                test_validate_qc_min_non_integral_for_int32_aborts), &
+            new_unittest("qc: min value out of int32 range aborts", &
+                test_validate_qc_min_out_of_int32_range_aborts) &
             ]
     end subroutine collect_tests_parquet_errors
 
@@ -226,6 +232,27 @@ contains
         call check_scenario_exit_status(error, "write_protected_column_with_null", expect_abort=.true., &
             failure_message="writing a Null (via is_valid) into a protected column was expected to error stop")
     end subroutine test_write_protected_column_with_null_aborts
+
+    subroutine test_validate_qc_min_not_numeric_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "validate_qc_min_not_numeric", expect_abort=.true., &
+            failure_message="qc: min: value that does not parse as a number was expected to error stop")
+    end subroutine test_validate_qc_min_not_numeric_aborts
+
+    subroutine test_validate_qc_min_non_integral_for_int32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "validate_qc_min_non_integral_for_int32", expect_abort=.true., &
+            failure_message="qc: min: value with a fractional part on an int32 field was expected to error stop")
+    end subroutine test_validate_qc_min_non_integral_for_int32_aborts
+
+    subroutine test_validate_qc_min_out_of_int32_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "validate_qc_min_out_of_int32_range", expect_abort=.true., &
+            failure_message="qc: min: value out of int32 range was expected to error stop")
+    end subroutine test_validate_qc_min_out_of_int32_range_aborts
 
     subroutine check_scenario_exit_status(error, scenario, expect_abort, failure_message)
         type(error_type), allocatable, intent(out) :: error

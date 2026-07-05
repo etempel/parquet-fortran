@@ -34,7 +34,8 @@ test = false
 
 [features.thread_safe]
 description = "Genuine multi-threaded OpenMP execution with per-thread-safe local variables"
-flags = "-fopenmp"
+#flags = "-fopenmp"
+flags = ""
 
 [preprocess]
 [preprocess.cpp]

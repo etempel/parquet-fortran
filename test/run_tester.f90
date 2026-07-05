@@ -18,7 +18,7 @@ program tester
     use test_maml, only : collect_tests_parquet_maml
     use test_errors, only : collect_tests_parquet_errors
     use test_examples, only : collect_tests_parquet_examples
-    use test_openmp, only : collect_tests_parquet_openmp
+    use test_openmp, only : collect_tests_parquet_openmp_write, collect_tests_parquet_openmp
     !
     implicit none
     integer :: stat, is
@@ -35,6 +35,13 @@ program tester
         new_testsuite("maml", collect_tests_parquet_maml), &
         new_testsuite("errors", collect_tests_parquet_errors), &
         new_testsuite("examples", collect_tests_parquet_examples), &
+        ! openmp_write must run (and fully complete) as its own suite before
+        ! openmp: testdrive runs every test *within* one suite concurrently
+        ! with each other by default, but different suites still run
+        ! sequentially relative to each other (see the note on
+        ! collect_tests_parquet_openmp_write in test_openmp.f90) -- several
+        ! tests in the openmp suite depend on files this one writes.
+        new_testsuite("openmp_write", collect_tests_parquet_openmp_write), &
         new_testsuite("openmp", collect_tests_parquet_openmp) &
         ]
     !

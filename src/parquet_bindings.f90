@@ -18,6 +18,7 @@ module parquet_bindings
     public :: close_parquet_writer, close_parquet_reader
     public :: parquet_set_writer_options
     public :: parquet_set_thread_pool_capacity
+    public :: parquet_maml_lock, parquet_maml_unlock
     public :: parquet_add_column_metadata, parquet_add_table_metadata
     public :: parquet_append_int32_column, parquet_append_int64_column
     public :: parquet_append_float32_column, parquet_append_float64_column
@@ -61,6 +62,12 @@ module parquet_bindings
                 bind(C, name="parquet_set_max_threads")
             import
             integer(c_int), value :: n
+        end subroutine
+
+        subroutine parquet_maml_lock() bind(C, name="parquet_maml_lock")
+        end subroutine
+
+        subroutine parquet_maml_unlock() bind(C, name="parquet_maml_unlock")
         end subroutine
 
         function create_parquet_reader(filename, use_threads) &

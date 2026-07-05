@@ -124,6 +124,8 @@ to FPM_LDFLAGS:
 
 NB! It might depend on the operating system and fortran compiler what environment variables are needed.
 
+For genuine multi-threaded (OpenMP) use, `-fopenmp` is also required — see [Thread safety](#thread-safety) for why, and `fpm test --features thread_safe` for this project's own bundled shortcut.
+
 ## Building and installing instructions
 
 To test the code:
@@ -461,9 +463,15 @@ Concurrent use (e.g. from an OpenMP parallel region) is supported, but only unde
 
 - Safe: many threads, each opening/writing/closing its own `parquet_writer` to a different file.
 - Safe: many threads, each opening/reading/closing its own `parquet_reader` — including multiple threads independently opening their own reader on the *same* file at the same time (each thread's `parquet_open_reader` call is independent).
-- Safe: parsing MAML files (`parquet_read_maml`, `parquet_validate_maml`, etc.) concurrently across threads.
+- Safe: parsing MAML files (`parquet_read_maml`, `parquet_validate_maml`, etc.) concurrently across threads. Internally this is serialized with a lock: the parser repeatedly grows arrays of a derived type with several allocatable string components while parsing, and that turned out not to be safely reentrant under genuine concurrent threads (garbled field lists, occasional heap corruption). The lock keeps this correct — calls from different threads queue up rather than truly running in parallel — so the "safe to call concurrently" guarantee above holds, just without a speedup for that specific operation.
 - **Not safe:** sharing a single `parquet_writer`/`parquet_reader` variable across threads (e.g. a module-level or `!$omp shared` instance that multiple threads call into at once).
 - **Not safe:** two threads writing to the *same* output file at the same time, even with separate `parquet_writer` instances — the underlying file itself isn't safe to write from more than one place at once.
+
+**Building for genuine multi-threaded use:** this project's own `fpm.toml` exposes a `thread_safe` feature (`-fopenmp`) so its own test suite can be run with genuine concurrency via:
+```sh
+fpm test --features thread_safe
+```
+If you depend on this library from your own project and call into it concurrently from your own `!$omp parallel` regions, make sure your build applies `-fopenmp` to this library's compiled code too (e.g. via your own `[features]` entry, or `FPM_FFLAGS`) — without it, none of the above is exercised and everything just runs single-threaded.
 
 This is exercised by `test/test_openmp.f90`, which covers: writing different files in parallel, reading different files in parallel, a mixed read/write workload, concurrent MAML parsing, many independent readers repeatedly opening/closing the same shared file, and a higher-fan-out stress case — in every one of these, each thread always owns its own reader/writer instance.
 

@@ -297,8 +297,15 @@ contains
         integer :: exitstat, cmdstat
         logical :: aborted
 
+        ! --features thread_safe (-fopenmp -frecursive, see fpm.toml) is
+        ! forced here regardless of how the outer `fpm test` was invoked:
+        ! execute_command_line spawns a brand new fpm process that only
+        ! inherits environment variables, not the parent's own command-line
+        ! flags, so without this the concurrent_calls_into_shared_reader/
+        ! writer scenarios below would silently run single-threaded and
+        ! never actually exercise the race they're meant to check.
         call execute_command_line( &
-            "fpm test error_scenarios -- "//trim(scenario)//" > /dev/null 2>&1", &
+            "fpm test error_scenarios --features thread_safe -- "//trim(scenario)//" > /dev/null 2>&1", &
             wait=.true., exitstat=exitstat, cmdstat=cmdstat)
 
         call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper program via fpm")

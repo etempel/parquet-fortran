@@ -278,6 +278,8 @@ contains
         type(parquet_maml_missing_column), allocatable :: tmp(:)
         integer :: n
 
+        ! See g_maml_mutex in parquet_wrapper.cpp.
+        call parquet_maml_lock()
         if (.not. allocated(maml%missing_columns)) then
             allocate(maml%missing_columns(1))
             n = 1
@@ -295,6 +297,7 @@ contains
         maml%missing_columns(n)%data_type = col%data_type
         maml%missing_columns(n)%array_size = col%array_size
         maml%missing_columns(n)%col_size = col%col_size
+        call parquet_maml_unlock()
     end subroutine parquet_append_missing_column
 
     subroutine parquet_merge_missing_columns(maml, cinfo)
@@ -307,6 +310,8 @@ contains
         if (.not. allocated(maml%missing_columns)) return
         if (size(maml%missing_columns) == 0) return
 
+        ! See g_maml_mutex in parquet_wrapper.cpp.
+        call parquet_maml_lock()
         n_old = 0
         if (allocated(cinfo%col)) n_old = size(cinfo%col)
         n_new = size(maml%missing_columns)
@@ -328,6 +333,7 @@ contains
         end do
 
         call move_alloc(merged, cinfo%col)
+        call parquet_maml_unlock()
     end subroutine parquet_merge_missing_columns
 
     module procedure parquet_validate_maml_internal
@@ -560,6 +566,14 @@ contains
         type(parquet_maml_col_map_entry), allocatable :: col_map(:)
         integer :: ios, n, i, j, list_item_idx, doi_idx, depends_idx
         character(len=32) :: idx_buf
+
+        ! See g_maml_mutex in parquet_wrapper.cpp: this function's repeated
+        ! "grow tmp(:), whole-array-assign the old contents in, move_alloc"
+        ! pattern is not safely reentrant under genuine concurrent threads,
+        ! even with -frecursive -- this lock keeps concurrent MAML parsing
+        ! correct (serialized) rather than racing (recursive: this function
+        ! calls other locked helpers, e.g. parquet_metadata_append_entry).
+        call parquet_maml_lock()
 
         in_fields = .false.
         have_current = .false.
@@ -877,6 +891,7 @@ contains
 
         if (n <= 0) then
             allocate(cinfo%col(0))
+            call parquet_maml_unlock()
             return
         end if
 
@@ -926,14 +941,18 @@ contains
         end block
 
         call move_alloc(tmp, cinfo%col)
+        call parquet_maml_unlock()
     end procedure parquet_parse_maml_lines
 
     module procedure parquet_append_line
         character(len=1024), allocatable :: tmp(:)
 
+        ! See g_maml_mutex in parquet_wrapper.cpp.
+        call parquet_maml_lock()
         if (.not. allocated(lines)) then
             allocate(lines(1))
             lines(1) = line
+            call parquet_maml_unlock()
             return
         end if
 
@@ -941,6 +960,7 @@ contains
         tmp(1:n-1) = lines
         tmp(n) = line
         call move_alloc(tmp, lines)
+        call parquet_maml_unlock()
     end procedure parquet_append_line
 
     module procedure parquet_metadata_append_entry
@@ -953,6 +973,10 @@ contains
         desc_val = ""
         if (present(description)) desc_val = trim(description)
 
+        ! See g_maml_mutex in parquet_wrapper.cpp / parquet_parse_maml_lines
+        ! above: growing metadata%items this way is not safely reentrant
+        ! under genuine concurrent threads even with -frecursive.
+        call parquet_maml_lock()
         if (.not. allocated(metadata%items)) then
             allocate(metadata%items(1))
             metadata%items(1)%key = trim(key)
@@ -967,6 +991,7 @@ contains
             tmp(n+1)%description = desc_val
             call move_alloc(tmp, metadata%items)
         end if
+        call parquet_maml_unlock()
 
         ! metadata%source_maml_lines is only allocated once parquet_read_maml has
         ! finished parsing (see parquet_read_maml_file/_internal below), so this
@@ -1179,6 +1204,8 @@ contains
     module procedure parquet_append_empty_cinfo
         type(parquet_column_type), allocatable :: tmp(:)
 
+        ! See g_maml_mutex in parquet_wrapper.cpp.
+        call parquet_maml_lock()
         if (.not. allocated(columns)) then
             allocate(columns(1))
             n = 1
@@ -1192,6 +1219,7 @@ contains
         columns(n)%is_set = .true.
         columns(n)%array_size = 1
         columns(n)%col_size = 1
+        call parquet_maml_unlock()
     end procedure parquet_append_empty_cinfo
 
     module procedure parquet_split_key_value
@@ -1249,6 +1277,8 @@ contains
         integer :: insert_pos, n_old, n_new, new_len
         logical :: need_header
 
+        ! See g_maml_mutex in parquet_wrapper.cpp.
+        call parquet_maml_lock()
         call parquet_locate_keyarray_insert(lines, insert_pos, need_header)
 
         new_len = max(len(lines), 7+len(key), 9+len(value), 11+len(desc))
@@ -1275,6 +1305,7 @@ contains
         if (insert_pos <= n_old) new_lines(insert_pos+n_new:) = lines(insert_pos:n_old)
 
         call move_alloc(new_lines, lines)
+        call parquet_maml_unlock()
     end subroutine parquet_append_keyarray_line
 
     !> Locates where a new keyarray entry should be inserted in `lines`.
@@ -1435,6 +1466,8 @@ contains
         end do
         if (idx_col_map == 0) return
 
+        ! See g_maml_mutex in parquet_wrapper.cpp.
+        call parquet_maml_lock()
         do i = idx_col_map + 1, extra_end
             if (len_trim(lines(i)) == 0) cycle
 
@@ -1453,6 +1486,7 @@ contains
             tmp(n_entries + 1)%output_name = parquet_unquote(cvalue)
             call move_alloc(tmp, col_map)
         end do
+        call parquet_maml_unlock()
     end function parquet_parse_col_map
 
     !> Parses a `protected_cols:` entry nested inside `extra:`, e.g.:
@@ -1514,6 +1548,8 @@ contains
         end do
         if (idx_key == 0) return
 
+        ! See g_maml_mutex in parquet_wrapper.cpp.
+        call parquet_maml_lock()
         if (len_trim(cvalue) > 0) then
             ! Scalar semicolon-separated form: protected_cols: col1;col2; col3
             cvalue = trim(adjustl(cvalue))
@@ -1536,6 +1572,7 @@ contains
                     call move_alloc(tmp, names)
                 end if
             end do
+            call parquet_maml_unlock()
             return
         end if
 
@@ -1554,6 +1591,7 @@ contains
             tmp(n_names + 1) = token
             call move_alloc(tmp, names)
         end do
+        call parquet_maml_unlock()
     end function parquet_parse_protected_cols
 
     !> Checks that every top-level section in `lines`, every sub-key found

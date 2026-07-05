@@ -13,17 +13,39 @@ module test_openmp
     !
     implicit none
     private
+    public :: collect_tests_parquet_openmp_write
     public :: collect_tests_parquet_openmp
     !
     integer, parameter :: nfiles = 8
     !
 contains
     !
+    !> testdrive's own run_testsuite runs every test *within one collection*
+    !> concurrently with each other by default (parallel_ defaults to .true.
+    !> in testdrive.F90, and this project never overrides it) -- tests in
+    !> *different* collections/suites still run sequentially relative to each
+    !> other, since run_tester.f90 calls run_testsuite once per suite in a
+    !> plain sequential loop. test_write_parallel's output
+    !> (test_run/test_openmp_write_*.parquet) is read by several of the other
+    !> tests below, so it's split into its own collection here to guarantee
+    !> it fully completes before any of them start, rather than racing them.
+    subroutine collect_tests_parquet_openmp_write(testsuite)
+        type(unittest_type), allocatable, intent(out) :: testsuite(:)
+
+        testsuite = [ &
+            new_unittest("write different parquet files in parallel", test_write_parallel) &
+            ]
+    end subroutine collect_tests_parquet_openmp_write
+
+    !> Every test here either only reads test_run/test_openmp_write_*.parquet
+    !> (produced by collect_tests_parquet_openmp_write, run beforehand as its
+    !> own suite -- see the note there) or is fully self-contained, so it's
+    !> safe for these to run concurrently with each other, exactly as
+    !> testdrive's own default (parallel) test execution already does.
     subroutine collect_tests_parquet_openmp(testsuite)
         type(unittest_type), allocatable, intent(out) :: testsuite(:)
 
         testsuite = [ &
-            new_unittest("write different parquet files in parallel", test_write_parallel), &
             new_unittest("read different parquet files in parallel", test_read_parallel), &
             new_unittest("mixed read/write of different files in parallel", test_mixed_read_write_parallel), &
             new_unittest("parse MAML files concurrently", test_maml_parallel), &

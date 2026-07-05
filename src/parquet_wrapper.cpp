@@ -18,6 +18,7 @@
 #include <cstring>
 #include <memory>
 #include <limits>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -95,6 +96,34 @@ private:
 
 extern "C"
 {
+	// MAML parsing (parquet_metadata.f90) repeatedly grows arrays of derived
+	// types that themselves have allocatable character components (e.g.
+	// parquet_column_type, parquet_metadata_entry) via a "allocate a bigger
+	// tmp, whole-array-assign the old contents into it, move_alloc" pattern.
+	// That whole-array assignment requires the compiler to generate a deep
+	// copy (allocating and copying each element's allocatable components),
+	// and testing found this is not reliably safe under genuine concurrent
+	// threads in this gfortran version -- even with -frecursive, which fixes
+	// the (different, simpler) problem of non-recursive local variables not
+	// being safely stack-allocated per thread. A recursive mutex serializes
+	// the affected code paths (parquet_parse_maml_lines and friends, see
+	// parquet_metadata.f90) so concurrent MAML parsing stays correct, at the
+	// cost of not running in true parallel for that specific operation.
+	// Recursive because these functions call each other (e.g.
+	// parquet_parse_maml_lines calls parquet_metadata_append_entry): a plain
+	// std::mutex would deadlock a single thread locking it twice.
+	static std::recursive_mutex g_maml_mutex;
+
+	void parquet_maml_lock()
+	{
+		g_maml_mutex.lock();
+	}
+
+	void parquet_maml_unlock()
+	{
+		g_maml_mutex.unlock();
+	}
+
 	struct ColumnMetadata
 	{
 		std::string name;

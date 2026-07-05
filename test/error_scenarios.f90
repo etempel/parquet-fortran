@@ -687,19 +687,25 @@ contains
     !> synchronization, so this must be caught by the ConcurrencyGuard in
     !> parquet_wrapper.cpp rather than silently racing/corrupting memory.
     !> Uses !$omp parallel (not parallel do): every thread runs the *entire*
-    !> loop itself, all hammering the same shared reader for many iterations,
-    !> with a barrier right at the start so all threads begin as close to
-    !> simultaneously as possible -- a work-shared "parallel do" split across
-    !> threads turned out not to reliably overlap in practice (each thread
-    !> only touching the reader a handful of times), so this maximizes both
-    !> the number of concurrent attempts and how simultaneous they are.
+    !> loop itself, all hammering the same shared reader for many iterations.
+    !> A work-shared "parallel do" split across threads turned out not to
+    !> reliably overlap in practice (each thread only touching the reader a
+    !> handful of times). Beyond that, a *single* barrier right at the start
+    !> also turned out not to be reliable enough on its own: how simultaneous
+    !> the very first round of calls actually is depends on details like
+    !> compiler flags (e.g. -frecursive changes per-call overhead enough to
+    !> visibly change contention odds) -- so this re-synchronizes every
+    !> thread with a fresh barrier before *every* batch of calls, giving many
+    !> repeated chances at genuine overlap throughout the run instead of
+    !> just one, regardless of exactly how simultaneous any single batch is.
     subroutine scenario_concurrent_calls_into_shared_reader()
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
         integer(int32) :: values(5) = [1_int32, 2_int32, 3_int32, 4_int32, 5_int32]
         integer(int32) :: read_back(5)
-        integer, parameter :: iterations = 20000
-        integer :: i
+        integer, parameter :: batches = 200
+        integer, parameter :: iterations_per_batch = 500
+        integer :: b, i
 
         call parquet_open_writer(writer, "test_run/error_scenario_shared_reader.parquet")
         call parquet_write_column(writer, "v", values)
@@ -707,10 +713,12 @@ contains
 
         call parquet_open_reader(reader, "test_run/error_scenario_shared_reader.parquet")
 
-        !$omp parallel default(shared) private(i, read_back)
-        !$omp barrier
-        do i = 1, iterations
-            call parquet_read_column(reader, "v", read_back)
+        !$omp parallel default(shared) private(b, i, read_back)
+        do b = 1, batches
+            !$omp barrier
+            do i = 1, iterations_per_batch
+                call parquet_read_column(reader, "v", read_back)
+            end do
         end do
         !$omp end parallel
 
@@ -718,28 +726,31 @@ contains
         print '(a)', "unexpectedly finished concurrent reads of a shared reader without the concurrency guard firing"
     end subroutine scenario_concurrent_calls_into_shared_reader
 
-    !> Same idea as scenario_concurrent_calls_into_shared_reader, but for the
-    !> writer side: every thread calls parquet_write_column on the *same*
-    !> shared writer instance, in a loop it runs in full itself (see the note
-    !> above), each writing its own column names (thread index + iteration)
-    !> so a successful call would never legitimately fail for an unrelated
-    !> reason like a duplicate column name.
+    !> Same idea as scenario_concurrent_calls_into_shared_reader (including
+    !> the repeated-barrier-per-batch rationale above), but for the writer
+    !> side: every thread calls parquet_write_column on the *same* shared
+    !> writer instance, each writing its own column names (thread index +
+    !> batch + iteration) so a successful call would never legitimately fail
+    !> for an unrelated reason like a duplicate column name.
     subroutine scenario_concurrent_calls_into_shared_writer()
         type(parquet_writer) :: writer
         integer(int32) :: values(3) = [1_int32, 2_int32, 3_int32]
-        integer, parameter :: iterations = 3000
-        integer :: i, tid
+        integer, parameter :: batches = 50
+        integer, parameter :: iterations_per_batch = 100
+        integer :: b, i, tid
         character(len=32) :: colname
 
         call parquet_open_writer(writer, "test_run/error_scenario_shared_writer.parquet")
 
-        !$omp parallel default(shared) private(i, tid, colname)
+        !$omp parallel default(shared) private(b, i, tid, colname)
         tid = 0
         !$ tid = omp_get_thread_num()
-        !$omp barrier
-        do i = 1, iterations
-            write(colname, '(A,I0,A,I0)') "col_", tid, "_", i
-            call parquet_write_column(writer, trim(colname), values)
+        do b = 1, batches
+            !$omp barrier
+            do i = 1, iterations_per_batch
+                write(colname, '(A,I0,A,I0,A,I0)') "col_", tid, "_", b, "_", i
+                call parquet_write_column(writer, trim(colname), values)
+            end do
         end do
         !$omp end parallel
 

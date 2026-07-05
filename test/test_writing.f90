@@ -967,8 +967,11 @@ contains
         integer :: exitstat, cmdstat
         logical :: aborted
 
+        ! --features thread_safe forced regardless of how the outer `fpm
+        ! test` was invoked -- see the identical note on
+        ! check_scenario_exit_status in test_errors.f90.
         call execute_command_line( &
-            "fpm test error_scenarios -- "//trim(scenario)//" > /dev/null 2>&1", &
+            "fpm test error_scenarios --features thread_safe -- "//trim(scenario)//" > /dev/null 2>&1", &
             wait=.true., exitstat=exitstat, cmdstat=cmdstat)
 
         call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper program via fpm")

@@ -38,8 +38,36 @@ end program quick_example
 ```
 See [Reading parquet files](#reading-parquet-files-from-your-fortran-code) and [Writing parquet files](#writing-parquet-files-from-your-fortran-code) below for the full picture, including MAML-driven schemas, matrix columns, and the features listed above. You'll need Arrow/Parquet available and a couple of environment variables set to actually build against this library — see [Prerequisites](#prerequisites).
 
+## Quickstart for consumers (10 lines)
+
+```bash
+# 1) Install Arrow/Parquet C++ library (example: macOS Homebrew)
+brew install apache-arrow
+
+# 2) Point FPM to Arrow headers/libs (adjust path to your install)
+export LIBRARY_PATH="/opt/homebrew/lib:$LIBRARY_PATH"
+export FPM_FFLAGS="-I/opt/homebrew/include"
+export FPM_CXXFLAGS="-std=c++20 -stdlib=libc++ -I/opt/homebrew/include"
+export FPM_LDFLAGS="-L/opt/homebrew/lib -lc++"
+
+# 3) In your own fpm.toml, add parquet-fortran + link = ["arrow", "parquet", "c++"]
+# 4) Build/test your project
+fpm test
+```
+
+## Important behavior
+
+- Most failures are reported via Fortran `error stop` and abort the process immediately.
+- There are no status/`ierr` return codes in the public API.
+- Some lower-level Arrow/Parquet failures may abort via C++ rather than `error stop`.
+
+See [Error handling](#error-handling) and [Limitations](#limitations) for full details.
+
 ## Contents
 
+- [Quick example](#quick-example)
+- [Quickstart for consumers (10 lines)](#quickstart-for-consumers-10-lines)
+- [Important behavior](#important-behavior)
 - [Prerequisites](#prerequisites)
   - [Environment variables](#environment-variables)
 - [Building and installing instructions](#building-and-installing-instructions)
@@ -95,7 +123,7 @@ Unit testing is handled using test-drive, which is automatically installed by FP
 
 ### Environment variables
 
-To build the code with intel compiles, the following environment variables should be set:
+To build with Intel Fortran (or any supported compiler), set these variables so FPM can find Arrow/Parquet:
 
 - LIBRARY_PATH should point to the parquet and arrow library.
 - FPM_FFLAGS should point to arrows include directory
@@ -103,26 +131,32 @@ To build the code with intel compiles, the following environment variables shoul
 - FPM_LDFLAGS should point to arrow and parquet library
 - FPM_FC can be used to set fortran compiler for FPM (e.g. FPM_FC=ifx)
 
-In bash you can initialise them as follows:
+In bash, initialize them as follows (replace `path_arrow` with your install root):
 
-    export LIBRARY_PATH=path_arrow/lib:$LIBRARY_PATH
-    export FPM_FFLAGS="-Ipath_arrow/include"
-    export FPM_CXXFLAGS="-std=c++20 -stdlib=libc++ -Ipath_arrow/include" # macOS
-    export FPM_CXXFLAGS="-std=c++20"
-    export FPM_LDFLAGS="-Lpath_arrow/lib"
-    export FPM_FC=ifx
+macOS (Clang/libc++):
 
-NB! `-std=c++20` is required on every platform (Arrow/Parquet headers use `std::span` unconditionally).
+```bash
+export LIBRARY_PATH=path_arrow/lib:$LIBRARY_PATH
+export FPM_FFLAGS="-Ipath_arrow/include"
+export FPM_CXXFLAGS="-std=c++20 -stdlib=libc++ -Ipath_arrow/include"
+export FPM_LDFLAGS="-Lpath_arrow/lib -lc++"
+export FPM_FC=ifx
+```
+
+Linux (GCC/libstdc++):
+
+```bash
+export LIBRARY_PATH=path_arrow/lib:$LIBRARY_PATH
+export FPM_FFLAGS="-Ipath_arrow/include"
+export FPM_CXXFLAGS="-std=c++20 -Ipath_arrow/include"
+export FPM_LDFLAGS="-Lpath_arrow/lib -lstdc++"
+export FPM_FC=ifx
+```
+
+Note: `-std=c++20` is required on every platform (Arrow/Parquet headers use `std::span` unconditionally).
 `-stdlib=libc++` is macOS/Clang-specific and should be dropped on Linux.
 
-The build also links a C++ standard library at the final link step, since the executables/tests are
-linked by the Fortran compiler driver. This library is platform/toolchain-specific and must be added
-to FPM_LDFLAGS:
-
-- macOS (Clang/libc++): `export FPM_LDFLAGS="-Lpath_arrow/lib -lc++"`
-- Linux (GCC/libstdc++): `export FPM_LDFLAGS="-Lpath_arrow/lib -lstdc++"`
-
-NB! It might depend on the operating system and fortran compiler what environment variables are needed.
+Note: the exact variable set can vary by operating system and compiler toolchain.
 
 For genuine multi-threaded (OpenMP) use, `-fopenmp` is also required — see [Thread safety](#thread-safety) for why, and `fpm test --features thread_safe` for this project's own bundled shortcut.
 
@@ -303,7 +337,7 @@ call parquet_read_maml("maml_example.maml", cinfo, metadata)
 call parquet_open_writer(writer, "data.parquet", cinfo, metadata)
 ```
 
-If `cinfo` is omitted, `parquet_open_writer` does not enforce a fixed schema: each column's type, string length and array size are inferred from the first `parquet_write_column` call that writes it. If `cinfo` is given, only columns marked `is_set = .true.` (see `set_available`/`set_unavailable` below) are written, and calling `parquet_write_column` with a name that is not in `cinfo` stops the program with an error.
+If `cinfo` is omitted, `parquet_open_writer` does not enforce a fixed schema: each column's type, string length and array size are inferred from the first `parquet_write_column` call that writes it. If `cinfo` is given, only columns marked `is_set = .true.` (see `set_available`/`set_unavailable` below) are written, and calling `parquet_write_column` with a name that is not in `cinfo` fails immediately with `error stop`.
 
 ### Saving the source MAML alongside the parquet file
 
@@ -320,7 +354,7 @@ This requires `metadata` to come from `parquet_read_maml` — it saves the verba
 - Calls to `metadata%add_metadata` made *after* `parquet_read_maml` (to add extra runtime metadata, as in the [combined example](#combined-example-maml-schema-matrices-and-metadata) below) each append a new `keyarray:` entry (`key`/`value`/`comment`) to the saved `.maml`, so runtime metadata is reflected in the sidecar too. Entries are always appended, even if a `keyarray:` entry with the same key already exists — the sidecar will then contain both. A `keyarray:` header is added automatically if the source MAML didn't have one, placed before `extra:` if present, else before `fields:`.
 - The saved `.maml`'s `fields:` section only lists columns that are enabled (`cinfo%col(:)%is_set`) at the time `parquet_open_writer` is called, i.e. what actually ends up in the `.parquet` file: entries for columns disabled via `set_unavailable`, or excluded from a user MAML subset via `parquet_validate_user_maml`, are removed from the sidecar. Matching is by column name against the `cinfo` passed to `parquet_open_writer`; every other section (table-level metadata, `keyarray:`, etc.) is left untouched. If disabling columns would leave zero fields, pruning is skipped entirely and the full field list is kept instead, since a MAML file with no fields cannot be read back by `parquet_validate_maml`.
 
-Omitting `write_maml`, or passing `write_maml=.false.`, behaves exactly as before (no sidecar file). Passing `write_maml=.true.` without `metadata`, or with `metadata` that wasn't produced by `parquet_read_maml`, stops the program with an error.
+Omitting `write_maml`, or passing `write_maml=.false.`, behaves exactly as before (no sidecar file). Passing `write_maml=.true.` without `metadata`, or with `metadata` that wasn't produced by `parquet_read_maml`, fails immediately with `error stop`.
 
 Notes:
 
@@ -334,6 +368,8 @@ A [MAML](https://github.com/asgr/MAML-Format) file is YAML. Table-level metadata
 - [docs/maml_example.maml](docs/maml_example.maml) — the base example used throughout this README.
 - [docs/maml_example2.maml](docs/maml_example2.maml) — adds `string` fields and `qc: min:`/`max:` bounds (both the plain-number and the quoted-operator forms).
 - [docs/maml_example3.maml](docs/maml_example3.maml) — adds `extra: col_map:` column renaming (e.g. `id` → `uberid`, `RA` → `ra_J2000`) alongside `qc:`.
+
+If you're new to MAML in this library, focus first on `table:` and `fields:` (`name` + `data_type` for each field). Everything else is optional metadata or advanced behavior.
 
 An abridged version of the base example:
 
@@ -398,7 +434,7 @@ fields:
 - `user_maml%col_map` (populated by `parquet_validate_user_maml`) exposes the parsed entries for inspection.
 - Since it lives inside `extra:`, `col_map:` does not produce any table-level metadata entry of its own (nor does `protected_cols:`, `extra:`'s other specifically-parsed key — see [Null values](#null-values)); anything else nested inside `extra:` is accepted unvalidated and otherwise unused.
 
-Table-level top-level keys become one metadata entry each, with a few special cases:
+Table-level keys become parquet metadata entries, with these special mappings:
 
 | Top-level key | Becomes |
 |---|---|
@@ -411,9 +447,9 @@ Table-level top-level keys become one metadata entry each, with a few special ca
 | any other list of *maps* | **Not** specially handled: only its first sub-key ends up captured as a raw, unparsed string, and the rest of that entry's sub-keys are silently dropped. Use `keyarray:` for arbitrary structured metadata instead. |
 | `extra:` | Opaque to table-level metadata (produces no metadata entry of its own), but not ignored: `col_map:` and `protected_cols:` are specifically parsed out of it — see [Renaming columns for output with `col_map:`](#renaming-columns-for-output-with-col_map) and [Null values](#null-values). Anything else nested inside `extra:` is accepted unvalidated and otherwise unused. |
 
-`parquet_validate_maml` also checks that the MAML file only uses known sections: every top-level section name, and every sub-key one level inside a map-list section's items (e.g. `name:`/`data_type:`/... inside a `fields:` entry, or `key:`/`value:`/`comment:` inside a `keyarray:` entry), must be declared in the schema at the top of [src/parquet_metadata.f90](src/parquet_metadata.f90) (`allowed_maml_sections`). This checks presence only, not values. To allow a new top-level section, or a new sub-key within an existing map-list section, add an entry there.
+`parquet_validate_maml` also checks that section names and known sub-keys are registered in [src/parquet_metadata.f90](src/parquet_metadata.f90) (`allowed_maml_sections`). This checks key presence, not semantic value meaning. To allow a new top-level section or map-list sub-key, add it there.
 
-One level deeper still (e.g. a `fields:` entry's own `qc:` sub-block, with its `min:`/`max:`/`miss:` keys) is validated too, but only where a matching entry exists in the separate `allowed_maml_nested_sections` schema (also in `src/parquet_metadata.f90`) — add an entry there for any other sub-key that itself has structured children needing validation. `extra:` is the sole exception to all of this: its entire internal structure (however deeply nested) is accepted unvalidated. Anything nested deeper than `allowed_maml_nested_sections` covers is likewise left unvalidated.
+In short: validation is strict for the known schema (`fields`, `keyarray`, `DOIs`, etc.), permissive for `extra:`, and intentionally shallow beyond the explicitly registered nested blocks. If you extend MAML structure in this library, update `allowed_maml_sections` and (where needed) `allowed_maml_nested_sections` in [src/parquet_metadata.f90](src/parquet_metadata.f90).
 
 ## Combined example: MAML schema, matrices and metadata
 
@@ -459,11 +495,20 @@ This library reports all failures (missing files, invalid MAML, unknown column n
 
 ## Thread safety
 
-Concurrent use (e.g. from an OpenMP parallel region) is supported, but only under this rule: **each thread must use its own, independent `parquet_writer`/`parquet_reader` instance.** Concretely:
+Concurrent use (e.g. from an OpenMP parallel region) is supported.
+
+Rules at a glance:
+
+- Each thread must use its own independent `parquet_writer`/`parquet_reader` instance.
+- Never call into the same reader/writer instance from two threads at once.
+- Independent readers may open/read the same parquet file concurrently.
+- Never write to the same output file path from two threads at the same time.
+
+Practical cases:
 
 - Safe: many threads, each opening/writing/closing its own `parquet_writer` to a different file.
 - Safe: many threads, each opening/reading/closing its own `parquet_reader` — including multiple threads independently opening their own reader on the *same* file at the same time (each thread's `parquet_open_reader` call is independent).
-- Safe: parsing MAML files (`parquet_read_maml`, `parquet_validate_maml`, etc.) concurrently across threads. Internally this is serialized with a lock: the parser repeatedly grows arrays of a derived type with several allocatable string components while parsing, and that turned out not to be safely reentrant under genuine concurrent threads (garbled field lists, occasional heap corruption). The lock keeps this correct — calls from different threads queue up rather than truly running in parallel — so the "safe to call concurrently" guarantee above holds, just without a speedup for that specific operation.
+- Safe: parsing MAML files (`parquet_read_maml`, `parquet_validate_maml`, etc.) concurrently across threads. Internally this path is lock-serialized for correctness, so it is thread-safe but not expected to speed up with more threads.
 - **Not safe:** sharing a single `parquet_writer`/`parquet_reader` variable across threads (e.g. a module-level or `!$omp shared` instance that multiple threads call into at once).
 - **Not safe:** two threads writing to the *same* output file at the same time, even with separate `parquet_writer` instances — the underlying file itself isn't safe to write from more than one place at once.
 
@@ -471,13 +516,11 @@ Concurrent use (e.g. from an OpenMP parallel region) is supported, but only unde
 ```sh
 fpm test --features thread_safe
 ```
-If you depend on this library from your own project and call into it concurrently from your own `!$omp parallel` regions, make sure your build applies `-fopenmp` to this library's compiled code too (e.g. via your own `[features]` entry, or `FPM_FFLAGS`) — without it, none of the above is exercised and everything just runs single-threaded.
+If you depend on this library from your own project and call into it concurrently from your own `!$omp parallel` regions, make sure your build applies `-fopenmp` to this library's compiled code too (e.g. via your own `[features]` entry or `FPM_FFLAGS`). Without it, those code paths run single-threaded.
 
-This is exercised by `test/test_openmp.f90`, which covers: writing different files in parallel, reading different files in parallel, a mixed read/write workload, concurrent MAML parsing, many independent readers repeatedly opening/closing the same shared file, and a higher-fan-out stress case — in every one of these, each thread always owns its own reader/writer instance.
+Calling into a *shared* `parquet_writer`/`parquet_reader` from more than one thread at a time (the "not safe" case above) is actively detected and rejected: the second concurrent caller triggers an immediate process abort (`std::abort()`) with a diagnostic on stderr. This is a fail-fast race guard, not a locking mechanism. Sequential, non-overlapping hand-off between threads remains allowed.
 
-Calling into a *shared* `parquet_writer`/`parquet_reader` from more than one thread at a time (the "not safe" case above) is actively detected and rejected, rather than silently racing or corrupting memory: each instance internally guards against concurrent entry, and a second thread that tries to call into one while another thread is already inside a call on that same instance immediately prints a diagnostic to stderr and aborts the whole process (`std::abort()`), rather than a clean `error stop`. This deliberately does not go through a thrown C++ exception: the OpenMP specification does not guarantee well-defined behavior for an exception that escapes a `!$omp parallel` region uncaught (which is exactly the situation this guard is meant to catch), so different compiler/OpenMP-runtime combinations could handle that inconsistently; a direct process abort is well-defined from any thread regardless. This is a safety net that turns a dangerous, unpredictable race into a loud, immediate, deterministic failure; it is not a way to make sharing one instance across threads *work* (there is still no internal locking that would make that safe *and* correct, and doing so wouldn't buy you anything: Arrow's own [`use_threads`](#multi-threaded-decodingencoding-use_threads-and-thread-pool-size)/`parquet_prefetch_columns` are the supported ways to parallelize work *within* one reader/writer). Note that this guard does not forbid *sequential*, non-overlapping hand-off of one instance between threads (e.g. opening a reader on one thread and passing it to a different thread that does all the actual reading) — only genuine concurrent entry from more than one thread at the same moment is rejected.
-
-Note that each reader/writer's own internal `use_threads` (see [Multi-threaded decoding/encoding](#multi-threaded-decodingencoding-use_threads-and-thread-pool-size)) is a *separate* dimension from this: it controls whether that one reader/writer also fans out across Arrow's thread pool, on top of whatever thread (OpenMP or otherwise) already owns it. If you're parallelizing at the OpenMP level as described above, consider `use_threads=.false.` (and/or `parquet_set_max_threads`) to avoid oversubscribing your cores.
+`use_threads` (see [Multi-threaded decoding/encoding](#multi-threaded-decodingencoding-use_threads-and-thread-pool-size)) is separate from OpenMP-level concurrency here. If you already parallelize with OpenMP across many readers/writers, consider `use_threads=.false.` (and/or `parquet_set_max_threads`) to avoid CPU oversubscription.
 
 ## Supported data types
 
@@ -496,7 +539,7 @@ Matrix (vector-column) entries use the shape convention `(col_size, nrows)` for 
 
 ### Null values
 
-Fortran has no per-element representation for a missing/Null value. On the **read** side, if a column contains any genuine Parquet Null (e.g. a file produced by another tool), the default behavior of `parquet_read_column`, `parquet_read_array_row_mode`, and `parquet_read_array_element_mode` is to error out immediately, rather than silently returning undefined data.
+Fortran has no per-element representation for a missing/Null value. On the **read** side, if a column contains any genuine Parquet Null (e.g. a file produced by another tool), the default behavior of `parquet_read_column`, `parquet_read_array_row_mode`, and `parquet_read_array_element_mode` is to fail immediately with `error stop`, rather than silently returning undefined data.
 
 To read a Null-containing column instead of erroring, pass one or both of these optional keyword arguments (supported by all three of the read families above, for every data type):
 
@@ -524,7 +567,7 @@ extra:
   - col2
   - col3
 ```
-Every name listed must be one of this same MAML file's own declared `fields:` (checked by `parquet_validate_maml`; an unknown name errors out). If a user MAML overrides a base MAML, `protected_cols:` is taken from whichever MAML is actually used to build the writer's schema (the user MAML if one is provided, otherwise the base MAML) — not merged across both. Writing an `is_valid` mask with any `.false.` entry for a protected column errors out immediately. This only applies when writing against a MAML-derived schema (`parquet_open_writer(..., cinfo, ...)`); a schema-less writer has no `protected_cols:` to enforce.
+Every name listed must be one of this same MAML file's own declared `fields:` (checked by `parquet_validate_maml`; unknown names fail validation). If a user MAML overrides a base MAML, `protected_cols:` is taken from whichever MAML is actually used to build the writer's schema (the user MAML if one is provided, otherwise the base MAML) — not merged across both. Writing an `is_valid` mask with any `.false.` entry for a protected column fails immediately with `error stop`. This only applies when writing against a MAML-derived schema (`parquet_open_writer(..., cinfo, ...)`); a schema-less writer has no `protected_cols:` to enforce.
 
 ### Quality control (qc:) range checks on write
 
@@ -554,7 +597,7 @@ This only applies when writing against a MAML-derived schema (`parquet_open_writ
 ```fortran
 call parquet_open_writer(writer, "data.parquet", compression="zstd", compression_level=9, chunk_size=100000)
 ```
-- `compression` — one of `"uncompressed"`, `"snappy"` (the default), `"gzip"`, `"zstd"`, `"brotli"`, `"lz4"` (case-insensitive); an unrecognized name errors out immediately. Note that Parquet-the-library's own built-in default is actually `"uncompressed"` — this library deliberately follows the ecosystem convention (pyarrow, Spark, ...) of defaulting to `"snappy"` instead, since writing uncompressed files was never an intentional choice, just an unset option. Rough guidance: `snappy`/`lz4` for fastest read/write at a modest size reduction; `gzip`/`brotli` for the smallest files at the cost of slower compression; `zstd` for the best all-round balance of the two (and the only one of these with a meaningfully tunable `compression_level`, roughly 1–22 for higher-ratio/slower).
+- `compression` — one of `"uncompressed"`, `"snappy"` (the default), `"gzip"`, `"zstd"`, `"brotli"`, `"lz4"` (case-insensitive); an unrecognized name fails immediately with `error stop`. Note that Parquet-the-library's own built-in default is actually `"uncompressed"` — this library deliberately follows the ecosystem convention (pyarrow, Spark, ...) of defaulting to `"snappy"` instead, since writing uncompressed files was never an intentional choice, just an unset option. Rough guidance: `snappy`/`lz4` for fastest read/write at a modest size reduction; `gzip`/`brotli` for the smallest files at the cost of slower compression; `zstd` for the best all-round balance of the two (and the only one of these with a meaningfully tunable `compression_level`, roughly 1–22 for higher-ratio/slower).
 - `compression_level` — optional integer tuning the chosen codec's compression level (mainly meaningful for `zstd`/`gzip`/`brotli`); omitted means "use that codec's own default level".
 - `chunk_size` — the maximum number of rows per Parquet row group. If omitted, it is auto-sized from the table's final row count once `parquet_close_writer` runs (the number of rows written, capped at 500,000 rows per row group), instead of the small fixed default this library used previously — so large tables automatically get large, throughput-friendly row groups without any tuning on your part. Pass an explicit value to override the auto-sizing, e.g. to force multiple row groups in a small file (as the tests do) or to hand-tune the read/write memory-vs-overhead trade-off described below. Larger values reduce per-row-group overhead and can improve compression (more data for the compressor to find patterns in), at the cost of more memory needed to read/write one row group at a time; smaller values let readers that only need a few rows skip more of the file.
 
@@ -573,7 +616,7 @@ The most common reason to pass `use_threads=.false.` is to avoid **oversubscript
 ```fortran
 call parquet_set_max_threads(4)
 ```
-Unlike `use_threads`, this is **not** a per-reader/per-writer setting — Arrow's CPU thread pool is a single, process-global resource shared by every reader/writer (in every thread) that has `use_threads` enabled. Call it once, e.g. near the start of your program, before opening readers/writers on other threads; calling it repeatedly with different values from multiple concurrent threads is a race, since each call resizes a pool everyone else is using at that same moment. `n` must be `>= 1`; anything less errors out immediately.
+Unlike `use_threads`, this is **not** a per-reader/per-writer setting — Arrow's CPU thread pool is a single, process-global resource shared by every reader/writer (in every thread) that has `use_threads` enabled. Call it once, e.g. near the start of your program, before opening readers/writers on other threads; calling it repeatedly with different values from multiple concurrent threads is a race, since each call resizes a pool everyone else is using at that same moment. `n` must be `>= 1`; values below that fail immediately with `error stop`.
 
 ### Combined example: Nulls, quality control and compression together
 
@@ -626,19 +669,19 @@ List of public callable procedures available with `use parquet`:
 ### Utility
 
 - `call parquet_get_version(ver_string[, internal])` — sets `ver_string` (`character`, `intent(out)`) to the library version. By default (or `internal=.false.`) returns just the release number without a `v` prefix, e.g. `"0.4.0"` (matching `VERSION.txt`, substituted in at build time via fpm). Pass `internal=.true.` to instead get the full internal version string embedded in the source, e.g. `"v0.4.0 (2026-07-05)"` (includes a `v` prefix and the last-updated date). If the two disagree (e.g. the library was built without going through fpm's version substitution), a `WARNING` is printed to stdout.
-- `parquet_set_max_threads(n)` — sets the capacity (number of worker threads) of Arrow's global CPU thread pool to `n`. This is process-global, not per-reader/per-writer; see [Multi-threaded decoding/encoding](#multi-threaded-decodingencoding-use_threads-and-thread-pool-size). `n < 1` errors out immediately.
+- `parquet_set_max_threads(n)` — sets the capacity (number of worker threads) of Arrow's global CPU thread pool to `n`. This is process-global, not per-reader/per-writer; see [Multi-threaded decoding/encoding](#multi-threaded-decodingencoding-use_threads-and-thread-pool-size). `n < 1` fails immediately with `error stop`.
 
 ### MAML and metadata
 
 - `parquet_read_maml(maml, cinfo, metadata)` — parses a MAML source into `cinfo` (column definitions) and `metadata` (table-level key/value metadata). Two overloads share the same `maml` keyword: pass a filename (`character`) to read and parse a `.maml` file directly, or pass an already-loaded `parquet_maml_file` object (see `parquet_load_maml_file`) to parse MAML content you already hold in memory.
 - `parquet_load_maml_file(filename)` — reads a `.maml` file from disk and returns it as a `parquet_maml_file` object, without parsing it into `cinfo`/`metadata`. Useful when you want to hold on to the raw MAML content (e.g. to pass to `parquet_read_maml` later, or inspect `maml%name`/`maml%lines` directly).
-- `parquet_validate_user_maml(base_maml, user_maml)` — checks that every column declared in `user_maml`'s `fields:` block also exists in `base_maml`'s `fields:` block (by name only). `user_maml` may omit any columns from `base_maml`, but must not declare any that aren't there. Errors out, naming the offending column(s), if it does.
+- `parquet_validate_user_maml(base_maml, user_maml)` — checks that every column declared in `user_maml`'s `fields:` block also exists in `base_maml`'s `fields:` block (by name only). `user_maml` may omit any columns from `base_maml`, but must not declare any that aren't there. Unknown columns fail validation and are reported by name.
 - `parquet_validate_maml(maml)` — validates a single MAML file on its own. Checks that: at least one field is defined; every field has a non-empty `name`; every field's `data_type` is one of the recognized types (see [Supported data types](#supported-data-types) above; see `valid_maml_data_types` in `src/parquet_metadata.f90` to add more); no two fields share the same `name`; and the file's metadata includes a non-empty `table` entry. It also validates the `qc:` and `protected_cols:` features described in [Null values](#null-values) and [Quality control (qc:) range checks on write](#quality-control-qc-range-checks-on-write) below. Collects and reports all violations together in a single error stop.
 
 `cinfo` is of type `parquet_column_info`, a scalar wrapper holding the array of parsed columns in `cinfo%col(:)` (each element of type `parquet_column_type`, with fields such as `name`, `output_name`, `unit`, `info`, `ucd`, `data_type`, `array_size`, `col_size`, `is_set`). It provides:
 
-- `cinfo%get_column_index(name)` — returns the index of the named column in `cinfo%col(:)`. Errors out if no column with that name exists.
-- `cinfo%set_unavailable([name])` — marks the named column as not set (`is_set = .false.`), so it is skipped when the schema is written. Errors out if no column with that name exists. If `name` is omitted, marks every column unavailable at once. Use this to drop columns from a base MAML schema without writing a separate MAML file for each combination of active columns.
+- `cinfo%get_column_index(name)` — returns the index of the named column in `cinfo%col(:)`. Missing columns fail immediately with `error stop`.
+- `cinfo%set_unavailable([name])` — marks the named column as not set (`is_set = .false.`), so it is skipped when the schema is written. Missing columns fail immediately with `error stop`. If `name` is omitted, marks every column unavailable at once. Use this to drop columns from a base MAML schema without writing a separate MAML file for each combination of active columns.
 - `cinfo%set_available([name])` — the inverse of `set_unavailable`: marks the named column (or, if `name` is omitted, every column) as set (`is_set = .true.`).
 
 The public derived type `parquet_table_metadata` provides:

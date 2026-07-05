@@ -12,6 +12,8 @@
 #include <parquet/arrow/writer.h>
 
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <cstring>
 #include <memory>
@@ -29,14 +31,23 @@
 // column_cache). Each library-facing entry point obtains its handle through
 // as_reader_handle/as_handle below, which return this guard instead of a raw
 // pointer: it atomically claims `busy` for the duration of the call (RAII)
-// and throws immediately if another thread is already inside a call on the
-// same handle, rather than silently racing. This intentionally does NOT
-// forbid handing a reader/writer off between threads sequentially (only true
-// overlap is rejected), and it does not make it safe/meaningful to call into
-// one reader/writer from many threads at once for speed -- see the README's
-// Thread safety section: each thread must still use its own independent
-// instance for that. Declared outside the extern "C" block below because
-// templates cannot be given C language linkage.
+// and immediately aborts the process if another thread is already inside a
+// call on the same handle, rather than silently racing. This intentionally
+// does NOT forbid handing a reader/writer off between threads sequentially
+// (only true overlap is rejected), and it does not make it safe/meaningful to
+// call into one reader/writer from many threads at once for speed -- see the
+// README's Thread safety section: each thread must still use its own
+// independent instance for that. Declared outside the extern "C" block below
+// because templates cannot be given C language linkage.
+//
+// Deliberately calls std::abort() here instead of throwing: this guard is
+// meant to be hit from worker threads inside a caller's own !$omp/#pragma omp
+// parallel region (that's the whole misuse case it exists to catch), and the
+// OpenMP specification does not guarantee well-defined behavior for a C++
+// exception that escapes a parallel region uncaught -- different compiler/
+// OpenMP-runtime combinations are free to handle that differently. Aborting
+// directly sidesteps that entirely: it is well-defined from any thread,
+// inside or outside any parallel construct, on every platform.
 template <typename Handle>
 class ConcurrencyGuard
 {
@@ -46,10 +57,13 @@ public:
 		bool expected = false;
 		if (!handle_->busy.compare_exchange_strong(expected, true))
 		{
-			throw std::runtime_error(
-				std::string("Concurrent access to a single ") + what + " detected: each thread must use "
+			std::fprintf(stderr,
+				"parquet-fortran: concurrent access to a single %s detected: each thread must use "
 				"its own independent parquet_reader/parquet_writer instance (see the README's Thread "
-				"safety section) -- do not call into the same one from more than one thread at a time.");
+				"safety section) -- do not call into the same one from more than one thread at a time. "
+				"Aborting.\n", what);
+			std::fflush(stderr);
+			std::abort();
 		}
 	}
 

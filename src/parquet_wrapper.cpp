@@ -11,6 +11,7 @@
 #include <parquet/arrow/reader.h>
 #include <parquet/arrow/writer.h>
 
+#include <atomic>
 #include <ctime>
 #include <cstring>
 #include <memory>
@@ -20,6 +21,63 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+// Neither ParquetReaderHandle nor ParquetWriterHandle's own data structures
+// (column_cache, the fields/arrays/*_metadata vectors, defined below) are
+// synchronized -- concurrent calls into the *same* handle from more than one
+// thread race on them (e.g. two threads' unordered_map::emplace on
+// column_cache). Each library-facing entry point obtains its handle through
+// as_reader_handle/as_handle below, which return this guard instead of a raw
+// pointer: it atomically claims `busy` for the duration of the call (RAII)
+// and throws immediately if another thread is already inside a call on the
+// same handle, rather than silently racing. This intentionally does NOT
+// forbid handing a reader/writer off between threads sequentially (only true
+// overlap is rejected), and it does not make it safe/meaningful to call into
+// one reader/writer from many threads at once for speed -- see the README's
+// Thread safety section: each thread must still use its own independent
+// instance for that. Declared outside the extern "C" block below because
+// templates cannot be given C language linkage.
+template <typename Handle>
+class ConcurrencyGuard
+{
+public:
+	ConcurrencyGuard(Handle *handle, const char *what) : handle_(handle)
+	{
+		bool expected = false;
+		if (!handle_->busy.compare_exchange_strong(expected, true))
+		{
+			throw std::runtime_error(
+				std::string("Concurrent access to a single ") + what + " detected: each thread must use "
+				"its own independent parquet_reader/parquet_writer instance (see the README's Thread "
+				"safety section) -- do not call into the same one from more than one thread at a time.");
+		}
+	}
+
+	~ConcurrencyGuard()
+	{
+		if (handle_) handle_->busy.store(false, std::memory_order_release);
+	}
+
+	ConcurrencyGuard(const ConcurrencyGuard &) = delete;
+	ConcurrencyGuard &operator=(const ConcurrencyGuard &) = delete;
+
+	operator Handle *() const { return handle_; }
+	Handle *operator->() const { return handle_; }
+
+	// Disarms the guard (its destructor becomes a no-op) and returns the raw
+	// pointer, for close_parquet_reader/close_parquet_writer, which delete
+	// the underlying handle themselves -- without this, the guard's
+	// destructor would touch already-freed memory afterwards.
+	Handle *release()
+	{
+		auto *p = handle_;
+		handle_ = nullptr;
+		return p;
+	}
+
+private:
+	Handle *handle_;
+};
 
 extern "C"
 {
@@ -52,6 +110,7 @@ extern "C"
 		int compression_level = arrow::util::kUseDefaultCompressionLevel;
 		int64_t chunk_size = -1; // <= 0 means "not set by the caller": auto-sized at close time from the final row count.
 		bool use_threads = true; // per-writer opt-out of Arrow's internal thread pool; see parquet_open_writer(..., use_threads=).
+		std::atomic<bool> busy{false}; // guards against two threads calling into the same writer at once; see ConcurrencyGuard.
 	};
 
 	// Deliberately does NOT hold a materialized arrow::Table: opening a file
@@ -67,16 +126,17 @@ extern "C"
 		std::shared_ptr<arrow::Schema> schema;
 		int64_t nrows = 0;
 		std::unordered_map<int, std::shared_ptr<arrow::Array>> column_cache;
+		std::atomic<bool> busy{false}; // guards against two threads calling into the same reader at once; see ConcurrencyGuard.
 	};
 
-	static ParquetWriterHandle *as_handle(void *handle)
+	static ConcurrencyGuard<ParquetWriterHandle> as_handle(void *handle)
 	{
-		return static_cast<ParquetWriterHandle *>(handle);
+		return ConcurrencyGuard<ParquetWriterHandle>(static_cast<ParquetWriterHandle *>(handle), "parquet_writer");
 	}
 
-	static ParquetReaderHandle *as_reader_handle(void *handle)
+	static ConcurrencyGuard<ParquetReaderHandle> as_reader_handle(void *handle)
 	{
-		return static_cast<ParquetReaderHandle *>(handle);
+		return ConcurrencyGuard<ParquetReaderHandle>(static_cast<ParquetReaderHandle *>(handle), "parquet_reader");
 	}
 
 	static int64_t get_column_index(const ParquetReaderHandle *reader_handle, const char *name)
@@ -597,7 +657,7 @@ extern "C"
 	void close_parquet_reader(void *handle)
 	{
 		auto reader_handle = as_reader_handle(handle);
-		delete reader_handle;
+		delete reader_handle.release();
 	}
 
 	// Warms the column_cache for `n` columns in a single Arrow call
@@ -660,7 +720,13 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto nrows = reader_handle->nrows;
-		auto asize = parquet_reader_get_column_col_size(handle, name);
+		// Calls the same static helpers parquet_reader_get_column_col_size
+		// itself uses, rather than that exported function directly -- going
+		// through the exported function would re-enter as_reader_handle on
+		// the same handle while this call's own guard is still held, which
+		// the (deliberately non-reentrant) ConcurrencyGuard always rejects.
+		auto array = get_single_chunk_array(reader_handle, name);
+		auto asize = get_col_size(array);
 		return nrows * asize;
 	}
 
@@ -1792,7 +1858,7 @@ extern "C"
 			if (writer_handle->fields.size() != writer_handle->column_metadata.size() ||
 				writer_handle->arrays.size() != writer_handle->column_metadata.size())
 			{
-				delete writer_handle;
+				delete writer_handle.release();
 				throw std::runtime_error("Internal error: schema/data size mismatch before close");
 			}
 
@@ -1801,7 +1867,7 @@ extern "C"
 				if (!writer_handle->fields[i] || !writer_handle->arrays[i])
 				{
 					auto missing = writer_handle->column_metadata[i].name;
-					delete writer_handle;
+					delete writer_handle.release();
 					throw std::runtime_error("Missing column data before close: " + missing);
 				}
 			}
@@ -1849,12 +1915,12 @@ extern "C"
 			arrow_writer_properties);
 		if (!status.ok())
 		{
-			delete writer_handle;
+			delete writer_handle.release();
 			throw std::runtime_error(status.ToString());
 		}
 
 		status = writer_handle->outfile->Close();
-		delete writer_handle;
+		delete writer_handle.release();
 		if (!status.ok())
 			throw std::runtime_error(status.ToString());
 	}

@@ -12,6 +12,7 @@ program error_scenarios
     use parquet
     use parquet_maml_base, only: parquet_maml_file, get_parquet_maml
     use iso_fortran_env, only : int32
+    !$ use omp_lib, only : omp_get_max_threads, omp_get_thread_num
     implicit none
 
     character(len=64) :: scenario
@@ -92,6 +93,10 @@ program error_scenarios
         call scenario_write_values_not_divisible_by_col_size()
     case ("set_max_threads_below_one")
         call scenario_set_max_threads_below_one()
+    case ("concurrent_calls_into_shared_reader")
+        call scenario_concurrent_calls_into_shared_reader()
+    case ("concurrent_calls_into_shared_writer")
+        call scenario_concurrent_calls_into_shared_writer()
     case default
         print '(a)', "unknown scenario: "//trim(scenario)
         stop 1
@@ -674,5 +679,72 @@ contains
         call parquet_set_max_threads(0)
         print '(a)', "unexpectedly accepted parquet_set_max_threads(0) without error"
     end subroutine scenario_set_max_threads_below_one
+
+    !> Deliberately violates the documented rule that each thread must use
+    !> its own independent parquet_reader (see README's Thread safety
+    !> section): every thread here calls parquet_read_column on the *same*
+    !> shared reader instance. The reader's internal column cache has no
+    !> synchronization, so this must be caught by the ConcurrencyGuard in
+    !> parquet_wrapper.cpp rather than silently racing/corrupting memory.
+    !> Uses !$omp parallel (not parallel do): every thread runs the *entire*
+    !> loop itself, all hammering the same shared reader for many iterations,
+    !> with a barrier right at the start so all threads begin as close to
+    !> simultaneously as possible -- a work-shared "parallel do" split across
+    !> threads turned out not to reliably overlap in practice (each thread
+    !> only touching the reader a handful of times), so this maximizes both
+    !> the number of concurrent attempts and how simultaneous they are.
+    subroutine scenario_concurrent_calls_into_shared_reader()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: values(5) = [1_int32, 2_int32, 3_int32, 4_int32, 5_int32]
+        integer(int32) :: read_back(5)
+        integer, parameter :: iterations = 20000
+        integer :: i
+
+        call parquet_open_writer(writer, "test_run/error_scenario_shared_reader.parquet")
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, "test_run/error_scenario_shared_reader.parquet")
+
+        !$omp parallel default(shared) private(i, read_back)
+        !$omp barrier
+        do i = 1, iterations
+            call parquet_read_column(reader, "v", read_back)
+        end do
+        !$omp end parallel
+
+        call parquet_close_reader(reader)
+        print '(a)', "unexpectedly finished concurrent reads of a shared reader without the concurrency guard firing"
+    end subroutine scenario_concurrent_calls_into_shared_reader
+
+    !> Same idea as scenario_concurrent_calls_into_shared_reader, but for the
+    !> writer side: every thread calls parquet_write_column on the *same*
+    !> shared writer instance, in a loop it runs in full itself (see the note
+    !> above), each writing its own column names (thread index + iteration)
+    !> so a successful call would never legitimately fail for an unrelated
+    !> reason like a duplicate column name.
+    subroutine scenario_concurrent_calls_into_shared_writer()
+        type(parquet_writer) :: writer
+        integer(int32) :: values(3) = [1_int32, 2_int32, 3_int32]
+        integer, parameter :: iterations = 3000
+        integer :: i, tid
+        character(len=32) :: colname
+
+        call parquet_open_writer(writer, "test_run/error_scenario_shared_writer.parquet")
+
+        !$omp parallel default(shared) private(i, tid, colname)
+        tid = 0
+        !$ tid = omp_get_thread_num()
+        !$omp barrier
+        do i = 1, iterations
+            write(colname, '(A,I0,A,I0)') "col_", tid, "_", i
+            call parquet_write_column(writer, trim(colname), values)
+        end do
+        !$omp end parallel
+
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly finished concurrent writes into a shared writer without the concurrency guard firing"
+    end subroutine scenario_concurrent_calls_into_shared_writer
 
 end program error_scenarios

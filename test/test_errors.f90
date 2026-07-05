@@ -70,7 +70,11 @@ contains
             new_unittest("writing values(:) not divisible by col_size aborts", &
                 test_write_values_not_divisible_by_col_size_aborts), &
             new_unittest("parquet_set_max_threads(0) aborts", &
-                test_set_max_threads_below_one_aborts) &
+                test_set_max_threads_below_one_aborts), &
+            new_unittest("concurrent calls into a shared parquet_reader abort", &
+                test_concurrent_calls_into_shared_reader_aborts), &
+            new_unittest("concurrent calls into a shared parquet_writer abort", &
+                test_concurrent_calls_into_shared_writer_aborts) &
             ]
     end subroutine collect_tests_parquet_errors
 
@@ -271,6 +275,20 @@ contains
         call check_scenario_exit_status(error, "set_max_threads_below_one", expect_abort=.true., &
             failure_message="parquet_set_max_threads(0) was expected to error stop")
     end subroutine test_set_max_threads_below_one_aborts
+
+    subroutine test_concurrent_calls_into_shared_reader_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "concurrent_calls_into_shared_reader", expect_abort=.true., &
+            failure_message="concurrent parquet_read_column calls into one shared reader were expected to abort")
+    end subroutine test_concurrent_calls_into_shared_reader_aborts
+
+    subroutine test_concurrent_calls_into_shared_writer_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "concurrent_calls_into_shared_writer", expect_abort=.true., &
+            failure_message="concurrent parquet_write_column calls into one shared writer were expected to abort")
+    end subroutine test_concurrent_calls_into_shared_writer_aborts
 
     subroutine check_scenario_exit_status(error, scenario, expect_abort, failure_message)
         type(error_type), allocatable, intent(out) :: error

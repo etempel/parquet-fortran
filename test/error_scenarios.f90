@@ -88,6 +88,8 @@ program error_scenarios
         call scenario_qc_silently_ignored_for_boolean()
     case ("write_unknown_compression")
         call scenario_write_unknown_compression()
+    case ("write_values_not_divisible_by_col_size")
+        call scenario_write_values_not_divisible_by_col_size()
     case default
         print '(a)', "unknown scenario: "//trim(scenario)
         stop 1
@@ -634,5 +636,34 @@ contains
         call parquet_close_writer(writer)
         print '(a)', "unexpectedly opened a writer with an unknown compression codec without error"
     end subroutine scenario_write_unknown_compression
+
+    !> "v" is declared with col_size: 2 (a vector column), so a 1D values(:)
+    !> array passed to parquet_write_column must have a length divisible by
+    !> 2; length 3 is not, and used to hit a plain `stop` (exit code 0, no
+    !> actual failure signaled) instead of `error stop` -- this scenario
+    !> guards against that regressing.
+    subroutine scenario_write_values_not_divisible_by_col_size()
+        type(parquet_maml_file) :: maml
+        type(parquet_column_info) :: cinfo
+        type(parquet_table_metadata) :: metadata
+        type(parquet_writer) :: writer
+        integer(int32) :: values(3) = [1_int32, 2_int32, 3_int32]
+
+        maml%name = "col_size_mismatch.maml"
+        maml%lines = [character(len=40) :: &
+            "table: col_size_mismatch_table", &
+            "fields:", &
+            "- name: v", &
+            "  data_type: int32", &
+            "  col_size: 2" ]
+
+        call parquet_validate_maml(maml)
+        call parquet_read_maml(maml, cinfo, metadata)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_col_size_mismatch.parquet", cinfo, metadata)
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote a values(:) array whose length isn't divisible by col_size without error"
+    end subroutine scenario_write_values_not_divisible_by_col_size
 
 end program error_scenarios

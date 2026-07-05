@@ -66,7 +66,9 @@ contains
             new_unittest("qc: min value with a fractional part on an int32 field aborts", &
                 test_validate_qc_min_non_integral_for_int32_aborts), &
             new_unittest("qc: min value out of int32 range aborts", &
-                test_validate_qc_min_out_of_int32_range_aborts) &
+                test_validate_qc_min_out_of_int32_range_aborts), &
+            new_unittest("writing values(:) not divisible by col_size aborts", &
+                test_write_values_not_divisible_by_col_size_aborts) &
             ]
     end subroutine collect_tests_parquet_errors
 
@@ -253,6 +255,13 @@ contains
         call check_scenario_exit_status(error, "validate_qc_min_out_of_int32_range", expect_abort=.true., &
             failure_message="qc: min: value out of int32 range was expected to error stop")
     end subroutine test_validate_qc_min_out_of_int32_range_aborts
+
+    subroutine test_write_values_not_divisible_by_col_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_values_not_divisible_by_col_size", expect_abort=.true., &
+            failure_message="writing a values(:) array whose length isn't divisible by col_size was expected to error stop")
+    end subroutine test_write_values_not_divisible_by_col_size_aborts
 
     subroutine check_scenario_exit_status(error, scenario, expect_abort, failure_message)
         type(error_type), allocatable, intent(out) :: error

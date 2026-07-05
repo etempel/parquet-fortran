@@ -7,7 +7,7 @@ Library to read/write parquet files and handle MAML files. The parquet file meta
 - Define and validate a table's schema and metadata from a [MAML](https://github.com/asgr/MAML-Format) file, including column renaming (`col_map:`), quality-control range checks (`qc:`), and protecting specific columns from ever containing a Null (`protected_cols:`).
 - Read and write genuine Parquet Null values, with either substitution (`null_value=`) or a validity mask (`is_valid=`).
 - Control output compression codec, compression level, and row group size.
-- Thread-safe: reading and writing different files concurrently (e.g. from OpenMP) is supported.
+- Safe to use concurrently (e.g. from OpenMP) — see [Thread safety](#thread-safety) for the exact rule.
 
 ## Quick example
 
@@ -45,6 +45,7 @@ See [Reading parquet files](#reading-parquet-files-from-your-fortran-code) and [
 - [Building and installing instructions](#building-and-installing-instructions)
   - [Running the error-path tests](#running-the-error-path-tests)
 - [Generating the built-in MAML module](#generating-the-built-in-maml-module)
+  - [Embedding your own schemas in your own project](#embedding-your-own-schemas-in-your-own-project)
 - [Reading parquet files from your fortran code](#reading-parquet-files-from-your-fortran-code)
 - [Writing parquet files from your fortran code](#writing-parquet-files-from-your-fortran-code)
   - [Saving the source MAML alongside the parquet file](#saving-the-source-maml-alongside-the-parquet-file)
@@ -52,6 +53,7 @@ See [Reading parquet files](#reading-parquet-files-from-your-fortran-code) and [
   - [Renaming columns for output with `col_map:`](#renaming-columns-for-output-with-col_map)
 - [Combined example: MAML schema, matrices and metadata](#combined-example-maml-schema-matrices-and-metadata)
 - [Error handling](#error-handling)
+- [Thread safety](#thread-safety)
 - [Supported data types](#supported-data-types)
   - [Null values](#null-values)
   - [Quality control (qc:) range checks on write](#quality-control-qc-range-checks-on-write)
@@ -63,7 +65,9 @@ See [Reading parquet files](#reading-parquet-files-from-your-fortran-code) and [
   - [Writer](#writer)
   - [Reader (table and column info)](#reader-table-and-column-info)
   - [Reader (reads column data)](#reader-reads-column-data)
+- [Limitations](#limitations)
 - [Troubleshooting](#troubleshooting)
+- [License](#license)
 
 ## Prerequisites
 
@@ -74,6 +78,15 @@ The code compiles successfully with the following compilers and libraries. It mi
     - Gfortran v15.2.0
 - FPM ([Fortran Package Manager](https://fpm.fortran-lang.org/))
 - [apache-arrow](https://arrow.apache.org) (C++ library for parquet)
+
+Installing the Arrow/Parquet C++ library itself (not a Fortran package, so it isn't installed by FPM):
+
+- macOS (Homebrew): `brew install apache-arrow`
+- macOS (MacPorts): `sudo port install apache-arrow`
+- Debian/Ubuntu: follow [Arrow's official apt repository instructions](https://arrow.apache.org/install/) and install `libarrow-dev`/`libparquet-dev`
+- conda-forge: `conda install -c conda-forge libarrow libparquet`
+
+Whichever route you use, take note of the resulting `include`/`lib` directories — they're what the environment variables below need to point at.
 
 Unit testing is handled using test-drive, which is automatically installed by FPM.
 
@@ -176,6 +189,17 @@ tools/generate_parquet_maml.sh        # (re)generates src/parquet_maml.f90 (for 
 - The default (no-argument) mode generates `parquet_maml`, which exposes `get_parquet_maml(name)` (looks up an embedded MAML by its `docs/`-relative path or bare filename stem, e.g. `"maml_example"` or `"maml_example.maml"`) and `set_maml(maml_default, [maml_file])` (returns the embedded default, or — if `maml_file` is given — loads and validates a user-supplied MAML file against that default via `parquet_validate_user_maml`).
 
 Both generated files carry a header stating they are auto-generated — do not hand-edit `src/parquet_maml_base.f90` or `src/parquet_maml.f90`; instead edit the source `.maml` files under `docs/` and re-run the script.
+
+### Embedding your own schemas in your own project
+
+The default (no-argument) mode isn't just for regenerating this repository's own `src/parquet_maml.f90` — it's a generic tool any project depending on `parquet-fortran` can reuse to embed *its own* `.maml` schemas, so a downstream pipeline doesn't need to locate/ship `.maml` files at run time either. To do this in your own project:
+
+1. Copy `tools/generate_parquet_maml.sh` into your own project (e.g. under your own `tools/`).
+2. Put your own `.maml` schema files under a `docs/` directory at your project's root.
+3. Run it with no argument from your project's root: `tools/generate_parquet_maml.sh` — this writes `src/parquet_maml.f90` in *your* project, generated from *your* `docs/*.maml` files.
+4. `use parquet_maml` (the module the script just generated for you) alongside `use parquet` in your code, to call `get_parquet_maml("your_schema.maml")` or `set_maml(...)` the same way this library's own tests do internally.
+
+The generated `parquet_maml` module depends on `parquet` (`parquet_maml_file`, `parquet_validate_maml`, etc.) but not on `parquet_maml_base` directly — `parquet_maml_base` is this library's own internal module (it defines the derived types `parquet` re-exports) and isn't meant to be `use`d directly by consuming projects. Only run the `base` mode if you're modifying `parquet-fortran` itself.
 
 ## Reading parquet files from your fortran code
 
@@ -410,6 +434,18 @@ end program write_parquet_combined_example
 
 This library reports all failures (missing files, invalid MAML, unknown column names, type mismatches, etc.) by calling Fortran's `error stop`, which aborts the running program immediately and cannot be caught or recovered from. There are no status/`ierr` return codes — check inputs (file existence, column names, array bounds) before calling into the library if you need to avoid aborting. If you're modifying this library and need to add or test one of these failure paths, see [Running the error-path tests](#running-the-error-path-tests) for how that's done out-of-process.
 
+## Thread safety
+
+Concurrent use (e.g. from an OpenMP parallel region) is supported, but only under this rule: **each thread must use its own, independent `parquet_writer`/`parquet_reader` instance.** Concretely:
+
+- Safe: many threads, each opening/writing/closing its own `parquet_writer` to a different file.
+- Safe: many threads, each opening/reading/closing its own `parquet_reader` — including multiple threads independently opening their own reader on the *same* file at the same time (each thread's `parquet_open_reader` call is independent).
+- Safe: parsing MAML files (`parquet_read_maml`, `parquet_validate_maml`, etc.) concurrently across threads.
+- **Not safe:** sharing a single `parquet_writer`/`parquet_reader` variable across threads (e.g. a module-level or `!$omp shared` instance that multiple threads call into at once).
+- **Not safe:** two threads writing to the *same* output file at the same time, even with separate `parquet_writer` instances — the underlying file itself isn't safe to write from more than one place at once.
+
+This is exercised by `test/test_openmp.f90`, which covers: writing different files in parallel, reading different files in parallel, a mixed read/write workload, concurrent MAML parsing, many independent readers repeatedly opening/closing the same shared file, and a higher-fan-out stress case — in every one of these, each thread always owns its own reader/writer instance.
+
 ## Supported data types
 
 The following intrinsic Fortran kinds (from `iso_fortran_env`) are supported throughout the write, read and metadata APIs, both as scalars/1D arrays and as 2D matrices:
@@ -539,11 +575,11 @@ List of public callable procedures available with `use parquet`:
 
 ### Utility
 
-- `parquet_get_version([internal])` — returns the library version as a `character` string. By default (or `internal=.false.`) returns just the release number without a `v` prefix, e.g. `"0.4.0"` (matching `VERSION.txt`, substituted in at build time via fpm). Pass `internal=.true.` to instead get the full internal version string embedded in the source, e.g. `"v0.4.0 (2026-07-05)"` (includes a `v` prefix and the last-updated date). If the two disagree (e.g. the library was built without going through fpm's version substitution), a `WARNING` is printed to stdout.
+- `call parquet_get_version(ver_string[, internal])` — sets `ver_string` (`character`, `intent(out)`) to the library version. By default (or `internal=.false.`) returns just the release number without a `v` prefix, e.g. `"0.4.0"` (matching `VERSION.txt`, substituted in at build time via fpm). Pass `internal=.true.` to instead get the full internal version string embedded in the source, e.g. `"v0.4.0 (2026-07-05)"` (includes a `v` prefix and the last-updated date). If the two disagree (e.g. the library was built without going through fpm's version substitution), a `WARNING` is printed to stdout.
 
 ### MAML and metadata
 
-- `parquet_read_maml(maml_filename_or_maml, cinfo, metadata)` — parses a MAML source into `cinfo` (column definitions) and `metadata` (table-level key/value metadata). Two overloads are provided: pass a filename (`character`) to read and parse a `.maml` file directly, or pass an already-loaded `parquet_maml_file` object (see `parquet_load_maml_file`) to parse MAML content you already hold in memory.
+- `parquet_read_maml(maml, cinfo, metadata)` — parses a MAML source into `cinfo` (column definitions) and `metadata` (table-level key/value metadata). Two overloads share the same `maml` keyword: pass a filename (`character`) to read and parse a `.maml` file directly, or pass an already-loaded `parquet_maml_file` object (see `parquet_load_maml_file`) to parse MAML content you already hold in memory.
 - `parquet_load_maml_file(filename)` — reads a `.maml` file from disk and returns it as a `parquet_maml_file` object, without parsing it into `cinfo`/`metadata`. Useful when you want to hold on to the raw MAML content (e.g. to pass to `parquet_read_maml` later, or inspect `maml%name`/`maml%lines` directly).
 - `parquet_validate_user_maml(base_maml, user_maml)` — checks that every column declared in `user_maml`'s `fields:` block also exists in `base_maml`'s `fields:` block (by name only). `user_maml` may omit any columns from `base_maml`, but must not declare any that aren't there. Errors out, naming the offending column(s), if it does.
 - `parquet_validate_maml(maml)` — validates a single MAML file on its own. Checks that: at least one field is defined; every field has a non-empty `name`; every field's `data_type` is one of the recognized types (see [Supported data types](#supported-data-types) above; see `valid_maml_data_types` in `src/parquet_metadata.f90` to add more); no two fields share the same `name`; and the file's metadata includes a non-empty `table` entry. It also validates the `qc:` and `protected_cols:` features described in [Null values](#null-values) and [Quality control (qc:) range checks on write](#quality-control-qc-range-checks-on-write) below. Collects and reports all violations together in a single error stop.
@@ -588,6 +624,16 @@ The public derived type `parquet_table_metadata` provides:
 - `parquet_read_array_row_mode(reader, name, values, row_index[, null_value, is_valid])` — reads only row `row_index` of vector column `name` into the 1D array `values(col_size)`. Use this to fetch one row's vector at a time (e.g. when iterating row-by-row) without loading the whole column.
 - `parquet_read_array_element_mode(reader, name, values, elem_index[, null_value, is_valid])` — reads only element `elem_index` of vector column `name`, across all rows, into the 1D array `values(nrows)`. Use this to fetch one vector position across every row (e.g. "the 3rd element of every row's vector") without loading the whole column.
 
+## Limitations
+
+Worth knowing up front before relying on this library:
+
+- Only the six types in [Supported data types](#supported-data-types) are handled — there is no `date`/`timestamp`/`decimal` support, no `int8`/`int16`/unsigned integers, and no arbitrary nested/struct/map columns. Vector columns are fixed-length (`col_size`) only; there is no variable-length list type.
+- **Reading a column whose physical Parquet type falls outside those six types aborts the process with an uncaught C++ exception**, not a clean `error stop` — this is a harsher failure mode than everything else described in [Error handling](#error-handling), since it comes from Arrow/Parquet's own code rather than this library's validation.
+- A column can only be written once per `parquet_writer` — there's no incremental/streaming append to a column across multiple `parquet_write_column` calls, and no way to append rows to an already-closed `.parquet` file.
+- **`parquet_open_writer` silently overwrites/truncates an existing file at that path** — there is no existence check and no warning.
+- There is no random-access or predicate-pushdown read: `parquet_read_array_row_mode`/`parquet_read_array_element_mode` avoid loading a whole *column* at once, but there's no way to filter which *rows* are read across a table.
+
 ## Troubleshooting
 
 Most build failures come from the Arrow/Parquet C++ dependency not being visible to FPM at compile or link time. See [Environment variables](#environment-variables) above for the full variable list; the following are the most common symptoms:
@@ -598,3 +644,7 @@ Most build failures come from the Arrow/Parquet C++ dependency not being visible
 - **Undefined references to `std::__1::...` (macOS) or `std::...` (Linux) at the final link step** — the C++ standard library is missing from `FPM_LDFLAGS`. Add `-lc++` on macOS/Clang or `-lstdc++` on Linux/GCC (see [Environment variables](#environment-variables)).
 - **At runtime, `dyld: Library not loaded` / `error while loading shared libraries` for `libarrow`/`libparquet`** — the Arrow/Parquet shared libraries are not on the dynamic linker's search path at run time; add their directory to `DYLD_LIBRARY_PATH` (macOS) or `LD_LIBRARY_PATH` (Linux) in addition to `LIBRARY_PATH` used at build time.
 - **Program aborts with an `ERROR STOP` message instead of returning a status code** — this is expected; see [Error handling](#error-handling). The message text (e.g. naming a missing column or file) indicates the failing precondition.
+
+## License
+
+BSD 3-Clause License — see [LICENSE](LICENSE). See [CHANGELOG.md](CHANGELOG.md) for release history.

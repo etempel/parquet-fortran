@@ -92,7 +92,7 @@ contains
         integer :: idx
 
         schema_type = ""
-        if (.not. writer%enforce_schema) return
+        if (.not. writer%is_schema_enforced) return
         idx = parquet_get_defined_column_index(writer, name)
         if (idx == 0) return
         schema_type = trim(writer%all_columns(idx)%data_type)
@@ -267,7 +267,7 @@ contains
     module procedure parquet_assert_column_type
         integer :: idx
 
-        if (.not. writer%enforce_schema) return
+        if (.not. writer%is_schema_enforced) return
 
         idx = parquet_get_defined_column_index(writer, name)
         if (idx == 0) then
@@ -315,10 +315,6 @@ contains
         end do
     end procedure parquet_get_column_col_size
 
-    module procedure parquet_get_column_array_size
-        parquet_get_column_array_size = parquet_get_column_col_size(writer, name)
-    end procedure parquet_get_column_array_size
-
     module procedure parquet_open_writer
         integer :: i, k, n_enabled, jc
         character(len=:), allocatable :: compression_name
@@ -328,7 +324,7 @@ contains
             "uncompressed", "snappy", "gzip", "zstd", "brotli", "lz4"]
 
         writer%handle = create_parquet_writer(trim(filename)//char(0))
-        writer%enforce_schema = present(cinfo)
+        writer%is_schema_enforced = present(cinfo)
         if (present(qc)) writer%qc = qc
 
         ! Defaults to "snappy" -- Parquet-the-library's own built-in default is
@@ -657,7 +653,7 @@ contains
         character(len=:), allocatable :: bounds_desc
 
         if (.not. writer%qc) return
-        if (.not. writer%enforce_schema) return
+        if (.not. writer%is_schema_enforced) return
         idx = parquet_get_defined_column_index(writer, name)
         if (idx == 0) return
         if (.not. (writer%all_columns(idx)%has_qc_min .or. writer%all_columns(idx)%has_qc_max)) return
@@ -721,7 +717,7 @@ contains
         character(len=:), allocatable :: data_min, data_max, bounds_desc
 
         if (.not. writer%qc) return
-        if (.not. writer%enforce_schema) return
+        if (.not. writer%is_schema_enforced) return
         idx = parquet_get_defined_column_index(writer, name)
         if (idx == 0) return
         if (.not. (writer%all_columns(idx)%has_qc_min .or. writer%all_columns(idx)%has_qc_max)) return
@@ -779,7 +775,7 @@ contains
         logical, intent(in) :: is_valid_flat(:)
         integer :: idx
 
-        if (.not. writer%enforce_schema) return
+        if (.not. writer%is_schema_enforced) return
         idx = parquet_get_defined_column_index(writer, name)
         if (idx == 0) return
         if (writer%all_columns(idx)%is_protected .and. .not. all(is_valid_flat)) then
@@ -816,7 +812,7 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
 
-        if (writer%enforce_schema) then
+        if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
             if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name)
             if (.not. writer%all_columns(idx)%is_set) return
@@ -828,7 +824,7 @@ contains
         call parquet_mark_column_written(writer, name)
 
         asize = parquet_get_column_col_size(writer, name)
-        if (mod(size(values), asize) /= 0) stop "parquet_write_int32_column: values size is not divisible by col_size"
+        if (mod(size(values), asize) /= 0) error stop "parquet_write_int32_column: values size is not divisible by col_size"
         nrows = size(values) / asize
 
         if (present(is_valid)) then
@@ -853,7 +849,7 @@ contains
         asize = size(values, 1)
         nrows = size(values, 2)
 
-        if (writer%enforce_schema) then
+        if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
             if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name)
             if (.not. writer%all_columns(idx)%is_set) return
@@ -889,7 +885,7 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
 
-        if (writer%enforce_schema) then
+        if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
             if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name)
             if (.not. writer%all_columns(idx)%is_set) return
@@ -901,7 +897,7 @@ contains
         call parquet_mark_column_written(writer, name)
 
         asize = parquet_get_column_col_size(writer, name)
-        if (mod(size(values), asize) /= 0) stop "parquet_write_int64_column: values size is not divisible by col_size"
+        if (mod(size(values), asize) /= 0) error stop "parquet_write_int64_column: values size is not divisible by col_size"
         nrows = size(values) / asize
 
         if (present(is_valid)) then
@@ -926,7 +922,7 @@ contains
         asize = size(values, 1)
         nrows = size(values, 2)
 
-        if (writer%enforce_schema) then
+        if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
             if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name)
             if (.not. writer%all_columns(idx)%is_set) return
@@ -962,7 +958,7 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
 
-        if (writer%enforce_schema) then
+        if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
             if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name)
             if (.not. writer%all_columns(idx)%is_set) return
@@ -974,7 +970,7 @@ contains
         call parquet_mark_column_written(writer, name)
 
         asize = parquet_get_column_col_size(writer, name)
-        if (mod(size(values), asize) /= 0) stop "parquet_write_float32_column: values size is not divisible by col_size"
+        if (mod(size(values), asize) /= 0) error stop "parquet_write_float32_column: values size is not divisible by col_size"
         nrows = size(values) / asize
 
         if (present(is_valid)) then
@@ -999,7 +995,7 @@ contains
         asize = size(values, 1)
         nrows = size(values, 2)
 
-        if (writer%enforce_schema) then
+        if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
             if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name)
             if (.not. writer%all_columns(idx)%is_set) return
@@ -1035,7 +1031,7 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
 
-        if (writer%enforce_schema) then
+        if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
             if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name)
             if (.not. writer%all_columns(idx)%is_set) return
@@ -1047,7 +1043,7 @@ contains
         call parquet_mark_column_written(writer, name)
 
         asize = parquet_get_column_col_size(writer, name)
-        if (mod(size(values), asize) /= 0) stop "parquet_write_float64_column: values size is not divisible by col_size"
+        if (mod(size(values), asize) /= 0) error stop "parquet_write_float64_column: values size is not divisible by col_size"
         nrows = size(values) / asize
 
         if (present(is_valid)) then
@@ -1072,7 +1068,7 @@ contains
         asize = size(values, 1)
         nrows = size(values, 2)
 
-        if (writer%enforce_schema) then
+        if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
             if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name)
             if (.not. writer%all_columns(idx)%is_set) return
@@ -1109,7 +1105,7 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
 
-        if (writer%enforce_schema) then
+        if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
             if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name)
             if (.not. writer%all_columns(idx)%is_set) return
@@ -1121,7 +1117,7 @@ contains
         call parquet_mark_column_written(writer, name)
 
         asize = parquet_get_column_col_size(writer, name)
-        if (mod(size(values), asize) /= 0) stop "parquet_write_logical_column: values size is not divisible by col_size"
+        if (mod(size(values), asize) /= 0) error stop "parquet_write_logical_column: values size is not divisible by col_size"
         nrows = size(values) / asize
 
         allocate(bool_data(size(values)))
@@ -1155,7 +1151,7 @@ contains
         asize = size(values, 1)
         nrows = size(values, 2)
 
-        if (writer%enforce_schema) then
+        if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
             if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name)
             if (.not. writer%all_columns(idx)%is_set) return
@@ -1195,7 +1191,7 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
 
-        if (writer%enforce_schema) then
+        if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
             if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name)
             if (.not. writer%all_columns(idx)%is_set) return
@@ -1209,9 +1205,9 @@ contains
         asize = parquet_get_column_col_size(writer, name)
         nitems = size(values)
         if (nitems <= 0) return
-        if (mod(nitems, asize) /= 0) stop "parquet_write_string_column: values size is not divisible by col_size"
+        if (mod(nitems, asize) /= 0) error stop "parquet_write_string_column: values size is not divisible by col_size"
 
-        if (writer%enforce_schema) then
+        if (writer%is_schema_enforced) then
             max_string_len = max(1, writer%all_columns(idx)%array_size)
             max_item_len = maxval([(len_trim(values(i)), i=1,nitems)])
             if (max_item_len > max_string_len) then
@@ -1271,7 +1267,7 @@ contains
         asize = size(values, 1)
         nrows = size(values, 2)
 
-        if (writer%enforce_schema) then
+        if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
             if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name)
             if (.not. writer%all_columns(idx)%is_set) return
@@ -1324,7 +1320,7 @@ contains
     module procedure parquet_close_writer
         integer :: i
 
-        if (writer%enforce_schema .and. allocated(writer%enabled_columns)) then
+        if (writer%is_schema_enforced .and. allocated(writer%enabled_columns)) then
             do i = 1, size(writer%enabled_columns)
                 if (writer%write_counts(i) == 0) then
                     error stop "parquet_close_writer: missing write for enabled column: " // trim(writer%enabled_columns(i)%name)
@@ -1339,14 +1335,14 @@ contains
         if (allocated(writer%all_columns)) deallocate(writer%all_columns)
         if (allocated(writer%write_counts)) deallocate(writer%write_counts)
         if (allocated(writer%enabled_columns)) deallocate(writer%enabled_columns)
-        writer%enforce_schema = .false.
+        writer%is_schema_enforced = .false.
     end procedure parquet_close_writer
 
     !> Safety net for a writer whose handle is still open when it goes out of
     !> scope or is overwritten (e.g. reassigned, or an early RETURN between
     !> parquet_open_writer and parquet_close_writer): frees the underlying
     !> C++ object so the process doesn't leak it. This intentionally skips
-    !> parquet_close_writer's enforce_schema check (erroring from an implicit
+    !> parquet_close_writer's is_schema_enforced check (erroring from an implicit
     !> finalizer on an incompletely-written file would be surprising) --
     !> always prefer calling parquet_close_writer explicitly.
     module procedure writer_finalize

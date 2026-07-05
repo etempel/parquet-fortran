@@ -475,7 +475,7 @@ contains
         type(error_type), allocatable, intent(out) :: error
         character(len=:), allocatable :: ver_string
 
-        ver_string = parquet_get_version()
+        call parquet_get_version(ver_string)
 
         call check(error, len_trim(ver_string) > 0)
         if (allocated(error)) then

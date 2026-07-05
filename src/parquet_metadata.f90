@@ -84,12 +84,12 @@ submodule (parquet) parquet_metadata
 contains
 
     module procedure parquet_read_maml_file
-        type(parquet_maml_file) :: maml
+        type(parquet_maml_file) :: loaded_maml
 
-        maml = parquet_load_maml_file(maml_filename)
-        call parquet_parse_maml_lines(maml%lines, cinfo, metadata)
-        call parquet_merge_missing_columns(maml, cinfo)
-        metadata%source_maml_lines = maml%lines
+        loaded_maml = parquet_load_maml_file(maml)
+        call parquet_parse_maml_lines(loaded_maml%lines, cinfo, metadata)
+        call parquet_merge_missing_columns(loaded_maml, cinfo)
+        metadata%source_maml_lines = loaded_maml%lines
     end procedure parquet_read_maml_file
 
     module procedure parquet_read_maml_internal
@@ -323,7 +323,7 @@ contains
             merged(n_old + i)%array_size = maml%missing_columns(i)%array_size
             merged(n_old + i)%col_size = maml%missing_columns(i)%col_size
             merged(n_old + i)%is_set = .false.
-            merged(n_old + i)%deactivated = .true.
+            merged(n_old + i)%is_deactivated = .true.
             merged(n_old + i)%output_name = maml%missing_columns(i)%name
         end do
 
@@ -439,14 +439,14 @@ contains
         end if
     end procedure parquet_validate_maml_internal
 
-    !> Loads maml_filename from disk and validates it (parquet_load_maml_file
+    !> Loads maml (a filename) from disk and validates it (parquet_load_maml_file
     !> already validates internally, but this keeps that requirement explicit
     !> and self-contained here rather than depending on that side effect).
     module procedure parquet_validate_maml_file
-        type(parquet_maml_file) :: maml
+        type(parquet_maml_file) :: loaded_maml
 
-        maml = parquet_load_maml_file(maml_filename)
-        call parquet_validate_maml_internal(maml)
+        loaded_maml = parquet_load_maml_file(maml)
+        call parquet_validate_maml_internal(loaded_maml)
     end procedure parquet_validate_maml_file
 
     module procedure parquet_load_maml_file
@@ -455,8 +455,8 @@ contains
         integer :: unit, ios, nlines, i, max_len
 
         nlines = 0
-        open(newunit=unit, file=trim(maml_filename), status="old", action="read", iostat=ios)
-        if (ios /= 0) error stop "parquet_load_maml_file: cannot open file: " // trim(maml_filename)
+        open(newunit=unit, file=trim(filename), status="old", action="read", iostat=ios)
+        if (ios /= 0) error stop "parquet_load_maml_file: cannot open file: " // trim(filename)
 
         do
             read(unit, '(A)', iostat=ios) line
@@ -467,7 +467,7 @@ contains
 
         close(unit)
 
-        maml%name = trim(maml_filename)
+        maml%name = trim(filename)
 
         max_len = 1
         do i = 1, nlines
@@ -1149,13 +1149,13 @@ contains
 
         if (present(name)) then
             idx = this%get_column_index(name)
-            if (this%col(idx)%deactivated) then
+            if (this%col(idx)%is_deactivated) then
                 error stop "parquet_column_info%set_unavailable: column is deactivated: " // trim(name)
             end if
             this%col(idx)%is_set = .false.
         else if (allocated(this%col)) then
             do i = 1, size(this%col)
-                if (.not. this%col(i)%deactivated) this%col(i)%is_set = .false.
+                if (.not. this%col(i)%is_deactivated) this%col(i)%is_set = .false.
             end do
         end if
     end procedure set_unavailable
@@ -1165,13 +1165,13 @@ contains
 
         if (present(name)) then
             idx = this%get_column_index(name)
-            if (this%col(idx)%deactivated) then
+            if (this%col(idx)%is_deactivated) then
                 error stop "parquet_column_info%set_available: column is deactivated: " // trim(name)
             end if
             this%col(idx)%is_set = .true.
         else if (allocated(this%col)) then
             do i = 1, size(this%col)
-                if (.not. this%col(i)%deactivated) this%col(i)%is_set = .true.
+                if (.not. this%col(i)%is_deactivated) this%col(i)%is_set = .true.
             end do
         end if
     end procedure set_available

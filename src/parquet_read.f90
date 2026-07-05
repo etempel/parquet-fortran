@@ -59,7 +59,7 @@ contains
 	end procedure parquet_get_nrows_int32
 
 	module procedure parquet_get_col_size
-		col_size = int(parquet_reader_get_column_array_size(reader%handle, trim(name)//char(0)))
+		col_size = int(parquet_reader_get_column_col_size(reader%handle, trim(name)//char(0)))
 	end procedure parquet_get_col_size
 
 	module procedure parquet_get_column_total_elements_int64

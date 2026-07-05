@@ -115,12 +115,12 @@ contains
         if (allocated(error)) return
 
         idx = user_cinfo%get_column_index("id0")
-        call check(error, user_cinfo%col(idx)%is_set .and. .not. user_cinfo%col(idx)%deactivated, &
+        call check(error, user_cinfo%col(idx)%is_set .and. .not. user_cinfo%col(idx)%is_deactivated, &
             "expected 'id0' to be active (declared by the user MAML)")
         if (allocated(error)) return
 
         idx = user_cinfo%get_column_index("idarr")
-        call check(error, (.not. user_cinfo%col(idx)%is_set) .and. user_cinfo%col(idx)%deactivated, &
+        call check(error, (.not. user_cinfo%col(idx)%is_set) .and. user_cinfo%col(idx)%is_deactivated, &
             "expected 'idarr' to be merged in as a deactivated placeholder")
     end subroutine test_validate_user_maml_ok
 
@@ -167,7 +167,7 @@ contains
         idx = user_cinfo%get_column_index("id0")
         call check(error, idx > 0, "expected 'id0' (internal name) to be found via get_column_index")
         if (allocated(error)) return
-        call check(error, user_cinfo%col(idx)%is_set .and. .not. user_cinfo%col(idx)%deactivated, &
+        call check(error, user_cinfo%col(idx)%is_set .and. .not. user_cinfo%col(idx)%is_deactivated, &
             "expected the renamed field to be active")
         if (allocated(error)) return
         call check(error, trim(user_cinfo%col(idx)%output_name) == "my_id", &

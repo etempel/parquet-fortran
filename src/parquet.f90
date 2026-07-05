@@ -10,14 +10,14 @@ module parquet
     implicit none
     private
     !
-    character(len=*),parameter:: cversion = "v0.4.0 (2026-07-05)" !< version info
+    character(len=*),parameter:: cversion = "v0.5.0 (2026-07-05)" !< version info
 #ifndef RELEASE_VERSION
 #  define RELEASE_VERSION 0.1
 #endif
 
     type parquet_column_type
         logical :: is_set = .false.
-        logical :: deactivated = .false. ! true for columns merged in from a base MAML that the user's MAML excluded;
+        logical :: is_deactivated = .false. ! true for columns merged in from a base MAML that the user's MAML excluded;
                                           ! protects is_set from being changed by set_available/set_unavailable (bulk or by name).
         logical :: is_protected = .false. ! true if this column's name is listed under extra: protected_cols: in
                                            ! whichever MAML built this cinfo; parquet_write_column error stops if an
@@ -102,12 +102,19 @@ module parquet
     ! other, which would then double-free/use-after-free when it is itself
     ! later closed or finalized. Always use a single named writer/reader,
     ! passed by reference (as every procedure in this module already does).
+    ! Fully opaque from outside this module: every component is an
+    ! implementation detail (the raw C handle, schema bookkeeping, write
+    ! tracking) that parquet_write_column/parquet_open_writer/etc. manage
+    ! internally. Never referenced directly by any test or consumer -- only
+    ! parquet.f90's own submodules (parquet_write, parquet_read,
+    ! parquet_metadata) need access, which `private` here still allows.
     type parquet_writer
+        private
         type(c_ptr) :: handle = c_null_ptr
         type(parquet_column_type), allocatable :: all_columns(:)
         type(parquet_column_type), allocatable :: enabled_columns(:)
         integer, allocatable :: write_counts(:)
-        logical :: enforce_schema = .false.
+        logical :: is_schema_enforced = .false.
         logical :: qc = .false. ! set from parquet_open_writer(..., qc=); when true, parquet_write_column checks
                                  ! each column's qc: min/max (if declared) against its valid (is_valid) elements
                                  ! and prints a WARNING (never an error) on violation. No-op without a schema.
@@ -116,6 +123,7 @@ module parquet
     end type parquet_writer
 
     type parquet_reader
+        private
         type(c_ptr) :: handle = c_null_ptr
     contains
         final :: reader_finalize
@@ -267,11 +275,6 @@ module parquet
             character(len=*), intent(in) :: name
         end function parquet_get_column_col_size
 
-        module integer function parquet_get_column_array_size(writer, name)
-            type(parquet_writer), intent(in) :: writer
-            character(len=*), intent(in) :: name
-        end function parquet_get_column_array_size
-
         module subroutine parquet_open_writer(writer, filename, cinfo, metadata, write_maml, qc, &
                 compression, compression_level, chunk_size)
             type(parquet_writer), intent(out) :: writer
@@ -388,14 +391,14 @@ module parquet
             type(parquet_writer), intent(inout) :: this
         end subroutine writer_finalize
 
-        module subroutine parquet_read_maml_file(maml_filename, cinfo, metadata)
-            character(len=*), intent(in) :: maml_filename
+        module subroutine parquet_read_maml_file(maml, cinfo, metadata)
+            character(len=*), intent(in) :: maml
             type(parquet_column_info), intent(out) :: cinfo
             type(parquet_table_metadata), intent(out) :: metadata
         end subroutine parquet_read_maml_file
 
-        module function parquet_load_maml_file(maml_filename) result(maml)
-            character(len=*), intent(in) :: maml_filename
+        module function parquet_load_maml_file(filename) result(maml)
+            character(len=*), intent(in) :: filename
             type(parquet_maml_file) :: maml
         end function parquet_load_maml_file
 
@@ -408,8 +411,8 @@ module parquet
             type(parquet_maml_file), intent(in) :: maml
         end subroutine parquet_validate_maml_internal
 
-        module subroutine parquet_validate_maml_file(maml_filename)
-            character(len=*), intent(in) :: maml_filename
+        module subroutine parquet_validate_maml_file(maml)
+            character(len=*), intent(in) :: maml
         end subroutine parquet_validate_maml_file
 
         module subroutine parquet_read_maml_internal(maml, cinfo, metadata)
@@ -815,11 +818,11 @@ module parquet
 
 contains
 
-    function parquet_get_version(internal) result(ver_string)
+    subroutine parquet_get_version(ver_string, internal)
         implicit none
-        character (len=:), allocatable :: ver_string
-        integer :: i
+        character(len=:), allocatable, intent(out) :: ver_string
         logical, intent(in), optional :: internal
+        integer :: i
         !
 ! Accept solution from https://stackoverflow.com/questions/31649691/stringify-macro-with-gnu-gfortran
 ! which provides the easiest way to pass a macro to a string in Fortran complying with both
@@ -852,6 +855,6 @@ contains
             end if
         end if
         !
-    end function parquet_get_version
+    end subroutine parquet_get_version
 
 end module

@@ -7,7 +7,7 @@ program parquet_fortran
     implicit none
     character(len=:), allocatable :: ver_string
     !
-    ver_string = parquet_get_version()
+    call parquet_get_version(ver_string)
     print*, "Parquet Fortran version: "//ver_string
     !
 end program parquet_fortran

@@ -85,7 +85,7 @@ extern "C"
 		return chunked->chunk(0);
 	}
 
-	static int64_t get_array_size(const std::shared_ptr<arrow::Array> &array)
+	static int64_t get_col_size(const std::shared_ptr<arrow::Array> &array)
 	{
 		if (array->type_id() == arrow::Type::FIXED_SIZE_LIST)
 		{
@@ -136,16 +136,16 @@ extern "C"
 	}
 
 	static std::shared_ptr<arrow::Array> get_uniform_list_values(const std::shared_ptr<arrow::Array> &array,
-		const std::string &name, int64_t nrows, int64_t array_size)
+		const std::string &name, int64_t nrows, int64_t col_size)
 	{
 		if (array->type_id() == arrow::Type::FIXED_SIZE_LIST)
 		{
 			auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
-			if (list_arr->length() != nrows || static_cast<int64_t>(list_arr->value_length()) != array_size)
+			if (list_arr->length() != nrows || static_cast<int64_t>(list_arr->value_length()) != col_size)
 			{
 				throw std::runtime_error(std::string("shape mismatch for column: ") + name);
 			}
-			return list_arr->values()->Slice(list_arr->value_offset(0), nrows * array_size);
+			return list_arr->values()->Slice(list_arr->value_offset(0), nrows * col_size);
 		}
 		if (array->type_id() == arrow::Type::LIST)
 		{
@@ -156,12 +156,12 @@ extern "C"
 			}
 			for (int64_t i = 0; i < nrows; ++i)
 			{
-				if (static_cast<int64_t>(list_arr->value_length(i)) != array_size)
+				if (static_cast<int64_t>(list_arr->value_length(i)) != col_size)
 				{
 					throw std::runtime_error(std::string("shape mismatch for column: ") + name);
 				}
 			}
-			return list_arr->values()->Slice(list_arr->value_offset(0), nrows * array_size);
+			return list_arr->values()->Slice(list_arr->value_offset(0), nrows * col_size);
 		}
 		if (array->type_id() == arrow::Type::LARGE_LIST)
 		{
@@ -172,12 +172,12 @@ extern "C"
 			}
 			for (int64_t i = 0; i < nrows; ++i)
 			{
-				if (list_arr->value_length(i) != array_size)
+				if (list_arr->value_length(i) != col_size)
 				{
 					throw std::runtime_error(std::string("shape mismatch for column: ") + name);
 				}
 			}
-			return list_arr->values()->Slice(list_arr->value_offset(0), nrows * array_size);
+			return list_arr->values()->Slice(list_arr->value_offset(0), nrows * col_size);
 		}
 		throw std::runtime_error(std::string("type mismatch for column: ") + name +
 			" (expected fixed_size_list/list/large_list, got " + array->type()->ToString() + ")");
@@ -309,10 +309,10 @@ extern "C"
 		return xml.str();
 	}
 
-	// `nullable` only affects the scalar (array_size <= 1) case: the outer
+	// `nullable` only affects the scalar (col_size <= 1) case: the outer
 	// field there is the only place a Null can ever land for a scalar
 	// column, so it must say so in the schema whenever the caller actually
-	// wrote one (see has_any_null). For array/vector columns (array_size >
+	// wrote one (see has_any_null). For array/vector columns (col_size >
 	// 1), nulls are always element-level (never a whole missing row -- by
 	// design, see parquet_append_*_column's valid_in handling below), and
 	// arrow::fixed_size_list(value_type, size)'s convenience constructor
@@ -322,12 +322,12 @@ extern "C"
 	static std::shared_ptr<arrow::Field> build_field(
 		const std::string &name,
 		const std::shared_ptr<arrow::DataType> &value_type,
-		int64_t array_size,
+		int64_t col_size,
 		bool nullable = false)
 	{
-		if (array_size > 1)
+		if (col_size > 1)
 		{
-			return arrow::field(name, arrow::fixed_size_list(value_type, static_cast<int32_t>(array_size)), false);
+			return arrow::field(name, arrow::fixed_size_list(value_type, static_cast<int32_t>(col_size)), false);
 		}
 		return arrow::field(name, value_type, nullable);
 	}
@@ -518,18 +518,18 @@ extern "C"
 		return reader_handle->table->num_rows();
 	}
 
-	int64_t parquet_reader_get_column_array_size(void *handle, const char *name)
+	int64_t parquet_reader_get_column_col_size(void *handle, const char *name)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		return get_array_size(array);
+		return get_col_size(array);
 	}
 
 	int64_t parquet_reader_get_column_total_elements(void *handle, const char *name)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto nrows = reader_handle->table->num_rows();
-		auto asize = parquet_reader_get_column_array_size(handle, name);
+		auto asize = parquet_reader_get_column_col_size(handle, name);
 		return nrows * asize;
 	}
 
@@ -619,14 +619,14 @@ extern "C"
 	// reported invalid if either is null. `list_array` is the outer list
 	// array (row-level nulls are looked up at row_offset + i); `vals_any` is
 	// the already-flattened/sliced child values array that data[] is about
-	// to be copied from, of length `nrows * array_size`, indexed the same
-	// way data[] is (k = i * array_size + j). Same throw-vs-report contract
+	// to be copied from, of length `nrows * col_size`, indexed the same
+	// way data[] is (k = i * col_size + j). Same throw-vs-report contract
 	// as check_or_report_nulls.
 	static void report_nulls_list_full(
 		const std::shared_ptr<arrow::Array> &list_array,
 		const std::shared_ptr<arrow::Array> &vals_any,
 		const std::string &name,
-		int64_t nrows, int64_t array_size, int64_t row_offset,
+		int64_t nrows, int64_t col_size, int64_t row_offset,
 		int8_t *valid_out)
 	{
 		bool any_null = (vals_any->null_count() != 0);
@@ -647,9 +647,9 @@ extern "C"
 		for (int64_t i = 0; i < nrows; ++i)
 		{
 			bool row_valid = list_array->IsValid(row_offset + i);
-			for (int64_t j = 0; j < array_size; ++j)
+			for (int64_t j = 0; j < col_size; ++j)
 			{
-				int64_t k = i * array_size + j;
+				int64_t k = i * col_size + j;
 				valid_out[k] = (row_valid && vals_any->IsValid(k)) ? 1 : 0;
 			}
 		}
@@ -658,19 +658,19 @@ extern "C"
 	// Element-mode variant: valid_out has length `nrows` (one entry per
 	// row), every entry evaluated at the same fixed array position `offset`
 	// (0-based) within its row. `vals_any` is the full flattened child
-	// values array (length nrows * array_size); `list_array` is the outer
+	// values array (length nrows * col_size); `list_array` is the outer
 	// list array.
 	static void report_nulls_list_element(
 		const std::shared_ptr<arrow::Array> &list_array,
 		const std::shared_ptr<arrow::Array> &vals_any,
 		const std::string &name,
-		int64_t nrows, int64_t array_size, int64_t offset,
+		int64_t nrows, int64_t col_size, int64_t offset,
 		int8_t *valid_out)
 	{
 		bool any_null = false;
 		for (int64_t i = 0; i < nrows; ++i)
 		{
-			if (!list_array->IsValid(i) || !vals_any->IsValid(i * array_size + offset)) { any_null = true; break; }
+			if (!list_array->IsValid(i) || !vals_any->IsValid(i * col_size + offset)) { any_null = true; break; }
 		}
 		if (!any_null) return;
 
@@ -681,7 +681,7 @@ extern "C"
 
 		for (int64_t i = 0; i < nrows; ++i)
 		{
-			valid_out[i] = (list_array->IsValid(i) && vals_any->IsValid(i * array_size + offset)) ? 1 : 0;
+			valid_out[i] = (list_array->IsValid(i) && vals_any->IsValid(i * col_size + offset)) ? 1 : 0;
 		}
 	}
 
@@ -728,7 +728,7 @@ extern "C"
 	}
 
 	static std::shared_ptr<arrow::Array> get_row_list_values(const std::shared_ptr<arrow::Array> &array,
-		const std::string &name, int64_t row_index, int64_t array_size)
+		const std::string &name, int64_t row_index, int64_t col_size)
 	{
 		if (array->type_id() == arrow::Type::FIXED_SIZE_LIST)
 		{
@@ -737,11 +737,11 @@ extern "C"
 			{
 				throw std::runtime_error("row_index out of bounds");
 			}
-			if (static_cast<int64_t>(list_arr->value_length()) != array_size)
+			if (static_cast<int64_t>(list_arr->value_length()) != col_size)
 			{
-				throw std::runtime_error(std::string("array_size mismatch for column: ") + name);
+				throw std::runtime_error(std::string("col_size mismatch for column: ") + name);
 			}
-			return list_arr->values()->Slice(list_arr->value_offset(row_index - 1), array_size);
+			return list_arr->values()->Slice(list_arr->value_offset(row_index - 1), col_size);
 		}
 		if (array->type_id() == arrow::Type::LIST)
 		{
@@ -750,11 +750,11 @@ extern "C"
 			{
 				throw std::runtime_error("row_index out of bounds");
 			}
-			if (static_cast<int64_t>(list_arr->value_length(row_index - 1)) != array_size)
+			if (static_cast<int64_t>(list_arr->value_length(row_index - 1)) != col_size)
 			{
-				throw std::runtime_error(std::string("array_size mismatch for column: ") + name);
+				throw std::runtime_error(std::string("col_size mismatch for column: ") + name);
 			}
-			return list_arr->values()->Slice(list_arr->value_offset(row_index - 1), array_size);
+			return list_arr->values()->Slice(list_arr->value_offset(row_index - 1), col_size);
 		}
 		if (array->type_id() == arrow::Type::LARGE_LIST)
 		{
@@ -763,11 +763,11 @@ extern "C"
 			{
 				throw std::runtime_error("row_index out of bounds");
 			}
-			if (list_arr->value_length(row_index - 1) != array_size)
+			if (list_arr->value_length(row_index - 1) != col_size)
 			{
-				throw std::runtime_error(std::string("array_size mismatch for column: ") + name);
+				throw std::runtime_error(std::string("col_size mismatch for column: ") + name);
 			}
-			return list_arr->values()->Slice(list_arr->value_offset(row_index - 1), array_size);
+			return list_arr->values()->Slice(list_arr->value_offset(row_index - 1), col_size);
 		}
 		throw std::runtime_error(std::string("type mismatch for column: ") + name +
 			" (expected fixed_size_list/list/large_list, got " + array->type()->ToString() + ")");
@@ -792,17 +792,17 @@ extern "C"
 	}
 
 	template <typename ArrowArrayType, typename CType>
-	static void read_list_primitive_row(void *handle, const char *name, int64_t row_index, CType *data, int64_t array_size, arrow::Type::type expected_value_type, const char *expected_name, int8_t *valid_out)
+	static void read_list_primitive_row(void *handle, const char *name, int64_t row_index, CType *data, int64_t col_size, arrow::Type::type expected_value_type, const char *expected_name, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		auto vals_any = get_row_list_values(array, name, row_index, array_size);
-		report_nulls_list_full(array, vals_any, name, 1, array_size, row_index - 1, valid_out);
-		for (int64_t j = 0; j < array_size; ++j)
+		auto vals_any = get_row_list_values(array, name, row_index, col_size);
+		report_nulls_list_full(array, vals_any, name, 1, col_size, row_index - 1, valid_out);
+		for (int64_t j = 0; j < col_size; ++j)
 		{
 			data[j] = static_cast<CType>(numeric_value_at(vals_any, name, j));
 		}
-		fill_null_default(data, valid_out, array_size);
+		fill_null_default(data, valid_out, col_size);
 	}
 
 	template <typename ArrowArrayType, typename CType>
@@ -810,17 +810,17 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		auto array_size = get_array_size(array);
-		if (col_index < 1 || col_index > array_size)
+		auto col_size = get_col_size(array);
+		if (col_index < 1 || col_index > col_size)
 		{
 			throw std::runtime_error("col_index out of bounds");
 		}
-		auto vals_any = get_uniform_list_values(array, name, nrows, array_size);
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size);
 		auto offset = col_index - 1;
-		report_nulls_list_element(array, vals_any, name, nrows, array_size, offset, valid_out);
+		report_nulls_list_element(array, vals_any, name, nrows, col_size, offset, valid_out);
 		for (int64_t i = 0; i < nrows; ++i)
 		{
-			data[i] = static_cast<CType>(numeric_value_at(vals_any, name, i * array_size + offset));
+			data[i] = static_cast<CType>(numeric_value_at(vals_any, name, i * col_size + offset));
 		}
 		fill_null_default(data, valid_out, nrows);
 	}
@@ -1062,13 +1062,13 @@ extern "C"
 		fill_null_default_string(data, item_len, valid_out, nrows);
 	}
 
-	void parquet_read_int32_array_column(void *handle, const char *name, int32_t *data, int64_t nrows, int64_t array_size, int8_t *valid_out)
+	void parquet_read_int32_array_column(void *handle, const char *name, int32_t *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		auto vals_any = get_uniform_list_values(array, name, nrows, array_size);
-		report_nulls_list_full(array, vals_any, name, nrows, array_size, 0, valid_out);
-		int64_t total = nrows * array_size;
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size);
+		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out);
+		int64_t total = nrows * col_size;
 		switch (vals_any->type_id())
 		{
 		case arrow::Type::INT32:
@@ -1098,13 +1098,13 @@ extern "C"
 		fill_null_default(data, valid_out, total);
 	}
 
-	void parquet_read_int64_array_column(void *handle, const char *name, int64_t *data, int64_t nrows, int64_t array_size, int8_t *valid_out)
+	void parquet_read_int64_array_column(void *handle, const char *name, int64_t *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		auto vals_any = get_uniform_list_values(array, name, nrows, array_size);
-		report_nulls_list_full(array, vals_any, name, nrows, array_size, 0, valid_out);
-		int64_t total = nrows * array_size;
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size);
+		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out);
+		int64_t total = nrows * col_size;
 		switch (vals_any->type_id())
 		{
 		case arrow::Type::INT64:
@@ -1126,13 +1126,13 @@ extern "C"
 		fill_null_default(data, valid_out, total);
 	}
 
-	void parquet_read_float32_array_column(void *handle, const char *name, float *data, int64_t nrows, int64_t array_size, int8_t *valid_out)
+	void parquet_read_float32_array_column(void *handle, const char *name, float *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		auto vals_any = get_uniform_list_values(array, name, nrows, array_size);
-		report_nulls_list_full(array, vals_any, name, nrows, array_size, 0, valid_out);
-		int64_t total = nrows * array_size;
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size);
+		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out);
+		int64_t total = nrows * col_size;
 		switch (vals_any->type_id())
 		{
 		case arrow::Type::FLOAT:
@@ -1166,13 +1166,13 @@ extern "C"
 		fill_null_default(data, valid_out, total);
 	}
 
-	void parquet_read_float64_array_column(void *handle, const char *name, double *data, int64_t nrows, int64_t array_size, int8_t *valid_out)
+	void parquet_read_float64_array_column(void *handle, const char *name, double *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		auto vals_any = get_uniform_list_values(array, name, nrows, array_size);
-		report_nulls_list_full(array, vals_any, name, nrows, array_size, 0, valid_out);
-		int64_t total = nrows * array_size;
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size);
+		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out);
+		int64_t total = nrows * col_size;
 		switch (vals_any->type_id())
 		{
 		case arrow::Type::DOUBLE:
@@ -1206,116 +1206,116 @@ extern "C"
 		fill_null_default(data, valid_out, total);
 	}
 
-	void parquet_read_bool8_array_column(void *handle, const char *name, int8_t *data, int64_t nrows, int64_t array_size, int8_t *valid_out)
+	void parquet_read_bool8_array_column(void *handle, const char *name, int8_t *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		auto vals_any = get_uniform_list_values(array, name, nrows, array_size);
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size);
 		if (vals_any->type_id() != arrow::Type::BOOL)
 		{
 			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
 				" (expected bool, got " + vals_any->type()->ToString() + ")");
 		}
-		report_nulls_list_full(array, vals_any, name, nrows, array_size, 0, valid_out);
+		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out);
 		auto vals = std::static_pointer_cast<arrow::BooleanArray>(vals_any);
-		for (int64_t i = 0; i < nrows * array_size; ++i)
+		for (int64_t i = 0; i < nrows * col_size; ++i)
 		{
 			data[i] = vals->Value(i) ? 1 : 0;
 		}
-		fill_null_default(data, valid_out, nrows * array_size);
+		fill_null_default(data, valid_out, nrows * col_size);
 	}
 
-	void parquet_read_string_array_column(void *handle, const char *name, char *data, int64_t item_len, int64_t nrows, int64_t array_size, int8_t *valid_out)
+	void parquet_read_string_array_column(void *handle, const char *name, char *data, int64_t item_len, int64_t nrows, int64_t col_size, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		auto vals_any = get_uniform_list_values(array, name, nrows, array_size);
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size);
 		if (vals_any->type_id() != arrow::Type::STRING)
 		{
 			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
 				" (expected string, got " + vals_any->type()->ToString() + ")");
 		}
-		report_nulls_list_full(array, vals_any, name, nrows, array_size, 0, valid_out);
+		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out);
 		auto vals = std::static_pointer_cast<arrow::StringArray>(vals_any);
-		for (int64_t i = 0; i < nrows * array_size; ++i)
+		for (int64_t i = 0; i < nrows * col_size; ++i)
 		{
 			copy_string_with_padding(data + i * item_len, item_len, vals->GetView(i));
 		}
-		fill_null_default_string(data, item_len, valid_out, nrows * array_size);
+		fill_null_default_string(data, item_len, valid_out, nrows * col_size);
 	}
 
-	void parquet_read_int32_array_row(void *handle, const char *name, int64_t row_index, int32_t *data, int64_t array_size, int8_t *valid_out)
+	void parquet_read_int32_array_row(void *handle, const char *name, int64_t row_index, int32_t *data, int64_t col_size, int8_t *valid_out)
 	{
-		read_list_primitive_row<arrow::Int32Array, int32_t>(handle, name, row_index, data, array_size, arrow::Type::INT32, "int32", valid_out);
+		read_list_primitive_row<arrow::Int32Array, int32_t>(handle, name, row_index, data, col_size, arrow::Type::INT32, "int32", valid_out);
 	}
 
-	void parquet_read_int64_array_row(void *handle, const char *name, int64_t row_index, int64_t *data, int64_t array_size, int8_t *valid_out)
+	void parquet_read_int64_array_row(void *handle, const char *name, int64_t row_index, int64_t *data, int64_t col_size, int8_t *valid_out)
 	{
-		read_list_primitive_row<arrow::Int64Array, int64_t>(handle, name, row_index, data, array_size, arrow::Type::INT64, "int64", valid_out);
+		read_list_primitive_row<arrow::Int64Array, int64_t>(handle, name, row_index, data, col_size, arrow::Type::INT64, "int64", valid_out);
 	}
 
-	void parquet_read_float32_array_row(void *handle, const char *name, int64_t row_index, float *data, int64_t array_size, int8_t *valid_out)
+	void parquet_read_float32_array_row(void *handle, const char *name, int64_t row_index, float *data, int64_t col_size, int8_t *valid_out)
 	{
-		read_list_primitive_row<arrow::FloatArray, float>(handle, name, row_index, data, array_size, arrow::Type::FLOAT, "float32", valid_out);
+		read_list_primitive_row<arrow::FloatArray, float>(handle, name, row_index, data, col_size, arrow::Type::FLOAT, "float32", valid_out);
 	}
 
-	void parquet_read_float64_array_row(void *handle, const char *name, int64_t row_index, double *data, int64_t array_size, int8_t *valid_out)
+	void parquet_read_float64_array_row(void *handle, const char *name, int64_t row_index, double *data, int64_t col_size, int8_t *valid_out)
 	{
-		read_list_primitive_row<arrow::DoubleArray, double>(handle, name, row_index, data, array_size, arrow::Type::DOUBLE, "float64", valid_out);
+		read_list_primitive_row<arrow::DoubleArray, double>(handle, name, row_index, data, col_size, arrow::Type::DOUBLE, "float64", valid_out);
 	}
 
-	void parquet_read_bool8_array_row(void *handle, const char *name, int64_t row_index, int8_t *data, int64_t array_size, int8_t *valid_out)
+	void parquet_read_bool8_array_row(void *handle, const char *name, int64_t row_index, int8_t *data, int64_t col_size, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		auto vals_any = get_row_list_values(array, name, row_index, array_size);
+		auto vals_any = get_row_list_values(array, name, row_index, col_size);
 		if (vals_any->type_id() != arrow::Type::BOOL)
 			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
 				" (expected bool, got " + vals_any->type()->ToString() + ")");
-		report_nulls_list_full(array, vals_any, name, 1, array_size, row_index - 1, valid_out);
+		report_nulls_list_full(array, vals_any, name, 1, col_size, row_index - 1, valid_out);
 
 		auto vals = std::static_pointer_cast<arrow::BooleanArray>(vals_any);
-		for (int64_t j = 0; j < array_size; ++j)
+		for (int64_t j = 0; j < col_size; ++j)
 		{
 			data[j] = vals->Value(j) ? 1 : 0;
 		}
-		fill_null_default(data, valid_out, array_size);
+		fill_null_default(data, valid_out, col_size);
 	}
 
-	void parquet_read_string_array_row(void *handle, const char *name, int64_t row_index, char *data, int64_t item_len, int64_t array_size, int8_t *valid_out)
+	void parquet_read_string_array_row(void *handle, const char *name, int64_t row_index, char *data, int64_t item_len, int64_t col_size, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		auto vals_any = get_row_list_values(array, name, row_index, array_size);
+		auto vals_any = get_row_list_values(array, name, row_index, col_size);
 		if (vals_any->type_id() != arrow::Type::STRING)
 			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
 				" (expected string, got " + vals_any->type()->ToString() + ")");
-		report_nulls_list_full(array, vals_any, name, 1, array_size, row_index - 1, valid_out);
+		report_nulls_list_full(array, vals_any, name, 1, col_size, row_index - 1, valid_out);
 
 		auto vals = std::static_pointer_cast<arrow::StringArray>(vals_any);
-		for (int64_t j = 0; j < array_size; ++j)
+		for (int64_t j = 0; j < col_size; ++j)
 		{
 			copy_string_with_padding(data + j * item_len, item_len, vals->GetView(j));
 		}
-		fill_null_default_string(data, item_len, valid_out, array_size);
+		fill_null_default_string(data, item_len, valid_out, col_size);
 	}
 
-	void parquet_read_int32_array_element(void *handle, const char *name, int64_t col_index, int32_t *data, int64_t nrows, int64_t unused_array_size, int8_t *valid_out)
+	void parquet_read_int32_array_element(void *handle, const char *name, int64_t col_index, int32_t *data, int64_t nrows, int64_t unused_col_size, int8_t *valid_out)
 	{
 		read_list_primitive_element<arrow::Int32Array, int32_t>(handle, name, col_index, data, nrows, arrow::Type::INT32, "int32", valid_out);
 	}
 
-	void parquet_read_int64_array_element(void *handle, const char *name, int64_t col_index, int64_t *data, int64_t nrows, int64_t unused_array_size, int8_t *valid_out)
+	void parquet_read_int64_array_element(void *handle, const char *name, int64_t col_index, int64_t *data, int64_t nrows, int64_t unused_col_size, int8_t *valid_out)
 	{
 		read_list_primitive_element<arrow::Int64Array, int64_t>(handle, name, col_index, data, nrows, arrow::Type::INT64, "int64", valid_out);
 	}
 
-	void parquet_read_float32_array_element(void *handle, const char *name, int64_t col_index, float *data, int64_t nrows, int64_t unused_array_size, int8_t *valid_out)
+	void parquet_read_float32_array_element(void *handle, const char *name, int64_t col_index, float *data, int64_t nrows, int64_t unused_col_size, int8_t *valid_out)
 	{
 		read_list_primitive_element<arrow::FloatArray, float>(handle, name, col_index, data, nrows, arrow::Type::FLOAT, "float32", valid_out);
 	}
 
-	void parquet_read_float64_array_element(void *handle, const char *name, int64_t col_index, double *data, int64_t nrows, int64_t unused_array_size, int8_t *valid_out)
+	void parquet_read_float64_array_element(void *handle, const char *name, int64_t col_index, double *data, int64_t nrows, int64_t unused_col_size, int8_t *valid_out)
 	{
 		read_list_primitive_element<arrow::DoubleArray, double>(handle, name, col_index, data, nrows, arrow::Type::DOUBLE, "float64", valid_out);
 	}
@@ -1324,20 +1324,20 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		auto array_size = get_array_size(array);
-		if (col_index < 1 || col_index > array_size)
+		auto col_size = get_col_size(array);
+		if (col_index < 1 || col_index > col_size)
 			throw std::runtime_error("col_index out of bounds");
-		auto vals_any = get_uniform_list_values(array, name, nrows, array_size);
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size);
 		if (vals_any->type_id() != arrow::Type::BOOL)
 			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
 				" (expected bool, got " + vals_any->type()->ToString() + ")");
 		auto offset = col_index - 1;
-		report_nulls_list_element(array, vals_any, name, nrows, array_size, offset, valid_out);
+		report_nulls_list_element(array, vals_any, name, nrows, col_size, offset, valid_out);
 
 		auto vals = std::static_pointer_cast<arrow::BooleanArray>(vals_any);
 		for (int64_t i = 0; i < nrows; ++i)
 		{
-			data[i] = vals->Value(i * array_size + offset) ? 1 : 0;
+			data[i] = vals->Value(i * col_size + offset) ? 1 : 0;
 		}
 		fill_null_default(data, valid_out, nrows);
 	}
@@ -1346,20 +1346,20 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		auto array_size = get_array_size(array);
-		if (col_index < 1 || col_index > array_size)
+		auto col_size = get_col_size(array);
+		if (col_index < 1 || col_index > col_size)
 			throw std::runtime_error("col_index out of bounds");
-		auto vals_any = get_uniform_list_values(array, name, nrows, array_size);
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size);
 		if (vals_any->type_id() != arrow::Type::STRING)
 			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
 				" (expected string, got " + vals_any->type()->ToString() + ")");
 		auto offset = col_index - 1;
-		report_nulls_list_element(array, vals_any, name, nrows, array_size, offset, valid_out);
+		report_nulls_list_element(array, vals_any, name, nrows, col_size, offset, valid_out);
 
 		auto vals = std::static_pointer_cast<arrow::StringArray>(vals_any);
 		for (int64_t i = 0; i < nrows; ++i)
 		{
-			copy_string_with_padding(data + i * item_len, item_len, vals->GetView(i * array_size + offset));
+			copy_string_with_padding(data + i * item_len, item_len, vals->GetView(i * col_size + offset));
 		}
 		fill_null_default_string(data, item_len, valid_out, nrows);
 	}
@@ -1404,7 +1404,7 @@ extern "C"
 			std::string(description)});
 	}
 
-	void parquet_append_int32_column(void *handle, const char *name, const int32_t *data, int64_t nrows, int64_t array_size, const int8_t *valid_in)
+	void parquet_append_int32_column(void *handle, const char *name, const int32_t *data, int64_t nrows, int64_t col_size, const int8_t *valid_in)
 	{
 		auto writer_handle = as_handle(handle);
 
@@ -1412,14 +1412,14 @@ extern "C"
 		auto value_type = arrow::int32();
 		auto valid_bytes = reinterpret_cast<const uint8_t *>(valid_in);
 
-		if (array_size > 1)
+		if (col_size > 1)
 		{
 			auto value_builder = std::make_shared<arrow::Int32Builder>();
-			arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(array_size));
+			arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(col_size));
 			auto status = list_builder.AppendValues(nrows);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
-			status = value_builder->AppendValues(data, nrows * array_size, valid_bytes);
+			status = value_builder->AppendValues(data, nrows * col_size, valid_bytes);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
 			status = list_builder.Finish(&array);
@@ -1437,10 +1437,10 @@ extern "C"
 				throw std::runtime_error(status.ToString());
 		}
 
-		append_column(writer_handle, name, build_field(name, value_type, array_size, has_any_null(valid_in, nrows * array_size)), array);
+		append_column(writer_handle, name, build_field(name, value_type, col_size, has_any_null(valid_in, nrows * col_size)), array);
 	}
 
-	void parquet_append_int64_column(void *handle, const char *name, const int64_t *data, int64_t nrows, int64_t array_size, const int8_t *valid_in)
+	void parquet_append_int64_column(void *handle, const char *name, const int64_t *data, int64_t nrows, int64_t col_size, const int8_t *valid_in)
 	{
 		auto writer_handle = as_handle(handle);
 
@@ -1448,14 +1448,14 @@ extern "C"
 		auto value_type = arrow::int64();
 		auto valid_bytes = reinterpret_cast<const uint8_t *>(valid_in);
 
-		if (array_size > 1)
+		if (col_size > 1)
 		{
 			auto value_builder = std::make_shared<arrow::Int64Builder>();
-			arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(array_size));
+			arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(col_size));
 			auto status = list_builder.AppendValues(nrows);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
-			status = value_builder->AppendValues(data, nrows * array_size, valid_bytes);
+			status = value_builder->AppendValues(data, nrows * col_size, valid_bytes);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
 			status = list_builder.Finish(&array);
@@ -1473,10 +1473,10 @@ extern "C"
 				throw std::runtime_error(status.ToString());
 		}
 
-		append_column(writer_handle, name, build_field(name, value_type, array_size, has_any_null(valid_in, nrows * array_size)), array);
+		append_column(writer_handle, name, build_field(name, value_type, col_size, has_any_null(valid_in, nrows * col_size)), array);
 	}
 
-	void parquet_append_float32_column(void *handle, const char *name, const float *data, int64_t nrows, int64_t array_size, const int8_t *valid_in)
+	void parquet_append_float32_column(void *handle, const char *name, const float *data, int64_t nrows, int64_t col_size, const int8_t *valid_in)
 	{
 		auto writer_handle = as_handle(handle);
 
@@ -1484,14 +1484,14 @@ extern "C"
 		auto value_type = arrow::float32();
 		auto valid_bytes = reinterpret_cast<const uint8_t *>(valid_in);
 
-		if (array_size > 1)
+		if (col_size > 1)
 		{
 			auto value_builder = std::make_shared<arrow::FloatBuilder>();
-			arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(array_size));
+			arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(col_size));
 			auto status = list_builder.AppendValues(nrows);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
-			status = value_builder->AppendValues(data, nrows * array_size, valid_bytes);
+			status = value_builder->AppendValues(data, nrows * col_size, valid_bytes);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
 			status = list_builder.Finish(&array);
@@ -1509,10 +1509,10 @@ extern "C"
 				throw std::runtime_error(status.ToString());
 		}
 
-		append_column(writer_handle, name, build_field(name, value_type, array_size, has_any_null(valid_in, nrows * array_size)), array);
+		append_column(writer_handle, name, build_field(name, value_type, col_size, has_any_null(valid_in, nrows * col_size)), array);
 	}
 
-	void parquet_append_float64_column(void *handle, const char *name, const double *data, int64_t nrows, int64_t array_size, const int8_t *valid_in)
+	void parquet_append_float64_column(void *handle, const char *name, const double *data, int64_t nrows, int64_t col_size, const int8_t *valid_in)
 	{
 		auto writer_handle = as_handle(handle);
 
@@ -1520,14 +1520,14 @@ extern "C"
 		auto value_type = arrow::float64();
 		auto valid_bytes = reinterpret_cast<const uint8_t *>(valid_in);
 
-		if (array_size > 1)
+		if (col_size > 1)
 		{
 			auto value_builder = std::make_shared<arrow::DoubleBuilder>();
-			arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(array_size));
+			arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(col_size));
 			auto status = list_builder.AppendValues(nrows);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
-			status = value_builder->AppendValues(data, nrows * array_size, valid_bytes);
+			status = value_builder->AppendValues(data, nrows * col_size, valid_bytes);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
 			status = list_builder.Finish(&array);
@@ -1545,10 +1545,10 @@ extern "C"
 				throw std::runtime_error(status.ToString());
 		}
 
-		append_column(writer_handle, name, build_field(name, value_type, array_size, has_any_null(valid_in, nrows * array_size)), array);
+		append_column(writer_handle, name, build_field(name, value_type, col_size, has_any_null(valid_in, nrows * col_size)), array);
 	}
 
-	void parquet_append_bool8_column(void *handle, const char *name, const int8_t *data, int64_t nrows, int64_t array_size, const int8_t *valid_in)
+	void parquet_append_bool8_column(void *handle, const char *name, const int8_t *data, int64_t nrows, int64_t col_size, const int8_t *valid_in)
 	{
 		auto writer_handle = as_handle(handle);
 
@@ -1557,14 +1557,14 @@ extern "C"
 		auto valid_bytes = reinterpret_cast<const uint8_t *>(valid_in);
 		auto values_bytes = reinterpret_cast<const uint8_t *>(data);
 
-		if (array_size > 1)
+		if (col_size > 1)
 		{
 			auto value_builder = std::make_shared<arrow::BooleanBuilder>();
-			arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(array_size));
+			arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(col_size));
 			auto status = list_builder.AppendValues(nrows);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
-			status = value_builder->AppendValues(values_bytes, nrows * array_size, valid_bytes);
+			status = value_builder->AppendValues(values_bytes, nrows * col_size, valid_bytes);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
 			status = list_builder.Finish(&array);
@@ -1582,7 +1582,7 @@ extern "C"
 				throw std::runtime_error(status.ToString());
 		}
 
-		append_column(writer_handle, name, build_field(name, value_type, array_size, has_any_null(valid_in, nrows * array_size)), array);
+		append_column(writer_handle, name, build_field(name, value_type, col_size, has_any_null(valid_in, nrows * col_size)), array);
 	}
 
 	void parquet_append_string_column(void *handle, const char *name, const char *data, int64_t item_len, int64_t nrows, const int8_t *valid_in)
@@ -1616,17 +1616,17 @@ extern "C"
 		append_column(writer_handle, name, build_field(name, arrow::utf8(), 1, has_any_null(valid_in, nrows)), array);
 	}
 
-	void parquet_append_string_array_column(void *handle, const char *name, const char *data, int64_t item_len, int64_t nrows, int64_t array_size, const int8_t *valid_in)
+	void parquet_append_string_array_column(void *handle, const char *name, const char *data, int64_t item_len, int64_t nrows, int64_t col_size, const int8_t *valid_in)
 	{
 		auto writer_handle = as_handle(handle);
 		auto value_builder = std::make_shared<arrow::StringBuilder>();
-		arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(array_size));
+		arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(col_size));
 
 		auto status = list_builder.AppendValues(nrows);
 		if (!status.ok())
 			throw std::runtime_error(status.ToString());
 
-		for (int64_t i = 0; i < nrows * array_size; ++i)
+		for (int64_t i = 0; i < nrows * col_size; ++i)
 		{
 			if (valid_in != nullptr && valid_in[i] == 0)
 			{
@@ -1648,7 +1648,7 @@ extern "C"
 		if (!status.ok())
 			throw std::runtime_error(status.ToString());
 
-		append_column(writer_handle, name, build_field(name, arrow::utf8(), array_size), array);
+		append_column(writer_handle, name, build_field(name, arrow::utf8(), col_size), array);
 	}
 
 

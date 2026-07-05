@@ -47,6 +47,7 @@ See [Reading parquet files](#reading-parquet-files-from-your-fortran-code) and [
 - [Generating the built-in MAML module](#generating-the-built-in-maml-module)
   - [Embedding your own schemas in your own project](#embedding-your-own-schemas-in-your-own-project)
 - [Reading parquet files from your fortran code](#reading-parquet-files-from-your-fortran-code)
+  - [Reading only touches the columns you ask for](#reading-only-touches-the-columns-you-ask-for)
 - [Writing parquet files from your fortran code](#writing-parquet-files-from-your-fortran-code)
   - [Saving the source MAML alongside the parquet file](#saving-the-source-maml-alongside-the-parquet-file)
 - [The MAML metadata format](#the-maml-metadata-format)
@@ -245,6 +246,10 @@ Notes:
 - Allocate output arrays before calling `parquet_read_column`.
 - For string columns, choose a fixed string length that is large enough for your data.
 - For vector/array columns, allocate 2D arrays with shape `(col_size, nrows)`.
+
+### Reading only touches the columns you ask for
+
+`parquet_open_reader` only parses the file's footer (schema, row count, row-group layout) — it does not read or decompress any column's actual data. Each column is only read from disk the first time you ask for it (`parquet_read_column`, `parquet_get_col_size`, `parquet_get_string_length`, etc.); after that, it's cached in memory for the lifetime of that `reader`, so asking for the same column twice doesn't re-read it. Columns you never ask for are never read at all. This is a direct consequence of Parquet's on-disk layout — each column's data is stored as its own contiguous byte range, independent of every other column, so the reader can seek straight to just the bytes it needs — and holds regardless of which [compression codec](#compression-and-row-group-size) was used to write the file. Practically: opening a large file with many columns and reading only a handful of them is cheap, both in I/O and memory, no matter how large the *other*, unrequested columns are.
 
 ## Writing parquet files from your fortran code
 

@@ -4,6 +4,8 @@
 #endif
 
 #include <arrow/api.h>
+#include <arrow/array/concatenate.h>
+#include <arrow/array/util.h>
 #include <arrow/io/api.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/arrow/writer.h>
@@ -15,6 +17,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 extern "C"
@@ -49,9 +52,19 @@ extern "C"
 		int64_t chunk_size = 1024;
 	};
 
+	// Deliberately does NOT hold a materialized arrow::Table: opening a file
+	// only parses the (small) footer/schema via FileReaderBuilder, so no
+	// column's data is ever read from disk until that specific column is
+	// actually requested (see get_single_chunk_array). column_cache holds
+	// each column already read this way, keyed by its schema field index, so
+	// asking for the same column twice (e.g. parquet_get_col_size followed
+	// by parquet_read_column) doesn't re-read it from disk.
 	struct ParquetReaderHandle
 	{
-		std::shared_ptr<arrow::Table> table;
+		std::unique_ptr<parquet::arrow::FileReader> reader;
+		std::shared_ptr<arrow::Schema> schema;
+		int64_t nrows = 0;
+		std::unordered_map<int, std::shared_ptr<arrow::Array>> column_cache;
 	};
 
 	static ParquetWriterHandle *as_handle(void *handle)
@@ -66,7 +79,7 @@ extern "C"
 
 	static int64_t get_column_index(const ParquetReaderHandle *reader_handle, const char *name)
 	{
-		auto idx = reader_handle->table->schema()->GetFieldIndex(name);
+		auto idx = reader_handle->schema->GetFieldIndex(name);
 		if (idx < 0)
 		{
 			throw std::runtime_error(std::string("Column not found: ") + name);
@@ -74,15 +87,58 @@ extern "C"
 		return static_cast<int64_t>(idx);
 	}
 
-	static std::shared_ptr<arrow::Array> get_single_chunk_array(const ParquetReaderHandle *reader_handle, const char *name)
+	// A column chunk read via FileReader::ReadColumn can still be split
+	// across several Arrow chunks if the file has multiple row groups (see
+	// the `chunk_size` writer option) -- collapse those into one contiguous
+	// array here, same as the whole-table CombineChunks this replaced used
+	// to do, just scoped to one column instead of the entire file.
+	static std::shared_ptr<arrow::Array> combine_column_chunks(const std::shared_ptr<arrow::ChunkedArray> &chunked, const std::string &name)
+	{
+		if (chunked->num_chunks() == 1)
+		{
+			return chunked->chunk(0);
+		}
+		if (chunked->num_chunks() == 0)
+		{
+			auto empty = arrow::MakeEmptyArray(chunked->type(), arrow::default_memory_pool());
+			if (!empty.ok())
+			{
+				throw std::runtime_error(std::string("Failed to build empty array for column: ") + name);
+			}
+			return empty.ValueOrDie();
+		}
+		auto combined = arrow::Concatenate(chunked->chunks(), arrow::default_memory_pool());
+		if (!combined.ok())
+		{
+			throw std::runtime_error(std::string("Failed to combine chunks for column: ") + name + ": " + combined.status().ToString());
+		}
+		return combined.ValueOrDie();
+	}
+
+	// Reads (and caches) exactly one column's data from disk -- every other
+	// column in the file is never touched, regardless of how many columns
+	// the file has or how large they are. This is what makes reading a
+	// large file with many columns, but only asking for a few of them,
+	// cheap: nothing beyond the footer/schema is read until this is called.
+	static std::shared_ptr<arrow::Array> get_single_chunk_array(ParquetReaderHandle *reader_handle, const char *name)
 	{
 		auto idx = get_column_index(reader_handle, name);
-		auto chunked = reader_handle->table->column(static_cast<int>(idx));
-		if (chunked->num_chunks() != 1)
+		auto cached = reader_handle->column_cache.find(static_cast<int>(idx));
+		if (cached != reader_handle->column_cache.end())
 		{
-			throw std::runtime_error(std::string("Expected one chunk for column: ") + name);
+			return cached->second;
 		}
-		return chunked->chunk(0);
+
+		std::shared_ptr<arrow::ChunkedArray> chunked;
+		auto status = reader_handle->reader->ReadColumn(static_cast<int>(idx), &chunked);
+		if (!status.ok())
+		{
+			throw std::runtime_error(status.ToString());
+		}
+
+		auto array = combine_column_chunks(chunked, name);
+		reader_handle->column_cache.emplace(static_cast<int>(idx), array);
+		return array;
 	}
 
 	static int64_t get_col_size(const std::shared_ptr<arrow::Array> &array)
@@ -470,6 +526,14 @@ extern "C"
 		writer_handle->chunk_size = chunk_size;
 	}
 
+	// Opens the file and parses its footer/schema only -- no column's actual
+	// data is read from disk here. FileReaderBuilder::Open/Build touch just
+	// enough of the file to learn the schema and per-row-group metadata
+	// (row counts, column chunk byte offsets); the metadata()->num_rows()
+	// call below reads the row count directly from that same footer, again
+	// without touching any column data. Actual column bytes are only ever
+	// read on demand, in get_single_chunk_array, the first time that
+	// specific column is asked for.
 	void *create_parquet_reader(const char *filename)
 	{
 		auto *handle = new ParquetReaderHandle{};
@@ -481,28 +545,21 @@ extern "C"
 			delete handle;
 			throw std::runtime_error(status.ToString());
 		}
-		std::unique_ptr<parquet::arrow::FileReader> reader;
-		status = builder.Build(&reader);
+		status = builder.Build(&handle->reader);
 		if (!status.ok())
 		{
 			delete handle;
 			throw std::runtime_error(status.ToString());
 		}
 
-		status = reader->ReadTable(&handle->table);
+		status = handle->reader->GetSchema(&handle->schema);
 		if (!status.ok())
 		{
 			delete handle;
 			throw std::runtime_error(status.ToString());
 		}
 
-		auto combined = handle->table->CombineChunks(arrow::default_memory_pool());
-		if (!combined.ok())
-		{
-			delete handle;
-			throw std::runtime_error(combined.status().ToString());
-		}
-		handle->table = combined.ValueOrDie();
+		handle->nrows = handle->reader->parquet_reader()->metadata()->num_rows();
 		return handle;
 	}
 
@@ -515,7 +572,7 @@ extern "C"
 	int64_t parquet_reader_get_nrows(void *handle)
 	{
 		auto reader_handle = as_reader_handle(handle);
-		return reader_handle->table->num_rows();
+		return reader_handle->nrows;
 	}
 
 	int64_t parquet_reader_get_column_col_size(void *handle, const char *name)
@@ -528,7 +585,7 @@ extern "C"
 	int64_t parquet_reader_get_column_total_elements(void *handle, const char *name)
 	{
 		auto reader_handle = as_reader_handle(handle);
-		auto nrows = reader_handle->table->num_rows();
+		auto nrows = reader_handle->nrows;
 		auto asize = parquet_reader_get_column_col_size(handle, name);
 		return nrows * asize;
 	}

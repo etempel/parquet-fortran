@@ -48,6 +48,7 @@ See [Reading parquet files](#reading-parquet-files-from-your-fortran-code) and [
   - [Embedding your own schemas in your own project](#embedding-your-own-schemas-in-your-own-project)
 - [Reading parquet files from your fortran code](#reading-parquet-files-from-your-fortran-code)
   - [Reading only touches the columns you ask for](#reading-only-touches-the-columns-you-ask-for)
+  - [Prefetching multiple columns at once](#prefetching-multiple-columns-at-once-with-parquet_prefetch_columns)
 - [Writing parquet files from your fortran code](#writing-parquet-files-from-your-fortran-code)
   - [Saving the source MAML alongside the parquet file](#saving-the-source-maml-alongside-the-parquet-file)
 - [The MAML metadata format](#the-maml-metadata-format)
@@ -59,6 +60,7 @@ See [Reading parquet files](#reading-parquet-files-from-your-fortran-code) and [
   - [Null values](#null-values)
   - [Quality control (qc:) range checks on write](#quality-control-qc-range-checks-on-write)
   - [Compression and row group size](#compression-and-row-group-size)
+  - [Multi-threaded decoding/encoding (use_threads) and thread pool size](#multi-threaded-decodingencoding-use_threads-and-thread-pool-size)
   - [Combined example: Nulls, quality control and compression together](#combined-example-nulls-quality-control-and-compression-together)
 - [parquet module API (functions/subroutines)](#parquet-module-api-functionssubroutines)
   - [Utility](#utility)
@@ -250,6 +252,20 @@ Notes:
 ### Reading only touches the columns you ask for
 
 `parquet_open_reader` only parses the file's footer (schema, row count, row-group layout) — it does not read or decompress any column's actual data. Each column is only read from disk the first time you ask for it (`parquet_read_column`, `parquet_get_col_size`, `parquet_get_string_length`, etc.); after that, it's cached in memory for the lifetime of that `reader`, so asking for the same column twice doesn't re-read it. Columns you never ask for are never read at all. This is a direct consequence of Parquet's on-disk layout — each column's data is stored as its own contiguous byte range, independent of every other column, so the reader can seek straight to just the bytes it needs — and holds regardless of which [compression codec](#compression-and-row-group-size) was used to write the file. Practically: opening a large file with many columns and reading only a handful of them is cheap, both in I/O and memory, no matter how large the *other*, unrequested columns are.
+
+### Prefetching multiple columns at once with `parquet_prefetch_columns`
+
+`parquet_prefetch_columns(reader, names)` reads several named columns in one call, filling the same per-column cache that `parquet_read_column` would otherwise populate lazily, one column at a time, on first use. Since Arrow's internal `use_threads` is always on for this library (see [Compression and row group size](#compression-and-row-group-size)), reading several columns together like this lets Arrow decode them across its internal thread pool concurrently, instead of strictly one column at a time as each is lazily requested — it's purely a throughput optimization on top of the existing lazy-read design, never a requirement: a column you don't pass to `parquet_prefetch_columns` still works exactly as before, via `parquet_read_column`'s normal lazy, read-on-first-request path.
+
+```fortran
+call parquet_open_reader(reader, "data.parquet")
+call parquet_prefetch_columns(reader, ["ra ", "dec", "mag"])
+! call parquet_read_column for these (in any order) and any other, non-prefetched column:
+call parquet_read_column(reader, "ra", ra)
+call parquet_read_column(reader, "id", id)   ! fine even though "id" was never prefetched
+```
+
+Note that all names in the `names(:)` array argument must share the same declared string length (pad shorter names with trailing spaces, as with any other Fortran character array literal).
 
 ## Writing parquet files from your fortran code
 
@@ -451,6 +467,8 @@ Concurrent use (e.g. from an OpenMP parallel region) is supported, but only unde
 
 This is exercised by `test/test_openmp.f90`, which covers: writing different files in parallel, reading different files in parallel, a mixed read/write workload, concurrent MAML parsing, many independent readers repeatedly opening/closing the same shared file, and a higher-fan-out stress case — in every one of these, each thread always owns its own reader/writer instance.
 
+Note that each reader/writer's own internal `use_threads` (see [Multi-threaded decoding/encoding](#multi-threaded-decodingencoding-use_threads-and-thread-pool-size)) is a *separate* dimension from this: it controls whether that one reader/writer also fans out across Arrow's thread pool, on top of whatever thread (OpenMP or otherwise) already owns it. If you're parallelizing at the OpenMP level as described above, consider `use_threads=.false.` (and/or `parquet_set_max_threads`) to avoid oversubscribing your cores.
+
 ## Supported data types
 
 The following intrinsic Fortran kinds (from `iso_fortran_env`) are supported throughout the write, read and metadata APIs, both as scalars/1D arrays and as 2D matrices:
@@ -528,7 +546,24 @@ call parquet_open_writer(writer, "data.parquet", compression="zstd", compression
 ```
 - `compression` — one of `"uncompressed"`, `"snappy"` (the default), `"gzip"`, `"zstd"`, `"brotli"`, `"lz4"` (case-insensitive); an unrecognized name errors out immediately. Note that Parquet-the-library's own built-in default is actually `"uncompressed"` — this library deliberately follows the ecosystem convention (pyarrow, Spark, ...) of defaulting to `"snappy"` instead, since writing uncompressed files was never an intentional choice, just an unset option. Rough guidance: `snappy`/`lz4` for fastest read/write at a modest size reduction; `gzip`/`brotli` for the smallest files at the cost of slower compression; `zstd` for the best all-round balance of the two (and the only one of these with a meaningfully tunable `compression_level`, roughly 1–22 for higher-ratio/slower).
 - `compression_level` — optional integer tuning the chosen codec's compression level (mainly meaningful for `zstd`/`gzip`/`brotli`); omitted means "use that codec's own default level".
-- `chunk_size` — the maximum number of rows per Parquet row group (default `1024`, matching this library's previous hardcoded behavior). Larger values reduce per-row-group overhead and can improve compression (more data for the compressor to find patterns in), at the cost of more memory needed to read/write one row group at a time; smaller values let readers that only need a few rows skip more of the file.
+- `chunk_size` — the maximum number of rows per Parquet row group. If omitted, it is auto-sized from the table's final row count once `parquet_close_writer` runs (the number of rows written, capped at 500,000 rows per row group), instead of the small fixed default this library used previously — so large tables automatically get large, throughput-friendly row groups without any tuning on your part. Pass an explicit value to override the auto-sizing, e.g. to force multiple row groups in a small file (as the tests do) or to hand-tune the read/write memory-vs-overhead trade-off described below. Larger values reduce per-row-group overhead and can improve compression (more data for the compressor to find patterns in), at the cost of more memory needed to read/write one row group at a time; smaller values let readers that only need a few rows skip more of the file.
+
+### Multi-threaded decoding/encoding (`use_threads`) and thread pool size
+
+Both `parquet_open_reader` and `parquet_open_writer` accept an optional `use_threads` (`logical`, default `.true.`):
+```fortran
+call parquet_open_reader(reader, "data.parquet", use_threads=.true.)
+call parquet_open_writer(writer, "data.parquet", use_threads=.true.)
+```
+When `.true.` (the default), that reader/writer decodes or encodes column data across Arrow's internal CPU thread pool instead of a single thread — Arrow's own library default is actually `.false.`, so this library turns it on by default since the extra parallelism is normally a pure win. This is on a per-reader/per-writer basis: it costs nothing to leave it on, and there's no shared state to worry about between independent readers/writers.
+
+The most common reason to pass `use_threads=.false.` is to avoid **oversubscription** when you're already parallelizing at a coarser level — e.g. many OpenMP threads (see [Thread safety](#thread-safety)) each opening their own reader/writer: without this, every one of those threads would *also* fan out across Arrow's thread pool, so N OpenMP threads times Arrow's pool size threads end up competing for the same cores. It's also useful for deterministic single-threaded benchmarking/profiling.
+
+`parquet_set_max_threads(n)` caps the size of Arrow's thread pool itself:
+```fortran
+call parquet_set_max_threads(4)
+```
+Unlike `use_threads`, this is **not** a per-reader/per-writer setting — Arrow's CPU thread pool is a single, process-global resource shared by every reader/writer (in every thread) that has `use_threads` enabled. Call it once, e.g. near the start of your program, before opening readers/writers on other threads; calling it repeatedly with different values from multiple concurrent threads is a race, since each call resizes a pool everyone else is using at that same moment. `n` must be `>= 1`; anything less errors out immediately.
 
 ### Combined example: Nulls, quality control and compression together
 
@@ -581,6 +616,7 @@ List of public callable procedures available with `use parquet`:
 ### Utility
 
 - `call parquet_get_version(ver_string[, internal])` — sets `ver_string` (`character`, `intent(out)`) to the library version. By default (or `internal=.false.`) returns just the release number without a `v` prefix, e.g. `"0.4.0"` (matching `VERSION.txt`, substituted in at build time via fpm). Pass `internal=.true.` to instead get the full internal version string embedded in the source, e.g. `"v0.4.0 (2026-07-05)"` (includes a `v` prefix and the last-updated date). If the two disagree (e.g. the library was built without going through fpm's version substitution), a `WARNING` is printed to stdout.
+- `parquet_set_max_threads(n)` — sets the capacity (number of worker threads) of Arrow's global CPU thread pool to `n`. This is process-global, not per-reader/per-writer; see [Multi-threaded decoding/encoding](#multi-threaded-decodingencoding-use_threads-and-thread-pool-size). `n < 1` errors out immediately.
 
 ### MAML and metadata
 
@@ -601,7 +637,7 @@ The public derived type `parquet_table_metadata` provides:
 
 ### Writer
 
-- `parquet_open_writer(writer, filename[, cinfo, metadata, write_maml, qc, compression, compression_level, chunk_size])` — opens `filename` for writing. `cinfo`/`metadata` are optional; see the schema-enforcement note above. All other arguments are optional keywords:
+- `parquet_open_writer(writer, filename[, cinfo, metadata, write_maml, qc, compression, compression_level, chunk_size, use_threads])` — opens `filename` for writing. `cinfo`/`metadata` are optional; see the schema-enforcement note above. All other arguments are optional keywords:
 
   | Keyword | Default | Effect |
   |---|---|---|
@@ -609,19 +645,21 @@ The public derived type `parquet_table_metadata` provides:
   | `qc` | `.false.` | Turn on `qc: min:`/`max:` range-check warnings during writing. See [Quality control (qc:) range checks on write](#quality-control-qc-range-checks-on-write). |
   | `compression` | `"snappy"` | Output compression codec. See [Compression and row group size](#compression-and-row-group-size). |
   | `compression_level` | codec's own default | Tunes the chosen codec's compression level (mainly `zstd`/`gzip`/`brotli`). See [Compression and row group size](#compression-and-row-group-size). |
-  | `chunk_size` | `1024` | Maximum rows per Parquet row group. See [Compression and row group size](#compression-and-row-group-size). |
+  | `chunk_size` | auto-sized from row count (capped at 500,000) | Maximum rows per Parquet row group. See [Compression and row group size](#compression-and-row-group-size). |
+  | `use_threads` | `.true.` | Encode across Arrow's internal thread pool. See [Multi-threaded decoding/encoding](#multi-threaded-decodingencoding-use_threads-and-thread-pool-size). |
 
 - `parquet_write_column(writer, name, values[, is_valid])` — writes one full column named `name`. `values` may be any [supported type](#supported-data-types), passed as a 1D array (`values(:)`) for a plain column or a 2D array (`values(col_size, nrows)`) for a vector/array column. `is_valid` (optional, `logical`, same shape as `values`) writes a genuine Parquet Null wherever `.false.` — see [Null values](#null-values).
 - `parquet_close_writer(writer)` — flushes buffered data and finalizes the file. Always call this before the program ends, or the file may be incomplete/unreadable.
 
 ### Reader (table and column info)
 
-- `parquet_open_reader(reader, filename)` — opens an existing parquet file for reading.
+- `parquet_open_reader(reader, filename[, use_threads])` — opens an existing parquet file for reading. `use_threads` (optional, `logical`, default `.true.`) — decode across Arrow's internal thread pool. See [Multi-threaded decoding/encoding](#multi-threaded-decodingencoding-use_threads-and-thread-pool-size).
 - `parquet_close_reader(reader)` — releases resources associated with `reader`.
 - `parquet_get_nrows(reader, nrows)` — returns the number of table rows in `nrows` (`integer(int32)` or `integer(int64)`).
 - `parquet_get_col_size(reader, name, col_size)` — returns the fixed vector length of an array/matrix column `name` in `col_size`. Call this before allocating the output array for `parquet_read_column`/`parquet_read_array_row_mode`/`parquet_read_array_element_mode` on that column.
 - `parquet_get_column_total_elements(reader, name, total_elements)` — returns the total number of elements in column `name` across all rows (`total_elements = col_size * nrows` for array columns), in `total_elements` (`integer(int32)` or `integer(int64)`).
 - `parquet_get_string_length(reader, name, max_string_length)` — returns the longest string found in string column `name`. Call this before allocating a `character(len=...)` array for `parquet_read_column`, since the allocated length must be at least `max_string_length`.
+- `parquet_prefetch_columns(reader, names)` — reads every column named in the `character(len=*)` array `names(:)` in a single call, warming the lazy-read cache for all of them at once. See [Prefetching multiple columns at once](#prefetching-multiple-columns-at-once-with-parquet_prefetch_columns).
 
 ### Reader (reads column data)
 

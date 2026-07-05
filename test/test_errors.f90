@@ -68,7 +68,9 @@ contains
             new_unittest("qc: min value out of int32 range aborts", &
                 test_validate_qc_min_out_of_int32_range_aborts), &
             new_unittest("writing values(:) not divisible by col_size aborts", &
-                test_write_values_not_divisible_by_col_size_aborts) &
+                test_write_values_not_divisible_by_col_size_aborts), &
+            new_unittest("parquet_set_max_threads(0) aborts", &
+                test_set_max_threads_below_one_aborts) &
             ]
     end subroutine collect_tests_parquet_errors
 
@@ -262,6 +264,13 @@ contains
         call check_scenario_exit_status(error, "write_values_not_divisible_by_col_size", expect_abort=.true., &
             failure_message="writing a values(:) array whose length isn't divisible by col_size was expected to error stop")
     end subroutine test_write_values_not_divisible_by_col_size_aborts
+
+    subroutine test_set_max_threads_below_one_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "set_max_threads_below_one", expect_abort=.true., &
+            failure_message="parquet_set_max_threads(0) was expected to error stop")
+    end subroutine test_set_max_threads_below_one_aborts
 
     subroutine check_scenario_exit_status(error, scenario, expect_abort, failure_message)
         type(error_type), allocatable, intent(out) :: error

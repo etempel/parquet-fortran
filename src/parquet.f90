@@ -216,6 +216,7 @@ module parquet
     public :: parquet_validate_user_maml
     public :: parquet_open_reader
     public :: parquet_close_reader
+    public :: parquet_prefetch_columns
     public :: parquet_get_nrows
     public :: parquet_get_col_size
     public :: parquet_get_column_total_elements
@@ -223,6 +224,7 @@ module parquet
     public :: parquet_read_column
     public :: parquet_read_array_row_mode
     public :: parquet_read_array_element_mode
+    public :: parquet_set_max_threads
 
     interface
         module integer function parquet_get_enabled_column_index(writer, name)
@@ -276,7 +278,7 @@ module parquet
         end function parquet_get_column_col_size
 
         module subroutine parquet_open_writer(writer, filename, cinfo, metadata, write_maml, qc, &
-                compression, compression_level, chunk_size)
+                compression, compression_level, chunk_size, use_threads)
             type(parquet_writer), intent(out) :: writer
             character(len=*), intent(in) :: filename
             type(parquet_column_info), intent(in), optional :: cinfo
@@ -286,6 +288,7 @@ module parquet
             character(len=*), intent(in), optional :: compression
             integer, intent(in), optional :: compression_level
             integer, intent(in), optional :: chunk_size
+            logical, intent(in), optional :: use_threads
         end subroutine parquet_open_writer
 
         module subroutine parquet_add_column_info(writer, name, unit, description, ucd, data_type, array_size, col_size)
@@ -564,14 +567,20 @@ module parquet
             character(len=:), allocatable :: out
         end function parquet_to_lower
 
-        module subroutine parquet_open_reader(reader, filename)
+        module subroutine parquet_open_reader(reader, filename, use_threads)
             type(parquet_reader), intent(out) :: reader
             character(len=*), intent(in) :: filename
+            logical, intent(in), optional :: use_threads
         end subroutine parquet_open_reader
 
         module subroutine parquet_close_reader(reader)
             type(parquet_reader), intent(inout) :: reader
         end subroutine parquet_close_reader
+
+        module subroutine parquet_prefetch_columns(reader, names)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: names(:)
+        end subroutine parquet_prefetch_columns
 
         module subroutine reader_finalize(this)
             type(parquet_reader), intent(inout) :: this
@@ -856,5 +865,20 @@ contains
         end if
         !
     end subroutine parquet_get_version
+
+    !> Resizes Arrow's global CPU thread pool -- the single pool shared by
+    !> every parquet_reader/parquet_writer in this process that has
+    !> use_threads enabled (the default). This is NOT a per-reader/per-writer
+    !> setting: call it once, e.g. near the start of your program, before
+    !> opening readers/writers on other threads -- calling it concurrently
+    !> from multiple threads with different values is a race, since it
+    !> resizes a pool everyone else is also using at that moment.
+    subroutine parquet_set_max_threads(n)
+        implicit none
+        integer, intent(in) :: n
+
+        if (n < 1) error stop "parquet_set_max_threads: n must be >= 1"
+        call parquet_set_thread_pool_capacity(int(n, kind=c_int))
+    end subroutine parquet_set_max_threads
 
 end module

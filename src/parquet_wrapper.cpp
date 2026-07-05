@@ -7,6 +7,7 @@
 #include <arrow/array/concatenate.h>
 #include <arrow/array/util.h>
 #include <arrow/io/api.h>
+#include <arrow/util/thread_pool.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/arrow/writer.h>
 
@@ -49,7 +50,8 @@ extern "C"
 		std::vector<TableMetadataEntry> table_metadata;
 		arrow::Compression::type compression_codec = arrow::Compression::SNAPPY;
 		int compression_level = arrow::util::kUseDefaultCompressionLevel;
-		int64_t chunk_size = 1024;
+		int64_t chunk_size = -1; // <= 0 means "not set by the caller": auto-sized at close time from the final row count.
+		bool use_threads = true; // per-writer opt-out of Arrow's internal thread pool; see parquet_open_writer(..., use_threads=).
 	};
 
 	// Deliberately does NOT hold a materialized arrow::Table: opening a file
@@ -518,12 +520,32 @@ extern "C"
 		throw std::runtime_error("Unknown compression codec: " + compression_name);
 	}
 
-	void parquet_set_writer_options(void *handle, const char *compression_name, int compression_level, int64_t chunk_size)
+	void parquet_set_writer_options(void *handle, const char *compression_name, int compression_level, int64_t chunk_size, int use_threads)
 	{
 		auto writer_handle = as_handle(handle);
 		writer_handle->compression_codec = parse_compression_name(compression_name);
 		writer_handle->compression_level = compression_level;
 		writer_handle->chunk_size = chunk_size;
+		writer_handle->use_threads = (use_threads != 0);
+	}
+
+	// Resizes Arrow's global CPU thread pool -- the single pool shared by
+	// every reader/writer in this process that has use_threads enabled. This
+	// is NOT a per-reader/per-writer setting: it takes effect immediately for
+	// all concurrent Arrow work, so call it once (e.g. at program start),
+	// before opening readers/writers on other threads, rather than from
+	// multiple threads with different values.
+	void parquet_set_max_threads(int n)
+	{
+		if (n < 1)
+		{
+			throw std::runtime_error("parquet_set_max_threads: n must be >= 1");
+		}
+		auto status = arrow::SetCpuThreadPoolCapacity(n);
+		if (!status.ok())
+		{
+			throw std::runtime_error(status.ToString());
+		}
 	}
 
 	// Opens the file and parses its footer/schema only -- no column's actual
@@ -534,7 +556,7 @@ extern "C"
 	// without touching any column data. Actual column bytes are only ever
 	// read on demand, in get_single_chunk_array, the first time that
 	// specific column is asked for.
-	void *create_parquet_reader(const char *filename)
+	void *create_parquet_reader(const char *filename, int use_threads)
 	{
 		auto *handle = new ParquetReaderHandle{};
 		auto infile = arrow::io::ReadableFile::Open(filename).ValueOrDie();
@@ -545,6 +567,15 @@ extern "C"
 			delete handle;
 			throw std::runtime_error(status.ToString());
 		}
+		// Arrow's own default (kArrowDefaultUseThreads) is false; enabling
+		// this lets Arrow decode a column's row groups (or several columns
+		// requested together, e.g. via parquet_prefetch_columns) across its
+		// internal thread pool instead of strictly single-threaded. Callers
+		// can opt back out via parquet_open_reader(..., use_threads=.false.),
+		// e.g. to avoid oversubscription when many OpenMP threads each hold
+		// their own reader (see "Thread safety" in the README).
+		parquet::ArrowReaderProperties reader_properties(/*use_threads=*/use_threads != 0);
+		builder.properties(reader_properties);
 		status = builder.Build(&handle->reader);
 		if (!status.ok())
 		{
@@ -567,6 +598,49 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		delete reader_handle;
+	}
+
+	// Warms the column_cache for `n` columns in a single Arrow call
+	// (ReadTable with an explicit column-index list), instead of the
+	// separate single-column ReadColumn calls get_single_chunk_array makes
+	// lazily. With use_threads enabled (see create_parquet_reader), Arrow
+	// can decode these columns in parallel across its thread pool. This is
+	// purely additive: any column not passed here (or any column at all, if
+	// this is never called) still gets read lazily, on demand, exactly as
+	// before -- prefetching just means that read is already cached by the
+	// time it's asked for. names_packed holds `n` fixed-width (`item_len`
+	// bytes each) column names back-to-back, the same convention this
+	// codebase already uses for packed Fortran string arrays elsewhere.
+	void parquet_reader_prefetch_columns(void *handle, const char *names_packed, int64_t item_len, int64_t n)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		if (n <= 0) return;
+
+		std::vector<int> indices;
+		std::vector<std::string> names;
+		indices.reserve(static_cast<size_t>(n));
+		names.reserve(static_cast<size_t>(n));
+		for (int64_t i = 0; i < n; ++i)
+		{
+			std::string name(names_packed + i * item_len, static_cast<size_t>(item_len));
+			name = trim_right_spaces_and_nuls(name);
+			indices.push_back(static_cast<int>(get_column_index(reader_handle, name.c_str())));
+			names.push_back(name);
+		}
+
+		std::shared_ptr<arrow::Table> table;
+		auto status = reader_handle->reader->ReadTable(indices, &table);
+		if (!status.ok())
+		{
+			throw std::runtime_error(status.ToString());
+		}
+
+		for (int64_t i = 0; i < n; ++i)
+		{
+			auto chunked = table->column(static_cast<int>(i));
+			auto array = combine_column_chunks(chunked, names[static_cast<size_t>(i)]);
+			reader_handle->column_cache[indices[static_cast<size_t>(i)]] = array;
+		}
 	}
 
 	int64_t parquet_reader_get_nrows(void *handle)
@@ -1737,8 +1811,29 @@ extern "C"
 		auto schema = arrow::schema(writer_handle->fields, metadata);
 		auto table = arrow::Table::Make(schema, writer_handle->arrays);
 
+		// writer_handle->chunk_size <= 0 means the caller never passed
+		// chunk_size to parquet_open_writer: auto-size it now that the
+		// final row count is known, rather than using a single fixed
+		// constant regardless of file size. One row group is enough for a
+		// small table (avoids the per-row-group overhead -- its own footer
+		// entry, dictionary reset, compression context reset -- of splitting
+		// a small file into many tiny groups for no benefit); a large table
+		// is capped at kAutoChunkSizeCap rows per group so it doesn't end up
+		// as one enormous row group either.
+		auto effective_chunk_size = writer_handle->chunk_size;
+		if (effective_chunk_size <= 0)
+		{
+			static constexpr int64_t kAutoChunkSizeCap = 500000;
+			effective_chunk_size = std::min(table->num_rows(), kAutoChunkSizeCap);
+			if (effective_chunk_size < 1) effective_chunk_size = 1;
+		}
+
 		parquet::ArrowWriterProperties::Builder arrow_writer_builder;
 		arrow_writer_builder.store_schema();
+		// See create_parquet_reader for why this defaults to true (Arrow's own
+		// default is false); callers can opt out via
+		// parquet_open_writer(..., use_threads=.false.).
+		arrow_writer_builder.set_use_threads(writer_handle->use_threads);
 		auto arrow_writer_properties = arrow_writer_builder.build();
 		auto writer_properties = parquet::WriterProperties::Builder()
 			.compression(writer_handle->compression_codec)
@@ -1749,7 +1844,7 @@ extern "C"
 			*table,
 			arrow::default_memory_pool(),
 			writer_handle->outfile,
-			writer_handle->chunk_size,
+			effective_chunk_size,
 			writer_properties,
 			arrow_writer_properties);
 		if (!status.ok())

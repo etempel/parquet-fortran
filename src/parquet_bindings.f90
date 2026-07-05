@@ -17,6 +17,7 @@ module parquet_bindings
     public :: create_parquet_writer, create_parquet_reader
     public :: close_parquet_writer, close_parquet_reader
     public :: parquet_set_writer_options
+    public :: parquet_set_thread_pool_capacity
     public :: parquet_add_column_metadata, parquet_add_table_metadata
     public :: parquet_append_int32_column, parquet_append_int64_column
     public :: parquet_append_float32_column, parquet_append_float64_column
@@ -24,6 +25,7 @@ module parquet_bindings
     public :: parquet_append_string_column, parquet_append_string_array_column
     public :: parquet_reader_get_nrows, parquet_reader_get_column_col_size
     public :: parquet_reader_get_column_total_elements, parquet_reader_get_string_length
+    public :: parquet_reader_prefetch_columns
     public :: parquet_read_int32_column, parquet_read_int64_column
     public :: parquet_read_float32_column, parquet_read_float64_column
     public :: parquet_read_bool8_column, parquet_read_string_column
@@ -45,19 +47,27 @@ module parquet_bindings
             type(c_ptr) :: writer
         end function
 
-        subroutine parquet_set_writer_options(writer, compression_name, compression_level, chunk_size) &
+        subroutine parquet_set_writer_options(writer, compression_name, compression_level, chunk_size, use_threads) &
                 bind(C, name="parquet_set_writer_options")
             import
             type(c_ptr), value :: writer
             character(kind=c_char) :: compression_name(*)
             integer(c_int), value :: compression_level
             integer(c_long_long), value :: chunk_size
+            integer(c_int), value :: use_threads
         end subroutine
 
-        function create_parquet_reader(filename) &
+        subroutine parquet_set_thread_pool_capacity(n) &
+                bind(C, name="parquet_set_max_threads")
+            import
+            integer(c_int), value :: n
+        end subroutine
+
+        function create_parquet_reader(filename, use_threads) &
                 bind(C, name="create_parquet_reader") result(reader)
             import
             character(kind=c_char) :: filename(*)
+            integer(c_int), value :: use_threads
             type(c_ptr) :: reader
         end function
 
@@ -179,6 +189,15 @@ module parquet_bindings
             type(c_ptr), value :: reader
             integer(c_long_long) :: nrows
         end function
+
+        subroutine parquet_reader_prefetch_columns(reader, names_packed, item_len, n) &
+                bind(C, name="parquet_reader_prefetch_columns")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: names_packed(*)
+            integer(c_long_long), value :: item_len
+            integer(c_long_long), value :: n
+        end subroutine
 
         function parquet_reader_get_column_col_size(reader, name) &
                 bind(C, name="parquet_reader_get_column_col_size") result(col_size)

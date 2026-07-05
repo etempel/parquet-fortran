@@ -24,7 +24,12 @@ contains
 	end subroutine make_valid_buf
 
 	module procedure parquet_open_reader
-		reader%handle = create_parquet_reader(trim(filename)//char(0))
+		logical :: use_threads_value
+
+		use_threads_value = .true.
+		if (present(use_threads)) use_threads_value = use_threads
+
+		reader%handle = create_parquet_reader(trim(filename)//char(0), merge(1_c_int, 0_c_int, use_threads_value))
 	end procedure parquet_open_reader
 
 	module procedure parquet_close_reader
@@ -33,6 +38,32 @@ contains
 			reader%handle = c_null_ptr
 		end if
 	end procedure parquet_close_reader
+
+	!> Warms the cache for every column in `names` with a single, parallelizable
+	!> (use_threads is on -- see create_parquet_reader) Arrow read, instead of
+	!> one lazy single-column read per name. Purely additive: parquet_read_column
+	!> (or any other read call) still works for any column, prefetched or not --
+	!> a non-prefetched name simply falls through to the existing lazy,
+	!> read-on-first-request path exactly as if this was never called.
+	module procedure parquet_prefetch_columns
+		character(kind=c_char), allocatable :: packed(:)
+		integer :: i, j, k, item_len, n
+
+		n = size(names)
+		if (n <= 0) return
+		item_len = len(names(1))
+		allocate(packed(item_len * n))
+
+		k = 0
+		do i = 1, n
+			do j = 1, item_len
+				k = k + 1
+				packed(k) = achar(iachar(names(i)(j:j)), kind=c_char)
+			end do
+		end do
+
+		call parquet_reader_prefetch_columns(reader%handle, packed, int(item_len, kind=c_long_long), int(n, kind=c_long_long))
+	end procedure parquet_prefetch_columns
 
 	!> Safety net for a reader whose handle is still open when it goes out of
 	!> scope or is overwritten -- frees the underlying C++ object so the

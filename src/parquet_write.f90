@@ -320,6 +320,7 @@ contains
         character(len=:), allocatable :: compression_name
         integer :: level_value, chunk_size_value
         logical :: comp_ok
+        logical :: use_threads_value
         character(len=12), parameter :: valid_compressions(6) = [character(len=12) :: &
             "uncompressed", "snappy", "gzip", "zstd", "brotli", "lz4"]
 
@@ -350,11 +351,15 @@ contains
         level_value = -huge(level_value) - 1 ! Arrow's kUseDefaultCompressionLevel sentinel (INT_MIN): "use the codec's own default".
         if (present(compression_level)) level_value = compression_level
 
-        chunk_size_value = 1024
+        chunk_size_value = -1 ! <= 0 tells the C++ side "not set": auto-size from the final row count at close time.
         if (present(chunk_size)) chunk_size_value = chunk_size
 
+        use_threads_value = .true.
+        if (present(use_threads)) use_threads_value = use_threads
+
         call parquet_set_writer_options(writer%handle, trim(compression_name)//char(0), &
-            int(level_value, kind=c_int), int(chunk_size_value, kind=c_long_long))
+            int(level_value, kind=c_int), int(chunk_size_value, kind=c_long_long), &
+            merge(1_c_int, 0_c_int, use_threads_value))
 
         if (present(cinfo)) then
             allocate(writer%all_columns(size(cinfo%col)))

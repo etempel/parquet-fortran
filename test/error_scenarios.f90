@@ -90,6 +90,8 @@ program error_scenarios
         call scenario_write_unknown_compression()
     case ("write_values_not_divisible_by_col_size")
         call scenario_write_values_not_divisible_by_col_size()
+    case ("set_max_threads_below_one")
+        call scenario_set_max_threads_below_one()
     case default
         print '(a)', "unknown scenario: "//trim(scenario)
         stop 1
@@ -665,5 +667,12 @@ contains
         call parquet_close_writer(writer)
         print '(a)', "unexpectedly wrote a values(:) array whose length isn't divisible by col_size without error"
     end subroutine scenario_write_values_not_divisible_by_col_size
+
+    !> n < 1 is not a valid thread pool capacity -- must error stop rather
+    !> than silently passing an invalid value down to Arrow.
+    subroutine scenario_set_max_threads_below_one()
+        call parquet_set_max_threads(0)
+        print '(a)', "unexpectedly accepted parquet_set_max_threads(0) without error"
+    end subroutine scenario_set_max_threads_below_one
 
 end program error_scenarios

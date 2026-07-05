@@ -76,7 +76,15 @@ contains
                 test_compression_uncompressed_larger_than_default), &
             new_unittest("an unknown compression codec aborts", test_compression_unknown_aborts), &
             new_unittest("chunk_size forces multiple row groups and still round-trips", &
-                test_chunk_size_round_trip) &
+                test_chunk_size_round_trip), &
+            new_unittest("chunk_size auto-sizes when not given and still round-trips", &
+                test_chunk_size_auto_sizing_without_explicit_value), &
+            new_unittest("parquet_prefetch_columns still allows reading a non-prefetched column", &
+                test_prefetch_columns_then_read_non_prefetched), &
+            new_unittest("use_threads=.false. on writer and reader still round-trips", &
+                test_use_threads_false_still_round_trips), &
+            new_unittest("parquet_set_max_threads with a valid value does not break a round-trip", &
+                test_set_max_threads_valid_value_does_not_break_round_trip) &
             ]
         !
     end subroutine collect_tests_parquet_writing
@@ -833,6 +841,121 @@ contains
         call check(error, nrows == 10_int64 .and. all(read_back == values), &
             "chunk_size=2 (multiple row groups) did not round-trip the written data correctly")
     end subroutine test_chunk_size_round_trip
+
+    !> When chunk_size is not given, the writer auto-sizes it from the final
+    !> row count (capped at 500000) instead of the old fixed default of 1024;
+    !> a table smaller than the cap must still round-trip in a single row group.
+    subroutine test_chunk_size_auto_sizing_without_explicit_value(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: values(10)
+        integer(int32) :: read_back(10)
+        integer(int64) :: nrows
+        character(len=*), parameter :: out_file = "test_run/test_chunk_size_auto.parquet"
+        integer :: i
+
+        values = [(i, i=1,10)]
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_read_column(reader, "v", read_back)
+        call parquet_close_reader(reader)
+
+        call check(error, nrows == 10_int64 .and. all(read_back == values), &
+            "auto-sized chunk_size (no explicit value given) did not round-trip the written data correctly")
+    end subroutine test_chunk_size_auto_sizing_without_explicit_value
+
+    !> parquet_prefetch_columns must warm the cache for the requested columns
+    !> without breaking parquet_read_column for a column that was never
+    !> prefetched -- the non-prefetched column still falls through to the
+    !> existing lazy, read-on-first-request path.
+    subroutine test_prefetch_columns_then_read_non_prefetched(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: a_values(5), b_values(5), c_values(5)
+        integer(int32) :: a_back(5), b_back(5), c_back(5)
+        character(len=*), parameter :: out_file = "test_run/test_prefetch.parquet"
+        integer :: i
+
+        a_values = [(i, i=1,5)]
+        b_values = [(i*10, i=1,5)]
+        c_values = [(i*100, i=1,5)]
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "a", a_values)
+        call parquet_write_column(writer, "b", b_values)
+        call parquet_write_column(writer, "c", c_values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_prefetch_columns(reader, ["a", "b"])
+        call parquet_read_column(reader, "a", a_back)
+        call parquet_read_column(reader, "c", c_back)
+        call parquet_read_column(reader, "b", b_back)
+        call parquet_read_column(reader, "c", c_back)
+        call parquet_close_reader(reader)
+
+        call check(error, all(a_back == a_values) .and. all(b_back == b_values) .and. all(c_back == c_values), &
+            "prefetching a subset of columns broke reading either the prefetched or the non-prefetched column")
+    end subroutine test_prefetch_columns_then_read_non_prefetched
+
+    !> use_threads=.false. must still be a fully functional writer/reader --
+    !> it only turns off Arrow's internal thread pool for that instance, it
+    !> never changes what gets written or read.
+    subroutine test_use_threads_false_still_round_trips(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: values(5), read_back(5)
+        character(len=*), parameter :: out_file = "test_run/test_use_threads_false.parquet"
+        integer :: i
+
+        values = [(i, i=1,5)]
+
+        call parquet_open_writer(writer, out_file, use_threads=.false.)
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file, use_threads=.false.)
+        call parquet_read_column(reader, "v", read_back)
+        call parquet_close_reader(reader)
+
+        call check(error, all(read_back == values), &
+            "use_threads=.false. on the writer and/or reader broke the round-trip")
+    end subroutine test_use_threads_false_still_round_trips
+
+    !> parquet_set_max_threads is a global Arrow thread-pool capacity knob,
+    !> not something that changes any file's content -- a valid call must be
+    !> a no-op as far as write/read correctness goes.
+    subroutine test_set_max_threads_valid_value_does_not_break_round_trip(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: values(5), read_back(5)
+        character(len=*), parameter :: out_file = "test_run/test_set_max_threads.parquet"
+        integer :: i
+
+        values = [(i, i=1,5)]
+
+        call parquet_set_max_threads(2)
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "v", read_back)
+        call parquet_close_reader(reader)
+
+        call check(error, all(read_back == values), &
+            "parquet_set_max_threads(2) broke a subsequent write/read round-trip")
+    end subroutine test_set_max_threads_valid_value_does_not_break_round_trip
 
     !> Mirrors test_errors.f90's check_scenario_exit_status, duplicated here
     !> (rather than exposed from test_errors) since it's test-module-private

@@ -33,6 +33,8 @@ contains
             new_unittest("write to undeclared column aborts", test_write_undeclared_column_aborts), &
             new_unittest("write with type mismatch aborts", test_write_type_mismatch_aborts), &
             new_unittest("writing the same column twice aborts", test_write_column_twice_aborts), &
+            new_unittest("writing the same column twice on a schema-less writer aborts", &
+                test_write_column_twice_no_schema_aborts), &
             new_unittest("validating an invalid data_type aborts", test_validate_bad_data_type_aborts), &
             new_unittest("validating data_type: date aborts", test_validate_excluded_date_type_aborts), &
             new_unittest("validating data_type: timestamp aborts", test_validate_excluded_timestamp_type_aborts), &
@@ -77,6 +79,12 @@ contains
                 test_write_before_open_aborts), &
             new_unittest("calling parquet_get_nrows on an unopened reader aborts", &
                 test_get_nrows_before_open_aborts), &
+            new_unittest("closing a never-opened reader aborts", &
+                test_close_reader_before_open_aborts), &
+            new_unittest("closing a never-opened writer aborts", &
+                test_close_writer_before_open_aborts), &
+            new_unittest("reading an unknown column via parquet_read_column aborts", &
+                test_read_unknown_column_aborts), &
             new_unittest("opening a nonexistent file for reading aborts", &
                 test_open_reader_missing_file_aborts), &
             new_unittest("opening a writer at a bad path aborts", &
@@ -131,6 +139,16 @@ contains
         call check_scenario_exit_status(error, "write_column_twice", expect_abort=.true., &
             failure_message="writing the same column twice was expected to error stop")
     end subroutine test_write_column_twice_aborts
+
+    !> Same rule as test_write_column_twice_aborts, but for a schema-less
+    !> writer (no cinfo), which previously had no tracking at all for this.
+    subroutine test_write_column_twice_no_schema_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "write_column_twice_no_schema", expect_abort=.true., &
+            failure_message="writing the same column twice on a schema-less writer was expected to error stop", &
+            required_stderr="parquet_write_column: column written more than once: id")
+    end subroutine test_write_column_twice_no_schema_aborts
 
     subroutine test_validate_bad_data_type_aborts(error)
         type(error_type), allocatable, intent(out) :: error
@@ -270,11 +288,17 @@ contains
             failure_message="write_maml=.true. without metadata was expected to error stop")
     end subroutine test_write_maml_without_metadata_aborts
 
+    !> A genuine Parquet Null with no null_value/is_valid given now aborts via
+    !> report_fatal_error (print + std::abort()), same as the type-mismatch
+    !> case below, instead of an uncaught C++ exception reaching
+    !> std::terminate() -- still a C++-level abort, not a Fortran error stop
+    !> (see README's Null values section), just a clean, diagnosable one.
     subroutine test_read_column_with_nulls_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
-        call check_scenario_exit_status(error, "read_column_with_nulls", expect_abort=.true., &
-            failure_message="reading a column with a genuine Parquet Null was expected to error stop")
+        call check_scenario_exit_status_and_stderr(error, "read_column_with_nulls", expect_abort=.true., &
+            failure_message="reading a column with a genuine Parquet Null was expected to abort", &
+            required_stderr="column contains Null value(s), which is not supported: id_with_null")
     end subroutine test_read_column_with_nulls_aborts
 
     !> README's Limitations section documents that reading a column whose
@@ -359,6 +383,36 @@ contains
             failure_message="calling parquet_get_nrows on an unopened reader was expected to abort", &
             required_stderr="parquet_get_nrows: reader has not been opened (call parquet_open_reader first)")
     end subroutine test_get_nrows_before_open_aborts
+
+    !> parquet_close_reader now error stops on a reader that was never
+    !> opened, instead of silently no-oping.
+    subroutine test_close_reader_before_open_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "close_reader_before_open", expect_abort=.true., &
+            failure_message="closing a never-opened reader was expected to abort", &
+            required_stderr="parquet_close_reader: reader has not been opened, or was already closed")
+    end subroutine test_close_reader_before_open_aborts
+
+    !> Same as test_close_reader_before_open_aborts, but for the writer side.
+    subroutine test_close_writer_before_open_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "close_writer_before_open", expect_abort=.true., &
+            failure_message="closing a never-opened writer was expected to abort", &
+            required_stderr="parquet_close_writer: writer has not been opened, or was already closed")
+    end subroutine test_close_writer_before_open_aborts
+
+    !> parquet_read_column now validates the column name against the file's
+    !> schema and error stops, instead of letting the C++ side's uncaught
+    !> "Column not found" exception abort the process.
+    subroutine test_read_unknown_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "read_unknown_column", expect_abort=.true., &
+            failure_message="reading an unknown column via parquet_read_column was expected to abort", &
+            required_stderr="parquet_read_column: column not found in parquet file: not_a_real_column")
+    end subroutine test_read_unknown_column_aborts
 
     !> create_parquet_reader (parquet_wrapper.cpp) now checks Arrow's file-open
     !> status directly instead of calling ValueOrDie() unchecked, so a missing

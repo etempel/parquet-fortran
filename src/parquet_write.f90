@@ -296,7 +296,10 @@ contains
     module procedure parquet_mark_column_written
         integer :: idx
 
-        if (.not. allocated(writer%enabled_columns)) return
+        if (.not. allocated(writer%enabled_columns)) then
+            call parquet_check_and_mark_written_name(writer, name)
+            return
+        end if
 
         idx = parquet_get_enabled_column_index(writer, name)
         if (idx == 0) return
@@ -306,6 +309,35 @@ contains
         end if
         writer%write_counts(idx) = writer%write_counts(idx) + 1
     end procedure parquet_mark_column_written
+
+    !> Schema-less writer (no cinfo, so enabled_columns/write_counts above
+    !> don't exist and can't track this): checks `name` against every name
+    !> already written by this writer, error stopping on a repeat, then
+    !> records `name` as written. Grows written_names by one each call --
+    !> fine here since it only holds as many entries as columns actually
+    !> written (typically a handful to a few dozen), unlike a per-row buffer.
+    subroutine parquet_check_and_mark_written_name(writer, name)
+        type(parquet_writer), intent(inout) :: writer
+        character(len=*), intent(in) :: name
+        character(len=256), allocatable :: tmp(:)
+        integer :: n, i
+
+        if (allocated(writer%written_names)) then
+            do i = 1, size(writer%written_names)
+                if (trim(writer%written_names(i)) == trim(name)) then
+                    error stop "parquet_write_column: column written more than once: " // trim(name)
+                end if
+            end do
+            n = size(writer%written_names)
+            allocate(tmp(n + 1))
+            tmp(1:n) = writer%written_names
+            tmp(n + 1) = trim(name)
+            call move_alloc(tmp, writer%written_names)
+        else
+            allocate(writer%written_names(1))
+            writer%written_names(1) = trim(name)
+        end if
+    end subroutine parquet_check_and_mark_written_name
 
     module procedure parquet_is_column_enabled
         parquet_is_column_enabled = .true.
@@ -1385,6 +1417,10 @@ contains
     module procedure parquet_close_writer
         integer :: i
 
+        if (.not. c_associated(writer%handle)) then
+            error stop "parquet_close_writer: writer has not been opened, or was already closed"
+        end if
+
         if (writer%is_schema_enforced .and. allocated(writer%enabled_columns)) then
             do i = 1, size(writer%enabled_columns)
                 if (writer%write_counts(i) == 0) then
@@ -1393,10 +1429,8 @@ contains
             end do
         end if
 
-        if (c_associated(writer%handle)) then
-            call close_parquet_writer(writer%handle)
-            writer%handle = c_null_ptr
-        end if
+        call close_parquet_writer(writer%handle)
+        writer%handle = c_null_ptr
         if (allocated(writer%all_columns)) deallocate(writer%all_columns)
         if (allocated(writer%write_counts)) deallocate(writer%write_counts)
         if (allocated(writer%enabled_columns)) deallocate(writer%enabled_columns)

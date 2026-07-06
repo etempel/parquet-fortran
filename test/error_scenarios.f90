@@ -37,6 +37,8 @@ program error_scenarios
         call scenario_write_type_mismatch()
     case ("write_column_twice")
         call scenario_write_column_twice()
+    case ("write_column_twice_no_schema")
+        call scenario_write_column_twice_no_schema()
     case ("validate_bad_data_type")
         call scenario_validate_bad_data_type()
     case ("validate_excluded_date_type")
@@ -91,6 +93,12 @@ program error_scenarios
         call scenario_write_before_open()
     case ("get_nrows_before_open")
         call scenario_get_nrows_before_open()
+    case ("close_reader_before_open")
+        call scenario_close_reader_before_open()
+    case ("close_writer_before_open")
+        call scenario_close_writer_before_open()
+    case ("read_unknown_column")
+        call scenario_read_unknown_column()
     case ("open_reader_missing_file")
         call scenario_open_reader_missing_file()
     case ("open_writer_bad_path")
@@ -567,6 +575,46 @@ contains
         print '(a)', "unexpectedly wrote to an unopened writer without error"
     end subroutine scenario_write_before_open
 
+    !> parquet_close_reader used to silently no-op on a reader that was never
+    !> opened (or already closed) -- matching the automatic finalizer's own
+    !> safe-no-op behavior, but leaving a real user mistake (closing something
+    !> that was never opened) undetected. It now error stops instead; the
+    !> finalizer itself (reader_finalize) is untouched and still no-ops, since
+    !> that path legitimately runs on every never-opened reader that goes out
+    !> of scope and must not crash the program.
+    subroutine scenario_close_reader_before_open()
+        type(parquet_reader) :: reader
+
+        call parquet_close_reader(reader)
+        print '(a)', "unexpectedly closed a never-opened reader without error"
+    end subroutine scenario_close_reader_before_open
+
+    !> Same issue as scenario_close_reader_before_open, but for the writer
+    !> side.
+    subroutine scenario_close_writer_before_open()
+        type(parquet_writer) :: writer
+
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly closed a never-opened writer without error"
+    end subroutine scenario_close_writer_before_open
+
+    !> parquet_read_column (and every other reader procedure naming a column:
+    !> parquet_get_col_size, parquet_get_column_total_elements,
+    !> parquet_get_string_length, parquet_read_array_row_mode,
+    !> parquet_read_array_element_mode) now validates the column name against
+    !> the file's actual schema before reading any data, and error stops with
+    !> a dedicated message -- the same class of fix already applied to
+    !> parquet_prefetch_columns. Previously this reached the underlying C++
+    !> "Column not found" exception uncaught, aborting with SIGABRT.
+    subroutine scenario_read_unknown_column()
+        type(parquet_reader) :: reader
+        integer :: values(3)
+
+        call parquet_open_reader(reader, "test/fixtures/has_null.parquet")
+        call parquet_read_column(reader, "not_a_real_column", values)
+        print '(a)', "unexpectedly read an unknown column without error"
+    end subroutine scenario_read_unknown_column
+
     !> The same "reader has not been opened" guard now covers every other
     !> reader-taking procedure too (parquet_prefetch_columns, parquet_get_nrows/
     !> parquet_get_col_size/parquet_get_column_total_elements/
@@ -885,6 +933,26 @@ contains
         call parquet_set_max_threads(0)
         print '(a)', "unexpectedly accepted parquet_set_max_threads(0) without error"
     end subroutine scenario_set_max_threads_below_one
+
+    !> A schema-enforced writer (cinfo given) already error stops on this via
+    !> parquet_mark_column_written's write_counts tracking. A schema-less
+    !> writer (no cinfo) previously had no such tracking at all: the C++ side
+    !> only detects a duplicate name via column_metadata, which is only
+    !> populated from cinfo -- so this used to silently write a file with two
+    !> columns both named "id", and only fail much later, on read, with an
+    !> uncaught "Column not found: id" exception (Arrow's GetFieldIndex
+    !> returns -1 for an ambiguous/duplicate name). parquet_mark_column_written
+    !> now tracks written names itself for the schema-less case too, so this
+    !> is caught immediately, at the second parquet_write_column call.
+    subroutine scenario_write_column_twice_no_schema()
+        type(parquet_writer) :: writer
+
+        call parquet_open_writer(writer, "test_run/write_column_twice_no_schema.parquet")
+        call parquet_write_column(writer, "id", [1, 2, 3])
+        call parquet_write_column(writer, "id", [10, 20, 30])
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote the same column twice on a schema-less writer without error"
+    end subroutine scenario_write_column_twice_no_schema
 
     !> Deliberately violates the documented rule that each thread must use
     !> its own independent parquet_reader (see README's Thread safety

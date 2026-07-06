@@ -879,22 +879,28 @@ extern "C"
 	// This library has no representation for a per-element missing value
 	// unless the caller opts in via a validity-output buffer (`valid_out`,
 	// nullable): if valid_out is null and the array contains any Parquet
-	// Nulls, throws immediately (the default, strict behavior) rather than
-	// silently copying out whatever undefined bit pattern Arrow happens to
-	// leave in a null slot's data buffer. If valid_out is non-null, no
-	// exception is thrown regardless of nulls: valid_out[i] is filled with
-	// 1 (valid) / 0 (Null) for every i. The caller is then responsible for
-	// overwriting the corresponding data[i] with a safe default wherever
-	// valid_out[i] == 0 (see fill_null_default/fill_null_default_string
-	// below) -- these two responsibilities are deliberately kept separate
-	// so this function stays a simple, type-agnostic yes/no null report.
-	static void check_or_report_nulls(const std::shared_ptr<arrow::Array> &array, const std::string &name, int8_t *valid_out)
+	// Nulls, aborts immediately via report_fatal_error (the default, strict
+	// behavior) rather than silently copying out whatever undefined bit
+	// pattern Arrow happens to leave in a null slot's data buffer. Calls
+	// report_fatal_error directly instead of throwing -- same rationale as
+	// the type-mismatch/nrows-mismatch checks elsewhere in this file (see
+	// the comment above parquet_read_int32_column): a clean, deliberate
+	// abort with a diagnostic on stderr, not an exception relying on
+	// unwinding that's unreliable when gfortran links the final executable
+	// on macOS. If valid_out is non-null, no abort happens regardless of
+	// nulls: valid_out[i] is filled with 1 (valid) / 0 (Null) for every i.
+	// The caller is then responsible for overwriting the corresponding
+	// data[i] with a safe default wherever valid_out[i] == 0 (see
+	// fill_null_default/fill_null_default_string below) -- these two
+	// responsibilities are deliberately kept separate so this function stays
+	// a simple, type-agnostic yes/no null report.
+	static void check_or_report_nulls(const std::shared_ptr<arrow::Array> &array, const std::string &name, int8_t *valid_out, const char *context)
 	{
 		if (valid_out == nullptr)
 		{
 			if (array->null_count() != 0)
 			{
-				throw std::runtime_error(std::string("column contains Null value(s), which is not supported: ") + name);
+				report_fatal_error(context, std::string("column contains Null value(s), which is not supported: ") + name);
 			}
 			return;
 		}
@@ -912,14 +918,14 @@ extern "C"
 	// array (row-level nulls are looked up at row_offset + i); `vals_any` is
 	// the already-flattened/sliced child values array that data[] is about
 	// to be copied from, of length `nrows * col_size`, indexed the same
-	// way data[] is (k = i * col_size + j). Same throw-vs-report contract
+	// way data[] is (k = i * col_size + j). Same abort-vs-report contract
 	// as check_or_report_nulls.
 	static void report_nulls_list_full(
 		const std::shared_ptr<arrow::Array> &list_array,
 		const std::shared_ptr<arrow::Array> &vals_any,
 		const std::string &name,
 		int64_t nrows, int64_t col_size, int64_t row_offset,
-		int8_t *valid_out)
+		int8_t *valid_out, const char *context)
 	{
 		bool any_null = (vals_any->null_count() != 0);
 		if (!any_null)
@@ -933,7 +939,7 @@ extern "C"
 
 		if (valid_out == nullptr)
 		{
-			throw std::runtime_error(std::string("column contains Null value(s), which is not supported: ") + name);
+			report_fatal_error(context, std::string("column contains Null value(s), which is not supported: ") + name);
 		}
 
 		for (int64_t i = 0; i < nrows; ++i)
@@ -957,7 +963,7 @@ extern "C"
 		const std::shared_ptr<arrow::Array> &vals_any,
 		const std::string &name,
 		int64_t nrows, int64_t col_size, int64_t offset,
-		int8_t *valid_out)
+		int8_t *valid_out, const char *context)
 	{
 		bool any_null = false;
 		for (int64_t i = 0; i < nrows; ++i)
@@ -968,7 +974,7 @@ extern "C"
 
 		if (valid_out == nullptr)
 		{
-			throw std::runtime_error(std::string("column contains Null value(s), which is not supported: ") + name);
+			report_fatal_error(context, std::string("column contains Null value(s), which is not supported: ") + name);
 		}
 
 		for (int64_t i = 0; i < nrows; ++i)
@@ -1209,7 +1215,7 @@ static void read_list_primitive_row(void *handle, const char *name, int64_t row_
 	auto reader_handle = as_reader_handle(handle);
 	auto array = get_single_chunk_array(reader_handle, name);
 	auto vals_any = get_row_list_values(array, name, row_index, col_size, "parquet_read_array_row_mode");
-	report_nulls_list_full(array, vals_any, name, 1, col_size, row_index - 1, valid_out);
+	report_nulls_list_full(array, vals_any, name, 1, col_size, row_index - 1, valid_out, "parquet_read_array_row_mode");
 
 	// get_row_list_values already returns a contiguous col_size-element slice
 	// for this one row, so the default stride=1/offset=0 applies.
@@ -1237,7 +1243,7 @@ static void read_list_primitive_element(void *handle, const char *name, int64_t 
 	}
 	auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_array_element_mode");
 	auto offset = col_index - 1;
-	report_nulls_list_element(array, vals_any, name, nrows, col_size, offset, valid_out);
+	report_nulls_list_element(array, vals_any, name, nrows, col_size, offset, valid_out, "parquet_read_array_element_mode");
 
 	// vals_any holds every row's full col_size-element vector back to back,
 	// so the value for row i at this fixed col_index sits at a stride of
@@ -1281,7 +1287,7 @@ extern "C"
 		{
 			report_fatal_error("parquet_read_int32_column", std::string("nrows mismatch for column: ") + name);
 		}
-		check_or_report_nulls(array, name, valid_out);
+		check_or_report_nulls(array, name, valid_out, "parquet_read_int32_column");
 		convert_values_to_int32(array, data, nrows, name, "parquet_read_int32_column");
 		fill_null_default(data, valid_out, nrows);
 	}
@@ -1294,7 +1300,7 @@ extern "C"
 		{
 			report_fatal_error("parquet_read_int64_column", std::string("nrows mismatch for column: ") + name);
 		}
-		check_or_report_nulls(array, name, valid_out);
+		check_or_report_nulls(array, name, valid_out, "parquet_read_int64_column");
 		convert_values_to_int64(array, data, nrows, name, "parquet_read_int64_column");
 		fill_null_default(data, valid_out, nrows);
 	}
@@ -1307,7 +1313,7 @@ extern "C"
 		{
 			report_fatal_error("parquet_read_float32_column", std::string("nrows mismatch for column: ") + name);
 		}
-		check_or_report_nulls(array, name, valid_out);
+		check_or_report_nulls(array, name, valid_out, "parquet_read_float32_column");
 		convert_values_to_float32(array, data, nrows, name, "parquet_read_float32_column");
 		fill_null_default(data, valid_out, nrows);
 	}
@@ -1320,7 +1326,7 @@ extern "C"
 		{
 			report_fatal_error("parquet_read_float64_column", std::string("nrows mismatch for column: ") + name);
 		}
-		check_or_report_nulls(array, name, valid_out);
+		check_or_report_nulls(array, name, valid_out, "parquet_read_float64_column");
 		convert_values_to_float64(array, data, nrows, name, "parquet_read_float64_column");
 		fill_null_default(data, valid_out, nrows);
 	}
@@ -1339,7 +1345,7 @@ extern "C"
 		{
 			report_fatal_error("parquet_read_bool8_column", std::string("nrows mismatch for column: ") + name);
 		}
-		check_or_report_nulls(arr, name, valid_out);
+		check_or_report_nulls(arr, name, valid_out, "parquet_read_bool8_column");
 		for (int64_t i = 0; i < nrows; ++i)
 		{
 			data[i] = arr->Value(i) ? 1 : 0;
@@ -1361,7 +1367,7 @@ extern "C"
 		{
 			report_fatal_error("parquet_read_string_column", std::string("nrows mismatch for column: ") + name);
 		}
-		check_or_report_nulls(arr, name, valid_out);
+		check_or_report_nulls(arr, name, valid_out, "parquet_read_string_column");
 		for (int64_t i = 0; i < nrows; ++i)
 		{
 			auto view = arr->GetView(i);
@@ -1375,7 +1381,7 @@ extern "C"
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
 		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_int32_array_column");
-		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out);
+		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out, "parquet_read_int32_array_column");
 		int64_t total = nrows * col_size;
 		convert_values_to_int32(vals_any, data, total, name, "parquet_read_int32_array_column");
 		fill_null_default(data, valid_out, total);
@@ -1386,7 +1392,7 @@ extern "C"
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
 		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_int64_array_column");
-		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out);
+		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out, "parquet_read_int64_array_column");
 		int64_t total = nrows * col_size;
 		convert_values_to_int64(vals_any, data, total, name, "parquet_read_int64_array_column");
 		fill_null_default(data, valid_out, total);
@@ -1397,7 +1403,7 @@ extern "C"
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
 		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_float32_array_column");
-		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out);
+		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out, "parquet_read_float32_array_column");
 		int64_t total = nrows * col_size;
 		convert_values_to_float32(vals_any, data, total, name, "parquet_read_float32_array_column");
 		fill_null_default(data, valid_out, total);
@@ -1408,7 +1414,7 @@ extern "C"
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
 		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_float64_array_column");
-		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out);
+		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out, "parquet_read_float64_array_column");
 		int64_t total = nrows * col_size;
 		convert_values_to_float64(vals_any, data, total, name, "parquet_read_float64_array_column");
 		fill_null_default(data, valid_out, total);
@@ -1424,7 +1430,7 @@ extern "C"
 			report_fatal_error("parquet_read_bool8_array_column", std::string("type mismatch for list values in column: ") + name +
 				" (expected bool, got " + vals_any->type()->ToString() + ")");
 		}
-		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out);
+		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out, "parquet_read_bool8_array_column");
 		auto vals = std::static_pointer_cast<arrow::BooleanArray>(vals_any);
 		for (int64_t i = 0; i < nrows * col_size; ++i)
 		{
@@ -1443,7 +1449,7 @@ extern "C"
 			report_fatal_error("parquet_read_string_array_column", std::string("type mismatch for list values in column: ") + name +
 				" (expected string, got " + vals_any->type()->ToString() + ")");
 		}
-		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out);
+		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out, "parquet_read_string_array_column");
 		auto vals = std::static_pointer_cast<arrow::StringArray>(vals_any);
 		for (int64_t i = 0; i < nrows * col_size; ++i)
 		{
@@ -1480,7 +1486,7 @@ extern "C"
 		if (vals_any->type_id() != arrow::Type::BOOL)
 			report_fatal_error("parquet_read_bool8_array_row", std::string("type mismatch for list values in column: ") + name +
 				" (expected bool, got " + vals_any->type()->ToString() + ")");
-		report_nulls_list_full(array, vals_any, name, 1, col_size, row_index - 1, valid_out);
+		report_nulls_list_full(array, vals_any, name, 1, col_size, row_index - 1, valid_out, "parquet_read_bool8_array_row");
 
 		auto vals = std::static_pointer_cast<arrow::BooleanArray>(vals_any);
 		for (int64_t j = 0; j < col_size; ++j)
@@ -1498,7 +1504,7 @@ extern "C"
 		if (vals_any->type_id() != arrow::Type::STRING)
 			report_fatal_error("parquet_read_string_array_row", std::string("type mismatch for list values in column: ") + name +
 				" (expected string, got " + vals_any->type()->ToString() + ")");
-		report_nulls_list_full(array, vals_any, name, 1, col_size, row_index - 1, valid_out);
+		report_nulls_list_full(array, vals_any, name, 1, col_size, row_index - 1, valid_out, "parquet_read_string_array_row");
 
 		auto vals = std::static_pointer_cast<arrow::StringArray>(vals_any);
 		for (int64_t j = 0; j < col_size; ++j)
@@ -1540,7 +1546,7 @@ extern "C"
 			report_fatal_error("parquet_read_bool8_array_element", std::string("type mismatch for list values in column: ") + name +
 				" (expected bool, got " + vals_any->type()->ToString() + ")");
 		auto offset = col_index - 1;
-		report_nulls_list_element(array, vals_any, name, nrows, col_size, offset, valid_out);
+		report_nulls_list_element(array, vals_any, name, nrows, col_size, offset, valid_out, "parquet_read_bool8_array_element");
 
 		auto vals = std::static_pointer_cast<arrow::BooleanArray>(vals_any);
 		for (int64_t i = 0; i < nrows; ++i)
@@ -1562,7 +1568,7 @@ extern "C"
 			report_fatal_error("parquet_read_string_array_element", std::string("type mismatch for list values in column: ") + name +
 				" (expected string, got " + vals_any->type()->ToString() + ")");
 		auto offset = col_index - 1;
-		report_nulls_list_element(array, vals_any, name, nrows, col_size, offset, valid_out);
+		report_nulls_list_element(array, vals_any, name, nrows, col_size, offset, valid_out, "parquet_read_string_array_element");
 
 		auto vals = std::static_pointer_cast<arrow::StringArray>(vals_any);
 		for (int64_t i = 0; i < nrows; ++i)

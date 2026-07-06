@@ -10,7 +10,7 @@ module parquet
     implicit none
     private
     !
-    character(len=*),parameter:: cversion = "v0.6.0 (2026-07-06)" !< version info
+    character(len=*),parameter:: cversion = "v0.7.0 (2026-07-07)" !< version info
 #ifndef RELEASE_VERSION
 #  define RELEASE_VERSION 0.1
 #endif
@@ -121,6 +121,10 @@ module parquet
         integer(c_long_long) :: expected_nrows = -1 ! set by the first parquet_write_column call; every later
                                  ! call must supply this same row count (see parquet_check_row_count), since
                                  ! Arrow/Parquet requires every column in a table to have equal length.
+        character(len=256), allocatable :: written_names(:) ! Schema-less writer only (no cinfo, so
+                                 ! enabled_columns/write_counts below don't exist): every name
+                                 ! parquet_write_column has already written, so a repeat can still be
+                                 ! caught -- see parquet_mark_column_written.
     contains
         final :: writer_finalize
     end type parquet_writer

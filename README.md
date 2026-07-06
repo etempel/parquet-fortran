@@ -217,6 +217,7 @@ Notes:
 
 - `parquet_get_nrows` returns the number of table rows.
 - Allocate output arrays before calling `parquet_read_column`. Its row count (`size(values)` for a plain column, `size(values, 2)` for a vector column) must match `parquet_get_nrows` exactly, or it fails immediately with `error stop`, naming the column and both row counts.
+- `name` must be a column that actually exists in the file — this is checked for every procedure that takes a column name (`parquet_read_column`, `parquet_get_col_size`, `parquet_get_column_total_elements`, `parquet_get_string_length`, `parquet_read_array_row_mode`, `parquet_read_array_element_mode`), each failing immediately with `error stop` naming the missing column.
 - For string columns, choose a fixed string length that is large enough for your data.
 - For vector columns, allocate 2D arrays with shape `(col_size, nrows)`.
 
@@ -424,7 +425,9 @@ end program write_parquet_combined_example
 
 This library reports all failures (missing files, invalid MAML, unknown column names, type mismatches, etc.) by calling Fortran's `error stop`, which aborts the running program immediately and cannot be caught or recovered from. There are no status/`ierr` return codes — check inputs (file existence, column names, array bounds) before calling into the library if you need to avoid aborting. If you're contributing to this library and need to add or test one of these failure paths, see [CONTRIBUTING.md](CONTRIBUTING.md) for how that's done out-of-process, and for this project's own conventions around C++-level error reporting.
 
-Calling any reader-taking procedure (`parquet_read_column`, `parquet_prefetch_columns`, `parquet_get_nrows`, `parquet_get_col_size`, `parquet_get_column_total_elements`, `parquet_get_string_length`, `parquet_read_array_row_mode`, `parquet_read_array_element_mode`) before `parquet_open_reader`, or `parquet_write_column` before `parquet_open_writer`, fails with `error stop`, naming the missing open call. (`parquet_close_reader`/`parquet_close_writer` are the one exception — closing a reader/writer that was never opened is a harmless no-op, not an error.)
+Calling any reader-taking procedure (`parquet_read_column`, `parquet_prefetch_columns`, `parquet_get_nrows`, `parquet_get_col_size`, `parquet_get_column_total_elements`, `parquet_get_string_length`, `parquet_read_array_row_mode`, `parquet_read_array_element_mode`) before `parquet_open_reader`, or `parquet_write_column` before `parquet_open_writer`, fails with `error stop`, naming the missing open call. The same applies to `parquet_close_reader`/`parquet_close_writer` themselves: closing a reader/writer that was never opened, or that was already closed, also fails with `error stop` rather than silently doing nothing.
+
+Re-opening an already-open `reader`/`writer` variable (calling `parquet_open_reader`/`parquet_open_writer` again on one that's already in use, without closing it first) is safe and does **not** error: Fortran automatically finalizes (cleanly closes) the previous handle first, since `reader`/`writer` are `intent(out)` arguments of a finalizable type. The old file's handle is not leaked; the variable simply now refers to the newly-opened file.
 
 ## Thread safety
 
@@ -472,7 +475,7 @@ Vector column entries use the shape convention `(col_size, nrows)` for arrays pa
 
 ### Null values
 
-Fortran has no per-element representation for a missing/Null value. On the **read** side, if a column contains any genuine Parquet Null (e.g. a file produced by another tool), the default behavior of `parquet_read_column`, `parquet_read_array_row_mode`, and `parquet_read_array_element_mode` is to fail immediately with `error stop`, rather than silently returning undefined data.
+Fortran has no per-element representation for a missing/Null value. On the **read** side, if a column contains any genuine Parquet Null (e.g. a file produced by another tool), the default behavior of `parquet_read_column`, `parquet_read_array_row_mode`, and `parquet_read_array_element_mode` is to abort the process immediately, rather than silently returning undefined data. This is a C++-level abort with a diagnostic printed to stderr (e.g. `parquet-fortran: parquet_read_int32_column: column contains Null value(s), which is not supported: <column>`), not a Fortran `error stop` — the same class of failure as the physical-type-mismatch case in [Limitations](#limitations).
 
 To read a Null-containing column instead of erroring, pass one or both of these optional keyword arguments (supported by all three of the read families above, for every data type):
 
@@ -612,7 +615,7 @@ List of public callable procedures available with `use parquet`:
 
 ### Utility
 
-- `call parquet_get_version(ver_string[, internal])` — sets `ver_string` (`character`, `intent(out)`) to the library version. By default (or `internal=.false.`) returns just the release number without a `v` prefix, e.g. `"0.6.0"` (matching `VERSION.txt`, substituted in at build time via fpm). Pass `internal=.true.` to instead get the full internal version string embedded in the source, e.g. `"v0.6.0 (2026-07-06)"` (includes a `v` prefix and the last-updated date). If the two disagree (e.g. the library was built without going through fpm's version substitution), a `WARNING` is printed to stdout.
+- `call parquet_get_version(ver_string[, internal])` — sets `ver_string` (`character`, `intent(out)`) to the library version. By default (or `internal=.false.`) returns just the release number without a `v` prefix, e.g. `"0.7.0"` (matching `VERSION.txt`, substituted in at build time via fpm). Pass `internal=.true.` to instead get the full internal version string embedded in the source, e.g. `"v0.7.0 (2026-07-07)"` (includes a `v` prefix and the last-updated date). If the two disagree (e.g. the library was built without going through fpm's version substitution), a `WARNING` is printed to stdout.
 - `parquet_set_max_threads(n)` — sets the capacity (number of worker threads) of Arrow's global CPU thread pool to `n`. This is process-global, not per-reader/per-writer; see [Multi-threaded decoding/encoding](#multi-threaded-decodingencoding-use_threads-and-thread-pool-size). `n < 1` fails immediately with `error stop`.
 
 ### MAML and metadata
@@ -646,12 +649,12 @@ The public derived type `parquet_table_metadata` provides:
   | `use_threads` | `.true.` | Encode across Arrow's internal thread pool. See [Multi-threaded decoding/encoding](#multi-threaded-decodingencoding-use_threads-and-thread-pool-size). |
 
 - `parquet_write_column(writer, name, values[, is_valid])` — writes one full column named `name`. `values` may be any [supported type](#supported-data-types), passed as a 1D array (`values(:)`) for a plain column or a 2D array (`values(col_size, nrows)`) for a vector column. `is_valid` (optional, `logical`, same shape as `values`) writes a genuine Parquet Null wherever `.false.` — see [Null values](#null-values).
-- `parquet_close_writer(writer)` — flushes buffered data and finalizes the file. Always call this before the program ends, or the file may be incomplete/unreadable.
+- `parquet_close_writer(writer)` — flushes buffered data and finalizes the file. Always call this before the program ends, or the file may be incomplete/unreadable. Fails with `error stop` if `writer` was never opened, or was already closed.
 
 ### Reader (table and column info)
 
 - `parquet_open_reader(reader, filename[, use_threads])` — opens an existing parquet file for reading. `use_threads` (optional, `logical`, default `.true.`) — decode across Arrow's internal thread pool. See [Multi-threaded decoding/encoding](#multi-threaded-decodingencoding-use_threads-and-thread-pool-size).
-- `parquet_close_reader(reader)` — releases resources associated with `reader`.
+- `parquet_close_reader(reader)` — releases resources associated with `reader`. Fails with `error stop` if `reader` was never opened, or was already closed.
 - `parquet_get_nrows(reader, nrows)` — returns the number of table rows in `nrows` (`integer(int32)` or `integer(int64)`).
 - `parquet_get_col_size(reader, name, col_size)` — returns the fixed row length of vector column `name` in `col_size`. Call this before allocating the output array for `parquet_read_column`/`parquet_read_array_row_mode`/`parquet_read_array_element_mode` on that column.
 - `parquet_get_column_total_elements(reader, name, total_elements)` — returns the total number of elements in column `name` across all rows (`total_elements = col_size * nrows` for vector columns), in `total_elements` (`integer(int32)` or `integer(int64)`).
@@ -670,7 +673,7 @@ Worth knowing up front before relying on this library:
 
 - Only the six types in [Supported data types](#supported-data-types) are handled — there is no `date`/`timestamp`/`decimal` support, no `int8`/`int16`/unsigned integers, and no arbitrary nested/struct/map columns. Vector columns are fixed-length (`col_size`) only; there is no variable-length list type.
 - **Reading a column whose physical Parquet type doesn't match what you asked for aborts the process, but not via a clean `error stop`** — it's a C++-level abort with a diagnostic printed to stderr (e.g. `parquet-fortran: parquet_read_column: type mismatch for column: d (expected int32/int64, got date32[day])`), not a Fortran `error stop`. This covers the physical type being outside the six [supported data types](#supported-data-types) (e.g. the file has a `date32` column) as well as a declared vector column's shape not matching what was requested, across every read function (`parquet_read_column`, `parquet_read_array_row_mode`, `parquet_read_array_element_mode`, and vector-column reads).
-- A column can only be written once per `parquet_writer` — there's no incremental/streaming append to a column across multiple `parquet_write_column` calls, and no way to append rows to an already-closed `.parquet` file.
+- A column can only be written once per `parquet_writer` — there's no incremental/streaming append to a column across multiple `parquet_write_column` calls, and no way to append rows to an already-closed `.parquet` file. Writing the same column name twice fails immediately with `error stop`, naming the column, whether or not the writer has a MAML-derived schema (`cinfo`).
 - **`parquet_open_writer` silently overwrites/truncates an existing file at that path** — there is no existence check and no warning.
 - There is no random-access or predicate-pushdown read: `parquet_read_array_row_mode`/`parquet_read_array_element_mode` avoid loading a whole *column* at once, but there's no way to filter which *rows* are read across a table.
 

@@ -31,6 +31,9 @@ contains
             new_unittest("write with type mismatch aborts", test_write_type_mismatch_aborts), &
             new_unittest("writing the same column twice aborts", test_write_column_twice_aborts), &
             new_unittest("validating an invalid data_type aborts", test_validate_bad_data_type_aborts), &
+            new_unittest("validating data_type: date aborts", test_validate_excluded_date_type_aborts), &
+            new_unittest("validating data_type: timestamp aborts", test_validate_excluded_timestamp_type_aborts), &
+            new_unittest("validating data_type: decimal aborts", test_validate_excluded_decimal_type_aborts), &
             new_unittest("validating a duplicate field name aborts", test_validate_duplicate_name_aborts), &
             new_unittest("validating a MAML without table: aborts", test_validate_missing_table_aborts), &
             new_unittest("validating a MAML without fields aborts", test_validate_no_fields_aborts), &
@@ -112,6 +115,31 @@ contains
         call check_scenario_exit_status(error, "validate_bad_data_type", expect_abort=.true., &
             failure_message="validating an invalid data_type was expected to error stop")
     end subroutine test_validate_bad_data_type_aborts
+
+    !> Locks in the specific type exclusions from the README's Limitations
+    !> section (no date/timestamp/decimal support) so that accidentally
+    !> adding one of these to the allowed type list would be caught here,
+    !> not just a generic invalid-token check.
+    subroutine test_validate_excluded_date_type_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "validate_excluded_date_type", expect_abort=.true., &
+            failure_message="'date' is documented as unsupported and was expected to error stop")
+    end subroutine test_validate_excluded_date_type_aborts
+
+    subroutine test_validate_excluded_timestamp_type_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "validate_excluded_timestamp_type", expect_abort=.true., &
+            failure_message="'timestamp' is documented as unsupported and was expected to error stop")
+    end subroutine test_validate_excluded_timestamp_type_aborts
+
+    subroutine test_validate_excluded_decimal_type_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "validate_excluded_decimal_type", expect_abort=.true., &
+            failure_message="'decimal' is documented as unsupported and was expected to error stop")
+    end subroutine test_validate_excluded_decimal_type_aborts
 
     subroutine test_validate_duplicate_name_aborts(error)
         type(error_type), allocatable, intent(out) :: error
@@ -279,15 +307,23 @@ contains
     subroutine test_concurrent_calls_into_shared_reader_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
-        call check_scenario_exit_status(error, "concurrent_calls_into_shared_reader", expect_abort=.true., &
-            failure_message="concurrent parquet_read_column calls into one shared reader were expected to abort")
+        ! README's Thread safety section explicitly promises a diagnostic on
+        ! stderr for this case, not just a bare abort -- check that promise
+        ! from the same run as the exit-status check, rather than re-running
+        ! the (race-dependent) scenario a second time.
+        call check_scenario_exit_status_and_stderr(error, "concurrent_calls_into_shared_reader", &
+            expect_abort=.true., &
+            failure_message="concurrent parquet_read_column calls into one shared reader were expected to abort", &
+            required_stderr="concurrent access to a single parquet_reader detected")
     end subroutine test_concurrent_calls_into_shared_reader_aborts
 
     subroutine test_concurrent_calls_into_shared_writer_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
-        call check_scenario_exit_status(error, "concurrent_calls_into_shared_writer", expect_abort=.true., &
-            failure_message="concurrent parquet_write_column calls into one shared writer were expected to abort")
+        call check_scenario_exit_status_and_stderr(error, "concurrent_calls_into_shared_writer", &
+            expect_abort=.true., &
+            failure_message="concurrent parquet_write_column calls into one shared writer were expected to abort", &
+            required_stderr="concurrent access to a single parquet_writer detected")
     end subroutine test_concurrent_calls_into_shared_writer_aborts
 
     subroutine check_scenario_exit_status(error, scenario, expect_abort, failure_message)
@@ -297,13 +333,15 @@ contains
         integer :: exitstat, cmdstat
         logical :: aborted
 
-        ! --features thread_safe (-fopenmp -frecursive, see fpm.toml) is
-        ! forced here regardless of how the outer `fpm test` was invoked:
-        ! execute_command_line spawns a brand new fpm process that only
-        ! inherits environment variables, not the parent's own command-line
-        ! flags, so without this the concurrent_calls_into_shared_reader/
-        ! writer scenarios below would silently run single-threaded and
-        ! never actually exercise the race they're meant to check.
+        ! --features thread_safe (see fpm.toml) is forced here regardless
+        ! of how the outer `fpm test` was invoked: execute_command_line
+        ! spawns a brand new fpm process that only inherits environment
+        ! variables, not the parent's own command-line flags, so without
+        ! this the concurrent_calls_into_shared_reader/writer scenarios
+        ! below would silently run single-threaded and never actually
+        ! exercise the race they're meant to check. The actual OpenMP
+        ! flag itself must come from the environment (e.g. FPM_FFLAGS),
+        ! since it's compiler-dependent.
         call execute_command_line( &
             "fpm test error_scenarios --features thread_safe -- "//trim(scenario)//" > /dev/null 2>&1", &
             wait=.true., exitstat=exitstat, cmdstat=cmdstat)
@@ -314,5 +352,49 @@ contains
         aborted = (exitstat /= 0)
         call check(error, aborted .eqv. expect_abort, failure_message)
     end subroutine check_scenario_exit_status
+
+    !> Like check_scenario_exit_status, but also asserts stderr (captured
+    !> from the same single run) contains `required_stderr`. Used only where
+    !> the diagnostic text itself is an explicit documented guarantee (e.g.
+    !> the concurrency guard's stderr message in the README's Thread safety
+    !> section) -- not applied broadly to every scenario, since most
+    !> diagnostic wording isn't a documented contract and shouldn't be
+    !> locked down by regression tests.
+    subroutine check_scenario_exit_status_and_stderr(error, scenario, expect_abort, failure_message, required_stderr)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), intent(in) :: scenario, failure_message, required_stderr
+        logical, intent(in) :: expect_abort
+        character(len=:), allocatable :: out_file
+        integer :: exitstat, cmdstat, unit, ios
+        character(len=512) :: line
+        logical :: aborted, found
+
+        out_file = "test_run/" // trim(scenario) // "_stderr.txt"
+
+        call execute_command_line( &
+            "fpm test error_scenarios --features thread_safe -- " // trim(scenario) // &
+            " > " // out_file // " 2>&1", &
+            wait=.true., exitstat=exitstat, cmdstat=cmdstat)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper program via fpm")
+        if (allocated(error)) return
+
+        aborted = (exitstat /= 0)
+        call check(error, aborted .eqv. expect_abort, failure_message)
+        if (allocated(error)) return
+
+        found = .false.
+        open(newunit=unit, file=out_file, status="old", action="read", iostat=ios)
+        if (ios == 0) then
+            do
+                read(unit, '(a)', iostat=ios) line
+                if (ios /= 0) exit
+                if (index(line, required_stderr) > 0) found = .true.
+            end do
+            close(unit)
+        end if
+
+        call check(error, found, &
+            "expected stderr to contain '" // trim(required_stderr) // "' for scenario '" // trim(scenario) // "'")
+    end subroutine check_scenario_exit_status_and_stderr
     !
 end module test_errors

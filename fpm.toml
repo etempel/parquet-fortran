@@ -33,8 +33,7 @@ library = false
 test = false
 
 [features.thread_safe]
-description = "Genuine multi-threaded OpenMP execution with per-thread-safe local variables"
-#flags = "-fopenmp"
+description = "Marks a build/test run as expecting genuine multi-threaded OpenMP execution. The actual OpenMP flag is compiler-dependent (-fopenmp for gfortran, -qopenmp for ifx, ...) and must be supplied externally, e.g. via FPM_FFLAGS in the environment."
 flags = ""
 
 [preprocess]

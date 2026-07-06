@@ -158,7 +158,7 @@ Note: `-std=c++20` is required on every platform (Arrow/Parquet headers use `std
 
 Note: the exact variable set can vary by operating system and compiler toolchain.
 
-For genuine multi-threaded (OpenMP) use, `-fopenmp` is also required — see [Thread safety](#thread-safety) for why, and `fpm test --features thread_safe` for this project's own bundled shortcut.
+For genuine multi-threaded (OpenMP) use, the compiler's OpenMP flag (e.g. `-fopenmp` for gfortran, `-qopenmp` for ifx) is also required, supplied via `FPM_FFLAGS` — see [Thread safety](#thread-safety) for why.
 
 ## Building and installing instructions
 
@@ -512,11 +512,12 @@ Practical cases:
 - **Not safe:** sharing a single `parquet_writer`/`parquet_reader` variable across threads (e.g. a module-level or `!$omp shared` instance that multiple threads call into at once).
 - **Not safe:** two threads writing to the *same* output file at the same time, even with separate `parquet_writer` instances — the underlying file itself isn't safe to write from more than one place at once.
 
-**Building for genuine multi-threaded use:** this project's own `fpm.toml` exposes a `thread_safe` feature (`-fopenmp`) so its own test suite can be run with genuine concurrency via:
+**Building for genuine multi-threaded use:** the OpenMP flag is compiler-dependent (`-fopenmp` for gfortran, `-qopenmp` for ifx, ...), so it can't be hardcoded in `fpm.toml`. Supply it yourself, e.g.:
 ```sh
+export FPM_FFLAGS="-fopenmp"
 fpm test --features thread_safe
 ```
-If you depend on this library from your own project and call into it concurrently from your own `!$omp parallel` regions, make sure your build applies `-fopenmp` to this library's compiled code too (e.g. via your own `[features]` entry or `FPM_FFLAGS`). Without it, those code paths run single-threaded.
+`--features thread_safe` itself adds no flags — it's just a marker this project's own tests use to know real concurrency is expected (some scenario tests spawn `fpm test ... --features thread_safe` subprocesses and rely on the name being present). If you depend on this library from your own project and call into it concurrently from your own `!$omp parallel` regions, make sure your build applies the equivalent OpenMP flag to this library's compiled code too. Without it, those code paths run single-threaded.
 
 Calling into a *shared* `parquet_writer`/`parquet_reader` from more than one thread at a time (the "not safe" case above) is actively detected and rejected: the second concurrent caller triggers an immediate process abort (`std::abort()`) with a diagnostic on stderr. This is a fail-fast race guard, not a locking mechanism. Sequential, non-overlapping hand-off between threads remains allowed.
 

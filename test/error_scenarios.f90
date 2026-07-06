@@ -39,6 +39,12 @@ program error_scenarios
         call scenario_write_column_twice()
     case ("validate_bad_data_type")
         call scenario_validate_bad_data_type()
+    case ("validate_excluded_date_type")
+        call scenario_validate_bad_data_type_named("date")
+    case ("validate_excluded_timestamp_type")
+        call scenario_validate_bad_data_type_named("timestamp")
+    case ("validate_excluded_decimal_type")
+        call scenario_validate_bad_data_type_named("decimal")
     case ("validate_duplicate_name")
         call scenario_validate_duplicate_name()
     case ("validate_missing_table")
@@ -176,6 +182,25 @@ contains
 
         call parquet_validate_maml(maml)
     end subroutine scenario_validate_bad_data_type
+
+    !> Locks in the specific type exclusions documented in the README's
+    !> Limitations section (no date/timestamp/decimal support): unlike
+    !> scenario_validate_bad_data_type's generic garbage token, this uses the
+    !> real excluded type name, so a future accidental addition of one of
+    !> these types to valid_maml_data_types would be caught here.
+    subroutine scenario_validate_bad_data_type_named(type_name)
+        character(len=*), intent(in) :: type_name
+        type(parquet_maml_file) :: maml
+
+        maml%name = "excluded_data_type.maml"
+        maml%lines = [character(len=40) :: &
+            "table: bad_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: "//trim(type_name) ]
+
+        call parquet_validate_maml(maml)
+    end subroutine scenario_validate_bad_data_type_named
 
     subroutine scenario_validate_duplicate_name()
         type(parquet_maml_file) :: maml

@@ -266,13 +266,13 @@ contains
     end subroutine test_read_column_with_nulls_aborts
 
     !> README's Limitations section documents that reading a column whose
-    !> physical Parquet type falls outside this library's six supported
-    !> types is a harsher failure mode than everything else in Error
-    !> handling. parquet_wrapper.cpp's scalar read functions now catch that
-    !> failure at their own extern "C" boundary and abort cleanly instead of
-    !> letting an uncaught C++ exception reach std::terminate() -- this just
-    !> checks the process still aborts (nonzero exit), which is all this
-    !> out-of-process harness can observe either way.
+    !> physical Parquet type doesn't match what was requested aborts the
+    !> process via a C++-level abort (not a clean Fortran error stop).
+    !> parquet_wrapper.cpp's read functions report that failure via
+    !> report_fatal_error (print + std::abort()) instead of letting an
+    !> uncaught C++ exception reach std::terminate() -- this just checks the
+    !> process still aborts (nonzero exit), which is all this out-of-process
+    !> harness can observe either way.
     subroutine test_read_unsupported_physical_type_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 

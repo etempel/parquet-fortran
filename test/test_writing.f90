@@ -80,6 +80,8 @@ contains
                 test_chunk_size_round_trip), &
             new_unittest("chunk_size auto-sizes when not given and still round-trips", &
                 test_chunk_size_auto_sizing_without_explicit_value), &
+            new_unittest("chunk_size auto-sizing accounts for a wide vector column", &
+                test_chunk_size_auto_sizing_wide_row), &
             new_unittest("parquet_prefetch_columns still allows reading a non-prefetched column", &
                 test_prefetch_columns_then_read_non_prefetched), &
             new_unittest("use_threads=.false. on writer and reader still round-trips", &
@@ -844,8 +846,9 @@ contains
     end subroutine test_chunk_size_round_trip
 
     !> When chunk_size is not given, the writer auto-sizes it from the final
-    !> row count (capped at 500000) instead of the old fixed default of 1024;
-    !> a table smaller than the cap must still round-trip in a single row group.
+    !> table's actual in-memory byte size (targeting ~256 MiB per row group),
+    !> not a flat row count -- a table smaller than that target must still
+    !> round-trip in a single row group.
     subroutine test_chunk_size_auto_sizing_without_explicit_value(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_writer) :: writer
@@ -870,6 +873,45 @@ contains
         call check(error, nrows == 10_int64 .and. all(read_back == values), &
             "auto-sized chunk_size (no explicit value given) did not round-trip the written data correctly")
     end subroutine test_chunk_size_auto_sizing_without_explicit_value
+
+    !> A "wide" row (a vector column with a large col_size) can reach the
+    !> ~256 MiB row-group byte target at well under a million rows -- a flat
+    !> row-count-based auto-sizing heuristic would never split a table this
+    !> small into multiple row groups, but a byte-size-aware one should.
+    !> This only checks the round-trip still comes back correct; the actual
+    !> row-group count/size was verified manually against a standalone
+    !> parquet::ParquetFileReader inspector during development (2 row groups
+    !> of ~256 MiB and ~132 MiB for 50,000 rows x col_size=1000 int64).
+    subroutine test_chunk_size_auto_sizing_wide_row(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer, parameter :: nrows = 50000
+        integer, parameter :: col_size = 1000
+        integer(int64), allocatable :: wide(:, :), wide_read(:, :)
+        integer(int64) :: n
+        character(len=*), parameter :: out_file = "test_run/test_chunk_size_auto_wide.parquet"
+        integer :: i, j
+
+        allocate(wide(col_size, nrows), wide_read(col_size, nrows))
+        do i = 1, nrows
+            do j = 1, col_size
+                wide(j, i) = int(i, kind=int64) * 10000_int64 + j
+            end do
+        end do
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "wide", wide)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_nrows(reader, n)
+        call parquet_read_column(reader, "wide", wide_read)
+        call parquet_close_reader(reader)
+
+        call check(error, n == int(nrows, kind=int64) .and. all(wide_read == wide), &
+            "auto-sized chunk_size for a wide vector column did not round-trip the written data correctly")
+    end subroutine test_chunk_size_auto_sizing_wide_row
 
     !> parquet_prefetch_columns must warm the cache for the requested columns
     !> without breaking parquet_read_column for a column that was never

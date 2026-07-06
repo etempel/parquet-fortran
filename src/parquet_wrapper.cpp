@@ -7,10 +7,12 @@
 #include <arrow/array/concatenate.h>
 #include <arrow/array/util.h>
 #include <arrow/io/api.h>
+#include <arrow/util/byte_size.h>
 #include <arrow/util/thread_pool.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/arrow/writer.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -313,15 +315,21 @@ extern "C"
 		return 1;
 	}
 
+	// context identifies the calling extern "C" entry point (parquet_read_*_array_column/
+	// _row/_element) for report_fatal_error's diagnostic -- see the comment on
+	// convert_values_to_int32 for why these report_fatal_error rather than throw:
+	// a container-shape mismatch here is exactly as fatal/unrecoverable as a
+	// value-type mismatch further down the same read, so it gets the same
+	// clean-abort treatment instead of being left as an uncaught exception.
 	static std::shared_ptr<arrow::Array> get_uniform_list_values(const std::shared_ptr<arrow::Array> &array,
-		const std::string &name, int64_t nrows, int64_t col_size)
+		const std::string &name, int64_t nrows, int64_t col_size, const char *context)
 	{
 		if (array->type_id() == arrow::Type::FIXED_SIZE_LIST)
 		{
 			auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
 			if (list_arr->length() != nrows || static_cast<int64_t>(list_arr->value_length()) != col_size)
 			{
-				throw std::runtime_error(std::string("shape mismatch for column: ") + name);
+				report_fatal_error(context, std::string("shape mismatch for column: ") + name);
 			}
 			return list_arr->values()->Slice(list_arr->value_offset(0), nrows * col_size);
 		}
@@ -330,13 +338,13 @@ extern "C"
 			auto list_arr = std::static_pointer_cast<arrow::ListArray>(array);
 			if (list_arr->length() != nrows)
 			{
-				throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
+				report_fatal_error(context, std::string("nrows mismatch for column: ") + name);
 			}
 			for (int64_t i = 0; i < nrows; ++i)
 			{
 				if (static_cast<int64_t>(list_arr->value_length(i)) != col_size)
 				{
-					throw std::runtime_error(std::string("shape mismatch for column: ") + name);
+					report_fatal_error(context, std::string("shape mismatch for column: ") + name);
 				}
 			}
 			return list_arr->values()->Slice(list_arr->value_offset(0), nrows * col_size);
@@ -346,18 +354,18 @@ extern "C"
 			auto list_arr = std::static_pointer_cast<arrow::LargeListArray>(array);
 			if (list_arr->length() != nrows)
 			{
-				throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
+				report_fatal_error(context, std::string("nrows mismatch for column: ") + name);
 			}
 			for (int64_t i = 0; i < nrows; ++i)
 			{
 				if (list_arr->value_length(i) != col_size)
 				{
-					throw std::runtime_error(std::string("shape mismatch for column: ") + name);
+					report_fatal_error(context, std::string("shape mismatch for column: ") + name);
 				}
 			}
 			return list_arr->values()->Slice(list_arr->value_offset(0), nrows * col_size);
 		}
-		throw std::runtime_error(std::string("type mismatch for column: ") + name +
+		report_fatal_error(context, std::string("type mismatch for column: ") + name +
 			" (expected fixed_size_list/list/large_list, got " + array->type()->ToString() + ")");
 	}
 
@@ -978,19 +986,22 @@ extern "C"
 		}
 	}
 
+	// context identifies the calling extern "C" entry point (parquet_read_*_array_row) --
+	// see the comment on get_uniform_list_values above for why every failure
+	// path here reports cleanly instead of throwing uncaught.
 	static std::shared_ptr<arrow::Array> get_row_list_values(const std::shared_ptr<arrow::Array> &array,
-		const std::string &name, int64_t row_index, int64_t col_size)
+		const std::string &name, int64_t row_index, int64_t col_size, const char *context)
 	{
 		if (array->type_id() == arrow::Type::FIXED_SIZE_LIST)
 		{
 			auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
 			if (row_index < 1 || row_index > list_arr->length())
 			{
-				throw std::runtime_error("row_index out of bounds");
+				report_fatal_error(context, "row_index out of bounds");
 			}
 			if (static_cast<int64_t>(list_arr->value_length()) != col_size)
 			{
-				throw std::runtime_error(std::string("col_size mismatch for column: ") + name);
+				report_fatal_error(context, std::string("col_size mismatch for column: ") + name);
 			}
 			return list_arr->values()->Slice(list_arr->value_offset(row_index - 1), col_size);
 		}
@@ -999,11 +1010,11 @@ extern "C"
 			auto list_arr = std::static_pointer_cast<arrow::ListArray>(array);
 			if (row_index < 1 || row_index > list_arr->length())
 			{
-				throw std::runtime_error("row_index out of bounds");
+				report_fatal_error(context, "row_index out of bounds");
 			}
 			if (static_cast<int64_t>(list_arr->value_length(row_index - 1)) != col_size)
 			{
-				throw std::runtime_error(std::string("col_size mismatch for column: ") + name);
+				report_fatal_error(context, std::string("col_size mismatch for column: ") + name);
 			}
 			return list_arr->values()->Slice(list_arr->value_offset(row_index - 1), col_size);
 		}
@@ -1012,15 +1023,15 @@ extern "C"
 			auto list_arr = std::static_pointer_cast<arrow::LargeListArray>(array);
 			if (row_index < 1 || row_index > list_arr->length())
 			{
-				throw std::runtime_error("row_index out of bounds");
+				report_fatal_error(context, "row_index out of bounds");
 			}
 			if (list_arr->value_length(row_index - 1) != col_size)
 			{
-				throw std::runtime_error(std::string("col_size mismatch for column: ") + name);
+				report_fatal_error(context, std::string("col_size mismatch for column: ") + name);
 			}
 			return list_arr->values()->Slice(list_arr->value_offset(row_index - 1), col_size);
 		}
-		throw std::runtime_error(std::string("type mismatch for column: ") + name +
+		report_fatal_error(context, std::string("type mismatch for column: ") + name +
 			" (expected fixed_size_list/list/large_list, got " + array->type()->ToString() + ")");
 	}
 
@@ -1058,7 +1069,7 @@ extern "C"
 				auto v = arr->Value(offset + i * stride);
 				if (v < std::numeric_limits<int32_t>::min() || v > std::numeric_limits<int32_t>::max())
 				{
-					throw std::runtime_error(std::string("int64->int32 overflow for column: ") + name);
+					report_fatal_error(context, std::string("int64->int32 overflow for column: ") + name);
 				}
 				data[i] = static_cast<int32_t>(v);
 			}
@@ -1187,7 +1198,7 @@ static void read_list_primitive_row(void *handle, const char *name, int64_t row_
 {
 	auto reader_handle = as_reader_handle(handle);
 	auto array = get_single_chunk_array(reader_handle, name);
-	auto vals_any = get_row_list_values(array, name, row_index, col_size);
+	auto vals_any = get_row_list_values(array, name, row_index, col_size, "parquet_read_array_row_mode");
 	report_nulls_list_full(array, vals_any, name, 1, col_size, row_index - 1, valid_out);
 
 	// get_row_list_values already returns a contiguous col_size-element slice
@@ -1212,9 +1223,9 @@ static void read_list_primitive_element(void *handle, const char *name, int64_t 
 	auto col_size = get_col_size(array);
 	if (col_index < 1 || col_index > col_size)
 	{
-		throw std::runtime_error("col_index out of bounds");
+		report_fatal_error("parquet_read_array_element_mode", "col_index out of bounds");
 	}
-	auto vals_any = get_uniform_list_values(array, name, nrows, col_size);
+	auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_array_element_mode");
 	auto offset = col_index - 1;
 	report_nulls_list_element(array, vals_any, name, nrows, col_size, offset, valid_out);
 
@@ -1239,11 +1250,11 @@ extern "C"
 
 	// parquet_read_{int32,int64,float32,float64,bool8,string}_column are the
 	// direct target of parquet_read_column -- the README documents that
-	// reading a column whose physical Parquet type falls outside this
-	// library's six supported types is a harsher failure mode than the rest
-	// of this library's error handling (see "Limitations"). The `default:`
-	// branch below (an unrecognized physical type) calls report_fatal_error
-	// directly instead of throwing: this project's own toolchain testing
+	// reading a column whose physical Parquet type doesn't match what was
+	// requested aborts the process via a C++-level abort, not a clean
+	// Fortran error stop (see "Limitations"). The `default:` branch below
+	// (an unrecognized physical type) calls report_fatal_error directly
+	// instead of throwing: this project's own toolchain testing
 	// found that a C++ exception thrown and caught within the very same
 	// function can still go uncaught when the final executable is linked by
 	// gfortran on macOS -- gfortran's driver passes `-no_compact_unwind` to
@@ -1258,7 +1269,7 @@ extern "C"
 		auto array = get_single_chunk_array(reader_handle, name);
 		if (array->length() != nrows)
 		{
-			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
+			report_fatal_error("parquet_read_int32_column", std::string("nrows mismatch for column: ") + name);
 		}
 		check_or_report_nulls(array, name, valid_out);
 		convert_values_to_int32(array, data, nrows, name, "parquet_read_int32_column");
@@ -1271,7 +1282,7 @@ extern "C"
 		auto array = get_single_chunk_array(reader_handle, name);
 		if (array->length() != nrows)
 		{
-			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
+			report_fatal_error("parquet_read_int64_column", std::string("nrows mismatch for column: ") + name);
 		}
 		check_or_report_nulls(array, name, valid_out);
 		convert_values_to_int64(array, data, nrows, name, "parquet_read_int64_column");
@@ -1284,7 +1295,7 @@ extern "C"
 		auto array = get_single_chunk_array(reader_handle, name);
 		if (array->length() != nrows)
 		{
-			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
+			report_fatal_error("parquet_read_float32_column", std::string("nrows mismatch for column: ") + name);
 		}
 		check_or_report_nulls(array, name, valid_out);
 		convert_values_to_float32(array, data, nrows, name, "parquet_read_float32_column");
@@ -1297,7 +1308,7 @@ extern "C"
 		auto array = get_single_chunk_array(reader_handle, name);
 		if (array->length() != nrows)
 		{
-			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
+			report_fatal_error("parquet_read_float64_column", std::string("nrows mismatch for column: ") + name);
 		}
 		check_or_report_nulls(array, name, valid_out);
 		convert_values_to_float64(array, data, nrows, name, "parquet_read_float64_column");
@@ -1316,7 +1327,7 @@ extern "C"
 		auto arr = std::static_pointer_cast<arrow::BooleanArray>(array);
 		if (arr->length() != nrows)
 		{
-			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
+			report_fatal_error("parquet_read_bool8_column", std::string("nrows mismatch for column: ") + name);
 		}
 		check_or_report_nulls(arr, name, valid_out);
 		for (int64_t i = 0; i < nrows; ++i)
@@ -1338,7 +1349,7 @@ extern "C"
 		auto arr = std::static_pointer_cast<arrow::StringArray>(array);
 		if (arr->length() != nrows)
 		{
-			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
+			report_fatal_error("parquet_read_string_column", std::string("nrows mismatch for column: ") + name);
 		}
 		check_or_report_nulls(arr, name, valid_out);
 		for (int64_t i = 0; i < nrows; ++i)
@@ -1353,7 +1364,7 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		auto vals_any = get_uniform_list_values(array, name, nrows, col_size);
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_int32_array_column");
 		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out);
 		int64_t total = nrows * col_size;
 		convert_values_to_int32(vals_any, data, total, name, "parquet_read_int32_array_column");
@@ -1364,7 +1375,7 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		auto vals_any = get_uniform_list_values(array, name, nrows, col_size);
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_int64_array_column");
 		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out);
 		int64_t total = nrows * col_size;
 		convert_values_to_int64(vals_any, data, total, name, "parquet_read_int64_array_column");
@@ -1375,7 +1386,7 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		auto vals_any = get_uniform_list_values(array, name, nrows, col_size);
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_float32_array_column");
 		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out);
 		int64_t total = nrows * col_size;
 		convert_values_to_float32(vals_any, data, total, name, "parquet_read_float32_array_column");
@@ -1386,7 +1397,7 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		auto vals_any = get_uniform_list_values(array, name, nrows, col_size);
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_float64_array_column");
 		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out);
 		int64_t total = nrows * col_size;
 		convert_values_to_float64(vals_any, data, total, name, "parquet_read_float64_array_column");
@@ -1397,10 +1408,10 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		auto vals_any = get_uniform_list_values(array, name, nrows, col_size);
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_bool8_array_column");
 		if (vals_any->type_id() != arrow::Type::BOOL)
 		{
-			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
+			report_fatal_error("parquet_read_bool8_array_column", std::string("type mismatch for list values in column: ") + name +
 				" (expected bool, got " + vals_any->type()->ToString() + ")");
 		}
 		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out);
@@ -1416,10 +1427,10 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		auto vals_any = get_uniform_list_values(array, name, nrows, col_size);
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_string_array_column");
 		if (vals_any->type_id() != arrow::Type::STRING)
 		{
-			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
+			report_fatal_error("parquet_read_string_array_column", std::string("type mismatch for list values in column: ") + name +
 				" (expected string, got " + vals_any->type()->ToString() + ")");
 		}
 		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out);
@@ -1455,9 +1466,9 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		auto vals_any = get_row_list_values(array, name, row_index, col_size);
+		auto vals_any = get_row_list_values(array, name, row_index, col_size, "parquet_read_bool8_array_row");
 		if (vals_any->type_id() != arrow::Type::BOOL)
-			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
+			report_fatal_error("parquet_read_bool8_array_row", std::string("type mismatch for list values in column: ") + name +
 				" (expected bool, got " + vals_any->type()->ToString() + ")");
 		report_nulls_list_full(array, vals_any, name, 1, col_size, row_index - 1, valid_out);
 
@@ -1473,9 +1484,9 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		auto vals_any = get_row_list_values(array, name, row_index, col_size);
+		auto vals_any = get_row_list_values(array, name, row_index, col_size, "parquet_read_string_array_row");
 		if (vals_any->type_id() != arrow::Type::STRING)
-			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
+			report_fatal_error("parquet_read_string_array_row", std::string("type mismatch for list values in column: ") + name +
 				" (expected string, got " + vals_any->type()->ToString() + ")");
 		report_nulls_list_full(array, vals_any, name, 1, col_size, row_index - 1, valid_out);
 
@@ -1513,10 +1524,10 @@ extern "C"
 		auto array = get_single_chunk_array(reader_handle, name);
 		auto col_size = get_col_size(array);
 		if (col_index < 1 || col_index > col_size)
-			throw std::runtime_error("col_index out of bounds");
-		auto vals_any = get_uniform_list_values(array, name, nrows, col_size);
+			report_fatal_error("parquet_read_bool8_array_element", "col_index out of bounds");
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_bool8_array_element");
 		if (vals_any->type_id() != arrow::Type::BOOL)
-			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
+			report_fatal_error("parquet_read_bool8_array_element", std::string("type mismatch for list values in column: ") + name +
 				" (expected bool, got " + vals_any->type()->ToString() + ")");
 		auto offset = col_index - 1;
 		report_nulls_list_element(array, vals_any, name, nrows, col_size, offset, valid_out);
@@ -1535,10 +1546,10 @@ extern "C"
 		auto array = get_single_chunk_array(reader_handle, name);
 		auto col_size = get_col_size(array);
 		if (col_index < 1 || col_index > col_size)
-			throw std::runtime_error("col_index out of bounds");
-		auto vals_any = get_uniform_list_values(array, name, nrows, col_size);
+			report_fatal_error("parquet_read_string_array_element", "col_index out of bounds");
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_string_array_element");
 		if (vals_any->type_id() != arrow::Type::STRING)
-			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
+			report_fatal_error("parquet_read_string_array_element", std::string("type mismatch for list values in column: ") + name +
 				" (expected string, got " + vals_any->type()->ToString() + ")");
 		auto offset = col_index - 1;
 		report_nulls_list_element(array, vals_any, name, nrows, col_size, offset, valid_out);
@@ -1765,18 +1776,80 @@ extern "C"
 
 		// writer_handle->chunk_size <= 0 means the caller never passed
 		// chunk_size to parquet_open_writer: auto-size it now that the
-		// final row count is known, rather than using a single fixed
-		// constant regardless of file size. One row group is enough for a
-		// small table (avoids the per-row-group overhead -- its own footer
-		// entry, dictionary reset, compression context reset -- of splitting
-		// a small file into many tiny groups for no benefit); a large table
-		// is capped at kAutoChunkSizeCap rows per group so it doesn't end up
-		// as one enormous row group either.
+		// final table exists, targeting a row group size in BYTES rather
+		// than a flat row count. A flat row-count cap doesn't know how wide
+		// a row is: for a handful of int32 columns, a few hundred thousand
+		// rows might be a few MB, while for a table with several vector
+		// columns (large col_size) the same row count could be gigabytes --
+		// sized this way, both end up with row groups in the same
+		// ballpark of actual bytes, which is what Parquet's own row-group
+		// size guidance (roughly 128MB-1GB) is actually about, and what
+		// drives per-row-group compression efficiency and decode cost.
+		// kMinAutoChunkSizeRows/kMaxAutoChunkSizeRows bound the result so
+		// pathological row widths still produce something reasonable: an
+		// extremely wide row (e.g. a huge vector column) is floored so a
+		// table isn't fragmented into an absurd number of tiny row groups,
+		// and an extremely narrow row is capped so a huge table doesn't
+		// collapse into one single, enormous row group either.
 		auto effective_chunk_size = writer_handle->chunk_size;
 		if (effective_chunk_size <= 0)
 		{
-			static constexpr int64_t kAutoChunkSizeCap = 500000;
-			effective_chunk_size = std::min(table->num_rows(), kAutoChunkSizeCap);
+			static constexpr int64_t kTargetRowGroupBytes = 256LL * 1024 * 1024; // ~256 MiB
+			static constexpr int64_t kMinAutoChunkSizeRows = 1000;
+			// 10,000,000: high enough that the byte target above governs for
+			// any realistically-shaped table (the row-count cap only starts
+			// to bind below ~27 bytes/row -- e.g. a single narrow column --
+			// see kTargetRowGroupBytes/kMaxAutoChunkSizeRows), while still
+			// backstopping genuinely pathological cases (a handful of bytes
+			// per row at billions of rows) from collapsing into one giant
+			// row group spanning the whole file.
+			static constexpr int64_t kMaxAutoChunkSizeRows = 10000000;
+			// The kMinAutoChunkSizeRows floor exists to avoid fragmenting a
+			// table into an excessive number of tiny row groups when rows are
+			// moderately wide -- but blindly applying it regardless of row
+			// width defeats the whole point of sizing by bytes: if a single
+			// row is already close to (or bigger than) kTargetRowGroupBytes
+			// (e.g. a vector column with a very large col_size), forcing
+			// kMinAutoChunkSizeRows rows into one row group would produce a
+			// row group many times the intended size. kMaxFloorOvershootFactor
+			// bounds how far the floor is allowed to push things past the
+			// target before it's abandoned in favor of a smaller-than-floor
+			// (down to 1 row) row group instead -- an under-sized row group is
+			// a much smaller problem than one that is unboundedly oversized.
+			static constexpr double kMaxFloorOvershootFactor = 4.0;
+
+			auto num_rows = table->num_rows();
+			auto total_bytes = arrow::util::TotalBufferSize(*table);
+			if (num_rows > 0 && total_bytes > 0)
+			{
+				double bytes_per_row = static_cast<double>(total_bytes) / static_cast<double>(num_rows);
+				auto rows_for_target = static_cast<int64_t>(
+					static_cast<double>(kTargetRowGroupBytes) / std::max(bytes_per_row, 1.0));
+
+				if (rows_for_target >= kMinAutoChunkSizeRows)
+				{
+					effective_chunk_size = std::min<int64_t>(rows_for_target, kMaxAutoChunkSizeRows);
+				}
+				else if (static_cast<double>(kMinAutoChunkSizeRows) * bytes_per_row
+					<= static_cast<double>(kTargetRowGroupBytes) * kMaxFloorOvershootFactor)
+				{
+					// Floor overshoots the target, but only by a bounded,
+					// acceptable amount -- apply it as usual.
+					effective_chunk_size = kMinAutoChunkSizeRows;
+				}
+				else
+				{
+					// Even the floor would blow far past the target (rows
+					// this wide): accept a smaller-than-floor row group
+					// (down to 1 row) instead of a wildly oversized one.
+					effective_chunk_size = std::max<int64_t>(rows_for_target, 1);
+				}
+				effective_chunk_size = std::min(effective_chunk_size, num_rows);
+			}
+			else
+			{
+				effective_chunk_size = num_rows;
+			}
 			if (effective_chunk_size < 1) effective_chunk_size = 1;
 		}
 
@@ -1787,9 +1860,16 @@ extern "C"
 		// parquet_open_writer(..., use_threads=.false.).
 		arrow_writer_builder.set_use_threads(writer_handle->use_threads);
 		auto arrow_writer_properties = arrow_writer_builder.build();
+		// WriterProperties has its own, separate max_row_group_length, defaulting
+		// to parquet::DEFAULT_MAX_ROW_GROUP_LENGTH (1,048,576) -- independent of
+		// and silently overriding the chunk_size passed to WriteTable below
+		// whenever effective_chunk_size exceeds it. Set explicitly here so
+		// effective_chunk_size (whether auto-sized above or given by the
+		// caller) is the actual, sole authority on row group size.
 		auto writer_properties = parquet::WriterProperties::Builder()
 			.compression(writer_handle->compression_codec)
 			->compression_level(writer_handle->compression_level)
+			->max_row_group_length(effective_chunk_size)
 			->build();
 
 		auto status = parquet::arrow::WriteTable(

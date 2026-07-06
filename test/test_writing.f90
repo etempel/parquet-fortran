@@ -7,6 +7,7 @@ module test_writing
     use parquet_maml_base
     use iso_fortran_env, only : int32, int64, real32, real64
     use testdrive, only : new_unittest, unittest_type, error_type, check, test_failed
+    use test_errors, only : check_scenario_exit_status
     !
     implicit none
     private
@@ -811,7 +812,7 @@ contains
     subroutine test_compression_unknown_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
-        call check_scenario_exit_status_local(error, "write_unknown_compression", expect_abort=.true., &
+        call check_scenario_exit_status(error, "write_unknown_compression", expect_abort=.true., &
             failure_message="an unknown compression codec name was expected to error stop")
     end subroutine test_compression_unknown_aborts
 
@@ -956,30 +957,6 @@ contains
         call check(error, all(read_back == values), &
             "parquet_set_max_threads(2) broke a subsequent write/read round-trip")
     end subroutine test_set_max_threads_valid_value_does_not_break_round_trip
-
-    !> Mirrors test_errors.f90's check_scenario_exit_status, duplicated here
-    !> (rather than exposed from test_errors) since it's test-module-private
-    !> plumbing, not part of that module's public collect_tests_* interface.
-    subroutine check_scenario_exit_status_local(error, scenario, expect_abort, failure_message)
-        type(error_type), allocatable, intent(out) :: error
-        character(len=*), intent(in) :: scenario, failure_message
-        logical, intent(in) :: expect_abort
-        integer :: exitstat, cmdstat
-        logical :: aborted
-
-        ! --features thread_safe forced regardless of how the outer `fpm
-        ! test` was invoked -- see the identical note on
-        ! check_scenario_exit_status in test_errors.f90.
-        call execute_command_line( &
-            "fpm test error_scenarios --features thread_safe -- "//trim(scenario)//" > /dev/null 2>&1", &
-            wait=.true., exitstat=exitstat, cmdstat=cmdstat)
-
-        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper program via fpm")
-        if (allocated(error)) return
-
-        aborted = (exitstat /= 0)
-        call check(error, aborted .eqv. expect_abort, failure_message)
-    end subroutine check_scenario_exit_status_local
 
     subroutine test_write_parquet_file(error)
         type(error_type), allocatable, intent(out) :: error

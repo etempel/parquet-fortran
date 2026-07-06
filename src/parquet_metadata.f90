@@ -542,11 +542,11 @@ contains
         case ("int32")
             rounded = anint(value)
             if (value /= rounded) return
-            if (rounded < -2147483648.0_real64 .or. rounded > 2147483647.0_real64) return
+            if (rounded < -real(huge(0_int32), real64) - 1.0_real64 .or. rounded > real(huge(0_int32), real64)) return
         case ("int64")
             rounded = anint(value)
             if (value /= rounded) return
-            if (rounded < -9223372036854775808.0_real64 .or. rounded >= 9223372036854775808.0_real64) return
+            if (rounded < -real(huge(0_int64), real64) .or. rounded >= real(huge(0_int64), real64)) return
         end select
 
         parquet_qc_numeric_bound = .true.

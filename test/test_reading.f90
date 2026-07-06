@@ -2,6 +2,14 @@
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
 !===========================================
 !
+!> NB: several tests below read "test_run/test_simple.parquet" and
+!> "test_run/test_parquet.parquet" without writing them first -- those files
+!> are only ever produced by test_writing.f90 (collect_tests_parquet_writing).
+!> This is an undocumented-to-the-runtime, order-dependent assumption: it
+!> works only because run_tester.f90 happens to list the "writing" suite
+!> before "reading". If that order ever changes, these tests would fail
+!> (file not found) with no explanatory trail pointing back here -- if you
+!> reorder run_tester.f90's testsuites array, check this comment first.
 module test_reading
     use parquet
     use parquet_maml_base

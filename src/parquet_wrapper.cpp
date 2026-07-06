@@ -182,6 +182,22 @@ extern "C"
 		return ConcurrencyGuard<ParquetReaderHandle>(static_cast<ParquetReaderHandle *>(handle), "parquet_reader");
 	}
 
+	// Prints a diagnostic and aborts, the same way ConcurrencyGuard does. Used
+	// at specific extern "C" entry points (file-open, and reading a column
+	// whose physical Parquet type this library doesn't support) to turn a
+	// C++ exception into a clean, well-defined process abort with a message
+	// on stderr, instead of an uncaught exception reaching std::terminate()
+	// with compiler/runtime-dependent output. Most other throw sites in this
+	// file are deliberately left as plain, uncaught std::runtime_errors --
+	// see the README's Error handling section: this project only guarantees
+	// a clean error at these specific, documented boundaries.
+	[[noreturn]] static void report_fatal_error(const char *context, const std::string &message)
+	{
+		std::fprintf(stderr, "parquet-fortran: %s: %s\n", context, message.c_str());
+		std::fflush(stderr);
+		std::abort();
+	}
+
 	static int64_t get_column_index(const ParquetReaderHandle *reader_handle, const char *name)
 	{
 		auto idx = reader_handle->schema->GetFieldIndex(name);
@@ -604,7 +620,14 @@ extern "C"
 	void *create_parquet_writer(const char *filename)
 	{
 		auto *handle = new ParquetWriterHandle{};
-		handle->outfile = arrow::io::FileOutputStream::Open(filename).ValueOrDie();
+		auto result = arrow::io::FileOutputStream::Open(filename);
+		if (!result.ok())
+		{
+			delete handle;
+			report_fatal_error("create_parquet_writer",
+				std::string("failed to open '") + filename + "' for writing: " + result.status().ToString());
+		}
+		handle->outfile = result.ValueOrDie();
 		return handle;
 	}
 
@@ -662,13 +685,21 @@ extern "C"
 	void *create_parquet_reader(const char *filename, int use_threads)
 	{
 		auto *handle = new ParquetReaderHandle{};
-		auto infile = arrow::io::ReadableFile::Open(filename).ValueOrDie();
+		auto infile_result = arrow::io::ReadableFile::Open(filename);
+		if (!infile_result.ok())
+		{
+			delete handle;
+			report_fatal_error("create_parquet_reader",
+				std::string("failed to open '") + filename + "' for reading: " + infile_result.status().ToString());
+		}
+		auto infile = infile_result.ValueOrDie();
 		parquet::arrow::FileReaderBuilder builder;
 		auto status = builder.Open(infile);
 		if (!status.ok())
 		{
 			delete handle;
-			throw std::runtime_error(status.ToString());
+			report_fatal_error("create_parquet_reader",
+				std::string("failed to open '") + filename + "': " + status.ToString());
 		}
 		// Arrow's own default (kArrowDefaultUseThreads) is false; enabling
 		// this lets Arrow decode a column's row groups (or several columns
@@ -683,14 +714,16 @@ extern "C"
 		if (!status.ok())
 		{
 			delete handle;
-			throw std::runtime_error(status.ToString());
+			report_fatal_error("create_parquet_reader",
+				std::string("failed to open '") + filename + "': " + status.ToString());
 		}
 
 		status = handle->reader->GetSchema(&handle->schema);
 		if (!status.ok())
 		{
 			delete handle;
-			throw std::runtime_error(status.ToString());
+			report_fatal_error("create_parquet_reader",
+				std::string("failed to open '") + filename + "': " + status.ToString());
 		}
 
 		handle->nrows = handle->reader->parquet_reader()->metadata()->num_rows();
@@ -944,29 +977,6 @@ extern "C"
 		}
 	}
 
-	template <typename ArrowArrayType, typename CType>
-	static void read_scalar_primitive(void *handle, const char *name, CType *data, int64_t nrows, arrow::Type::type expected_type, const char *expected_name)
-	{
-		auto reader_handle = as_reader_handle(handle);
-		auto array = get_single_chunk_array(reader_handle, name);
-		if (array->type_id() != expected_type)
-		{
-			throw std::runtime_error(std::string("type mismatch for column: ") + name +
-				" (expected " + expected_name +
-				", got " + array->type()->ToString() + ")");
-		}
-		auto arr = std::static_pointer_cast<ArrowArrayType>(array);
-		if (arr->length() != nrows)
-		{
-			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
-		}
-		check_no_nulls(arr, name);
-		for (int64_t i = 0; i < nrows; ++i)
-		{
-			data[i] = static_cast<CType>(arr->Value(i));
-		}
-	}
-
 	static std::shared_ptr<arrow::Array> get_row_list_values(const std::shared_ptr<arrow::Array> &array,
 		const std::string &name, int64_t row_index, int64_t col_size)
 	{
@@ -1068,31 +1078,27 @@ extern "C"
 extern "C"
 {
 
-	void parquet_read_int32_column(void *handle, const char *name, int32_t *data, int64_t nrows, int8_t *valid_out)
+	// Shared by both the scalar (parquet_read_*_column) and fixed-size-list
+	// (parquet_read_*_array_column) numeric read paths below: each pair
+	// previously duplicated the exact same per-physical-type widening/
+	// narrowing switch, once over a plain array and once over a list's
+	// values array. One conversion routine per output CType, called from
+	// both sites, replaces both duplicated copies.
+	static void convert_values_to_int32(
+		const std::shared_ptr<arrow::Array> &vals, int32_t *data, int64_t n, const char *name, const char *context)
 	{
-		auto reader_handle = as_reader_handle(handle);
-		auto array = get_single_chunk_array(reader_handle, name);
-		if (array->length() != nrows)
-		{
-			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
-		}
-		check_or_report_nulls(array, name, valid_out);
-
-		switch (array->type_id())
+		switch (vals->type_id())
 		{
 		case arrow::Type::INT32:
 		{
-			auto arr = std::static_pointer_cast<arrow::Int32Array>(array);
-			for (int64_t i = 0; i < nrows; ++i)
-			{
-				data[i] = arr->Value(i);
-			}
+			auto arr = std::static_pointer_cast<arrow::Int32Array>(vals);
+			for (int64_t i = 0; i < n; ++i) data[i] = arr->Value(i);
 			break;
 		}
 		case arrow::Type::INT64:
 		{
-			auto arr = std::static_pointer_cast<arrow::Int64Array>(array);
-			for (int64_t i = 0; i < nrows; ++i)
+			auto arr = std::static_pointer_cast<arrow::Int64Array>(vals);
+			for (int64_t i = 0; i < n; ++i)
 			{
 				auto v = arr->Value(i);
 				if (v < std::numeric_limits<int32_t>::min() || v > std::numeric_limits<int32_t>::max())
@@ -1104,9 +1110,129 @@ extern "C"
 			break;
 		}
 		default:
-			throw std::runtime_error(std::string("type mismatch for column: ") + name +
-				" (expected int32/int64, got " + array->type()->ToString() + ")");
+			report_fatal_error(context, std::string("type mismatch for column: ") + name +
+				" (expected int32/int64, got " + vals->type()->ToString() + ")");
 		}
+	}
+
+	static void convert_values_to_int64(
+		const std::shared_ptr<arrow::Array> &vals, int64_t *data, int64_t n, const char *name, const char *context)
+	{
+		switch (vals->type_id())
+		{
+		case arrow::Type::INT64:
+		{
+			auto arr = std::static_pointer_cast<arrow::Int64Array>(vals);
+			for (int64_t i = 0; i < n; ++i) data[i] = arr->Value(i);
+			break;
+		}
+		case arrow::Type::INT32:
+		{
+			auto arr = std::static_pointer_cast<arrow::Int32Array>(vals);
+			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<int64_t>(arr->Value(i));
+			break;
+		}
+		default:
+			report_fatal_error(context, std::string("type mismatch for column: ") + name +
+				" (expected int64/int32, got " + vals->type()->ToString() + ")");
+		}
+	}
+
+	static void convert_values_to_float32(
+		const std::shared_ptr<arrow::Array> &vals, float *data, int64_t n, const char *name, const char *context)
+	{
+		switch (vals->type_id())
+		{
+		case arrow::Type::FLOAT:
+		{
+			auto arr = std::static_pointer_cast<arrow::FloatArray>(vals);
+			for (int64_t i = 0; i < n; ++i) data[i] = arr->Value(i);
+			break;
+		}
+		case arrow::Type::DOUBLE:
+		{
+			auto arr = std::static_pointer_cast<arrow::DoubleArray>(vals);
+			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<float>(arr->Value(i));
+			break;
+		}
+		case arrow::Type::INT32:
+		{
+			auto arr = std::static_pointer_cast<arrow::Int32Array>(vals);
+			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<float>(arr->Value(i));
+			break;
+		}
+		case arrow::Type::INT64:
+		{
+			auto arr = std::static_pointer_cast<arrow::Int64Array>(vals);
+			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<float>(arr->Value(i));
+			break;
+		}
+		default:
+			report_fatal_error(context, std::string("type mismatch for column: ") + name +
+				" (expected float32/float64/int32/int64, got " + vals->type()->ToString() + ")");
+		}
+	}
+
+	static void convert_values_to_float64(
+		const std::shared_ptr<arrow::Array> &vals, double *data, int64_t n, const char *name, const char *context)
+	{
+		switch (vals->type_id())
+		{
+		case arrow::Type::DOUBLE:
+		{
+			auto arr = std::static_pointer_cast<arrow::DoubleArray>(vals);
+			for (int64_t i = 0; i < n; ++i) data[i] = arr->Value(i);
+			break;
+		}
+		case arrow::Type::FLOAT:
+		{
+			auto arr = std::static_pointer_cast<arrow::FloatArray>(vals);
+			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<double>(arr->Value(i));
+			break;
+		}
+		case arrow::Type::INT32:
+		{
+			auto arr = std::static_pointer_cast<arrow::Int32Array>(vals);
+			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<double>(arr->Value(i));
+			break;
+		}
+		case arrow::Type::INT64:
+		{
+			auto arr = std::static_pointer_cast<arrow::Int64Array>(vals);
+			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<double>(arr->Value(i));
+			break;
+		}
+		default:
+			report_fatal_error(context, std::string("type mismatch for column: ") + name +
+				" (expected float64/float32/int32/int64, got " + vals->type()->ToString() + ")");
+		}
+	}
+
+	// parquet_read_{int32,int64,float32,float64,bool8,string}_column are the
+	// direct target of parquet_read_column -- the README documents that
+	// reading a column whose physical Parquet type falls outside this
+	// library's six supported types is a harsher failure mode than the rest
+	// of this library's error handling (see "Limitations"). The `default:`
+	// branch below (an unrecognized physical type) calls report_fatal_error
+	// directly instead of throwing: this project's own toolchain testing
+	// found that a C++ exception thrown and caught within the very same
+	// function can still go uncaught when the final executable is linked by
+	// gfortran on macOS -- gfortran's driver passes `-no_compact_unwind` to
+	// the linker, which breaks libc++abi's stack unwinding for objects
+	// compiled by clang++, so a try/catch here would be unreliable across
+	// this specific toolchain combination. Calling report_fatal_error
+	// directly (same as ConcurrencyGuard elsewhere in this file) sidesteps
+	// exception unwinding entirely and aborts cleanly regardless.
+	void parquet_read_int32_column(void *handle, const char *name, int32_t *data, int64_t nrows, int8_t *valid_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_single_chunk_array(reader_handle, name);
+		if (array->length() != nrows)
+		{
+			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
+		}
+		check_or_report_nulls(array, name, valid_out);
+		convert_values_to_int32(array, data, nrows, name, "parquet_read_int32_column");
 		fill_null_default(data, valid_out, nrows);
 	}
 
@@ -1119,31 +1245,7 @@ extern "C"
 			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
 		}
 		check_or_report_nulls(array, name, valid_out);
-
-		switch (array->type_id())
-		{
-		case arrow::Type::INT64:
-		{
-			auto arr = std::static_pointer_cast<arrow::Int64Array>(array);
-			for (int64_t i = 0; i < nrows; ++i)
-			{
-				data[i] = arr->Value(i);
-			}
-			break;
-		}
-		case arrow::Type::INT32:
-		{
-			auto arr = std::static_pointer_cast<arrow::Int32Array>(array);
-			for (int64_t i = 0; i < nrows; ++i)
-			{
-				data[i] = static_cast<int64_t>(arr->Value(i));
-			}
-			break;
-		}
-		default:
-			throw std::runtime_error(std::string("type mismatch for column: ") + name +
-				" (expected int64/int32, got " + array->type()->ToString() + ")");
-		}
+		convert_values_to_int64(array, data, nrows, name, "parquet_read_int64_column");
 		fill_null_default(data, valid_out, nrows);
 	}
 
@@ -1156,49 +1258,7 @@ extern "C"
 			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
 		}
 		check_or_report_nulls(array, name, valid_out);
-
-		switch (array->type_id())
-		{
-		case arrow::Type::FLOAT:
-		{
-			auto arr = std::static_pointer_cast<arrow::FloatArray>(array);
-			for (int64_t i = 0; i < nrows; ++i)
-			{
-				data[i] = arr->Value(i);
-			}
-			break;
-		}
-		case arrow::Type::DOUBLE:
-		{
-			auto arr = std::static_pointer_cast<arrow::DoubleArray>(array);
-			for (int64_t i = 0; i < nrows; ++i)
-			{
-				data[i] = static_cast<float>(arr->Value(i));
-			}
-			break;
-		}
-		case arrow::Type::INT32:
-		{
-			auto arr = std::static_pointer_cast<arrow::Int32Array>(array);
-			for (int64_t i = 0; i < nrows; ++i)
-			{
-				data[i] = static_cast<float>(arr->Value(i));
-			}
-			break;
-		}
-		case arrow::Type::INT64:
-		{
-			auto arr = std::static_pointer_cast<arrow::Int64Array>(array);
-			for (int64_t i = 0; i < nrows; ++i)
-			{
-				data[i] = static_cast<float>(arr->Value(i));
-			}
-			break;
-		}
-		default:
-			throw std::runtime_error(std::string("type mismatch for column: ") + name +
-				" (expected float32/float64/int32/int64, got " + array->type()->ToString() + ")");
-		}
+		convert_values_to_float32(array, data, nrows, name, "parquet_read_float32_column");
 		fill_null_default(data, valid_out, nrows);
 	}
 
@@ -1211,49 +1271,7 @@ extern "C"
 			throw std::runtime_error(std::string("nrows mismatch for column: ") + name);
 		}
 		check_or_report_nulls(array, name, valid_out);
-
-		switch (array->type_id())
-		{
-		case arrow::Type::DOUBLE:
-		{
-			auto arr = std::static_pointer_cast<arrow::DoubleArray>(array);
-			for (int64_t i = 0; i < nrows; ++i)
-			{
-				data[i] = arr->Value(i);
-			}
-			break;
-		}
-		case arrow::Type::FLOAT:
-		{
-			auto arr = std::static_pointer_cast<arrow::FloatArray>(array);
-			for (int64_t i = 0; i < nrows; ++i)
-			{
-				data[i] = static_cast<double>(arr->Value(i));
-			}
-			break;
-		}
-		case arrow::Type::INT32:
-		{
-			auto arr = std::static_pointer_cast<arrow::Int32Array>(array);
-			for (int64_t i = 0; i < nrows; ++i)
-			{
-				data[i] = static_cast<double>(arr->Value(i));
-			}
-			break;
-		}
-		case arrow::Type::INT64:
-		{
-			auto arr = std::static_pointer_cast<arrow::Int64Array>(array);
-			for (int64_t i = 0; i < nrows; ++i)
-			{
-				data[i] = static_cast<double>(arr->Value(i));
-			}
-			break;
-		}
-		default:
-			throw std::runtime_error(std::string("type mismatch for column: ") + name +
-				" (expected float64/float32/int32/int64, got " + array->type()->ToString() + ")");
-		}
+		convert_values_to_float64(array, data, nrows, name, "parquet_read_float64_column");
 		fill_null_default(data, valid_out, nrows);
 	}
 
@@ -1263,7 +1281,7 @@ extern "C"
 		auto array = get_single_chunk_array(reader_handle, name);
 		if (array->type_id() != arrow::Type::BOOL)
 		{
-			throw std::runtime_error(std::string("type mismatch for column: ") + name +
+			report_fatal_error("parquet_read_bool8_column", std::string("type mismatch for column: ") + name +
 				" (expected bool, got " + array->type()->ToString() + ")");
 		}
 		auto arr = std::static_pointer_cast<arrow::BooleanArray>(array);
@@ -1285,7 +1303,7 @@ extern "C"
 		auto array = get_single_chunk_array(reader_handle, name);
 		if (array->type_id() != arrow::Type::STRING)
 		{
-			throw std::runtime_error(std::string("type mismatch for column: ") + name +
+			report_fatal_error("parquet_read_string_column", std::string("type mismatch for column: ") + name +
 				" (expected string, got " + array->type()->ToString() + ")");
 		}
 		auto arr = std::static_pointer_cast<arrow::StringArray>(array);
@@ -1309,32 +1327,7 @@ extern "C"
 		auto vals_any = get_uniform_list_values(array, name, nrows, col_size);
 		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out);
 		int64_t total = nrows * col_size;
-		switch (vals_any->type_id())
-		{
-		case arrow::Type::INT32:
-		{
-			auto vals = std::static_pointer_cast<arrow::Int32Array>(vals_any);
-			for (int64_t i = 0; i < total; ++i) data[i] = vals->Value(i);
-			break;
-		}
-		case arrow::Type::INT64:
-		{
-			auto vals = std::static_pointer_cast<arrow::Int64Array>(vals_any);
-			for (int64_t i = 0; i < total; ++i)
-			{
-				auto v = vals->Value(i);
-				if (v < std::numeric_limits<int32_t>::min() || v > std::numeric_limits<int32_t>::max())
-				{
-					throw std::runtime_error(std::string("int64->int32 overflow for column: ") + name);
-				}
-				data[i] = static_cast<int32_t>(v);
-			}
-			break;
-		}
-		default:
-			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
-				" (expected int32/int64, got " + vals_any->type()->ToString() + ")");
-		}
+		convert_values_to_int32(vals_any, data, total, name, "parquet_read_int32_array_column");
 		fill_null_default(data, valid_out, total);
 	}
 
@@ -1345,24 +1338,7 @@ extern "C"
 		auto vals_any = get_uniform_list_values(array, name, nrows, col_size);
 		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out);
 		int64_t total = nrows * col_size;
-		switch (vals_any->type_id())
-		{
-		case arrow::Type::INT64:
-		{
-			auto vals = std::static_pointer_cast<arrow::Int64Array>(vals_any);
-			for (int64_t i = 0; i < total; ++i) data[i] = vals->Value(i);
-			break;
-		}
-		case arrow::Type::INT32:
-		{
-			auto vals = std::static_pointer_cast<arrow::Int32Array>(vals_any);
-			for (int64_t i = 0; i < total; ++i) data[i] = static_cast<int64_t>(vals->Value(i));
-			break;
-		}
-		default:
-			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
-				" (expected int64/int32, got " + vals_any->type()->ToString() + ")");
-		}
+		convert_values_to_int64(vals_any, data, total, name, "parquet_read_int64_array_column");
 		fill_null_default(data, valid_out, total);
 	}
 
@@ -1373,36 +1349,7 @@ extern "C"
 		auto vals_any = get_uniform_list_values(array, name, nrows, col_size);
 		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out);
 		int64_t total = nrows * col_size;
-		switch (vals_any->type_id())
-		{
-		case arrow::Type::FLOAT:
-		{
-			auto vals = std::static_pointer_cast<arrow::FloatArray>(vals_any);
-			for (int64_t i = 0; i < total; ++i) data[i] = vals->Value(i);
-			break;
-		}
-		case arrow::Type::DOUBLE:
-		{
-			auto vals = std::static_pointer_cast<arrow::DoubleArray>(vals_any);
-			for (int64_t i = 0; i < total; ++i) data[i] = static_cast<float>(vals->Value(i));
-			break;
-		}
-		case arrow::Type::INT32:
-		{
-			auto vals = std::static_pointer_cast<arrow::Int32Array>(vals_any);
-			for (int64_t i = 0; i < total; ++i) data[i] = static_cast<float>(vals->Value(i));
-			break;
-		}
-		case arrow::Type::INT64:
-		{
-			auto vals = std::static_pointer_cast<arrow::Int64Array>(vals_any);
-			for (int64_t i = 0; i < total; ++i) data[i] = static_cast<float>(vals->Value(i));
-			break;
-		}
-		default:
-			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
-				" (expected float32/float64/int32/int64, got " + vals_any->type()->ToString() + ")");
-		}
+		convert_values_to_float32(vals_any, data, total, name, "parquet_read_float32_array_column");
 		fill_null_default(data, valid_out, total);
 	}
 
@@ -1413,36 +1360,7 @@ extern "C"
 		auto vals_any = get_uniform_list_values(array, name, nrows, col_size);
 		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out);
 		int64_t total = nrows * col_size;
-		switch (vals_any->type_id())
-		{
-		case arrow::Type::DOUBLE:
-		{
-			auto vals = std::static_pointer_cast<arrow::DoubleArray>(vals_any);
-			for (int64_t i = 0; i < total; ++i) data[i] = vals->Value(i);
-			break;
-		}
-		case arrow::Type::FLOAT:
-		{
-			auto vals = std::static_pointer_cast<arrow::FloatArray>(vals_any);
-			for (int64_t i = 0; i < total; ++i) data[i] = static_cast<double>(vals->Value(i));
-			break;
-		}
-		case arrow::Type::INT32:
-		{
-			auto vals = std::static_pointer_cast<arrow::Int32Array>(vals_any);
-			for (int64_t i = 0; i < total; ++i) data[i] = static_cast<double>(vals->Value(i));
-			break;
-		}
-		case arrow::Type::INT64:
-		{
-			auto vals = std::static_pointer_cast<arrow::Int64Array>(vals_any);
-			for (int64_t i = 0; i < total; ++i) data[i] = static_cast<double>(vals->Value(i));
-			break;
-		}
-		default:
-			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
-				" (expected float64/float32/int32/int64, got " + vals_any->type()->ToString() + ")");
-		}
+		convert_values_to_float64(vals_any, data, total, name, "parquet_read_float64_array_column");
 		fill_null_default(data, valid_out, total);
 	}
 
@@ -1644,185 +1562,81 @@ extern "C"
 			std::string(description)});
 	}
 
+} // extern "C"
+
+// Shared by parquet_append_{int32,int64,float32,float64,bool8}_column below:
+// these five were near-identical copies differing only in Builder type and
+// the raw pointer type passed to AppendValues (the same widening pattern for
+// a plain column vs. a col_size > 1 fixed-size-list column). Templated here
+// instead, since a fix to one of the five previously had to be manually
+// replicated into the other four. Declared outside extern "C" (templates
+// cannot have C language linkage) between two extern "C" blocks -- as_handle,
+// append_column, build_field and has_any_null above are already visible here
+// via ordinary (non-template-dependent) name lookup.
+template <typename BuilderType, typename ValueType>
+static void append_typed_column(void *handle, const char *name, const ValueType *data, int64_t nrows, int64_t col_size,
+	const int8_t *valid_in, const std::shared_ptr<arrow::DataType> &value_type)
+{
+	auto writer_handle = as_handle(handle);
+
+	std::shared_ptr<arrow::Array> array;
+	auto valid_bytes = reinterpret_cast<const uint8_t *>(valid_in);
+
+	if (col_size > 1)
+	{
+		auto value_builder = std::make_shared<BuilderType>();
+		arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(col_size));
+		auto status = list_builder.AppendValues(nrows);
+		if (!status.ok())
+			throw std::runtime_error(status.ToString());
+		status = value_builder->AppendValues(data, nrows * col_size, valid_bytes);
+		if (!status.ok())
+			throw std::runtime_error(status.ToString());
+		status = list_builder.Finish(&array);
+		if (!status.ok())
+			throw std::runtime_error(status.ToString());
+	}
+	else
+	{
+		BuilderType builder;
+		auto status = builder.AppendValues(data, nrows, valid_bytes);
+		if (!status.ok())
+			throw std::runtime_error(status.ToString());
+		status = builder.Finish(&array);
+		if (!status.ok())
+			throw std::runtime_error(status.ToString());
+	}
+
+	append_column(writer_handle, name, build_field(name, value_type, col_size, has_any_null(valid_in, nrows * col_size)), array);
+}
+
+extern "C"
+{
+
 	void parquet_append_int32_column(void *handle, const char *name, const int32_t *data, int64_t nrows, int64_t col_size, const int8_t *valid_in)
 	{
-		auto writer_handle = as_handle(handle);
-
-		std::shared_ptr<arrow::Array> array;
-		auto value_type = arrow::int32();
-		auto valid_bytes = reinterpret_cast<const uint8_t *>(valid_in);
-
-		if (col_size > 1)
-		{
-			auto value_builder = std::make_shared<arrow::Int32Builder>();
-			arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(col_size));
-			auto status = list_builder.AppendValues(nrows);
-			if (!status.ok())
-				throw std::runtime_error(status.ToString());
-			status = value_builder->AppendValues(data, nrows * col_size, valid_bytes);
-			if (!status.ok())
-				throw std::runtime_error(status.ToString());
-			status = list_builder.Finish(&array);
-			if (!status.ok())
-				throw std::runtime_error(status.ToString());
-		}
-		else
-		{
-			arrow::Int32Builder builder;
-			auto status = builder.AppendValues(data, nrows, valid_bytes);
-			if (!status.ok())
-				throw std::runtime_error(status.ToString());
-			status = builder.Finish(&array);
-			if (!status.ok())
-				throw std::runtime_error(status.ToString());
-		}
-
-		append_column(writer_handle, name, build_field(name, value_type, col_size, has_any_null(valid_in, nrows * col_size)), array);
+		append_typed_column<arrow::Int32Builder>(handle, name, data, nrows, col_size, valid_in, arrow::int32());
 	}
 
 	void parquet_append_int64_column(void *handle, const char *name, const int64_t *data, int64_t nrows, int64_t col_size, const int8_t *valid_in)
 	{
-		auto writer_handle = as_handle(handle);
-
-		std::shared_ptr<arrow::Array> array;
-		auto value_type = arrow::int64();
-		auto valid_bytes = reinterpret_cast<const uint8_t *>(valid_in);
-
-		if (col_size > 1)
-		{
-			auto value_builder = std::make_shared<arrow::Int64Builder>();
-			arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(col_size));
-			auto status = list_builder.AppendValues(nrows);
-			if (!status.ok())
-				throw std::runtime_error(status.ToString());
-			status = value_builder->AppendValues(data, nrows * col_size, valid_bytes);
-			if (!status.ok())
-				throw std::runtime_error(status.ToString());
-			status = list_builder.Finish(&array);
-			if (!status.ok())
-				throw std::runtime_error(status.ToString());
-		}
-		else
-		{
-			arrow::Int64Builder builder;
-			auto status = builder.AppendValues(data, nrows, valid_bytes);
-			if (!status.ok())
-				throw std::runtime_error(status.ToString());
-			status = builder.Finish(&array);
-			if (!status.ok())
-				throw std::runtime_error(status.ToString());
-		}
-
-		append_column(writer_handle, name, build_field(name, value_type, col_size, has_any_null(valid_in, nrows * col_size)), array);
+		append_typed_column<arrow::Int64Builder>(handle, name, data, nrows, col_size, valid_in, arrow::int64());
 	}
 
 	void parquet_append_float32_column(void *handle, const char *name, const float *data, int64_t nrows, int64_t col_size, const int8_t *valid_in)
 	{
-		auto writer_handle = as_handle(handle);
-
-		std::shared_ptr<arrow::Array> array;
-		auto value_type = arrow::float32();
-		auto valid_bytes = reinterpret_cast<const uint8_t *>(valid_in);
-
-		if (col_size > 1)
-		{
-			auto value_builder = std::make_shared<arrow::FloatBuilder>();
-			arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(col_size));
-			auto status = list_builder.AppendValues(nrows);
-			if (!status.ok())
-				throw std::runtime_error(status.ToString());
-			status = value_builder->AppendValues(data, nrows * col_size, valid_bytes);
-			if (!status.ok())
-				throw std::runtime_error(status.ToString());
-			status = list_builder.Finish(&array);
-			if (!status.ok())
-				throw std::runtime_error(status.ToString());
-		}
-		else
-		{
-			arrow::FloatBuilder builder;
-			auto status = builder.AppendValues(data, nrows, valid_bytes);
-			if (!status.ok())
-				throw std::runtime_error(status.ToString());
-			status = builder.Finish(&array);
-			if (!status.ok())
-				throw std::runtime_error(status.ToString());
-		}
-
-		append_column(writer_handle, name, build_field(name, value_type, col_size, has_any_null(valid_in, nrows * col_size)), array);
+		append_typed_column<arrow::FloatBuilder>(handle, name, data, nrows, col_size, valid_in, arrow::float32());
 	}
 
 	void parquet_append_float64_column(void *handle, const char *name, const double *data, int64_t nrows, int64_t col_size, const int8_t *valid_in)
 	{
-		auto writer_handle = as_handle(handle);
-
-		std::shared_ptr<arrow::Array> array;
-		auto value_type = arrow::float64();
-		auto valid_bytes = reinterpret_cast<const uint8_t *>(valid_in);
-
-		if (col_size > 1)
-		{
-			auto value_builder = std::make_shared<arrow::DoubleBuilder>();
-			arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(col_size));
-			auto status = list_builder.AppendValues(nrows);
-			if (!status.ok())
-				throw std::runtime_error(status.ToString());
-			status = value_builder->AppendValues(data, nrows * col_size, valid_bytes);
-			if (!status.ok())
-				throw std::runtime_error(status.ToString());
-			status = list_builder.Finish(&array);
-			if (!status.ok())
-				throw std::runtime_error(status.ToString());
-		}
-		else
-		{
-			arrow::DoubleBuilder builder;
-			auto status = builder.AppendValues(data, nrows, valid_bytes);
-			if (!status.ok())
-				throw std::runtime_error(status.ToString());
-			status = builder.Finish(&array);
-			if (!status.ok())
-				throw std::runtime_error(status.ToString());
-		}
-
-		append_column(writer_handle, name, build_field(name, value_type, col_size, has_any_null(valid_in, nrows * col_size)), array);
+		append_typed_column<arrow::DoubleBuilder>(handle, name, data, nrows, col_size, valid_in, arrow::float64());
 	}
 
 	void parquet_append_bool8_column(void *handle, const char *name, const int8_t *data, int64_t nrows, int64_t col_size, const int8_t *valid_in)
 	{
-		auto writer_handle = as_handle(handle);
-
-		std::shared_ptr<arrow::Array> array;
-		auto value_type = arrow::boolean();
-		auto valid_bytes = reinterpret_cast<const uint8_t *>(valid_in);
-		auto values_bytes = reinterpret_cast<const uint8_t *>(data);
-
-		if (col_size > 1)
-		{
-			auto value_builder = std::make_shared<arrow::BooleanBuilder>();
-			arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(col_size));
-			auto status = list_builder.AppendValues(nrows);
-			if (!status.ok())
-				throw std::runtime_error(status.ToString());
-			status = value_builder->AppendValues(values_bytes, nrows * col_size, valid_bytes);
-			if (!status.ok())
-				throw std::runtime_error(status.ToString());
-			status = list_builder.Finish(&array);
-			if (!status.ok())
-				throw std::runtime_error(status.ToString());
-		}
-		else
-		{
-			arrow::BooleanBuilder builder;
-			auto status = builder.AppendValues(values_bytes, nrows, valid_bytes);
-			if (!status.ok())
-				throw std::runtime_error(status.ToString());
-			status = builder.Finish(&array);
-			if (!status.ok())
-				throw std::runtime_error(status.ToString());
-		}
-
-		append_column(writer_handle, name, build_field(name, value_type, col_size, has_any_null(valid_in, nrows * col_size)), array);
+		append_typed_column<arrow::BooleanBuilder>(
+			handle, name, reinterpret_cast<const uint8_t *>(data), nrows, col_size, valid_in, arrow::boolean());
 	}
 
 	void parquet_append_string_column(void *handle, const char *name, const char *data, int64_t item_len, int64_t nrows, const int8_t *valid_in)

@@ -37,10 +37,14 @@ contains
             ]
     end subroutine collect_tests_parquet_openmp_write
 
-    !> Every test here either only reads test_run/test_openmp_write_*.parquet
-    !> (produced by collect_tests_parquet_openmp_write, run beforehand as its
-    !> own suite -- see the note there) or is fully self-contained, so it's
-    !> safe for these to run concurrently with each other, exactly as
+    !> Every test here only reads files it never writes itself: most read
+    !> test_run/test_openmp_write_*.parquet (produced by
+    !> collect_tests_parquet_openmp_write, run beforehand as its own suite --
+    !> see the note there); test_shared_file_read_parallel instead reads
+    !> test_run/test_simple.parquet, produced by test_writing.f90's suite
+    !> (which run_tester.f90 also lists before this one). None of these tests
+    !> write a file another test in this same collection could read, so it's
+    !> safe for them to run concurrently with each other, exactly as
     !> testdrive's own default (parallel) test execution already does.
     subroutine collect_tests_parquet_openmp(testsuite)
         type(unittest_type), allocatable, intent(out) :: testsuite(:)

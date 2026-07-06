@@ -19,6 +19,9 @@ module test_errors
     implicit none
     private
     public :: collect_tests_parquet_errors
+    ! Exposed for test_writing.f90 to reuse (avoids a second copy of the same
+    ! subprocess-driving helper -- see check_scenario_exit_status below).
+    public :: check_scenario_exit_status
     !
 contains
     !
@@ -60,6 +63,14 @@ contains
             new_unittest("write_maml without metadata aborts", test_write_maml_without_metadata_aborts), &
             new_unittest("reading a column with genuine Null values aborts", &
                 test_read_column_with_nulls_aborts), &
+            new_unittest("reading a column of an unsupported physical type aborts", &
+                test_read_unsupported_physical_type_aborts), &
+            new_unittest("opening a nonexistent file for reading aborts", &
+                test_open_reader_missing_file_aborts), &
+            new_unittest("opening a writer at a bad path aborts", &
+                test_open_writer_bad_path_aborts), &
+            new_unittest("writing an over-length string into a fixed-size string matrix column aborts", &
+                test_write_string_matrix_exceeds_array_size_aborts), &
             new_unittest("protected_cols: referencing an unknown field aborts", &
                 test_validate_protected_cols_unknown_name_aborts), &
             new_unittest("writing a Null into a protected column aborts", &
@@ -254,6 +265,49 @@ contains
             failure_message="reading a column with a genuine Parquet Null was expected to error stop")
     end subroutine test_read_column_with_nulls_aborts
 
+    !> README's Limitations section documents that reading a column whose
+    !> physical Parquet type falls outside this library's six supported
+    !> types is a harsher failure mode than everything else in Error
+    !> handling. parquet_wrapper.cpp's scalar read functions now catch that
+    !> failure at their own extern "C" boundary and abort cleanly instead of
+    !> letting an uncaught C++ exception reach std::terminate() -- this just
+    !> checks the process still aborts (nonzero exit), which is all this
+    !> out-of-process harness can observe either way.
+    subroutine test_read_unsupported_physical_type_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "read_unsupported_physical_type", expect_abort=.true., &
+            failure_message="reading a column of an unsupported physical Parquet type was expected to abort")
+    end subroutine test_read_unsupported_physical_type_aborts
+
+    !> create_parquet_reader (parquet_wrapper.cpp) now checks Arrow's file-open
+    !> status directly instead of calling ValueOrDie() unchecked, so a missing
+    !> file aborts cleanly with a diagnostic instead of an unconditional abort
+    !> with no context.
+    subroutine test_open_reader_missing_file_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "open_reader_missing_file", expect_abort=.true., &
+            failure_message="opening a nonexistent file for reading was expected to abort")
+    end subroutine test_open_reader_missing_file_aborts
+
+    subroutine test_open_writer_bad_path_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "open_writer_bad_path", expect_abort=.true., &
+            failure_message="opening a writer at a path under a nonexistent directory was expected to abort")
+    end subroutine test_open_writer_bad_path_aborts
+
+    !> parquet_write_string_matrix_column previously had no array_size check
+    !> (unlike the scalar parquet_write_string_column), silently truncating
+    !> an over-length string in a fixed-size string matrix column.
+    subroutine test_write_string_matrix_exceeds_array_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_string_matrix_exceeds_array_size", expect_abort=.true., &
+            failure_message="writing an over-length string into a fixed-size string matrix column was expected to error stop")
+    end subroutine test_write_string_matrix_exceeds_array_size_aborts
+
     subroutine test_validate_protected_cols_unknown_name_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
@@ -349,6 +403,16 @@ contains
         call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper program via fpm")
         if (allocated(error)) return
 
+        ! exitstat == 97 means error_scenarios.f90's `case default` was hit --
+        ! i.e. `scenario` doesn't match any case there (a typo, or a case
+        ! renamed on one side but not the other). Distinguishing this from a
+        ! genuine abort (which this scenario name should never produce) is
+        ! the whole point of that distinctive exit code -- otherwise this
+        ! check could pass "by accident" while silently testing nothing.
+        call check(error, exitstat /= 97, &
+            "scenario name not recognized by error_scenarios.f90 (typo?): "//trim(scenario))
+        if (allocated(error)) return
+
         aborted = (exitstat /= 0)
         call check(error, aborted .eqv. expect_abort, failure_message)
     end subroutine check_scenario_exit_status
@@ -376,6 +440,12 @@ contains
             " > " // out_file // " 2>&1", &
             wait=.true., exitstat=exitstat, cmdstat=cmdstat)
         call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper program via fpm")
+        if (allocated(error)) return
+
+        ! See check_scenario_exit_status's identical check for why: exit
+        ! code 97 means the scenario name itself was not recognized.
+        call check(error, exitstat /= 97, &
+            "scenario name not recognized by error_scenarios.f90 (typo?): "//trim(scenario))
         if (allocated(error)) return
 
         aborted = (exitstat /= 0)

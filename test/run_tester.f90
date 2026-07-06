@@ -58,7 +58,6 @@ program tester
                 write(error_unit, fmt) "Suite:", testsuites(is)%name
                 call run_selected(testsuites(is)%collect, test_name, error_unit, stat)
                 if (stat < 0) then
-                    call cleanup_testsuites()
                     error stop 1
                 end if
             else
@@ -80,20 +79,8 @@ program tester
     end if
     !
     if (stat > 0) then
-        call cleanup_testsuites()
         write(error_unit, '(i0, 1x, a)') stat, "test(s) failed!"
         error stop 1
     end if
-
-    call cleanup_testsuites()
-    !
-contains
-    !
-    subroutine cleanup_testsuites()
-        integer :: status
-        !
-        !call execute_command_line("rm -f test_parquet.parquet",wait=.true.,cmdstat=status)
-        !
-    end subroutine cleanup_testsuites
     !
 end program tester

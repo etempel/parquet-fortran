@@ -77,6 +77,14 @@ program error_scenarios
         call scenario_write_maml_without_metadata()
     case ("read_column_with_nulls")
         call scenario_read_column_with_nulls()
+    case ("read_unsupported_physical_type")
+        call scenario_read_unsupported_physical_type()
+    case ("open_reader_missing_file")
+        call scenario_open_reader_missing_file()
+    case ("open_writer_bad_path")
+        call scenario_open_writer_bad_path()
+    case ("write_string_matrix_exceeds_array_size")
+        call scenario_write_string_matrix_exceeds_array_size()
     case ("validate_protected_cols_unknown_name")
         call scenario_validate_protected_cols_unknown_name()
     case ("write_protected_column_with_null")
@@ -104,8 +112,13 @@ program error_scenarios
     case ("concurrent_calls_into_shared_writer")
         call scenario_concurrent_calls_into_shared_writer()
     case default
+        ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
+        ! not the plain 1 that `error stop "message"` produces) -- callers
+        ! checking exit status can tell "the scenario name doesn't exist
+        ! (typo?)" apart from "the scenario ran and genuinely aborted",
+        ! which a plain `stop 1` here could not be told apart from.
         print '(a)', "unknown scenario: "//trim(scenario)
-        stop 1
+        stop 97
     end select
 
 contains
@@ -487,6 +500,76 @@ contains
         call parquet_read_column(reader, "id_with_null", values)
         print '(a)', "unexpectedly read a column containing Null values without error"
     end subroutine scenario_read_column_with_nulls
+
+    !> test/fixtures/unsupported_type.parquet has a column ("d") of Arrow's
+    !> date32 type -- one of the physical types outside this library's six
+    !> supported types (see README's Limitations). This exercises that
+    !> documented failure mode: parquet_wrapper.cpp's scalar read functions
+    !> now catch the resulting type-mismatch exception at their own
+    !> extern "C" boundary and abort cleanly (see report_fatal_error), rather
+    !> than letting an uncaught C++ exception reach std::terminate().
+    subroutine scenario_read_unsupported_physical_type()
+        type(parquet_reader) :: reader
+        integer(int32) :: values(3)
+
+        call parquet_open_reader(reader, "test/fixtures/unsupported_type.parquet")
+        call parquet_read_column(reader, "d", values)
+        print '(a)', "unexpectedly read a column of an unsupported physical type without error"
+    end subroutine scenario_read_unsupported_physical_type
+
+    !> Opening a nonexistent file for reading previously called Arrow's
+    !> ValueOrDie() with no status check first, which aborts the process
+    !> directly (not a catchable C++ exception) with a generic message.
+    !> create_parquet_reader (parquet_wrapper.cpp) now checks Arrow's status
+    !> first and reports a clean, specific diagnostic before aborting.
+    subroutine scenario_open_reader_missing_file()
+        type(parquet_reader) :: reader
+
+        call parquet_open_reader(reader, "test_run/does_not_exist_xyz_123.parquet")
+        print '(a)', "unexpectedly opened a nonexistent file for reading without error"
+    end subroutine scenario_open_reader_missing_file
+
+    !> Same as scenario_open_reader_missing_file but for the write side: a
+    !> path under a nonexistent directory can never be opened for writing.
+    subroutine scenario_open_writer_bad_path()
+        type(parquet_writer) :: writer
+
+        call parquet_open_writer(writer, "test_run/no_such_directory_xyz/out.parquet")
+        print '(a)', "unexpectedly opened a bad path for writing without error"
+    end subroutine scenario_open_writer_bad_path
+
+    !> parquet_write_string_column (scalar) checks a string's trimmed length
+    !> against the schema's declared array_size and error stops if exceeded;
+    !> parquet_write_string_matrix_column (this scenario) previously had no
+    !> equivalent check, silently truncating an over-length string in a
+    !> fixed-length string vector/matrix column instead of erroring.
+    subroutine scenario_write_string_matrix_exceeds_array_size()
+        type(parquet_maml_file) :: maml
+        type(parquet_column_info) :: cinfo
+        type(parquet_table_metadata) :: metadata
+        type(parquet_writer) :: writer
+        character(len=20) :: values(2, 1)
+
+        maml%name = "string_matrix_array_size.maml"
+        maml%lines = [character(len=40) :: &
+            "table: string_matrix_table", &
+            "fields:", &
+            "- name: s", &
+            "  data_type: string", &
+            "  array_size: 5", &
+            "  col_size: 2" ]
+
+        call parquet_validate_maml(maml)
+        call parquet_read_maml(maml, cinfo, metadata)
+
+        values(1, 1) = "short"
+        values(2, 1) = "this_is_way_too_long"
+
+        call parquet_open_writer(writer, "test_run/error_scenario_string_matrix_array_size.parquet", cinfo, metadata)
+        call parquet_write_column(writer, "s", values)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote an over-length string into a fixed-size string matrix column without error"
+    end subroutine scenario_write_string_matrix_exceeds_array_size
 
     subroutine scenario_validate_protected_cols_unknown_name()
         type(parquet_maml_file) :: maml

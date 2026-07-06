@@ -106,7 +106,7 @@ contains
 
         allocate(dst(size(src)))
         do i = 1, size(src)
-            if (src(i) < -2147483648_int64 .or. src(i) > 2147483647_int64) then
+            if (src(i) < -huge(0_int32) - 1_int64 .or. src(i) > huge(0_int32)) then
                 error stop "parquet_write_column: int64 value out of int32 range for column " // trim(name)
             end if
             dst(i) = int(src(i), kind=int32)
@@ -124,7 +124,7 @@ contains
             if (src(i) /= anint(src(i))) then
                 error stop "parquet_write_column: non-integral float value written to int column " // trim(name)
             end if
-            if (src(i) < -2147483648.0_real64 .or. src(i) > 2147483647.0_real64) then
+            if (src(i) < -real(huge(0_int32), real64) - 1.0_real64 .or. src(i) > real(huge(0_int32), real64)) then
                 error stop "parquet_write_column: float value out of int32 range for column " // trim(name)
             end if
             dst(i) = int(src(i), kind=int32)
@@ -142,7 +142,7 @@ contains
             if (src(i) /= anint(src(i))) then
                 error stop "parquet_write_column: non-integral float value written to int column " // trim(name)
             end if
-            if (src(i) < -9223372036854775808.0_real64 .or. src(i) >= 9223372036854775808.0_real64) then
+            if (src(i) < -real(huge(0_int64), real64) .or. src(i) >= real(huge(0_int64), real64)) then
                 error stop "parquet_write_column: float value out of int64 range for column " // trim(name)
             end if
             dst(i) = int(src(i), kind=int64)
@@ -1264,7 +1264,7 @@ contains
     module procedure parquet_write_string_matrix_column
         character(kind=c_char), allocatable :: packed(:)
         integer :: i, j, k, l, nrows, asize, item_len, idx
-        integer :: nitems
+        integer :: nitems, max_item_len, max_string_len
         logical, allocatable :: valid_flat(:)
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
@@ -1278,6 +1278,13 @@ contains
             if (.not. writer%all_columns(idx)%is_set) return
             if (writer%all_columns(idx)%col_size /= asize) then
                 error stop "parquet_write_column: array size mismatch for column " // trim(name)
+            end if
+
+            max_string_len = max(1, writer%all_columns(idx)%array_size)
+            max_item_len = maxval(len_trim(values))
+            if (max_item_len > max_string_len) then
+                error stop "parquet_write_string_matrix_column: string length exceeds declared array_size for column: " &
+                    // trim(name)
             end if
         end if
 

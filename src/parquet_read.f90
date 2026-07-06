@@ -23,6 +23,20 @@ contains
         end if
     end subroutine make_valid_buf
 
+    !> Every parquet_read_column variant calls this first: reader%handle is
+    !> c_null_ptr until parquet_open_reader sets it, and every C++ entry point
+    !> dereferences the handle immediately (see ConcurrencyGuard in
+    !> parquet_wrapper.cpp) with no null check of its own -- calling in with an
+    !> unopened reader previously crashed with an unhelpful SIGSEGV instead of
+    !> a clean, diagnosable error.
+    subroutine check_reader_open(reader, context)
+        type(parquet_reader), intent(in) :: reader
+        character(len=*), intent(in) :: context
+        if (.not. c_associated(reader%handle)) then
+            error stop trim(context) // ": reader has not been opened (call parquet_open_reader first)"
+        end if
+    end subroutine check_reader_open
+
     module procedure parquet_open_reader
         logical :: use_threads_value
 
@@ -49,8 +63,16 @@ contains
         character(kind=c_char), allocatable :: packed(:)
         integer :: i, j, k, item_len, n
 
+        call check_reader_open(reader, "parquet_prefetch_columns")
         n = size(names)
         if (n <= 0) return
+
+        do i = 1, n
+            if (parquet_reader_has_column(reader%handle, trim(names(i))//char(0)) == 0) then
+                error stop "parquet_prefetch_columns: column not found in parquet file: " // trim(names(i))
+            end if
+        end do
+
         item_len = len(names(1))
         allocate(packed(item_len * n))
 
@@ -77,11 +99,13 @@ contains
     end procedure reader_finalize
 
     module procedure parquet_get_nrows_int64
+        call check_reader_open(reader, "parquet_get_nrows")
         nrows = int(parquet_reader_get_nrows(reader%handle), kind=int64)
     end procedure parquet_get_nrows_int64
 
     module procedure parquet_get_nrows_int32
         integer(int64) :: nrows64
+        call check_reader_open(reader, "parquet_get_nrows")
         nrows64 = int(parquet_reader_get_nrows(reader%handle), kind=int64)
         if (nrows64 > huge(0_int32)) then
             error stop "parquet_get_nrows: number of rows exceeds int32 range"
@@ -90,15 +114,18 @@ contains
     end procedure parquet_get_nrows_int32
 
     module procedure parquet_get_col_size
+        call check_reader_open(reader, "parquet_get_col_size")
         col_size = int(parquet_reader_get_column_col_size(reader%handle, trim(name)//char(0)))
     end procedure parquet_get_col_size
 
     module procedure parquet_get_column_total_elements_int64
+        call check_reader_open(reader, "parquet_get_column_total_elements")
         total_elements = int(parquet_reader_get_column_total_elements(reader%handle, trim(name)//char(0)), kind=int64)
     end procedure parquet_get_column_total_elements_int64
 
     module procedure parquet_get_column_total_elements_int32
         integer(int64) :: nelem64
+        call check_reader_open(reader, "parquet_get_column_total_elements")
         nelem64 = int(parquet_reader_get_column_total_elements(reader%handle, trim(name)//char(0)), kind=int64)
         if (nelem64 > huge(0_int32)) then
             error stop "parquet_get_column_total_elements: number of elements exceeds int32 range for column: " // trim(name)
@@ -107,14 +134,30 @@ contains
     end procedure parquet_get_column_total_elements_int32
 
     module procedure parquet_get_string_length
+        call check_reader_open(reader, "parquet_get_string_length")
         max_string_length = int(parquet_reader_get_string_length(reader%handle, trim(name)//char(0)))
     end procedure parquet_get_string_length
+
+    module procedure parquet_check_read_row_count
+        integer(c_long_long) :: file_nrows
+        character(len=32) :: expected_str, got_str
+
+        file_nrows = parquet_reader_get_nrows(reader%handle)
+        if (given_nrows /= file_nrows) then
+            write(expected_str, '(i0)') file_nrows
+            write(got_str, '(i0)') given_nrows
+            error stop "parquet_read_column: row count mismatch for column " // trim(name) // &
+                ": file has " // trim(expected_str) // " rows but the values array implies " // trim(got_str)
+        end if
+    end procedure parquet_check_read_row_count
 
     module procedure parquet_read_int32_column_1d
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer :: i
 
+        call check_reader_open(reader, "parquet_read_column")
+        call parquet_check_read_row_count(reader, name, int(size(values), kind=c_long_long))
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values), valid_buf, valid_ptr)
         call parquet_read_int32_column(reader%handle, trim(name)//char(0), values, int(size(values), kind=c_long_long), valid_ptr)
         if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
@@ -130,6 +173,8 @@ contains
         type(c_ptr) :: valid_ptr
         integer :: i
 
+        call check_reader_open(reader, "parquet_read_column")
+        call parquet_check_read_row_count(reader, name, int(size(values), kind=c_long_long))
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values), valid_buf, valid_ptr)
         call parquet_read_int64_column(reader%handle, trim(name)//char(0), values, int(size(values), kind=c_long_long), valid_ptr)
         if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
@@ -145,6 +190,8 @@ contains
         type(c_ptr) :: valid_ptr
         integer :: i
 
+        call check_reader_open(reader, "parquet_read_column")
+        call parquet_check_read_row_count(reader, name, int(size(values), kind=c_long_long))
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values), valid_buf, valid_ptr)
         call parquet_read_float32_column(reader%handle, trim(name)//char(0), values, int(size(values), kind=c_long_long), valid_ptr)
         if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
@@ -160,6 +207,8 @@ contains
         type(c_ptr) :: valid_ptr
         integer :: i
 
+        call check_reader_open(reader, "parquet_read_column")
+        call parquet_check_read_row_count(reader, name, int(size(values), kind=c_long_long))
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values), valid_buf, valid_ptr)
         call parquet_read_float64_column(reader%handle, trim(name)//char(0), values, int(size(values), kind=c_long_long), valid_ptr)
         if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
@@ -176,6 +225,8 @@ contains
         type(c_ptr) :: valid_ptr
         integer :: i
 
+        call check_reader_open(reader, "parquet_read_column")
+        call parquet_check_read_row_count(reader, name, int(size(values), kind=c_long_long))
         allocate(tmp(size(values)))
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values), valid_buf, valid_ptr)
         call parquet_read_bool8_column(reader%handle, trim(name)//char(0), tmp, int(size(tmp), kind=c_long_long), valid_ptr)
@@ -197,6 +248,8 @@ contains
         integer :: nrows, item_len, i, j, k
 
         nrows = size(values)
+        call check_reader_open(reader, "parquet_read_column")
+        call parquet_check_read_row_count(reader, name, int(nrows, kind=c_long_long))
         item_len = len(values(1))
         allocate(packed(item_len*nrows))
         call make_valid_buf(present(null_value) .or. present(is_valid), nrows, valid_buf, valid_ptr)
@@ -227,6 +280,8 @@ contains
 
         asize = size(values, 1)
         nrows = size(values, 2)
+        call check_reader_open(reader, "parquet_read_column")
+        call parquet_check_read_row_count(reader, name, int(nrows, kind=c_long_long))
         allocate(flat(asize*nrows))
         call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)
         call parquet_read_int32_array_column(reader%handle, trim(name)//char(0), flat, int(nrows, kind=c_long_long), &
@@ -251,6 +306,8 @@ contains
 
         asize = size(values, 1)
         nrows = size(values, 2)
+        call check_reader_open(reader, "parquet_read_column")
+        call parquet_check_read_row_count(reader, name, int(nrows, kind=c_long_long))
         allocate(flat(asize*nrows))
         call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)
         call parquet_read_int64_array_column(reader%handle, trim(name)//char(0), flat, int(nrows, kind=c_long_long), &
@@ -275,6 +332,8 @@ contains
 
         asize = size(values, 1)
         nrows = size(values, 2)
+        call check_reader_open(reader, "parquet_read_column")
+        call parquet_check_read_row_count(reader, name, int(nrows, kind=c_long_long))
         allocate(flat(asize*nrows))
         call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)
         call parquet_read_float32_array_column(reader%handle, trim(name)//char(0), flat, int(nrows, kind=c_long_long), &
@@ -299,6 +358,8 @@ contains
 
         asize = size(values, 1)
         nrows = size(values, 2)
+        call check_reader_open(reader, "parquet_read_column")
+        call parquet_check_read_row_count(reader, name, int(nrows, kind=c_long_long))
         allocate(flat(asize*nrows))
         call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)
         call parquet_read_float64_array_column(reader%handle, trim(name)//char(0), flat, int(nrows, kind=c_long_long), &
@@ -323,6 +384,8 @@ contains
 
         asize = size(values, 1)
         nrows = size(values, 2)
+        call check_reader_open(reader, "parquet_read_column")
+        call parquet_check_read_row_count(reader, name, int(nrows, kind=c_long_long))
         allocate(flat(asize*nrows))
         call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)
         call parquet_read_bool8_array_column(reader%handle, trim(name)//char(0), flat, int(nrows, kind=c_long_long), &
@@ -347,6 +410,8 @@ contains
 
         asize = size(values, 1)
         nrows = size(values, 2)
+        call check_reader_open(reader, "parquet_read_column")
+        call parquet_check_read_row_count(reader, name, int(nrows, kind=c_long_long))
         item_len = len(values(1,1))
         allocate(packed(item_len*asize*nrows))
         call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)
@@ -375,6 +440,7 @@ contains
         type(c_ptr) :: valid_ptr
         integer :: i
 
+        call check_reader_open(reader, "parquet_read_array_row_mode")
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values), valid_buf, valid_ptr)
         call parquet_read_int32_array_row(reader%handle, trim(name)//char(0), int(row_index, kind=c_long_long), values, &
             int(size(values), kind=c_long_long), valid_ptr)
@@ -391,6 +457,7 @@ contains
         type(c_ptr) :: valid_ptr
         integer :: i
 
+        call check_reader_open(reader, "parquet_read_array_row_mode")
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values), valid_buf, valid_ptr)
         call parquet_read_int64_array_row(reader%handle, trim(name)//char(0), int(row_index, kind=c_long_long), values, &
             int(size(values), kind=c_long_long), valid_ptr)
@@ -407,6 +474,7 @@ contains
         type(c_ptr) :: valid_ptr
         integer :: i
 
+        call check_reader_open(reader, "parquet_read_array_row_mode")
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values), valid_buf, valid_ptr)
         call parquet_read_float32_array_row(reader%handle, trim(name)//char(0), int(row_index, kind=c_long_long), values, &
             int(size(values), kind=c_long_long), valid_ptr)
@@ -423,6 +491,7 @@ contains
         type(c_ptr) :: valid_ptr
         integer :: i
 
+        call check_reader_open(reader, "parquet_read_array_row_mode")
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values), valid_buf, valid_ptr)
         call parquet_read_float64_array_row(reader%handle, trim(name)//char(0), int(row_index, kind=c_long_long), values, &
             int(size(values), kind=c_long_long), valid_ptr)
@@ -440,6 +509,7 @@ contains
         type(c_ptr) :: valid_ptr
         integer :: i
 
+        call check_reader_open(reader, "parquet_read_array_row_mode")
         allocate(tmp(size(values)))
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values), valid_buf, valid_ptr)
         call parquet_read_bool8_array_row(reader%handle, trim(name)//char(0), int(row_index, kind=c_long_long), tmp, &
@@ -461,6 +531,7 @@ contains
         type(c_ptr) :: valid_ptr
         integer :: item_len, i, j, p
 
+        call check_reader_open(reader, "parquet_read_array_row_mode")
         item_len = len(values(1))
         allocate(packed(item_len*size(values)))
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values), valid_buf, valid_ptr)
@@ -487,6 +558,7 @@ contains
         type(c_ptr) :: valid_ptr
         integer :: i
 
+        call check_reader_open(reader, "parquet_read_array_element_mode")
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values), valid_buf, valid_ptr)
         call parquet_read_int32_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), values, &
             int(size(values), kind=c_long_long), 0_c_long_long, valid_ptr)
@@ -503,6 +575,7 @@ contains
         type(c_ptr) :: valid_ptr
         integer :: i
 
+        call check_reader_open(reader, "parquet_read_array_element_mode")
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values), valid_buf, valid_ptr)
         call parquet_read_int64_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), values, &
             int(size(values), kind=c_long_long), 0_c_long_long, valid_ptr)
@@ -519,6 +592,7 @@ contains
         type(c_ptr) :: valid_ptr
         integer :: i
 
+        call check_reader_open(reader, "parquet_read_array_element_mode")
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values), valid_buf, valid_ptr)
         call parquet_read_float32_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), values, &
             int(size(values), kind=c_long_long), 0_c_long_long, valid_ptr)
@@ -535,6 +609,7 @@ contains
         type(c_ptr) :: valid_ptr
         integer :: i
 
+        call check_reader_open(reader, "parquet_read_array_element_mode")
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values), valid_buf, valid_ptr)
         call parquet_read_float64_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), values, &
             int(size(values), kind=c_long_long), 0_c_long_long, valid_ptr)
@@ -552,6 +627,7 @@ contains
         type(c_ptr) :: valid_ptr
         integer :: i
 
+        call check_reader_open(reader, "parquet_read_array_element_mode")
         allocate(tmp(size(values)))
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values), valid_buf, valid_ptr)
         call parquet_read_bool8_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), tmp, &
@@ -573,6 +649,7 @@ contains
         type(c_ptr) :: valid_ptr
         integer :: item_len, i, j, p
 
+        call check_reader_open(reader, "parquet_read_array_element_mode")
         item_len = len(values(1))
         allocate(packed(item_len*size(values)))
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values), valid_buf, valid_ptr)

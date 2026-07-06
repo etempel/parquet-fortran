@@ -5,6 +5,19 @@
 submodule (parquet) parquet_write
 contains
 
+    !> Every parquet_write_column variant calls this first: writer%handle is
+    !> c_null_ptr until parquet_open_writer sets it, and every C++ entry point
+    !> dereferences the handle immediately (see ConcurrencyGuard in
+    !> parquet_wrapper.cpp) with no null check of its own -- calling in with an
+    !> unopened writer previously crashed with an unhelpful SIGSEGV instead of
+    !> a clean, diagnosable error.
+    subroutine check_writer_open(writer)
+        type(parquet_writer), intent(in) :: writer
+        if (.not. c_associated(writer%handle)) then
+            error stop "parquet_write_column: writer has not been opened (call parquet_open_writer first)"
+        end if
+    end subroutine check_writer_open
+
     !> The name actually written to the parquet file/VOTable header for
     !> `col`: its output_name if set, else its (internal) name. Falling back
     !> to name defensively handles a parquet_column_type built without going
@@ -314,6 +327,22 @@ contains
             end if
         end do
     end procedure parquet_get_column_col_size
+
+    module procedure parquet_check_row_count
+        character(len=32) :: expected_str, got_str
+
+        if (writer%expected_nrows < 0) then
+            writer%expected_nrows = nrows
+            return
+        end if
+
+        if (writer%expected_nrows /= nrows) then
+            write(expected_str, '(i0)') writer%expected_nrows
+            write(got_str, '(i0)') nrows
+            error stop "parquet_write_column: row count mismatch for column " // trim(name) // &
+                ": expected " // trim(expected_str) // " rows (from an earlier column) but got " // trim(got_str)
+        end if
+    end procedure parquet_check_row_count
 
     module procedure parquet_open_writer
         integer :: i, k, n_enabled, jc
@@ -816,6 +845,7 @@ contains
         integer :: asize, nrows, idx
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
+        call check_writer_open(writer)
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -839,6 +869,7 @@ contains
             call parquet_check_qc_numeric(writer, name, real(values, kind=real64), spread(.true., 1, size(values)))
         end if
         call parquet_make_valid_buf_write(is_valid, valid_buf, valid_ptr)
+        call parquet_check_row_count(writer, name, int(nrows, kind=c_long_long))
 
         call parquet_append_as_schema_int32(&
             writer, name, values, int(nrows, kind=c_long_long), int(asize, kind=c_long_long), valid_ptr)
@@ -850,6 +881,7 @@ contains
         logical, allocatable :: valid_flat(:)
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
+        call check_writer_open(writer)
 
         asize = size(values, 1)
         nrows = size(values, 2)
@@ -880,6 +912,7 @@ contains
             call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), spread(.true., 1, size(packed)))
             call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
         end if
+        call parquet_check_row_count(writer, name, int(nrows, kind=c_long_long))
 
         call parquet_append_as_schema_int32(&
             writer, name, packed, int(nrows, kind=c_long_long), int(asize, kind=c_long_long), valid_ptr)
@@ -889,6 +922,7 @@ contains
         integer :: asize, nrows, idx
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
+        call check_writer_open(writer)
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -912,6 +946,7 @@ contains
             call parquet_check_qc_numeric(writer, name, real(values, kind=real64), spread(.true., 1, size(values)))
         end if
         call parquet_make_valid_buf_write(is_valid, valid_buf, valid_ptr)
+        call parquet_check_row_count(writer, name, int(nrows, kind=c_long_long))
 
         call parquet_append_as_schema_int64(&
             writer, name, values, int(nrows, kind=c_long_long), int(asize, kind=c_long_long), valid_ptr)
@@ -923,6 +958,7 @@ contains
         logical, allocatable :: valid_flat(:)
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
+        call check_writer_open(writer)
 
         asize = size(values, 1)
         nrows = size(values, 2)
@@ -953,6 +989,7 @@ contains
             call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), spread(.true., 1, size(packed)))
             call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
         end if
+        call parquet_check_row_count(writer, name, int(nrows, kind=c_long_long))
 
         call parquet_append_as_schema_int64(&
             writer, name, packed, int(nrows, kind=c_long_long), int(asize, kind=c_long_long), valid_ptr)
@@ -962,6 +999,7 @@ contains
         integer :: asize, nrows, idx
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
+        call check_writer_open(writer)
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -985,6 +1023,7 @@ contains
             call parquet_check_qc_numeric(writer, name, real(values, kind=real64), spread(.true., 1, size(values)))
         end if
         call parquet_make_valid_buf_write(is_valid, valid_buf, valid_ptr)
+        call parquet_check_row_count(writer, name, int(nrows, kind=c_long_long))
 
         call parquet_append_as_schema_float32(&
             writer, name, values, int(nrows, kind=c_long_long), int(asize, kind=c_long_long), valid_ptr)
@@ -996,6 +1035,7 @@ contains
         logical, allocatable :: valid_flat(:)
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
+        call check_writer_open(writer)
 
         asize = size(values, 1)
         nrows = size(values, 2)
@@ -1026,6 +1066,7 @@ contains
             call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), spread(.true., 1, size(packed)))
             call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
         end if
+        call parquet_check_row_count(writer, name, int(nrows, kind=c_long_long))
 
         call parquet_append_as_schema_float32(&
             writer, name, packed, int(nrows, kind=c_long_long), int(asize, kind=c_long_long), valid_ptr)
@@ -1035,6 +1076,7 @@ contains
         integer :: asize, nrows, idx
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
+        call check_writer_open(writer)
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -1058,6 +1100,7 @@ contains
             call parquet_check_qc_numeric(writer, name, real(values, kind=real64), spread(.true., 1, size(values)))
         end if
         call parquet_make_valid_buf_write(is_valid, valid_buf, valid_ptr)
+        call parquet_check_row_count(writer, name, int(nrows, kind=c_long_long))
 
         call parquet_append_as_schema_float64(&
             writer, name, values, int(nrows, kind=c_long_long), int(asize, kind=c_long_long), valid_ptr)
@@ -1069,6 +1112,7 @@ contains
         logical, allocatable :: valid_flat(:)
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
+        call check_writer_open(writer)
 
         asize = size(values, 1)
         nrows = size(values, 2)
@@ -1099,6 +1143,7 @@ contains
             call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), spread(.true., 1, size(packed)))
             call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
         end if
+        call parquet_check_row_count(writer, name, int(nrows, kind=c_long_long))
 
         call parquet_append_as_schema_float64(&
             writer, name, packed, int(nrows, kind=c_long_long), int(asize, kind=c_long_long), valid_ptr)
@@ -1109,6 +1154,7 @@ contains
         integer(c_int8_t), allocatable :: bool_data(:)
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
+        call check_writer_open(writer)
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -1136,6 +1182,7 @@ contains
 
         if (present(is_valid)) call parquet_check_protected(writer, name, is_valid)
         call parquet_make_valid_buf_write(is_valid, valid_buf, valid_ptr)
+        call parquet_check_row_count(writer, name, int(nrows, kind=c_long_long))
 
         call parquet_append_bool8_column(&
             writer%handle, &
@@ -1152,6 +1199,7 @@ contains
         logical, allocatable :: valid_flat(:)
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
+        call check_writer_open(writer)
 
         asize = size(values, 1)
         nrows = size(values, 2)
@@ -1180,6 +1228,7 @@ contains
         else
             call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
         end if
+        call parquet_check_row_count(writer, name, int(nrows, kind=c_long_long))
 
         call parquet_append_bool8_column(&
             writer%handle, &
@@ -1195,6 +1244,7 @@ contains
         integer :: i, j, k, nrows, item_len, idx, asize, nitems, max_item_len, max_string_len
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
+        call check_writer_open(writer)
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -1221,6 +1271,7 @@ contains
         end if
 
         nrows = nitems / asize
+        call parquet_check_row_count(writer, name, int(nrows, kind=c_long_long))
 
         item_len = len(values(1))
         allocate(packed(item_len*nitems))
@@ -1268,6 +1319,7 @@ contains
         logical, allocatable :: valid_flat(:)
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
+        call check_writer_open(writer)
 
         asize = size(values, 1)
         nrows = size(values, 2)
@@ -1295,6 +1347,7 @@ contains
 
         nitems = size(values)
         if (nitems <= 0) return
+        call parquet_check_row_count(writer, name, int(nrows, kind=c_long_long))
 
         item_len = len(values(1, 1))
         allocate(packed(item_len * nitems))

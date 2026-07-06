@@ -794,6 +794,16 @@ extern "C"
 		return reader_handle->nrows;
 	}
 
+	// Non-throwing existence check, so callers (parquet_prefetch_columns) can
+	// validate names up front and report a clean Fortran-side error stop,
+	// instead of letting get_column_index's std::runtime_error escape
+	// uncaught across the Fortran/C++ boundary.
+	int64_t parquet_reader_has_column(void *handle, const char *name)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		return reader_handle->schema->GetFieldIndex(name) >= 0 ? 1 : 0;
+	}
+
 	int64_t parquet_reader_get_column_col_size(void *handle, const char *name)
 	{
 		auto reader_handle = as_reader_handle(handle);

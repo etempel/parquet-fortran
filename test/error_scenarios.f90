@@ -11,7 +11,7 @@
 program error_scenarios
     use parquet
     use parquet_maml_base, only: parquet_maml_file, get_parquet_maml
-    use iso_fortran_env, only : int32
+    use iso_fortran_env, only : int32, int64
     !$ use omp_lib, only : omp_get_max_threads, omp_get_thread_num
     implicit none
 
@@ -79,6 +79,18 @@ program error_scenarios
         call scenario_read_column_with_nulls()
     case ("read_unsupported_physical_type")
         call scenario_read_unsupported_physical_type()
+    case ("prefetch_unknown_column")
+        call scenario_prefetch_unknown_column()
+    case ("write_row_count_mismatch")
+        call scenario_write_row_count_mismatch()
+    case ("read_row_count_mismatch")
+        call scenario_read_row_count_mismatch()
+    case ("read_before_open")
+        call scenario_read_before_open()
+    case ("write_before_open")
+        call scenario_write_before_open()
+    case ("get_nrows_before_open")
+        call scenario_get_nrows_before_open()
     case ("open_reader_missing_file")
         call scenario_open_reader_missing_file()
     case ("open_writer_bad_path")
@@ -516,6 +528,92 @@ contains
         call parquet_read_column(reader, "d", values)
         print '(a)', "unexpectedly read a column of an unsupported physical type without error"
     end subroutine scenario_read_unsupported_physical_type
+
+    !> Arrow/Parquet requires every column in a table to have the same number
+    !> of rows. parquet_write_column now records the row count of the first
+    !> column written and error stops with a dedicated message the moment a
+    !> later column's row count disagrees -- rather than letting this reach
+    !> parquet_close_writer, where it used to surface as Arrow's own uncaught
+    !> "table.Validate()" exception inside WriteTable, aborting the process.
+    subroutine scenario_write_row_count_mismatch()
+        type(parquet_writer) :: writer
+
+        call parquet_open_writer(writer, "test_run/row_count_mismatch.parquet")
+        call parquet_write_column(writer, "a", [1, 2, 3, 4, 5])
+        call parquet_write_column(writer, "b", [10, 20, 30])
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote columns with mismatched row counts without error"
+    end subroutine scenario_write_row_count_mismatch
+
+    !> reader%handle is c_null_ptr until parquet_open_reader is called; every
+    !> C++ read entry point used to dereference it unconditionally (see
+    !> ConcurrencyGuard in parquet_wrapper.cpp), so calling parquet_read_column
+    !> on an unopened reader crashed with an unhelpful, message-less SIGSEGV.
+    !> parquet_read_column now checks this itself first and error stops.
+    subroutine scenario_read_before_open()
+        type(parquet_reader) :: reader
+        integer :: values(3)
+
+        call parquet_read_column(reader, "a", values)
+        print '(a)', "unexpectedly read from an unopened reader without error"
+    end subroutine scenario_read_before_open
+
+    !> Same issue as scenario_read_before_open, but for the write side:
+    !> writer%handle is c_null_ptr until parquet_open_writer is called.
+    subroutine scenario_write_before_open()
+        type(parquet_writer) :: writer
+
+        call parquet_write_column(writer, "a", [1, 2, 3])
+        print '(a)', "unexpectedly wrote to an unopened writer without error"
+    end subroutine scenario_write_before_open
+
+    !> The same "reader has not been opened" guard now covers every other
+    !> reader-taking procedure too (parquet_prefetch_columns, parquet_get_nrows/
+    !> parquet_get_col_size/parquet_get_column_total_elements/
+    !> parquet_get_string_length, parquet_read_array_row_mode/
+    !> parquet_read_array_element_mode), not just parquet_read_column.
+    !> parquet_get_nrows here is just one representative of that group.
+    subroutine scenario_get_nrows_before_open()
+        type(parquet_reader) :: reader
+        integer(int64) :: nrows
+
+        call parquet_get_nrows(reader, nrows)
+        print '(a,i0)', "unexpectedly read nrows from an unopened reader without error: ", nrows
+    end subroutine scenario_get_nrows_before_open
+
+    !> parquet_read_column now validates the given `values` array's row count
+    !> against the file's actual row count before reading any data, and error
+    !> stops with a dedicated message -- rather than letting the underlying
+    !> C++ read call's own "nrows mismatch" check run, which reports a clean
+    !> diagnostic but via std::abort() (see report_fatal_error in
+    !> parquet_wrapper.cpp), not a Fortran error stop.
+    subroutine scenario_read_row_count_mismatch()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer :: a_read(3) ! file has 5 rows
+
+        call parquet_open_writer(writer, "test_run/read_row_count_mismatch.parquet")
+        call parquet_write_column(writer, "a", [1, 2, 3, 4, 5])
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, "test_run/read_row_count_mismatch.parquet")
+        call parquet_read_column(reader, "a", a_read)
+        print '(a)', "unexpectedly read a column into a wrong-size array without error"
+    end subroutine scenario_read_row_count_mismatch
+
+    !> parquet_prefetch_columns validates every requested name against the
+    !> file's actual schema before doing any Arrow read, and reports an
+    !> ordinary Fortran error stop naming the missing column -- rather than
+    !> letting the underlying C++ "Column not found" exception escape
+    !> uncaught across the Fortran/C++ boundary (which would abort the
+    !> process with a raw libc++abi/SIGABRT message instead).
+    subroutine scenario_prefetch_unknown_column()
+        type(parquet_reader) :: reader
+
+        call parquet_open_reader(reader, "test/fixtures/has_null.parquet")
+        call parquet_prefetch_columns(reader, ["not_a_real_column"])
+        print '(a)', "unexpectedly prefetched an unknown column without error"
+    end subroutine scenario_prefetch_unknown_column
 
     !> Opening a nonexistent file for reading previously called Arrow's
     !> ValueOrDie() with no status check first, which aborts the process

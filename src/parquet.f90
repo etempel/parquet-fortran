@@ -118,6 +118,9 @@ module parquet
         logical :: qc = .false. ! set from parquet_open_writer(..., qc=); when true, parquet_write_column checks
                                  ! each column's qc: min/max (if declared) against its valid (is_valid) elements
                                  ! and prints a WARNING (never an error) on violation. No-op without a schema.
+        integer(c_long_long) :: expected_nrows = -1 ! set by the first parquet_write_column call; every later
+                                 ! call must supply this same row count (see parquet_check_row_count), since
+                                 ! Arrow/Parquet requires every column in a table to have equal length.
     contains
         final :: writer_finalize
     end type parquet_writer
@@ -276,6 +279,16 @@ module parquet
             type(parquet_writer), intent(in) :: writer
             character(len=*), intent(in) :: name
         end function parquet_get_column_col_size
+
+        !> Every column in a file must have the same number of rows (Arrow/Parquet
+        !> requirement). Called by every parquet_write_column variant with that
+        !> call's own row count: the first call for a given writer fixes the
+        !> expected row count, every later call must match it or error stop.
+        module subroutine parquet_check_row_count(writer, name, nrows)
+            type(parquet_writer), intent(inout) :: writer
+            character(len=*), intent(in) :: name
+            integer(c_long_long), intent(in) :: nrows
+        end subroutine parquet_check_row_count
 
         module subroutine parquet_open_writer(writer, filename, cinfo, metadata, write_maml, qc, &
                 compression, compression_level, chunk_size, use_threads)
@@ -601,6 +614,20 @@ module parquet
             character(len=*), intent(in) :: name
             integer, intent(out) :: col_size
         end subroutine parquet_get_col_size
+
+        !> Every parquet_read_column variant calls this with its own `values`
+        !> array's row count (size(values) for a scalar column, size(values, 2)
+        !> for a vector column) before reading any data. A mismatch against the
+        !> file's actual row count fails immediately with error stop, instead of
+        !> reaching the underlying C++ read call, whose own "nrows mismatch"
+        !> check reports a clean diagnostic but aborts the process rather than
+        !> returning control to Fortran (see report_fatal_error in
+        !> parquet_wrapper.cpp).
+        module subroutine parquet_check_read_row_count(reader, name, given_nrows)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: name
+            integer(c_long_long), intent(in) :: given_nrows
+        end subroutine parquet_check_read_row_count
 
         module subroutine parquet_get_column_total_elements_int64(reader, name, total_elements)
             type(parquet_reader), intent(in) :: reader

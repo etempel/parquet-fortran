@@ -4,7 +4,7 @@ Library to read/write parquet files and handle MAML files. The parquet file meta
 
 **Features:**
 - Read and write parquet columns for `int32`/`int64`/`float32`/`float64`/`logical`/`character` (MAML: `boolean`/`string`) — as plain 1D columns or fixed-length vector columns.
-- Define and validate a table's schema and metadata from a [MAML](https://github.com/asgr/MAML-Format) file, including column renaming (`col_map:`), quality-control range checks (`qc:`), and protecting specific columns from ever containing a Null (`protected_cols:`).
+- Define and validate a table's schema and metadata from a [MAML](https://github.com/asgr/MAML-Format) file, including column renaming (`col_map:`), quality-control range checks (`qc:`), and protecting specific columns from ever containing a Null (`protected_cols:`). This is relevant only when *writing* — reading a parquet file never involves MAML.
 - Read and write genuine Parquet Null values, with either substitution (`null_value=`) or a validity mask (`is_valid=`).
 - Control output compression codec, compression level, and row group size.
 - Safe to use concurrently (e.g. from OpenMP) — see [Thread safety](#thread-safety) for the exact rule.
@@ -38,7 +38,9 @@ end program quick_example
 ```
 See [Reading parquet files](#reading-parquet-files-from-your-fortran-code) and [Writing parquet files](#writing-parquet-files-from-your-fortran-code) below for the full picture, including MAML-driven schemas, vector columns, and the features listed above. You'll need Arrow/Parquet available and a couple of environment variables set to actually build against this library — see [Prerequisites](#prerequisites).
 
-## Quickstart for consumers (10 lines)
+## Minimal setup to depend on this library
+
+The Homebrew example below is illustrative, not independently verified end-to-end — if it doesn't match your platform or package manager (e.g. MacPorts, Linux, a manual Arrow build), treat [Environment variables](#environment-variables) as the authoritative, verified reference instead.
 
 ```bash
 # 1) Install Arrow/Parquet C++ library (example: macOS Homebrew)
@@ -67,7 +69,7 @@ See [Error handling](#error-handling) and [Limitations](#limitations) for full d
 ## Contents
 
 - [Quick example](#quick-example)
-- [Quickstart for consumers (10 lines)](#quickstart-for-consumers-10-lines)
+- [Minimal setup to depend on this library](#minimal-setup-to-depend-on-this-library)
 - [Important behavior](#important-behavior)
 - [Prerequisites](#prerequisites)
   - [Environment variables](#environment-variables)
@@ -214,7 +216,7 @@ end program read_parquet_example
 Notes:
 
 - `parquet_get_nrows` returns the number of table rows.
-- Allocate output arrays before calling `parquet_read_column`.
+- Allocate output arrays before calling `parquet_read_column`. Its row count (`size(values)` for a plain column, `size(values, 2)` for a vector column) must match `parquet_get_nrows` exactly, or it fails immediately with `error stop`, naming the column and both row counts.
 - For string columns, choose a fixed string length that is large enough for your data.
 - For vector columns, allocate 2D arrays with shape `(col_size, nrows)`.
 
@@ -224,7 +226,7 @@ Notes:
 
 ### Prefetching multiple columns at once with `parquet_prefetch_columns`
 
-`parquet_prefetch_columns(reader, names)` reads several named columns in one call, filling the same per-column cache that `parquet_read_column` would otherwise populate lazily, one column at a time, on first use. Since Arrow's internal `use_threads` is always on for this library (see [Compression and row group size](#compression-and-row-group-size)), reading several columns together like this lets Arrow decode them across its internal thread pool concurrently, instead of strictly one column at a time as each is lazily requested — it's purely a throughput optimization on top of the existing lazy-read design, never a requirement: a column you don't pass to `parquet_prefetch_columns` still works exactly as before, via `parquet_read_column`'s normal lazy, read-on-first-request path.
+`parquet_prefetch_columns(reader, names)` reads several named columns in one call, filling the same per-column cache that `parquet_read_column` would otherwise populate lazily, one column at a time, on first use. Since Arrow's internal `use_threads` is always on for this library (see [Compression and row group size](#compression-and-row-group-size)), reading several columns together like this lets Arrow decode them across its internal thread pool concurrently, instead of strictly one column at a time as each is lazily requested — it's purely a throughput optimization on top of the existing lazy-read design, never a requirement: a column you don't pass to `parquet_prefetch_columns` still works exactly as before, via `parquet_read_column`'s normal lazy, read-on-first-request path. Every name is validated against the file's actual schema before any data is read; a name that isn't a real column in the file fails immediately with `error stop`, naming the offending column.
 
 ```fortran
 call parquet_open_reader(reader, "data.parquet")
@@ -272,6 +274,8 @@ call parquet_open_writer(writer, "data.parquet", cinfo, metadata)
 
 If `cinfo` is omitted, `parquet_open_writer` does not enforce a fixed schema: each column's type, string length and array size are inferred from the first `parquet_write_column` call that writes it. If `cinfo` is given, only columns marked `is_set = .true.` (see `set_available`/`set_unavailable` below) are written, and calling `parquet_write_column` with a name that is not in `cinfo` fails immediately with `error stop`.
 
+`cinfo` and `metadata` are independent optional arguments to `parquet_open_writer` — pass either, both, or neither. Each governs a different part of the parquet file's VOTable-style header: `cinfo` supplies each column's own `unit`/`info`/`ucd` attributes, while `metadata` supplies table-level entries (author, description, `keyarray:`, etc. — see [The MAML metadata format](#the-maml-metadata-format)). If `metadata` is omitted, no table-level metadata is written to the file, regardless of whether `cinfo` is given.
+
 ### Saving the source MAML alongside the parquet file
 
 Pass `write_maml=.true.` to `parquet_open_writer` to also save a sidecar `.maml` file next to the parquet output — same path, with a trailing `.parquet` replaced by `.maml` (or `.maml` appended if there is none):
@@ -292,7 +296,7 @@ Omitting `write_maml`, or passing `write_maml=.false.`, behaves exactly as befor
 Notes:
 
 - Every call to `parquet_write_column` writes one full column.
-- All columns in one file must contain the same number of rows.
+- All columns in one file must contain the same number of rows. The first `parquet_write_column` call fixes the row count for the whole file; any later call with a different row count fails immediately with `error stop`, naming the column and both row counts.
 - Close the writer with `parquet_close_writer` to flush data and finalize the file.
 
 ## The MAML metadata format
@@ -419,6 +423,8 @@ end program write_parquet_combined_example
 ## Error handling
 
 This library reports all failures (missing files, invalid MAML, unknown column names, type mismatches, etc.) by calling Fortran's `error stop`, which aborts the running program immediately and cannot be caught or recovered from. There are no status/`ierr` return codes — check inputs (file existence, column names, array bounds) before calling into the library if you need to avoid aborting. If you're contributing to this library and need to add or test one of these failure paths, see [CONTRIBUTING.md](CONTRIBUTING.md) for how that's done out-of-process, and for this project's own conventions around C++-level error reporting.
+
+Calling any reader-taking procedure (`parquet_read_column`, `parquet_prefetch_columns`, `parquet_get_nrows`, `parquet_get_col_size`, `parquet_get_column_total_elements`, `parquet_get_string_length`, `parquet_read_array_row_mode`, `parquet_read_array_element_mode`) before `parquet_open_reader`, or `parquet_write_column` before `parquet_open_writer`, fails with `error stop`, naming the missing open call. (`parquet_close_reader`/`parquet_close_writer` are the one exception — closing a reader/writer that was never opened is a harmless no-op, not an error.)
 
 ## Thread safety
 
@@ -654,7 +660,7 @@ The public derived type `parquet_table_metadata` provides:
 
 ### Reader (reads column data)
 
-- `parquet_read_column(reader, name, values[, null_value, is_valid])` — reads the full column `name` into `values`, which may be any [supported type](#supported-data-types) as a 1D array (`values(nrows)`) for a plain column, or a 2D array (`values(col_size, nrows)`) for a vector column. Allocate `values` first, using `parquet_get_nrows`/`parquet_get_col_size`/`parquet_get_string_length` as needed. `null_value`/`is_valid` (optional) opt in to reading a column that contains genuine Parquet Nulls instead of erroring — see [Null values](#null-values).
+- `parquet_read_column(reader, name, values[, null_value, is_valid])` — reads the full column `name` into `values`, which may be any [supported type](#supported-data-types) as a 1D array (`values(nrows)`) for a plain column, or a 2D array (`values(col_size, nrows)`) for a vector column. Allocate `values` first, using `parquet_get_nrows`/`parquet_get_col_size`/`parquet_get_string_length` as needed; a row count that doesn't match `parquet_get_nrows` fails immediately with `error stop`. `null_value`/`is_valid` (optional) opt in to reading a column that contains genuine Parquet Nulls instead of erroring — see [Null values](#null-values).
 - `parquet_read_array_row_mode(reader, name, values, row_index[, null_value, is_valid])` — reads only row `row_index` of vector column `name` into the 1D array `values(col_size)`. Use this to fetch one row's vector at a time (e.g. when iterating row-by-row) without loading the whole column.
 - `parquet_read_array_element_mode(reader, name, values, elem_index[, null_value, is_valid])` — reads only element `elem_index` of vector column `name`, across all rows, into the 1D array `values(nrows)`. Use this to fetch one vector position across every row (e.g. "the 3rd element of every row's vector") without loading the whole column.
 

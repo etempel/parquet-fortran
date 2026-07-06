@@ -65,6 +65,18 @@ contains
                 test_read_column_with_nulls_aborts), &
             new_unittest("reading a column of an unsupported physical type aborts", &
                 test_read_unsupported_physical_type_aborts), &
+            new_unittest("prefetching an unknown column aborts", &
+                test_prefetch_unknown_column_aborts), &
+            new_unittest("writing columns with mismatched row counts aborts", &
+                test_write_row_count_mismatch_aborts), &
+            new_unittest("reading a column into a wrong-size array aborts", &
+                test_read_row_count_mismatch_aborts), &
+            new_unittest("reading from an unopened reader aborts", &
+                test_read_before_open_aborts), &
+            new_unittest("writing to an unopened writer aborts", &
+                test_write_before_open_aborts), &
+            new_unittest("calling parquet_get_nrows on an unopened reader aborts", &
+                test_get_nrows_before_open_aborts), &
             new_unittest("opening a nonexistent file for reading aborts", &
                 test_open_reader_missing_file_aborts), &
             new_unittest("opening a writer at a bad path aborts", &
@@ -279,6 +291,74 @@ contains
         call check_scenario_exit_status(error, "read_unsupported_physical_type", expect_abort=.true., &
             failure_message="reading a column of an unsupported physical Parquet type was expected to abort")
     end subroutine test_read_unsupported_physical_type_aborts
+
+    !> parquet_prefetch_columns now validates names against the file's schema
+    !> up front and error stops with a dedicated message, instead of letting
+    !> the C++ "Column not found" exception escape uncaught.
+    subroutine test_prefetch_unknown_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "prefetch_unknown_column", expect_abort=.true., &
+            failure_message="prefetching an unknown column was expected to abort", &
+            required_stderr="parquet_prefetch_columns: column not found in parquet file: not_a_real_column")
+    end subroutine test_prefetch_unknown_column_aborts
+
+    !> parquet_write_column now catches a row-count mismatch itself and error
+    !> stops with a dedicated message, instead of letting Arrow's own
+    !> "table.Validate()" exception escape uncaught inside WriteTable.
+    subroutine test_write_row_count_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "write_row_count_mismatch", expect_abort=.true., &
+            failure_message="writing columns with mismatched row counts was expected to abort", &
+            required_stderr="parquet_write_column: row count mismatch for column b: " // &
+                "expected 5 rows (from an earlier column) but got 3")
+    end subroutine test_write_row_count_mismatch_aborts
+
+    !> parquet_read_column now catches a values-array/file row-count mismatch
+    !> itself and error stops with a dedicated message, instead of letting the
+    !> C++ side's own "nrows mismatch" check abort the process.
+    subroutine test_read_row_count_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "read_row_count_mismatch", expect_abort=.true., &
+            failure_message="reading a column into a wrong-size array was expected to abort", &
+            required_stderr="parquet_read_column: row count mismatch for column a: " // &
+                "file has 5 rows but the values array implies 3")
+    end subroutine test_read_row_count_mismatch_aborts
+
+    !> parquet_read_column now checks c_associated(reader%handle) itself and
+    !> error stops, instead of dereferencing a null handle (a message-less
+    !> SIGSEGV) inside the C++ ConcurrencyGuard.
+    subroutine test_read_before_open_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "read_before_open", expect_abort=.true., &
+            failure_message="reading from an unopened reader was expected to abort", &
+            required_stderr="parquet_read_column: reader has not been opened (call parquet_open_reader first)")
+    end subroutine test_read_before_open_aborts
+
+    !> Same as test_read_before_open_aborts, but for the write side.
+    subroutine test_write_before_open_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "write_before_open", expect_abort=.true., &
+            failure_message="writing to an unopened writer was expected to abort", &
+            required_stderr="parquet_write_column: writer has not been opened (call parquet_open_writer first)")
+    end subroutine test_write_before_open_aborts
+
+    !> Representative of the same guard now applied to every other
+    !> reader-taking procedure (parquet_prefetch_columns, parquet_get_col_size,
+    !> parquet_get_column_total_elements, parquet_get_string_length,
+    !> parquet_read_array_row_mode, parquet_read_array_element_mode), not just
+    !> parquet_read_column/parquet_get_nrows.
+    subroutine test_get_nrows_before_open_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "get_nrows_before_open", expect_abort=.true., &
+            failure_message="calling parquet_get_nrows on an unopened reader was expected to abort", &
+            required_stderr="parquet_get_nrows: reader has not been opened (call parquet_open_reader first)")
+    end subroutine test_get_nrows_before_open_aborts
 
     !> create_parquet_reader (parquet_wrapper.cpp) now checks Arrow's file-open
     !> status directly instead of calling ValueOrDie() unchecked, so a missing

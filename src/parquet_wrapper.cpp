@@ -22,6 +22,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -1023,58 +1024,6 @@ extern "C"
 			" (expected fixed_size_list/list/large_list, got " + array->type()->ToString() + ")");
 	}
 
-	static double numeric_value_at(const std::shared_ptr<arrow::Array> &array, const std::string &name, int64_t idx)
-	{
-		switch (array->type_id())
-		{
-		case arrow::Type::DOUBLE:
-			return std::static_pointer_cast<arrow::DoubleArray>(array)->Value(idx);
-		case arrow::Type::FLOAT:
-			return static_cast<double>(std::static_pointer_cast<arrow::FloatArray>(array)->Value(idx));
-		case arrow::Type::INT32:
-			return static_cast<double>(std::static_pointer_cast<arrow::Int32Array>(array)->Value(idx));
-		case arrow::Type::INT64:
-			return static_cast<double>(std::static_pointer_cast<arrow::Int64Array>(array)->Value(idx));
-		default:
-			throw std::runtime_error(std::string("type mismatch for list values in column: ") + name +
-				" (expected numeric, got " + array->type()->ToString() + ")");
-		}
-	}
-
-	template <typename ArrowArrayType, typename CType>
-	static void read_list_primitive_row(void *handle, const char *name, int64_t row_index, CType *data, int64_t col_size, arrow::Type::type expected_value_type, const char *expected_name, int8_t *valid_out)
-	{
-		auto reader_handle = as_reader_handle(handle);
-		auto array = get_single_chunk_array(reader_handle, name);
-		auto vals_any = get_row_list_values(array, name, row_index, col_size);
-		report_nulls_list_full(array, vals_any, name, 1, col_size, row_index - 1, valid_out);
-		for (int64_t j = 0; j < col_size; ++j)
-		{
-			data[j] = static_cast<CType>(numeric_value_at(vals_any, name, j));
-		}
-		fill_null_default(data, valid_out, col_size);
-	}
-
-	template <typename ArrowArrayType, typename CType>
-	static void read_list_primitive_element(void *handle, const char *name, int64_t col_index, CType *data, int64_t nrows, arrow::Type::type expected_value_type, const char *expected_name, int8_t *valid_out)
-	{
-		auto reader_handle = as_reader_handle(handle);
-		auto array = get_single_chunk_array(reader_handle, name);
-		auto col_size = get_col_size(array);
-		if (col_index < 1 || col_index > col_size)
-		{
-			throw std::runtime_error("col_index out of bounds");
-		}
-		auto vals_any = get_uniform_list_values(array, name, nrows, col_size);
-		auto offset = col_index - 1;
-		report_nulls_list_element(array, vals_any, name, nrows, col_size, offset, valid_out);
-		for (int64_t i = 0; i < nrows; ++i)
-		{
-			data[i] = static_cast<CType>(numeric_value_at(vals_any, name, i * col_size + offset));
-		}
-		fill_null_default(data, valid_out, nrows);
-	}
-
 extern "C"
 {
 
@@ -1084,15 +1033,21 @@ extern "C"
 	// narrowing switch, once over a plain array and once over a list's
 	// values array. One conversion routine per output CType, called from
 	// both sites, replaces both duplicated copies.
+	// stride/offset let this also serve parquet_read_*_array_element (which
+	// reads one strided element per row out of the full list-values array,
+	// at index i*stride+offset, rather than n contiguous values from index
+	// 0) -- see read_list_primitive_element below. Every other caller reads
+	// a contiguous run, i.e. the default stride=1/offset=0.
 	static void convert_values_to_int32(
-		const std::shared_ptr<arrow::Array> &vals, int32_t *data, int64_t n, const char *name, const char *context)
+		const std::shared_ptr<arrow::Array> &vals, int32_t *data, int64_t n, const char *name, const char *context,
+		int64_t stride = 1, int64_t offset = 0)
 	{
 		switch (vals->type_id())
 		{
 		case arrow::Type::INT32:
 		{
 			auto arr = std::static_pointer_cast<arrow::Int32Array>(vals);
-			for (int64_t i = 0; i < n; ++i) data[i] = arr->Value(i);
+			for (int64_t i = 0; i < n; ++i) data[i] = arr->Value(offset + i * stride);
 			break;
 		}
 		case arrow::Type::INT64:
@@ -1100,7 +1055,7 @@ extern "C"
 			auto arr = std::static_pointer_cast<arrow::Int64Array>(vals);
 			for (int64_t i = 0; i < n; ++i)
 			{
-				auto v = arr->Value(i);
+				auto v = arr->Value(offset + i * stride);
 				if (v < std::numeric_limits<int32_t>::min() || v > std::numeric_limits<int32_t>::max())
 				{
 					throw std::runtime_error(std::string("int64->int32 overflow for column: ") + name);
@@ -1116,20 +1071,21 @@ extern "C"
 	}
 
 	static void convert_values_to_int64(
-		const std::shared_ptr<arrow::Array> &vals, int64_t *data, int64_t n, const char *name, const char *context)
+		const std::shared_ptr<arrow::Array> &vals, int64_t *data, int64_t n, const char *name, const char *context,
+		int64_t stride = 1, int64_t offset = 0)
 	{
 		switch (vals->type_id())
 		{
 		case arrow::Type::INT64:
 		{
 			auto arr = std::static_pointer_cast<arrow::Int64Array>(vals);
-			for (int64_t i = 0; i < n; ++i) data[i] = arr->Value(i);
+			for (int64_t i = 0; i < n; ++i) data[i] = arr->Value(offset + i * stride);
 			break;
 		}
 		case arrow::Type::INT32:
 		{
 			auto arr = std::static_pointer_cast<arrow::Int32Array>(vals);
-			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<int64_t>(arr->Value(i));
+			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<int64_t>(arr->Value(offset + i * stride));
 			break;
 		}
 		default:
@@ -1139,32 +1095,33 @@ extern "C"
 	}
 
 	static void convert_values_to_float32(
-		const std::shared_ptr<arrow::Array> &vals, float *data, int64_t n, const char *name, const char *context)
+		const std::shared_ptr<arrow::Array> &vals, float *data, int64_t n, const char *name, const char *context,
+		int64_t stride = 1, int64_t offset = 0)
 	{
 		switch (vals->type_id())
 		{
 		case arrow::Type::FLOAT:
 		{
 			auto arr = std::static_pointer_cast<arrow::FloatArray>(vals);
-			for (int64_t i = 0; i < n; ++i) data[i] = arr->Value(i);
+			for (int64_t i = 0; i < n; ++i) data[i] = arr->Value(offset + i * stride);
 			break;
 		}
 		case arrow::Type::DOUBLE:
 		{
 			auto arr = std::static_pointer_cast<arrow::DoubleArray>(vals);
-			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<float>(arr->Value(i));
+			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<float>(arr->Value(offset + i * stride));
 			break;
 		}
 		case arrow::Type::INT32:
 		{
 			auto arr = std::static_pointer_cast<arrow::Int32Array>(vals);
-			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<float>(arr->Value(i));
+			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<float>(arr->Value(offset + i * stride));
 			break;
 		}
 		case arrow::Type::INT64:
 		{
 			auto arr = std::static_pointer_cast<arrow::Int64Array>(vals);
-			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<float>(arr->Value(i));
+			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<float>(arr->Value(offset + i * stride));
 			break;
 		}
 		default:
@@ -1174,32 +1131,33 @@ extern "C"
 	}
 
 	static void convert_values_to_float64(
-		const std::shared_ptr<arrow::Array> &vals, double *data, int64_t n, const char *name, const char *context)
+		const std::shared_ptr<arrow::Array> &vals, double *data, int64_t n, const char *name, const char *context,
+		int64_t stride = 1, int64_t offset = 0)
 	{
 		switch (vals->type_id())
 		{
 		case arrow::Type::DOUBLE:
 		{
 			auto arr = std::static_pointer_cast<arrow::DoubleArray>(vals);
-			for (int64_t i = 0; i < n; ++i) data[i] = arr->Value(i);
+			for (int64_t i = 0; i < n; ++i) data[i] = arr->Value(offset + i * stride);
 			break;
 		}
 		case arrow::Type::FLOAT:
 		{
 			auto arr = std::static_pointer_cast<arrow::FloatArray>(vals);
-			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<double>(arr->Value(i));
+			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<double>(arr->Value(offset + i * stride));
 			break;
 		}
 		case arrow::Type::INT32:
 		{
 			auto arr = std::static_pointer_cast<arrow::Int32Array>(vals);
-			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<double>(arr->Value(i));
+			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<double>(arr->Value(offset + i * stride));
 			break;
 		}
 		case arrow::Type::INT64:
 		{
 			auto arr = std::static_pointer_cast<arrow::Int64Array>(vals);
-			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<double>(arr->Value(i));
+			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<double>(arr->Value(offset + i * stride));
 			break;
 		}
 		default:
@@ -1207,6 +1165,77 @@ extern "C"
 				" (expected float64/float32/int32/int64, got " + vals->type()->ToString() + ")");
 		}
 	}
+
+} // extern "C"
+
+// read_list_primitive_row/read_list_primitive_element back parquet_read_*_array_row
+// and parquet_read_*_array_element -- reading one row's (or one strided
+// element's) worth of a fixed-size-list/list column. These used to run their
+// own separate, looser numeric conversion (numeric_value_at: silently
+// accepted any of int32/int64/float32/float64 as a source and widened
+// through a double, with no int64->int32 overflow check) instead of the
+// same convert_values_to_* rules parquet_read_column/parquet_read_array_column
+// enforce. Dispatching to convert_values_to_<CType> here instead makes a
+// row/element read exactly as strict as reading the whole column: same
+// accepted source types, same int64->int32 overflow check, same clean abort
+// via report_fatal_error on a type mismatch. Declared outside extern "C"
+// (templates cannot have C language linkage) between two extern "C" blocks,
+// same as ConcurrencyGuard/append_typed_column above -- convert_values_to_*
+// is already visible here via ordinary (non-template-dependent) name lookup.
+template <typename CType>
+static void read_list_primitive_row(void *handle, const char *name, int64_t row_index, CType *data, int64_t col_size, int8_t *valid_out)
+{
+	auto reader_handle = as_reader_handle(handle);
+	auto array = get_single_chunk_array(reader_handle, name);
+	auto vals_any = get_row_list_values(array, name, row_index, col_size);
+	report_nulls_list_full(array, vals_any, name, 1, col_size, row_index - 1, valid_out);
+
+	// get_row_list_values already returns a contiguous col_size-element slice
+	// for this one row, so the default stride=1/offset=0 applies.
+	if constexpr (std::is_same_v<CType, int32_t>)
+		convert_values_to_int32(vals_any, data, col_size, name, "parquet_read_array_row_mode");
+	else if constexpr (std::is_same_v<CType, int64_t>)
+		convert_values_to_int64(vals_any, data, col_size, name, "parquet_read_array_row_mode");
+	else if constexpr (std::is_same_v<CType, float>)
+		convert_values_to_float32(vals_any, data, col_size, name, "parquet_read_array_row_mode");
+	else if constexpr (std::is_same_v<CType, double>)
+		convert_values_to_float64(vals_any, data, col_size, name, "parquet_read_array_row_mode");
+
+	fill_null_default(data, valid_out, col_size);
+}
+
+template <typename CType>
+static void read_list_primitive_element(void *handle, const char *name, int64_t col_index, CType *data, int64_t nrows, int8_t *valid_out)
+{
+	auto reader_handle = as_reader_handle(handle);
+	auto array = get_single_chunk_array(reader_handle, name);
+	auto col_size = get_col_size(array);
+	if (col_index < 1 || col_index > col_size)
+	{
+		throw std::runtime_error("col_index out of bounds");
+	}
+	auto vals_any = get_uniform_list_values(array, name, nrows, col_size);
+	auto offset = col_index - 1;
+	report_nulls_list_element(array, vals_any, name, nrows, col_size, offset, valid_out);
+
+	// vals_any holds every row's full col_size-element vector back to back,
+	// so the value for row i at this fixed col_index sits at a stride of
+	// col_size apart, starting at offset -- not contiguous, hence passing
+	// stride/offset explicitly here (unlike the row-mode call above).
+	if constexpr (std::is_same_v<CType, int32_t>)
+		convert_values_to_int32(vals_any, data, nrows, name, "parquet_read_array_element_mode", col_size, offset);
+	else if constexpr (std::is_same_v<CType, int64_t>)
+		convert_values_to_int64(vals_any, data, nrows, name, "parquet_read_array_element_mode", col_size, offset);
+	else if constexpr (std::is_same_v<CType, float>)
+		convert_values_to_float32(vals_any, data, nrows, name, "parquet_read_array_element_mode", col_size, offset);
+	else if constexpr (std::is_same_v<CType, double>)
+		convert_values_to_float64(vals_any, data, nrows, name, "parquet_read_array_element_mode", col_size, offset);
+
+	fill_null_default(data, valid_out, nrows);
+}
+
+extern "C"
+{
 
 	// parquet_read_{int32,int64,float32,float64,bool8,string}_column are the
 	// direct target of parquet_read_column -- the README documents that
@@ -1404,22 +1433,22 @@ extern "C"
 
 	void parquet_read_int32_array_row(void *handle, const char *name, int64_t row_index, int32_t *data, int64_t col_size, int8_t *valid_out)
 	{
-		read_list_primitive_row<arrow::Int32Array, int32_t>(handle, name, row_index, data, col_size, arrow::Type::INT32, "int32", valid_out);
+		read_list_primitive_row<int32_t>(handle, name, row_index, data, col_size, valid_out);
 	}
 
 	void parquet_read_int64_array_row(void *handle, const char *name, int64_t row_index, int64_t *data, int64_t col_size, int8_t *valid_out)
 	{
-		read_list_primitive_row<arrow::Int64Array, int64_t>(handle, name, row_index, data, col_size, arrow::Type::INT64, "int64", valid_out);
+		read_list_primitive_row<int64_t>(handle, name, row_index, data, col_size, valid_out);
 	}
 
 	void parquet_read_float32_array_row(void *handle, const char *name, int64_t row_index, float *data, int64_t col_size, int8_t *valid_out)
 	{
-		read_list_primitive_row<arrow::FloatArray, float>(handle, name, row_index, data, col_size, arrow::Type::FLOAT, "float32", valid_out);
+		read_list_primitive_row<float>(handle, name, row_index, data, col_size, valid_out);
 	}
 
 	void parquet_read_float64_array_row(void *handle, const char *name, int64_t row_index, double *data, int64_t col_size, int8_t *valid_out)
 	{
-		read_list_primitive_row<arrow::DoubleArray, double>(handle, name, row_index, data, col_size, arrow::Type::DOUBLE, "float64", valid_out);
+		read_list_primitive_row<double>(handle, name, row_index, data, col_size, valid_out);
 	}
 
 	void parquet_read_bool8_array_row(void *handle, const char *name, int64_t row_index, int8_t *data, int64_t col_size, int8_t *valid_out)
@@ -1460,22 +1489,22 @@ extern "C"
 
 	void parquet_read_int32_array_element(void *handle, const char *name, int64_t col_index, int32_t *data, int64_t nrows, int64_t unused_col_size, int8_t *valid_out)
 	{
-		read_list_primitive_element<arrow::Int32Array, int32_t>(handle, name, col_index, data, nrows, arrow::Type::INT32, "int32", valid_out);
+		read_list_primitive_element<int32_t>(handle, name, col_index, data, nrows, valid_out);
 	}
 
 	void parquet_read_int64_array_element(void *handle, const char *name, int64_t col_index, int64_t *data, int64_t nrows, int64_t unused_col_size, int8_t *valid_out)
 	{
-		read_list_primitive_element<arrow::Int64Array, int64_t>(handle, name, col_index, data, nrows, arrow::Type::INT64, "int64", valid_out);
+		read_list_primitive_element<int64_t>(handle, name, col_index, data, nrows, valid_out);
 	}
 
 	void parquet_read_float32_array_element(void *handle, const char *name, int64_t col_index, float *data, int64_t nrows, int64_t unused_col_size, int8_t *valid_out)
 	{
-		read_list_primitive_element<arrow::FloatArray, float>(handle, name, col_index, data, nrows, arrow::Type::FLOAT, "float32", valid_out);
+		read_list_primitive_element<float>(handle, name, col_index, data, nrows, valid_out);
 	}
 
 	void parquet_read_float64_array_element(void *handle, const char *name, int64_t col_index, double *data, int64_t nrows, int64_t unused_col_size, int8_t *valid_out)
 	{
-		read_list_primitive_element<arrow::DoubleArray, double>(handle, name, col_index, data, nrows, arrow::Type::DOUBLE, "float64", valid_out);
+		read_list_primitive_element<double>(handle, name, col_index, data, nrows, valid_out);
 	}
 
 	void parquet_read_bool8_array_element(void *handle, const char *name, int64_t col_index, int8_t *data, int64_t nrows, int64_t, int8_t *valid_out)

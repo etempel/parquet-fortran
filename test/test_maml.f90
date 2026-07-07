@@ -17,6 +17,7 @@
 module test_maml
     use parquet
     use parquet_maml_base, only : parquet_maml_file, get_parquet_maml
+    use iso_fortran_env, only : real64
     use testdrive, only : new_unittest, unittest_type, error_type, check
     !
     implicit none
@@ -38,7 +39,9 @@ contains
             new_unittest("col_map: renames a field to an internal name", test_validate_user_maml_col_map_ok), &
             new_unittest("load a MAML file from disk", test_load_maml_file), &
             new_unittest("get_column_index finds an existing column", test_get_column_index_found), &
-            new_unittest("set_unavailable/set_available toggle is_set", test_set_available_unavailable) &
+            new_unittest("set_unavailable/set_available toggle is_set", test_set_available_unavailable), &
+            new_unittest("add_col_qc builds a qc-maml from compact strings", test_add_col_qc_builds_maml), &
+            new_unittest("add_col_qc result reads back through parquet_open_reader", test_add_col_qc_roundtrip) &
             ]
     end subroutine collect_tests_parquet_maml
 
@@ -236,5 +239,72 @@ contains
         call check(error, all(cinfo%col(:)%is_set), &
             "set_available() (no name) did not set is_set for every column")
     end subroutine test_set_available_unavailable
+
+    !> maml%add_col_qc builds a read-time qc-maml incrementally from compact
+    !> "col, min, max, miss" strings: positional fields, empty tokens skipped,
+    !> the returned col_name, and the exact generated lines (fields: header
+    !> created once, quoted min/max, name-only entry with no qc: block).
+    subroutine test_add_col_qc_builds_maml(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_maml_file) :: maml
+        character(len=:), allocatable :: cn
+
+        call maml%add_col_qc("ra, >0, <=360, Null", cn)
+        call check(error, cn == "ra", "add_col_qc did not return the parsed column name")
+        if (allocated(error)) return
+
+        call maml%add_col_qc("dec, , <=90,", cn)   ! max only
+        call check(error, cn == "dec", "add_col_qc did not return 'dec'")
+        if (allocated(error)) return
+
+        call maml%add_col_qc("mag, 5", cn)         ! bare numeric min
+        if (allocated(error)) return
+        call maml%add_col_qc("flag", cn)           ! name only, no qc: block
+
+        ! Exact expected lines (order of appends preserved). The name-only
+        ! "flag" entry adds just a "- name:" line, with no qc: block.
+        call check(error, size(maml%lines) == 13, "add_col_qc produced an unexpected number of lines")
+        if (allocated(error)) return
+        call check(error, &
+            trim(maml%lines(1))  == "fields:"           .and. &
+            trim(maml%lines(2))  == "- name: ra"        .and. &
+            trim(maml%lines(3))  == "  qc:"             .and. &
+            trim(maml%lines(4))  == "    min: '>0'"     .and. &
+            trim(maml%lines(5))  == "    max: '<=360'"  .and. &
+            trim(maml%lines(6))  == "    miss: Null"    .and. &
+            trim(maml%lines(7))  == "- name: dec"       .and. &
+            trim(maml%lines(8))  == "  qc:"             .and. &
+            trim(maml%lines(9))  == "    max: '<=90'"   .and. &
+            trim(maml%lines(10)) == "- name: mag"       .and. &
+            trim(maml%lines(11)) == "  qc:"             .and. &
+            trim(maml%lines(12)) == "    min: '5'"      .and. &
+            trim(maml%lines(13)) == "- name: flag", &
+            "add_col_qc generated unexpected qc-maml lines")
+    end subroutine test_add_col_qc_builds_maml
+
+    !> A qc-maml built purely with add_col_qc is accepted by parquet_open_reader
+    !> and drives the read-side qc checks: ra in the list_vector fixture is
+    !> [1.5,2.5,3.5,4.5], within [>=0, <=10], so no violation occurs and the
+    !> column reads back correctly.
+    subroutine test_add_col_qc_roundtrip(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_maml_file) :: maml
+        type(parquet_reader) :: reader
+        character(len=:), allocatable :: cn
+        integer :: nrows
+        real(real64), allocatable :: ra(:)
+
+        call maml%add_col_qc("ra, >=0, <=10", cn)
+
+        call parquet_open_reader(reader, "test/fixtures/list_vector.parquet", maml=maml)
+        call parquet_get_nrows(reader, nrows)
+        allocate(ra(nrows))
+        call parquet_read_column(reader, cn, ra)
+        call parquet_close_reader(reader)
+
+        call check(error, nrows == 4 .and. abs(ra(1) - 1.5_real64) < 1.0e-12_real64 .and. &
+            abs(ra(4) - 4.5_real64) < 1.0e-12_real64, &
+            "add_col_qc-built qc-maml did not read back the ra column correctly")
+    end subroutine test_add_col_qc_roundtrip
     !
 end module test_maml

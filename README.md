@@ -333,6 +333,30 @@ call parquet_read_column(reader, "ra", ra_back)
 call parquet_close_reader(reader)
 ```
 
+#### Building a qc-maml in code with `maml%add_col_qc`
+
+Instead of authoring a `.maml` file, you can build the qc-maml in memory a column at a time with the `type(parquet_maml_file)` type-bound procedure `add_col_qc`, then pass it straight to `parquet_open_reader(..., maml=)`:
+
+```fortran
+type(parquet_maml_file) :: qc
+type(parquet_reader) :: reader
+character(len=:), allocatable :: col
+
+call qc%add_col_qc("ra, >=0, <=360, Null", col)  ! col is returned as "ra"
+call qc%add_col_qc("dec, , <=90", col)           ! max only (empty min); col == "dec"
+call qc%add_col_qc("mag, 5", col)                ! bare number => inclusive (>= 5)
+
+call parquet_open_reader(reader, "data.parquet", maml=qc)
+call parquet_read_column(reader, col, mag)   ! reuse the returned name
+```
+
+`call maml%add_col_qc(qc_input, col_name)` appends one field entry (and its `qc:` block) to `maml` from a compact, comma-separated string, and returns the column name in `col_name` (`character(len=:), allocatable, intent(out)`) so you can reuse it directly in the reads that follow.
+
+- **`qc_input` is `"col_name, qc_min, qc_max, qc_miss"`** — at most four comma-separated fields, matched **positionally**. Only `col_name` (the first field) is required and must be non-empty; any of the last three may be empty or omitted (`"ra, >0"` sets just a min; `"ra, , <=10"` sets just a max; `"ra,,, Null"` sets just miss). The `fields:` header is created automatically on the first call.
+- **`qc_min`/`qc_max`** may carry a leading operator (`>=`/`>` for `min`, `<=`/`<` for `max`) or be a bare number (inclusive, i.e. `>=` for min and `<=` for max — same convention as the [write-side `qc:`](#quality-control-qc-range-checks-on-write)). A reversed operator (e.g. a `<` on `min`), or an operator with no value after it, fails immediately with `error stop`.
+- **`qc_miss`** may only be empty, `Null`/`null`, or `NA`/`na`; anything else fails with `error stop`. (Meaning is exactly as for a file-based qc-maml: `Null`/`NA` ⇒ Nulls expected, empty ⇒ not expected.)
+- Adding a column already present in this maml, or supplying more than four fields, also fails immediately with `error stop` — invalid input is never partially applied.
+
 - `maml` is optional, `type(parquet_maml_file)`; `parquet_load_qc_maml_file(filename)` loads one from disk (a separate function from `parquet_load_maml_file`, since a qc-maml has different, lighter requirements — see below). `qc` is optional `logical`: if omitted, it defaults to `.true.` whenever `maml` is supplied and `.false.` otherwise; an explicit `qc=` always wins (so `qc=.false.` with a `maml=` present disables checking entirely, and `qc=.true.` with no `maml=` at all is a harmless no-op, nothing to check).
 - `qc_soft` is optional `logical`, default `.false.` (hard: a violation aborts the process). It only ever takes effect when qc is active; with `qc=.false.` (or no `maml=`) it is irrelevant.
 - A qc-maml's only required field attribute is `name` — `data_type` and everything else (including `qc:` itself) are optional, unlike a schema-authoring MAML. `qc: min:`/`max:` bounds are parsed against the column's actual Parquet type at read time, not any `data_type` the maml might declare. A qc-maml may declare fields that don't exist in the parquet file at all (they're silently ignored) or that already have a value in the file's own physical type different from the maml — validation only requires that field names not repeat, that a `qc: miss:` value (if present) is `Null`/`NA` (case-insensitive) or empty, and that any `qc: min:`/`max:` operator points the right way (`min:` a lower bound with `>=`/`>`, `max:` an upper bound with `<=`/`<` — the same rule the [write side](#quality-control-qc-range-checks-on-write) enforces; a reversed operator aborts `parquet_open_reader`).
@@ -725,6 +749,7 @@ List of public callable procedures available with `use parquet`:
 - `parquet_read_maml(maml, cinfo, metadata)` — parses a MAML source into `cinfo` (column definitions) and `metadata` (table-level key/value metadata). Two overloads share the same `maml` keyword: pass a filename (`character`) to read and parse a `.maml` file directly, or pass an already-loaded `parquet_maml_file` object (see `parquet_load_maml_file`) to parse MAML content you already hold in memory. Either overload always runs the same checks as `parquet_validate_maml` first, so a structurally invalid MAML (unknown top-level section, missing `table`, etc.) fails immediately with `error stop` rather than being silently parsed.
 - `parquet_load_maml_file(filename)` — reads a `.maml` file from disk and returns it as a `parquet_maml_file` object, without parsing it into `cinfo`/`metadata`. Also validates it (same checks as `parquet_validate_maml`) before returning. Useful when you want to hold on to the raw MAML content (e.g. to pass to `parquet_read_maml` later, or inspect `maml%name`/`maml%lines` directly).
 - `parquet_load_qc_maml_file(filename)` — reads a *qc-maml* from disk (a lighter MAML used only for read-time quality-control checks) and returns it as a `parquet_maml_file`, without `parquet_load_maml_file`'s full schema-authoring validation: a qc-maml doesn't need `table:`, `data_type:`, or even `qc:` itself. Pass the result as `parquet_open_reader(..., maml=)`; see [Read-time quality control with a qc-maml](#read-time-quality-control-with-a-qc-maml).
+- `call maml%add_col_qc(qc_input, col_name)` — type-bound procedure on `parquet_maml_file` that builds a qc-maml in memory instead of loading one from disk: appends one field entry (plus its `qc:` block) from a compact `"col, min, max, miss"` string and returns the parsed column name in `col_name` (`character(len=:), allocatable, intent(out)`). Validates operator direction, bound values, `miss:` value, field count (≤ 4) and uniqueness, each with `error stop`. See [Building a qc-maml in code](#building-a-qc-maml-in-code-with-mamladd_col_qc).
 - `parquet_validate_user_maml(base_maml, user_maml)` — checks that every column declared in `user_maml`'s `fields:` block also exists in `base_maml`'s `fields:` block (by name only). `user_maml` may omit any columns from `base_maml`, but must not declare any that aren't there. Unknown columns fail validation and are reported by name.
 - `parquet_validate_maml(maml)` — validates a single MAML file on its own. Checks that: at least one field is defined; every field has a non-empty `name`; every field's `data_type` is one of the recognized types (see [Supported data types](#supported-data-types) above; see `valid_maml_data_types` in `src/parquet_metadata.f90` to add more); no two fields share the same `name`; and the file's metadata includes a non-empty `table` entry. It also validates the `qc:` and `protected_cols:` features described in [Null values](#null-values) and [Quality control (qc:) range checks on write](#quality-control-qc-range-checks-on-write) below. Collects and reports all violations together in a single error stop.
 

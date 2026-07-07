@@ -161,6 +161,18 @@ program error_scenarios
         call scenario_validate_qc_max_wrong_operator()
     case ("qc_maml_min_wrong_operator")
         call scenario_qc_maml_min_wrong_operator()
+    case ("add_col_qc_min_reversed_operator")
+        call scenario_add_col_qc_min_reversed_operator()
+    case ("add_col_qc_operator_without_value")
+        call scenario_add_col_qc_operator_without_value()
+    case ("add_col_qc_bad_miss_value")
+        call scenario_add_col_qc_bad_miss_value()
+    case ("add_col_qc_too_many_fields")
+        call scenario_add_col_qc_too_many_fields()
+    case ("add_col_qc_empty_column_name")
+        call scenario_add_col_qc_empty_column_name()
+    case ("add_col_qc_duplicate_column")
+        call scenario_add_col_qc_duplicate_column()
     case ("qc_warning_numeric")
         call scenario_qc_warning_numeric()
     case ("qc_warning_string")
@@ -1128,6 +1140,63 @@ contains
             maml=parquet_load_qc_maml_file("test_run/qc_min_wrong_op.maml"))
         print '(a)', "unexpectedly opened a reader with a reversed qc: min: operator"
     end subroutine scenario_qc_maml_min_wrong_operator
+
+    !> maml%add_col_qc rejects a reversed min: operator ('<'/'<=' is an upper
+    !> bound), the same rule the qc-maml parser and the write-side validator
+    !> enforce.
+    subroutine scenario_add_col_qc_min_reversed_operator()
+        type(parquet_maml_file) :: maml
+        character(len=:), allocatable :: col_name
+
+        call maml%add_col_qc("ra, <5", col_name)
+        print '(a)', "unexpectedly accepted a reversed qc min operator in add_col_qc"
+    end subroutine scenario_add_col_qc_min_reversed_operator
+
+    !> maml%add_col_qc rejects a bound that is only an operator with no value.
+    subroutine scenario_add_col_qc_operator_without_value()
+        type(parquet_maml_file) :: maml
+        character(len=:), allocatable :: col_name
+
+        call maml%add_col_qc("ra, >", col_name)
+        print '(a)', "unexpectedly accepted an operator with no value in add_col_qc"
+    end subroutine scenario_add_col_qc_operator_without_value
+
+    !> maml%add_col_qc rejects a miss value other than Null/NA/empty.
+    subroutine scenario_add_col_qc_bad_miss_value()
+        type(parquet_maml_file) :: maml
+        character(len=:), allocatable :: col_name
+
+        call maml%add_col_qc("ra,,, garbage", col_name)
+        print '(a)', "unexpectedly accepted an invalid qc miss value in add_col_qc"
+    end subroutine scenario_add_col_qc_bad_miss_value
+
+    !> maml%add_col_qc rejects a qc_input with more than four comma-separated fields.
+    subroutine scenario_add_col_qc_too_many_fields()
+        type(parquet_maml_file) :: maml
+        character(len=:), allocatable :: col_name
+
+        call maml%add_col_qc("ra, 1, 2, Null, extra", col_name)
+        print '(a)', "unexpectedly accepted more than four fields in add_col_qc"
+    end subroutine scenario_add_col_qc_too_many_fields
+
+    !> maml%add_col_qc rejects an empty first field (a leading comma / empty name).
+    subroutine scenario_add_col_qc_empty_column_name()
+        type(parquet_maml_file) :: maml
+        character(len=:), allocatable :: col_name
+
+        call maml%add_col_qc(", >0", col_name)
+        print '(a)', "unexpectedly accepted an empty column name in add_col_qc"
+    end subroutine scenario_add_col_qc_empty_column_name
+
+    !> maml%add_col_qc rejects a column already declared earlier in the same maml.
+    subroutine scenario_add_col_qc_duplicate_column()
+        type(parquet_maml_file) :: maml
+        character(len=:), allocatable :: col_name
+
+        call maml%add_col_qc("ra, >0", col_name)
+        call maml%add_col_qc("ra, <10", col_name)
+        print '(a)', "unexpectedly accepted a duplicate column name in add_col_qc"
+    end subroutine scenario_add_col_qc_duplicate_column
 
     !> A fields: entry with no name: at all is rejected -- name is the one
     !> required attribute for a qc-maml field (everything else, including

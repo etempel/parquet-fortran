@@ -137,6 +137,18 @@ contains
                 test_validate_qc_max_wrong_operator_aborts), &
             new_unittest("qc-maml: min value with a reversed (</<=) operator aborts", &
                 test_qc_maml_min_wrong_operator_aborts), &
+            new_unittest("add_col_qc: reversed min operator aborts", &
+                test_add_col_qc_min_reversed_operator_aborts), &
+            new_unittest("add_col_qc: operator with no value aborts", &
+                test_add_col_qc_operator_without_value_aborts), &
+            new_unittest("add_col_qc: invalid miss value aborts", &
+                test_add_col_qc_bad_miss_value_aborts), &
+            new_unittest("add_col_qc: more than four fields aborts", &
+                test_add_col_qc_too_many_fields_aborts), &
+            new_unittest("add_col_qc: empty column name aborts", &
+                test_add_col_qc_empty_column_name_aborts), &
+            new_unittest("add_col_qc: duplicate column name aborts", &
+                test_add_col_qc_duplicate_column_aborts), &
             new_unittest("writing values(:) not divisible by col_size aborts", &
                 test_write_values_not_divisible_by_col_size_aborts), &
             new_unittest("parquet_set_max_threads(0) aborts", &
@@ -683,6 +695,48 @@ contains
         call check_scenario_exit_status(error, "qc_maml_min_wrong_operator", expect_abort=.true., &
             failure_message="qc-maml qc: min: with a reversed (</<=) operator was expected to error stop")
     end subroutine test_qc_maml_min_wrong_operator_aborts
+
+    subroutine test_add_col_qc_min_reversed_operator_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "add_col_qc_min_reversed_operator", expect_abort=.true., &
+            failure_message="add_col_qc with a reversed min operator was expected to error stop")
+    end subroutine test_add_col_qc_min_reversed_operator_aborts
+
+    subroutine test_add_col_qc_operator_without_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "add_col_qc_operator_without_value", expect_abort=.true., &
+            failure_message="add_col_qc with an operator but no value was expected to error stop")
+    end subroutine test_add_col_qc_operator_without_value_aborts
+
+    subroutine test_add_col_qc_bad_miss_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "add_col_qc_bad_miss_value", expect_abort=.true., &
+            failure_message="add_col_qc with an invalid miss value was expected to error stop")
+    end subroutine test_add_col_qc_bad_miss_value_aborts
+
+    subroutine test_add_col_qc_too_many_fields_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "add_col_qc_too_many_fields", expect_abort=.true., &
+            failure_message="add_col_qc with more than four fields was expected to error stop")
+    end subroutine test_add_col_qc_too_many_fields_aborts
+
+    subroutine test_add_col_qc_empty_column_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "add_col_qc_empty_column_name", expect_abort=.true., &
+            failure_message="add_col_qc with an empty column name was expected to error stop")
+    end subroutine test_add_col_qc_empty_column_name_aborts
+
+    subroutine test_add_col_qc_duplicate_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "add_col_qc_duplicate_column", expect_abort=.true., &
+            failure_message="add_col_qc with a duplicate column name was expected to error stop")
+    end subroutine test_add_col_qc_duplicate_column_aborts
 
     subroutine test_write_values_not_divisible_by_col_size_aborts(error)
         type(error_type), allocatable, intent(out) :: error

@@ -117,6 +117,65 @@ static bool generate_unsupported_type_fixture()
     return status.ok();
 }
 
+// test/fixtures/list_vector.parquet: a vector (per-row array) column stored
+// with Arrow's variable-length `list<element: double>` encoding -- the
+// standard 3-level Parquet LIST layout
+//   optional group spec (List) { repeated group list { optional double element; } }
+// -- rather than the `fixed_size_list` this library's own writer always emits
+// for vector columns. Both encode a per-row vector; some producers (e.g. the
+// file this fixture is modelled on) use plain `list` even when every row has
+// the same length. Every row here is deliberately the same length (3), so the
+// column is a well-formed uniform vector column that the read side's
+// get_col_size/get_uniform_list_values path can consume exactly as it does a
+// fixed_size_list -- this fixture exists to prove that alternate on-disk
+// schema is read back identically.
+//
+//   ID:   int32 scalar        [10, 20, 30, 40]
+//   ra:   double scalar       [1.5, 2.5, 3.5, 4.5]
+//   spec: list<double>, len 3 [[0.1,0.2,0.3],[1.1,1.2,1.3],[2.1,2.2,2.3],[3.1,3.2,3.3]]
+//
+// Used by test/test_reading.f90's "read list-encoded vector column" test.
+static bool generate_list_vector_fixture()
+{
+    arrow::Int32Builder id_builder;
+    auto st = id_builder.AppendValues({10, 20, 30, 40});
+    std::shared_ptr<arrow::Array> id_arr;
+    st = id_builder.Finish(&id_arr);
+
+    arrow::DoubleBuilder ra_builder;
+    st = ra_builder.AppendValues({1.5, 2.5, 3.5, 4.5});
+    std::shared_ptr<arrow::Array> ra_arr;
+    st = ra_builder.Finish(&ra_arr);
+
+    // Variable-length ListBuilder (not FixedSizeListBuilder): this is what
+    // produces the plain `list` Parquet encoding. Each row happens to append
+    // exactly 3 elements, so the resulting column is uniform-length.
+    auto spec_values = std::make_shared<arrow::DoubleBuilder>();
+    arrow::ListBuilder spec_builder(arrow::default_memory_pool(), spec_values);
+    for (int row = 0; row < 4; ++row)
+    {
+        st = spec_builder.Append();
+        st = spec_values->Append(row + 0.1);
+        st = spec_values->Append(row + 0.2);
+        st = spec_values->Append(row + 0.3);
+    }
+    std::shared_ptr<arrow::Array> spec_arr;
+    st = spec_builder.Finish(&spec_arr);
+
+    auto id_field = arrow::field("ID", arrow::int32(), false);
+    auto ra_field = arrow::field("ra", arrow::float64(), false);
+    // list field itself non-nullable, element nullable -- matches Arrow's
+    // default `arrow::list(value_type)` layout used by common producers.
+    auto spec_field = arrow::field("spec", arrow::list(arrow::float64()), false);
+    auto schema = arrow::schema({id_field, ra_field, spec_field});
+    auto table = arrow::Table::Make(schema, {id_arr, ra_arr, spec_arr});
+
+    auto maybe_outfile = arrow::io::FileOutputStream::Open("test/fixtures/list_vector.parquet");
+    auto outfile = *maybe_outfile;
+    auto status = parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile, 4);
+    return status.ok();
+}
+
 int main()
 {
     struct Fixture
@@ -128,6 +187,7 @@ int main()
     Fixture fixtures[] = {
         {"test/fixtures/has_null.parquet", generate_has_null_fixture},
         {"test/fixtures/unsupported_type.parquet", generate_unsupported_type_fixture},
+        {"test/fixtures/list_vector.parquet", generate_list_vector_fixture},
     };
 
     int failures = 0;

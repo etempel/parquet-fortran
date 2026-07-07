@@ -36,7 +36,8 @@ contains
             new_unittest("read scalar column with is_valid", test_read_scalar_is_valid), &
             new_unittest("read scalar column with both null_value and is_valid", test_read_scalar_both), &
             new_unittest("read string column with null_value and is_valid", test_read_string_null), &
-            new_unittest("read array column with null_value and is_valid", test_read_array_null) &
+            new_unittest("read array column with null_value and is_valid", test_read_array_null), &
+            new_unittest("read list-encoded vector column", test_read_list_vector_column) &
             ]
     end subroutine collect_tests_parquet_reading
 
@@ -656,5 +657,82 @@ contains
             return
         end if
     end subroutine test_read_array_null
+
+    !> Reads test/fixtures/list_vector.parquet, whose "spec" vector column is
+    !> stored with Arrow's variable-length `list<element: double>` encoding
+    !> (the standard 3-level Parquet LIST layout) rather than the
+    !> `fixed_size_list` this library's own writer emits. Every row is length
+    !> 3, so it is a well-formed uniform vector column; this test proves the
+    !> read side treats that alternate on-disk schema identically to a
+    !> fixed_size_list -- same col_size, total elements, and values. See
+    !> tools/generate_fixtures.cpp (generate_list_vector_fixture).
+    subroutine test_read_list_vector_column(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: in_file = "test/fixtures/list_vector.parquet"
+        logical :: exists
+        integer :: nrows, nelem, ntot, row
+        integer(int32), allocatable :: id(:)
+        real(real64), allocatable :: ra(:)
+        real(real64), allocatable :: spec(:,:)
+        logical :: ok
+        !
+        inquire(file=in_file, exist=exists)
+        call check(error, exists)
+        if (allocated(error)) then
+            call test_failed(error, "input parquet file missing: expected test/fixtures/list_vector.parquet")
+            return
+        end if
+        !
+        call parquet_open_reader(reader, in_file)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 4)
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "unexpected number of rows in list_vector fixture")
+            return
+        end if
+        !
+        ! The list-encoded vector column reports its shape exactly like a
+        ! fixed_size_list column would: uniform per-row length 3, 12 total.
+        call parquet_get_col_size(reader, "spec", nelem)
+        call parquet_get_column_total_elements(reader, "spec", ntot)
+        call check(error, nelem == 3 .and. ntot == 12)
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "unexpected col_size/total elements for list-encoded spec column")
+            return
+        end if
+        !
+        allocate(id(nrows), ra(nrows), spec(nelem, nrows))
+        call parquet_read_column(reader, "ID", id)
+        call parquet_read_column(reader, "ra", ra)
+        call parquet_read_column(reader, "spec", spec)
+        call parquet_close_reader(reader)
+        !
+        call check(error, all(id == [10_int32, 20_int32, 30_int32, 40_int32]))
+        if (allocated(error)) then
+            call test_failed(error, "scalar ID column alongside list-encoded vector read incorrectly")
+            return
+        end if
+        call check(error, all(abs(ra - [1.5_real64, 2.5_real64, 3.5_real64, 4.5_real64]) < 1.0e-12_real64))
+        if (allocated(error)) then
+            call test_failed(error, "scalar ra column alongside list-encoded vector read incorrectly")
+            return
+        end if
+        !
+        ! Row r (0-based) holds [r+0.1, r+0.2, r+0.3]; spec is (nelem, nrows).
+        ok = .true.
+        do row = 1, nrows
+            ok = ok .and. abs(spec(1, row) - (real(row - 1, real64) + 0.1_real64)) < 1.0e-12_real64
+            ok = ok .and. abs(spec(2, row) - (real(row - 1, real64) + 0.2_real64)) < 1.0e-12_real64
+            ok = ok .and. abs(spec(3, row) - (real(row - 1, real64) + 0.3_real64)) < 1.0e-12_real64
+        end do
+        call check(error, ok)
+        if (allocated(error)) then
+            call test_failed(error, "list-encoded spec vector column values do not match expected")
+            return
+        end if
+    end subroutine test_read_list_vector_column
     !
 end module test_reading

@@ -136,6 +136,19 @@ module parquet
         final :: reader_finalize
     end type parquet_reader
 
+    ! A row filter for parquet_open_reader: each %add call is one AND-combined
+    ! clause, "<column> <op> [value]" (e.g. "ra > 180", "id is_not_null"),
+    ! validated (column exists, is a scalar column, value is well-formed for
+    ! that column's type) once parquet_open_reader actually applies it --
+    ! %add itself just accumulates the raw rule text. See "Row filtering with
+    ! parquet_filter" in the README for the full rule syntax.
+    type parquet_filter
+        character(len=512), allocatable :: rules(:)
+        integer :: n = 0
+    contains
+        procedure :: add => parquet_filter_add
+    end type parquet_filter
+
     interface parquet_write_column
         module procedure parquet_write_int32_column
         module procedure parquet_write_int32_matrix_column
@@ -209,6 +222,7 @@ module parquet
 
     public :: parquet_writer
     public :: parquet_reader
+    public :: parquet_filter
     public :: parquet_column_info
     public :: parquet_column_type
     public :: parquet_table_metadata
@@ -584,10 +598,11 @@ module parquet
             character(len=:), allocatable :: out
         end function parquet_to_lower
 
-        module subroutine parquet_open_reader(reader, filename, use_threads)
+        module subroutine parquet_open_reader(reader, filename, use_threads, filter)
             type(parquet_reader), intent(out) :: reader
             character(len=*), intent(in) :: filename
             logical, intent(in), optional :: use_threads
+            type(parquet_filter), intent(in), optional :: filter
         end subroutine parquet_open_reader
 
         module subroutine parquet_close_reader(reader, print_stat)
@@ -912,5 +927,28 @@ contains
         if (n < 1) error stop "parquet_set_max_threads: n must be >= 1"
         call parquet_set_thread_pool_capacity(int(n, kind=c_int))
     end subroutine parquet_set_max_threads
+
+    subroutine parquet_filter_add(this, rule)
+        class(parquet_filter), intent(inout) :: this
+        character(len=*), intent(in) :: rule
+        character(len=512), allocatable :: tmp(:)
+
+        if (len(rule) > len(this%rules)) then
+            error stop "parquet_filter%add: rule exceeds the maximum supported length (512 characters): " // trim(rule)
+        end if
+
+        if (.not. allocated(this%rules)) then
+            allocate(this%rules(1))
+            this%rules(1) = rule
+            this%n = 1
+            return
+        end if
+
+        allocate(tmp(this%n + 1))
+        tmp(1:this%n) = this%rules
+        tmp(this%n + 1) = rule
+        call move_alloc(tmp, this%rules)
+        this%n = this%n + 1
+    end subroutine parquet_filter_add
 
 end module

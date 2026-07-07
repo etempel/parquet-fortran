@@ -69,6 +69,20 @@ contains
                 test_read_unsupported_physical_type_aborts), &
             new_unittest("prefetching an unknown column aborts", &
                 test_prefetch_unknown_column_aborts), &
+            new_unittest("filter: unknown column aborts", &
+                test_filter_unknown_column_aborts), &
+            new_unittest("filter: vector column aborts", &
+                test_filter_vector_column_aborts), &
+            new_unittest("filter: malformed rule aborts", &
+                test_filter_malformed_rule_aborts), &
+            new_unittest("filter: non-numeric value against a numeric column aborts", &
+                test_filter_bad_numeric_value_aborts), &
+            new_unittest("filter: unquoted value against a string column aborts", &
+                test_filter_unquoted_string_value_aborts), &
+            new_unittest("filter: invalid boolean value aborts", &
+                test_filter_bad_boolean_value_aborts), &
+            new_unittest("filter: ordering comparison against a boolean column aborts", &
+                test_filter_bool_ordering_not_supported_aborts), &
             new_unittest("writing columns with mismatched row counts aborts", &
                 test_write_row_count_mismatch_aborts), &
             new_unittest("reading a column into a wrong-size array aborts", &
@@ -326,6 +340,79 @@ contains
             failure_message="prefetching an unknown column was expected to abort", &
             required_stderr="parquet_prefetch_columns: column not found in parquet file: not_a_real_column")
     end subroutine test_prefetch_unknown_column_aborts
+
+    !> parquet_open_reader(..., filter=) validates every filter column name
+    !> against the schema before applying it -- an unknown column aborts
+    !> cleanly rather than reaching Arrow's own uncaught exception.
+    subroutine test_filter_unknown_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_unknown_column", expect_abort=.true., &
+            failure_message="opening a reader with a filter naming an unknown column was expected to abort", &
+            required_stderr="unknown column in filter: not_a_real_column")
+    end subroutine test_filter_unknown_column_aborts
+
+    !> Filtering only supports scalar columns; naming a vector column in a
+    !> filter rule aborts cleanly instead of silently doing something
+    !> undefined per-row.
+    subroutine test_filter_vector_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_vector_column", expect_abort=.true., &
+            failure_message="opening a reader with a filter naming a vector column was expected to abort", &
+            required_stderr="filter column 'vec' is a vector column")
+    end subroutine test_filter_vector_column_aborts
+
+    !> A filter rule missing its operator ("<column> <op> [value]" shape)
+    !> aborts with a clean, syntax-specific message from the Fortran-side
+    !> tokenizer, before ever reaching the C++ side.
+    subroutine test_filter_malformed_rule_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_malformed_rule", expect_abort=.true., &
+            failure_message="opening a reader with a malformed filter rule was expected to abort", &
+            required_stderr="invalid filter rule")
+    end subroutine test_filter_malformed_rule_aborts
+
+    !> A non-numeric value against a numeric filter column (rule shape is
+    !> fine, the value itself isn't) aborts with a message naming the value
+    !> and the column, distinct from the shape-only rejection above.
+    subroutine test_filter_bad_numeric_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_bad_numeric_value", expect_abort=.true., &
+            failure_message="a non-numeric filter value against a numeric column was expected to abort", &
+            required_stderr="is not a valid integer for column 'id_with_null'")
+    end subroutine test_filter_bad_numeric_value_aborts
+
+    !> A string column's filter value must be double-quoted -- a bare,
+    !> unquoted word aborts rather than being silently treated as a string.
+    subroutine test_filter_unquoted_string_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_unquoted_string_value", expect_abort=.true., &
+            failure_message="an unquoted value against a string filter column was expected to abort", &
+            required_stderr="must be double-quoted")
+    end subroutine test_filter_unquoted_string_value_aborts
+
+    !> A boolean column's filter value must be the literal true/false.
+    subroutine test_filter_bad_boolean_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_bad_boolean_value", expect_abort=.true., &
+            failure_message="an invalid boolean filter value was expected to abort", &
+            required_stderr="is not true/false for boolean column")
+    end subroutine test_filter_bad_boolean_value_aborts
+
+    !> Ordering comparisons (>, >=, <, <=) aren't supported against a boolean
+    !> filter column -- only ==//= are.
+    subroutine test_filter_bool_ordering_not_supported_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_bool_ordering_not_supported", expect_abort=.true., &
+            failure_message="an ordering comparison against a boolean filter column was expected to abort", &
+            required_stderr="ordering comparisons")
+    end subroutine test_filter_bool_ordering_not_supported_aborts
 
     !> parquet_write_column now catches a row-count mismatch itself and error
     !> stops with a dedicated message, instead of letting Arrow's own

@@ -54,6 +54,151 @@ contains
         end if
     end subroutine check_column_exists
 
+    !> Splits one parquet_filter%add rule ("<column> <op> [value]") into its
+    !> three parts, purely by syntax -- no schema access here, so this cannot
+    !> check that `name` is a real column or that `value` is well-formed for
+    !> that column's actual type (parquet_reader_set_filter does that, once
+    !> the schema is available). Deliberately NOT a general boolean-expression
+    !> parser: exactly one clause per rule, no AND/OR/parens inside the string
+    !> itself -- see the parquet_filter type's own doc comment.
+    subroutine parquet_tokenize_filter_rule(rule, name, op, value, is_string, ok, errmsg)
+        character(len=*), intent(in) :: rule
+        character(len=:), allocatable, intent(out) :: name, op, value, errmsg
+        logical, intent(out) :: is_string, ok
+        character(len=:), allocatable :: t, rest
+        integer :: p
+
+        ok = .false.
+        is_string = .false.
+        value = ""
+        name = ""
+        op = ""
+        errmsg = ""
+        t = trim(adjustl(rule))
+        if (len(t) == 0) then
+            errmsg = "empty filter rule"
+            return
+        end if
+
+        p = index(t, " ")
+        if (p == 0) then
+            errmsg = "filter rule '" // t // "' is missing an operator"
+            return
+        end if
+        name = t(1:p-1)
+        rest = trim(adjustl(t(p+1:)))
+        if (len(rest) == 0) then
+            errmsg = "filter rule '" // t // "' is missing an operator"
+            return
+        end if
+
+        p = index(rest, " ")
+        if (p == 0) then
+            op = rest
+            rest = ""
+        else
+            op = rest(1:p-1)
+            rest = trim(adjustl(rest(p+1:)))
+        end if
+
+        select case (trim(op))
+        case ("is_null", "is_not_null")
+            if (len(rest) > 0) then
+                errmsg = "filter rule '" // t // "': " // trim(op) // " takes no value"
+                return
+            end if
+        case (">", ">=", "<", "<=", "==", "/=")
+            if (len(rest) == 0) then
+                errmsg = "filter rule '" // t // "' is missing a value after '" // trim(op) // "'"
+                return
+            end if
+            if (rest(1:1) == '"') then
+                if (len(rest) < 2 .or. rest(len(rest):len(rest)) /= '"') then
+                    errmsg = "filter rule '" // t // "' has an unterminated quoted value"
+                    return
+                end if
+                value = rest(2:len(rest)-1)
+                is_string = .true.
+            else
+                value = rest
+                is_string = .false.
+            end if
+        case default
+            errmsg = "filter rule '" // t // "' has an unknown operator '" // trim(op) // "'"
+            return
+        end select
+
+        ok = .true.
+    end subroutine parquet_tokenize_filter_rule
+
+    !> Packs a fixed-width character array into the same "n fixed-width items
+    !> back to back" convention used for names_packed elsewhere in this file
+    !> (see parquet_prefetch_columns) -- shared here since apply_parquet_filter
+    !> needs it for three separate arrays (names/ops/values).
+    subroutine pack_fixed_width_strings(strs, packed)
+        character(len=*), intent(in) :: strs(:)
+        character(kind=c_char), allocatable, intent(out) :: packed(:)
+        integer :: i, j, k, item_len, n
+
+        item_len = len(strs)
+        n = size(strs)
+        allocate(packed(item_len * n))
+        k = 0
+        do i = 1, n
+            do j = 1, item_len
+                k = k + 1
+                packed(k) = achar(iachar(strs(i)(j:j)), kind=c_char)
+            end do
+        end do
+    end subroutine pack_fixed_width_strings
+
+    !> Tokenizes and applies every rule in `filter` to `reader` -- called from
+    !> parquet_open_reader right after the reader itself is created, so
+    !> parquet_get_nrows and every column read afterward already reflect the
+    !> filtered row set (see parquet_reader_set_filter in parquet_wrapper.cpp
+    !> for the actual validation/masking).
+    subroutine apply_parquet_filter(reader, filter)
+        type(parquet_reader), intent(inout) :: reader
+        type(parquet_filter), intent(in) :: filter
+        character(len=64), allocatable :: names(:)
+        character(len=16), allocatable :: ops(:)
+        character(len=512), allocatable :: values(:)
+        integer(c_int8_t), allocatable :: is_string_flags(:)
+        character(kind=c_char), allocatable :: names_packed(:), ops_packed(:), values_packed(:)
+        character(len=:), allocatable :: parsed_name, parsed_op, parsed_value, errmsg
+        logical :: parsed_is_string, ok
+        character(len=1024) :: c_err
+        integer(c_long_long) :: status
+        integer :: i, n
+
+        n = filter%n
+        allocate(names(n), ops(n), values(n), is_string_flags(n))
+
+        do i = 1, n
+            call parquet_tokenize_filter_rule(filter%rules(i), parsed_name, parsed_op, parsed_value, &
+                parsed_is_string, ok, errmsg)
+            if (.not. ok) error stop "parquet_open_reader: invalid filter rule: " // errmsg
+            if (len(parsed_name) > len(names) .or. len(parsed_op) > len(ops) .or. len(parsed_value) > len(values)) then
+                error stop "parquet_open_reader: filter rule exceeds an internal length limit: " // trim(filter%rules(i))
+            end if
+            names(i) = parsed_name
+            ops(i) = parsed_op
+            values(i) = parsed_value
+            is_string_flags(i) = merge(1_c_int8_t, 0_c_int8_t, parsed_is_string)
+        end do
+
+        call pack_fixed_width_strings(names, names_packed)
+        call pack_fixed_width_strings(ops, ops_packed)
+        call pack_fixed_width_strings(values, values_packed)
+
+        c_err = ""
+        status = parquet_reader_set_filter(reader%handle, names_packed, int(len(names), kind=c_long_long), &
+            ops_packed, int(len(ops), kind=c_long_long), values_packed, int(len(values), kind=c_long_long), &
+            is_string_flags, int(n, kind=c_long_long), c_err, int(len(c_err), kind=c_long_long))
+
+        if (status /= 0) error stop "parquet_open_reader: " // trim(c_err)
+    end subroutine apply_parquet_filter
+
     module procedure parquet_open_reader
         logical :: use_threads_value
 
@@ -61,6 +206,10 @@ contains
         if (present(use_threads)) use_threads_value = use_threads
 
         reader%handle = create_parquet_reader(trim(filename)//char(0), merge(1_c_int, 0_c_int, use_threads_value))
+
+        if (present(filter)) then
+            if (filter%n > 0) call apply_parquet_filter(reader, filter)
+        end if
     end procedure parquet_open_reader
 
     module procedure parquet_close_reader

@@ -88,6 +88,18 @@ contains
                 test_prefetch_columns_repeated_overlapping_calls), &
             new_unittest("parquet_close_reader(print_stat=.true.) does not disturb a normal close", &
                 test_close_reader_print_stat_smoke), &
+            new_unittest("parquet_open_reader(filter=) ANDs multiple rules and updates nrows", &
+                test_open_reader_filter_ands_rules), &
+            new_unittest("parquet_open_reader(filter=) supports is_null/is_not_null and quoted strings", &
+                test_open_reader_filter_null_and_string_rules), &
+            new_unittest("parquet_open_reader(filter=) leaves a non-filter vector column readable", &
+                test_filter_leaves_vector_column_readable), &
+            new_unittest("parquet_open_reader(filter=) supports boolean equality and string ordering", &
+                test_filter_boolean_and_string_ordering), &
+            new_unittest("parquet_prefetch_columns after a filtered open still returns filtered rows", &
+                test_filter_prefetch_after_open), &
+            new_unittest("parquet_open_reader(filter=) with zero matching rows still works", &
+                test_filter_zero_matching_rows), &
             new_unittest("use_threads=.false. on writer and reader still round-trips", &
                 test_use_threads_false_still_round_trips), &
             new_unittest("parquet_set_max_threads with a valid value does not break a round-trip", &
@@ -988,49 +1000,279 @@ contains
             "repeated, overlapping parquet_prefetch_columns calls did not yield the union of all requested columns")
     end subroutine test_prefetch_columns_repeated_overlapping_calls
 
-    !> print_stat is purely a diagnostic print to stdout -- this only checks
-    !> that passing print_stat=.true. (with a mix of a prefetched-only column,
-    !> a column that was actually read, and a column nobody touched at all)
-    !> doesn't disturb the close itself or the data already read back, and
-    !> that the file is left in a normal, readable state afterwards.
+    !> print_stat=.true. always prints to stdout -- run out-of-process (see
+    !> scenario_print_stat_smoke in error_scenarios.f90) so that output is
+    !> captured/discarded by check_scenario_exit_status instead of
+    !> interleaving with test-drive's own progress lines in the visible
+    !> `fpm test` console output.
     subroutine test_close_reader_print_stat_smoke(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "print_stat_smoke", expect_abort=.false., &
+            failure_message="parquet_close_reader(print_stat=.true.) was expected to exit cleanly")
+    end subroutine test_close_reader_print_stat_smoke
+
+    !> Every parquet_filter%add rule ANDs together: "ra > 200", "ra <= 360",
+    !> and "id /= 7" together should keep only rows where ra is in (200,360]
+    !> AND id isn't 7 -- and parquet_get_nrows/parquet_read_column should
+    !> transparently reflect just that filtered row set.
+    subroutine test_open_reader_filter_ands_rules(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
-        integer(int32) :: a_values(5), b_values(5), c_values(5)
-        integer(int32) :: a_back(5)
-        character(len=*), parameter :: out_file = "test_run/test_print_stat.parquet"
-        integer :: i
+        type(parquet_filter) :: filt
+        integer(int32) :: ra(10), id(10)
         integer(int32) :: nrows
+        integer(int32), allocatable :: ra_back(:), id_back(:)
+        character(len=*), parameter :: out_file = "test_run/test_filter_and.parquet"
+        integer :: i
 
-        a_values = [(i, i=1,5)]
-        b_values = [(i*10, i=1,5)]
-        c_values = [(i*100, i=1,5)]
+        ra = [(i*40, i=1,10)]
+        id = [(i, i=1,10)]
 
         call parquet_open_writer(writer, out_file)
-        call parquet_write_column(writer, "a", a_values)
-        call parquet_write_column(writer, "b", b_values)
-        call parquet_write_column(writer, "c", c_values)
+        call parquet_write_column(writer, "ra", ra)
+        call parquet_write_column(writer, "id", id)
         call parquet_close_writer(writer)
 
-        call parquet_open_reader(reader, out_file)
-        call parquet_prefetch_columns(reader, ["b"])
-        call parquet_read_column(reader, "a", a_back)
-        ! "c" is deliberately never prefetched or read, to exercise the
-        ! "untouched columns are left out of the report" behavior.
-        call parquet_close_reader(reader, print_stat=.true.)
+        call filt%add("ra > 200")
+        call filt%add("ra <= 360")
+        call filt%add("id /= 7")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
 
-        call check(error, all(a_back == a_values), &
-            "print_stat=.true. disturbed a column already read back before the close")
+        allocate(ra_back(nrows), id_back(nrows))
+        call parquet_read_column(reader, "ra", ra_back)
+        call parquet_read_column(reader, "id", id_back)
+        call parquet_close_reader(reader)
+
+        ! ra in (200, 360] is {240, 280, 320, 360} (id 6,7,8,9); excluding
+        ! id == 7 (ra == 280) leaves exactly {240, 320, 360} / {6, 8, 9}.
+        call check(error, nrows == 3, "parquet_get_nrows did not reflect the AND-combined filter's row count")
         if (allocated(error)) return
 
-        call parquet_open_reader(reader, out_file)
+        call check(error, all(ra_back == [240, 320, 360]) .and. all(id_back == [6, 8, 9]), &
+            "parquet_read_column did not return the AND-combined filter's expected rows")
+    end subroutine test_open_reader_filter_ands_rules
+
+    !> is_null/is_not_null and a double-quoted string equality rule, each
+    !> exercised on their own so a false match/no-match on one wouldn't be
+    !> masked by another passing rule.
+    subroutine test_open_reader_filter_null_and_string_rules(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt_string, filt_not_null
+        integer(int32) :: id(5)
+        logical :: is_valid(5)
+        character(len=8) :: name(5)
+        integer(int32) :: nrows
+        character(len=*), parameter :: out_file = "test_run/test_filter_null_string.parquet"
+        integer :: i
+
+        id = [(i, i=1,5)]
+        is_valid = [.true., .false., .true., .true., .false.]
+        do i = 1, 5
+            write(name(i), '(A,I0)') "row", i
+        end do
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id", id, is_valid=is_valid)
+        call parquet_write_column(writer, "name", name)
+        call parquet_close_writer(writer)
+
+        call filt_string%add('name == "row3"')
+        call parquet_open_reader(reader, out_file, filter=filt_string)
         call parquet_get_nrows(reader, nrows)
         call parquet_close_reader(reader)
 
-        call check(error, nrows == 5, &
-            "file was left in a bad state after parquet_close_reader(print_stat=.true.)")
-    end subroutine test_close_reader_print_stat_smoke
+        call check(error, nrows == 1, "quoted string equality filter did not match exactly one row")
+        if (allocated(error)) return
+
+        call filt_not_null%add("id is_not_null")
+        call parquet_open_reader(reader, out_file, filter=filt_not_null)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+
+        call check(error, nrows == 3, "id is_not_null did not exclude exactly the two genuine Nulls")
+    end subroutine test_open_reader_filter_null_and_string_rules
+
+    !> A filter narrows every column's row count via arrow::compute::Filter,
+    !> including fixed-size-list (vector) columns -- even one never named in
+    !> any filter rule. This specifically guards against the filtered array's
+    !> internal offsets/slicing being wrong for get_uniform_list_values/
+    !> get_row_list_values (parquet_wrapper.cpp), which was never exercised
+    !> by the AND/is_null/string tests above (those only ever read scalar
+    !> columns back).
+    subroutine test_filter_leaves_vector_column_readable(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32) :: id(6)
+        integer(int64) :: vec(3,6)
+        integer(int32) :: nrows
+        integer(int64), allocatable :: vec_back(:,:)
+        integer(int64) :: row_back(3)
+        character(len=*), parameter :: out_file = "test_run/test_filter_vector_readback.parquet"
+        integer :: i
+
+        id = [(i, i=1,6)]
+        do i = 1, 6
+            vec(:,i) = [i*10_int64, i*20_int64, i*30_int64]
+        end do
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_write_column(writer, "vec", vec)
+        call parquet_close_writer(writer)
+
+        ! Filter only references "id" -- "vec" is never named in a rule.
+        call filt%add("id > 2")
+        call filt%add("id <= 5")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+
+        call check(error, nrows == 3, "filter on 'id' did not produce the expected 3 filtered rows")
+        if (allocated(error)) return
+
+        allocate(vec_back(3, nrows))
+        call parquet_read_column(reader, "vec", vec_back)
+        call check(error, &
+            all(vec_back(:,1) == [30_int64, 60_int64, 90_int64]) .and. &
+            all(vec_back(:,2) == [40_int64, 80_int64, 120_int64]) .and. &
+            all(vec_back(:,3) == [50_int64, 100_int64, 150_int64]), &
+            "reading a non-filter vector column after filtering did not return the correctly filtered rows")
+        if (allocated(error)) return
+
+        ! Row-mode read of the (already-filtered) 2nd row must line up with
+        ! vec_back(:,2) above -- i.e. id == 4's original vector, not id == 2's.
+        call parquet_read_array_row_mode(reader, "vec", row_back, 2)
+        call parquet_close_reader(reader)
+
+        call check(error, all(row_back == [40_int64, 80_int64, 120_int64]), &
+            "parquet_read_array_row_mode on a filtered reader did not return the correctly filtered row")
+    end subroutine test_filter_leaves_vector_column_readable
+
+    !> Boolean equality (only ==//= are supported for boolean columns) and
+    !> string ordering comparisons (<, <=, >, >=, lexicographic), neither of
+    !> which the AND/is_null/quoted-equality tests above exercise.
+    subroutine test_filter_boolean_and_string_ordering(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt_bool, filt_string
+        integer(int32) :: id(6)
+        logical :: flag(6)
+        character(len=8) :: name(6)
+        integer(int32) :: nrows
+        character(len=8), allocatable :: name_back(:)
+        character(len=*), parameter :: out_file = "test_run/test_filter_bool_string.parquet"
+        integer :: i
+
+        id = [(i, i=1,6)]
+        flag = [.true., .false., .true., .false., .true., .false.]
+        do i = 1, 6
+            write(name(i), '(A,I0)') "n", i
+        end do
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_write_column(writer, "flag", flag)
+        call parquet_write_column(writer, "name", name)
+        call parquet_close_writer(writer)
+
+        call filt_bool%add("flag == true")
+        call parquet_open_reader(reader, out_file, filter=filt_bool)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+
+        call check(error, nrows == 3, "flag == true did not match exactly the 3 true rows")
+        if (allocated(error)) return
+
+        ! Lexicographic: "n2" < "n3" < "n4" < "n5" -- rule keeps "n3"/"n4" only.
+        call filt_string%add('name > "n2"')
+        call filt_string%add('name <= "n4"')
+        call parquet_open_reader(reader, out_file, filter=filt_string)
+        call parquet_get_nrows(reader, nrows)
+        allocate(name_back(nrows))
+        call parquet_read_column(reader, "name", name_back)
+        call parquet_close_reader(reader)
+
+        call check(error, nrows == 2 .and. all(name_back == ["n3      ", "n4      "]), &
+            "string ordering filter rules did not select exactly ['n3','n4']")
+    end subroutine test_filter_boolean_and_string_ordering
+
+    !> parquet_prefetch_columns called on a reader that already has a filter
+    !> set must still route through the same filtering path as an ordinary
+    !> lazy read (see apply_filter_mask in parquet_wrapper.cpp) -- otherwise
+    !> a prefetched column would silently return unfiltered data.
+    subroutine test_filter_prefetch_after_open(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32) :: id(6)
+        integer(int32) :: nrows
+        integer(int32), allocatable :: id_back(:)
+        character(len=*), parameter :: out_file = "test_run/test_filter_prefetch_after.parquet"
+        integer :: i
+
+        id = [(i, i=1,6)]
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_close_writer(writer)
+
+        call filt%add("id > 4")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+
+        ! "id" was already decoded/filtered as part of applying the filter
+        ! itself -- prefetch it again anyway, to exercise the "already
+        ! cached" skip path together with an active filter.
+        call parquet_prefetch_columns(reader, ["id"])
+        allocate(id_back(nrows))
+        call parquet_read_column(reader, "id", id_back)
+        call parquet_close_reader(reader)
+
+        call check(error, nrows == 2 .and. all(id_back == [5, 6]), &
+            "parquet_prefetch_columns after a filtered open did not return filtered rows")
+    end subroutine test_filter_prefetch_after_open
+
+    !> A filter that matches no rows at all is a valid, non-error outcome:
+    !> parquet_get_nrows must report 0, and reading a zero-length column must
+    !> not crash.
+    subroutine test_filter_zero_matching_rows(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32) :: id(6)
+        integer(int32) :: nrows
+        integer(int32), allocatable :: id_back(:)
+        character(len=*), parameter :: out_file = "test_run/test_filter_zero_rows.parquet"
+        integer :: i
+
+        id = [(i, i=1,6)]
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_close_writer(writer)
+
+        call filt%add("id > 100")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+
+        call check(error, nrows == 0, "a filter matching no rows did not produce nrows == 0")
+        if (allocated(error)) return
+
+        allocate(id_back(nrows))
+        call parquet_read_column(reader, "id", id_back)
+        call parquet_close_reader(reader)
+
+        call check(error, size(id_back) == 0, "reading a zero-length filtered column did not behave correctly")
+    end subroutine test_filter_zero_matching_rows
 
     !> use_threads=.false. must still be a fully functional writer/reader --
     !> it only turns off Arrow's internal thread pool for that instance, it

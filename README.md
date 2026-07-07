@@ -78,6 +78,7 @@ See [Error handling](#error-handling) and [Limitations](#limitations) for full d
   - [Reading only touches the columns you ask for](#reading-only-touches-the-columns-you-ask-for)
   - [Prefetching multiple columns at once](#prefetching-multiple-columns-at-once-with-parquet_prefetch_columns)
   - [Printing reader statistics](#printing-reader-statistics-with-parquet_close_readerprint_stattrue)
+  - [Row filtering with parquet_filter](#row-filtering-with-parquet_filter)
 - [Writing parquet files from your fortran code](#writing-parquet-files-from-your-fortran-code)
   - [Saving the source MAML alongside the parquet file](#saving-the-source-maml-alongside-the-parquet-file)
 - [The MAML metadata format](#the-maml-metadata-format)
@@ -268,6 +269,36 @@ call parquet_close_reader(reader, print_stat=.true.)
 ```
 
 Requires linking Arrow's `arrow_compute` library (for the min/max calculation) in addition to `arrow`/`parquet` — see [Environment variables](#environment-variables); `parquet-fortran`'s own `fpm.toml` already declares this link, and fpm propagates it to consuming projects automatically, so no action is normally needed.
+
+### Row filtering with `parquet_filter`
+
+`parquet_open_reader(reader, filename, filter=filt)` restricts a reader to only the rows matching a `type(parquet_filter)`. Once a filter is set, it is completely transparent to everything else: `parquet_get_nrows`, `parquet_read_column`, `parquet_prefetch_columns`, and `parquet_close_reader(..., print_stat=.true.)` all behave exactly as if the file only ever contained the matching rows — there is no separate "filtered count" to track yourself.
+
+```fortran
+type(parquet_filter) :: filt
+type(parquet_reader) :: reader
+integer(int32) :: nrows
+integer(int32), allocatable :: ra(:)
+
+call filt%add("ra > 180")
+call filt%add("ra <= 360")
+call filt%add("id is_not_null")
+
+call parquet_open_reader(reader, "data.parquet", filter=filt)
+call parquet_get_nrows(reader, nrows)      ! already the filtered row count
+allocate(ra(nrows))
+call parquet_read_column(reader, "ra", ra) ! already just the matching rows
+call parquet_close_reader(reader)
+```
+
+Each `filt%add(rule)` call adds one clause; multiple clauses always combine with AND (there is no OR/NOT) — call `%add` more than once, as above, to express a range or several independent conditions. A `rule` has the shape `"<column> <op> <value>"` or `"<column> is_null"` / `"<column> is_not_null"`:
+
+- Supported operators: `>`, `>=`, `<`, `<=`, `==`, `/=`, `is_null`, `is_not_null`.
+- `<value>` is a bare number for a numeric column (`ra > 180`), `true`/`false` for a boolean column (`flag == true`), or a **double-quoted** string for a `string` column (`name == "abell_1"`) — quotes are required for strings and not used for anything else.
+- `is_null`/`is_not_null` take no value.
+- Only plain scalar columns can be filtered — naming a vector (`col_size > 1`) column in a rule fails immediately with `error stop` when `parquet_open_reader` is called. So does naming a column that doesn't exist in the file, or a rule with invalid syntax (unknown operator, unquoted string value, non-numeric value against a numeric column, etc.) — every rule is fully validated (column existence, type-compatibility, and value parsing) right there in `parquet_open_reader`, before any of your own code runs.
+
+Filtering is **not** predicate pushdown: every filter-referenced column, and every column you subsequently read, is still fully read and decoded from disk exactly as without a filter (Parquet row-group statistics are never used to skip I/O). The benefit is entirely downstream: `parquet_get_nrows` and every column you read only ever reflect the matching rows, so your own code loops over, allocates for, and processes far fewer rows when the filter is selective — at the cost of a small transient memory bump while a column's full decoded array and its filtered result briefly coexist, before the unfiltered one is discarded.
 
 ## Writing parquet files from your fortran code
 
@@ -683,7 +714,7 @@ The public derived type `parquet_table_metadata` provides:
 
 ### Reader (table and column info)
 
-- `parquet_open_reader(reader, filename[, use_threads])` — opens an existing parquet file for reading. `use_threads` (optional, `logical`, default `.true.`) — decode across Arrow's internal thread pool. See [Multi-threaded decoding/encoding](#multi-threaded-decodingencoding-use_threads-and-thread-pool-size).
+- `parquet_open_reader(reader, filename[, use_threads, filter])` — opens an existing parquet file for reading. `use_threads` (optional, `logical`, default `.true.`) — decode across Arrow's internal thread pool. See [Multi-threaded decoding/encoding](#multi-threaded-decodingencoding-use_threads-and-thread-pool-size). `filter` (optional, `type(parquet_filter)`) restricts the reader to only rows matching the filter — see [Row filtering with parquet_filter](#row-filtering-with-parquet_filter).
 - `parquet_close_reader(reader[, print_stat])` — releases resources associated with `reader`. Fails with `error stop` if `reader` was never opened, or was already closed. `print_stat` (optional `logical`, default `.false.`) prints a diagnostic summary of the reader's activity to stdout first — see [Printing reader statistics](#printing-reader-statistics-with-parquet_close_readerprint_stattrue).
 - `parquet_get_nrows(reader, nrows)` — returns the number of table rows in `nrows` (`integer(int32)` or `integer(int64)`).
 - `parquet_get_col_size(reader, name, col_size)` — returns the fixed row length of vector column `name` in `col_size`. Call this before allocating the output array for `parquet_read_column`/`parquet_read_array_row_mode`/`parquet_read_array_element_mode` on that column.

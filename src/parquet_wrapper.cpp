@@ -16,6 +16,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -100,6 +102,21 @@ private:
 	Handle *handle_;
 };
 
+// Used by eval_filter_clause (filter row-matching, further below) -- declared
+// here, outside extern "C", since templates cannot have C language linkage
+// (same reason read_list_primitive_row/ctype_name live between extern "C"
+// blocks rather than inside one).
+template <typename T>
+static bool compare_op(const T &a, const T &b, const std::string &op)
+{
+	if (op == ">") return a > b;
+	if (op == ">=") return a >= b;
+	if (op == "<") return a < b;
+	if (op == "<=") return a <= b;
+	if (op == "==") return a == b;
+	return a != b; // "/="; every other op string is rejected before this is ever called.
+}
+
 extern "C"
 {
 	// MAML parsing (parquet_metadata.f90) repeatedly grows arrays of derived
@@ -174,8 +191,17 @@ extern "C"
 		std::unique_ptr<parquet::arrow::FileReader> reader;
 		std::shared_ptr<arrow::Schema> schema;
 		std::string filename;
-		int64_t nrows = 0;
+		int64_t nrows = 0; // effective row count: equal to total_nrows until a filter narrows it (see parquet_reader_set_filter).
+		int64_t total_nrows = 0; // the file's true, unfiltered row count -- kept for parquet_reader_print_stat's "of N total".
 		std::unordered_map<int, std::shared_ptr<arrow::Array>> column_cache;
+		// Set once by parquet_reader_set_filter: a plain (never-null) boolean
+		// mask, one entry per row of the *unfiltered* file, true for rows that
+		// pass every filter clause. get_single_chunk_array and
+		// parquet_reader_prefetch_columns both apply this (via arrow::compute::Filter)
+		// to every column right after decoding it, so every column ever handed
+		// back to Fortran -- and every column_cache entry -- reflects only the
+		// matching rows, transparently, once a filter is set.
+		std::shared_ptr<arrow::BooleanArray> filter_mask;
 		// Access bookkeeping for parquet_reader_print_stat only: was_prefetched
 		// is set for every column index named in a parquet_reader_prefetch_columns
 		// call (whether or not it actually triggered a read that time -- see
@@ -256,6 +282,36 @@ extern "C"
 		return combined.ValueOrDie();
 	}
 
+	// Arrow's compute kernels (MinMax, Filter, ...) live in a separate
+	// registry from core arrow/parquet and are only usable once explicitly
+	// registered -- done lazily here (only print_stat/filtering need them),
+	// once per process via std::call_once, since the underlying registry is
+	// process-global and not safe to register into concurrently.
+	static void ensure_compute_initialized()
+	{
+		static std::once_flag compute_init_flag;
+		std::call_once(compute_init_flag, []() { auto st = arrow::compute::Initialize(); (void)st; });
+	}
+
+	// Applies a reader's filter_mask (if set -- see parquet_reader_set_filter)
+	// to a just-decoded column array, keeping only the rows that pass every
+	// filter clause. A no-op (returns `array` unchanged) if no filter is set.
+	// Called from every place a column is first decoded from disk
+	// (get_single_chunk_array, parquet_reader_prefetch_columns), so every
+	// column ever cached or handed back to Fortran reflects only the
+	// matching rows once a filter is in effect.
+	static std::shared_ptr<arrow::Array> apply_filter_mask(ParquetReaderHandle *reader_handle, const std::shared_ptr<arrow::Array> &array)
+	{
+		if (!reader_handle->filter_mask) return array;
+		ensure_compute_initialized();
+		auto filtered = arrow::compute::Filter(array, reader_handle->filter_mask);
+		if (!filtered.ok())
+		{
+			throw std::runtime_error(filtered.status().ToString());
+		}
+		return filtered.ValueOrDie().make_array();
+	}
+
 	// Reads (and caches) exactly one column's data from disk -- every other
 	// column in the file is never touched, regardless of how many columns
 	// the file has or how large they are. This is what makes reading a
@@ -277,7 +333,7 @@ extern "C"
 			throw std::runtime_error(status.ToString());
 		}
 
-		auto array = combine_column_chunks(chunked, name);
+		auto array = apply_filter_mask(reader_handle, combine_column_chunks(chunked, name));
 		reader_handle->column_cache.emplace(static_cast<int>(idx), array);
 		return array;
 	}
@@ -773,6 +829,7 @@ extern "C"
 		}
 
 		handle->nrows = handle->reader->parquet_reader()->metadata()->num_rows();
+		handle->total_nrows = handle->nrows;
 		return handle;
 	}
 
@@ -837,7 +894,7 @@ extern "C"
 		for (size_t i = 0; i < indices.size(); ++i)
 		{
 			auto chunked = table->column(static_cast<int>(i));
-			auto array = combine_column_chunks(chunked, names[i]);
+			auto array = apply_filter_mask(reader_handle, combine_column_chunks(chunked, names[i]));
 			reader_handle->column_cache[indices[i]] = array;
 		}
 	}
@@ -846,6 +903,297 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		return reader_handle->nrows;
+	}
+
+	// Row-filtering support for parquet_open_reader(..., filter=). Every
+	// clause is a single "<column> <op> [value]" rule, already tokenized on
+	// the Fortran side (parquet_tokenize_filter_rule) -- this is deliberately
+	// NOT a general boolean-expression parser (no AND/OR/parens inside one
+	// rule string): composing several rules is done by calling
+	// parquet_filter%add more than once, which this function always ANDs
+	// together. See parquet_reader_set_filter below for the overall flow.
+
+	static bool parse_int64_strict(const std::string &s, int64_t &out)
+	{
+		if (s.empty()) return false;
+		char *end = nullptr;
+		errno = 0;
+		long long v = std::strtoll(s.c_str(), &end, 10);
+		if (end != s.c_str() + s.size() || errno == ERANGE) return false;
+		out = static_cast<int64_t>(v);
+		return true;
+	}
+
+	static bool parse_double_strict(const std::string &s, double &out)
+	{
+		if (s.empty()) return false;
+		char *end = nullptr;
+		double v = std::strtod(s.c_str(), &end);
+		if (end != s.c_str() + s.size()) return false;
+		out = v;
+		return true;
+	}
+
+	static std::string ascii_to_lower(const std::string &s)
+	{
+		std::string out = s;
+		for (char &c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		return out;
+	}
+
+	// Evaluates one filter clause against `array` (the filter column's own,
+	// still-unfiltered decoded array -- filter_mask isn't set on the reader
+	// yet while this runs), AND-ing the per-row result into `combined`
+	// in place. Returns false (with `err` set) on any validation failure
+	// (unknown/unsupported type for the clause's operator, unparseable
+	// value, ...); the caller aborts the whole parquet_reader_set_filter
+	// call in that case, same as an unknown filter column.
+	static bool eval_filter_clause(const std::shared_ptr<arrow::Array> &array, const std::string &colname,
+		const std::string &op, bool is_string, const std::string &value_text,
+		std::vector<uint8_t> &combined, std::string &err)
+	{
+		int64_t n = array->length();
+
+		if (op == "is_null" || op == "is_not_null")
+		{
+			bool want_null = (op == "is_null");
+			for (int64_t i = 0; i < n; ++i)
+			{
+				bool ok = want_null ? array->IsNull(i) : array->IsValid(i);
+				combined[static_cast<size_t>(i)] = combined[static_cast<size_t>(i)] && ok;
+			}
+			return true;
+		}
+
+		switch (array->type_id())
+		{
+		case arrow::Type::INT32:
+		case arrow::Type::INT64:
+		{
+			int64_t parsed;
+			if (is_string || !parse_int64_strict(value_text, parsed))
+			{
+				err = "value '" + value_text + "' is not a valid integer for column '" + colname + "'";
+				return false;
+			}
+			if (array->type_id() == arrow::Type::INT32)
+			{
+				if (parsed < std::numeric_limits<int32_t>::min() || parsed > std::numeric_limits<int32_t>::max())
+				{
+					err = "value '" + value_text + "' is out of int32 range for column '" + colname + "'";
+					return false;
+				}
+				auto arr = std::static_pointer_cast<arrow::Int32Array>(array);
+				int32_t v = static_cast<int32_t>(parsed);
+				for (int64_t i = 0; i < n; ++i)
+				{
+					bool ok = !arr->IsNull(i) && compare_op<int32_t>(arr->Value(i), v, op);
+					combined[static_cast<size_t>(i)] = combined[static_cast<size_t>(i)] && ok;
+				}
+			}
+			else
+			{
+				auto arr = std::static_pointer_cast<arrow::Int64Array>(array);
+				for (int64_t i = 0; i < n; ++i)
+				{
+					bool ok = !arr->IsNull(i) && compare_op<int64_t>(arr->Value(i), parsed, op);
+					combined[static_cast<size_t>(i)] = combined[static_cast<size_t>(i)] && ok;
+				}
+			}
+			return true;
+		}
+		case arrow::Type::FLOAT:
+		case arrow::Type::DOUBLE:
+		{
+			double parsed;
+			if (is_string || !parse_double_strict(value_text, parsed))
+			{
+				err = "value '" + value_text + "' is not a valid number for column '" + colname + "'";
+				return false;
+			}
+			if (array->type_id() == arrow::Type::FLOAT)
+			{
+				auto arr = std::static_pointer_cast<arrow::FloatArray>(array);
+				for (int64_t i = 0; i < n; ++i)
+				{
+					bool ok = !arr->IsNull(i) && compare_op<double>(static_cast<double>(arr->Value(i)), parsed, op);
+					combined[static_cast<size_t>(i)] = combined[static_cast<size_t>(i)] && ok;
+				}
+			}
+			else
+			{
+				auto arr = std::static_pointer_cast<arrow::DoubleArray>(array);
+				for (int64_t i = 0; i < n; ++i)
+				{
+					bool ok = !arr->IsNull(i) && compare_op<double>(arr->Value(i), parsed, op);
+					combined[static_cast<size_t>(i)] = combined[static_cast<size_t>(i)] && ok;
+				}
+			}
+			return true;
+		}
+		case arrow::Type::BOOL:
+		{
+			if (op != "==" && op != "/=")
+			{
+				err = "ordering comparisons ('>', '>=', '<', '<=') are not supported for boolean column '" + colname + "'";
+				return false;
+			}
+			if (is_string)
+			{
+				err = "value for boolean column '" + colname + "' must be true or false (unquoted)";
+				return false;
+			}
+			std::string lowered = ascii_to_lower(value_text);
+			bool bval;
+			if (lowered == "true") bval = true;
+			else if (lowered == "false") bval = false;
+			else
+			{
+				err = "value '" + value_text + "' is not true/false for boolean column '" + colname + "'";
+				return false;
+			}
+			auto arr = std::static_pointer_cast<arrow::BooleanArray>(array);
+			for (int64_t i = 0; i < n; ++i)
+			{
+				bool ok = !arr->IsNull(i) && ((op == "==") ? (arr->Value(i) == bval) : (arr->Value(i) != bval));
+				combined[static_cast<size_t>(i)] = combined[static_cast<size_t>(i)] && ok;
+			}
+			return true;
+		}
+		case arrow::Type::STRING:
+		{
+			if (!is_string)
+			{
+				err = "value for string column '" + colname + "' must be double-quoted";
+				return false;
+			}
+			auto arr = std::static_pointer_cast<arrow::StringArray>(array);
+			for (int64_t i = 0; i < n; ++i)
+			{
+				bool ok = !arr->IsNull(i) && compare_op<std::string>(std::string(arr->GetView(i)), value_text, op);
+				combined[static_cast<size_t>(i)] = combined[static_cast<size_t>(i)] && ok;
+			}
+			return true;
+		}
+		default:
+			err = "column '" + colname + "' has a type that filtering does not support";
+			return false;
+		}
+	}
+
+	// Validates and applies a set of AND-combined filter clauses to this
+	// reader: every referenced column must exist and be a plain scalar
+	// column (col_size == 1; a vector/list column always fails, regardless
+	// of its size). On success, updates nrows to the filtered row count,
+	// stores the resulting mask on the handle (so every column decoded from
+	// here on -- via get_single_chunk_array or parquet_reader_prefetch_columns
+	// -- is filtered to just the matching rows), and re-filters/updates
+	// column_cache for every filter column itself (already decoded above,
+	// as a side effect of evaluating its own clause) so it's consistent with
+	// every other column. Returns 0 on success; on failure, returns 1 and
+	// writes a human-readable reason into err_out (truncated to err_cap).
+	int64_t parquet_reader_set_filter(void *handle,
+		const char *names_packed, int64_t name_len,
+		const char *ops_packed, int64_t op_len,
+		const char *values_packed, int64_t value_len,
+		const int8_t *is_string_flags,
+		int64_t n,
+		char *err_out, int64_t err_cap)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		if (n <= 0) return 0;
+
+		std::vector<uint8_t> combined(static_cast<size_t>(reader_handle->total_nrows), 1);
+		std::vector<int> touched_indices;
+
+		for (int64_t i = 0; i < n; ++i)
+		{
+			std::string name(names_packed + i * name_len, static_cast<size_t>(name_len));
+			name = trim_right_spaces_and_nuls(name);
+			std::string op(ops_packed + i * op_len, static_cast<size_t>(op_len));
+			op = trim_right_spaces_and_nuls(op);
+			std::string value(values_packed + i * value_len, static_cast<size_t>(value_len));
+			value = trim_right_spaces_and_nuls(value);
+			bool is_string = is_string_flags[i] != 0;
+
+			if (reader_handle->schema->GetFieldIndex(name) < 0)
+			{
+				std::snprintf(err_out, static_cast<size_t>(err_cap), "unknown column in filter: %s", name.c_str());
+				return 1;
+			}
+
+			std::shared_ptr<arrow::Array> array;
+			try
+			{
+				array = get_single_chunk_array(reader_handle, name.c_str());
+			}
+			catch (const std::exception &e)
+			{
+				std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to read filter column '%s': %s", name.c_str(), e.what());
+				return 1;
+			}
+
+			if (array->type_id() == arrow::Type::FIXED_SIZE_LIST || array->type_id() == arrow::Type::LIST)
+			{
+				std::snprintf(err_out, static_cast<size_t>(err_cap),
+					"filter column '%s' is a vector column; filtering only supports scalar columns", name.c_str());
+				return 1;
+			}
+
+			int idx = static_cast<int>(reader_handle->schema->GetFieldIndex(name));
+			if (std::find(touched_indices.begin(), touched_indices.end(), idx) == touched_indices.end())
+			{
+				touched_indices.push_back(idx);
+			}
+
+			std::string err;
+			if (!eval_filter_clause(array, name, op, is_string, value, combined, err))
+			{
+				std::snprintf(err_out, static_cast<size_t>(err_cap), "%s", err.c_str());
+				return 1;
+			}
+		}
+
+		arrow::BooleanBuilder mask_builder;
+		auto append_status = mask_builder.AppendValues(combined.data(), static_cast<int64_t>(combined.size()));
+		if (!append_status.ok())
+		{
+			std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to build filter mask: %s", append_status.ToString().c_str());
+			return 1;
+		}
+		std::shared_ptr<arrow::Array> mask_array;
+		auto finish_status = mask_builder.Finish(&mask_array);
+		if (!finish_status.ok())
+		{
+			std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to build filter mask: %s", finish_status.ToString().c_str());
+			return 1;
+		}
+		reader_handle->filter_mask = std::static_pointer_cast<arrow::BooleanArray>(mask_array);
+
+		int64_t matched = 0;
+		for (uint8_t v : combined) matched += (v != 0);
+		reader_handle->nrows = matched;
+
+		// Every filter column was decoded (and cached) above, before
+		// filter_mask existed -- re-filter those specific cache entries now
+		// so they're consistent with every other column, which will only
+		// ever see the filtered version (via apply_filter_mask, from here on).
+		ensure_compute_initialized();
+		for (int idx : touched_indices)
+		{
+			auto it = reader_handle->column_cache.find(idx);
+			if (it == reader_handle->column_cache.end()) continue;
+			auto filtered = arrow::compute::Filter(it->second, reader_handle->filter_mask);
+			if (!filtered.ok())
+			{
+				std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to apply filter: %s", filtered.status().ToString().c_str());
+				return 1;
+			}
+			it->second = filtered.ValueOrDie().make_array();
+			reader_handle->was_prefetched.insert(idx);
+		}
+
+		return 0;
 	}
 
 	// Non-throwing existence check, so callers (parquet_prefetch_columns) can
@@ -998,13 +1346,7 @@ extern "C"
 	// Null, since MinMax then has nothing to report.
 	static bool compute_stat_min_max(const std::shared_ptr<arrow::Array> &array, std::string &min_out, std::string &max_out)
 	{
-		// Arrow's compute kernels (MinMax, here) live in a separate registry
-		// from core arrow/parquet and are only usable once explicitly
-		// registered -- done lazily here (only print_stat needs them), once
-		// per process via std::call_once, since the underlying registry is
-		// process-global and not safe to register into concurrently.
-		static std::once_flag compute_init_flag;
-		std::call_once(compute_init_flag, []() { auto st = arrow::compute::Initialize(); (void)st; });
+		ensure_compute_initialized();
 
 		auto result = arrow::compute::MinMax(array);
 		if (!result.ok()) return false;
@@ -1128,8 +1470,17 @@ extern "C"
 
 		std::fprintf(stdout, "=== parquet_reader stats ===\n");
 		std::fprintf(stdout, "file: %s\n", reader_handle->filename.c_str());
-		std::fprintf(stdout, "columns: %d   shown: %zu   rows: %lld\n\n",
-			reader_handle->schema->num_fields(), rows.size(), static_cast<long long>(reader_handle->nrows));
+		if (reader_handle->nrows != reader_handle->total_nrows)
+		{
+			std::fprintf(stdout, "columns: %d   shown: %zu   rows: %lld (of %lld total)\n\n",
+				reader_handle->schema->num_fields(), rows.size(),
+				static_cast<long long>(reader_handle->nrows), static_cast<long long>(reader_handle->total_nrows));
+		}
+		else
+		{
+			std::fprintf(stdout, "columns: %d   shown: %zu   rows: %lld\n\n",
+				reader_handle->schema->num_fields(), rows.size(), static_cast<long long>(reader_handle->nrows));
+		}
 
 		print_row(headers);
 		std::vector<std::string> sep;

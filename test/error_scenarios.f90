@@ -31,6 +31,8 @@ program error_scenarios
     select case (trim(scenario))
     case ("ok")
         continue
+    case ("print_stat_smoke")
+        call scenario_print_stat_smoke()
     case ("write_undeclared_column")
         call scenario_write_undeclared_column()
     case ("write_type_mismatch")
@@ -83,6 +85,20 @@ program error_scenarios
         call scenario_read_unsupported_physical_type()
     case ("prefetch_unknown_column")
         call scenario_prefetch_unknown_column()
+    case ("filter_unknown_column")
+        call scenario_filter_unknown_column()
+    case ("filter_vector_column")
+        call scenario_filter_vector_column()
+    case ("filter_malformed_rule")
+        call scenario_filter_malformed_rule()
+    case ("filter_bad_numeric_value")
+        call scenario_filter_bad_numeric_value()
+    case ("filter_unquoted_string_value")
+        call scenario_filter_unquoted_string_value()
+    case ("filter_bad_boolean_value")
+        call scenario_filter_bad_boolean_value()
+    case ("filter_bool_ordering_not_supported")
+        call scenario_filter_bool_ordering_not_supported()
     case ("write_row_count_mismatch")
         call scenario_write_row_count_mismatch()
     case ("read_row_count_mismatch")
@@ -662,6 +678,167 @@ contains
         call parquet_prefetch_columns(reader, ["not_a_real_column"])
         print '(a)', "unexpectedly prefetched an unknown column without error"
     end subroutine scenario_prefetch_unknown_column
+
+    !> print_stat=.true. always prints to stdout -- run out-of-process (like
+    !> every other scenario here) specifically so that output lands in the
+    !> subprocess's own captured stdout (check_scenario_exit_status redirects
+    !> it to /dev/null) instead of interleaving with test-drive's own
+    !> progress lines in the visible `fpm test` console output. Checks that
+    !> print_stat=.true. (with a mix of a prefetched-only column, a column
+    !> actually read, and a column nobody touched at all) doesn't disturb the
+    !> close itself or the data already read back, and that the file is left
+    !> in a normal, readable state afterwards -- error stops (a genuine
+    !> failure, not just "printed something") if either check fails.
+    subroutine scenario_print_stat_smoke()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: a_values(5), b_values(5), c_values(5)
+        integer(int32) :: a_back(5)
+        character(len=*), parameter :: out_file = "test_run/scenario_print_stat.parquet"
+        integer :: i
+        integer(int32) :: nrows
+
+        a_values = [(i, i=1,5)]
+        b_values = [(i*10, i=1,5)]
+        c_values = [(i*100, i=1,5)]
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "a", a_values)
+        call parquet_write_column(writer, "b", b_values)
+        call parquet_write_column(writer, "c", c_values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_prefetch_columns(reader, ["b"])
+        call parquet_read_column(reader, "a", a_back)
+        ! "c" is deliberately never prefetched or read, to exercise the
+        ! "untouched columns are left out of the report" behavior.
+        call parquet_close_reader(reader, print_stat=.true.)
+
+        if (.not. all(a_back == a_values)) then
+            error stop "print_stat=.true. disturbed a column already read back before the close"
+        end if
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+
+        if (nrows /= 5) then
+            error stop "file was left in a bad state after parquet_close_reader(print_stat=.true.)"
+        end if
+    end subroutine scenario_print_stat_smoke
+
+    !> parquet_open_reader(..., filter=) validates every filter column name
+    !> against the file's actual schema before applying it, the same as
+    !> parquet_prefetch_columns does for its own names -- an unknown column
+    !> reports a clean Fortran error stop naming it, rather than reaching
+    !> Arrow's own uncaught "Column not found" exception.
+    subroutine scenario_filter_unknown_column()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+
+        call filt%add("not_a_real_column > 5")
+        call parquet_open_reader(reader, "test/fixtures/has_null.parquet", filter=filt)
+        print '(a)', "unexpectedly opened a reader with a filter naming an unknown column"
+    end subroutine scenario_filter_unknown_column
+
+    !> Filtering only supports plain scalar columns (col_size == 1): a rule
+    !> naming a vector/list column reports a clean error stop instead of
+    !> silently picking (or crashing on) some undefined per-row semantics.
+    subroutine scenario_filter_vector_column()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: vec(2,3)
+
+        vec(:,1) = [1_int64, 2_int64]
+        vec(:,2) = [3_int64, 4_int64]
+        vec(:,3) = [5_int64, 6_int64]
+
+        call parquet_open_writer(writer, "test_run/filter_vector_column.parquet")
+        call parquet_write_column(writer, "vec", vec)
+        call parquet_close_writer(writer)
+
+        call filt%add("vec > 3")
+        call parquet_open_reader(reader, "test_run/filter_vector_column.parquet", filter=filt)
+        print '(a)', "unexpectedly opened a reader with a filter naming a vector column"
+    end subroutine scenario_filter_vector_column
+
+    !> parquet_tokenize_filter_rule (parquet_read.f90) rejects a rule that
+    !> doesn't have the "<column> <op> [value]" shape (here: no operator at
+    !> all) with a clean error stop, before ever reaching the C++ side.
+    subroutine scenario_filter_malformed_rule()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+
+        call filt%add("ra")
+        call parquet_open_reader(reader, "test/fixtures/has_null.parquet", filter=filt)
+        print '(a)', "unexpectedly opened a reader with a malformed filter rule"
+    end subroutine scenario_filter_malformed_rule
+
+    !> A rule whose shape is fine ("<column> <op> <value>") but whose value
+    !> isn't a valid number for a numeric column reports a clean error stop
+    !> naming the bad value and the column, from parquet_reader_set_filter
+    !> (parquet_wrapper.cpp) -- distinct from scenario_filter_malformed_rule,
+    !> which is a Fortran-side syntax/shape rejection before the value is
+    !> ever inspected against the actual column type.
+    subroutine scenario_filter_bad_numeric_value()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+
+        call filt%add("id_with_null > abc")
+        call parquet_open_reader(reader, "test/fixtures/has_null.parquet", filter=filt)
+        print '(a)', "unexpectedly opened a reader with a non-numeric value against a numeric filter column"
+    end subroutine scenario_filter_bad_numeric_value
+
+    !> A string column's filter value must be double-quoted; a bare,
+    !> unquoted word is rejected rather than silently treated as a string.
+    subroutine scenario_filter_unquoted_string_value()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+
+        call parquet_open_writer(writer, "test_run/filter_unquoted_string.parquet")
+        call parquet_write_column(writer, "name", ["abc", "def"])
+        call parquet_close_writer(writer)
+
+        call filt%add("name == abc")
+        call parquet_open_reader(reader, "test_run/filter_unquoted_string.parquet", filter=filt)
+        print '(a)', "unexpectedly opened a reader with an unquoted value against a string filter column"
+    end subroutine scenario_filter_unquoted_string_value
+
+    !> A boolean column's filter value must be the literal true/false; any
+    !> other value (numeric, quoted, or otherwise) is rejected.
+    subroutine scenario_filter_bad_boolean_value()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+
+        call parquet_open_writer(writer, "test_run/filter_bad_boolean.parquet")
+        call parquet_write_column(writer, "flag", [.true., .false.])
+        call parquet_close_writer(writer)
+
+        call filt%add("flag == 5")
+        call parquet_open_reader(reader, "test_run/filter_bad_boolean.parquet", filter=filt)
+        print '(a)', "unexpectedly opened a reader with an invalid boolean value in a filter rule"
+    end subroutine scenario_filter_bad_boolean_value
+
+    !> Ordering comparisons (>, >=, <, <=) don't have a meaningful definition
+    !> for a boolean column -- only ==/=/= are accepted; an ordering operator
+    !> against a boolean column is rejected.
+    subroutine scenario_filter_bool_ordering_not_supported()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+
+        call parquet_open_writer(writer, "test_run/filter_bool_ordering.parquet")
+        call parquet_write_column(writer, "flag", [.true., .false.])
+        call parquet_close_writer(writer)
+
+        call filt%add("flag > true")
+        call parquet_open_reader(reader, "test_run/filter_bool_ordering.parquet", filter=filt)
+        print '(a)', "unexpectedly opened a reader with an ordering comparison against a boolean filter column"
+    end subroutine scenario_filter_bool_ordering_not_supported
 
     !> Opening a nonexistent file for reading previously called Arrow's
     !> ValueOrDie() with no status check first, which aborts the process

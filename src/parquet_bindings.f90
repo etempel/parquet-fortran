@@ -28,6 +28,7 @@ module parquet_bindings
     public :: parquet_reader_get_nrows, parquet_reader_get_column_col_size
     public :: parquet_reader_get_column_total_elements, parquet_reader_get_string_length
     public :: parquet_reader_prefetch_columns, parquet_reader_has_column
+    public :: parquet_reader_set_filter
     public :: parquet_read_int32_column, parquet_read_int64_column
     public :: parquet_read_float32_column, parquet_read_float64_column
     public :: parquet_read_bool8_column, parquet_read_string_column
@@ -219,6 +220,24 @@ module parquet_bindings
             type(c_ptr), value :: reader
             character(kind=c_char) :: name(*)
             integer(c_long_long) :: has_column
+        end function
+
+        function parquet_reader_set_filter(reader, names_packed, name_len, ops_packed, op_len, &
+                values_packed, value_len, is_string_flags, n, err_out, err_cap) &
+                bind(C, name="parquet_reader_set_filter") result(status)
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: names_packed(*)
+            integer(c_long_long), value :: name_len
+            character(kind=c_char) :: ops_packed(*)
+            integer(c_long_long), value :: op_len
+            character(kind=c_char) :: values_packed(*)
+            integer(c_long_long), value :: value_len
+            integer(c_int8_t) :: is_string_flags(*)
+            integer(c_long_long), value :: n
+            character(kind=c_char) :: err_out(*)
+            integer(c_long_long), value :: err_cap
+            integer(c_long_long) :: status
         end function
 
         function parquet_reader_get_column_col_size(reader, name) &

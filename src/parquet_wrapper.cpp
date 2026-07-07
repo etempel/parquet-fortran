@@ -179,6 +179,23 @@ extern "C"
 		std::atomic<bool> busy{false}; // guards against two threads calling into the same writer at once; see ConcurrencyGuard.
 	};
 
+	// One column's read-time QC declaration, parsed on the Fortran side
+	// (parquet_parse_qc_maml, parquet_metadata.f90) from a qc-maml's fields:
+	// entries -- min_raw/max_raw are deliberately raw text, parsed against
+	// this column's *actual* Arrow type only when a check actually runs
+	// (run_qc_range_check), the same "don't trust a declared data_type"
+	// convention parquet_reader_set_filter already uses for filter values.
+	struct QcRule
+	{
+		bool has_min = false;
+		std::string min_op; // ">", ">=", "<", or "<="
+		std::string min_raw;
+		bool has_max = false;
+		std::string max_op;
+		std::string max_raw;
+		bool null_values_allowed = false; // true only if the maml's qc: miss: was Null/NA (case-insensitive)
+	};
+
 	// Deliberately does NOT hold a materialized arrow::Table: opening a file
 	// only parses the (small) footer/schema via FileReaderBuilder, so no
 	// column's data is ever read from disk until that specific column is
@@ -215,6 +232,27 @@ extern "C"
 		std::unordered_set<int> was_read;
 		std::unordered_map<int, std::string> output_type_used;
 		std::unordered_map<int, int64_t> output_str_len_used;
+		// Read-time QC (see parquet_reader_set_qc, called from parquet_open_reader
+		// when a qc-maml is supplied and qc is enabled): qc_rules holds one
+		// entry per column the maml declared bounds/miss: for AND that also
+		// exists in this file (columns named in the maml but absent from the
+		// file are silently ignored -- see parquet_reader_set_qc). qc_enabled
+		// is false whenever no qc-maml was supplied, or qc was explicitly
+		// turned off; every check below is a no-op in that case. qc_soft
+		// picks the failure mode when a violation is found: soft (true) prints
+		// a WARNING and continues; hard (false, the default) aborts the
+		// process via report_fatal_error -- the same class of clean,
+		// stderr-diagnosed abort as the read-side Null/type-mismatch checks.
+		// qc_null_warned/qc_range_warned record which columns have already
+		// printed their (at most one each) Null-presence/range-violation
+		// WARNING in soft mode, so repeated reads of the same column during
+		// the reader's lifetime don't spam the same warning again (moot in
+		// hard mode, which aborts on the first violation) -- see run_qc_checks.
+		bool qc_enabled = false;
+		bool qc_soft = false;
+		std::unordered_map<int, QcRule> qc_rules;
+		std::unordered_set<int> qc_null_warned;
+		std::unordered_set<int> qc_range_warned;
 		std::atomic<bool> busy{false}; // guards against two threads calling into the same reader at once; see ConcurrencyGuard.
 	};
 
@@ -338,6 +376,271 @@ extern "C"
 		return array;
 	}
 
+	// Flattens a fixed-size-list/list column's array down to its element
+	// values, so null-count/min-max/qc checks run over every element in
+	// every row, as one column-wide figure -- the same "flatten across the
+	// whole vector column" scope get_uniform_list_values gives an actual
+	// read, just without the nrows/col_size shape checks (callers here only
+	// ever see an already-cached, already-validated array). Non-list arrays
+	// are returned unchanged.
+	static std::shared_ptr<arrow::Array> flatten_for_stats(const std::shared_ptr<arrow::Array> &array)
+	{
+		if (array->type_id() == arrow::Type::FIXED_SIZE_LIST)
+		{
+			return std::static_pointer_cast<arrow::FixedSizeListArray>(array)->values();
+		}
+		if (array->type_id() == arrow::Type::LIST)
+		{
+			return std::static_pointer_cast<arrow::ListArray>(array)->values();
+		}
+		return array;
+	}
+
+	static std::string format_stat_double(double v)
+	{
+		char buf[64];
+		std::snprintf(buf, sizeof(buf), "%.6g", v);
+		return std::string(buf);
+	}
+
+	// Shared by run_qc_range_check below and eval_filter_clause (row-filter
+	// value parsing, further below) -- strict (whole-string, no trailing
+	// junk) numeric parsing of a raw maml/filter text value.
+	static bool parse_int64_strict(const std::string &s, int64_t &out)
+	{
+		if (s.empty()) return false;
+		char *end = nullptr;
+		errno = 0;
+		long long v = std::strtoll(s.c_str(), &end, 10);
+		if (end != s.c_str() + s.size() || errno == ERANGE) return false;
+		out = static_cast<int64_t>(v);
+		return true;
+	}
+
+	static bool parse_double_strict(const std::string &s, double &out)
+	{
+		if (s.empty()) return false;
+		char *end = nullptr;
+		double v = std::strtod(s.c_str(), &end);
+		if (end != s.c_str() + s.size()) return false;
+		out = v;
+		return true;
+	}
+
+	// Read-time QC (see the QcRule struct and parquet_reader_set_qc further
+	// below): checks `array` (already the filtered version, if a filter is
+	// set -- see apply_filter_mask) against `rule`'s declared Null policy.
+	// Fires (returns true, filling `out_message`) only if Nulls are found
+	// and the maml's qc: miss: did NOT declare Null/NA for this field --
+	// independent of whether the caller passed null_value=/is_valid=, and
+	// regardless of whether reading would go on to abort for that same
+	// reason (see check_or_report_nulls/report_nulls_list_*): this is a
+	// diagnostic, not a substitute for that existing strict-by-default
+	// behavior, which is completely unchanged by any of this.
+	static bool run_qc_null_check(const std::shared_ptr<arrow::Array> &array, const QcRule &rule,
+		const std::string &colname, std::string &out_message)
+	{
+		if (rule.null_values_allowed) return false;
+		int64_t nulls = array->null_count();
+		if (nulls == 0) return false;
+		// Core message only (no "WARNING: " prefix, no "parquet-fortran: "
+		// prefix) -- run_qc_checks adds whichever is appropriate for the
+		// soft (WARNING to stdout) vs hard (report_fatal_error) mode.
+		out_message = "qc violation for column '" + colname + "' (based on incomplete column information): " +
+			std::to_string(nulls) + " unexpected Null value(s) found (qc: miss: does not declare Null/NA for this field)";
+		return true;
+	}
+
+	// Checks `array`'s non-Null elements against `rule`'s declared min:/max:
+	// bounds (parsed dynamically here, against whatever `array`'s actual
+	// Arrow type turns out to be -- never trusting a maml-declared
+	// data_type, the same convention parquet_reader_set_filter's clause
+	// evaluation already uses). Always false for a boolean array (min/max
+	// isn't meaningful there) or a column with neither bound declared.
+	// Fires at most one combined message covering either/both bounds,
+	// mirroring the writer's own qc: WARNING wording exactly.
+	static bool run_qc_range_check(const std::shared_ptr<arrow::Array> &array, const QcRule &rule,
+		const std::string &colname, std::string &out_message)
+	{
+		if (!(rule.has_min || rule.has_max)) return false;
+		if (array->type_id() == arrow::Type::BOOL) return false;
+
+		int64_t n = array->length();
+		int64_t n_valid = 0, n_violate = 0;
+		bool any_valid = false;
+		std::string bounds_desc, data_min_s, data_max_s;
+
+		switch (array->type_id())
+		{
+		case arrow::Type::INT32:
+		case arrow::Type::INT64:
+		{
+			int64_t min_bound = 0, max_bound = 0;
+			bool have_min = rule.has_min && parse_int64_strict(rule.min_raw, min_bound);
+			bool have_max = rule.has_max && parse_int64_strict(rule.max_raw, max_bound);
+			if (!have_min && !have_max) return false;
+			int64_t data_min = 0, data_max = 0;
+			auto scan = [&](int64_t v)
+			{
+				n_valid++;
+				if (!any_valid) { data_min = v; data_max = v; any_valid = true; }
+				else { data_min = std::min(data_min, v); data_max = std::max(data_max, v); }
+				bool ok = true;
+				if (have_min) ok = ok && compare_op<int64_t>(v, min_bound, rule.min_op);
+				if (have_max) ok = ok && compare_op<int64_t>(v, max_bound, rule.max_op);
+				if (!ok) n_violate++;
+			};
+			if (array->type_id() == arrow::Type::INT32)
+			{
+				auto arr = std::static_pointer_cast<arrow::Int32Array>(array);
+				for (int64_t i = 0; i < n; ++i) if (!arr->IsNull(i)) scan(arr->Value(i));
+			}
+			else
+			{
+				auto arr = std::static_pointer_cast<arrow::Int64Array>(array);
+				for (int64_t i = 0; i < n; ++i) if (!arr->IsNull(i)) scan(arr->Value(i));
+			}
+			if (!any_valid || n_violate == 0) return false;
+			if (have_min) bounds_desc = "min " + rule.min_op + " " + std::to_string(min_bound);
+			if (have_max)
+			{
+				if (!bounds_desc.empty()) bounds_desc += ", ";
+				bounds_desc += "max " + rule.max_op + " " + std::to_string(max_bound);
+			}
+			data_min_s = std::to_string(data_min);
+			data_max_s = std::to_string(data_max);
+			break;
+		}
+		case arrow::Type::FLOAT:
+		case arrow::Type::DOUBLE:
+		{
+			double min_bound = 0, max_bound = 0;
+			bool have_min = rule.has_min && parse_double_strict(rule.min_raw, min_bound);
+			bool have_max = rule.has_max && parse_double_strict(rule.max_raw, max_bound);
+			if (!have_min && !have_max) return false;
+			double data_min = 0, data_max = 0;
+			auto scan = [&](double v)
+			{
+				n_valid++;
+				if (!any_valid) { data_min = v; data_max = v; any_valid = true; }
+				else { data_min = std::min(data_min, v); data_max = std::max(data_max, v); }
+				bool ok = true;
+				if (have_min) ok = ok && compare_op<double>(v, min_bound, rule.min_op);
+				if (have_max) ok = ok && compare_op<double>(v, max_bound, rule.max_op);
+				if (!ok) n_violate++;
+			};
+			if (array->type_id() == arrow::Type::FLOAT)
+			{
+				auto arr = std::static_pointer_cast<arrow::FloatArray>(array);
+				for (int64_t i = 0; i < n; ++i) if (!arr->IsNull(i)) scan(static_cast<double>(arr->Value(i)));
+			}
+			else
+			{
+				auto arr = std::static_pointer_cast<arrow::DoubleArray>(array);
+				for (int64_t i = 0; i < n; ++i) if (!arr->IsNull(i)) scan(arr->Value(i));
+			}
+			if (!any_valid || n_violate == 0) return false;
+			if (have_min) bounds_desc = "min " + rule.min_op + " " + format_stat_double(min_bound);
+			if (have_max)
+			{
+				if (!bounds_desc.empty()) bounds_desc += ", ";
+				bounds_desc += "max " + rule.max_op + " " + format_stat_double(max_bound);
+			}
+			data_min_s = format_stat_double(data_min);
+			data_max_s = format_stat_double(data_max);
+			break;
+		}
+		case arrow::Type::STRING:
+		{
+			auto arr = std::static_pointer_cast<arrow::StringArray>(array);
+			std::string data_min, data_max;
+			auto scan = [&](const std::string &v)
+			{
+				n_valid++;
+				if (!any_valid) { data_min = v; data_max = v; any_valid = true; }
+				else { data_min = std::min(data_min, v); data_max = std::max(data_max, v); }
+				bool ok = true;
+				if (rule.has_min) ok = ok && compare_op<std::string>(v, rule.min_raw, rule.min_op);
+				if (rule.has_max) ok = ok && compare_op<std::string>(v, rule.max_raw, rule.max_op);
+				if (!ok) n_violate++;
+			};
+			for (int64_t i = 0; i < n; ++i) if (!arr->IsNull(i)) scan(std::string(arr->GetView(i)));
+			if (!any_valid || n_violate == 0) return false;
+			if (rule.has_min) bounds_desc = "min " + rule.min_op + " \"" + rule.min_raw + "\"";
+			if (rule.has_max)
+			{
+				if (!bounds_desc.empty()) bounds_desc += ", ";
+				bounds_desc += "max " + rule.max_op + " \"" + rule.max_raw + "\"";
+			}
+			data_min_s = "\"" + data_min + "\"";
+			data_max_s = "\"" + data_max + "\"";
+			break;
+		}
+		default:
+			return false;
+		}
+
+		// Core message only (no "WARNING: "/"parquet-fortran: " prefix) --
+		// run_qc_checks adds whichever suits the soft vs hard mode.
+		out_message = "qc violation for column '" + colname + "' (based on incomplete column information): declared " +
+			bounds_desc + ", data range [" + data_min_s + ", " + data_max_s + "], " +
+			std::to_string(n_violate) + " of " + std::to_string(n_valid) + " valid element(s) out of range";
+		return true;
+	}
+
+	// Runs both read-time QC checks for column `idx`/`name` against
+	// `array` (whatever was just decoded/cached for it -- already the
+	// filtered version, if a filter is set), if this reader has qc enabled
+	// and this column has a rule declared for it. In soft mode (qc_soft),
+	// each of the two checks (Null-presence, range) prints a WARNING to
+	// stdout at most once per column for the whole lifetime of the reader
+	// -- qc_null_warned/qc_range_warned record that, so a column
+	// read/prefetched/filtered more than once doesn't repeat the same
+	// warning. In hard mode (the default), the first violation of either
+	// check aborts the process via report_fatal_error, so the throttling
+	// sets are never consulted. Called from mark_read/mark_read_string (an
+	// actual typed read), parquet_reader_prefetch_columns, and
+	// parquet_reader_set_filter (for a column the filter itself touches) --
+	// i.e. every place this reader already tracks as "touched" for
+	// parquet_reader_print_stat.
+	static void run_qc_checks(ParquetReaderHandle *reader_handle, int idx, const std::string &name,
+		const std::shared_ptr<arrow::Array> &array)
+	{
+		if (!reader_handle->qc_enabled) return;
+		auto it = reader_handle->qc_rules.find(idx);
+		if (it == reader_handle->qc_rules.end()) return;
+
+		auto flat = flatten_for_stats(array);
+
+		if (reader_handle->qc_null_warned.find(idx) == reader_handle->qc_null_warned.end())
+		{
+			std::string msg;
+			if (run_qc_null_check(flat, it->second, name, msg))
+			{
+				if (!reader_handle->qc_soft)
+				{
+					report_fatal_error("qc hard check", msg);
+				}
+				std::fprintf(stdout, "WARNING: %s\n", msg.c_str());
+				reader_handle->qc_null_warned.insert(idx);
+			}
+		}
+
+		if (reader_handle->qc_range_warned.find(idx) == reader_handle->qc_range_warned.end())
+		{
+			std::string msg;
+			if (run_qc_range_check(flat, it->second, name, msg))
+			{
+				if (!reader_handle->qc_soft)
+				{
+					report_fatal_error("qc hard check", msg);
+				}
+				std::fprintf(stdout, "WARNING: %s\n", msg.c_str());
+				reader_handle->qc_range_warned.insert(idx);
+			}
+		}
+	}
+
 	// Records that a typed parquet_read_* entry point actually read `name`
 	// (as opposed to it merely being cached via get_single_chunk_array's own
 	// cache-fill or via parquet_reader_prefetch_columns) and what Fortran-side
@@ -347,6 +650,7 @@ extern "C"
 		auto idx = static_cast<int>(get_column_index(reader_handle, name));
 		reader_handle->was_read.insert(idx);
 		reader_handle->output_type_used[idx] = type_name;
+		run_qc_checks(reader_handle, idx, name, reader_handle->column_cache.at(idx));
 	}
 
 	static void mark_read_string(ParquetReaderHandle *reader_handle, const char *name, int64_t item_len)
@@ -355,6 +659,7 @@ extern "C"
 		reader_handle->was_read.insert(idx);
 		reader_handle->output_type_used[idx] = "string";
 		reader_handle->output_str_len_used[idx] = item_len;
+		run_qc_checks(reader_handle, idx, name, reader_handle->column_cache.at(idx));
 	}
 
 	static int64_t get_col_size(const std::shared_ptr<arrow::Array> &array)
@@ -874,8 +1179,15 @@ extern "C"
 			name = trim_right_spaces_and_nuls(name);
 			int idx = static_cast<int>(get_column_index(reader_handle, name.c_str()));
 			reader_handle->was_prefetched.insert(idx);
-			if (reader_handle->column_cache.find(idx) != reader_handle->column_cache.end())
+			auto cached = reader_handle->column_cache.find(idx);
+			if (cached != reader_handle->column_cache.end())
 			{
+				// Already decoded (by an earlier prefetch, read, or filter
+				// evaluation) -- still counts as "touched" by this prefetch
+				// call, so QC still runs for it here (it may not have, e.g.
+				// if the only earlier touch was a plain get_col_size/
+				// get_string_length query, which doesn't run QC itself).
+				run_qc_checks(reader_handle, idx, name, cached->second);
 				continue;
 			}
 			indices.push_back(idx);
@@ -896,6 +1208,7 @@ extern "C"
 			auto chunked = table->column(static_cast<int>(i));
 			auto array = apply_filter_mask(reader_handle, combine_column_chunks(chunked, names[i]));
 			reader_handle->column_cache[indices[i]] = array;
+			run_qc_checks(reader_handle, indices[i], names[i], array);
 		}
 	}
 
@@ -905,6 +1218,62 @@ extern "C"
 		return reader_handle->nrows;
 	}
 
+	// Read-time QC support for parquet_open_reader(..., maml=, qc=). Every
+	// field the qc-maml declared has already been validated and parsed on
+	// the Fortran side (parquet_parse_qc_maml, parquet_metadata.f90) --
+	// name/has_min/min_op/min_raw/has_max/max_op/max_raw/null_allowed, one
+	// packed array each, `n` entries. A name that doesn't match any column
+	// in this file is silently skipped (the qc-maml is explicitly allowed to
+	// declare more fields than the file actually has); everything else is
+	// stored as-is into qc_rules for run_qc_checks to use once this column
+	// is actually touched (read, prefetched, or filtered). Always succeeds:
+	// there's nothing left to validate here that Fortran hasn't already
+	// checked, so this returns void unlike parquet_reader_set_filter.
+	void parquet_reader_set_qc(void *handle,
+		const char *names_packed, int64_t name_len,
+		const int8_t *has_min_flags, const char *min_ops_packed, int64_t min_op_len,
+		const char *min_values_packed, int64_t min_value_len,
+		const int8_t *has_max_flags, const char *max_ops_packed, int64_t max_op_len,
+		const char *max_values_packed, int64_t max_value_len,
+		const int8_t *null_allowed_flags,
+		int64_t n, int8_t qc_soft)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		reader_handle->qc_enabled = true;
+		reader_handle->qc_soft = (qc_soft != 0);
+		if (n <= 0) return;
+
+		for (int64_t i = 0; i < n; ++i)
+		{
+			std::string name(names_packed + i * name_len, static_cast<size_t>(name_len));
+			name = trim_right_spaces_and_nuls(name);
+
+			auto idx = reader_handle->schema->GetFieldIndex(name);
+			if (idx < 0) continue; // qc-maml may declare columns not present in this file -- fine, just ignore them.
+
+			QcRule rule;
+			rule.has_min = has_min_flags[i] != 0;
+			if (rule.has_min)
+			{
+				std::string op(min_ops_packed + i * min_op_len, static_cast<size_t>(min_op_len));
+				rule.min_op = trim_right_spaces_and_nuls(op);
+				std::string raw(min_values_packed + i * min_value_len, static_cast<size_t>(min_value_len));
+				rule.min_raw = trim_right_spaces_and_nuls(raw);
+			}
+			rule.has_max = has_max_flags[i] != 0;
+			if (rule.has_max)
+			{
+				std::string op(max_ops_packed + i * max_op_len, static_cast<size_t>(max_op_len));
+				rule.max_op = trim_right_spaces_and_nuls(op);
+				std::string raw(max_values_packed + i * max_value_len, static_cast<size_t>(max_value_len));
+				rule.max_raw = trim_right_spaces_and_nuls(raw);
+			}
+			rule.null_values_allowed = null_allowed_flags[i] != 0;
+
+			reader_handle->qc_rules[static_cast<int>(idx)] = rule;
+		}
+	}
+
 	// Row-filtering support for parquet_open_reader(..., filter=). Every
 	// clause is a single "<column> <op> [value]" rule, already tokenized on
 	// the Fortran side (parquet_tokenize_filter_rule) -- this is deliberately
@@ -912,27 +1281,6 @@ extern "C"
 	// rule string): composing several rules is done by calling
 	// parquet_filter%add more than once, which this function always ANDs
 	// together. See parquet_reader_set_filter below for the overall flow.
-
-	static bool parse_int64_strict(const std::string &s, int64_t &out)
-	{
-		if (s.empty()) return false;
-		char *end = nullptr;
-		errno = 0;
-		long long v = std::strtoll(s.c_str(), &end, 10);
-		if (end != s.c_str() + s.size() || errno == ERANGE) return false;
-		out = static_cast<int64_t>(v);
-		return true;
-	}
-
-	static bool parse_double_strict(const std::string &s, double &out)
-	{
-		if (s.empty()) return false;
-		char *end = nullptr;
-		double v = std::strtod(s.c_str(), &end);
-		if (end != s.c_str() + s.size()) return false;
-		out = v;
-		return true;
-	}
 
 	static std::string ascii_to_lower(const std::string &s)
 	{
@@ -1191,6 +1539,7 @@ extern "C"
 			}
 			it->second = filtered.ValueOrDie().make_array();
 			reader_handle->was_prefetched.insert(idx);
+			run_qc_checks(reader_handle, idx, reader_handle->schema->field(idx)->name(), it->second);
 		}
 
 		return 0;
@@ -1276,26 +1625,6 @@ extern "C"
 		return max_len;
 	}
 
-	// Flattens a fixed-size-list/list column's array down to its element
-	// values, for the summary stats below (null count, min/max) to run over
-	// every element in every row, as one column-wide figure -- the same
-	// "flatten across the whole vector column" scope get_uniform_list_values
-	// gives an actual read, just without the nrows/col_size shape checks
-	// (print_stat only ever sees an already-cached, already-validated array).
-	// Non-list arrays are returned unchanged.
-	static std::shared_ptr<arrow::Array> flatten_for_stats(const std::shared_ptr<arrow::Array> &array)
-	{
-		if (array->type_id() == arrow::Type::FIXED_SIZE_LIST)
-		{
-			return std::static_pointer_cast<arrow::FixedSizeListArray>(array)->values();
-		}
-		if (array->type_id() == arrow::Type::LIST)
-		{
-			return std::static_pointer_cast<arrow::ListArray>(array)->values();
-		}
-		return array;
-	}
-
 	static std::string describe_parquet_type(const std::shared_ptr<arrow::Field> &field)
 	{
 		auto type = field->type();
@@ -1304,13 +1633,6 @@ extern "C"
 			return std::string("list<") + type->field(0)->type()->ToString() + ">";
 		}
 		return type->ToString();
-	}
-
-	static std::string format_stat_double(double v)
-	{
-		char buf[64];
-		std::snprintf(buf, sizeof(buf), "%.6g", v);
-		return std::string(buf);
 	}
 
 	// Extracts a min/max compute result's scalar as display text -- integers

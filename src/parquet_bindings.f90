@@ -29,6 +29,7 @@ module parquet_bindings
     public :: parquet_reader_get_column_total_elements, parquet_reader_get_string_length
     public :: parquet_reader_prefetch_columns, parquet_reader_has_column
     public :: parquet_reader_set_filter
+    public :: parquet_reader_set_qc
     public :: parquet_read_int32_column, parquet_read_int64_column
     public :: parquet_read_float32_column, parquet_read_float64_column
     public :: parquet_read_bool8_column, parquet_read_string_column
@@ -239,6 +240,30 @@ module parquet_bindings
             integer(c_long_long), value :: err_cap
             integer(c_long_long) :: status
         end function
+
+        subroutine parquet_reader_set_qc(reader, names_packed, name_len, &
+                has_min_flags, min_ops_packed, min_op_len, min_values_packed, min_value_len, &
+                has_max_flags, max_ops_packed, max_op_len, max_values_packed, max_value_len, &
+                null_allowed_flags, n, qc_soft) &
+                bind(C, name="parquet_reader_set_qc")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: names_packed(*)
+            integer(c_long_long), value :: name_len
+            integer(c_int8_t) :: has_min_flags(*)
+            character(kind=c_char) :: min_ops_packed(*)
+            integer(c_long_long), value :: min_op_len
+            character(kind=c_char) :: min_values_packed(*)
+            integer(c_long_long), value :: min_value_len
+            integer(c_int8_t) :: has_max_flags(*)
+            character(kind=c_char) :: max_ops_packed(*)
+            integer(c_long_long), value :: max_op_len
+            character(kind=c_char) :: max_values_packed(*)
+            integer(c_long_long), value :: max_value_len
+            integer(c_int8_t) :: null_allowed_flags(*)
+            integer(c_long_long), value :: n
+            integer(c_int8_t), value :: qc_soft
+        end subroutine
 
         function parquet_reader_get_column_col_size(reader, name) &
                 bind(C, name="parquet_reader_get_column_col_size") result(col_size)

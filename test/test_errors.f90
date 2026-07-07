@@ -22,6 +22,8 @@ module test_errors
     ! Exposed for test_writing.f90 to reuse (avoids a second copy of the same
     ! subprocess-driving helper -- see check_scenario_exit_status below).
     public :: check_scenario_exit_status
+    public :: check_scenario_exit_status_and_stderr
+    public :: check_scenario_exit_status_and_no_output
     !
 contains
     !
@@ -83,6 +85,20 @@ contains
                 test_filter_bad_boolean_value_aborts), &
             new_unittest("filter: ordering comparison against a boolean column aborts", &
                 test_filter_bool_ordering_not_supported_aborts), &
+            new_unittest("qc-maml: unrecognized miss: value aborts", &
+                test_qc_maml_bad_miss_value_aborts), &
+            new_unittest("qc-maml: duplicate field name aborts", &
+                test_qc_maml_duplicate_field_aborts), &
+            new_unittest("qc-maml: field missing name aborts", &
+                test_qc_maml_missing_name_aborts), &
+            new_unittest("qc-maml: unknown qc: sub-key aborts", &
+                test_qc_maml_unknown_subkey_aborts), &
+            new_unittest("qc: existing Null-abort behavior is unchanged", &
+                test_qc_existing_null_abort_unchanged_aborts), &
+            new_unittest("qc: hard mode (default) aborts on a range violation", &
+                test_qc_range_violation_hard_aborts), &
+            new_unittest("qc: hard mode (default) aborts on an unexpected Null", &
+                test_qc_null_violation_hard_aborts), &
             new_unittest("writing columns with mismatched row counts aborts", &
                 test_write_row_count_mismatch_aborts), &
             new_unittest("reading a column into a wrong-size array aborts", &
@@ -414,6 +430,82 @@ contains
             required_stderr="ordering comparisons")
     end subroutine test_filter_bool_ordering_not_supported_aborts
 
+    !> qc: miss: must be Null/NA (case-insensitive) or empty -- anything
+    !> else is rejected as invalid qc-maml syntax before the parquet file is
+    !> even touched.
+    subroutine test_qc_maml_bad_miss_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "qc_maml_bad_miss_value", expect_abort=.true., &
+            failure_message="an unrecognized qc: miss: value was expected to abort", &
+            required_stderr="is not recognized")
+    end subroutine test_qc_maml_bad_miss_value_aborts
+
+    !> Two qc-maml fields: entries sharing the same name are ambiguous and
+    !> rejected, the same as a schema-authoring maml already rejects a
+    !> duplicate field name.
+    subroutine test_qc_maml_duplicate_field_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "qc_maml_duplicate_field", expect_abort=.true., &
+            failure_message="a duplicate qc-maml field name was expected to abort", &
+            required_stderr="duplicate field name")
+    end subroutine test_qc_maml_duplicate_field_aborts
+
+    !> name is the one required attribute for a qc-maml field.
+    subroutine test_qc_maml_missing_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "qc_maml_missing_name", expect_abort=.true., &
+            failure_message="a qc-maml field missing 'name' was expected to abort", &
+            required_stderr="missing required 'name'")
+    end subroutine test_qc_maml_missing_name_aborts
+
+    !> parquet_parse_qc_maml reuses the same section/sub-key name schema
+    !> every other maml validation path checks -- an unknown qc: sub-key
+    !> (here a typo, "minimum" instead of "min") is still caught.
+    subroutine test_qc_maml_unknown_subkey_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "qc_maml_unknown_subkey", expect_abort=.true., &
+            failure_message="an unknown qc: sub-key was expected to abort", &
+            required_stderr="unknown sub-key")
+    end subroutine test_qc_maml_unknown_subkey_aborts
+
+    !> qc being active must never change the existing strict-by-default Null
+    !> behavior: reading a column with a genuine Null and no null_value=/
+    !> is_valid= still aborts with the very same message as without any
+    !> qc-maml at all.
+    subroutine test_qc_existing_null_abort_unchanged_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "qc_existing_null_abort_unchanged", expect_abort=.true., &
+            failure_message="a genuine Null with no null_value=/is_valid= was expected to abort even with qc active", &
+            required_stderr="column contains Null value(s), which is not supported: id")
+    end subroutine test_qc_existing_null_abort_unchanged_aborts
+
+    !> The DEFAULT read-time qc mode (qc_soft=.false., hard): an out-of-range
+    !> value aborts the process (via report_fatal_error) rather than merely
+    !> warning -- the diagnostic reaches stderr and names the offending column.
+    subroutine test_qc_range_violation_hard_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "qc_range_violation_hard_aborts", expect_abort=.true., &
+            failure_message="an out-of-range value under the default hard qc mode was expected to abort", &
+            required_stderr="qc hard check: qc violation for column 'ra'")
+    end subroutine test_qc_range_violation_hard_aborts
+
+    !> The DEFAULT read-time qc mode (qc_soft=.false., hard): an unexpected
+    !> Null aborts even when is_valid= was passed (so the read itself would
+    !> otherwise have succeeded).
+    subroutine test_qc_null_violation_hard_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "qc_null_violation_hard_aborts", expect_abort=.true., &
+            failure_message="an unexpected Null under the default hard qc mode was expected to abort", &
+            required_stderr="qc hard check: qc violation for column 'id'")
+    end subroutine test_qc_null_violation_hard_aborts
+
     !> parquet_write_column now catches a row-count mismatch itself and error
     !> stops with a dedicated message, instead of letting Arrow's own
     !> "table.Validate()" exception escape uncaught inside WriteTable.
@@ -687,5 +779,51 @@ contains
         call check(error, found, &
             "expected stderr to contain '" // trim(required_stderr) // "' for scenario '" // trim(scenario) // "'")
     end subroutine check_scenario_exit_status_and_stderr
+
+    !> Like check_scenario_exit_status_and_stderr, but asserts `forbidden_text`
+    !> is ABSENT from the captured (combined stdout+stderr) output instead of
+    !> present -- used for read-time qc scenarios that must NOT print a
+    !> WARNING (e.g. qc: miss: Null explicitly allowing Nulls, or qc=.false.
+    !> suppressing a would-be violation).
+    subroutine check_scenario_exit_status_and_no_output(error, scenario, expect_abort, failure_message, forbidden_text)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), intent(in) :: scenario, failure_message, forbidden_text
+        logical, intent(in) :: expect_abort
+        character(len=:), allocatable :: out_file
+        integer :: exitstat, cmdstat, unit, ios
+        character(len=512) :: line
+        logical :: aborted, found
+
+        out_file = "test_run/" // trim(scenario) // "_stdout.txt"
+
+        call execute_command_line( &
+            "fpm test error_scenarios --features thread_safe -- " // trim(scenario) // &
+            " > " // out_file // " 2>&1", &
+            wait=.true., exitstat=exitstat, cmdstat=cmdstat)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper program via fpm")
+        if (allocated(error)) return
+
+        call check(error, exitstat /= 97, &
+            "scenario name not recognized by error_scenarios.f90 (typo?): "//trim(scenario))
+        if (allocated(error)) return
+
+        aborted = (exitstat /= 0)
+        call check(error, aborted .eqv. expect_abort, failure_message)
+        if (allocated(error)) return
+
+        found = .false.
+        open(newunit=unit, file=out_file, status="old", action="read", iostat=ios)
+        if (ios == 0) then
+            do
+                read(unit, '(a)', iostat=ios) line
+                if (ios /= 0) exit
+                if (index(line, forbidden_text) > 0) found = .true.
+            end do
+            close(unit)
+        end if
+
+        call check(error, .not. found, &
+            "expected output to NOT contain '" // trim(forbidden_text) // "' for scenario '" // trim(scenario) // "'")
+    end subroutine check_scenario_exit_status_and_no_output
     !
 end module test_errors

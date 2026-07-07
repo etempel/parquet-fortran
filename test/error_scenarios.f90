@@ -99,6 +99,30 @@ program error_scenarios
         call scenario_filter_bad_boolean_value()
     case ("filter_bool_ordering_not_supported")
         call scenario_filter_bool_ordering_not_supported()
+    case ("qc_range_violation_warns")
+        call scenario_qc_range_violation_warns()
+    case ("qc_null_violation_warns")
+        call scenario_qc_null_violation_warns()
+    case ("qc_range_violation_hard_aborts")
+        call scenario_qc_range_violation_hard_aborts()
+    case ("qc_null_violation_hard_aborts")
+        call scenario_qc_null_violation_hard_aborts()
+    case ("qc_miss_null_no_warning")
+        call scenario_qc_miss_null_no_warning()
+    case ("qc_existing_null_abort_unchanged")
+        call scenario_qc_existing_null_abort_unchanged()
+    case ("qc_column_not_in_file")
+        call scenario_qc_column_not_in_file()
+    case ("qc_disabled_explicit_no_warning")
+        call scenario_qc_disabled_explicit_no_warning()
+    case ("qc_maml_bad_miss_value")
+        call scenario_qc_maml_bad_miss_value()
+    case ("qc_maml_duplicate_field")
+        call scenario_qc_maml_duplicate_field()
+    case ("qc_maml_missing_name")
+        call scenario_qc_maml_missing_name()
+    case ("qc_maml_unknown_subkey")
+        call scenario_qc_maml_unknown_subkey()
     case ("write_row_count_mismatch")
         call scenario_write_row_count_mismatch()
     case ("read_row_count_mismatch")
@@ -839,6 +863,280 @@ contains
         call parquet_open_reader(reader, "test_run/filter_bool_ordering.parquet", filter=filt)
         print '(a)', "unexpectedly opened a reader with an ordering comparison against a boolean filter column"
     end subroutine scenario_filter_bool_ordering_not_supported
+
+    !> Writes `lines` verbatim to `path`, one per record -- used by the
+    !> read-time qc scenarios below to produce a throwaway qc-maml file
+    !> (parquet_load_qc_maml_file only reads from disk, no in-memory
+    !> constructor exists for a qc-maml, same as every other maml in this
+    !> codebase).
+    subroutine write_text_file(path, lines)
+        character(len=*), intent(in) :: path
+        character(len=*), intent(in) :: lines(:)
+        integer :: unit, i
+
+        open(newunit=unit, file=path, status="replace", action="write")
+        do i = 1, size(lines)
+            write(unit, '(a)') trim(lines(i))
+        end do
+        close(unit)
+    end subroutine write_text_file
+
+    !> parquet_open_reader(..., maml=) with a qc: min:/max: declared for
+    !> "ra" must print exactly one aggregate WARNING (matching the writer's
+    !> own qc: wording) when parquet_read_column reads an out-of-range
+    !> value, but must NOT abort -- with qc_soft=.true. qc is diagnostic-only.
+    !> (The default, qc_soft=.false., aborts instead -- see
+    !> scenario_qc_range_violation_hard_aborts.)
+    subroutine scenario_qc_range_violation_warns()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: ra(4), ra_back(4)
+
+        ra = [10, 400, -5, 300] ! 400 and -5 are outside [0, 360]
+
+        call parquet_open_writer(writer, "test_run/qc_range.parquet")
+        call parquet_write_column(writer, "ra", ra)
+        call parquet_close_writer(writer)
+
+        call write_text_file("test_run/qc_range.maml", [character(len=32) :: &
+            "fields:", "- name: ra", "  qc:", "    min: 0", "    max: 360"])
+
+        call parquet_open_reader(reader, "test_run/qc_range.parquet", &
+            maml=parquet_load_qc_maml_file("test_run/qc_range.maml"), qc_soft=.true.)
+        call parquet_read_column(reader, "ra", ra_back)
+        call parquet_close_reader(reader)
+    end subroutine scenario_qc_range_violation_warns
+
+    !> A column with a genuine Parquet Null, read with is_valid= (so the
+    !> read itself doesn't abort), against a qc-maml field with no qc:
+    !> miss: declared (Nulls unexpected by default) must print exactly one
+    !> aggregate Null-presence WARNING with qc_soft=.true. (The default,
+    !> qc_soft=.false., aborts instead -- see
+    !> scenario_qc_null_violation_hard_aborts.)
+    subroutine scenario_qc_null_violation_warns()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: id(4), id_back(4)
+        logical :: is_valid_in(4), is_valid_out(4)
+
+        id = [1, 2, 3, 4]
+        is_valid_in = [.true., .false., .true., .true.]
+
+        call parquet_open_writer(writer, "test_run/qc_null.parquet")
+        call parquet_write_column(writer, "id", id, is_valid=is_valid_in)
+        call parquet_close_writer(writer)
+
+        call write_text_file("test_run/qc_null.maml", [character(len=32) :: &
+            "fields:", "- name: id", "  qc:", "    min: 0"])
+
+        call parquet_open_reader(reader, "test_run/qc_null.parquet", &
+            maml=parquet_load_qc_maml_file("test_run/qc_null.maml"), qc_soft=.true.)
+        call parquet_read_column(reader, "id", id_back, is_valid=is_valid_out)
+        call parquet_close_reader(reader)
+    end subroutine scenario_qc_null_violation_warns
+
+    !> Default (qc_soft=.false., hard): reading an out-of-range value with
+    !> qc active aborts the process, via the report_fatal_error convention
+    !> (stderr diagnostic + SIGABRT), the same class of clean read-side
+    !> abort as the Null/type-mismatch checks.
+    subroutine scenario_qc_range_violation_hard_aborts()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: ra(4), ra_back(4)
+
+        ra = [10, 400, -5, 300] ! 400 and -5 are outside [0, 360]
+
+        call parquet_open_writer(writer, "test_run/qc_range_hard.parquet")
+        call parquet_write_column(writer, "ra", ra)
+        call parquet_close_writer(writer)
+
+        call write_text_file("test_run/qc_range_hard.maml", [character(len=32) :: &
+            "fields:", "- name: ra", "  qc:", "    min: 0", "    max: 360"])
+
+        call parquet_open_reader(reader, "test_run/qc_range_hard.parquet", &
+            maml=parquet_load_qc_maml_file("test_run/qc_range_hard.maml"))
+        call parquet_read_column(reader, "ra", ra_back)
+        print '(a)', "unexpectedly read an out-of-range value without aborting in hard qc mode"
+    end subroutine scenario_qc_range_violation_hard_aborts
+
+    !> Default (qc_soft=.false., hard): an unexpected Null (miss: not
+    !> Null/NA) with qc active aborts the process, even when is_valid= was
+    !> passed so the read itself would otherwise succeed.
+    subroutine scenario_qc_null_violation_hard_aborts()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: id(4), id_back(4)
+        logical :: is_valid_in(4), is_valid_out(4)
+
+        id = [1, 2, 3, 4]
+        is_valid_in = [.true., .false., .true., .true.]
+
+        call parquet_open_writer(writer, "test_run/qc_null_hard.parquet")
+        call parquet_write_column(writer, "id", id, is_valid=is_valid_in)
+        call parquet_close_writer(writer)
+
+        call write_text_file("test_run/qc_null_hard.maml", [character(len=32) :: &
+            "fields:", "- name: id", "  qc:", "    min: 0"])
+
+        call parquet_open_reader(reader, "test_run/qc_null_hard.parquet", &
+            maml=parquet_load_qc_maml_file("test_run/qc_null_hard.maml"))
+        call parquet_read_column(reader, "id", id_back, is_valid=is_valid_out)
+        print '(a)', "unexpectedly read an unexpected Null without aborting in hard qc mode"
+    end subroutine scenario_qc_null_violation_hard_aborts
+
+    !> Same as scenario_qc_null_violation_warns, except this qc-maml field
+    !> declares qc: miss: Null -- Nulls are expected here, so no WARNING
+    !> should ever print (checked as an ABSENCE by the test, since this
+    !> scenario's whole point is that nothing unusual happens).
+    subroutine scenario_qc_miss_null_no_warning()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: id(4), id_back(4)
+        logical :: is_valid_in(4), is_valid_out(4)
+
+        id = [1, 2, 3, 4]
+        is_valid_in = [.true., .false., .true., .true.]
+
+        call parquet_open_writer(writer, "test_run/qc_miss_null.parquet")
+        call parquet_write_column(writer, "id", id, is_valid=is_valid_in)
+        call parquet_close_writer(writer)
+
+        call write_text_file("test_run/qc_miss_null.maml", [character(len=32) :: &
+            "fields:", "- name: id", "  qc:", "    miss: Null"])
+
+        call parquet_open_reader(reader, "test_run/qc_miss_null.parquet", &
+            maml=parquet_load_qc_maml_file("test_run/qc_miss_null.maml"))
+        call parquet_read_column(reader, "id", id_back, is_valid=is_valid_out)
+        call parquet_close_reader(reader)
+    end subroutine scenario_qc_miss_null_no_warning
+
+    !> qc being active must never change the existing strict-by-default Null
+    !> behavior: reading a column with a genuine Null and no null_value=/
+    !> is_valid= still aborts with the same message as without any qc-maml
+    !> at all (see scenario_read_column_with_nulls).
+    subroutine scenario_qc_existing_null_abort_unchanged()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: id(4), id_back(4)
+        logical :: is_valid_in(4)
+
+        id = [1, 2, 3, 4]
+        is_valid_in = [.true., .false., .true., .true.]
+
+        call parquet_open_writer(writer, "test_run/qc_abort_unchanged.parquet")
+        call parquet_write_column(writer, "id", id, is_valid=is_valid_in)
+        call parquet_close_writer(writer)
+
+        call write_text_file("test_run/qc_abort_unchanged.maml", [character(len=32) :: &
+            "fields:", "- name: id", "  qc:", "    miss: Null"])
+
+        call parquet_open_reader(reader, "test_run/qc_abort_unchanged.parquet", &
+            maml=parquet_load_qc_maml_file("test_run/qc_abort_unchanged.maml"))
+        call parquet_read_column(reader, "id", id_back) ! no null_value=/is_valid= -- still expected to abort
+        print '(a)', "unexpectedly read a column with a genuine Null without error, even with qc active"
+    end subroutine scenario_qc_existing_null_abort_unchanged
+
+    !> A qc-maml is explicitly allowed to declare fields that don't exist in
+    !> the actual parquet file -- parquet_open_reader must succeed cleanly,
+    !> simply ignoring the unmatched field.
+    subroutine scenario_qc_column_not_in_file()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: id(3)
+
+        id = [1, 2, 3]
+
+        call parquet_open_writer(writer, "test_run/qc_missing_col.parquet")
+        call parquet_write_column(writer, "id", id)
+        call parquet_close_writer(writer)
+
+        call write_text_file("test_run/qc_missing_col.maml", [character(len=32) :: &
+            "fields:", "- name: does_not_exist", "  qc:", "    min: 0"])
+
+        call parquet_open_reader(reader, "test_run/qc_missing_col.parquet", &
+            maml=parquet_load_qc_maml_file("test_run/qc_missing_col.maml"))
+        call parquet_close_reader(reader)
+    end subroutine scenario_qc_column_not_in_file
+
+    !> qc=.false. always wins over a maml being present: no warning should
+    !> print even for a column that would otherwise clearly violate its
+    !> declared qc: bounds.
+    subroutine scenario_qc_disabled_explicit_no_warning()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: ra(4), ra_back(4)
+
+        ra = [10, 400, -5, 300]
+
+        call parquet_open_writer(writer, "test_run/qc_disabled.parquet")
+        call parquet_write_column(writer, "ra", ra)
+        call parquet_close_writer(writer)
+
+        call write_text_file("test_run/qc_disabled.maml", [character(len=32) :: &
+            "fields:", "- name: ra", "  qc:", "    min: 0", "    max: 360"])
+
+        call parquet_open_reader(reader, "test_run/qc_disabled.parquet", &
+            maml=parquet_load_qc_maml_file("test_run/qc_disabled.maml"), qc=.false.)
+        call parquet_read_column(reader, "ra", ra_back)
+        call parquet_close_reader(reader)
+    end subroutine scenario_qc_disabled_explicit_no_warning
+
+    !> An unrecognized qc: miss: value (anything other than Null/NA,
+    !> case-insensitive, or empty) is rejected as invalid qc-maml syntax at
+    !> parquet_open_reader time, before the parquet file is even touched.
+    subroutine scenario_qc_maml_bad_miss_value()
+        type(parquet_reader) :: reader
+
+        call write_text_file("test_run/qc_bad_miss.maml", [character(len=32) :: &
+            "fields:", "- name: ra", "  qc:", "    miss: garbage"])
+
+        call parquet_open_reader(reader, "test/fixtures/has_null.parquet", &
+            maml=parquet_load_qc_maml_file("test_run/qc_bad_miss.maml"))
+        print '(a)', "unexpectedly opened a reader with an unrecognized qc: miss: value"
+    end subroutine scenario_qc_maml_bad_miss_value
+
+    !> Two fields:  entries sharing the same name are ambiguous for qc
+    !> purposes and rejected, the same as parquet_validate_maml_internal
+    !> already rejects a duplicate field name for a schema-authoring maml.
+    subroutine scenario_qc_maml_duplicate_field()
+        type(parquet_reader) :: reader
+
+        call write_text_file("test_run/qc_dup_field.maml", [character(len=32) :: &
+            "fields:", "- name: ra", "- name: ra"])
+
+        call parquet_open_reader(reader, "test/fixtures/has_null.parquet", &
+            maml=parquet_load_qc_maml_file("test_run/qc_dup_field.maml"))
+        print '(a)', "unexpectedly opened a reader with a duplicate qc-maml field name"
+    end subroutine scenario_qc_maml_duplicate_field
+
+    !> A fields: entry with no name: at all is rejected -- name is the one
+    !> required attribute for a qc-maml field (everything else, including
+    !> qc: itself, is optional).
+    subroutine scenario_qc_maml_missing_name()
+        type(parquet_reader) :: reader
+
+        call write_text_file("test_run/qc_missing_name.maml", [character(len=32) :: &
+            "fields:", "- unit: cm"])
+
+        call parquet_open_reader(reader, "test/fixtures/has_null.parquet", &
+            maml=parquet_load_qc_maml_file("test_run/qc_missing_name.maml"))
+        print '(a)', "unexpectedly opened a reader with a qc-maml field missing 'name'"
+    end subroutine scenario_qc_maml_missing_name
+
+    !> parquet_parse_qc_maml reuses parquet_validate_maml_sections (the same
+    !> section/sub-key schema every other maml validation path checks), so a
+    !> typo'd qc: sub-key (here "minimum" instead of "min") is caught the
+    !> same way it would be for a schema-authoring maml.
+    subroutine scenario_qc_maml_unknown_subkey()
+        type(parquet_reader) :: reader
+
+        call write_text_file("test_run/qc_bad_subkey.maml", [character(len=32) :: &
+            "fields:", "- name: ra", "  qc:", "    minimum: 5"])
+
+        call parquet_open_reader(reader, "test/fixtures/has_null.parquet", &
+            maml=parquet_load_qc_maml_file("test_run/qc_bad_subkey.maml"))
+        print '(a)', "unexpectedly opened a reader with an unknown qc: sub-key"
+    end subroutine scenario_qc_maml_unknown_subkey
 
     !> Opening a nonexistent file for reading previously called Arrow's
     !> ValueOrDie() with no status check first, which aborts the process

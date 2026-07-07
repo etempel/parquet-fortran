@@ -149,6 +149,32 @@ module parquet
         procedure :: add => parquet_filter_add
     end type parquet_filter
 
+    ! Internal plumbing only (not part of the public API): one column's
+    ! read-time QC declaration, parsed from a qc-maml's fields: entries by
+    ! parquet_parse_qc_maml. min_text/max_text carry the qc: min:/max: value
+    ! verbatim (operator prefix, if any, already stripped and captured in
+    ! min_op/max_op by parquet_set_qc_bound) -- parsed against the actual
+    ! Arrow column type only when a check runs, in parquet_wrapper.cpp's
+    ! run_qc_range_check, never against a maml-declared data_type (this
+    ! maml doesn't even require one). See "Row filtering" for the analogous
+    ! convention parquet_filter already uses for its own rule values.
+    type :: parquet_qc_rule
+        character(len=64) :: name = ""
+        ! True only if this field had a qc: sub-block at all (even an empty
+        ! one) -- a field with just a name: and no qc: gets no rule at all,
+        ! the same as a field never mentioned in the maml (see
+        ! parquet_parse_qc_maml); apply_parquet_qc filters these out before
+        ! ever reaching parquet_reader_set_qc.
+        logical :: has_qc_block = .false.
+        logical :: has_min = .false.
+        character(len=2) :: min_op = ">="
+        character(len=256) :: min_text = ""
+        logical :: has_max = .false.
+        character(len=2) :: max_op = "<="
+        character(len=256) :: max_text = ""
+        logical :: null_values_allowed = .false.
+    end type parquet_qc_rule
+
     interface parquet_write_column
         module procedure parquet_write_int32_column
         module procedure parquet_write_int32_matrix_column
@@ -233,6 +259,7 @@ module parquet
     public :: parquet_get_version
     public :: parquet_read_maml
     public :: parquet_load_maml_file
+    public :: parquet_load_qc_maml_file
     public :: parquet_validate_maml
     public :: parquet_validate_user_maml
     public :: parquet_open_reader
@@ -436,6 +463,29 @@ module parquet
             type(parquet_maml_file) :: maml
         end function parquet_load_maml_file
 
+        !> Loads a qc-maml's raw lines from disk WITHOUT running the full
+        !> parquet_validate_maml checks parquet_load_maml_file always applies
+        !> (table:, at least one field, valid data_type, ...) -- a qc-maml
+        !> only needs name + qc: min:/max:/miss: per field, and doesn't need
+        !> data_type at all. Its own (lighter) validation happens later, in
+        !> parquet_parse_qc_maml, when parquet_open_reader(..., maml=) uses it.
+        module function parquet_load_qc_maml_file(filename) result(maml)
+            character(len=*), intent(in) :: filename
+            type(parquet_maml_file) :: maml
+        end function parquet_load_qc_maml_file
+
+        !> Validates and parses a qc-maml's fields: entries into `rules`, one
+        !> entry per field that has at least a name (data_type/unit/ucd/etc.
+        !> are irrelevant here and never required) -- error stops on a
+        !> duplicate field name, an unknown top-level section/sub-key, or an
+        !> unrecognized qc: miss: value (anything other than Null/NA,
+        !> case-insensitive, or empty). Table-level metadata is ignored
+        !> entirely. See parquet_qc_rule's own doc comment for min_text/max_text.
+        module subroutine parquet_parse_qc_maml(maml, rules)
+            type(parquet_maml_file), intent(in) :: maml
+            type(parquet_qc_rule), allocatable, intent(out) :: rules(:)
+        end subroutine parquet_parse_qc_maml
+
         module subroutine parquet_validate_user_maml(base_maml, user_maml)
             type(parquet_maml_file), intent(in) :: base_maml
             type(parquet_maml_file), intent(inout) :: user_maml
@@ -598,11 +648,14 @@ module parquet
             character(len=:), allocatable :: out
         end function parquet_to_lower
 
-        module subroutine parquet_open_reader(reader, filename, use_threads, filter)
+        module subroutine parquet_open_reader(reader, filename, use_threads, filter, maml, qc, qc_soft)
             type(parquet_reader), intent(out) :: reader
             character(len=*), intent(in) :: filename
             logical, intent(in), optional :: use_threads
             type(parquet_filter), intent(in), optional :: filter
+            type(parquet_maml_file), intent(in), optional :: maml
+            logical, intent(in), optional :: qc
+            logical, intent(in), optional :: qc_soft
         end subroutine parquet_open_reader
 
         module subroutine parquet_close_reader(reader, print_stat)

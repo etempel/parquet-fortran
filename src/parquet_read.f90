@@ -152,6 +152,58 @@ contains
         end do
     end subroutine pack_fixed_width_strings
 
+    !> Validates+parses `maml` (parquet_parse_qc_maml) and hands the
+    !> resulting per-column qc: rules to parquet_reader_set_qc -- called from
+    !> parquet_open_reader BEFORE apply_parquet_filter, so that any column
+    !> the filter itself touches while evaluating its clauses is already
+    !> covered by qc (see run_qc_checks/parquet_reader_set_filter in
+    !> parquet_wrapper.cpp). A field with no qc: block at all is already
+    !> excluded by parquet_parse_qc_maml, so every entry in `rules` here
+    !> really does need to reach parquet_reader_set_qc.
+    subroutine apply_parquet_qc(reader, maml, qc_soft)
+        type(parquet_reader), intent(inout) :: reader
+        type(parquet_maml_file), intent(in) :: maml
+        logical, intent(in) :: qc_soft
+        type(parquet_qc_rule), allocatable :: rules(:)
+        character(len=64), allocatable :: names(:), min_ops(:), max_ops(:)
+        character(len=256), allocatable :: min_texts(:), max_texts(:)
+        integer(c_int8_t), allocatable :: has_min_flags(:), has_max_flags(:), null_allowed_flags(:)
+        character(kind=c_char), allocatable :: names_packed(:), min_ops_packed(:), max_ops_packed(:)
+        character(kind=c_char), allocatable :: min_texts_packed(:), max_texts_packed(:)
+        integer :: i, n
+
+        call parquet_parse_qc_maml(maml, rules)
+        n = size(rules)
+
+        allocate(names(max(n, 1)), min_ops(max(n, 1)), max_ops(max(n, 1)))
+        allocate(min_texts(max(n, 1)), max_texts(max(n, 1)))
+        allocate(has_min_flags(max(n, 1)), has_max_flags(max(n, 1)), null_allowed_flags(max(n, 1)))
+
+        do i = 1, n
+            names(i) = rules(i)%name
+            has_min_flags(i) = merge(1_c_int8_t, 0_c_int8_t, rules(i)%has_min)
+            min_ops(i) = rules(i)%min_op
+            min_texts(i) = rules(i)%min_text
+            has_max_flags(i) = merge(1_c_int8_t, 0_c_int8_t, rules(i)%has_max)
+            max_ops(i) = rules(i)%max_op
+            max_texts(i) = rules(i)%max_text
+            null_allowed_flags(i) = merge(1_c_int8_t, 0_c_int8_t, rules(i)%null_values_allowed)
+        end do
+
+        call pack_fixed_width_strings(names, names_packed)
+        call pack_fixed_width_strings(min_ops, min_ops_packed)
+        call pack_fixed_width_strings(min_texts, min_texts_packed)
+        call pack_fixed_width_strings(max_ops, max_ops_packed)
+        call pack_fixed_width_strings(max_texts, max_texts_packed)
+
+        call parquet_reader_set_qc(reader%handle, names_packed, int(len(names), kind=c_long_long), &
+            has_min_flags, min_ops_packed, int(len(min_ops), kind=c_long_long), &
+            min_texts_packed, int(len(min_texts), kind=c_long_long), &
+            has_max_flags, max_ops_packed, int(len(max_ops), kind=c_long_long), &
+            max_texts_packed, int(len(max_texts), kind=c_long_long), &
+            null_allowed_flags, int(n, kind=c_long_long), merge(1_c_int8_t, 0_c_int8_t, qc_soft))
+    end subroutine apply_parquet_qc
+
     !> Tokenizes and applies every rule in `filter` to `reader` -- called from
     !> parquet_open_reader right after the reader itself is created, so
     !> parquet_get_nrows and every column read afterward already reflect the
@@ -200,12 +252,24 @@ contains
     end subroutine apply_parquet_filter
 
     module procedure parquet_open_reader
-        logical :: use_threads_value
+        logical :: use_threads_value, qc_effective, qc_soft_value
 
         use_threads_value = .true.
         if (present(use_threads)) use_threads_value = use_threads
 
         reader%handle = create_parquet_reader(trim(filename)//char(0), merge(1_c_int, 0_c_int, use_threads_value))
+
+        ! qc setup must happen before the filter is applied: the filter's own
+        ! clause evaluation already counts as "touching" a column (see
+        ! run_qc_checks/parquet_reader_set_filter in parquet_wrapper.cpp), so
+        ! qc rules need to already be in place by then, not applied after.
+        ! qc_soft defaults to .false. (hard: a violation aborts) and only ever
+        ! matters when qc is on -- see run_qc_checks in parquet_wrapper.cpp.
+        qc_effective = present(maml)
+        if (present(qc)) qc_effective = qc
+        qc_soft_value = .false.
+        if (present(qc_soft)) qc_soft_value = qc_soft
+        if (present(maml) .and. qc_effective) call apply_parquet_qc(reader, maml, qc_soft_value)
 
         if (present(filter)) then
             if (filter%n > 0) call apply_parquet_filter(reader, filter)

@@ -489,6 +489,173 @@ contains
         call parquet_validate_maml(maml)
     end procedure parquet_load_maml_file
 
+    module procedure parquet_load_qc_maml_file
+        character(len=1024), allocatable :: lines(:)
+        character(len=1024) :: line
+        integer :: unit, ios, nlines, i, max_len
+
+        nlines = 0
+        open(newunit=unit, file=trim(filename), status="old", action="read", iostat=ios)
+        if (ios /= 0) error stop "parquet_load_qc_maml_file: cannot open file: " // trim(filename)
+
+        do
+            read(unit, '(A)', iostat=ios) line
+            if (ios /= 0) exit
+            nlines = nlines + 1
+            call parquet_append_line(lines, nlines, line)
+        end do
+
+        close(unit)
+
+        maml%name = trim(filename)
+
+        max_len = 1
+        do i = 1, nlines
+            max_len = max(max_len, len_trim(lines(i)))
+        end do
+
+        allocate(character(len=max_len) :: maml%lines(nlines))
+        do i = 1, nlines
+            maml%lines(i) = lines(i)(1:max_len)
+        end do
+        ! Deliberately no parquet_validate_maml call here -- a qc-maml has its
+        ! own, lighter validation (parquet_parse_qc_maml), run later once
+        ! parquet_open_reader actually uses it.
+    end procedure parquet_load_qc_maml_file
+
+    !> Grows `rules(:)` by one empty entry and increments `n` -- same
+    !> grow-by-one-element pattern as parquet_append_line/parquet_filter_add
+    !> elsewhere in this codebase; qc-maml field counts are always small, so
+    !> no capacity-doubling scheme is warranted.
+    subroutine parquet_qc_append_empty_rule(rules, n)
+        type(parquet_qc_rule), allocatable, intent(inout) :: rules(:)
+        integer, intent(inout) :: n
+        type(parquet_qc_rule), allocatable :: tmp(:)
+
+        n = n + 1
+        if (.not. allocated(rules)) then
+            allocate(rules(1))
+            return
+        end if
+        if (size(rules) < n) then
+            allocate(tmp(n))
+            tmp(1:n-1) = rules
+            call move_alloc(tmp, rules)
+        end if
+    end subroutine parquet_qc_append_empty_rule
+
+    module procedure parquet_parse_qc_maml
+        character(len=1024) :: line
+        character(len=:), allocatable :: tline, key, cvalue, raw, errors, miss_lower
+        logical :: in_fields, have_current, in_qc
+        integer :: i, j, n
+        character(len=32) :: idx_buf
+        type(parquet_qc_rule), allocatable :: tmp(:)
+
+        ! Reuses the same top-level-section/sub-key name schema every other
+        ! MAML validation path checks against (allowed_maml_sections/
+        ! allowed_maml_nested_sections) -- so a typo'd section name or an
+        ! unrecognized fields:/qc: sub-key is still caught here, exactly as
+        ! it would be for a schema-authoring maml. Everything else
+        ! parquet_validate_maml_internal additionally requires (table:, at
+        ! least one field, valid data_type, ...) is deliberately NOT applied
+        ! to a qc-maml -- see parquet_qc_rule's own doc comment.
+        errors = ""
+        call parquet_validate_maml_sections(maml%lines, errors)
+        if (len_trim(errors) > 0) then
+            error stop "parquet_open_reader: invalid qc maml: " // trim(errors)
+        end if
+
+        in_fields = .false.
+        have_current = .false.
+        in_qc = .false.
+        n = 0
+
+        do i = 1, size(maml%lines)
+            line = maml%lines(i)
+            tline = trim(adjustl(line))
+            if (len_trim(tline) == 0) cycle
+            if (tline(1:1) == "#") cycle
+
+            if (.not. in_fields) then
+                if (tline == "fields:") in_fields = .true.
+                cycle
+            end if
+
+            ! A new top-level section (unindented, has a ":", not a dash
+            ! item) ends the fields: block, same as parquet_parse_maml_lines.
+            if (index(tline, "- ") /= 1 .and. index(tline, ":") > 0 .and. line(1:1) /= " ") exit
+
+            if (index(tline, "-") == 1 .and. line(1:1) /= " ") then
+                call parquet_qc_append_empty_rule(tmp, n)
+                have_current = .true.
+                in_qc = .false.
+                tline = trim(adjustl(tline(2:)))
+                if (len_trim(tline) == 0) cycle
+            end if
+
+            if (.not. have_current) cycle
+
+            if (in_qc) then
+                call parquet_split_key_value(tline, key, cvalue)
+                select case (parquet_to_lower(key))
+                case ("min")
+                    call parquet_set_qc_bound(tmp(n)%has_min, tmp(n)%min_op, raw, cvalue, ">=")
+                    tmp(n)%min_text = raw
+                    cycle
+                case ("max")
+                    call parquet_set_qc_bound(tmp(n)%has_max, tmp(n)%max_op, raw, cvalue, "<=")
+                    tmp(n)%max_text = raw
+                    cycle
+                case ("miss")
+                    miss_lower = trim(parquet_to_lower(parquet_unquote(cvalue)))
+                    if (len_trim(miss_lower) == 0) then
+                        tmp(n)%null_values_allowed = .false.
+                    else if (trim(miss_lower) == "null" .or. trim(miss_lower) == "na") then
+                        tmp(n)%null_values_allowed = .true.
+                    else
+                        error stop "parquet_open_reader: invalid qc maml: qc: miss: value '" // trim(miss_lower) // &
+                            "' for field '" // trim(tmp(n)%name) // "' is not recognized (expected Null/NA or empty)"
+                    end if
+                    cycle
+                case default
+                    in_qc = .false.
+                end select
+            end if
+
+            call parquet_split_key_value(tline, key, cvalue)
+            if (len_trim(key) == 0) cycle
+
+            select case (parquet_to_lower(key))
+            case ("name")
+                tmp(n)%name = parquet_unquote(cvalue)
+            case ("qc")
+                in_qc = .true.
+                tmp(n)%has_qc_block = .true.
+            end select
+        end do
+
+        do i = 1, n
+            if (len_trim(tmp(i)%name) == 0) then
+                write(idx_buf, '(I0)') i
+                error stop "parquet_open_reader: invalid qc maml: field #" // trim(idx_buf) // " is missing required 'name'"
+            end if
+            do j = 1, i - 1
+                if (trim(tmp(j)%name) == trim(tmp(i)%name)) then
+                    error stop "parquet_open_reader: invalid qc maml: duplicate field name '" // trim(tmp(i)%name) // "'"
+                end if
+            end do
+        end do
+
+        ! Fields with just a name: and no qc: block at all get no rule --
+        ! same as a field never mentioned in this maml (see parquet_qc_rule's
+        ! has_qc_block doc comment).
+        allocate(rules(0))
+        do i = 1, n
+            if (tmp(i)%has_qc_block) rules = [rules, tmp(i)]
+        end do
+    end procedure parquet_parse_qc_maml
+
     !> Parses one qc: min:/max: value (already unquoted or not) into an
     !> operator + bound-text pair: a leading ">=", "<=", ">", or "<" (checked
     !> in that order, so the two-char operators are never mistaken for the

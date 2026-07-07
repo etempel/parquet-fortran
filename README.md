@@ -79,6 +79,7 @@ See [Error handling](#error-handling) and [Limitations](#limitations) for full d
   - [Prefetching multiple columns at once](#prefetching-multiple-columns-at-once-with-parquet_prefetch_columns)
   - [Printing reader statistics](#printing-reader-statistics-with-parquet_close_readerprint_stattrue)
   - [Row filtering with parquet_filter](#row-filtering-with-parquet_filter)
+  - [Read-time quality control with a qc-maml](#read-time-quality-control-with-a-qc-maml)
 - [Writing parquet files from your fortran code](#writing-parquet-files-from-your-fortran-code)
   - [Saving the source MAML alongside the parquet file](#saving-the-source-maml-alongside-the-parquet-file)
 - [The MAML metadata format](#the-maml-metadata-format)
@@ -299,6 +300,45 @@ Each `filt%add(rule)` call adds one clause; multiple clauses always combine with
 - Only plain scalar columns can be filtered — naming a vector (`col_size > 1`) column in a rule fails immediately with `error stop` when `parquet_open_reader` is called. So does naming a column that doesn't exist in the file, or a rule with invalid syntax (unknown operator, unquoted string value, non-numeric value against a numeric column, etc.) — every rule is fully validated (column existence, type-compatibility, and value parsing) right there in `parquet_open_reader`, before any of your own code runs.
 
 Filtering is **not** predicate pushdown: every filter-referenced column, and every column you subsequently read, is still fully read and decoded from disk exactly as without a filter (Parquet row-group statistics are never used to skip I/O). The benefit is entirely downstream: `parquet_get_nrows` and every column you read only ever reflect the matching rows, so your own code loops over, allocates for, and processes far fewer rows when the filter is selective — at the cost of a small transient memory bump while a column's full decoded array and its filtered result briefly coexist, before the unfiltered one is discarded.
+
+### Read-time quality control with a qc-maml
+
+`parquet_open_reader(reader, filename, maml=..., qc=..., qc_soft=...)` checks column values against `qc: min:`/`max:`/`miss:` bounds declared in a MAML file — mirroring the writer's own [`qc:` range-check feature](#quality-control-qc-range-checks-on-write), but on the read side. By default a violation is a **hard error** (`qc_soft=.false.`): the process aborts with a diagnostic on stderr, the same class of clean, deliberate abort as the read-side Null/type-mismatch checks (see [Limitations](#limitations)). Pass `qc_soft=.true.` to instead **warn and continue**: a `WARNING` is printed to stdout and reading proceeds. Either way, the existing strict-by-default Null behavior (`error stop` on a genuine Null unless `null_value=`/`is_valid=` is passed — see [Null values](#null-values)) is completely unchanged.
+
+```fortran
+type(parquet_reader) :: reader
+integer(int32) :: ra(:), ra_back(:)
+
+! qc.maml:
+!   fields:
+!   - name: ra
+!     qc:
+!       min: 0
+!       max: 360
+!   - name: id
+!     qc:
+!       miss: Null   ! this column is expected to contain genuine Nulls
+
+! Default: a range violation aborts the process.
+call parquet_open_reader(reader, "data.parquet", maml=parquet_load_qc_maml_file("qc.maml"))
+call parquet_read_column(reader, "ra", ra_back)
+! aborts: parquet-fortran: qc hard check: qc violation for column 'ra' (based on incomplete column information): declared min >= 0, max <= 360, data range [...], N of M valid element(s) out of range
+call parquet_close_reader(reader)
+
+! qc_soft=.true.: the same violation only prints a WARNING to stdout, then continues.
+call parquet_open_reader(reader, "data.parquet", maml=parquet_load_qc_maml_file("qc.maml"), qc_soft=.true.)
+call parquet_read_column(reader, "ra", ra_back)
+! prints: WARNING: qc violation for column 'ra' (based on incomplete column information): declared min >= 0, max <= 360, data range [...], N of M valid element(s) out of range
+call parquet_close_reader(reader)
+```
+
+- `maml` is optional, `type(parquet_maml_file)`; `parquet_load_qc_maml_file(filename)` loads one from disk (a separate function from `parquet_load_maml_file`, since a qc-maml has different, lighter requirements — see below). `qc` is optional `logical`: if omitted, it defaults to `.true.` whenever `maml` is supplied and `.false.` otherwise; an explicit `qc=` always wins (so `qc=.false.` with a `maml=` present disables checking entirely, and `qc=.true.` with no `maml=` at all is a harmless no-op, nothing to check).
+- `qc_soft` is optional `logical`, default `.false.` (hard: a violation aborts the process). It only ever takes effect when qc is active; with `qc=.false.` (or no `maml=`) it is irrelevant.
+- A qc-maml's only required field attribute is `name` — `data_type` and everything else (including `qc:` itself) are optional, unlike a schema-authoring MAML. `qc: min:`/`max:` bounds are parsed against the column's actual Parquet type at read time, not any `data_type` the maml might declare. A qc-maml may declare fields that don't exist in the parquet file at all (they're silently ignored) or that already have a value in the file's own physical type different from the maml — validation only requires that field names not repeat, and that a `qc: miss:` value (if present) is `Null`/`NA` (case-insensitive) or empty.
+- `qc: miss: Null` (or `NA`) means Nulls are *expected* for that field: no violation is raised if the column contains one. Leaving `miss:` empty or omitting it (the default) means Nulls are *not* expected: reading a Null in that column is a violation — regardless of whether you also pass `null_value=`/`is_valid=` to actually read it. A field with no `qc:` block at all (just a bare `name:`) gets no checking whatsoever, the same as a field never mentioned in the maml.
+- qc only ever runs for a column this reader actually touches — read (`parquet_read_column`/`parquet_read_array_row_mode`/`parquet_read_array_element_mode`, scalar or vector), prefetched (`parquet_prefetch_columns`), or referenced by a [`parquet_filter`](#row-filtering-with-parquet_filter) — and, when a filter is active, only ever sees the already-filtered rows. Boolean columns skip the min/max check entirely (never meaningful there) but still get the Null-presence check.
+- In soft mode, each of the two violation categories (Null-presence, range) prints **at most once per column** for the whole lifetime of the reader, even if that column is read multiple times (in hard mode the first violation aborts, so this never comes up); the message notes it's based on incomplete (whatever's been decoded so far) column information.
+- Requires linking `arrow_compute` (see [Printing reader statistics](#printing-reader-statistics-with-parquet_close_readerprint_stattrue) above) — same as `print_stat`, and for the same reason (min/max calculation).
 
 ## Writing parquet files from your fortran code
 
@@ -714,7 +754,8 @@ The public derived type `parquet_table_metadata` provides:
 
 ### Reader (table and column info)
 
-- `parquet_open_reader(reader, filename[, use_threads, filter])` — opens an existing parquet file for reading. `use_threads` (optional, `logical`, default `.true.`) — decode across Arrow's internal thread pool. See [Multi-threaded decoding/encoding](#multi-threaded-decodingencoding-use_threads-and-thread-pool-size). `filter` (optional, `type(parquet_filter)`) restricts the reader to only rows matching the filter — see [Row filtering with parquet_filter](#row-filtering-with-parquet_filter).
+- `parquet_open_reader(reader, filename[, use_threads, filter, maml, qc, qc_soft])` — opens an existing parquet file for reading. `use_threads` (optional, `logical`, default `.true.`) — decode across Arrow's internal thread pool. See [Multi-threaded decoding/encoding](#multi-threaded-decodingencoding-use_threads-and-thread-pool-size). `filter` (optional, `type(parquet_filter)`) restricts the reader to only rows matching the filter — see [Row filtering with parquet_filter](#row-filtering-with-parquet_filter). `maml`/`qc`/`qc_soft` (optional, `type(parquet_maml_file)`/`logical`/`logical`) enable read-time qc range/Null checks; a violation aborts by default (`qc_soft=.false.`) or, with `qc_soft=.true.`, only warns — see [Read-time quality control with a qc-maml](#read-time-quality-control-with-a-qc-maml).
+- `parquet_load_qc_maml_file(filename)` — loads a qc-maml from disk for `parquet_open_reader(..., maml=)`, without `parquet_load_maml_file`'s full schema-authoring validation (a qc-maml doesn't need `table:`, `data_type`, or even `qc:` itself — see [Read-time quality control with a qc-maml](#read-time-quality-control-with-a-qc-maml)).
 - `parquet_close_reader(reader[, print_stat])` — releases resources associated with `reader`. Fails with `error stop` if `reader` was never opened, or was already closed. `print_stat` (optional `logical`, default `.false.`) prints a diagnostic summary of the reader's activity to stdout first — see [Printing reader statistics](#printing-reader-statistics-with-parquet_close_readerprint_stattrue).
 - `parquet_get_nrows(reader, nrows)` — returns the number of table rows in `nrows` (`integer(int32)` or `integer(int64)`).
 - `parquet_get_col_size(reader, name, col_size)` — returns the fixed row length of vector column `name` in `col_size`. Call this before allocating the output array for `parquet_read_column`/`parquet_read_array_row_mode`/`parquet_read_array_element_mode` on that column.

@@ -7,7 +7,8 @@ module test_writing
     use parquet_maml_base
     use iso_fortran_env, only : int32, int64, real32, real64
     use testdrive, only : new_unittest, unittest_type, error_type, check, test_failed
-    use test_errors, only : check_scenario_exit_status
+    use test_errors, only : check_scenario_exit_status, check_scenario_exit_status_and_stderr, &
+        check_scenario_exit_status_and_no_output
     !
     implicit none
     private
@@ -88,6 +89,16 @@ contains
                 test_prefetch_columns_repeated_overlapping_calls), &
             new_unittest("parquet_close_reader(print_stat=.true.) does not disturb a normal close", &
                 test_close_reader_print_stat_smoke), &
+            new_unittest("qc: range violation prints a WARNING but does not abort", &
+                test_qc_range_violation_warns), &
+            new_unittest("qc: unexpected Null prints a WARNING but does not abort", &
+                test_qc_null_violation_warns), &
+            new_unittest("qc: miss: Null suppresses the Null-presence WARNING", &
+                test_qc_miss_null_no_warning), &
+            new_unittest("qc=.false. suppresses a would-be range violation WARNING", &
+                test_qc_disabled_explicit_no_warning), &
+            new_unittest("qc-maml may declare a column absent from the parquet file", &
+                test_qc_column_not_in_file), &
             new_unittest("parquet_open_reader(filter=) ANDs multiple rules and updates nrows", &
                 test_open_reader_filter_ands_rules), &
             new_unittest("parquet_open_reader(filter=) supports is_null/is_not_null and quoted strings", &
@@ -1011,6 +1022,50 @@ contains
         call check_scenario_exit_status(error, "print_stat_smoke", expect_abort=.false., &
             failure_message="parquet_close_reader(print_stat=.true.) was expected to exit cleanly")
     end subroutine test_close_reader_print_stat_smoke
+
+    !> Read-time qc, like print_stat, always prints straight to stdout --
+    !> run out-of-process (see scenario_qc_range_violation_warns in
+    !> error_scenarios.f90) for the same reason print_stat's smoke test
+    !> does: keep that output out of the visible `fpm test` console log,
+    !> while still asserting on its content via the captured file.
+    subroutine test_qc_range_violation_warns(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "qc_range_violation_warns", expect_abort=.false., &
+            failure_message="a qc: range violation must warn, not abort", &
+            required_stderr="WARNING: qc violation for column 'ra'")
+    end subroutine test_qc_range_violation_warns
+
+    subroutine test_qc_null_violation_warns(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "qc_null_violation_warns", expect_abort=.false., &
+            failure_message="a qc: unexpected-Null violation must warn, not abort", &
+            required_stderr="WARNING: qc violation for column 'id'")
+    end subroutine test_qc_null_violation_warns
+
+    subroutine test_qc_miss_null_no_warning(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_no_output(error, "qc_miss_null_no_warning", expect_abort=.false., &
+            failure_message="qc: miss: Null scenario was expected to exit cleanly", &
+            forbidden_text="WARNING: qc violation")
+    end subroutine test_qc_miss_null_no_warning
+
+    subroutine test_qc_disabled_explicit_no_warning(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_no_output(error, "qc_disabled_explicit_no_warning", expect_abort=.false., &
+            failure_message="qc=.false. scenario was expected to exit cleanly", &
+            forbidden_text="WARNING: qc violation")
+    end subroutine test_qc_disabled_explicit_no_warning
+
+    subroutine test_qc_column_not_in_file(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "qc_column_not_in_file", expect_abort=.false., &
+            failure_message="a qc-maml field naming a column absent from the file was expected to exit cleanly")
+    end subroutine test_qc_column_not_in_file
 
     !> Every parquet_filter%add rule ANDs together: "ra > 200", "ra <= 360",
     !> and "id /= 7" together should keep only rows where ra is in (200,360]

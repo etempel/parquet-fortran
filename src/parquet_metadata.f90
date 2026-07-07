@@ -385,6 +385,26 @@ contains
                     end if
                 end do
 
+                ! qc: min: must use a lower-bound operator (>= or >) and qc:
+                ! max: an upper-bound operator (<= or <); the opposite
+                ! direction (e.g. min: '< 5') is a nonsensical bound. This is
+                ! a purely syntactic check, applied to every enforced type
+                ! (numeric and string alike); boolean's qc: is silently
+                ! ignored entirely (see the numeric block below), so it's
+                ! exempt here too.
+                if (trim(cinfo%col(i)%data_type) /= "boolean") then
+                    if (cinfo%col(i)%has_qc_min .and. cinfo%col(i)%qc_min_op(1:1) == "<") then
+                        errors = errors // "field '" // cur_name // "' has a qc: min value with a '" // &
+                            trim(cinfo%col(i)%qc_min_op) // "' operator; min: accepts only >= or > " // &
+                            "(use max: for an upper bound); "
+                    end if
+                    if (cinfo%col(i)%has_qc_max .and. cinfo%col(i)%qc_max_op(1:1) == ">") then
+                        errors = errors // "field '" // cur_name // "' has a qc: max value with a '" // &
+                            trim(cinfo%col(i)%qc_max_op) // "' operator; max: accepts only <= or < " // &
+                            "(use min: for a lower bound); "
+                    end if
+                end if
+
                 ! qc: min:/max: numeric convertibility only applies to the
                 ! numeric types; string uses its bound as a literal (nothing
                 ! to convert, so it can't fail), and boolean's qc: is always
@@ -645,6 +665,18 @@ contains
                     error stop "parquet_open_reader: invalid qc maml: duplicate field name '" // trim(tmp(i)%name) // "'"
                 end if
             end do
+            ! qc: min: must be a lower bound (>= or >), qc: max: an upper
+            ! bound (<= or <); the reversed direction is a nonsensical bound.
+            ! Unlike the write side this can't (and needn't) consult a
+            ! data_type -- a qc-maml has none -- so it applies to every field.
+            if (tmp(i)%has_min .and. tmp(i)%min_op(1:1) == "<") then
+                error stop "parquet_open_reader: invalid qc maml: qc: min: for field '" // trim(tmp(i)%name) // &
+                    "' uses a '" // trim(tmp(i)%min_op) // "' operator; min: accepts only >= or > (use max: for an upper bound)"
+            end if
+            if (tmp(i)%has_max .and. tmp(i)%max_op(1:1) == ">") then
+                error stop "parquet_open_reader: invalid qc maml: qc: max: for field '" // trim(tmp(i)%name) // &
+                    "' uses a '" // trim(tmp(i)%max_op) // "' operator; max: accepts only <= or < (use min: for a lower bound)"
+            end if
         end do
 
         ! Fields with just a name: and no qc: block at all get no rule --

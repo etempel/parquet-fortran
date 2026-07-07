@@ -155,6 +155,12 @@ program error_scenarios
         call scenario_validate_qc_min_non_integral_for_int32()
     case ("validate_qc_min_out_of_int32_range")
         call scenario_validate_qc_min_out_of_int32_range()
+    case ("validate_qc_min_wrong_operator")
+        call scenario_validate_qc_min_wrong_operator()
+    case ("validate_qc_max_wrong_operator")
+        call scenario_validate_qc_max_wrong_operator()
+    case ("qc_maml_min_wrong_operator")
+        call scenario_qc_maml_min_wrong_operator()
     case ("qc_warning_numeric")
         call scenario_qc_warning_numeric()
     case ("qc_warning_string")
@@ -1109,6 +1115,20 @@ contains
         print '(a)', "unexpectedly opened a reader with a duplicate qc-maml field name"
     end subroutine scenario_qc_maml_duplicate_field
 
+    !> A qc-maml's qc: min: must be a lower bound (>= or >). A reversed
+    !> '<'/'<=' operator is rejected when parquet_open_reader parses the
+    !> qc-maml, the same rule parquet_validate_maml enforces on the write side.
+    subroutine scenario_qc_maml_min_wrong_operator()
+        type(parquet_reader) :: reader
+
+        call write_text_file("test_run/qc_min_wrong_op.maml", [character(len=32) :: &
+            "fields:", "- name: ra", "  qc:", "    min: '< 5'"])
+
+        call parquet_open_reader(reader, "test/fixtures/has_null.parquet", &
+            maml=parquet_load_qc_maml_file("test_run/qc_min_wrong_op.maml"))
+        print '(a)', "unexpectedly opened a reader with a reversed qc: min: operator"
+    end subroutine scenario_qc_maml_min_wrong_operator
+
     !> A fields: entry with no name: at all is rejected -- name is the one
     !> required attribute for a qc-maml field (everything else, including
     !> qc: itself, is optional).
@@ -1279,6 +1299,40 @@ contains
 
         call parquet_validate_maml(maml)
     end subroutine scenario_validate_qc_min_out_of_int32_range
+
+    !> qc: min: must be a lower bound: a '<'/'<=' operator on min: is a
+    !> reversed, nonsensical bound and is rejected by parquet_validate_maml.
+    subroutine scenario_validate_qc_min_wrong_operator()
+        type(parquet_maml_file) :: maml
+
+        maml%name = "qc_min_wrong_operator.maml"
+        maml%lines = [character(len=40) :: &
+            "table: qc_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32", &
+            "  qc:", &
+            "    min: '< 5'" ]
+
+        call parquet_validate_maml(maml)
+    end subroutine scenario_validate_qc_min_wrong_operator
+
+    !> qc: max: must be an upper bound: a '>'/'>=' operator on max: is a
+    !> reversed, nonsensical bound and is rejected by parquet_validate_maml.
+    subroutine scenario_validate_qc_max_wrong_operator()
+        type(parquet_maml_file) :: maml
+
+        maml%name = "qc_max_wrong_operator.maml"
+        maml%lines = [character(len=40) :: &
+            "table: qc_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32", &
+            "  qc:", &
+            "    max: '>= 5'" ]
+
+        call parquet_validate_maml(maml)
+    end subroutine scenario_validate_qc_max_wrong_operator
 
     !> Not an error scenario: qc=.true. only ever prints a WARNING and lets
     !> the write proceed. This scenario exits cleanly (exit 0); the

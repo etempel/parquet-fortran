@@ -131,6 +131,12 @@ contains
                 test_validate_qc_min_non_integral_for_int32_aborts), &
             new_unittest("qc: min value out of int32 range aborts", &
                 test_validate_qc_min_out_of_int32_range_aborts), &
+            new_unittest("qc: min value with a reversed (</<=) operator aborts", &
+                test_validate_qc_min_wrong_operator_aborts), &
+            new_unittest("qc: max value with a reversed (>/>=) operator aborts", &
+                test_validate_qc_max_wrong_operator_aborts), &
+            new_unittest("qc-maml: min value with a reversed (</<=) operator aborts", &
+                test_qc_maml_min_wrong_operator_aborts), &
             new_unittest("writing values(:) not divisible by col_size aborts", &
                 test_write_values_not_divisible_by_col_size_aborts), &
             new_unittest("parquet_set_max_threads(0) aborts", &
@@ -656,6 +662,27 @@ contains
         call check_scenario_exit_status(error, "validate_qc_min_out_of_int32_range", expect_abort=.true., &
             failure_message="qc: min: value out of int32 range was expected to error stop")
     end subroutine test_validate_qc_min_out_of_int32_range_aborts
+
+    subroutine test_validate_qc_min_wrong_operator_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "validate_qc_min_wrong_operator", expect_abort=.true., &
+            failure_message="qc: min: with a reversed (</<=) operator was expected to error stop")
+    end subroutine test_validate_qc_min_wrong_operator_aborts
+
+    subroutine test_validate_qc_max_wrong_operator_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "validate_qc_max_wrong_operator", expect_abort=.true., &
+            failure_message="qc: max: with a reversed (>/>=) operator was expected to error stop")
+    end subroutine test_validate_qc_max_wrong_operator_aborts
+
+    subroutine test_qc_maml_min_wrong_operator_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "qc_maml_min_wrong_operator", expect_abort=.true., &
+            failure_message="qc-maml qc: min: with a reversed (</<=) operator was expected to error stop")
+    end subroutine test_qc_maml_min_wrong_operator_aborts
 
     subroutine test_write_values_not_divisible_by_col_size_aborts(error)
         type(error_type), allocatable, intent(out) :: error

@@ -6,6 +6,8 @@
 #include <arrow/api.h>
 #include <arrow/array/concatenate.h>
 #include <arrow/array/util.h>
+#include <arrow/compute/api.h>
+#include <arrow/compute/initialize.h>
 #include <arrow/io/api.h>
 #include <arrow/util/byte_size.h>
 #include <arrow/util/thread_pool.h>
@@ -26,6 +28,7 @@
 #include <string>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // Neither ParquetReaderHandle nor ParquetWriterHandle's own data structures
@@ -170,8 +173,22 @@ extern "C"
 	{
 		std::unique_ptr<parquet::arrow::FileReader> reader;
 		std::shared_ptr<arrow::Schema> schema;
+		std::string filename;
 		int64_t nrows = 0;
 		std::unordered_map<int, std::shared_ptr<arrow::Array>> column_cache;
+		// Access bookkeeping for parquet_reader_print_stat only: was_prefetched
+		// is set for every column index named in a parquet_reader_prefetch_columns
+		// call (whether or not it actually triggered a read that time -- see
+		// parquet_reader_prefetch_columns); was_read is set by mark_read/
+		// mark_read_string, called from every typed parquet_read_* entry point,
+		// so it reflects an actual Fortran-side read call, not just caching.
+		// output_type_used/output_str_len_used record the most recent Fortran
+		// output type (and, for strings, output buffer length) used to read
+		// that column, for the same reporting purpose.
+		std::unordered_set<int> was_prefetched;
+		std::unordered_set<int> was_read;
+		std::unordered_map<int, std::string> output_type_used;
+		std::unordered_map<int, int64_t> output_str_len_used;
 		std::atomic<bool> busy{false}; // guards against two threads calling into the same reader at once; see ConcurrencyGuard.
 	};
 
@@ -263,6 +280,25 @@ extern "C"
 		auto array = combine_column_chunks(chunked, name);
 		reader_handle->column_cache.emplace(static_cast<int>(idx), array);
 		return array;
+	}
+
+	// Records that a typed parquet_read_* entry point actually read `name`
+	// (as opposed to it merely being cached via get_single_chunk_array's own
+	// cache-fill or via parquet_reader_prefetch_columns) and what Fortran-side
+	// output type it was read into -- used only for parquet_reader_print_stat.
+	static void mark_read(ParquetReaderHandle *reader_handle, const char *name, const char *type_name)
+	{
+		auto idx = static_cast<int>(get_column_index(reader_handle, name));
+		reader_handle->was_read.insert(idx);
+		reader_handle->output_type_used[idx] = type_name;
+	}
+
+	static void mark_read_string(ParquetReaderHandle *reader_handle, const char *name, int64_t item_len)
+	{
+		auto idx = static_cast<int>(get_column_index(reader_handle, name));
+		reader_handle->was_read.insert(idx);
+		reader_handle->output_type_used[idx] = "string";
+		reader_handle->output_str_len_used[idx] = item_len;
 	}
 
 	static int64_t get_col_size(const std::shared_ptr<arrow::Array> &array)
@@ -694,6 +730,7 @@ extern "C"
 	void *create_parquet_reader(const char *filename, int use_threads)
 	{
 		auto *handle = new ParquetReaderHandle{};
+		handle->filename = filename;
 		auto infile_result = arrow::io::ReadableFile::Open(filename);
 		if (!infile_result.ok())
 		{
@@ -756,11 +793,20 @@ extern "C"
 	// time it's asked for. names_packed holds `n` fixed-width (`item_len`
 	// bytes each) column names back-to-back, the same convention this
 	// codebase already uses for packed Fortran string arrays elsewhere.
+	// Columns already in column_cache (from an earlier prefetch_columns
+	// call, or already read lazily) are skipped, so repeated calls with
+	// partially or fully overlapping column sets accumulate a union of
+	// cached columns rather than re-reading columns already cached.
 	void parquet_reader_prefetch_columns(void *handle, const char *names_packed, int64_t item_len, int64_t n)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		if (n <= 0) return;
 
+		// Columns already warmed by an earlier prefetch_columns (or by an
+		// earlier lazy read via get_single_chunk_array) are skipped here, so
+		// that repeated/overlapping prefetch_columns calls accumulate a
+		// union of cached columns instead of re-reading and re-decoding
+		// columns that are already in column_cache.
 		std::vector<int> indices;
 		std::vector<std::string> names;
 		indices.reserve(static_cast<size_t>(n));
@@ -769,9 +815,17 @@ extern "C"
 		{
 			std::string name(names_packed + i * item_len, static_cast<size_t>(item_len));
 			name = trim_right_spaces_and_nuls(name);
-			indices.push_back(static_cast<int>(get_column_index(reader_handle, name.c_str())));
+			int idx = static_cast<int>(get_column_index(reader_handle, name.c_str()));
+			reader_handle->was_prefetched.insert(idx);
+			if (reader_handle->column_cache.find(idx) != reader_handle->column_cache.end())
+			{
+				continue;
+			}
+			indices.push_back(idx);
 			names.push_back(name);
 		}
+
+		if (indices.empty()) return;
 
 		std::shared_ptr<arrow::Table> table;
 		auto status = reader_handle->reader->ReadTable(indices, &table);
@@ -780,11 +834,11 @@ extern "C"
 			throw std::runtime_error(status.ToString());
 		}
 
-		for (int64_t i = 0; i < n; ++i)
+		for (size_t i = 0; i < indices.size(); ++i)
 		{
 			auto chunked = table->column(static_cast<int>(i));
-			auto array = combine_column_chunks(chunked, names[static_cast<size_t>(i)]);
-			reader_handle->column_cache[indices[static_cast<size_t>(i)]] = array;
+			auto array = combine_column_chunks(chunked, names[i]);
+			reader_handle->column_cache[indices[i]] = array;
 		}
 	}
 
@@ -872,6 +926,217 @@ extern "C"
 			max_len = std::max(max_len, static_cast<int64_t>(vals->GetView(i).size()));
 		}
 		return max_len;
+	}
+
+	// Flattens a fixed-size-list/list column's array down to its element
+	// values, for the summary stats below (null count, min/max) to run over
+	// every element in every row, as one column-wide figure -- the same
+	// "flatten across the whole vector column" scope get_uniform_list_values
+	// gives an actual read, just without the nrows/col_size shape checks
+	// (print_stat only ever sees an already-cached, already-validated array).
+	// Non-list arrays are returned unchanged.
+	static std::shared_ptr<arrow::Array> flatten_for_stats(const std::shared_ptr<arrow::Array> &array)
+	{
+		if (array->type_id() == arrow::Type::FIXED_SIZE_LIST)
+		{
+			return std::static_pointer_cast<arrow::FixedSizeListArray>(array)->values();
+		}
+		if (array->type_id() == arrow::Type::LIST)
+		{
+			return std::static_pointer_cast<arrow::ListArray>(array)->values();
+		}
+		return array;
+	}
+
+	static std::string describe_parquet_type(const std::shared_ptr<arrow::Field> &field)
+	{
+		auto type = field->type();
+		if (type->id() == arrow::Type::FIXED_SIZE_LIST || type->id() == arrow::Type::LIST)
+		{
+			return std::string("list<") + type->field(0)->type()->ToString() + ">";
+		}
+		return type->ToString();
+	}
+
+	static std::string format_stat_double(double v)
+	{
+		char buf[64];
+		std::snprintf(buf, sizeof(buf), "%.6g", v);
+		return std::string(buf);
+	}
+
+	// Extracts a min/max compute result's scalar as display text -- integers
+	// print as plain integers (no trailing ".0"/spurious precision), floats
+	// are trimmed to 6 significant digits, and anything else (e.g. a string
+	// scalar) falls back to Arrow's own Scalar::ToString().
+	static std::string format_stat_scalar(const std::shared_ptr<arrow::Scalar> &s)
+	{
+		switch (s->type->id())
+		{
+		case arrow::Type::INT32:
+			return std::to_string(std::static_pointer_cast<arrow::Int32Scalar>(s)->value);
+		case arrow::Type::INT64:
+			return std::to_string(std::static_pointer_cast<arrow::Int64Scalar>(s)->value);
+		case arrow::Type::FLOAT:
+			return format_stat_double(static_cast<double>(std::static_pointer_cast<arrow::FloatScalar>(s)->value));
+		case arrow::Type::DOUBLE:
+			return format_stat_double(std::static_pointer_cast<arrow::DoubleScalar>(s)->value);
+		case arrow::Type::STRING:
+			return "\"" + std::static_pointer_cast<arrow::StringScalar>(s)->value->ToString() + "\"";
+		default:
+			return s->ToString();
+		}
+	}
+
+	// Computes this column's min/max (via Arrow's own "min_max" compute
+	// function, on the flattened element array for a vector column) for
+	// every supported scalar type except boolean, which is reported as
+	// True/False counts instead (see the boolean branch in
+	// parquet_reader_print_stat) -- a boolean's min/max is always exactly
+	// one of False/True/False-and-True and isn't a meaningful summary.
+	// Returns false (leaving min_out/max_out untouched) if every element is
+	// Null, since MinMax then has nothing to report.
+	static bool compute_stat_min_max(const std::shared_ptr<arrow::Array> &array, std::string &min_out, std::string &max_out)
+	{
+		// Arrow's compute kernels (MinMax, here) live in a separate registry
+		// from core arrow/parquet and are only usable once explicitly
+		// registered -- done lazily here (only print_stat needs them), once
+		// per process via std::call_once, since the underlying registry is
+		// process-global and not safe to register into concurrently.
+		static std::once_flag compute_init_flag;
+		std::call_once(compute_init_flag, []() { auto st = arrow::compute::Initialize(); (void)st; });
+
+		auto result = arrow::compute::MinMax(array);
+		if (!result.ok()) return false;
+		auto struct_scalar = std::static_pointer_cast<arrow::StructScalar>(result.ValueOrDie().scalar());
+		auto min_scalar = struct_scalar->field("min").ValueOrDie();
+		auto max_scalar = struct_scalar->field("max").ValueOrDie();
+		if (!min_scalar->is_valid || !max_scalar->is_valid) return false;
+		min_out = format_stat_scalar(min_scalar);
+		max_out = format_stat_scalar(max_scalar);
+		return true;
+	}
+
+	// Prints a debug/diagnostic summary of this reader's activity to stdout:
+	// table-level info (filename, total column/row counts) plus one row per
+	// column that was either prefetched (parquet_reader_prefetch_columns) or
+	// actually read (any parquet_read_* call) -- untouched columns are left
+	// out entirely, rather than forcing a decode of data nobody asked for
+	// just to fill in a report. Called from parquet_close_reader(print_stat=.true.)
+	// before the underlying reader is closed/deleted.
+	void parquet_reader_print_stat(void *handle)
+	{
+		auto reader_handle = as_reader_handle(handle);
+
+		std::vector<int> touched;
+		for (int idx : reader_handle->was_prefetched) touched.push_back(idx);
+		for (int idx : reader_handle->was_read)
+		{
+			if (std::find(touched.begin(), touched.end(), idx) == touched.end()) touched.push_back(idx);
+		}
+		std::sort(touched.begin(), touched.end());
+
+		std::vector<std::string> headers = {
+			"col", "parquet_type", "output_type", "col_size", "len_str",
+			"nulls", "min", "max", "prefetc", "read"};
+		std::vector<std::vector<std::string>> rows;
+
+		for (int idx : touched)
+		{
+			auto field = reader_handle->schema->field(idx);
+			auto array = reader_handle->column_cache.at(idx);
+			auto flat = flatten_for_stats(array);
+
+			std::string col_size_str;
+			auto col_size = get_col_size(array);
+			if (col_size > 1) col_size_str = std::to_string(col_size);
+
+			std::string len_str_str;
+			if (flat->type_id() == arrow::Type::STRING)
+			{
+				auto sarr = std::static_pointer_cast<arrow::StringArray>(flat);
+				int64_t max_len = 0;
+				for (int64_t i = 0; i < sarr->length(); ++i)
+				{
+					if (sarr->IsNull(i)) continue;
+					max_len = std::max(max_len, static_cast<int64_t>(sarr->GetView(i).size()));
+				}
+				len_str_str = std::to_string(max_len);
+				auto out_len = reader_handle->output_str_len_used.find(idx);
+				if (out_len != reader_handle->output_str_len_used.end())
+				{
+					len_str_str += " / " + std::to_string(out_len->second);
+				}
+			}
+
+			std::string nulls_str = std::to_string(flat->null_count());
+
+			std::string min_str, max_str;
+			if (flat->type_id() == arrow::Type::BOOL)
+			{
+				auto barr = std::static_pointer_cast<arrow::BooleanArray>(flat);
+				int64_t n_true = 0, n_false = 0;
+				for (int64_t i = 0; i < barr->length(); ++i)
+				{
+					if (barr->IsNull(i)) continue;
+					if (barr->Value(i)) ++n_true; else ++n_false;
+				}
+				min_str = "T:" + std::to_string(n_true);
+				max_str = "F:" + std::to_string(n_false);
+			}
+			else if (!compute_stat_min_max(flat, min_str, max_str))
+			{
+				min_str = "-";
+				max_str = "-";
+			}
+
+			auto output_type_it = reader_handle->output_type_used.find(idx);
+			std::string output_type_str = output_type_it != reader_handle->output_type_used.end() ? output_type_it->second : "";
+
+			rows.push_back({
+				field->name(),
+				describe_parquet_type(field),
+				output_type_str,
+				col_size_str,
+				len_str_str,
+				nulls_str,
+				min_str,
+				max_str,
+				reader_handle->was_prefetched.count(idx) ? "yes" : "no",
+				reader_handle->was_read.count(idx) ? "yes" : "no",
+			});
+		}
+
+		std::vector<size_t> widths;
+		for (const auto &h : headers) widths.push_back(h.size());
+		for (const auto &row : rows)
+		{
+			for (size_t i = 0; i < row.size(); ++i) widths[i] = std::max(widths[i], row[i].size());
+		}
+
+		auto print_row = [&](const std::vector<std::string> &row)
+		{
+			std::string line;
+			for (size_t i = 0; i < row.size(); ++i)
+			{
+				line += row[i];
+				line.append(widths[i] - row[i].size(), ' ');
+				if (i + 1 < row.size()) line += "  ";
+			}
+			std::fprintf(stdout, "%s\n", line.c_str());
+		};
+
+		std::fprintf(stdout, "=== parquet_reader stats ===\n");
+		std::fprintf(stdout, "file: %s\n", reader_handle->filename.c_str());
+		std::fprintf(stdout, "columns: %d   shown: %zu   rows: %lld\n\n",
+			reader_handle->schema->num_fields(), rows.size(), static_cast<long long>(reader_handle->nrows));
+
+		print_row(headers);
+		std::vector<std::string> sep;
+		for (auto w : widths) sep.push_back(std::string(w, '-'));
+		print_row(sep);
+		for (const auto &row : rows) print_row(row);
+		std::fflush(stdout);
 	}
 
 }
@@ -1209,6 +1474,19 @@ extern "C"
 // (templates cannot have C language linkage) between two extern "C" blocks,
 // same as ConcurrencyGuard/append_typed_column above -- convert_values_to_*
 // is already visible here via ordinary (non-template-dependent) name lookup.
+// Fortran-side output type name for CType, matching the strings mark_read
+// uses at every other typed read call site -- shared by read_list_primitive_row/
+// _element below so their tracked output_type_used entries look the same as
+// every other read function's (see parquet_reader_print_stat).
+template <typename CType>
+static constexpr const char *ctype_name()
+{
+	if constexpr (std::is_same_v<CType, int32_t>) return "int32";
+	else if constexpr (std::is_same_v<CType, int64_t>) return "int64";
+	else if constexpr (std::is_same_v<CType, float>) return "float32";
+	else if constexpr (std::is_same_v<CType, double>) return "float64";
+}
+
 template <typename CType>
 static void read_list_primitive_row(void *handle, const char *name, int64_t row_index, CType *data, int64_t col_size, int8_t *valid_out)
 {
@@ -1229,6 +1507,7 @@ static void read_list_primitive_row(void *handle, const char *name, int64_t row_
 		convert_values_to_float64(vals_any, data, col_size, name, "parquet_read_array_row_mode");
 
 	fill_null_default(data, valid_out, col_size);
+	mark_read(reader_handle, name, ctype_name<CType>());
 }
 
 template <typename CType>
@@ -1259,6 +1538,7 @@ static void read_list_primitive_element(void *handle, const char *name, int64_t 
 		convert_values_to_float64(vals_any, data, nrows, name, "parquet_read_array_element_mode", col_size, offset);
 
 	fill_null_default(data, valid_out, nrows);
+	mark_read(reader_handle, name, ctype_name<CType>());
 }
 
 extern "C"
@@ -1290,6 +1570,7 @@ extern "C"
 		check_or_report_nulls(array, name, valid_out, "parquet_read_int32_column");
 		convert_values_to_int32(array, data, nrows, name, "parquet_read_int32_column");
 		fill_null_default(data, valid_out, nrows);
+		mark_read(reader_handle, name, "int32");
 	}
 
 	void parquet_read_int64_column(void *handle, const char *name, int64_t *data, int64_t nrows, int8_t *valid_out)
@@ -1303,6 +1584,7 @@ extern "C"
 		check_or_report_nulls(array, name, valid_out, "parquet_read_int64_column");
 		convert_values_to_int64(array, data, nrows, name, "parquet_read_int64_column");
 		fill_null_default(data, valid_out, nrows);
+		mark_read(reader_handle, name, "int64");
 	}
 
 	void parquet_read_float32_column(void *handle, const char *name, float *data, int64_t nrows, int8_t *valid_out)
@@ -1316,6 +1598,7 @@ extern "C"
 		check_or_report_nulls(array, name, valid_out, "parquet_read_float32_column");
 		convert_values_to_float32(array, data, nrows, name, "parquet_read_float32_column");
 		fill_null_default(data, valid_out, nrows);
+		mark_read(reader_handle, name, "float32");
 	}
 
 	void parquet_read_float64_column(void *handle, const char *name, double *data, int64_t nrows, int8_t *valid_out)
@@ -1329,6 +1612,7 @@ extern "C"
 		check_or_report_nulls(array, name, valid_out, "parquet_read_float64_column");
 		convert_values_to_float64(array, data, nrows, name, "parquet_read_float64_column");
 		fill_null_default(data, valid_out, nrows);
+		mark_read(reader_handle, name, "float64");
 	}
 
 	void parquet_read_bool8_column(void *handle, const char *name, int8_t *data, int64_t nrows, int8_t *valid_out)
@@ -1351,6 +1635,7 @@ extern "C"
 			data[i] = arr->Value(i) ? 1 : 0;
 		}
 		fill_null_default(data, valid_out, nrows);
+		mark_read(reader_handle, name, "bool8");
 	}
 
 	void parquet_read_string_column(void *handle, const char *name, char *data, int64_t item_len, int64_t nrows, int8_t *valid_out)
@@ -1374,6 +1659,7 @@ extern "C"
 			copy_string_with_padding(data + i * item_len, item_len, view);
 		}
 		fill_null_default_string(data, item_len, valid_out, nrows);
+		mark_read_string(reader_handle, name, item_len);
 	}
 
 	void parquet_read_int32_array_column(void *handle, const char *name, int32_t *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
@@ -1385,6 +1671,7 @@ extern "C"
 		int64_t total = nrows * col_size;
 		convert_values_to_int32(vals_any, data, total, name, "parquet_read_int32_array_column");
 		fill_null_default(data, valid_out, total);
+		mark_read(reader_handle, name, "int32");
 	}
 
 	void parquet_read_int64_array_column(void *handle, const char *name, int64_t *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
@@ -1396,6 +1683,7 @@ extern "C"
 		int64_t total = nrows * col_size;
 		convert_values_to_int64(vals_any, data, total, name, "parquet_read_int64_array_column");
 		fill_null_default(data, valid_out, total);
+		mark_read(reader_handle, name, "int64");
 	}
 
 	void parquet_read_float32_array_column(void *handle, const char *name, float *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
@@ -1407,6 +1695,7 @@ extern "C"
 		int64_t total = nrows * col_size;
 		convert_values_to_float32(vals_any, data, total, name, "parquet_read_float32_array_column");
 		fill_null_default(data, valid_out, total);
+		mark_read(reader_handle, name, "float32");
 	}
 
 	void parquet_read_float64_array_column(void *handle, const char *name, double *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
@@ -1418,6 +1707,7 @@ extern "C"
 		int64_t total = nrows * col_size;
 		convert_values_to_float64(vals_any, data, total, name, "parquet_read_float64_array_column");
 		fill_null_default(data, valid_out, total);
+		mark_read(reader_handle, name, "float64");
 	}
 
 	void parquet_read_bool8_array_column(void *handle, const char *name, int8_t *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
@@ -1437,6 +1727,7 @@ extern "C"
 			data[i] = vals->Value(i) ? 1 : 0;
 		}
 		fill_null_default(data, valid_out, nrows * col_size);
+		mark_read(reader_handle, name, "bool8");
 	}
 
 	void parquet_read_string_array_column(void *handle, const char *name, char *data, int64_t item_len, int64_t nrows, int64_t col_size, int8_t *valid_out)
@@ -1456,6 +1747,7 @@ extern "C"
 			copy_string_with_padding(data + i * item_len, item_len, vals->GetView(i));
 		}
 		fill_null_default_string(data, item_len, valid_out, nrows * col_size);
+		mark_read_string(reader_handle, name, item_len);
 	}
 
 	void parquet_read_int32_array_row(void *handle, const char *name, int64_t row_index, int32_t *data, int64_t col_size, int8_t *valid_out)
@@ -1494,6 +1786,7 @@ extern "C"
 			data[j] = vals->Value(j) ? 1 : 0;
 		}
 		fill_null_default(data, valid_out, col_size);
+		mark_read(reader_handle, name, "bool8");
 	}
 
 	void parquet_read_string_array_row(void *handle, const char *name, int64_t row_index, char *data, int64_t item_len, int64_t col_size, int8_t *valid_out)
@@ -1512,6 +1805,7 @@ extern "C"
 			copy_string_with_padding(data + j * item_len, item_len, vals->GetView(j));
 		}
 		fill_null_default_string(data, item_len, valid_out, col_size);
+		mark_read_string(reader_handle, name, item_len);
 	}
 
 	void parquet_read_int32_array_element(void *handle, const char *name, int64_t col_index, int32_t *data, int64_t nrows, int64_t unused_col_size, int8_t *valid_out)
@@ -1554,6 +1848,7 @@ extern "C"
 			data[i] = vals->Value(i * col_size + offset) ? 1 : 0;
 		}
 		fill_null_default(data, valid_out, nrows);
+		mark_read(reader_handle, name, "bool8");
 	}
 
 	void parquet_read_string_array_element(void *handle, const char *name, int64_t col_index, char *data, int64_t item_len, int64_t nrows, int64_t, int8_t *valid_out)
@@ -1576,6 +1871,7 @@ extern "C"
 			copy_string_with_padding(data + i * item_len, item_len, vals->GetView(i * col_size + offset));
 		}
 		fill_null_default_string(data, item_len, valid_out, nrows);
+		mark_read_string(reader_handle, name, item_len);
 	}
 
 	void parquet_add_column_metadata(

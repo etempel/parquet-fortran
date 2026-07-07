@@ -26,7 +26,7 @@ auto-executables = true
 auto-tests = true
 auto-examples = true
 module-naming = false
-link = ["arrow", "parquet"]
+link = ["arrow", "arrow_compute", "parquet"]
 
 [install]
 library = false

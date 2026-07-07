@@ -16,6 +16,7 @@ module parquet_bindings
 
     public :: create_parquet_writer, create_parquet_reader
     public :: close_parquet_writer, close_parquet_reader
+    public :: parquet_reader_print_stat
     public :: parquet_set_writer_options
     public :: parquet_set_thread_pool_capacity
     public :: parquet_maml_lock, parquet_maml_unlock
@@ -186,6 +187,12 @@ module parquet_bindings
 
         subroutine close_parquet_reader(reader) &
                 bind(C, name="close_parquet_reader")
+            import
+            type(c_ptr), value :: reader
+        end subroutine
+
+        subroutine parquet_reader_print_stat(reader) &
+                bind(C, name="parquet_reader_print_stat")
             import
             type(c_ptr), value :: reader
         end subroutine

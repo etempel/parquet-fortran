@@ -84,6 +84,10 @@ contains
                 test_chunk_size_auto_sizing_wide_row), &
             new_unittest("parquet_prefetch_columns still allows reading a non-prefetched column", &
                 test_prefetch_columns_then_read_non_prefetched), &
+            new_unittest("repeated, overlapping parquet_prefetch_columns calls still read correctly", &
+                test_prefetch_columns_repeated_overlapping_calls), &
+            new_unittest("parquet_close_reader(print_stat=.true.) does not disturb a normal close", &
+                test_close_reader_print_stat_smoke), &
             new_unittest("use_threads=.false. on writer and reader still round-trips", &
                 test_use_threads_false_still_round_trips), &
             new_unittest("parquet_set_max_threads with a valid value does not break a round-trip", &
@@ -947,6 +951,86 @@ contains
         call check(error, all(a_back == a_values) .and. all(b_back == b_values) .and. all(c_back == c_values), &
             "prefetching a subset of columns broke reading either the prefetched or the non-prefetched column")
     end subroutine test_prefetch_columns_then_read_non_prefetched
+
+    !> Calling parquet_prefetch_columns more than once, with column sets that
+    !> partially overlap an earlier call, must accumulate the union of every
+    !> column named across all calls -- not just the columns from the most
+    !> recent call. This exercises the column_cache skip-if-already-cached
+    !> logic in parquet_reader_prefetch_columns (src/parquet_wrapper.cpp).
+    subroutine test_prefetch_columns_repeated_overlapping_calls(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: a_values(5), b_values(5), c_values(5)
+        integer(int32) :: a_back(5), b_back(5), c_back(5)
+        character(len=*), parameter :: out_file = "test_run/test_prefetch_overlap.parquet"
+        integer :: i
+
+        a_values = [(i, i=1,5)]
+        b_values = [(i*10, i=1,5)]
+        c_values = [(i*100, i=1,5)]
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "a", a_values)
+        call parquet_write_column(writer, "b", b_values)
+        call parquet_write_column(writer, "c", c_values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_prefetch_columns(reader, ["a", "b"])
+        call parquet_prefetch_columns(reader, ["b", "c"])
+        call parquet_read_column(reader, "a", a_back)
+        call parquet_read_column(reader, "b", b_back)
+        call parquet_read_column(reader, "c", c_back)
+        call parquet_close_reader(reader)
+
+        call check(error, all(a_back == a_values) .and. all(b_back == b_values) .and. all(c_back == c_values), &
+            "repeated, overlapping parquet_prefetch_columns calls did not yield the union of all requested columns")
+    end subroutine test_prefetch_columns_repeated_overlapping_calls
+
+    !> print_stat is purely a diagnostic print to stdout -- this only checks
+    !> that passing print_stat=.true. (with a mix of a prefetched-only column,
+    !> a column that was actually read, and a column nobody touched at all)
+    !> doesn't disturb the close itself or the data already read back, and
+    !> that the file is left in a normal, readable state afterwards.
+    subroutine test_close_reader_print_stat_smoke(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: a_values(5), b_values(5), c_values(5)
+        integer(int32) :: a_back(5)
+        character(len=*), parameter :: out_file = "test_run/test_print_stat.parquet"
+        integer :: i
+        integer(int32) :: nrows
+
+        a_values = [(i, i=1,5)]
+        b_values = [(i*10, i=1,5)]
+        c_values = [(i*100, i=1,5)]
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "a", a_values)
+        call parquet_write_column(writer, "b", b_values)
+        call parquet_write_column(writer, "c", c_values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_prefetch_columns(reader, ["b"])
+        call parquet_read_column(reader, "a", a_back)
+        ! "c" is deliberately never prefetched or read, to exercise the
+        ! "untouched columns are left out of the report" behavior.
+        call parquet_close_reader(reader, print_stat=.true.)
+
+        call check(error, all(a_back == a_values), &
+            "print_stat=.true. disturbed a column already read back before the close")
+        if (allocated(error)) return
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+
+        call check(error, nrows == 5, &
+            "file was left in a bad state after parquet_close_reader(print_stat=.true.)")
+    end subroutine test_close_reader_print_stat_smoke
 
     !> use_threads=.false. must still be a fully functional writer/reader --
     !> it only turns off Arrow's internal thread pool for that instance, it

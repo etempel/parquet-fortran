@@ -93,6 +93,7 @@ contains
     end procedure parquet_read_maml_file
 
     module procedure parquet_read_maml_internal
+        call parquet_validate_maml(maml)
         call parquet_parse_maml_lines(maml%lines, cinfo, metadata)
         call parquet_merge_missing_columns(maml, cinfo)
         metadata%source_maml_lines = maml%lines

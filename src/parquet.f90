@@ -590,8 +590,9 @@ module parquet
             logical, intent(in), optional :: use_threads
         end subroutine parquet_open_reader
 
-        module subroutine parquet_close_reader(reader)
+        module subroutine parquet_close_reader(reader, print_stat)
             type(parquet_reader), intent(inout) :: reader
+            logical, intent(in), optional :: print_stat
         end subroutine parquet_close_reader
 
         module subroutine parquet_prefetch_columns(reader, names)

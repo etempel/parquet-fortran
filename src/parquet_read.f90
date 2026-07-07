@@ -67,6 +67,9 @@ contains
         if (.not. c_associated(reader%handle)) then
             error stop "parquet_close_reader: reader has not been opened, or was already closed"
         end if
+        if (present(print_stat)) then
+            if (print_stat) call parquet_reader_print_stat(reader%handle)
+        end if
         call close_parquet_reader(reader%handle)
         reader%handle = c_null_ptr
     end procedure parquet_close_reader

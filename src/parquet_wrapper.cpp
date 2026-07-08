@@ -1497,7 +1497,11 @@ extern "C"
 			std::string err;
 			if (!eval_filter_clause(array, name, op, is_string, value, combined, err))
 			{
-				std::snprintf(err_out, static_cast<size_t>(err_cap), "%s", err.c_str());
+				// Tag the clause-level message so it is unambiguously a row-filter
+				// error (vs a read-time qc check, which labels its own messages).
+				// The other set_filter failures (unknown/vector/read-fail column)
+				// already say "filter" themselves, so they aren't tagged again here.
+				std::snprintf(err_out, static_cast<size_t>(err_cap), "filter rule: %s", err.c_str());
 				return 1;
 			}
 		}

@@ -416,7 +416,7 @@ contains
 
         call check_scenario_exit_status_and_stderr(error, "filter_bad_numeric_value", expect_abort=.true., &
             failure_message="a non-numeric filter value against a numeric column was expected to abort", &
-            required_stderr="is not a valid integer for column 'id_with_null'")
+            required_stderr="filter rule: value 'abc' is not a valid integer for column 'id_with_null'")
     end subroutine test_filter_bad_numeric_value_aborts
 
     !> A string column's filter value must be double-quoted -- a bare,

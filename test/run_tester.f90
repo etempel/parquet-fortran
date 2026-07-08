@@ -21,12 +21,17 @@ program tester
     use test_openmp, only : collect_tests_parquet_openmp_write, collect_tests_parquet_openmp
     !
     implicit none
-    integer :: stat, is
+    integer :: stat, is, cmdstat
     character(len=:), allocatable :: suite_name, test_name
     type(testsuite_type), allocatable :: testsuites(:)
     character(len=*), parameter :: fmt = '("#", *(1x, a))'
     !
     stat = 0
+    !
+    ! Tests write scratch parquet/maml files under test_run/; ensure it
+    ! exists up front so a fresh checkout or `rm -rf test_run` doesn't
+    ! break tests that don't create the directory themselves.
+    call execute_command_line("mkdir -p test_run", wait=.true., cmdstat=cmdstat)
     !
     ! Add all testsuites here as a comma separated list
     testsuites = [ &

@@ -19,6 +19,7 @@ program tester
     use test_errors, only : collect_tests_parquet_errors
     use test_examples, only : collect_tests_parquet_examples
     use test_openmp, only : collect_tests_parquet_openmp_write, collect_tests_parquet_openmp
+    use parquet_bindings, only : parquet_warmup_memory_pool
     !
     implicit none
     integer :: stat, is, cmdstat
@@ -32,6 +33,15 @@ program tester
     ! exists up front so a fresh checkout or `rm -rf test_run` doesn't
     ! break tests that don't create the directory themselves.
     call execute_command_line("mkdir -p test_run", wait=.true., cmdstat=cmdstat)
+    !
+    ! Forces Arrow's default_memory_pool() singleton to be constructed here,
+    ! single-threaded, before test-drive starts running tests within a suite
+    ! concurrently via OpenMP. Its first call is not safely reentrant in
+    ! every Arrow build -- without this, two threads racing to be the first
+    ! caller can abort with "Internal error: cannot create default memory
+    ! pool" (observed nondeterministically, e.g. reliably with
+    ! OMP_NUM_THREADS=2 on one Arrow 23.0.1 build).
+    call parquet_warmup_memory_pool()
     !
     ! Add all testsuites here as a comma separated list
     testsuites = [ &

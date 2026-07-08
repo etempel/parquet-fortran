@@ -20,6 +20,7 @@ module parquet_bindings
     public :: parquet_set_writer_options
     public :: parquet_set_thread_pool_capacity
     public :: parquet_maml_lock, parquet_maml_unlock
+    public :: parquet_warmup_memory_pool
     public :: parquet_add_column_metadata, parquet_add_table_metadata
     public :: parquet_append_int32_column, parquet_append_int64_column
     public :: parquet_append_float32_column, parquet_append_float64_column
@@ -71,6 +72,14 @@ module parquet_bindings
         end subroutine
 
         subroutine parquet_maml_unlock() bind(C, name="parquet_maml_unlock")
+        end subroutine
+
+        !> Forces arrow::default_memory_pool()'s lazy singleton to be
+        !> constructed now, single-threaded. See parquet_warmup_memory_pool
+        !> in parquet_wrapper.cpp for why: its first call is not safely
+        !> reentrant in every Arrow build, and test-drive runs tests within a
+        !> suite concurrently via OpenMP.
+        subroutine parquet_warmup_memory_pool() bind(C, name="parquet_warmup_memory_pool")
         end subroutine
 
         function create_parquet_reader(filename, use_threads) &

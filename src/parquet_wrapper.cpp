@@ -147,6 +147,19 @@ extern "C"
 		g_maml_mutex.unlock();
 	}
 
+	// arrow::default_memory_pool() lazily constructs a process-wide singleton
+	// on its first call. That first call is not safely reentrant in every
+	// Arrow build (observed: "Internal error: cannot create default memory
+	// pool" / SIGABRT when two OpenMP test threads both hit it as their very
+	// first Arrow call at the same time -- test-drive runs tests within a
+	// suite concurrently, see run_testsuite in testdrive.F90). Calling this
+	// once, single-threaded, before any concurrent work starts forces the
+	// singleton to already exist by the time multiple threads use it.
+	void parquet_warmup_memory_pool()
+	{
+		arrow::default_memory_pool();
+	}
+
 	struct ColumnMetadata
 	{
 		std::string name;

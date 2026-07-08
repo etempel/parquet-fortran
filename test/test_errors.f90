@@ -15,6 +15,7 @@
 !> `error_type` calls its FINAL `escalate_error` and aborts the whole process.
 module test_errors
     use testdrive, only : new_unittest, unittest_type, error_type, check
+    !$ use omp_lib, only : omp_get_max_threads
     !
     implicit none
     private
@@ -761,8 +762,23 @@ contains
             failure_message="parquet_set_max_threads(0) was expected to error stop")
     end subroutine test_set_max_threads_below_one_aborts
 
+    !> These two concurrency tests are self-adapting: the race they check can
+    !> only occur when this build genuinely runs multi-threaded (OpenMP flag
+    !> supplied via FPM_FFLAGS, and more than one thread available). When it
+    !> doesn't -- plain `fpm test` with no OpenMP flag, or OMP_NUM_THREADS=1 --
+    !> the shared-reader/writer race cannot happen, the guard cannot fire, and
+    !> running the scenario would just report a misleading failure. So we skip
+    !> (pass trivially) when omp_get_max_threads() <= 1, and only assert the
+    !> abort when real concurrency is available. The subprocess spawned by the
+    !> scenario inherits the same build/environment, so its thread count
+    !> matches what we observe here.
     subroutine test_concurrent_calls_into_shared_reader_aborts(error)
         type(error_type), allocatable, intent(out) :: error
+        integer :: nthreads
+
+        nthreads = 1
+        !$ nthreads = omp_get_max_threads()
+        if (nthreads <= 1) return   ! no real concurrency -> skip (pass)
 
         ! README's Thread safety section explicitly promises a diagnostic on
         ! stderr for this case, not just a bare abort -- check that promise
@@ -776,6 +792,11 @@ contains
 
     subroutine test_concurrent_calls_into_shared_writer_aborts(error)
         type(error_type), allocatable, intent(out) :: error
+        integer :: nthreads
+
+        nthreads = 1
+        !$ nthreads = omp_get_max_threads()
+        if (nthreads <= 1) return   ! no real concurrency -> skip (pass)
 
         call check_scenario_exit_status_and_stderr(error, "concurrent_calls_into_shared_writer", &
             expect_abort=.true., &
@@ -790,17 +811,13 @@ contains
         integer :: exitstat, cmdstat
         logical :: aborted
 
-        ! --features thread_safe (see fpm.toml) is forced here regardless
-        ! of how the outer `fpm test` was invoked: execute_command_line
-        ! spawns a brand new fpm process that only inherits environment
-        ! variables, not the parent's own command-line flags, so without
-        ! this the concurrent_calls_into_shared_reader/writer scenarios
-        ! below would silently run single-threaded and never actually
-        ! exercise the race they're meant to check. The actual OpenMP
-        ! flag itself must come from the environment (e.g. FPM_FFLAGS),
-        ! since it's compiler-dependent.
+        ! execute_command_line spawns a brand new fpm process that inherits
+        ! the environment (including FPM_FFLAGS), so an OpenMP flag set there
+        ! carries into the subprocess and the concurrency scenarios genuinely
+        ! run multi-threaded. The OpenMP flag itself is compiler-dependent, so
+        ! it must come from the environment rather than being hardcoded here.
         call execute_command_line( &
-            "fpm test error_scenarios --features thread_safe -- "//trim(scenario)//" > /dev/null 2>&1", &
+            "fpm test error_scenarios -- "//trim(scenario)//" > /dev/null 2>&1", &
             wait=.true., exitstat=exitstat, cmdstat=cmdstat)
 
         call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper program via fpm")
@@ -839,7 +856,7 @@ contains
         out_file = "test_run/" // trim(scenario) // "_stderr.txt"
 
         call execute_command_line( &
-            "fpm test error_scenarios --features thread_safe -- " // trim(scenario) // &
+            "fpm test error_scenarios -- " // trim(scenario) // &
             " > " // out_file // " 2>&1", &
             wait=.true., exitstat=exitstat, cmdstat=cmdstat)
         call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper program via fpm")
@@ -887,7 +904,7 @@ contains
         out_file = "test_run/" // trim(scenario) // "_stdout.txt"
 
         call execute_command_line( &
-            "fpm test error_scenarios --features thread_safe -- " // trim(scenario) // &
+            "fpm test error_scenarios -- " // trim(scenario) // &
             " > " // out_file // " 2>&1", &
             wait=.true., exitstat=exitstat, cmdstat=cmdstat)
         call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper program via fpm")

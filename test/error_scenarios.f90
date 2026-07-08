@@ -1589,7 +1589,18 @@ contains
         integer(int32) :: read_back(5)
         integer, parameter :: batches = 200
         integer, parameter :: iterations_per_batch = 500
-        integer :: b, i
+        integer :: b, i, nthreads
+
+        ! Self-adapting: the race only exists under genuine multi-threading.
+        ! Without an OpenMP flag (or with a single thread) the parallel region
+        ! below runs serially, the guard cannot fire, and the 100k-iteration
+        ! loop would be a pointless "unexpectedly finished" run. Skip cleanly.
+        nthreads = 1
+        !$ nthreads = omp_get_max_threads()
+        if (nthreads <= 1) then
+            print '(a)', "SKIPPED: OpenMP not active (omp_get_max_threads() <= 1); shared-reader race cannot occur"
+            return
+        end if
 
         call parquet_open_writer(writer, "test_run/error_scenario_shared_reader.parquet")
         call parquet_write_column(writer, "v", values)
@@ -1621,8 +1632,16 @@ contains
         integer(int32) :: values(3) = [1_int32, 2_int32, 3_int32]
         integer, parameter :: batches = 50
         integer, parameter :: iterations_per_batch = 100
-        integer :: b, i, tid
+        integer :: b, i, tid, nthreads
         character(len=32) :: colname
+
+        ! Self-adapting: see scenario_concurrent_calls_into_shared_reader.
+        nthreads = 1
+        !$ nthreads = omp_get_max_threads()
+        if (nthreads <= 1) then
+            print '(a)', "SKIPPED: OpenMP not active (omp_get_max_threads() <= 1); shared-writer race cannot occur"
+            return
+        end if
 
         call parquet_open_writer(writer, "test_run/error_scenario_shared_writer.parquet")
 

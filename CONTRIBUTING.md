@@ -73,10 +73,10 @@ This repository's own OpenMP-dependent tests (the `openmp` test suite, plus the 
 
 ```sh
 export FPM_FFLAGS="-fopenmp"
-fpm test --features thread_safe
+fpm test
 ```
 
-`--features thread_safe` itself adds no flags (the OpenMP flag is compiler-dependent and must come from `FPM_FFLAGS` as shown) — it's just a marker this project's own tests use to know real concurrency is expected; some scenario tests spawn `fpm test ... --features thread_safe` subprocesses and rely on the name being present. Running plain `fpm test` (without `--features thread_safe` and `FPM_FFLAGS`) still passes, but doesn't meaningfully exercise these specific concurrency checks.
+The OpenMP flag is compiler-dependent (`-fopenmp` for gfortran, `-qopenmp` for ifx, ...), so it can't be hardcoded in `fpm.toml` and must come from `FPM_FFLAGS` as shown. The two concurrency error-scenario tests are **self-adapting**: they check `omp_get_max_threads()` and, when it's `1` (no OpenMP flag, or `OMP_NUM_THREADS=1`), the shared-reader/writer race cannot occur, so they skip and pass trivially. So plain `fpm test` (no `FPM_FFLAGS`) is still green — it just doesn't meaningfully exercise these specific concurrency checks; set `FPM_FFLAGS="-fopenmp"` to actually verify the guard fires.
 
 ## Regenerating the built-in MAML module
 

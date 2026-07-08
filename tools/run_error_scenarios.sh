@@ -98,11 +98,12 @@ scenarios=(
 )
 
 # concurrent_calls_into_shared_reader/writer are deliberately not in the list
-# above: they only reliably trigger under genuine multi-threaded execution
-# (--features thread_safe with a real OpenMP flag supplied via FPM_FFLAGS --
-# see README's "Thread safety" section), which this script does not assume.
-# They are run separately below, best-effort, and do not count towards
-# failures if the environment isn't set up for real concurrency.
+# above: they only reliably trigger under genuine multi-threaded execution (a
+# real OpenMP flag supplied via FPM_FFLAGS -- see README's "Thread safety"
+# section), which this script does not assume. When OpenMP is not active the
+# scenarios detect that (omp_get_max_threads() <= 1) and skip cleanly. They are
+# run separately below, best-effort, and do not count towards failures whether
+# they abort (guard fired) or skip (no real concurrency available).
 concurrency_scenarios=(
     "concurrent_calls_into_shared_reader"
     "concurrent_calls_into_shared_writer"
@@ -148,10 +149,10 @@ for entry in "${scenarios[@]}"; do
 done
 
 echo
-echo "Concurrency scenarios (best-effort, need --features thread_safe + FPM_FFLAGS with a real OpenMP flag to reliably trigger):"
+echo "Concurrency scenarios (best-effort, need FPM_FFLAGS with a real OpenMP flag to reliably trigger):"
 for scenario in "${concurrency_scenarios[@]}"; do
-    if fpm test error_scenarios --features thread_safe -- "$scenario" > /dev/null 2>&1; then
-        printf "[INFO] %-50s did not abort (needs genuine OpenMP concurrency to trigger)\n" "$scenario"
+    if fpm test error_scenarios -- "$scenario" > /dev/null 2>&1; then
+        printf "[INFO] %-50s did not abort (skipped or single-threaded: needs genuine OpenMP concurrency)\n" "$scenario"
     else
         printf "[PASS] %-50s aborted as expected\n" "$scenario"
     fi

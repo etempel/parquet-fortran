@@ -25,6 +25,15 @@ contains
         character(len=:), allocatable :: miss_low
         logical :: has_qc
 
+        ! An empty (or all-blank) qc_input is an explicit no-op: return an
+        ! empty col_name and leave self%lines untouched. This is distinct from
+        ! a leading comma (e.g. ", >0"), which has content -- an empty first
+        ! field -- and is a genuine error (a missing column name).
+        if (len_trim(qc_input) == 0) then
+            col_name = ""
+            return
+        end if
+
         ! qc_input is at most four comma-separated fields:
         !   col_name , qc_min , qc_max , qc_miss
         ! (any of the last three may be empty). More than four is invalid.

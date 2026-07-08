@@ -41,7 +41,8 @@ contains
             new_unittest("get_column_index finds an existing column", test_get_column_index_found), &
             new_unittest("set_unavailable/set_available toggle is_set", test_set_available_unavailable), &
             new_unittest("add_col_qc builds a qc-maml from compact strings", test_add_col_qc_builds_maml), &
-            new_unittest("add_col_qc result reads back through parquet_open_reader", test_add_col_qc_roundtrip) &
+            new_unittest("add_col_qc result reads back through parquet_open_reader", test_add_col_qc_roundtrip), &
+            new_unittest("add_col_qc with an empty input is a no-op", test_add_col_qc_empty_input_is_noop) &
             ]
     end subroutine collect_tests_parquet_maml
 
@@ -306,5 +307,33 @@ contains
             abs(ra(4) - 4.5_real64) < 1.0e-12_real64, &
             "add_col_qc-built qc-maml did not read back the ra column correctly")
     end subroutine test_add_col_qc_roundtrip
+
+    !> An empty (or all-blank) qc_input is an explicit no-op: col_name comes
+    !> back empty and the maml's lines are left untouched. A subsequent real
+    !> add_col_qc call on the same maml still works and creates the fields:
+    !> header itself (i.e. the no-op left nothing half-initialized).
+    subroutine test_add_col_qc_empty_input_is_noop(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_maml_file) :: maml
+        character(len=:), allocatable :: cn
+
+        call maml%add_col_qc("", cn)
+        call check(error, len(cn) == 0, "add_col_qc('') should return an empty col_name")
+        if (allocated(error)) return
+        call check(error, .not. allocated(maml%lines), "add_col_qc('') should not add any lines")
+        if (allocated(error)) return
+
+        ! blank (whitespace-only) input is treated the same way.
+        call maml%add_col_qc("   ", cn)
+        call check(error, len(cn) == 0 .and. .not. allocated(maml%lines), &
+            "add_col_qc('   ') should be a no-op too")
+        if (allocated(error)) return
+
+        ! a real call afterwards behaves normally and builds from scratch.
+        call maml%add_col_qc("ra, >0", cn)
+        call check(error, cn == "ra" .and. allocated(maml%lines) .and. size(maml%lines) == 4 .and. &
+            trim(maml%lines(1)) == "fields:" .and. trim(maml%lines(2)) == "- name: ra", &
+            "a real add_col_qc after a no-op did not build correctly")
+    end subroutine test_add_col_qc_empty_input_is_noop
     !
 end module test_maml

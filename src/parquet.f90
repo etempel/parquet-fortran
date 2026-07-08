@@ -10,7 +10,7 @@ module parquet
     implicit none
     private
     !
-    character(len=*),parameter:: cversion = "v0.7.0 (2026-07-07)" !< version info
+    character(len=*),parameter:: cversion = "v0.8.0 (2026-07-08)" !< version info
 #ifndef RELEASE_VERSION
 #  define RELEASE_VERSION 0.1
 #endif
@@ -245,6 +245,16 @@ module parquet
         module procedure parquet_get_column_total_elements_int64
         module procedure parquet_get_column_total_elements_int32
     end interface parquet_get_column_total_elements
+
+    ! parquet_prefetch_columns accepts either an array of column names (each
+    ! element sharing one declared length -- pad shorter names with blanks) or
+    ! a single scalar string listing the names separated by commas and/or
+    ! semicolons ("ra;dec,mag"). The scalar form avoids the fixed-length array
+    ! pitfall where a too-short declared length silently truncates a name.
+    interface parquet_prefetch_columns
+        module procedure parquet_prefetch_columns_array
+        module procedure parquet_prefetch_columns_string
+    end interface parquet_prefetch_columns
 
     public :: parquet_writer
     public :: parquet_reader
@@ -663,10 +673,15 @@ module parquet
             logical, intent(in), optional :: print_stat
         end subroutine parquet_close_reader
 
-        module subroutine parquet_prefetch_columns(reader, names)
+        module subroutine parquet_prefetch_columns_array(reader, names)
             type(parquet_reader), intent(in) :: reader
             character(len=*), intent(in) :: names(:)
-        end subroutine parquet_prefetch_columns
+        end subroutine parquet_prefetch_columns_array
+
+        module subroutine parquet_prefetch_columns_string(reader, names)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: names
+        end subroutine parquet_prefetch_columns_string
 
         module subroutine reader_finalize(this)
             type(parquet_reader), intent(inout) :: this

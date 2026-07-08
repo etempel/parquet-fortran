@@ -87,6 +87,8 @@ contains
                 test_prefetch_columns_then_read_non_prefetched), &
             new_unittest("repeated, overlapping parquet_prefetch_columns calls still read correctly", &
                 test_prefetch_columns_repeated_overlapping_calls), &
+            new_unittest("parquet_prefetch_columns accepts a comma/semicolon string of names", &
+                test_prefetch_columns_string_form), &
             new_unittest("parquet_close_reader(print_stat=.true.) does not disturb a normal close", &
                 test_close_reader_print_stat_smoke), &
             new_unittest("qc: range violation prints a WARNING but does not abort", &
@@ -1010,6 +1012,44 @@ contains
         call check(error, all(a_back == a_values) .and. all(b_back == b_values) .and. all(c_back == c_values), &
             "repeated, overlapping parquet_prefetch_columns calls did not yield the union of all requested columns")
     end subroutine test_prefetch_columns_repeated_overlapping_calls
+
+    !> The scalar-string form of parquet_prefetch_columns accepts names of
+    !> differing lengths separated by commas and/or semicolons -- notably a
+    !> short name next to a longer one ("a", "xa"), the case that a
+    !> fixed-length character array literal cannot express without truncation.
+    !> Also checks that surrounding spaces and repeated/trailing delimiters are
+    !> tolerated, and that the file genuinely has no column "x" (so a truncated
+    !> "xa" -> "x" would have failed) yet the read still succeeds.
+    subroutine test_prefetch_columns_string_form(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: a_values(5), xa_values(5), b_values(5)
+        integer(int32) :: a_back(5), xa_back(5), b_back(5)
+        character(len=*), parameter :: out_file = "test_run/test_prefetch_string.parquet"
+        integer :: i
+
+        a_values  = [(i, i=1,5)]
+        xa_values = [(i*10, i=1,5)]
+        b_values  = [(i*100, i=1,5)]
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "a", a_values)
+        call parquet_write_column(writer, "xa", xa_values)
+        call parquet_write_column(writer, "b", b_values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        ! mixed comma/semicolon, stray spaces, and a trailing delimiter.
+        call parquet_prefetch_columns(reader, "a; xa , b;")
+        call parquet_read_column(reader, "a", a_back)
+        call parquet_read_column(reader, "xa", xa_back)
+        call parquet_read_column(reader, "b", b_back)
+        call parquet_close_reader(reader)
+
+        call check(error, all(a_back == a_values) .and. all(xa_back == xa_values) .and. all(b_back == b_values), &
+            "the string form of parquet_prefetch_columns did not prefetch a/xa/b correctly")
+    end subroutine test_prefetch_columns_string_form
 
     !> print_stat=.true. always prints to stdout -- run out-of-process (see
     !> scenario_print_stat_smoke in error_scenarios.f90) so that output is

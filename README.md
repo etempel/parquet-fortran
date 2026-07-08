@@ -233,15 +233,24 @@ Notes:
 
 `parquet_prefetch_columns(reader, names)` reads several named columns in one call, filling the same per-column cache that `parquet_read_column` would otherwise populate lazily, one column at a time, on first use. Since Arrow's internal `use_threads` is always on for this library (see [Compression and row group size](#compression-and-row-group-size)), reading several columns together like this lets Arrow decode them across its internal thread pool concurrently, instead of strictly one column at a time as each is lazily requested — it's purely a throughput optimization on top of the existing lazy-read design, never a requirement: a column you don't pass to `parquet_prefetch_columns` still works exactly as before, via `parquet_read_column`'s normal lazy, read-on-first-request path. Every name is validated against the file's actual schema before any data is read; a name that isn't a real column in the file fails immediately with `error stop`, naming the offending column. Calling `parquet_prefetch_columns` more than once (e.g. with a column set that partially overlaps an earlier call) is safe and efficient: columns already cached from an earlier prefetch, or already read lazily, are not re-read — only the columns not yet cached are fetched, so the cache after several calls holds the union of every column named across all of them.
 
+The column names can be given in either of two forms — `parquet_prefetch_columns` is generic:
+
 ```fortran
 call parquet_open_reader(reader, "data.parquet")
+
+! (1) a single string, names separated by commas and/or semicolons:
+call parquet_prefetch_columns(reader, "ra; dec, mag")
+
+! (2) an array of names (each element the same declared length):
 call parquet_prefetch_columns(reader, ["ra ", "dec", "mag"])
+
 ! call parquet_read_column for these (in any order) and any other, non-prefetched column:
 call parquet_read_column(reader, "ra", ra)
 call parquet_read_column(reader, "id", id)   ! fine even though "id" was never prefetched
 ```
 
-Note that all names in the `names(:)` array argument must share the same declared string length (pad shorter names with trailing spaces, as with any other Fortran character array literal).
+- **The string form (1)** splits on commas and/or semicolons (both accepted, and mixable), trims surrounding spaces from each name, and ignores empty tokens (so repeated or trailing delimiters are harmless). This is the recommended form when your names have different lengths, since it side-steps the array pitfall below.
+- **The array form (2)** requires all names to share the same declared string length — pad shorter names with trailing spaces, as with any Fortran character array literal (`["ra ", "dec"]`, not `["ra", "dec"]`, which won't even compile). Be careful: if the declared length is *shorter* than a name, that name is **silently truncated** and then fails validation as a "column not found" for the truncated text — e.g. `[character(len=1) :: "a", "xa"]` truncates `"xa"` to `"x"` and aborts with `column not found in parquet file: x`. The string form has no such trap.
 
 ### Printing reader statistics with `parquet_close_reader(..., print_stat=.true.)`
 
@@ -752,7 +761,7 @@ List of public callable procedures available with `use parquet`:
 
 ### Utility
 
-- `call parquet_get_version(ver_string[, internal])` — sets `ver_string` (`character`, `intent(out)`) to the library version. By default (or `internal=.false.`) returns just the release number without a `v` prefix, e.g. `"0.7.0"` (matching `VERSION.txt`, substituted in at build time via fpm). Pass `internal=.true.` to instead get the full internal version string embedded in the source, e.g. `"v0.7.0 (2026-07-07)"` (includes a `v` prefix and the last-updated date). If the two disagree (e.g. the library was built without going through fpm's version substitution), a `WARNING` is printed to stdout.
+- `call parquet_get_version(ver_string[, internal])` — sets `ver_string` (`character`, `intent(out)`) to the library version. By default (or `internal=.false.`) returns just the release number without a `v` prefix, e.g. `"0.8.0"` (matching `VERSION.txt`, substituted in at build time via fpm). Pass `internal=.true.` to instead get the full internal version string embedded in the source, e.g. `"v0.8.0 (2026-07-08)"` (includes a `v` prefix and the last-updated date). If the two disagree (e.g. the library was built without going through fpm's version substitution), a `WARNING` is printed to stdout.
 - `parquet_set_max_threads(n)` — sets the capacity (number of worker threads) of Arrow's global CPU thread pool to `n`. This is process-global, not per-reader/per-writer; see [Multi-threaded decoding/encoding](#multi-threaded-decodingencoding-use_threads-and-thread-pool-size). `n < 1` fails immediately with `error stop`.
 
 ### MAML and metadata
@@ -800,7 +809,7 @@ The public derived type `parquet_table_metadata` provides:
 - `parquet_get_col_size(reader, name, col_size)` — returns the fixed row length of vector column `name` in `col_size`. Call this before allocating the output array for `parquet_read_column`/`parquet_read_array_row_mode`/`parquet_read_array_element_mode` on that column.
 - `parquet_get_column_total_elements(reader, name, total_elements)` — returns the total number of elements in column `name` across all rows (`total_elements = col_size * nrows` for vector columns), in `total_elements` (`integer(int32)` or `integer(int64)`).
 - `parquet_get_string_length(reader, name, max_string_length)` — returns the longest string found in string column `name`. Call this before allocating a `character(len=...)` array for `parquet_read_column`, since the allocated length must be at least `max_string_length`.
-- `parquet_prefetch_columns(reader, names)` — reads every column named in the `character(len=*)` array `names(:)` in a single call, warming the lazy-read cache for all of them at once. See [Prefetching multiple columns at once](#prefetching-multiple-columns-at-once-with-parquet_prefetch_columns).
+- `parquet_prefetch_columns(reader, names)` — reads several named columns in a single call, warming the lazy-read cache for all of them at once. `names` is either a `character(len=*)` array (`["ra ", "dec"]`, elements sharing one declared length) or a single scalar string with the names separated by commas and/or semicolons (`"ra; dec, mag"`); the generic dispatches on which you pass. The string form is recommended for names of differing lengths — see [Prefetching multiple columns at once](#prefetching-multiple-columns-at-once-with-parquet_prefetch_columns).
 
 ### Reader (reads column data)
 

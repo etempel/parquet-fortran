@@ -293,7 +293,7 @@ contains
     !> (or any other read call) still works for any column, prefetched or not --
     !> a non-prefetched name simply falls through to the existing lazy,
     !> read-on-first-request path exactly as if this was never called.
-    module procedure parquet_prefetch_columns
+    module procedure parquet_prefetch_columns_array
         character(kind=c_char), allocatable :: packed(:)
         integer :: i, j, k, item_len, n
 
@@ -319,7 +319,60 @@ contains
         end do
 
         call parquet_reader_prefetch_columns(reader%handle, packed, int(item_len, kind=c_long_long), int(n, kind=c_long_long))
-    end procedure parquet_prefetch_columns
+    end procedure parquet_prefetch_columns_array
+
+    !> Scalar-string form of parquet_prefetch_columns: splits `names` on commas
+    !> and/or semicolons ("ra;dec, mag"), trims each token, drops empty tokens
+    !> (so trailing/repeated delimiters are harmless), packs them into a
+    !> uniform-length array, and delegates to the array form -- which does the
+    !> per-name existence check and the actual prefetch. Building the array
+    !> here from the split tokens sizes its length to the longest name, so it
+    !> cannot silently truncate a name the way a hand-declared fixed-length
+    !> array can.
+    module procedure parquet_prefetch_columns_string
+        character(len=:), allocatable :: name_arr(:)
+        character(len=:), allocatable :: tok
+        integer :: i, start, ntok, maxlen, idx
+        logical :: at_boundary
+
+        ! Pass 1: count non-empty tokens and find the longest, so the packed
+        ! array's element length covers every name exactly.
+        ntok = 0
+        maxlen = 0
+        start = 1
+        do i = 1, len(names) + 1
+            at_boundary = (i > len(names))
+            if (.not. at_boundary) at_boundary = (names(i:i) == ',' .or. names(i:i) == ';')
+            if (at_boundary) then
+                tok = trim(adjustl(names(start:i-1)))
+                if (len(tok) > 0) then
+                    ntok = ntok + 1
+                    maxlen = max(maxlen, len(tok))
+                end if
+                start = i + 1
+            end if
+        end do
+
+        ! Pass 2: fill the array and hand off to the array form (which also
+        ! does the reader-open and column-existence checks, even for ntok == 0).
+        allocate(character(len=max(maxlen, 1)) :: name_arr(ntok))
+        idx = 0
+        start = 1
+        do i = 1, len(names) + 1
+            at_boundary = (i > len(names))
+            if (.not. at_boundary) at_boundary = (names(i:i) == ',' .or. names(i:i) == ';')
+            if (at_boundary) then
+                tok = trim(adjustl(names(start:i-1)))
+                if (len(tok) > 0) then
+                    idx = idx + 1
+                    name_arr(idx) = tok
+                end if
+                start = i + 1
+            end if
+        end do
+
+        call parquet_prefetch_columns_array(reader, name_arr)
+    end procedure parquet_prefetch_columns_string
 
     !> Safety net for a reader whose handle is still open when it goes out of
     !> scope or is overwritten -- frees the underlying C++ object so the

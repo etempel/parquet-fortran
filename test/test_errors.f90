@@ -149,6 +149,8 @@ contains
                 test_add_col_qc_empty_column_name_aborts), &
             new_unittest("add_col_qc: duplicate column name aborts", &
                 test_add_col_qc_duplicate_column_aborts), &
+            new_unittest("get_col_qc: reversed min operator aborts (shared validation)", &
+                test_get_col_qc_reversed_operator_aborts), &
             new_unittest("writing values(:) not divisible by col_size aborts", &
                 test_write_values_not_divisible_by_col_size_aborts), &
             new_unittest("parquet_set_max_threads(0) aborts", &
@@ -737,6 +739,13 @@ contains
         call check_scenario_exit_status(error, "add_col_qc_duplicate_column", expect_abort=.true., &
             failure_message="add_col_qc with a duplicate column name was expected to error stop")
     end subroutine test_add_col_qc_duplicate_column_aborts
+
+    subroutine test_get_col_qc_reversed_operator_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "get_col_qc_reversed_operator", expect_abort=.true., &
+            failure_message="get_col_qc with a reversed min operator was expected to error stop")
+    end subroutine test_get_col_qc_reversed_operator_aborts
 
     subroutine test_write_values_not_divisible_by_col_size_aborts(error)
         type(error_type), allocatable, intent(out) :: error

@@ -333,24 +333,34 @@ call parquet_read_column(reader, "ra", ra_back)
 call parquet_close_reader(reader)
 ```
 
-#### Building a qc-maml in code with `maml%add_col_qc`
+#### Building a qc-maml in code with `add_col_qc` and `get_col_qc`
 
-Instead of authoring a `.maml` file, you can build the qc-maml in memory a column at a time with the `type(parquet_maml_file)` type-bound procedure `add_col_qc`, then pass it straight to `parquet_open_reader(..., maml=)`:
+Instead of authoring a `.maml` file, you can build the qc-maml in memory a column at a time from a compact, comma-separated string, then pass it straight to `parquet_open_reader(..., maml=)`. The `type(parquet_maml_file)` type provides two forms of the same builder — they append the identical field entry and differ only in how the parsed column name comes back:
+
+- **`call maml%add_col_qc(qc_input [, col_name])`** — subroutine. The parsed name is returned in the optional `col_name` argument (`character(len=:), allocatable, intent(out)`) when present; omit it to just add the entry.
+- **`col = maml%get_col_qc(qc_input)`** — function. The parsed name is the result, so it can be assigned straight back into the source variable: `col = maml%get_col_qc(col)`.
 
 ```fortran
 type(parquet_maml_file) :: qc
 type(parquet_reader) :: reader
 character(len=:), allocatable :: col
 
+! subroutine form: name comes back in the (optional) second argument
 call qc%add_col_qc("ra, >=0, <=360, Null", col)  ! col is returned as "ra"
-call qc%add_col_qc("dec, , <=90", col)           ! max only (empty min); col == "dec"
-call qc%add_col_qc("mag, 5", col)                ! bare number => inclusive (>= 5)
+call qc%add_col_qc("dec, , <=90")                ! col_name omitted: just add
+
+! function form: name is the result -- assign it wherever you like, even back
+! into the same variable you passed in
+col = "mag, 5"
+col = qc%get_col_qc(col)                          ! col becomes "mag" (bare 5 => >= 5)
 
 call parquet_open_reader(reader, "data.parquet", maml=qc)
-call parquet_read_column(reader, col, mag)   ! reuse the returned name
+call parquet_read_column(reader, col, mag)        ! reuse the returned name
 ```
 
-`call maml%add_col_qc(qc_input, col_name)` appends one field entry (and its `qc:` block) to `maml` from a compact, comma-separated string, and returns the column name in `col_name` (`character(len=:), allocatable, intent(out)`) so you can reuse it directly in the reads that follow.
+> **Why two forms?** `add_col_qc`'s `col_name` is `intent(out)`, so you must **not** pass the same variable as both arguments (`call maml%add_col_qc(x, x)`) — aliasing an `intent(out)` argument is undefined and corrupts the input. When you want the in-place `x = f(x)` convenience, use the `get_col_qc` function, which is safe for that. Note `get_col_qc` still **mutates** `maml` (it adds the entry) despite the `get_` name — it's a builder that also returns the name, not a pure query.
+
+Both forms share the same input format and validation:
 
 - **`qc_input` is `"col_name, qc_min, qc_max, qc_miss"`** — at most four comma-separated fields, matched **positionally**. Only `col_name` (the first field) is required and must be non-empty; any of the last three may be empty or omitted (`"ra, >0"` sets just a min; `"ra, , <=10"` sets just a max; `"ra,,, Null"` sets just miss). The `fields:` header is created automatically on the first call.
 - **`qc_min`/`qc_max`** may carry a leading operator (`>=`/`>` for `min`, `<=`/`<` for `max`) or be a bare number (inclusive, i.e. `>=` for min and `<=` for max — same convention as the [write-side `qc:`](#quality-control-qc-range-checks-on-write)). A reversed operator (e.g. a `<` on `min`), or an operator with no value after it, fails immediately with `error stop`.
@@ -750,7 +760,7 @@ List of public callable procedures available with `use parquet`:
 - `parquet_read_maml(maml, cinfo, metadata)` — parses a MAML source into `cinfo` (column definitions) and `metadata` (table-level key/value metadata). Two overloads share the same `maml` keyword: pass a filename (`character`) to read and parse a `.maml` file directly, or pass an already-loaded `parquet_maml_file` object (see `parquet_load_maml_file`) to parse MAML content you already hold in memory. Either overload always runs the same checks as `parquet_validate_maml` first, so a structurally invalid MAML (unknown top-level section, missing `table`, etc.) fails immediately with `error stop` rather than being silently parsed.
 - `parquet_load_maml_file(filename)` — reads a `.maml` file from disk and returns it as a `parquet_maml_file` object, without parsing it into `cinfo`/`metadata`. Also validates it (same checks as `parquet_validate_maml`) before returning. Useful when you want to hold on to the raw MAML content (e.g. to pass to `parquet_read_maml` later, or inspect `maml%name`/`maml%lines` directly).
 - `parquet_load_qc_maml_file(filename)` — reads a *qc-maml* from disk (a lighter MAML used only for read-time quality-control checks) and returns it as a `parquet_maml_file`, without `parquet_load_maml_file`'s full schema-authoring validation: a qc-maml doesn't need `table:`, `data_type:`, or even `qc:` itself. Pass the result as `parquet_open_reader(..., maml=)`; see [Read-time quality control with a qc-maml](#read-time-quality-control-with-a-qc-maml).
-- `call maml%add_col_qc(qc_input, col_name)` — type-bound procedure on `parquet_maml_file` that builds a qc-maml in memory instead of loading one from disk: appends one field entry (plus its `qc:` block) from a compact `"col, min, max, miss"` string and returns the parsed column name in `col_name` (`character(len=:), allocatable, intent(out)`). Validates operator direction, bound values, `miss:` value, field count (≤ 4) and uniqueness, each with `error stop`. See [Building a qc-maml in code](#building-a-qc-maml-in-code-with-mamladd_col_qc).
+- `call maml%add_col_qc(qc_input [, col_name])` / `col = maml%get_col_qc(qc_input)` — two type-bound forms of the same builder on `parquet_maml_file` for constructing a qc-maml in memory instead of loading one from disk. Each appends one field entry (plus its `qc:` block) from a compact `"col, min, max, miss"` string and hands back the parsed column name — `add_col_qc` (subroutine) via an optional `intent(out)` `col_name` argument, `get_col_qc` (function) as the result (usable in place as `col = maml%get_col_qc(col)`). Both validate operator direction, bound values, `miss:` value, field count (≤ 4) and uniqueness, each with `error stop`. See [Building a qc-maml in code](#building-a-qc-maml-in-code-with-add_col_qc-and-get_col_qc).
 - `parquet_validate_user_maml(base_maml, user_maml)` — checks that every column declared in `user_maml`'s `fields:` block also exists in `base_maml`'s `fields:` block (by name only). `user_maml` may omit any columns from `base_maml`, but must not declare any that aren't there. Unknown columns fail validation and are reported by name.
 - `parquet_validate_maml(maml)` — validates a single MAML file on its own. Checks that: at least one field is defined; every field has a non-empty `name`; every field's `data_type` is one of the recognized types (see [Supported data types](#supported-data-types) above; see `valid_maml_data_types` in `src/parquet_metadata.f90` to add more); no two fields share the same `name`; and the file's metadata includes a non-empty `table` entry. It also validates the `qc:` and `protected_cols:` features described in [Null values](#null-values) and [Quality control (qc:) range checks on write](#quality-control-qc-range-checks-on-write) below. Collects and reports all violations together in a single error stop.
 

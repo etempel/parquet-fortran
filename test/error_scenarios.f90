@@ -173,6 +173,8 @@ program error_scenarios
         call scenario_add_col_qc_empty_column_name()
     case ("add_col_qc_duplicate_column")
         call scenario_add_col_qc_duplicate_column()
+    case ("get_col_qc_reversed_operator")
+        call scenario_get_col_qc_reversed_operator()
     case ("qc_warning_numeric")
         call scenario_qc_warning_numeric()
     case ("qc_warning_string")
@@ -1197,6 +1199,16 @@ contains
         call maml%add_col_qc("ra, <10", col_name)
         print '(a)', "unexpectedly accepted a duplicate column name in add_col_qc"
     end subroutine scenario_add_col_qc_duplicate_column
+
+    !> The get_col_qc function form shares add_col_qc's worker, so it enforces
+    !> the same validation -- e.g. a reversed min: operator aborts here too.
+    subroutine scenario_get_col_qc_reversed_operator()
+        type(parquet_maml_file) :: maml
+        character(len=:), allocatable :: col_name
+
+        col_name = maml%get_col_qc("ra, <5")
+        print '(a)', "unexpectedly accepted a reversed qc min operator in get_col_qc"
+    end subroutine scenario_get_col_qc_reversed_operator
 
     !> A fields: entry with no name: at all is rejected -- name is the one
     !> required attribute for a qc-maml field (everything else, including

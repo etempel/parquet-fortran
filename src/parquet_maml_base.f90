@@ -40,17 +40,28 @@ module parquet_maml_base
         type(parquet_maml_col_map_entry), allocatable :: col_map(:)
     contains
         procedure :: add_col_qc => parquet_maml_add_col_qc
+        procedure :: get_col_qc => parquet_maml_get_col_qc
     end type parquet_maml_file
 
     interface
         !> Appends one qc: field entry to this MAML from a compact
-        !> "col, min, max, miss" string; returns the parsed column name.
-        !> Implemented in the submodule src/parquet_maml_base_add_col_qc.f90.
+        !> "col, min, max, miss" string. col_name (optional) returns the
+        !> parsed column name. Implemented in the submodule
+        !> src/parquet_maml_base_add_col_qc.f90.
         module subroutine parquet_maml_add_col_qc(self, qc_input, col_name)
             class(parquet_maml_file), intent(inout) :: self
             character(len=*), intent(in) :: qc_input
-            character(len=:), allocatable, intent(out) :: col_name
+            character(len=:), allocatable, intent(out), optional :: col_name
         end subroutine parquet_maml_add_col_qc
+        !> Function form of add_col_qc: appends the same qc: field entry and
+        !> returns the parsed column name as the result, so it may be assigned
+        !> back into the argument variable (col = maml%get_col_qc(col)). NB it
+        !> mutates self (adds the entry) despite the get_ name.
+        module function parquet_maml_get_col_qc(self, qc_input) result(col_name)
+            class(parquet_maml_file), intent(inout) :: self
+            character(len=*), intent(in) :: qc_input
+            character(len=:), allocatable :: col_name
+        end function parquet_maml_get_col_qc
     end interface
 
     public :: get_parquet_maml

@@ -57,6 +57,7 @@ scenarios=(
     "add_col_qc_too_many_fields:1"
     "add_col_qc_empty_column_name:1"
     "add_col_qc_duplicate_column:1"
+    "get_col_qc_reversed_operator:1"
     "get_column_index_not_found:1"
     "read_column_with_nulls:1"
     "read_unsupported_physical_type:1"

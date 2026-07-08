@@ -42,7 +42,8 @@ contains
             new_unittest("set_unavailable/set_available toggle is_set", test_set_available_unavailable), &
             new_unittest("add_col_qc builds a qc-maml from compact strings", test_add_col_qc_builds_maml), &
             new_unittest("add_col_qc result reads back through parquet_open_reader", test_add_col_qc_roundtrip), &
-            new_unittest("add_col_qc with an empty input is a no-op", test_add_col_qc_empty_input_is_noop) &
+            new_unittest("add_col_qc with an empty input is a no-op", test_add_col_qc_empty_input_is_noop), &
+            new_unittest("get_col_qc (function form) returns the name in place", test_get_col_qc) &
             ]
     end subroutine collect_tests_parquet_maml
 
@@ -335,5 +336,41 @@ contains
             trim(maml%lines(1)) == "fields:" .and. trim(maml%lines(2)) == "- name: ra", &
             "a real add_col_qc after a no-op did not build correctly")
     end subroutine test_add_col_qc_empty_input_is_noop
+
+    !> get_col_qc is the function form of add_col_qc: it appends the same entry
+    !> and returns the column name as its result, so it can be assigned back
+    !> into the source variable in place (col = maml%get_col_qc(col)) -- which
+    !> the subroutine form cannot do (that would alias an intent(out) argument).
+    !> Also confirms the subroutine's col_name argument is now optional.
+    subroutine test_get_col_qc(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_maml_file) :: maml, m2
+        character(len=:), allocatable :: s, r
+
+        ! subroutine form with col_name omitted (now optional) still adds.
+        call maml%add_col_qc("ra, >0, <=360")
+
+        ! function form: in-place, same-variable assignment, exact length.
+        s = 'id_galaxy , 0,'
+        s = maml%get_col_qc(s)
+        call check(error, s == "id_galaxy" .and. len(s) == 9, &
+            "get_col_qc did not return the exact in-place column name")
+        if (allocated(error)) return
+
+        ! both entries were appended, in order.
+        call check(error, size(maml%lines) == 8 .and. &
+            trim(maml%lines(1)) == "fields:"          .and. &
+            trim(maml%lines(2)) == "- name: ra"       .and. &
+            trim(maml%lines(6)) == "- name: id_galaxy" .and. &
+            trim(maml%lines(7)) == "  qc:"            .and. &
+            trim(maml%lines(8)) == "    min: '0'", &
+            "get_col_qc / optional-col_name add_col_qc produced unexpected lines")
+        if (allocated(error)) return
+
+        ! an empty input is a no-op for the function form too (returns "").
+        r = m2%get_col_qc("")
+        call check(error, len(r) == 0 .and. .not. allocated(m2%lines), &
+            "get_col_qc('') should be a no-op returning an empty string")
+    end subroutine test_get_col_qc
     !
 end module test_maml

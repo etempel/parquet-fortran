@@ -10,6 +10,7 @@
 #include <arrow/compute/initialize.h>
 #include <arrow/io/api.h>
 #include <arrow/util/byte_size.h>
+#include <arrow/util/compression.h>
 #include <arrow/util/thread_pool.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/arrow/writer.h>
@@ -155,9 +156,30 @@ extern "C"
 	// suite concurrently, see run_testsuite in testdrive.F90). Calling this
 	// once, single-threaded, before any concurrent work starts forces the
 	// singleton to already exist by the time multiple threads use it.
+	//
+	// The same class of race applies to Arrow's other lazily-constructed
+	// process-wide singletons: the global CPU thread pool
+	// (arrow::internal::GetCpuThreadPool(), used by SetCpuThreadPoolCapacity
+	// and multi-threaded reads) and each compression codec's first-use
+	// initialization (arrow::util::Codec::Create(), which for some codecs
+	// touches lazily-initialized library state, e.g. zlib). On machines with
+	// very high core counts, test-drive's concurrent-within-a-suite
+	// scheduling can start dozens of threads at once, several of which may
+	// hit one of these first-call paths simultaneously and abort with
+	// "terminate called recursively". Touch all of them here, single
+	// threaded, before any concurrent work starts.
 	void parquet_warmup_memory_pool()
 	{
 		arrow::default_memory_pool();
+		arrow::internal::GetCpuThreadPool();
+
+		for (auto codec_type : {arrow::Compression::SNAPPY, arrow::Compression::GZIP,
+			arrow::Compression::ZSTD, arrow::Compression::BROTLI, arrow::Compression::LZ4_FRAME})
+		{
+			if (!arrow::util::Codec::IsAvailable(codec_type)) continue;
+			auto result = arrow::util::Codec::Create(codec_type);
+			(void)result;
+		}
 	}
 
 	struct ColumnMetadata

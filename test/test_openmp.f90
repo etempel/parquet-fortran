@@ -234,20 +234,18 @@ contains
 
     subroutine parse_maml_once(ok)
         logical, intent(out) :: ok
-        type(parquet_maml_file) :: maml
-        type(parquet_column_info) :: cinfo
-        type(parquet_table_metadata) :: metadata
+        type(parquet_schema) :: schema
         integer :: idx
 
         ok = .false.
 
-        maml = get_parquet_maml("maml_example.maml")
-        call parquet_read_maml(maml, cinfo, metadata)
+        schema%maml = get_parquet_maml("maml_example.maml")
+        call parquet_parse_maml(schema)
 
-        idx = cinfo%get_column_index("id0")
+        idx = schema%get_column_index("id0")
         if (idx /= 1) return
 
-        idx = cinfo%get_column_index("idarr")
+        idx = schema%get_column_index("idarr")
         if (idx /= 2) return
 
         ok = .true.

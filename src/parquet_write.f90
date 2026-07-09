@@ -386,7 +386,7 @@ contains
             "uncompressed", "snappy", "gzip", "zstd", "brotli", "lz4"]
 
         writer%handle = create_parquet_writer(trim(filename)//char(0))
-        writer%is_schema_enforced = present(cinfo)
+        writer%is_schema_enforced = present(schema)
         if (present(qc)) writer%qc = qc
 
         ! Defaults to "snappy" -- Parquet-the-library's own built-in default is
@@ -422,13 +422,13 @@ contains
             int(level_value, kind=c_int), int(chunk_size_value, kind=c_long_long), &
             merge(1_c_int, 0_c_int, use_threads_value))
 
-        if (present(cinfo)) then
-            allocate(writer%all_columns(size(cinfo%col)))
-            writer%all_columns = cinfo%col
+        if (present(schema)) then
+            allocate(writer%all_columns(size(schema%cinfo%col)))
+            writer%all_columns = schema%cinfo%col
 
             n_enabled = 0
-            do i = 1, size(cinfo%col)
-                if (cinfo%col(i)%is_set) n_enabled = n_enabled + 1
+            do i = 1, size(schema%cinfo%col)
+                if (schema%cinfo%col(i)%is_set) n_enabled = n_enabled + 1
             end do
 
             if (n_enabled > 0) then
@@ -438,10 +438,10 @@ contains
                 k = 0
             end if
 
-            do i = 1, size(cinfo%col)
-                if (cinfo%col(i)%is_set) then
+            do i = 1, size(schema%cinfo%col)
+                if (schema%cinfo%col(i)%is_set) then
                     k = k + 1
-                    writer%enabled_columns(k) = cinfo%col(i)
+                    writer%enabled_columns(k) = schema%cinfo%col(i)
                     ! Registers the schema under output_name (the column's
                     ! display/file name -- equal to name unless a col_map:
                     ! entry renamed it), not the internal name, since that's
@@ -449,42 +449,40 @@ contains
                     ! Arrow to line up the field with its data.
                     call parquet_add_column_info(&
                         writer, &
-                        parquet_column_output_name(cinfo%col(i)), &
-                        cinfo%col(i)%unit, &
-                        cinfo%col(i)%info, &
-                        cinfo%col(i)%ucd, &
-                        cinfo%col(i)%data_type, &
-                        cinfo%col(i)%array_size, &
-                        cinfo%col(i)%col_size )
+                        parquet_column_output_name(schema%cinfo%col(i)), &
+                        schema%cinfo%col(i)%unit, &
+                        schema%cinfo%col(i)%info, &
+                        schema%cinfo%col(i)%ucd, &
+                        schema%cinfo%col(i)%data_type, &
+                        schema%cinfo%col(i)%array_size, &
+                        schema%cinfo%col(i)%col_size )
                 end if
             end do
-        end if
 
-        if (present(metadata)) then
-            if (allocated(metadata%items)) then
-                do i = 1, size(metadata%items)
+            if (allocated(schema%metadata%items)) then
+                do i = 1, size(schema%metadata%items)
                     call parquet_add_table_metadata(writer%handle, &
-                        trim(metadata%items(i)%key)//char(0), &
-                        trim(metadata%items(i)%value)//char(0), &
-                        trim(metadata%items(i)%description)//char(0))
+                        trim(schema%metadata%items(i)%key)//char(0), &
+                        trim(schema%metadata%items(i)%value)//char(0), &
+                        trim(schema%metadata%items(i)%description)//char(0))
                 end do
             end if
         end if
 
         if (present(write_maml)) then
             if (write_maml) then
-                if (.not. present(metadata)) then
-                    error stop "parquet_open_writer: write_maml=.true. requires metadata " // &
-                        "(populated by parquet_read_maml) to be present"
+                if (.not. present(schema)) then
+                    error stop "parquet_open_writer: write_maml=.true. requires a schema " // &
+                        "(prepared by parquet_parse_maml) to be present"
                 end if
-                if (.not. allocated(metadata%source_maml_lines)) then
-                    error stop "parquet_open_writer: write_maml=.true. requires metadata " // &
-                        "obtained from parquet_read_maml (no source MAML content found)"
+                if (.not. allocated(schema%metadata%source_maml_lines)) then
+                    error stop "parquet_open_writer: write_maml=.true. requires a schema " // &
+                        "obtained from parquet_parse_maml (no source MAML content found)"
                 end if
                 block
                     character(len=:), allocatable :: sidecar_lines(:)
-                    sidecar_lines = metadata%source_maml_lines
-                    if (present(cinfo)) call parquet_prune_disabled_fields(sidecar_lines, cinfo)
+                    sidecar_lines = schema%metadata%source_maml_lines
+                    call parquet_prune_disabled_fields(sidecar_lines, schema%cinfo)
                     call parquet_write_maml_sidecar(filename, sidecar_lines)
                 end block
             end if

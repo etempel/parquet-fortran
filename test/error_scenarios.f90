@@ -204,49 +204,43 @@ program error_scenarios
 contains
 
     subroutine scenario_write_undeclared_column()
-        type(parquet_maml_file) :: maml
-        type(parquet_column_info) :: cinfo
-        type(parquet_table_metadata) :: metadata
+        type(parquet_schema) :: schema
         type(parquet_writer) :: writer
         integer(int32) :: data(1) = [1_int32]
 
-        maml = get_parquet_maml("maml_example.maml")
-        call parquet_read_maml(maml, cinfo, metadata)
+        schema%maml = get_parquet_maml("maml_example.maml")
+        call parquet_parse_maml(schema)
 
-        call parquet_open_writer(writer, "test_run/error_scenario_undeclared.parquet", cinfo, metadata)
+        call parquet_open_writer(writer, "test_run/error_scenario_undeclared.parquet", schema)
         call parquet_write_column(writer, "not_a_real_column", data)
         call parquet_close_writer(writer)
     end subroutine scenario_write_undeclared_column
 
     subroutine scenario_write_type_mismatch()
-        type(parquet_maml_file) :: maml
-        type(parquet_column_info) :: cinfo
-        type(parquet_table_metadata) :: metadata
+        type(parquet_schema) :: schema
         type(parquet_writer) :: writer
         logical :: data(1) = [.true.]
 
-        maml = get_parquet_maml("maml_example.maml")
-        call parquet_read_maml(maml, cinfo, metadata)
+        schema%maml = get_parquet_maml("maml_example.maml")
+        call parquet_parse_maml(schema)
 
         ! "id0" is declared as int32 in the MAML schema; writing a logical is a type mismatch.
-        call parquet_open_writer(writer, "test_run/error_scenario_type_mismatch.parquet", cinfo, metadata)
+        call parquet_open_writer(writer, "test_run/error_scenario_type_mismatch.parquet", schema)
         call parquet_write_column(writer, "id0", data)
         call parquet_close_writer(writer)
     end subroutine scenario_write_type_mismatch
 
     subroutine scenario_write_column_twice()
-        type(parquet_maml_file) :: maml
-        type(parquet_column_info) :: cinfo
-        type(parquet_table_metadata) :: metadata
+        type(parquet_schema) :: schema
         type(parquet_writer) :: writer
         integer(int32) :: data(1) = [1_int32]
 
         ! The "written more than once" check only applies when a schema (cinfo) is
         ! enforced; a schema-less writer silently allows writing the same column twice.
-        maml = get_parquet_maml("maml_example.maml")
-        call parquet_read_maml(maml, cinfo, metadata)
+        schema%maml = get_parquet_maml("maml_example.maml")
+        call parquet_parse_maml(schema)
 
-        call parquet_open_writer(writer, "test_run/error_scenario_twice.parquet", cinfo, metadata)
+        call parquet_open_writer(writer, "test_run/error_scenario_twice.parquet", schema)
         call parquet_write_column(writer, "id0", data)
         call parquet_write_column(writer, "id0", data)
         call parquet_close_writer(writer)
@@ -256,7 +250,7 @@ contains
         type(parquet_writer) :: writer
         integer(int32) :: data(1) = [1_int32]
 
-        ! write_maml=.true. requires metadata populated by parquet_read_maml;
+        ! write_maml=.true. requires a schema populated by parquet_parse_maml;
         ! a schema-less writer has no source MAML content to save.
         call parquet_open_writer(writer, "test_run/error_scenario_write_maml.parquet", write_maml=.true.)
         call parquet_write_column(writer, "id", data)
@@ -554,15 +548,13 @@ contains
     end subroutine scenario_validate_col_map_output_matches_other_field
 
     subroutine scenario_get_column_index_not_found()
-        type(parquet_maml_file) :: maml
-        type(parquet_column_info) :: cinfo
-        type(parquet_table_metadata) :: metadata
+        type(parquet_schema) :: schema
         integer :: idx
 
-        maml = get_parquet_maml("maml_example.maml")
-        call parquet_read_maml(maml, cinfo, metadata)
+        schema%maml = get_parquet_maml("maml_example.maml")
+        call parquet_parse_maml(schema)
 
-        idx = cinfo%get_column_index("not_a_real_column")
+        idx = schema%get_column_index("not_a_real_column")
         print '(a,i0)', "unexpectedly found index: ", idx
     end subroutine scenario_get_column_index_not_found
 
@@ -901,7 +893,7 @@ contains
         close(unit)
     end subroutine write_text_file
 
-    !> parquet_open_reader(..., maml=) with a qc: min:/max: declared for
+    !> parquet_open_reader(..., schema=) with a qc: min:/max: declared for
     !> "ra" must print exactly one aggregate WARNING (matching the writer's
     !> own qc: wording) when parquet_read_column reads an out-of-range
     !> value, but must NOT abort -- with qc_soft=.true. qc is diagnostic-only.
@@ -922,7 +914,7 @@ contains
             "fields:", "- name: ra", "  qc:", "    min: 0", "    max: 360"])
 
         call parquet_open_reader(reader, "test_run/qc_range.parquet", &
-            maml=parquet_load_qc_maml_file("test_run/qc_range.maml"), qc_soft=.true.)
+            schema=parquet_load_qc_maml_file("test_run/qc_range.maml"), qc_soft=.true.)
         call parquet_read_column(reader, "ra", ra_back)
         call parquet_close_reader(reader)
     end subroutine scenario_qc_range_violation_warns
@@ -950,7 +942,7 @@ contains
             "fields:", "- name: id", "  qc:", "    min: 0"])
 
         call parquet_open_reader(reader, "test_run/qc_null.parquet", &
-            maml=parquet_load_qc_maml_file("test_run/qc_null.maml"), qc_soft=.true.)
+            schema=parquet_load_qc_maml_file("test_run/qc_null.maml"), qc_soft=.true.)
         call parquet_read_column(reader, "id", id_back, is_valid=is_valid_out)
         call parquet_close_reader(reader)
     end subroutine scenario_qc_null_violation_warns
@@ -974,7 +966,7 @@ contains
             "fields:", "- name: ra", "  qc:", "    min: 0", "    max: 360"])
 
         call parquet_open_reader(reader, "test_run/qc_range_hard.parquet", &
-            maml=parquet_load_qc_maml_file("test_run/qc_range_hard.maml"))
+            schema=parquet_load_qc_maml_file("test_run/qc_range_hard.maml"))
         call parquet_read_column(reader, "ra", ra_back)
         print '(a)', "unexpectedly read an out-of-range value without aborting in hard qc mode"
     end subroutine scenario_qc_range_violation_hard_aborts
@@ -999,7 +991,7 @@ contains
             "fields:", "- name: id", "  qc:", "    min: 0"])
 
         call parquet_open_reader(reader, "test_run/qc_null_hard.parquet", &
-            maml=parquet_load_qc_maml_file("test_run/qc_null_hard.maml"))
+            schema=parquet_load_qc_maml_file("test_run/qc_null_hard.maml"))
         call parquet_read_column(reader, "id", id_back, is_valid=is_valid_out)
         print '(a)', "unexpectedly read an unexpected Null without aborting in hard qc mode"
     end subroutine scenario_qc_null_violation_hard_aborts
@@ -1025,7 +1017,7 @@ contains
             "fields:", "- name: id", "  qc:", "    miss: Null"])
 
         call parquet_open_reader(reader, "test_run/qc_miss_null.parquet", &
-            maml=parquet_load_qc_maml_file("test_run/qc_miss_null.maml"))
+            schema=parquet_load_qc_maml_file("test_run/qc_miss_null.maml"))
         call parquet_read_column(reader, "id", id_back, is_valid=is_valid_out)
         call parquet_close_reader(reader)
     end subroutine scenario_qc_miss_null_no_warning
@@ -1051,7 +1043,7 @@ contains
             "fields:", "- name: id", "  qc:", "    miss: Null"])
 
         call parquet_open_reader(reader, "test_run/qc_abort_unchanged.parquet", &
-            maml=parquet_load_qc_maml_file("test_run/qc_abort_unchanged.maml"))
+            schema=parquet_load_qc_maml_file("test_run/qc_abort_unchanged.maml"))
         call parquet_read_column(reader, "id", id_back) ! no null_value=/is_valid= -- still expected to abort
         print '(a)', "unexpectedly read a column with a genuine Null without error, even with qc active"
     end subroutine scenario_qc_existing_null_abort_unchanged
@@ -1074,7 +1066,7 @@ contains
             "fields:", "- name: does_not_exist", "  qc:", "    min: 0"])
 
         call parquet_open_reader(reader, "test_run/qc_missing_col.parquet", &
-            maml=parquet_load_qc_maml_file("test_run/qc_missing_col.maml"))
+            schema=parquet_load_qc_maml_file("test_run/qc_missing_col.maml"))
         call parquet_close_reader(reader)
     end subroutine scenario_qc_column_not_in_file
 
@@ -1096,7 +1088,7 @@ contains
             "fields:", "- name: ra", "  qc:", "    min: 0", "    max: 360"])
 
         call parquet_open_reader(reader, "test_run/qc_disabled.parquet", &
-            maml=parquet_load_qc_maml_file("test_run/qc_disabled.maml"), qc=.false.)
+            schema=parquet_load_qc_maml_file("test_run/qc_disabled.maml"), qc=.false.)
         call parquet_read_column(reader, "ra", ra_back)
         call parquet_close_reader(reader)
     end subroutine scenario_qc_disabled_explicit_no_warning
@@ -1111,7 +1103,7 @@ contains
             "fields:", "- name: ra", "  qc:", "    miss: garbage"])
 
         call parquet_open_reader(reader, "test/fixtures/has_null.parquet", &
-            maml=parquet_load_qc_maml_file("test_run/qc_bad_miss.maml"))
+            schema=parquet_load_qc_maml_file("test_run/qc_bad_miss.maml"))
         print '(a)', "unexpectedly opened a reader with an unrecognized qc: miss: value"
     end subroutine scenario_qc_maml_bad_miss_value
 
@@ -1125,7 +1117,7 @@ contains
             "fields:", "- name: ra", "- name: ra"])
 
         call parquet_open_reader(reader, "test/fixtures/has_null.parquet", &
-            maml=parquet_load_qc_maml_file("test_run/qc_dup_field.maml"))
+            schema=parquet_load_qc_maml_file("test_run/qc_dup_field.maml"))
         print '(a)', "unexpectedly opened a reader with a duplicate qc-maml field name"
     end subroutine scenario_qc_maml_duplicate_field
 
@@ -1139,7 +1131,7 @@ contains
             "fields:", "- name: ra", "  qc:", "    min: '< 5'"])
 
         call parquet_open_reader(reader, "test/fixtures/has_null.parquet", &
-            maml=parquet_load_qc_maml_file("test_run/qc_min_wrong_op.maml"))
+            schema=parquet_load_qc_maml_file("test_run/qc_min_wrong_op.maml"))
         print '(a)', "unexpectedly opened a reader with a reversed qc: min: operator"
     end subroutine scenario_qc_maml_min_wrong_operator
 
@@ -1220,7 +1212,7 @@ contains
             "fields:", "- unit: cm"])
 
         call parquet_open_reader(reader, "test/fixtures/has_null.parquet", &
-            maml=parquet_load_qc_maml_file("test_run/qc_missing_name.maml"))
+            schema=parquet_load_qc_maml_file("test_run/qc_missing_name.maml"))
         print '(a)', "unexpectedly opened a reader with a qc-maml field missing 'name'"
     end subroutine scenario_qc_maml_missing_name
 
@@ -1235,7 +1227,7 @@ contains
             "fields:", "- name: ra", "  qc:", "    minimum: 5"])
 
         call parquet_open_reader(reader, "test/fixtures/has_null.parquet", &
-            maml=parquet_load_qc_maml_file("test_run/qc_bad_subkey.maml"))
+            schema=parquet_load_qc_maml_file("test_run/qc_bad_subkey.maml"))
         print '(a)', "unexpectedly opened a reader with an unknown qc: sub-key"
     end subroutine scenario_qc_maml_unknown_subkey
 
@@ -1266,14 +1258,12 @@ contains
     !> equivalent check, silently truncating an over-length string in a
     !> fixed-length string vector/matrix column instead of erroring.
     subroutine scenario_write_string_matrix_exceeds_array_size()
-        type(parquet_maml_file) :: maml
-        type(parquet_column_info) :: cinfo
-        type(parquet_table_metadata) :: metadata
+        type(parquet_schema) :: schema
         type(parquet_writer) :: writer
         character(len=20) :: values(2, 1)
 
-        maml%name = "string_matrix_array_size.maml"
-        maml%lines = [character(len=40) :: &
+        schema%maml%name = "string_matrix_array_size.maml"
+        schema%maml%lines = [character(len=40) :: &
             "table: string_matrix_table", &
             "fields:", &
             "- name: s", &
@@ -1281,13 +1271,12 @@ contains
             "  array_size: 5", &
             "  col_size: 2" ]
 
-        call parquet_validate_maml(maml)
-        call parquet_read_maml(maml, cinfo, metadata)
+        call parquet_parse_maml(schema)
 
         values(1, 1) = "short"
         values(2, 1) = "this_is_way_too_long"
 
-        call parquet_open_writer(writer, "test_run/error_scenario_string_matrix_array_size.parquet", cinfo, metadata)
+        call parquet_open_writer(writer, "test_run/error_scenario_string_matrix_array_size.parquet", schema)
         call parquet_write_column(writer, "s", values)
         call parquet_close_writer(writer)
         print '(a)', "unexpectedly wrote an over-length string into a fixed-size string matrix column without error"
@@ -1311,15 +1300,13 @@ contains
     end subroutine scenario_validate_protected_cols_unknown_name
 
     subroutine scenario_write_protected_column_with_null()
-        type(parquet_maml_file) :: maml
-        type(parquet_column_info) :: cinfo
-        type(parquet_table_metadata) :: metadata
+        type(parquet_schema) :: schema
         type(parquet_writer) :: writer
         integer(int32) :: values(3) = [1_int32, 2_int32, 3_int32]
         logical :: is_valid(3) = [.true., .false., .true.]
 
-        maml%name = "protected_write.maml"
-        maml%lines = [character(len=40) :: &
+        schema%maml%name = "protected_write.maml"
+        schema%maml%lines = [character(len=40) :: &
             "table: protected_table", &
             "extra:", &
             "  protected_cols: a", &
@@ -1327,10 +1314,9 @@ contains
             "- name: a", &
             "  data_type: int32" ]
 
-        call parquet_validate_maml(maml)
-        call parquet_read_maml(maml, cinfo, metadata)
+        call parquet_parse_maml(schema)
 
-        call parquet_open_writer(writer, "test_run/error_scenario_protected_write.parquet", cinfo, metadata)
+        call parquet_open_writer(writer, "test_run/error_scenario_protected_write.parquet", schema)
         call parquet_write_column(writer, "a", values, is_valid=is_valid)
         call parquet_close_writer(writer)
         print '(a)', "unexpectedly wrote a Null into a protected column without error"
@@ -1421,14 +1407,12 @@ contains
     !> and checks for the WARNING text, since test-drive itself can't
     !> observe stdout produced by an in-process print statement reliably.
     subroutine scenario_qc_warning_numeric()
-        type(parquet_maml_file) :: maml
-        type(parquet_column_info) :: cinfo
-        type(parquet_table_metadata) :: metadata
+        type(parquet_schema) :: schema
         type(parquet_writer) :: writer
         integer(int32) :: values(5) = [1_int32, 5_int32, 1500_int32, -3_int32, 10_int32]
 
-        maml%name = "qc_warning.maml"
-        maml%lines = [character(len=40) :: &
+        schema%maml%name = "qc_warning.maml"
+        schema%maml%lines = [character(len=40) :: &
             "table: qc_table", &
             "fields:", &
             "- name: a", &
@@ -1437,23 +1421,20 @@ contains
             "    min: 1", &
             "    max: 1000" ]
 
-        call parquet_validate_maml(maml)
-        call parquet_read_maml(maml, cinfo, metadata)
+        call parquet_parse_maml(schema)
 
-        call parquet_open_writer(writer, "test_run/error_scenario_qc_warning.parquet", cinfo, metadata, qc=.true.)
+        call parquet_open_writer(writer, "test_run/error_scenario_qc_warning.parquet", schema, qc=.true.)
         call parquet_write_column(writer, "a", values)
         call parquet_close_writer(writer)
     end subroutine scenario_qc_warning_numeric
 
     subroutine scenario_qc_warning_string()
-        type(parquet_maml_file) :: maml
-        type(parquet_column_info) :: cinfo
-        type(parquet_table_metadata) :: metadata
+        type(parquet_schema) :: schema
         type(parquet_writer) :: writer
         character(len=8) :: values(3) = ["banana  ", "apple   ", "cherry  "]
 
-        maml%name = "qc_warning_string.maml"
-        maml%lines = [character(len=40) :: &
+        schema%maml%name = "qc_warning_string.maml"
+        schema%maml%lines = [character(len=40) :: &
             "table: qc_table", &
             "fields:", &
             "- name: s", &
@@ -1462,10 +1443,9 @@ contains
             "  qc:", &
             "    min: 'banana'" ]
 
-        call parquet_validate_maml(maml)
-        call parquet_read_maml(maml, cinfo, metadata)
+        call parquet_parse_maml(schema)
 
-        call parquet_open_writer(writer, "test_run/error_scenario_qc_warning_string.parquet", cinfo, metadata, qc=.true.)
+        call parquet_open_writer(writer, "test_run/error_scenario_qc_warning_string.parquet", schema, qc=.true.)
         call parquet_write_column(writer, "s", values)
         call parquet_close_writer(writer)
     end subroutine scenario_qc_warning_string
@@ -1473,14 +1453,12 @@ contains
     !> qc: on a boolean field is accepted by validation but never enforced;
     !> this must write/close without error and without printing a WARNING.
     subroutine scenario_qc_silently_ignored_for_boolean()
-        type(parquet_maml_file) :: maml
-        type(parquet_column_info) :: cinfo
-        type(parquet_table_metadata) :: metadata
+        type(parquet_schema) :: schema
         type(parquet_writer) :: writer
         logical :: values(3) = [.true., .false., .true.]
 
-        maml%name = "qc_boolean.maml"
-        maml%lines = [character(len=40) :: &
+        schema%maml%name = "qc_boolean.maml"
+        schema%maml%lines = [character(len=40) :: &
             "table: qc_table", &
             "fields:", &
             "- name: b", &
@@ -1489,10 +1467,9 @@ contains
             "    min: 0", &
             "    max: 0" ]
 
-        call parquet_validate_maml(maml)
-        call parquet_read_maml(maml, cinfo, metadata)
+        call parquet_parse_maml(schema)
 
-        call parquet_open_writer(writer, "test_run/error_scenario_qc_boolean.parquet", cinfo, metadata, qc=.true.)
+        call parquet_open_writer(writer, "test_run/error_scenario_qc_boolean.parquet", schema, qc=.true.)
         call parquet_write_column(writer, "b", values)
         call parquet_close_writer(writer)
     end subroutine scenario_qc_silently_ignored_for_boolean
@@ -1514,24 +1491,21 @@ contains
     !> actual failure signaled) instead of `error stop` -- this scenario
     !> guards against that regressing.
     subroutine scenario_write_values_not_divisible_by_col_size()
-        type(parquet_maml_file) :: maml
-        type(parquet_column_info) :: cinfo
-        type(parquet_table_metadata) :: metadata
+        type(parquet_schema) :: schema
         type(parquet_writer) :: writer
         integer(int32) :: values(3) = [1_int32, 2_int32, 3_int32]
 
-        maml%name = "col_size_mismatch.maml"
-        maml%lines = [character(len=40) :: &
+        schema%maml%name = "col_size_mismatch.maml"
+        schema%maml%lines = [character(len=40) :: &
             "table: col_size_mismatch_table", &
             "fields:", &
             "- name: v", &
             "  data_type: int32", &
             "  col_size: 2" ]
 
-        call parquet_validate_maml(maml)
-        call parquet_read_maml(maml, cinfo, metadata)
+        call parquet_parse_maml(schema)
 
-        call parquet_open_writer(writer, "test_run/error_scenario_col_size_mismatch.parquet", cinfo, metadata)
+        call parquet_open_writer(writer, "test_run/error_scenario_col_size_mismatch.parquet", schema)
         call parquet_write_column(writer, "v", values)
         call parquet_close_writer(writer)
         print '(a)', "unexpectedly wrote a values(:) array whose length isn't divisible by col_size without error"

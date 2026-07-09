@@ -88,6 +88,49 @@ module parquet
                                     add_metadata_float64_array, add_metadata_logical_array, add_metadata_string_array
     end type parquet_table_metadata
 
+    ! Bundles a parsed MAML source together with the column schema (cinfo)
+    ! and table metadata (metadata) that parquet_parse_maml derives from it,
+    ! so a single variable carries everything parquet_open_writer needs.
+    ! %cinfo and %metadata are public: their fields (col(:), items(:)) and
+    ! own type-bound procedures stay directly reachable, and the procedures
+    ! below are flat convenience passthroughs (schema%set_column_available("id")
+    ! instead of schema%cinfo%set_available("id")).
+    !
+    ! On the read side a qc-maml is populated into %maml alone -- either by
+    ! parquet_load_qc_maml_file or schema%add_col_qc -- and is never run
+    ! through parquet_parse_maml (a qc-maml has no data_type and would fail
+    ! the full schema validation), so %cinfo/%metadata stay empty;
+    ! parquet_open_reader consumes only %maml.
+    type parquet_schema
+        type(parquet_maml_file)      :: maml
+        type(parquet_column_info)    :: cinfo
+        type(parquet_table_metadata) :: metadata
+    contains
+        procedure :: set_column_available
+        procedure :: set_column_unavailable
+        procedure :: get_column_index => schema_get_column_index
+        procedure :: add_col_qc => schema_add_col_qc
+        procedure :: get_col_qc => schema_get_col_qc
+        procedure :: schema_add_metadata_int32
+        procedure :: schema_add_metadata_int64
+        procedure :: schema_add_metadata_float32
+        procedure :: schema_add_metadata_float64
+        procedure :: schema_add_metadata_logical
+        procedure :: schema_add_metadata_string
+        procedure :: schema_add_metadata_int32_array
+        procedure :: schema_add_metadata_int64_array
+        procedure :: schema_add_metadata_float32_array
+        procedure :: schema_add_metadata_float64_array
+        procedure :: schema_add_metadata_logical_array
+        procedure :: schema_add_metadata_string_array
+        generic :: add_metadata => schema_add_metadata_int32, schema_add_metadata_int64, &
+                                    schema_add_metadata_float32, schema_add_metadata_float64, &
+                                    schema_add_metadata_logical, schema_add_metadata_string, &
+                                    schema_add_metadata_int32_array, schema_add_metadata_int64_array, &
+                                    schema_add_metadata_float32_array, schema_add_metadata_float64_array, &
+                                    schema_add_metadata_logical_array, schema_add_metadata_string_array
+    end type parquet_schema
+
     ! parquet_writer/parquet_reader own a handle to a C++-side Arrow/Parquet
     ! object with no automatic Fortran cleanup. Always prefer an explicit
     ! parquet_close_writer/parquet_close_reader call; the FINAL procedures
@@ -190,10 +233,13 @@ module parquet
         module procedure parquet_write_string_matrix_column
     end interface parquet_write_column
 
-    interface parquet_read_maml
-        module procedure parquet_read_maml_file
-        module procedure parquet_read_maml_internal
-    end interface parquet_read_maml
+    !> Parses a MAML into a parquet_schema (its %maml, %cinfo and %metadata).
+    !> The file form loads the .maml from disk first; the object form parses
+    !> a schema whose %maml has already been populated (e.g. built in memory).
+    interface parquet_parse_maml
+        module procedure parquet_parse_maml_from_file
+        module procedure parquet_parse_maml_from_object
+    end interface parquet_parse_maml
 
     !> Validates either a parquet_maml_file (already loaded, e.g. via
     !> parquet_load_maml_file or built in memory) or a MAML filename (loaded
@@ -262,12 +308,13 @@ module parquet
     public :: parquet_column_info
     public :: parquet_column_type
     public :: parquet_table_metadata
+    public :: parquet_schema
     public :: parquet_maml_file
     public :: parquet_open_writer
     public :: parquet_write_column
     public :: parquet_close_writer
     public :: parquet_get_version
-    public :: parquet_read_maml
+    public :: parquet_parse_maml
     public :: parquet_load_maml_file
     public :: parquet_load_qc_maml_file
     public :: parquet_validate_maml
@@ -345,12 +392,11 @@ module parquet
             integer(c_long_long), intent(in) :: nrows
         end subroutine parquet_check_row_count
 
-        module subroutine parquet_open_writer(writer, filename, cinfo, metadata, write_maml, qc, &
+        module subroutine parquet_open_writer(writer, filename, schema, write_maml, qc, &
                 compression, compression_level, chunk_size, use_threads)
             type(parquet_writer), intent(out) :: writer
             character(len=*), intent(in) :: filename
-            type(parquet_column_info), intent(in), optional :: cinfo
-            type(parquet_table_metadata), intent(in), optional :: metadata
+            type(parquet_schema), intent(in), optional :: schema
             logical, intent(in), optional :: write_maml
             logical, intent(in), optional :: qc
             character(len=*), intent(in), optional :: compression
@@ -462,11 +508,10 @@ module parquet
             type(parquet_writer), intent(inout) :: this
         end subroutine writer_finalize
 
-        module subroutine parquet_read_maml_file(maml, cinfo, metadata)
-            character(len=*), intent(in) :: maml
-            type(parquet_column_info), intent(out) :: cinfo
-            type(parquet_table_metadata), intent(out) :: metadata
-        end subroutine parquet_read_maml_file
+        module subroutine parquet_parse_maml_from_file(filename, schema)
+            character(len=*), intent(in) :: filename
+            type(parquet_schema), intent(out) :: schema
+        end subroutine parquet_parse_maml_from_file
 
         module function parquet_load_maml_file(filename) result(maml)
             character(len=*), intent(in) :: filename
@@ -478,10 +523,12 @@ module parquet
         !> (table:, at least one field, valid data_type, ...) -- a qc-maml
         !> only needs name + qc: min:/max:/miss: per field, and doesn't need
         !> data_type at all. Its own (lighter) validation happens later, in
-        !> parquet_parse_qc_maml, when parquet_open_reader(..., maml=) uses it.
-        module function parquet_load_qc_maml_file(filename) result(maml)
+        !> parquet_parse_qc_maml, when parquet_open_reader(..., schema=) uses it.
+        !> Returns a parquet_schema with only %maml populated (the raw qc-maml
+        !> lines); %cinfo/%metadata stay empty, since a qc-maml is never parsed.
+        module function parquet_load_qc_maml_file(filename) result(schema)
             character(len=*), intent(in) :: filename
-            type(parquet_maml_file) :: maml
+            type(parquet_schema) :: schema
         end function parquet_load_qc_maml_file
 
         !> Validates and parses a qc-maml's fields: entries into `rules`, one
@@ -509,11 +556,126 @@ module parquet
             character(len=*), intent(in) :: maml
         end subroutine parquet_validate_maml_file
 
-        module subroutine parquet_read_maml_internal(maml, cinfo, metadata)
-            type(parquet_maml_file), intent(in) :: maml
-            type(parquet_column_info), intent(out) :: cinfo
-            type(parquet_table_metadata), intent(out) :: metadata
-        end subroutine parquet_read_maml_internal
+        module subroutine parquet_parse_maml_from_object(schema)
+            type(parquet_schema), intent(inout) :: schema
+        end subroutine parquet_parse_maml_from_object
+
+        ! Flat convenience passthroughs on parquet_schema -- each forwards to
+        ! the matching procedure on %cinfo, %metadata or %maml.
+        module subroutine set_column_available(this, name)
+            class(parquet_schema), intent(inout) :: this
+            character(len=*), intent(in), optional :: name
+        end subroutine set_column_available
+
+        module subroutine set_column_unavailable(this, name)
+            class(parquet_schema), intent(inout) :: this
+            character(len=*), intent(in), optional :: name
+        end subroutine set_column_unavailable
+
+        module integer function schema_get_column_index(this, name)
+            class(parquet_schema), intent(in) :: this
+            character(len=*), intent(in) :: name
+        end function schema_get_column_index
+
+        module subroutine schema_add_col_qc(this, qc_input, col_name)
+            class(parquet_schema), intent(inout) :: this
+            character(len=*), intent(in) :: qc_input
+            character(len=:), allocatable, intent(out), optional :: col_name
+        end subroutine schema_add_col_qc
+
+        module function schema_get_col_qc(this, qc_input) result(col_name)
+            class(parquet_schema), intent(inout) :: this
+            character(len=*), intent(in) :: qc_input
+            character(len=:), allocatable :: col_name
+        end function schema_get_col_qc
+
+        module subroutine schema_add_metadata_int32(this, key, value, description)
+            class(parquet_schema), intent(inout) :: this
+            character(len=*), intent(in) :: key
+            integer(int32), intent(in) :: value
+            character(len=*), intent(in), optional :: description
+        end subroutine schema_add_metadata_int32
+
+        module subroutine schema_add_metadata_int64(this, key, value, description)
+            class(parquet_schema), intent(inout) :: this
+            character(len=*), intent(in) :: key
+            integer(int64), intent(in) :: value
+            character(len=*), intent(in), optional :: description
+        end subroutine schema_add_metadata_int64
+
+        module subroutine schema_add_metadata_float32(this, key, value, description, fmt)
+            class(parquet_schema), intent(inout) :: this
+            character(len=*), intent(in) :: key
+            real(real32), intent(in) :: value
+            character(len=*), intent(in), optional :: description
+            character(len=*), intent(in), optional :: fmt
+        end subroutine schema_add_metadata_float32
+
+        module subroutine schema_add_metadata_float64(this, key, value, description, fmt)
+            class(parquet_schema), intent(inout) :: this
+            character(len=*), intent(in) :: key
+            real(real64), intent(in) :: value
+            character(len=*), intent(in), optional :: description
+            character(len=*), intent(in), optional :: fmt
+        end subroutine schema_add_metadata_float64
+
+        module subroutine schema_add_metadata_logical(this, key, value, description)
+            class(parquet_schema), intent(inout) :: this
+            character(len=*), intent(in) :: key
+            logical, intent(in) :: value
+            character(len=*), intent(in), optional :: description
+        end subroutine schema_add_metadata_logical
+
+        module subroutine schema_add_metadata_string(this, key, value, description)
+            class(parquet_schema), intent(inout) :: this
+            character(len=*), intent(in) :: key
+            character(len=*), intent(in) :: value
+            character(len=*), intent(in), optional :: description
+        end subroutine schema_add_metadata_string
+
+        module subroutine schema_add_metadata_int32_array(this, key, value, description)
+            class(parquet_schema), intent(inout) :: this
+            character(len=*), intent(in) :: key
+            integer(int32), intent(in) :: value(:)
+            character(len=*), intent(in), optional :: description
+        end subroutine schema_add_metadata_int32_array
+
+        module subroutine schema_add_metadata_int64_array(this, key, value, description)
+            class(parquet_schema), intent(inout) :: this
+            character(len=*), intent(in) :: key
+            integer(int64), intent(in) :: value(:)
+            character(len=*), intent(in), optional :: description
+        end subroutine schema_add_metadata_int64_array
+
+        module subroutine schema_add_metadata_float32_array(this, key, value, description, fmt)
+            class(parquet_schema), intent(inout) :: this
+            character(len=*), intent(in) :: key
+            real(real32), intent(in) :: value(:)
+            character(len=*), intent(in), optional :: description
+            character(len=*), intent(in), optional :: fmt
+        end subroutine schema_add_metadata_float32_array
+
+        module subroutine schema_add_metadata_float64_array(this, key, value, description, fmt)
+            class(parquet_schema), intent(inout) :: this
+            character(len=*), intent(in) :: key
+            real(real64), intent(in) :: value(:)
+            character(len=*), intent(in), optional :: description
+            character(len=*), intent(in), optional :: fmt
+        end subroutine schema_add_metadata_float64_array
+
+        module subroutine schema_add_metadata_logical_array(this, key, value, description)
+            class(parquet_schema), intent(inout) :: this
+            character(len=*), intent(in) :: key
+            logical, intent(in) :: value(:)
+            character(len=*), intent(in), optional :: description
+        end subroutine schema_add_metadata_logical_array
+
+        module subroutine schema_add_metadata_string_array(this, key, value, description)
+            class(parquet_schema), intent(inout) :: this
+            character(len=*), intent(in) :: key
+            character(len=*), intent(in) :: value(:)
+            character(len=*), intent(in), optional :: description
+        end subroutine schema_add_metadata_string_array
 
         module subroutine parquet_parse_maml_lines(lines, cinfo, metadata)
             character(len=*), intent(in) :: lines(:)
@@ -658,12 +820,12 @@ module parquet
             character(len=:), allocatable :: out
         end function parquet_to_lower
 
-        module subroutine parquet_open_reader(reader, filename, use_threads, filter, maml, qc, qc_soft)
+        module subroutine parquet_open_reader(reader, filename, use_threads, filter, schema, qc, qc_soft)
             type(parquet_reader), intent(out) :: reader
             character(len=*), intent(in) :: filename
             logical, intent(in), optional :: use_threads
             type(parquet_filter), intent(in), optional :: filter
-            type(parquet_maml_file), intent(in), optional :: maml
+            type(parquet_schema), intent(in), optional :: schema
             logical, intent(in), optional :: qc
             logical, intent(in), optional :: qc_soft
         end subroutine parquet_open_reader

@@ -90,15 +90,14 @@ contains
 
     subroutine test_validate_user_maml_ok(error)
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_maml_file) :: base_maml, user_maml
-        type(parquet_column_info) :: user_cinfo
-        type(parquet_table_metadata) :: user_metadata
+        type(parquet_maml_file) :: base_maml
+        type(parquet_schema) :: schema
         integer :: idx
 
         base_maml = get_parquet_maml("maml_example.maml")
 
-        user_maml%name = "user_subset.maml"
-        user_maml%lines = [character(len=40) :: &
+        schema%maml%name = "user_subset.maml"
+        schema%maml%lines = [character(len=40) :: &
             "table: user_table", &
             "fields:", &
             "- name: id0", &
@@ -107,25 +106,25 @@ contains
             "  data_type: string", &
             "  array_size: 18" ]
 
-        ! Should not error stop: every field in user_maml (id0, name) exists in base_maml.
-        call parquet_validate_user_maml(base_maml, user_maml)
+        ! Should not error stop: every field in the user MAML (id0, name) exists in base_maml.
+        call parquet_validate_user_maml(base_maml, schema%maml)
 
-        call parquet_read_maml(user_maml, user_cinfo, user_metadata)
+        call parquet_parse_maml(schema)
 
-        ! Columns declared in base_maml but omitted from user_maml (11 of the 13) are
+        ! Columns declared in base_maml but omitted from the user MAML (11 of the 13) are
         ! merged back in as deactivated placeholders, so the schema still covers every
         ! base column; only "id0" and "name" should actually be active (is_set).
-        call check(error, size(user_cinfo%col) == 13, &
+        call check(error, size(schema%cinfo%col) == 13, &
             "expected the merged schema to cover all 13 base columns")
         if (allocated(error)) return
 
-        idx = user_cinfo%get_column_index("id0")
-        call check(error, user_cinfo%col(idx)%is_set .and. .not. user_cinfo%col(idx)%is_deactivated, &
+        idx = schema%get_column_index("id0")
+        call check(error, schema%cinfo%col(idx)%is_set .and. .not. schema%cinfo%col(idx)%is_deactivated, &
             "expected 'id0' to be active (declared by the user MAML)")
         if (allocated(error)) return
 
-        idx = user_cinfo%get_column_index("idarr")
-        call check(error, (.not. user_cinfo%col(idx)%is_set) .and. user_cinfo%col(idx)%is_deactivated, &
+        idx = schema%get_column_index("idarr")
+        call check(error, (.not. schema%cinfo%col(idx)%is_set) .and. schema%cinfo%col(idx)%is_deactivated, &
             "expected 'idarr' to be merged in as a deactivated placeholder")
     end subroutine test_validate_user_maml_ok
 
@@ -135,15 +134,14 @@ contains
     !> resulting schema/parquet output uses the renamed name ("my_id").
     subroutine test_validate_user_maml_col_map_ok(error)
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_maml_file) :: base_maml, user_maml
-        type(parquet_column_info) :: user_cinfo
-        type(parquet_table_metadata) :: user_metadata
+        type(parquet_maml_file) :: base_maml
+        type(parquet_schema) :: schema
         integer :: idx
 
         base_maml = get_parquet_maml("maml_example.maml")
 
-        user_maml%name = "user_col_map.maml"
-        user_maml%lines = [character(len=40) :: &
+        schema%maml%name = "user_col_map.maml"
+        schema%maml%lines = [character(len=40) :: &
             "table: user_table", &
             "extra:", &
             "  col_map:", &
@@ -154,31 +152,31 @@ contains
             "  info: renamed via col_map" ]
 
         ! Should not error stop: id0 (referenced by col_map) exists in base_maml.
-        call parquet_validate_user_maml(base_maml, user_maml)
+        call parquet_validate_user_maml(base_maml, schema%maml)
 
-        call check(error, allocated(user_maml%col_map), "expected col_map to be populated on user_maml")
+        call check(error, allocated(schema%maml%col_map), "expected col_map to be populated on the user MAML")
         if (allocated(error)) return
-        call check(error, size(user_maml%col_map) == 1 .and. &
-            trim(user_maml%col_map(1)%internal_name) == "id0" .and. &
-            trim(user_maml%col_map(1)%output_name) == "my_id", &
-            "unexpected user_maml%col_map contents")
+        call check(error, size(schema%maml%col_map) == 1 .and. &
+            trim(schema%maml%col_map(1)%internal_name) == "id0" .and. &
+            trim(schema%maml%col_map(1)%output_name) == "my_id", &
+            "unexpected schema%maml%col_map contents")
         if (allocated(error)) return
 
-        call parquet_read_maml(user_maml, user_cinfo, user_metadata)
+        call parquet_parse_maml(schema)
 
         ! The renamed field is stored under its internal name ("id0"), same as
         ! every other lookup (parquet_write_column, set_available, ...);
         ! output_name carries the user-facing rename ("my_id").
-        idx = user_cinfo%get_column_index("id0")
+        idx = schema%get_column_index("id0")
         call check(error, idx > 0, "expected 'id0' (internal name) to be found via get_column_index")
         if (allocated(error)) return
-        call check(error, user_cinfo%col(idx)%is_set .and. .not. user_cinfo%col(idx)%is_deactivated, &
+        call check(error, schema%cinfo%col(idx)%is_set .and. .not. schema%cinfo%col(idx)%is_deactivated, &
             "expected the renamed field to be active")
         if (allocated(error)) return
-        call check(error, trim(user_cinfo%col(idx)%output_name) == "my_id", &
+        call check(error, trim(schema%cinfo%col(idx)%output_name) == "my_id", &
             "expected output_name to carry the col_map-declared name 'my_id'")
         if (allocated(error)) return
-        call check(error, trim(user_cinfo%col(idx)%info) == "renamed via col_map", &
+        call check(error, trim(schema%cinfo%col(idx)%info) == "renamed via col_map", &
             "expected the renamed field's own fields: attributes (info) to be preserved")
     end subroutine test_validate_user_maml_col_map_ok
 
@@ -194,52 +192,48 @@ contains
 
     subroutine test_get_column_index_found(error)
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_maml_file) :: maml
-        type(parquet_column_info) :: cinfo
-        type(parquet_table_metadata) :: metadata
+        type(parquet_schema) :: schema
         integer :: idx
 
-        maml = get_parquet_maml("maml_example.maml")
-        call parquet_read_maml(maml, cinfo, metadata)
+        schema%maml = get_parquet_maml("maml_example.maml")
+        call parquet_parse_maml(schema)
 
-        idx = cinfo%get_column_index("id0")
+        idx = schema%get_column_index("id0")
         call check(error, idx == 1, "get_column_index('id0') did not return the expected index")
         if (allocated(error)) return
 
-        idx = cinfo%get_column_index("idarr")
+        idx = schema%get_column_index("idarr")
         call check(error, idx == 2, "get_column_index('idarr') did not return the expected index")
     end subroutine test_get_column_index_found
 
     subroutine test_set_available_unavailable(error)
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_maml_file) :: maml
-        type(parquet_column_info) :: cinfo
-        type(parquet_table_metadata) :: metadata
+        type(parquet_schema) :: schema
         integer :: idx
 
-        maml = get_parquet_maml("maml_example.maml")
-        call parquet_read_maml(maml, cinfo, metadata)
+        schema%maml = get_parquet_maml("maml_example.maml")
+        call parquet_parse_maml(schema)
 
-        idx = cinfo%get_column_index("id0")
-        call check(error, cinfo%col(idx)%is_set, "expected id0 to be set by default after parquet_read_maml")
+        idx = schema%get_column_index("id0")
+        call check(error, schema%cinfo%col(idx)%is_set, "expected id0 to be set by default after parquet_parse_maml")
         if (allocated(error)) return
 
-        call cinfo%set_unavailable("id0")
-        call check(error, .not. cinfo%col(idx)%is_set, "set_unavailable('id0') did not clear is_set")
+        call schema%set_column_unavailable("id0")
+        call check(error, .not. schema%cinfo%col(idx)%is_set, "set_column_unavailable('id0') did not clear is_set")
         if (allocated(error)) return
 
-        call cinfo%set_available("id0")
-        call check(error, cinfo%col(idx)%is_set, "set_available('id0') did not restore is_set")
+        call schema%set_column_available("id0")
+        call check(error, schema%cinfo%col(idx)%is_set, "set_column_available('id0') did not restore is_set")
         if (allocated(error)) return
 
-        call cinfo%set_unavailable()
-        call check(error, all(.not. cinfo%col(:)%is_set), &
-            "set_unavailable() (no name) did not clear is_set for every column")
+        call schema%set_column_unavailable()
+        call check(error, all(.not. schema%cinfo%col(:)%is_set), &
+            "set_column_unavailable() (no name) did not clear is_set for every column")
         if (allocated(error)) return
 
-        call cinfo%set_available()
-        call check(error, all(cinfo%col(:)%is_set), &
-            "set_available() (no name) did not set is_set for every column")
+        call schema%set_column_available()
+        call check(error, all(schema%cinfo%col(:)%is_set), &
+            "set_column_available() (no name) did not set is_set for every column")
     end subroutine test_set_available_unavailable
 
     !> maml%add_col_qc builds a read-time qc-maml incrementally from compact
@@ -290,15 +284,15 @@ contains
     !> column reads back correctly.
     subroutine test_add_col_qc_roundtrip(error)
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_maml_file) :: maml
+        type(parquet_schema) :: schema
         type(parquet_reader) :: reader
         character(len=:), allocatable :: cn
         integer :: nrows
         real(real64), allocatable :: ra(:)
 
-        call maml%add_col_qc("ra, >=0, <=10", cn)
+        call schema%add_col_qc("ra, >=0, <=10", cn)
 
-        call parquet_open_reader(reader, "test/fixtures/list_vector.parquet", maml=maml)
+        call parquet_open_reader(reader, "test/fixtures/list_vector.parquet", schema=schema)
         call parquet_get_nrows(reader, nrows)
         allocate(ra(nrows))
         call parquet_read_column(reader, cn, ra)

@@ -79,24 +79,23 @@ contains
         type(error_type), allocatable, intent(out) :: error
         character(len=*), parameter :: out_file = "test_run/readme_maml_schema_example.parquet"
         type(parquet_writer) :: writer
-        type(parquet_column_info) :: cinfo
-        type(parquet_table_metadata) :: metadata
+        type(parquet_schema) :: schema
         type(parquet_reader) :: reader
         integer(int32) :: id0(3)
         integer(int32), allocatable :: id0_read(:)
         integer(int64) :: nrows
 
-        ! README: call parquet_read_maml("maml_example.maml", cinfo, metadata)
-        call parquet_read_maml("docs/maml_example.maml", cinfo, metadata)
+        ! README: call parquet_parse_maml("maml_example.maml", schema)
+        call parquet_parse_maml("docs/maml_example.maml", schema)
 
         ! Only write the one column this test provides data for.
-        call cinfo%set_unavailable()
-        call cinfo%set_available("id0")
+        call schema%set_column_unavailable()
+        call schema%set_column_available("id0")
 
         id0 = [1_int32, 2_int32, 3_int32]
 
-        ! README: call parquet_open_writer(writer, "data.parquet", cinfo, metadata)
-        call parquet_open_writer(writer, out_file, cinfo, metadata)
+        ! README: call parquet_open_writer(writer, "data.parquet", schema)
+        call parquet_open_writer(writer, out_file, schema)
         call parquet_write_column(writer, "id0", id0)
         call parquet_close_writer(writer)
 
@@ -120,8 +119,7 @@ contains
         type(error_type), allocatable, intent(out) :: error
 
         type(parquet_writer) :: writer
-        type(parquet_column_info) :: cinfo
-        type(parquet_table_metadata) :: metadata
+        type(parquet_schema) :: schema
         integer(int32) :: id0(3)
         integer(int64) :: idarr(2, 3)   ! (col_size, nrows) for the "idarr" vector column
 
@@ -132,21 +130,21 @@ contains
         integer(int64), allocatable :: idarr_read(:,:)
 
         ! Parse column definitions + table metadata from the MAML file.
-        call parquet_read_maml("docs/maml_example.maml", cinfo, metadata)
+        call parquet_parse_maml("docs/maml_example.maml", schema)
 
         ! This schema defines more columns than we have data for in this example;
         ! disable everything, then re-enable only the columns we are about to write.
-        call cinfo%set_unavailable()
-        call cinfo%set_available("id0")
-        call cinfo%set_available("idarr")
+        call schema%set_column_unavailable()
+        call schema%set_column_available("id0")
+        call schema%set_column_available("idarr")
 
         ! Add an extra, run-time-only piece of metadata not present in the MAML file.
-        call metadata%add_metadata("generated_by", "write_parquet_combined_example")
+        call schema%add_metadata("generated_by", "write_parquet_combined_example")
 
         id0 = [1_int32, 2_int32, 3_int32]
         idarr = reshape([1_int64, 2_int64, 3_int64, 4_int64, 5_int64, 6_int64], [2, 3])
 
-        call parquet_open_writer(writer, out_file, cinfo, metadata)
+        call parquet_open_writer(writer, out_file, schema)
         call parquet_write_column(writer, "id0", id0)
         call parquet_write_column(writer, "idarr", idarr)
         call parquet_close_writer(writer)
@@ -174,8 +172,7 @@ contains
     subroutine test_maml_example2_sidecar_keyarray(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_writer) :: writer
-        type(parquet_column_info) :: cinfo, sidecar_cinfo
-        type(parquet_table_metadata) :: metadata, sidecar_metadata
+        type(parquet_schema) :: schema, sidecar_schema
         integer(int32) :: id(3)
         character(len=24) :: name(3)
         real(real64) :: ra(3), dec(3)
@@ -183,15 +180,15 @@ contains
         character(len=*), parameter :: out_file = "test_run/maml_example2.parquet"
         character(len=*), parameter :: sidecar_file = "test_run/maml_example2.maml"
 
-        call parquet_read_maml("docs/maml_example2.maml", cinfo, metadata)
+        call parquet_parse_maml("docs/maml_example2.maml", schema)
 
-        call check_keyarray_entries(error, metadata, "in-memory metadata parsed from docs/maml_example2.maml")
+        call check_keyarray_entries(error, schema%metadata, "in-memory metadata parsed from docs/maml_example2.maml")
         if (allocated(error)) return
 
-        call check_field_schema(error, cinfo, "in-memory cinfo parsed from docs/maml_example2.maml")
+        call check_field_schema(error, schema%cinfo, "in-memory cinfo parsed from docs/maml_example2.maml")
         if (allocated(error)) return
 
-        call check_scalar_metadata(error, metadata, "in-memory metadata parsed from docs/maml_example2.maml")
+        call check_scalar_metadata(error, schema%metadata, "in-memory metadata parsed from docs/maml_example2.maml")
         if (allocated(error)) return
 
         id = [1_int32, 2_int32, 3_int32]
@@ -199,7 +196,7 @@ contains
         ra = [10.5_real64, 45.2_real64, 190.0_real64]
         dec = [-5.1_real64, 12.3_real64, 60.0_real64]
 
-        call parquet_open_writer(writer, out_file, cinfo, metadata, write_maml=.true.)
+        call parquet_open_writer(writer, out_file, schema, write_maml=.true.)
         call parquet_write_column(writer, "id", id)
         call parquet_write_column(writer, "name", name)
         call parquet_write_column(writer, "RA", ra)
@@ -210,16 +207,16 @@ contains
         call check(error, exists, "write_maml=.true. did not create the expected sidecar .maml file")
         if (allocated(error)) return
 
-        call parquet_read_maml(sidecar_file, sidecar_cinfo, sidecar_metadata)
-        call check_keyarray_entries(error, sidecar_metadata, "metadata reparsed from the written sidecar .maml")
+        call parquet_parse_maml(sidecar_file, sidecar_schema)
+        call check_keyarray_entries(error, sidecar_schema%metadata, "metadata reparsed from the written sidecar .maml")
         if (allocated(error)) return
 
-        call check_field_schema(error, sidecar_cinfo, "cinfo reparsed from the written sidecar .maml")
+        call check_field_schema(error, sidecar_schema%cinfo, "cinfo reparsed from the written sidecar .maml")
         if (allocated(error)) return
 
         ! Every field was enabled and written above, so write_maml's field
         ! pruning should be a no-op here: all 4 fields should still be listed.
-        call check(error, size(sidecar_cinfo%col) == size(cinfo%col), &
+        call check(error, size(sidecar_schema%cinfo%col) == size(schema%cinfo%col), &
             "sidecar .maml should still list all 4 fields since none were disabled")
     end subroutine test_maml_example2_sidecar_keyarray
 

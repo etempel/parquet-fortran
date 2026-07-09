@@ -83,21 +83,94 @@ submodule (parquet) parquet_metadata
 
 contains
 
-    module procedure parquet_read_maml_file
-        type(parquet_maml_file) :: loaded_maml
+    module procedure parquet_parse_maml_from_file
+        schema%maml = parquet_load_maml_file(filename)
+        call parquet_parse_maml_lines(schema%maml%lines, schema%cinfo, schema%metadata)
+        call parquet_merge_missing_columns(schema%maml, schema%cinfo)
+        schema%metadata%source_maml_lines = schema%maml%lines
+    end procedure parquet_parse_maml_from_file
 
-        loaded_maml = parquet_load_maml_file(maml)
-        call parquet_parse_maml_lines(loaded_maml%lines, cinfo, metadata)
-        call parquet_merge_missing_columns(loaded_maml, cinfo)
-        metadata%source_maml_lines = loaded_maml%lines
-    end procedure parquet_read_maml_file
+    module procedure parquet_parse_maml_from_object
+        if (.not. allocated(schema%maml%lines)) &
+            error stop "parquet_parse_maml: schema%maml has no loaded content " // &
+                "(use the filename form, or populate schema%maml first)"
+        call parquet_validate_maml(schema%maml)
+        call parquet_parse_maml_lines(schema%maml%lines, schema%cinfo, schema%metadata)
+        call parquet_merge_missing_columns(schema%maml, schema%cinfo)
+        schema%metadata%source_maml_lines = schema%maml%lines
+    end procedure parquet_parse_maml_from_object
 
-    module procedure parquet_read_maml_internal
-        call parquet_validate_maml(maml)
-        call parquet_parse_maml_lines(maml%lines, cinfo, metadata)
-        call parquet_merge_missing_columns(maml, cinfo)
-        metadata%source_maml_lines = maml%lines
-    end procedure parquet_read_maml_internal
+    ! ---- parquet_schema flat convenience passthroughs ---------------------
+    ! Each simply forwards to the matching procedure on %cinfo, %metadata or
+    ! %maml. Absent optional arguments propagate unchanged.
+
+    module procedure set_column_available
+        call this%cinfo%set_available(name)
+    end procedure set_column_available
+
+    module procedure set_column_unavailable
+        call this%cinfo%set_unavailable(name)
+    end procedure set_column_unavailable
+
+    module procedure schema_get_column_index
+        schema_get_column_index = this%cinfo%get_column_index(name)
+    end procedure schema_get_column_index
+
+    module procedure schema_add_col_qc
+        call this%maml%add_col_qc(qc_input, col_name)
+    end procedure schema_add_col_qc
+
+    module procedure schema_get_col_qc
+        col_name = this%maml%get_col_qc(qc_input)
+    end procedure schema_get_col_qc
+
+    module procedure schema_add_metadata_int32
+        call this%metadata%add_metadata(key, value, description)
+    end procedure schema_add_metadata_int32
+
+    module procedure schema_add_metadata_int64
+        call this%metadata%add_metadata(key, value, description)
+    end procedure schema_add_metadata_int64
+
+    module procedure schema_add_metadata_float32
+        call this%metadata%add_metadata(key, value, description, fmt)
+    end procedure schema_add_metadata_float32
+
+    module procedure schema_add_metadata_float64
+        call this%metadata%add_metadata(key, value, description, fmt)
+    end procedure schema_add_metadata_float64
+
+    module procedure schema_add_metadata_logical
+        call this%metadata%add_metadata(key, value, description)
+    end procedure schema_add_metadata_logical
+
+    module procedure schema_add_metadata_string
+        call this%metadata%add_metadata(key, value, description)
+    end procedure schema_add_metadata_string
+
+    module procedure schema_add_metadata_int32_array
+        call this%metadata%add_metadata(key, value, description)
+    end procedure schema_add_metadata_int32_array
+
+    module procedure schema_add_metadata_int64_array
+        call this%metadata%add_metadata(key, value, description)
+    end procedure schema_add_metadata_int64_array
+
+    module procedure schema_add_metadata_float32_array
+        call this%metadata%add_metadata(key, value, description, fmt)
+    end procedure schema_add_metadata_float32_array
+
+    module procedure schema_add_metadata_float64_array
+        call this%metadata%add_metadata(key, value, description, fmt)
+    end procedure schema_add_metadata_float64_array
+
+    module procedure schema_add_metadata_logical_array
+        call this%metadata%add_metadata(key, value, description)
+    end procedure schema_add_metadata_logical_array
+
+    module procedure schema_add_metadata_string_array
+        call this%metadata%add_metadata(key, value, description)
+    end procedure schema_add_metadata_string_array
 
     module procedure parquet_validate_user_maml
         type(parquet_column_info) :: base_cinfo, user_cinfo
@@ -527,16 +600,16 @@ contains
 
         close(unit)
 
-        maml%name = trim(filename)
+        schema%maml%name = trim(filename)
 
         max_len = 1
         do i = 1, nlines
             max_len = max(max_len, len_trim(lines(i)))
         end do
 
-        allocate(character(len=max_len) :: maml%lines(nlines))
+        allocate(character(len=max_len) :: schema%maml%lines(nlines))
         do i = 1, nlines
-            maml%lines(i) = lines(i)(1:max_len)
+            schema%maml%lines(i) = lines(i)(1:max_len)
         end do
         ! Deliberately no parquet_validate_maml call here -- a qc-maml has its
         ! own, lighter validation (parquet_parse_qc_maml), run later once

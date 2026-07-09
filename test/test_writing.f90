@@ -46,7 +46,7 @@ contains
             new_unittest("write_maml=.true. saves a sidecar .maml file", test_write_maml_sidecar), &
             new_unittest("write_maml=.true. does not prune when every column is enabled", &
                 test_write_maml_sidecar_no_pruning_when_all_enabled), &
-            new_unittest("add_metadata after parquet_read_maml is reflected in the sidecar", &
+            new_unittest("add_metadata after parquet_parse_maml is reflected in the sidecar", &
                 test_write_maml_sidecar_with_runtime_metadata), &
             new_unittest("add_metadata inserts keyarray: before an existing extra:", &
                 test_add_metadata_inserts_before_extra), &
@@ -159,18 +159,17 @@ contains
         implicit none
         type(error_type), allocatable, intent(out) :: error
         type(parquet_writer) :: writer
-        type(parquet_column_info) :: cinfo, sidecar_cinfo
-        type(parquet_table_metadata) :: metadata, sidecar_metadata
+        type(parquet_schema) :: schema, sidecar_schema
         integer(int32) :: id0(3) = [1_int32, 2_int32, 3_int32]
         logical :: exists
         character(len=*), parameter :: out_file = "test_run/test_write_maml.parquet"
         character(len=*), parameter :: sidecar_file = "test_run/test_write_maml.maml"
 
-        call parquet_read_maml("docs/maml_example.maml", cinfo, metadata)
-        call cinfo%set_unavailable()
-        call cinfo%set_available("id0")
+        call parquet_parse_maml("docs/maml_example.maml", schema)
+        call schema%set_column_unavailable()
+        call schema%set_column_available("id0")
 
-        call parquet_open_writer(writer, out_file, cinfo, metadata, write_maml=.true.)
+        call parquet_open_writer(writer, out_file, schema, write_maml=.true.)
         call parquet_write_column(writer, "id0", id0)
         call parquet_close_writer(writer)
 
@@ -178,17 +177,17 @@ contains
         call check(error, exists, "write_maml=.true. did not create the expected sidecar .maml file")
         if (allocated(error)) return
 
-        call parquet_read_maml(sidecar_file, sidecar_cinfo, sidecar_metadata)
+        call parquet_parse_maml(sidecar_file, sidecar_schema)
 
-        call check(error, size(sidecar_cinfo%col) == 1, &
+        call check(error, size(sidecar_schema%cinfo%col) == 1, &
             "expected the sidecar .maml to only list the one enabled column ('id0')")
         if (allocated(error)) return
-        call check(error, trim(sidecar_cinfo%col(1)%name) == "id0", &
+        call check(error, trim(sidecar_schema%cinfo%col(1)%name) == "id0", &
             "expected the sidecar .maml's only field entry to be 'id0'")
         if (allocated(error)) return
 
         ! Non-field content (table-level metadata, keyarray) must be untouched.
-        call check(error, size(sidecar_metadata%items) == size(metadata%items), &
+        call check(error, size(sidecar_schema%metadata%items) == size(schema%metadata%items), &
             "pruning disabled fields should not affect table-level metadata items")
     end subroutine test_write_maml_sidecar
 
@@ -198,8 +197,7 @@ contains
         implicit none
         type(error_type), allocatable, intent(out) :: error
         type(parquet_writer) :: writer
-        type(parquet_column_info) :: cinfo
-        type(parquet_table_metadata) :: metadata
+        type(parquet_schema) :: schema
         type(parquet_maml_file) :: source_maml, sidecar_maml
         type(test_output_type), allocatable :: test_data(:)
         logical :: exists
@@ -207,9 +205,9 @@ contains
         character(len=*), parameter :: sidecar_file = "test_run/test_write_maml_full.maml"
         integer :: i
 
-        call parquet_read_maml("docs/maml_example.maml", cinfo, metadata)
+        call parquet_parse_maml("docs/maml_example.maml", schema)
         call init_test_data(test_data, 5)
-        call write_test_data(out_file, test_data, cinfo, metadata, write_maml=.true.)
+        call write_test_data(out_file, test_data, schema, write_maml=.true.)
 
         inquire(file=sidecar_file, exist=exists)
         call check(error, exists, "write_maml=.true. did not create the expected sidecar .maml file")
@@ -235,9 +233,7 @@ contains
         implicit none
         type(error_type), allocatable, intent(out) :: error
         type(parquet_writer) :: writer
-        type(parquet_column_info) :: cinfo
-        type(parquet_table_metadata) :: metadata, sidecar_metadata
-        type(parquet_column_info) :: sidecar_cinfo
+        type(parquet_schema) :: schema, sidecar_schema
         integer(int32) :: id0(3) = [1_int32, 2_int32, 3_int32]
         logical :: exists
         character(len=*), parameter :: out_file = "test_run/test_write_maml_runtime.parquet"
@@ -245,14 +241,14 @@ contains
         integer :: i
         logical :: found
 
-        call parquet_read_maml("docs/maml_example.maml", cinfo, metadata)
-        call cinfo%set_unavailable()
-        call cinfo%set_available("id0")
+        call parquet_parse_maml("docs/maml_example.maml", schema)
+        call schema%set_column_unavailable()
+        call schema%set_column_available("id0")
 
-        ! Added after parquet_read_maml: should now be reflected in the sidecar.
-        call metadata%add_metadata("generated_by", "unit_test", "added at runtime")
+        ! Added after parquet_parse_maml: should now be reflected in the sidecar.
+        call schema%add_metadata("generated_by", "unit_test", "added at runtime")
 
-        call parquet_open_writer(writer, out_file, cinfo, metadata, write_maml=.true.)
+        call parquet_open_writer(writer, out_file, schema, write_maml=.true.)
         call parquet_write_column(writer, "id0", id0)
         call parquet_close_writer(writer)
 
@@ -260,15 +256,15 @@ contains
         call check(error, exists, "write_maml=.true. did not create the expected sidecar .maml file")
         if (allocated(error)) return
 
-        call parquet_read_maml(sidecar_file, sidecar_cinfo, sidecar_metadata)
+        call parquet_parse_maml(sidecar_file, sidecar_schema)
 
         found = .false.
-        do i = 1, size(sidecar_metadata%items)
-            if (trim(sidecar_metadata%items(i)%key) == "generated_by") then
-                call check(error, trim(sidecar_metadata%items(i)%value) == "unit_test", &
+        do i = 1, size(sidecar_schema%metadata%items)
+            if (trim(sidecar_schema%metadata%items(i)%key) == "generated_by") then
+                call check(error, trim(sidecar_schema%metadata%items(i)%value) == "unit_test", &
                     "sidecar keyarray entry for 'generated_by' has an unexpected value")
                 if (allocated(error)) return
-                call check(error, trim(sidecar_metadata%items(i)%description) == "added at runtime", &
+                call check(error, trim(sidecar_schema%metadata%items(i)%description) == "added at runtime", &
                     "sidecar keyarray entry for 'generated_by' has an unexpected comment")
                 if (allocated(error)) return
                 found = .true.
@@ -277,13 +273,13 @@ contains
         end do
 
         call check(error, found, &
-            "add_metadata call made after parquet_read_maml was not reflected in the written sidecar .maml")
+            "add_metadata call made after parquet_parse_maml was not reflected in the written sidecar .maml")
         if (allocated(error)) return
 
         ! The keyarray entries already present in the source MAML must still be there too.
         found = .false.
-        do i = 1, size(sidecar_metadata%items)
-            if (trim(sidecar_metadata%items(i)%key) == "test_scalar") found = .true.
+        do i = 1, size(sidecar_schema%metadata%items)
+            if (trim(sidecar_schema%metadata%items(i)%key) == "test_scalar") found = .true.
         end do
         call check(error, found, &
             "pre-existing keyarray entries from the source MAML were lost when appending runtime metadata")
@@ -292,17 +288,15 @@ contains
     subroutine test_add_metadata_inserts_before_extra(error)
         implicit none
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_column_info) :: cinfo
-        type(parquet_table_metadata) :: metadata
-        type(parquet_maml_file) :: maml
+        type(parquet_schema) :: schema
         integer :: idx_keyarray, idx_extra, i
 
         ! Built in-memory (rather than loaded from docs/) so this test does not
         ! depend on whether the on-disk fixture happens to have a keyarray:
         ! block already: this specifically covers the "no existing keyarray:,
         ! but an extra: section is present" case.
-        maml%name = "no_keyarray_with_extra.maml"
-        maml%lines = [character(len=40) :: &
+        schema%maml%name = "no_keyarray_with_extra.maml"
+        schema%maml%lines = [character(len=40) :: &
             "table: no_keyarray_table", &
             "extra:", &
             "  anything:", &
@@ -311,21 +305,21 @@ contains
             "- name: id0", &
             "  data_type: int32" ]
 
-        call parquet_read_maml(maml, cinfo, metadata)
+        call parquet_parse_maml(schema)
 
-        call metadata%add_metadata("added_key", "42", "added comment")
+        call schema%add_metadata("added_key", "42", "added comment")
 
-        call check(error, allocated(metadata%source_maml_lines), &
-            "expected source_maml_lines to be populated after parquet_read_maml")
+        call check(error, allocated(schema%metadata%source_maml_lines), &
+            "expected source_maml_lines to be populated after parquet_parse_maml")
         if (allocated(error)) return
 
         idx_keyarray = 0
         idx_extra = 0
-        do i = 1, size(metadata%source_maml_lines)
-            if (metadata%source_maml_lines(i)(1:1) /= " " .and. &
-                trim(adjustl(metadata%source_maml_lines(i))) == "keyarray:") idx_keyarray = i
-            if (metadata%source_maml_lines(i)(1:1) /= " " .and. &
-                trim(adjustl(metadata%source_maml_lines(i))) == "extra:") idx_extra = i
+        do i = 1, size(schema%metadata%source_maml_lines)
+            if (schema%metadata%source_maml_lines(i)(1:1) /= " " .and. &
+                trim(adjustl(schema%metadata%source_maml_lines(i))) == "keyarray:") idx_keyarray = i
+            if (schema%metadata%source_maml_lines(i)(1:1) /= " " .and. &
+                trim(adjustl(schema%metadata%source_maml_lines(i))) == "extra:") idx_extra = i
         end do
 
         call check(error, idx_keyarray > 0, "expected a synthesized 'keyarray:' header in source_maml_lines")
@@ -336,13 +330,13 @@ contains
             "expected the synthesized 'keyarray:' block to be inserted before the existing 'extra:' section")
         if (allocated(error)) return
 
-        call check(error, trim(adjustl(metadata%source_maml_lines(idx_keyarray+1))) == "- key: added_key", &
+        call check(error, trim(adjustl(schema%metadata%source_maml_lines(idx_keyarray+1))) == "- key: added_key", &
             "expected the new keyarray entry right after the synthesized header")
         if (allocated(error)) return
-        call check(error, trim(adjustl(metadata%source_maml_lines(idx_keyarray+2))) == "value: 42", &
+        call check(error, trim(adjustl(schema%metadata%source_maml_lines(idx_keyarray+2))) == "value: 42", &
             "unexpected value line for the new keyarray entry")
         if (allocated(error)) return
-        call check(error, trim(adjustl(metadata%source_maml_lines(idx_keyarray+3))) == "comment: added comment", &
+        call check(error, trim(adjustl(schema%metadata%source_maml_lines(idx_keyarray+3))) == "comment: added comment", &
             "unexpected comment line for the new keyarray entry")
     end subroutine test_add_metadata_inserts_before_extra
     !
@@ -354,10 +348,8 @@ contains
     !> itself, not just cinfo%col in memory.
     subroutine test_col_map_write_renames_output_column(error)
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_maml_file) :: base_maml, user_maml
-        type(parquet_column_info) :: cinfo
-        type(parquet_table_metadata) :: metadata, sidecar_metadata
-        type(parquet_column_info) :: sidecar_cinfo
+        type(parquet_maml_file) :: base_maml
+        type(parquet_schema) :: schema, sidecar_schema
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
         integer(int32) :: id0(3) = [1_int32, 2_int32, 3_int32]
@@ -369,8 +361,8 @@ contains
 
         base_maml = get_parquet_maml("maml_example.maml")
 
-        user_maml%name = "user_col_map_write.maml"
-        user_maml%lines = [character(len=40) :: &
+        schema%maml%name = "user_col_map_write.maml"
+        schema%maml%lines = [character(len=40) :: &
             "table: user_table", &
             "extra:", &
             "  col_map:", &
@@ -379,12 +371,12 @@ contains
             "- name: my_id", &
             "  data_type: int32" ]
 
-        call parquet_validate_user_maml(base_maml, user_maml)
-        call parquet_read_maml(user_maml, cinfo, metadata)
+        call parquet_validate_user_maml(base_maml, schema%maml)
+        call parquet_parse_maml(schema)
 
         ! parquet_write_column is called with the internal name ("id0"), not
         ! the renamed output name ("my_id").
-        call parquet_open_writer(writer, out_file, cinfo, metadata, write_maml=.true.)
+        call parquet_open_writer(writer, out_file, schema, write_maml=.true.)
         call parquet_write_column(writer, "id0", id0)
         call parquet_close_writer(writer)
 
@@ -410,9 +402,9 @@ contains
         call check(error, exists, "write_maml=.true. did not create the expected sidecar .maml file")
         if (allocated(error)) return
 
-        call parquet_read_maml(sidecar_file, sidecar_cinfo, sidecar_metadata)
-        call check(error, size(sidecar_cinfo%col) == 1 .and. trim(sidecar_cinfo%col(1)%name) == "id0" .and. &
-            trim(sidecar_cinfo%col(1)%output_name) == "my_id", &
+        call parquet_parse_maml(sidecar_file, sidecar_schema)
+        call check(error, size(sidecar_schema%cinfo%col) == 1 .and. trim(sidecar_schema%cinfo%col(1)%name) == "id0" .and. &
+            trim(sidecar_schema%cinfo%col(1)%output_name) == "my_id", &
             "expected the sidecar .maml to round-trip the col_map: rename (name=id0, output_name=my_id)")
     end subroutine test_col_map_write_renames_output_column
     !
@@ -537,17 +529,15 @@ contains
     !> Null, never a plain write.
     subroutine test_write_protected_column_without_null(error)
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_maml_file) :: maml
-        type(parquet_column_info) :: cinfo
-        type(parquet_table_metadata) :: metadata
+        type(parquet_schema) :: schema
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
         integer(int32) :: values(3) = [1_int32, 2_int32, 3_int32]
         integer(int32) :: read_back(3)
         character(len=*), parameter :: out_file = "test_run/test_protected_no_null.parquet"
 
-        maml%name = "protected_no_null.maml"
-        maml%lines = [character(len=40) :: &
+        schema%maml%name = "protected_no_null.maml"
+        schema%maml%lines = [character(len=40) :: &
             "table: protected_table", &
             "extra:", &
             "  protected_cols: a", &
@@ -555,13 +545,12 @@ contains
             "- name: a", &
             "  data_type: int32" ]
 
-        call parquet_validate_maml(maml)
-        call parquet_read_maml(maml, cinfo, metadata)
+        call parquet_parse_maml(schema)
 
-        call check(error, cinfo%col(1)%is_protected, "expected column 'a' to be marked is_protected")
+        call check(error, schema%cinfo%col(1)%is_protected, "expected column 'a' to be marked is_protected")
         if (allocated(error)) return
 
-        call parquet_open_writer(writer, out_file, cinfo, metadata)
+        call parquet_open_writer(writer, out_file, schema)
         call parquet_write_column(writer, "a", values)
         call parquet_close_writer(writer)
 
@@ -578,12 +567,10 @@ contains
     !> is_protected.
     subroutine test_protected_cols_semicolon_and_dash_list_equivalent(error)
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_maml_file) :: maml_semicolon, maml_dashlist
-        type(parquet_column_info) :: cinfo_semicolon, cinfo_dashlist
-        type(parquet_table_metadata) :: metadata
+        type(parquet_schema) :: schema_semicolon, schema_dashlist
 
-        maml_semicolon%name = "protected_semicolon.maml"
-        maml_semicolon%lines = [character(len=40) :: &
+        schema_semicolon%maml%name = "protected_semicolon.maml"
+        schema_semicolon%maml%lines = [character(len=40) :: &
             "table: protected_table", &
             "extra:", &
             "  protected_cols: a;b", &
@@ -595,8 +582,8 @@ contains
             "- name: c", &
             "  data_type: int32" ]
 
-        maml_dashlist%name = "protected_dashlist.maml"
-        maml_dashlist%lines = [character(len=40) :: &
+        schema_dashlist%maml%name = "protected_dashlist.maml"
+        schema_dashlist%maml%lines = [character(len=40) :: &
             "table: protected_table", &
             "extra:", &
             "  protected_cols:", &
@@ -610,18 +597,16 @@ contains
             "- name: c", &
             "  data_type: int32" ]
 
-        call parquet_validate_maml(maml_semicolon)
-        call parquet_validate_maml(maml_dashlist)
-        call parquet_read_maml(maml_semicolon, cinfo_semicolon, metadata)
-        call parquet_read_maml(maml_dashlist, cinfo_dashlist, metadata)
+        call parquet_parse_maml(schema_semicolon)
+        call parquet_parse_maml(schema_dashlist)
 
-        call check(error, cinfo_semicolon%col(1)%is_protected .and. cinfo_semicolon%col(2)%is_protected .and. &
-            (.not. cinfo_semicolon%col(3)%is_protected), &
+        call check(error, schema_semicolon%cinfo%col(1)%is_protected .and. schema_semicolon%cinfo%col(2)%is_protected .and. &
+            (.not. schema_semicolon%cinfo%col(3)%is_protected), &
             "semicolon-form protected_cols did not mark the expected columns")
         if (allocated(error)) return
 
-        call check(error, cinfo_dashlist%col(1)%is_protected .and. cinfo_dashlist%col(2)%is_protected .and. &
-            (.not. cinfo_dashlist%col(3)%is_protected), &
+        call check(error, schema_dashlist%cinfo%col(1)%is_protected .and. schema_dashlist%cinfo%col(2)%is_protected .and. &
+            (.not. schema_dashlist%cinfo%col(3)%is_protected), &
             "dash-list-form protected_cols did not mark the expected columns")
     end subroutine test_protected_cols_semicolon_and_dash_list_equivalent
 
@@ -630,12 +615,10 @@ contains
     !> prefix (">=", "<=", ">", "<") uses that operator instead.
     subroutine test_qc_parsing_plain_and_operator_forms(error)
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_maml_file) :: maml
-        type(parquet_column_info) :: cinfo
-        type(parquet_table_metadata) :: metadata
+        type(parquet_schema) :: schema
 
-        maml%name = "qc_parsing.maml"
-        maml%lines = [character(len=40) :: &
+        schema%maml%name = "qc_parsing.maml"
+        schema%maml%lines = [character(len=40) :: &
             "table: qc_table", &
             "fields:", &
             "- name: id", &
@@ -649,18 +632,17 @@ contains
             "    min: '>= 0'", &
             "    max: '< 360'" ]
 
-        call parquet_validate_maml(maml)
-        call parquet_read_maml(maml, cinfo, metadata)
+        call parquet_parse_maml(schema)
 
-        call check(error, cinfo%col(1)%has_qc_min .and. cinfo%col(1)%has_qc_max .and. &
-            trim(cinfo%col(1)%qc_min_op) == ">=" .and. trim(cinfo%col(1)%qc_max_op) == "<=" .and. &
-            trim(cinfo%col(1)%qc_min_raw) == "1" .and. trim(cinfo%col(1)%qc_max_raw) == "1000", &
+        call check(error, schema%cinfo%col(1)%has_qc_min .and. schema%cinfo%col(1)%has_qc_max .and. &
+            trim(schema%cinfo%col(1)%qc_min_op) == ">=" .and. trim(schema%cinfo%col(1)%qc_max_op) == "<=" .and. &
+            trim(schema%cinfo%col(1)%qc_min_raw) == "1" .and. trim(schema%cinfo%col(1)%qc_max_raw) == "1000", &
             "plain-number qc: min/max did not default to inclusive operators with the expected bound text")
         if (allocated(error)) return
 
-        call check(error, cinfo%col(2)%has_qc_min .and. cinfo%col(2)%has_qc_max .and. &
-            trim(cinfo%col(2)%qc_min_op) == ">=" .and. trim(cinfo%col(2)%qc_max_op) == "<" .and. &
-            trim(cinfo%col(2)%qc_min_raw) == "0" .and. trim(cinfo%col(2)%qc_max_raw) == "360", &
+        call check(error, schema%cinfo%col(2)%has_qc_min .and. schema%cinfo%col(2)%has_qc_max .and. &
+            trim(schema%cinfo%col(2)%qc_min_op) == ">=" .and. trim(schema%cinfo%col(2)%qc_max_op) == "<" .and. &
+            trim(schema%cinfo%col(2)%qc_min_raw) == "0" .and. trim(schema%cinfo%col(2)%qc_max_raw) == "360", &
             "operator-prefixed qc: min/max did not parse the expected operator and bound text")
     end subroutine test_qc_parsing_plain_and_operator_forms
 
@@ -1423,9 +1405,7 @@ contains
 
     subroutine test_write_parquet_file(error)
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_maml_file) :: maml
-        type(parquet_column_info) :: cinfo
-        type(parquet_table_metadata) :: metadata
+        type(parquet_schema) :: schema
         type(test_output_type), allocatable :: test_data(:)
         logical :: exists
         character(len=*), parameter :: out_file = "test_run/test_parquet.parquet"
@@ -1437,25 +1417,25 @@ contains
             return
         end if
 
-        maml = get_parquet_maml("maml_example.maml")
-        call parquet_read_maml(maml, cinfo, metadata)
+        schema%maml = get_parquet_maml("maml_example.maml")
+        call parquet_parse_maml(schema)
 
-        call metadata%add_metadata("creator", "Parquet Fortran Test", "Description 1")
-        call metadata%add_metadata("PI", 3.14, "Description 1", fmt='F6.1')
-        call metadata%add_metadata("PI2", 3.14_rk, fmt='F0.2', description="Description 2")
-        call metadata%add_metadata("row_count", 20_int32, "Description 3")
-        call metadata%add_metadata("row_count_long", 20_int64, "Description 4")
-        call metadata%add_metadata("is_test", .true.)
+        call schema%add_metadata("creator", "Parquet Fortran Test", "Description 1")
+        call schema%add_metadata("PI", 3.14, "Description 1", fmt='F6.1')
+        call schema%add_metadata("PI2", 3.14_rk, fmt='F0.2', description="Description 2")
+        call schema%add_metadata("row_count", 20_int32, "Description 3")
+        call schema%add_metadata("row_count_long", 20_int64, "Description 4")
+        call schema%add_metadata("is_test", .true.)
 
-        call metadata%add_metadata("arrint", [0,1,2], "Array int")
-        call metadata%add_metadata("arrint64", [1_int64,2_int64])
-        call metadata%add_metadata("arreal", [1.1,1.0,2.0], "Array real")
-        call metadata%add_metadata("arrreal64", [1.1_rk,1.0_rk,2.0_rk], description="Array real64", fmt='F0.1')
-        call metadata%add_metadata("arrlogical", [.true., .false., .true.], description="Array logical")
-        call metadata%add_metadata("arrstring", ["one  ","two  ","three"], "Array string")
+        call schema%add_metadata("arrint", [0,1,2], "Array int")
+        call schema%add_metadata("arrint64", [1_int64,2_int64])
+        call schema%add_metadata("arreal", [1.1,1.0,2.0], "Array real")
+        call schema%add_metadata("arrreal64", [1.1_rk,1.0_rk,2.0_rk], description="Array real64", fmt='F0.1')
+        call schema%add_metadata("arrlogical", [.true., .false., .true.], description="Array logical")
+        call schema%add_metadata("arrstring", ["one  ","two  ","three"], "Array string")
 
         call init_test_data(test_data, 20)
-        call write_test_data(out_file, test_data, cinfo, metadata)
+        call write_test_data(out_file, test_data, schema)
 
         inquire(file=out_file, exist=exists)
         call check(error, exists)
@@ -1466,11 +1446,10 @@ contains
         !
     end subroutine test_write_parquet_file
 
-    subroutine write_test_data(filename, data, col, tmeta, write_maml)
+    subroutine write_test_data(filename, data, schema, write_maml)
         character(len=*), intent(in) :: filename
         type(test_output_type), dimension(:), intent(in) :: data
-        type(parquet_column_info), intent(in) :: col
-        type(parquet_table_metadata), intent(in), optional :: tmeta
+        type(parquet_schema), intent(in) :: schema
         logical, intent(in), optional :: write_maml
         type(parquet_writer) :: writer
         integer :: i, j, n, name_len_max
@@ -1482,7 +1461,7 @@ contains
         integer(int32), allocatable :: iarr_col(:)
         logical, allocatable :: flag_arr_col(:)
 
-        if (size(col%col) < 13) error stop "write_test_data: expected at least 13 columns in col"
+        if (size(schema%cinfo%col) < 13) error stop "write_test_data: expected at least 13 columns in schema"
 
         n = size(data)
         allocate(idarr_col(n*2), name_arr_col(n*3), arr_col(n*5), arrlong_col(n*5), iarr_col(n*3), flag_arr_col(n*6))
@@ -1514,21 +1493,21 @@ contains
             name_col(i) = "var_" // trim(adjustl(data(i)%name))
         end do
 
-        call parquet_open_writer(writer, filename, col, metadata=tmeta, write_maml=write_maml)
+        call parquet_open_writer(writer, filename, schema, write_maml=write_maml)
 
-        call parquet_write_column(writer, col%col(8)%name, arr_col)
+        call parquet_write_column(writer, schema%cinfo%col(8)%name, arr_col)
         call parquet_write_column(writer, "id0", data(:)%id)
-        call parquet_write_column(writer, col%col(12)%name, data(:)%flag)
-        call parquet_write_column(writer, col%col(2)%name, idarr_col)
+        call parquet_write_column(writer, schema%cinfo%col(12)%name, data(:)%flag)
+        call parquet_write_column(writer, schema%cinfo%col(2)%name, idarr_col)
         call parquet_write_column(writer, "name", name_col)
-        call parquet_write_column(writer, col%col(4)%name, name_arr_col)
-        call parquet_write_column(writer, col%col(13)%name, flag_arr_col)
-        call parquet_write_column(writer, col%col(7)%name, data(:)%value2)
-        call parquet_write_column(writer, col%col(5)%name, data(:)%idlong)
-        call parquet_write_column(writer, col%col(6)%name, data(:)%value)
-        call parquet_write_column(writer, col%col(10)%name, data(:)%val)
-        call parquet_write_column(writer, col%col(11)%name, iarr_col)
-        call parquet_write_column(writer, col%col(9)%name, arrlong_col)
+        call parquet_write_column(writer, schema%cinfo%col(4)%name, name_arr_col)
+        call parquet_write_column(writer, schema%cinfo%col(13)%name, flag_arr_col)
+        call parquet_write_column(writer, schema%cinfo%col(7)%name, data(:)%value2)
+        call parquet_write_column(writer, schema%cinfo%col(5)%name, data(:)%idlong)
+        call parquet_write_column(writer, schema%cinfo%col(6)%name, data(:)%value)
+        call parquet_write_column(writer, schema%cinfo%col(10)%name, data(:)%val)
+        call parquet_write_column(writer, schema%cinfo%col(11)%name, iarr_col)
+        call parquet_write_column(writer, schema%cinfo%col(9)%name, arrlong_col)
 
         call parquet_close_writer(writer)
     end subroutine write_test_data

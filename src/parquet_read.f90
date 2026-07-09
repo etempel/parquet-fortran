@@ -265,11 +265,11 @@ contains
         ! qc rules need to already be in place by then, not applied after.
         ! qc_soft defaults to .false. (hard: a violation aborts) and only ever
         ! matters when qc is on -- see run_qc_checks in parquet_wrapper.cpp.
-        qc_effective = present(maml)
+        qc_effective = present(schema)
         if (present(qc)) qc_effective = qc
         qc_soft_value = .false.
         if (present(qc_soft)) qc_soft_value = qc_soft
-        if (present(maml) .and. qc_effective) call apply_parquet_qc(reader, maml, qc_soft_value)
+        if (present(schema) .and. qc_effective) call apply_parquet_qc(reader, schema%maml, qc_soft_value)
 
         if (present(filter)) then
             if (filter%n > 0) call apply_parquet_filter(reader, filter)

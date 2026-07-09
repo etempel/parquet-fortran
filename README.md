@@ -313,7 +313,7 @@ Filtering is **not** predicate pushdown: every filter-referenced column, and eve
 
 ### Read-time quality control with a qc-maml
 
-`parquet_open_reader(reader, filename, maml=..., qc=..., qc_soft=...)` checks column values against `qc: min:`/`max:`/`miss:` bounds declared in a MAML file — mirroring the writer's own [`qc:` range-check feature](#quality-control-qc-range-checks-on-write), but on the read side. By default a violation is a **hard error** (`qc_soft=.false.`): the process aborts with a diagnostic on stderr, the same class of clean, deliberate abort as the read-side Null/type-mismatch checks (see [Limitations](#limitations)). Pass `qc_soft=.true.` to instead **warn and continue**: a `WARNING` is printed to stdout and reading proceeds. Either way, the existing strict-by-default Null behavior (`error stop` on a genuine Null unless `null_value=`/`is_valid=` is passed — see [Null values](#null-values)) is completely unchanged.
+`parquet_open_reader(reader, filename, schema=..., qc=..., qc_soft=...)` checks column values against `qc: min:`/`max:`/`miss:` bounds declared in a MAML file — mirroring the writer's own [`qc:` range-check feature](#quality-control-qc-range-checks-on-write), but on the read side. By default a violation is a **hard error** (`qc_soft=.false.`): the process aborts with a diagnostic on stderr, the same class of clean, deliberate abort as the read-side Null/type-mismatch checks (see [Limitations](#limitations)). Pass `qc_soft=.true.` to instead **warn and continue**: a `WARNING` is printed to stdout and reading proceeds. Either way, the existing strict-by-default Null behavior (`error stop` on a genuine Null unless `null_value=`/`is_valid=` is passed — see [Null values](#null-values)) is completely unchanged.
 
 ```fortran
 type(parquet_reader) :: reader
@@ -330,13 +330,13 @@ integer(int32), allocatable :: ra_back(:)
 !       miss: Null   ! this column is expected to contain genuine Nulls
 
 ! Default: a range violation aborts the process.
-call parquet_open_reader(reader, "data.parquet", maml=parquet_load_qc_maml_file("qc.maml"))
+call parquet_open_reader(reader, "data.parquet", schema=parquet_load_qc_maml_file("qc.maml"))
 call parquet_read_column(reader, "ra", ra_back)
 ! aborts: parquet-fortran: qc hard check: qc violation for column 'ra' (based on incomplete column information): declared min >= 0, max <= 360, data range [...], N of M valid element(s) out of range
 call parquet_close_reader(reader)
 
 ! qc_soft=.true.: the same violation only prints a WARNING to stdout, then continues.
-call parquet_open_reader(reader, "data.parquet", maml=parquet_load_qc_maml_file("qc.maml"), qc_soft=.true.)
+call parquet_open_reader(reader, "data.parquet", schema=parquet_load_qc_maml_file("qc.maml"), qc_soft=.true.)
 call parquet_read_column(reader, "ra", ra_back)
 ! prints: WARNING: qc violation for column 'ra' (based on incomplete column information): declared min >= 0, max <= 360, data range [...], N of M valid element(s) out of range
 call parquet_close_reader(reader)
@@ -344,13 +344,13 @@ call parquet_close_reader(reader)
 
 #### Building a qc-maml in code with `add_col_qc` and `get_col_qc`
 
-Instead of authoring a `.maml` file, you can build the qc-maml in memory a column at a time from a compact, comma-separated string, then pass it straight to `parquet_open_reader(..., maml=)`. The `type(parquet_maml_file)` type provides two forms of the same builder — they append the identical field entry and differ only in how the parsed column name comes back:
+Instead of authoring a `.maml` file, you can build the qc-maml in memory a column at a time from a compact, comma-separated string, then pass it straight to `parquet_open_reader(..., schema=)`. The `type(parquet_schema)` type provides two forms of the same builder — they append the identical field entry and differ only in how the parsed column name comes back:
 
-- **`call maml%add_col_qc(qc_input [, col_name])`** — subroutine. The parsed name is returned in the optional `col_name` argument (`character(len=:), allocatable, intent(out)`) when present; omit it to just add the entry.
-- **`col = maml%get_col_qc(qc_input)`** — function. The parsed name is the result, so it can be assigned straight back into the source variable: `col = maml%get_col_qc(col)`.
+- **`call schema%add_col_qc(qc_input [, col_name])`** — subroutine. The parsed name is returned in the optional `col_name` argument (`character(len=:), allocatable, intent(out)`) when present; omit it to just add the entry.
+- **`col = schema%get_col_qc(qc_input)`** — function. The parsed name is the result, so it can be assigned straight back into the source variable: `col = schema%get_col_qc(col)`.
 
 ```fortran
-type(parquet_maml_file) :: qc
+type(parquet_schema) :: qc
 type(parquet_reader) :: reader
 character(len=:), allocatable :: col
 
@@ -363,7 +363,7 @@ call qc%add_col_qc("dec, , <=90")                ! col_name omitted: just add
 col = "mag, 5"
 col = qc%get_col_qc(col)                          ! col becomes "mag" (bare 5 => >= 5)
 
-call parquet_open_reader(reader, "data.parquet", maml=qc)
+call parquet_open_reader(reader, "data.parquet", schema=qc)
 call parquet_read_column(reader, col, mag)        ! reuse the returned name
 ```
 
@@ -377,8 +377,8 @@ Both forms share the same input format and validation:
 - Adding a column already present in this maml, or supplying more than four fields, also fails immediately with `error stop` — invalid input is never partially applied.
 - An **empty (or all-blank) `qc_input` is a no-op**: `col_name` is returned as an empty string and nothing is added to the maml. This is distinct from a leading comma (e.g. `", >0"`), which does have content — an empty *first field* — and is the error above (a missing column name).
 
-- `maml` is optional, `type(parquet_maml_file)`; `parquet_load_qc_maml_file(filename)` loads one from disk (a separate function from `parquet_load_maml_file`, since a qc-maml has different, lighter requirements — see below). `qc` is optional `logical`: if omitted, it defaults to `.true.` whenever `maml` is supplied and `.false.` otherwise; an explicit `qc=` always wins (so `qc=.false.` with a `maml=` present disables checking entirely, and `qc=.true.` with no `maml=` at all is a harmless no-op, nothing to check).
-- `qc_soft` is optional `logical`, default `.false.` (hard: a violation aborts the process). It only ever takes effect when qc is active; with `qc=.false.` (or no `maml=`) it is irrelevant.
+- `schema` is optional, `type(parquet_schema)`; `parquet_load_qc_maml_file(filename)` loads one from disk (a separate function from `parquet_parse_maml`, since a qc-maml has different, lighter requirements and is never parsed into `cinfo`/`metadata` — see below). `qc` is optional `logical`: if omitted, it defaults to `.true.` whenever `schema` is supplied and `.false.` otherwise; an explicit `qc=` always wins (so `qc=.false.` with a `schema=` present disables checking entirely, and `qc=.true.` with no `schema=` at all is a harmless no-op, nothing to check).
+- `qc_soft` is optional `logical`, default `.false.` (hard: a violation aborts the process). It only ever takes effect when qc is active; with `qc=.false.` (or no `schema=`) it is irrelevant.
 - A qc-maml's only required field attribute is `name` — `data_type` and everything else (including `qc:` itself) are optional, unlike a schema-authoring MAML. `qc: min:`/`max:` bounds are parsed against the column's actual Parquet type at read time, not any `data_type` the maml might declare. A qc-maml may declare fields that don't exist in the parquet file at all (they're silently ignored) or that already have a value in the file's own physical type different from the maml — validation only requires that field names not repeat, that a `qc: miss:` value (if present) is `Null`/`NA` (case-insensitive) or empty, and that any `qc: min:`/`max:` operator points the right way (`min:` a lower bound with `>=`/`>`, `max:` an upper bound with `<=`/`<` — the same rule the [write side](#quality-control-qc-range-checks-on-write) enforces; a reversed operator aborts `parquet_open_reader`).
 - `qc: miss: Null` (or `NA`) means Nulls are *expected* for that field: no violation is raised if the column contains one. Leaving `miss:` empty or omitting it (the default) means Nulls are *not* expected: reading a Null in that column is a violation — regardless of whether you also pass `null_value=`/`is_valid=` to actually read it. A field with no `qc:` block at all (just a bare `name:`) gets no checking whatsoever, the same as a field never mentioned in the maml.
 - qc only ever runs for a column this reader actually touches — read (`parquet_read_column`/`parquet_read_array_row_mode`/`parquet_read_array_element_mode`, scalar or vector), prefetched (`parquet_prefetch_columns`), or referenced by a [`parquet_filter`](#row-filtering-with-parquet_filter) — and, when a filter is active, only ever sees the already-filtered rows. Boolean columns skip the min/max check entirely (never meaningful there) but still get the Null-presence check.
@@ -409,36 +409,35 @@ program write_parquet_example
 end program write_parquet_example
 ```
 
-If you want explicit column definitions and table metadata, first parse a MAML file and pass `cinfo` and `metadata` to `parquet_open_writer`.
+If you want explicit column definitions and table metadata, first parse a MAML file into a `parquet_schema` and pass that to `parquet_open_writer`.
 
 ```fortran
-type(parquet_column_info) :: cinfo
-type(parquet_table_metadata) :: metadata
+type(parquet_schema) :: schema
 
-call parquet_read_maml("maml_example.maml", cinfo, metadata)
-call parquet_open_writer(writer, "data.parquet", cinfo, metadata)
+call parquet_parse_maml("maml_example.maml", schema)
+call parquet_open_writer(writer, "data.parquet", schema)
 ```
 
-If `cinfo` is omitted, `parquet_open_writer` does not enforce a fixed schema: each column's type, string length and array size are inferred from the first `parquet_write_column` call that writes it. If `cinfo` is given, only columns marked `is_set = .true.` (see `set_available`/`set_unavailable` below) are written, and calling `parquet_write_column` with a name that is not in `cinfo` fails immediately with `error stop`.
+A `parquet_schema` bundles the parsed MAML source (`schema%maml`), the column definitions (`schema%cinfo`) and the table-level metadata (`schema%metadata`) into one value; `parquet_parse_maml` populates all three. If `schema` is omitted, `parquet_open_writer` does not enforce a fixed schema: each column's type, string length and array size are inferred from the first `parquet_write_column` call that writes it. If `schema` is given, only columns marked `is_set = .true.` (see `set_column_available`/`set_column_unavailable` below) are written, and calling `parquet_write_column` with a name that is not in the schema fails immediately with `error stop`.
 
-`cinfo` and `metadata` are independent optional arguments to `parquet_open_writer` — pass either, both, or neither. Each governs a different part of the parquet file's VOTable-style header: `cinfo` supplies each column's own `unit`/`info`/`ucd` attributes, while `metadata` supplies table-level entries (author, description, `keyarray:`, etc. — see [The MAML metadata format](#the-maml-metadata-format)). If `metadata` is omitted, no table-level metadata is written to the file, regardless of whether `cinfo` is given.
+Passing `schema` writes both parts of the parquet file's VOTable-style header at once: `schema%cinfo` supplies each column's own `unit`/`info`/`ucd` attributes, while `schema%metadata` supplies table-level entries (author, description, `keyarray:`, etc. — see [The MAML metadata format](#the-maml-metadata-format)).
 
 ### Saving the source MAML alongside the parquet file
 
 Pass `write_maml=.true.` to `parquet_open_writer` to also save a sidecar `.maml` file next to the parquet output — same path, with a trailing `.parquet` replaced by `.maml` (or `.maml` appended if there is none):
 
 ```fortran
-call parquet_read_maml("maml_example.maml", cinfo, metadata)
-call parquet_open_writer(writer, "data.parquet", cinfo, metadata, write_maml=.true.)
+call parquet_parse_maml("maml_example.maml", schema)
+call parquet_open_writer(writer, "data.parquet", schema, write_maml=.true.)
 ! writes data.parquet and data.maml
 ```
 
-This requires `metadata` to come from `parquet_read_maml` — it saves the verbatim MAML source that was parsed into `metadata`, not the parquet file's parquet/VOTable-style header. Two things follow from that:
+This requires `schema` to come from `parquet_parse_maml` — it saves the verbatim MAML source that was parsed into the schema, not the parquet file's parquet/VOTable-style header. Two things follow from that:
 
-- Calls to `metadata%add_metadata` made *after* `parquet_read_maml` (to add extra runtime metadata, as in the [combined example](#combined-example-maml-schema-vector-columns-and-metadata) below) each append a new `keyarray:` entry (`key`/`value`/`comment`) to the saved `.maml`, so runtime metadata is reflected in the sidecar too. Entries are always appended, even if a `keyarray:` entry with the same key already exists — the sidecar will then contain both. A `keyarray:` header is added automatically if the source MAML didn't have one, placed before `extra:` if present, else before `fields:`.
-- The saved `.maml`'s `fields:` section only lists columns that are enabled (`cinfo%col(:)%is_set`) at the time `parquet_open_writer` is called, i.e. what actually ends up in the `.parquet` file: entries for columns disabled via `set_unavailable`, or excluded from a user MAML subset via `parquet_validate_user_maml`, are removed from the sidecar. Matching is by column name against the `cinfo` passed to `parquet_open_writer`; every other section (table-level metadata, `keyarray:`, etc.) is left untouched. If disabling columns would leave zero fields, pruning is skipped entirely and the full field list is kept instead, since a MAML file with no fields cannot be read back by `parquet_validate_maml`.
+- Calls to `schema%add_metadata` made *after* `parquet_parse_maml` (to add extra runtime metadata, as in the [combined example](#combined-example-maml-schema-vector-columns-and-metadata) below) each append a new `keyarray:` entry (`key`/`value`/`comment`) to the saved `.maml`, so runtime metadata is reflected in the sidecar too. Entries are always appended, even if a `keyarray:` entry with the same key already exists — the sidecar will then contain both. A `keyarray:` header is added automatically if the source MAML didn't have one, placed before `extra:` if present, else before `fields:`.
+- The saved `.maml`'s `fields:` section only lists columns that are enabled (`schema%cinfo%col(:)%is_set`) at the time `parquet_open_writer` is called, i.e. what actually ends up in the `.parquet` file: entries for columns disabled via `set_column_unavailable`, or excluded from a user MAML subset via `parquet_validate_user_maml`, are removed from the sidecar. Matching is by column name against the `schema` passed to `parquet_open_writer`; every other section (table-level metadata, `keyarray:`, etc.) is left untouched. If disabling columns would leave zero fields, pruning is skipped entirely and the full field list is kept instead, since a MAML file with no fields cannot be read back by `parquet_validate_maml`.
 
-Omitting `write_maml`, or passing `write_maml=.false.`, behaves exactly as before (no sidecar file). Passing `write_maml=.true.` without `metadata`, or with `metadata` that wasn't produced by `parquet_read_maml`, fails immediately with `error stop`.
+Omitting `write_maml`, or passing `write_maml=.false.`, behaves exactly as before (no sidecar file). Passing `write_maml=.true.` without a `schema`, or with a `schema` that wasn't produced by `parquet_parse_maml`, fails immediately with `error stop`.
 
 Notes:
 
@@ -448,7 +447,7 @@ Notes:
 
 ## The MAML metadata format
 
-A [MAML](https://github.com/asgr/MAML-Format) file is YAML. Table-level metadata (author, description, ...) is given as top-level keys, and column definitions are given as a list under the `fields:` key. **Only a fixed, known set of top-level keys is accepted** — `survey`, `dataset`, `table`, `version`, `date`, `author`, `coauthors`, `dois`, `depends`, `description`, `comments`, `license`, `keywords`, `maml_version`, `keyarray`, `extra`, and `fields` (matched case-insensitively; see `allowed_maml_sections` in `src/parquet_metadata.f90`) — any other top-level key fails `parquet_validate_maml` as an unknown section. To attach your own custom metadata not covered by that list, nest it under `extra:` instead, which accepts arbitrary structure unvalidated (see [Renaming columns for output with `col_map:`](#renaming-columns-for-output-with-col_map) for an example of `extra:`'s own nested keys). `parquet_read_maml` always runs this same validation before parsing a MAML into `cinfo`/`metadata`, so an invalid MAML is caught immediately rather than silently parsed. Three full worked examples are checked into the repository under `docs/`:
+A [MAML](https://github.com/asgr/MAML-Format) file is YAML. Table-level metadata (author, description, ...) is given as top-level keys, and column definitions are given as a list under the `fields:` key. **Only a fixed, known set of top-level keys is accepted** — `survey`, `dataset`, `table`, `version`, `date`, `author`, `coauthors`, `dois`, `depends`, `description`, `comments`, `license`, `keywords`, `maml_version`, `keyarray`, `extra`, and `fields` (matched case-insensitively; see `allowed_maml_sections` in `src/parquet_metadata.f90`) — any other top-level key fails `parquet_validate_maml` as an unknown section. To attach your own custom metadata not covered by that list, nest it under `extra:` instead, which accepts arbitrary structure unvalidated (see [Renaming columns for output with `col_map:`](#renaming-columns-for-output-with-col_map) for an example of `extra:`'s own nested keys). `parquet_parse_maml` always runs this same validation before parsing a MAML into a `parquet_schema`, so an invalid MAML is caught immediately rather than silently parsed. Three full worked examples are checked into the repository under `docs/`:
 - [docs/maml_example.maml](docs/maml_example.maml) — the base example used throughout this README.
 - [docs/maml_example2.maml](docs/maml_example2.maml) — adds `string` fields and `qc: min:`/`max:` bounds (both the plain-number and the quoted-operator forms).
 - [docs/maml_example3.maml](docs/maml_example3.maml) — adds `extra: col_map:` column renaming (e.g. `id` → `uberid`, `RA` → `ra_J2000`) alongside `qc:`.
@@ -496,7 +495,7 @@ A second MAML file may be validated against a "base" MAML with `parquet_validate
 
 ### Renaming columns for output with `col_map:`
 
-A user MAML's `fields:` names are normally required to match the base schema's column names exactly. `col_map:` relaxes that: it lets a user MAML give a column an arbitrary name of its own choosing for the `fields:` section (and the resulting `.parquet`/sidecar `.maml`), while Fortran code continues to call `parquet_write_column`/`set_available`/`get_column_index`/etc. with the stable, well-known internal name from the base schema. `col_map:` is **not** a top-level MAML section — it is only recognized nested inside `extra:` (a bare top-level `col_map:` is rejected as an unknown section):
+A user MAML's `fields:` names are normally required to match the base schema's column names exactly. `col_map:` relaxes that: it lets a user MAML give a column an arbitrary name of its own choosing for the `fields:` section (and the resulting `.parquet`/sidecar `.maml`), while Fortran code continues to call `parquet_write_column`/`set_column_available`/`get_column_index`/etc. with the stable, well-known internal name from the base schema. `col_map:` is **not** a top-level MAML section — it is only recognized nested inside `extra:` (a bare top-level `col_map:` is rejected as an unknown section):
 
 ```yaml
 table: user_table
@@ -510,7 +509,7 @@ fields:
 
 - Each `col_map:` item is `<internal_name>: <output_name>`. `parquet_validate_user_maml` checks these are unambiguous — each `internal_name` must exist in the base schema and not also appear un-renamed elsewhere in `fields:`; each `output_name` must actually be declared in this MAML's own `fields:` and not collide with another column's name. A violation fails validation with a message naming the specific problem.
 - The renamed field's `fields:` entry (`my_id` above) is validated exactly like any other field entry (`data_type` required, etc.) — nothing is inherited from the base column's own attributes.
-- After `parquet_read_maml`, the resulting `parquet_column_type` always uses the internal name (`id0`) for `cinfo%col(:)%name` — the same name every other API (`parquet_write_column`, `set_available`, `get_column_index`, ...) already expects — with the rename available separately as `cinfo%col(:)%output_name` (`my_id`), which is what actually gets written to the `.parquet` file's schema/VOTable header and to a `write_maml=.true.` sidecar's `fields:` section.
+- After `parquet_parse_maml`, the resulting `parquet_column_type` always uses the internal name (`id0`) for `schema%cinfo%col(:)%name` — the same name every other API (`parquet_write_column`, `set_column_available`, `get_column_index`, ...) already expects — with the rename available separately as `schema%cinfo%col(:)%output_name` (`my_id`), which is what actually gets written to the `.parquet` file's schema/VOTable header and to a `write_maml=.true.` sidecar's `fields:` section.
 - `user_maml%col_map` (populated by `parquet_validate_user_maml`) exposes the parsed entries for inspection.
 - Since it lives inside `extra:`, `col_map:` does not produce any table-level metadata entry of its own (nor does `protected_cols:`, `extra:`'s other specifically-parsed key — see [Null values](#null-values)); anything else nested inside `extra:` is accepted unvalidated and otherwise unused.
 
@@ -540,27 +539,26 @@ program write_parquet_combined_example
     implicit none
 
     type(parquet_writer) :: writer
-    type(parquet_column_info) :: cinfo
-    type(parquet_table_metadata) :: metadata
+    type(parquet_schema) :: schema
     integer(int32) :: id0(3)
     integer(int64) :: idarr(2, 3)   ! (col_size, nrows) for the "idarr" vector column
 
     ! Parse column definitions + table metadata from the MAML file.
-    call parquet_read_maml("docs/maml_example.maml", cinfo, metadata)
+    call parquet_parse_maml("docs/maml_example.maml", schema)
 
     ! This schema defines more columns than we have data for in this example;
     ! disable everything, then re-enable only the columns we are about to write.
-    call cinfo%set_unavailable()
-    call cinfo%set_available("id0")
-    call cinfo%set_available("idarr")
+    call schema%set_column_unavailable()
+    call schema%set_column_available("id0")
+    call schema%set_column_available("idarr")
 
     ! Add an extra, run-time-only piece of metadata not present in the MAML file.
-    call metadata%add_metadata("generated_by", "write_parquet_combined_example")
+    call schema%add_metadata("generated_by", "write_parquet_combined_example")
 
     id0 = [1_int32, 2_int32, 3_int32]
     idarr = reshape([1_int64, 2_int64, 3_int64, 4_int64, 5_int64, 6_int64], [2, 3])
 
-    call parquet_open_writer(writer, "data.parquet", cinfo, metadata)
+    call parquet_open_writer(writer, "data.parquet", schema)
     call parquet_write_column(writer, "id0", id0)
     call parquet_write_column(writer, "idarr", idarr)
     call parquet_close_writer(writer)
@@ -590,7 +588,7 @@ Practical cases:
 
 - Safe: many threads, each opening/writing/closing its own `parquet_writer` to a different file.
 - Safe: many threads, each opening/reading/closing its own `parquet_reader` — including multiple threads independently opening their own reader on the *same* file at the same time (each thread's `parquet_open_reader` call is independent).
-- Safe: parsing MAML files (`parquet_read_maml`, `parquet_validate_maml`, etc.) concurrently across threads. Internally this path is lock-serialized for correctness, so it is thread-safe but not expected to speed up with more threads.
+- Safe: parsing MAML files (`parquet_parse_maml`, `parquet_validate_maml`, etc.) concurrently across threads. Internally this path is lock-serialized for correctness, so it is thread-safe but not expected to speed up with more threads.
 - **Not safe:** sharing a single `parquet_writer`/`parquet_reader` variable across threads (e.g. a module-level or `!$omp shared` instance that multiple threads call into at once).
 - **Not safe:** two threads writing to the *same* output file at the same time, even with separate `parquet_writer` instances — the underlying file itself isn't safe to write from more than one place at once.
 
@@ -649,7 +647,7 @@ extra:
   - col2
   - col3
 ```
-Every name listed must be one of this same MAML file's own declared `fields:` (checked by `parquet_validate_maml`; unknown names fail validation). If a user MAML overrides a base MAML, `protected_cols:` is taken from whichever MAML is actually used to build the writer's schema (the user MAML if one is provided, otherwise the base MAML) — not merged across both. Writing an `is_valid` mask with any `.false.` entry for a protected column fails immediately with `error stop`. This only applies when writing against a MAML-derived schema (`parquet_open_writer(..., cinfo, ...)`); a schema-less writer has no `protected_cols:` to enforce.
+Every name listed must be one of this same MAML file's own declared `fields:` (checked by `parquet_validate_maml`; unknown names fail validation). If a user MAML overrides a base MAML, `protected_cols:` is taken from whichever MAML is actually used to build the writer's schema (the user MAML if one is provided, otherwise the base MAML) — not merged across both. Writing an `is_valid` mask with any `.false.` entry for a protected column fails immediately with `error stop`. This only applies when writing against a MAML-derived schema (`parquet_open_writer(..., schema, ...)`); a schema-less writer has no `protected_cols:` to enforce.
 
 ### Quality control (qc:) range checks on write
 
@@ -665,13 +663,13 @@ A plain number (`min: 1`) is treated as inclusive (`>=` for `min:`, `<=` for `ma
 
 Pass `qc=.true.` to `parquet_open_writer` to turn on the actual range check during writing:
 ```fortran
-call parquet_open_writer(writer, "data.parquet", cinfo, metadata, qc=.true.)
+call parquet_open_writer(writer, "data.parquet", schema, qc=.true.)
 ```
 With `qc=.true.`, every `parquet_write_column` call checks its column's declared bound(s) (if any) against every element for which `is_valid` is `.true.` (or every element, if `is_valid` wasn't passed at all — see [Null values](#null-values)). String columns are compared lexicographically using Fortran's native string comparison. Vector columns are checked element-wise. A violation **never stops the write** — it prints one `WARNING` line to stdout naming the column, its declared bound(s), the observed data range among the checked elements, and how many of them are out of range, e.g.:
 ```
 WARNING: qc violation for column 'ra': declared min >= 0, max < 360, data range [-1.5, 359.9], 3 of 1000 valid element(s) out of range
 ```
-This only applies when writing against a MAML-derived schema (`parquet_open_writer(..., cinfo, ...)`) and only for columns that actually declare `qc: min:`/`max:`; omitting `qc=.true.` (the default) skips the check entirely, same as before this feature existed.
+This only applies when writing against a MAML-derived schema (`parquet_open_writer(..., schema, ...)`) and only for columns that actually declare `qc: min:`/`max:`; omitting `qc=.true.` (the default) skips the check entirely, same as before this feature existed.
 
 ### Compression and row group size
 
@@ -721,9 +719,7 @@ program write_parquet_qc_example
     use iso_fortran_env, only: int32
     implicit none
 
-    type(parquet_maml_file) :: maml
-    type(parquet_column_info) :: cinfo
-    type(parquet_table_metadata) :: metadata
+    type(parquet_schema) :: schema
     type(parquet_writer) :: writer
     type(parquet_reader) :: reader
     integer(int32) :: ra(4) = [10_int32, 400_int32, 90_int32, 200_int32]  ! 400 is out of range
@@ -731,8 +727,8 @@ program write_parquet_qc_example
     logical :: is_valid(4) = [.true., .true., .false., .true.]           ! row 3 will be written as Null
     logical :: is_valid_read(4)
 
-    maml%name = "qc_example.maml"
-    maml%lines = [character(len=40) :: &
+    schema%maml%name = "qc_example.maml"
+    schema%maml%lines = [character(len=40) :: &
         "table: qc_example_table", &
         "fields:", &
         "- name: ra", &
@@ -741,10 +737,9 @@ program write_parquet_qc_example
         "    min: '>= 0'", &
         "    max: '< 360'" ]
 
-    call parquet_validate_maml(maml)
-    call parquet_read_maml(maml, cinfo, metadata)
+    call parquet_parse_maml(schema)
 
-    call parquet_open_writer(writer, "data.parquet", cinfo, metadata, qc=.true., compression="zstd")
+    call parquet_open_writer(writer, "data.parquet", schema, qc=.true., compression="zstd")
     call parquet_write_column(writer, "ra", ra, is_valid=is_valid)
     ! prints: WARNING: qc violation for column 'ra': declared min >= 0, max < 360, ...
     call parquet_close_writer(writer)
@@ -766,30 +761,27 @@ List of public callable procedures available with `use parquet`:
 
 ### MAML and metadata
 
-- `parquet_read_maml(maml, cinfo, metadata)` — parses a MAML source into `cinfo` (column definitions) and `metadata` (table-level key/value metadata). Two overloads share the same `maml` keyword: pass a filename (`character`) to read and parse a `.maml` file directly, or pass an already-loaded `parquet_maml_file` object (see `parquet_load_maml_file`) to parse MAML content you already hold in memory. Either overload always runs the same checks as `parquet_validate_maml` first, so a structurally invalid MAML (unknown top-level section, missing `table`, etc.) fails immediately with `error stop` rather than being silently parsed.
-- `parquet_load_maml_file(filename)` — reads a `.maml` file from disk and returns it as a `parquet_maml_file` object, without parsing it into `cinfo`/`metadata`. Also validates it (same checks as `parquet_validate_maml`) before returning. Useful when you want to hold on to the raw MAML content (e.g. to pass to `parquet_read_maml` later, or inspect `maml%name`/`maml%lines` directly).
-- `parquet_load_qc_maml_file(filename)` — reads a *qc-maml* from disk (a lighter MAML used only for read-time quality-control checks) and returns it as a `parquet_maml_file`, without `parquet_load_maml_file`'s full schema-authoring validation: a qc-maml doesn't need `table:`, `data_type:`, or even `qc:` itself. Pass the result as `parquet_open_reader(..., maml=)`; see [Read-time quality control with a qc-maml](#read-time-quality-control-with-a-qc-maml).
-- `call maml%add_col_qc(qc_input [, col_name])` / `col = maml%get_col_qc(qc_input)` — two type-bound forms of the same builder on `parquet_maml_file` for constructing a qc-maml in memory instead of loading one from disk. Each appends one field entry (plus its `qc:` block) from a compact `"col, min, max, miss"` string and hands back the parsed column name — `add_col_qc` (subroutine) via an optional `intent(out)` `col_name` argument, `get_col_qc` (function) as the result (usable in place as `col = maml%get_col_qc(col)`). Both validate operator direction, bound values, `miss:` value, field count (≤ 4) and uniqueness, each with `error stop`. See [Building a qc-maml in code](#building-a-qc-maml-in-code-with-add_col_qc-and-get_col_qc).
+- `parquet_parse_maml(...)` — parses a MAML source into a `parquet_schema` (its `%maml`, `%cinfo` column definitions, and `%metadata` table-level key/value metadata). Two forms: `call parquet_parse_maml(filename, schema)` reads and parses a `.maml` file from disk directly (`filename` is `character`, `schema` is `intent(out)`); `call parquet_parse_maml(schema)` parses a schema whose `%maml` you have already populated in memory (e.g. built by hand or via `parquet_validate_user_maml`), and `error stop`s if `schema%maml` has no content. Either form always runs the same checks as `parquet_validate_maml` first, so a structurally invalid MAML (unknown top-level section, missing `table`, etc.) fails immediately with `error stop` rather than being silently parsed.
+- `parquet_load_maml_file(filename)` — reads a `.maml` file from disk and returns it as a `parquet_maml_file` object, without parsing it into a schema. Also validates it (same checks as `parquet_validate_maml`) before returning. Useful when you want to hold on to the raw MAML content (e.g. to assign into `schema%maml` and `parquet_parse_maml` later, or inspect `maml%name`/`maml%lines` directly).
+- `parquet_load_qc_maml_file(filename)` — reads a *qc-maml* from disk (a lighter MAML used only for read-time quality-control checks) and returns it as a `parquet_schema` with only `%maml` populated (`%cinfo`/`%metadata` stay empty, since a qc-maml is never parsed), without `parquet_load_maml_file`'s full schema-authoring validation: a qc-maml doesn't need `table:`, `data_type:`, or even `qc:` itself. Pass the result as `parquet_open_reader(..., schema=)`; see [Read-time quality control with a qc-maml](#read-time-quality-control-with-a-qc-maml).
+- `call schema%add_col_qc(qc_input [, col_name])` / `col = schema%get_col_qc(qc_input)` — two type-bound forms of the same builder on `parquet_schema` for constructing a qc-maml in memory instead of loading one from disk (they append into `schema%maml`). Each appends one field entry (plus its `qc:` block) from a compact `"col, min, max, miss"` string and hands back the parsed column name — `add_col_qc` (subroutine) via an optional `intent(out)` `col_name` argument, `get_col_qc` (function) as the result (usable in place as `col = schema%get_col_qc(col)`). Both validate operator direction, bound values, `miss:` value, field count (≤ 4) and uniqueness, each with `error stop`. See [Building a qc-maml in code](#building-a-qc-maml-in-code-with-add_col_qc-and-get_col_qc).
 - `parquet_validate_user_maml(base_maml, user_maml)` — checks that every column declared in `user_maml`'s `fields:` block also exists in `base_maml`'s `fields:` block (by name only). `user_maml` may omit any columns from `base_maml`, but must not declare any that aren't there. Unknown columns fail validation and are reported by name.
 - `parquet_validate_maml(maml)` — validates a single MAML file on its own. Checks that: at least one field is defined; every field has a non-empty `name`; every field's `data_type` is one of the recognized types (see [Supported data types](#supported-data-types) above; see `valid_maml_data_types` in `src/parquet_metadata.f90` to add more); no two fields share the same `name`; and the file's metadata includes a non-empty `table` entry. It also validates the `qc:` and `protected_cols:` features described in [Null values](#null-values) and [Quality control (qc:) range checks on write](#quality-control-qc-range-checks-on-write) below. Collects and reports all violations together in a single error stop.
 
-`cinfo` is of type `parquet_column_info`, a scalar wrapper holding the array of parsed columns in `cinfo%col(:)` (each element of type `parquet_column_type`, with fields such as `name`, `output_name`, `unit`, `info`, `ucd`, `data_type`, `array_size`, `col_size`, `is_set`). It provides:
+`parquet_parse_maml` populates a `parquet_schema`, whose components stay directly accessible: `schema%cinfo` (type `parquet_column_info`) holds the array of parsed columns in `schema%cinfo%col(:)` (each element of type `parquet_column_type`, with fields such as `name`, `output_name`, `unit`, `info`, `ucd`, `data_type`, `array_size`, `col_size`, `is_set`), and `schema%metadata` (type `parquet_table_metadata`) holds the table-level entries. For convenience `parquet_schema` also exposes these flat passthrough procedures (equivalent to reaching into `%cinfo`/`%metadata` yourself):
 
-- `cinfo%get_column_index(name)` — returns the index of the named column in `cinfo%col(:)`. Missing columns fail immediately with `error stop`.
-- `cinfo%set_unavailable([name])` — marks the named column as not set (`is_set = .false.`), so it is skipped when the schema is written. Missing columns fail immediately with `error stop`. If `name` is omitted, marks every column unavailable at once. Use this to drop columns from a base MAML schema without writing a separate MAML file for each combination of active columns.
-- `cinfo%set_available([name])` — the inverse of `set_unavailable`: marks the named column (or, if `name` is omitted, every column) as set (`is_set = .true.`).
-
-The public derived type `parquet_table_metadata` provides:
-
-- `metadata%add_metadata(key, value[, description][, fmt])` — attaches a table-level key/value pair (e.g. provenance, units, free-text notes) that is written into the parquet file's VOTable-style header. `value` may be a scalar or 1D array of any [supported type](#supported-data-types) (`integer(int32/int64)`, `real(real32/real64)`, `logical`, `character`). The optional `description` (`character`) is a free-text note stored alongside the value. The optional `fmt` (`character`) sets a display/print format string for the value, otherwise a type-appropriate default is used; it has no effect on how the value itself is stored.
+- `schema%get_column_index(name)` — returns the index of the named column in `schema%cinfo%col(:)`. Missing columns fail immediately with `error stop`.
+- `schema%set_column_unavailable([name])` — marks the named column as not set (`is_set = .false.`), so it is skipped when the schema is written. Missing columns fail immediately with `error stop`. If `name` is omitted, marks every column unavailable at once. Use this to drop columns from a base MAML schema without writing a separate MAML file for each combination of active columns.
+- `schema%set_column_available([name])` — the inverse of `set_column_unavailable`: marks the named column (or, if `name` is omitted, every column) as set (`is_set = .true.`).
+- `schema%add_metadata(key, value[, description][, fmt])` — attaches a table-level key/value pair (e.g. provenance, units, free-text notes) that is written into the parquet file's VOTable-style header. `value` may be a scalar or 1D array of any [supported type](#supported-data-types) (`integer(int32/int64)`, `real(real32/real64)`, `logical`, `character`). The optional `description` (`character`) is a free-text note stored alongside the value. The optional `fmt` (`character`) sets a display/print format string for the value, otherwise a type-appropriate default is used; it has no effect on how the value itself is stored.
 
 ### Writer
 
-- `parquet_open_writer(writer, filename[, cinfo, metadata, write_maml, qc, compression, compression_level, chunk_size, use_threads])` — opens `filename` for writing. `cinfo`/`metadata` are optional; see the schema-enforcement note above. All other arguments are optional keywords:
+- `parquet_open_writer(writer, filename[, schema, write_maml, qc, compression, compression_level, chunk_size, use_threads])` — opens `filename` for writing. `schema` (`type(parquet_schema)`) is optional; see the schema-enforcement note above. All other arguments are optional keywords:
 
   | Keyword | Default | Effect |
   |---|---|---|
-  | `write_maml` | `.false.` | Also save a sidecar `.maml` file next to `filename` with the MAML source that produced `metadata`. See [Saving the source MAML alongside the parquet file](#saving-the-source-maml-alongside-the-parquet-file). |
+  | `write_maml` | `.false.` | Also save a sidecar `.maml` file next to `filename` with the MAML source in `schema`. See [Saving the source MAML alongside the parquet file](#saving-the-source-maml-alongside-the-parquet-file). |
   | `qc` | `.false.` | Turn on `qc: min:`/`max:` range-check warnings during writing. See [Quality control (qc:) range checks on write](#quality-control-qc-range-checks-on-write). |
   | `compression` | `"snappy"` | Output compression codec. See [Compression and row group size](#compression-and-row-group-size). |
   | `compression_level` | codec's own default | Tunes the chosen codec's compression level (mainly `zstd`/`gzip`/`brotli`). See [Compression and row group size](#compression-and-row-group-size). |
@@ -802,8 +794,8 @@ The public derived type `parquet_table_metadata` provides:
 ### Reader (table and column info)
 
 - `type(parquet_filter)` with `call filt%add(rule)` — builds a row filter to pass as `parquet_open_reader(..., filter=filt)`. Each `%add` appends one rule; multiple rules combine with AND. A `rule` has the shape `"<column> <op> <value>"` (or `"<column> is_null"`/`"<column> is_not_null"`). See [Row filtering with parquet_filter](#row-filtering-with-parquet_filter) for the supported operators, value syntax, and validation.
-- `parquet_open_reader(reader, filename[, use_threads, filter, maml, qc, qc_soft])` — opens an existing parquet file for reading. `use_threads` (optional, `logical`, default `.true.`) — decode across Arrow's internal thread pool. See [Multi-threaded decoding/encoding](#multi-threaded-decodingencoding-use_threads-and-thread-pool-size). `filter` (optional, `type(parquet_filter)`) restricts the reader to only rows matching the filter — see [Row filtering with parquet_filter](#row-filtering-with-parquet_filter). `maml`/`qc`/`qc_soft` (optional, `type(parquet_maml_file)`/`logical`/`logical`) enable read-time qc range/Null checks; a violation aborts by default (`qc_soft=.false.`) or, with `qc_soft=.true.`, only warns — see [Read-time quality control with a qc-maml](#read-time-quality-control-with-a-qc-maml).
-- `parquet_load_qc_maml_file(filename)` — loads a qc-maml to pass as `parquet_open_reader(..., maml=)`; its full description is under [MAML and metadata](#maml-and-metadata) above, alongside the other MAML loaders.
+- `parquet_open_reader(reader, filename[, use_threads, filter, schema, qc, qc_soft])` — opens an existing parquet file for reading. `use_threads` (optional, `logical`, default `.true.`) — decode across Arrow's internal thread pool. See [Multi-threaded decoding/encoding](#multi-threaded-decodingencoding-use_threads-and-thread-pool-size). `filter` (optional, `type(parquet_filter)`) restricts the reader to only rows matching the filter — see [Row filtering with parquet_filter](#row-filtering-with-parquet_filter). `schema`/`qc`/`qc_soft` (optional, `type(parquet_schema)`/`logical`/`logical`) enable read-time qc range/Null checks; a violation aborts by default (`qc_soft=.false.`) or, with `qc_soft=.true.`, only warns — see [Read-time quality control with a qc-maml](#read-time-quality-control-with-a-qc-maml).
+- `parquet_load_qc_maml_file(filename)` — loads a qc-maml to pass as `parquet_open_reader(..., schema=)`; its full description is under [MAML and metadata](#maml-and-metadata) above, alongside the other MAML loaders.
 - `parquet_close_reader(reader[, print_stat])` — releases resources associated with `reader`. Fails with `error stop` if `reader` was never opened, or was already closed. `print_stat` (optional `logical`, default `.false.`) prints a diagnostic summary of the reader's activity to stdout first — see [Printing reader statistics](#printing-reader-statistics-with-parquet_close_readerprint_stattrue).
 - `parquet_get_nrows(reader, nrows)` — returns the number of table rows in `nrows` (`integer(int32)` or `integer(int64)`).
 - `parquet_get_col_size(reader, name, col_size)` — returns the fixed row length of vector column `name` in `col_size`. Call this before allocating the output array for `parquet_read_column`/`parquet_read_array_row_mode`/`parquet_read_array_element_mode` on that column.
@@ -823,7 +815,7 @@ Worth knowing up front before relying on this library:
 
 - Only the six types in [Supported data types](#supported-data-types) are handled — there is no `date`/`timestamp`/`decimal` support, no `int8`/`int16`/unsigned integers, and no arbitrary nested/struct/map columns. Vector columns are fixed-length (`col_size`) only: every row must hold the same number of elements. Such a column can be *read back* whether it was stored on disk as a `fixed_size_list` or as a variable-length `list<element>` (see the [reading notes](#reading-parquet-files-from-your-fortran-code)), but a genuinely ragged list (rows of differing length) is not supported — it is rejected on read — and this library's own writer only ever emits `fixed_size_list`.
 - **Reading a column whose physical Parquet type doesn't match what you asked for aborts the process, but not via a clean `error stop`** — it's a C++-level abort with a diagnostic printed to stderr (e.g. `parquet-fortran: parquet_read_column: type mismatch for column: d (expected int32/int64, got date32[day])`), not a Fortran `error stop`. This covers the physical type being outside the six [supported data types](#supported-data-types) (e.g. the file has a `date32` column) as well as a declared vector column's shape not matching what was requested, across every read function (`parquet_read_column`, `parquet_read_array_row_mode`, `parquet_read_array_element_mode`, and vector-column reads).
-- A column can only be written once per `parquet_writer` — there's no incremental/streaming append to a column across multiple `parquet_write_column` calls, and no way to append rows to an already-closed `.parquet` file. Writing the same column name twice fails immediately with `error stop`, naming the column, whether or not the writer has a MAML-derived schema (`cinfo`).
+- A column can only be written once per `parquet_writer` — there's no incremental/streaming append to a column across multiple `parquet_write_column` calls, and no way to append rows to an already-closed `.parquet` file. Writing the same column name twice fails immediately with `error stop`, naming the column, whether or not the writer has a MAML-derived schema.
 - **`parquet_open_writer` silently overwrites/truncates an existing file at that path** — there is no existence check and no warning.
 - There is no random-access or predicate-pushdown read: `parquet_read_array_row_mode`/`parquet_read_array_element_mode` avoid loading a whole *column* at once, but there's no way to filter which *rows* are read across a table.
 

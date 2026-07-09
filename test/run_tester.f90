@@ -77,7 +77,8 @@ program tester
                 end if
             else
                 write(error_unit, fmt) "Testing:", testsuites(is)%name
-                call run_testsuite(testsuites(is)%collect, error_unit, stat)
+                call run_testsuite(testsuites(is)%collect, error_unit, stat, &
+                    parallel=suite_is_safe_to_parallelize(testsuites(is)%name))
             end if
         else
             write(error_unit, fmt) "Available testsuites"
@@ -89,7 +90,8 @@ program tester
     else
         do is = 1, size(testsuites)
             write(error_unit, fmt) "Testing:", testsuites(is)%name
-            call run_testsuite(testsuites(is)%collect, error_unit, stat)
+            call run_testsuite(testsuites(is)%collect, error_unit, stat, &
+                parallel=suite_is_safe_to_parallelize(testsuites(is)%name))
         end do
     end if
     !
@@ -98,4 +100,19 @@ program tester
         error stop 1
     end if
     !
+contains
+
+    !> "writing" and "errors" contain tests that call execute_command_line
+    !> (fork()+exec() under the hood) to drive the error_scenarios helper
+    !> as a subprocess. test-drive runs the tests within a suite
+    !> concurrently via `!$omp parallel do` by default; forking while
+    !> sibling OpenMP worker threads are alive mid-barrier is unsafe with
+    !> libiomp5 (observed: deterministic SIGSEGV inside
+    !> __kmp_invoke_microtask). Run those two suites' tests sequentially
+    !> instead so the fork always happens with no other team threads active.
+    logical function suite_is_safe_to_parallelize(name) result(safe)
+        character(len=*), intent(in) :: name
+        safe = .not. (name == "writing" .or. name == "errors")
+    end function suite_is_safe_to_parallelize
+
 end program tester

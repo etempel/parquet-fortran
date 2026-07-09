@@ -113,7 +113,7 @@ The code compiles successfully with the following compilers and libraries. It mi
     - Intel Fortran (ifx) v2025.3.0
     - Gfortran v15.2.0
 - FPM ([Fortran Package Manager](https://fpm.fortran-lang.org/))
-- [apache-arrow](https://arrow.apache.org) (C++ library for parquet)
+- [apache-arrow](https://arrow.apache.org) (C++ library for parquet) v24.0.0
 
 Installing the Arrow/Parquet C++ library itself (not a Fortran package, so it isn't installed by FPM):
 

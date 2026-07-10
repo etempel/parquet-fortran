@@ -18,7 +18,7 @@ module parquet
     type parquet_column_type
         logical :: is_set = .false.
         logical :: is_deactivated = .false. ! true for columns merged in from a base MAML that the user's MAML excluded;
-                                          ! protects is_set from being changed by set_available/set_unavailable (bulk or by name).
+                                          ! protects is_set from being changed by set_column_available/set_column_unavailable (bulk or by name).
         logical :: is_protected = .false. ! true if this column's name is listed under extra: protected_cols: in
                                            ! whichever MAML built this cinfo; parquet_write_column error stops if an
                                            ! is_valid mask with any .false. entry is passed for such a column.
@@ -30,7 +30,7 @@ module parquet
                                                      ! numeric for int32/int64/float32/float64, literal for string.
         character(len=:), allocatable :: qc_max_raw ! qc: max: bound text, same convention as qc_min_raw.
         character(len=:), allocatable :: name      ! The name of the field [required]; always the internal/canonical
-                                                    ! name, i.e. what parquet_write_column/set_available/etc. use --
+                                                    ! name, i.e. what parquet_write_column/set_column_available/etc. use --
                                                     ! never affected by a col_map: rename (see output_name).
         character(len=:), allocatable :: unit      ! The unit of measurement for the field.
         character(len=:), allocatable :: info      ! A short description of the field.
@@ -50,8 +50,12 @@ module parquet
         type(parquet_column_type), allocatable :: col(:)
     contains
         procedure :: get_column_index
-        procedure :: set_unavailable
-        procedure :: set_available
+        ! Exposed as set_column_available/set_column_unavailable to match the
+        ! same-named methods on parquet_schema (the primary public API); the
+        ! backing module procedures keep the shorter set_available/set_unavailable
+        ! names only to avoid colliding with parquet_schema's own impls.
+        procedure :: set_column_unavailable => set_unavailable
+        procedure :: set_column_available => set_available
     end type parquet_column_info
 
     type parquet_metadata_entry
@@ -94,7 +98,7 @@ module parquet
     ! %cinfo and %metadata are public: their fields (col(:), items(:)) and
     ! own type-bound procedures stay directly reachable, and the procedures
     ! below are flat convenience passthroughs (schema%set_column_available("id")
-    ! instead of schema%cinfo%set_available("id")).
+    ! instead of schema%cinfo%set_column_available("id")).
     !
     ! On the read side a qc-maml is populated into %maml alone -- either by
     ! parquet_load_qc_maml_file or schema%add_col_qc -- and is never run
@@ -117,6 +121,15 @@ module parquet
         procedure :: set_column_available
         procedure :: set_column_unavailable
         procedure :: get_column_index => schema_get_column_index
+        ! add_col_qc/get_col_qc build a read-time qc-maml. Two intentional
+        ! naming choices here: (1) "col_qc" is a deliberate domain abbreviation
+        ! for "column quality-control" (the qc: block of a fields: entry) --
+        ! kept short because it appears in every qc-building call. (2) get_col_qc
+        ! is deliberately named get_ even though it MUTATES the schema (it
+        ! appends the entry, like add_col_qc): the get_ form exists only so the
+        ! parsed column name can be assigned back in place (col = schema%get_col_qc(col)),
+        ! which the subroutine form cannot do without aliasing an intent(out)
+        ! argument. It is a builder that also returns the name, not a pure query.
         procedure :: add_col_qc => schema_add_col_qc
         procedure :: get_col_qc => schema_get_col_qc
         procedure :: schema_add_metadata_int32
@@ -231,7 +244,7 @@ module parquet
         ! True only if this field had a qc: sub-block at all (even an empty
         ! one) -- a field with just a name: and no qc: gets no rule at all,
         ! the same as a field never mentioned in the maml (see
-        ! parquet_parse_qc_maml); apply_parquet_qc filters these out before
+        ! parquet_parse_qc_maml); parquet_apply_qc filters these out before
         ! ever reaching parquet_reader_set_qc.
         logical :: has_qc_block = .false.
         logical :: has_min = .false.

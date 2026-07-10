@@ -220,7 +220,7 @@ contains
     !> shortest element's length. This is the same class of fixed-length
     !> character array pitfall documented on parquet_prefetch_columns_string
     !> elsewhere in this codebase, now checked for the metadata array
-    !> split/parse path (pgm_split_array in parquet_metadata.f90).
+    !> split/parse path (parquet_metadata_split_array in parquet_metadata.f90).
     subroutine test_string_array_mixed_lengths(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_writer) :: writer

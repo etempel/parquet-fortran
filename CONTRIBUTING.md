@@ -76,7 +76,7 @@ export FPM_FFLAGS="-fopenmp"
 fpm test
 ```
 
-The OpenMP flag is compiler-dependent (`-fopenmp` for gfortran, `-qopenmp` for ifx, ...), so it can't be hardcoded in `fpm.toml` and must come from `FPM_FFLAGS` as shown. The two concurrency error-scenario tests are **self-adapting**: they check `omp_get_max_threads()` and, when it's `1` (no OpenMP flag, or `OMP_NUM_THREADS=1`), the shared-reader/writer race cannot occur, so they skip and pass trivially. So plain `fpm test` (no `FPM_FFLAGS`) is still green — it just doesn't meaningfully exercise these specific concurrency checks; set `FPM_FFLAGS="-fopenmp"` to actually verify the guard fires.
+The OpenMP flag is compiler-dependent (see [README's Thread safety section](README.md#thread-safety) for the per-compiler flags), so it can't be hardcoded in `fpm.toml` and must come from `FPM_FFLAGS` as shown. The two concurrency error-scenario tests are **self-adapting**: they check `omp_get_max_threads()` and, when it's `1` (no OpenMP flag, or `OMP_NUM_THREADS=1`), the shared-reader/writer race cannot occur, so they skip and pass trivially. So plain `fpm test` (no `FPM_FFLAGS`) is still green — it just doesn't meaningfully exercise these specific concurrency checks; set `FPM_FFLAGS="-fopenmp"` to actually verify the guard fires.
 
 ## Regenerating the built-in MAML module
 
@@ -113,7 +113,7 @@ These were looked at (during an audit comparing this library against Arrow C++'s
 - Per-column writer properties (e.g. `disable_statistics()` for write-heavy/throwaway files, explicit dictionary-encoding toggles) — small, additive, doesn't touch the type system.
 
 **Bigger lifts, worth being cautious about:**
-- Predicate pushdown / row filtering — real support means wiring Arrow's expression/compute-filter machinery or per-row-group statistics-based skipping; a genuinely large feature, and the current "no random-access read" limitation is treated as an intentional non-goal for now.
+- Predicate pushdown (statistics-based I/O skipping) — *not to be confused with row filtering, which is already implemented* (`parquet_filter` / `parquet_open_reader(..., filter=)`, see [README.md's Row filtering section](README.md#row-filtering-with-parquet_filter)). That existing filter is post-decode: it narrows the rows your code sees but still reads and decodes every referenced column in full. Genuine predicate pushdown — using per-row-group statistics (or Arrow's expression/compute-filter machinery) to skip reading matching row groups off disk entirely — is the unimplemented part, and the current "no random-access read" limitation treats it as an intentional non-goal for now.
 - Nested/struct/map/variable-length-list types — Arrow supports these natively, but they'd break the library's core "flat columns + fixed `col_size` vectors" data model that the whole Fortran-side API is built around; this would be a redesign, not an addition.
 - Additional scalar types (`int8`/`int16`/unsigned integers/`decimal`) — straightforward from Arrow's side, but each new type multiplies the `parquet_write_*`/`parquet_read_*` interface surface (a dedicated subroutine pair per type already exists for each of the six supported types).
 

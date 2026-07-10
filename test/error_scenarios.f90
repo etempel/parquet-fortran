@@ -1661,7 +1661,7 @@ contains
 
     !> parquet_get_metadata with no `default` given error stops the moment
     !> the requested key isn't present in the file's table metadata (see
-    !> pgm_stop_missing in parquet_metadata.f90).
+    !> parquet_metadata_stop_missing in parquet_metadata.f90).
     subroutine scenario_get_metadata_missing_key_no_default()
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
@@ -1679,7 +1679,7 @@ contains
 
     !> parquet_get_metadata with no `default` given error stops when the
     !> key is present but its stored text cannot be converted to the
-    !> requested type (see pgm_stop_conversion in parquet_metadata.f90).
+    !> requested type (see parquet_metadata_stop_conversion in parquet_metadata.f90).
     subroutine scenario_get_metadata_conversion_failure_no_default()
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader

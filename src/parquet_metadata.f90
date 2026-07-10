@@ -114,7 +114,7 @@ contains
     !> one is private to a different module (parquet_maml_base sits below this
     !> one in the module stack) and cannot be reused here without a new public
     !> API neither add_col_qc nor add_field need for anything else.
-    subroutine schema_maml_push_line(maml, s)
+    subroutine maml_push_line(maml, s)
         type(parquet_maml_file), intent(inout) :: maml
         character(len=*), intent(in) :: s
         character(len=:), allocatable :: tmp(:)
@@ -135,11 +135,11 @@ contains
         end do
         tmp(n + 1) = s
         call move_alloc(tmp, maml%lines)
-    end subroutine schema_maml_push_line
+    end subroutine maml_push_line
 
     !> True if any line of maml%lines equals `target` after trimming leading
     !> and trailing blanks (used for the fields: header check).
-    logical function schema_maml_line_exists(maml, target) result(found)
+    logical function maml_line_exists(maml, target) result(found)
         type(parquet_maml_file), intent(in) :: maml
         character(len=*), intent(in) :: target
         integer :: i
@@ -152,11 +152,11 @@ contains
                 return
             end if
         end do
-    end function schema_maml_line_exists
+    end function maml_line_exists
 
     !> True if maml%lines already declares a fields: entry named `name`, i.e.
     !> a "- name: <name>" line.
-    logical function schema_maml_field_name_exists(maml, name) result(found)
+    logical function maml_field_name_exists(maml, name) result(found)
         type(parquet_maml_file), intent(in) :: maml
         character(len=*), intent(in) :: name
         integer :: i, colon
@@ -185,7 +185,7 @@ contains
                 return
             end if
         end do
-    end function schema_maml_field_name_exists
+    end function maml_field_name_exists
 
     module procedure schema_init
         if (this%is_initialized) then
@@ -195,15 +195,15 @@ contains
             error stop "parquet_schema%init: table must not be empty"
         end if
 
-        call schema_maml_push_line(this%maml, "table: " // trim(table))
-        if (present(survey))       call schema_maml_push_line(this%maml, "survey: " // trim(survey))
-        if (present(dataset))      call schema_maml_push_line(this%maml, "dataset: " // trim(dataset))
-        if (present(version))     call schema_maml_push_line(this%maml, "version: " // trim(version))
-        if (present(date))         call schema_maml_push_line(this%maml, "date: " // trim(date))
-        if (present(author))      call schema_maml_push_line(this%maml, "author: " // trim(author))
-        if (present(description)) call schema_maml_push_line(this%maml, "description: " // trim(description))
-        if (present(license))     call schema_maml_push_line(this%maml, "license: " // trim(license))
-        if (present(maml_version)) call schema_maml_push_line(this%maml, "MAML_version: " // trim(maml_version))
+        call maml_push_line(this%maml, "table: " // trim(table))
+        if (present(survey))       call maml_push_line(this%maml, "survey: " // trim(survey))
+        if (present(dataset))      call maml_push_line(this%maml, "dataset: " // trim(dataset))
+        if (present(version))     call maml_push_line(this%maml, "version: " // trim(version))
+        if (present(date))         call maml_push_line(this%maml, "date: " // trim(date))
+        if (present(author))      call maml_push_line(this%maml, "author: " // trim(author))
+        if (present(description)) call maml_push_line(this%maml, "description: " // trim(description))
+        if (present(license))     call maml_push_line(this%maml, "license: " // trim(license))
+        if (present(maml_version)) call maml_push_line(this%maml, "MAML_version: " // trim(maml_version))
 
         this%is_initialized = .true.
     end procedure schema_init
@@ -222,7 +222,7 @@ contains
             error stop "parquet_schema%add_field: field name must not be empty"
         end if
 
-        if (schema_maml_field_name_exists(this%maml, trim(name))) then
+        if (maml_field_name_exists(this%maml, trim(name))) then
             error stop "parquet_schema%add_field: duplicate field name '" // trim(name) // "'"
         end if
 
@@ -251,38 +251,38 @@ contains
             end if
         end if
 
-        if (.not. schema_maml_line_exists(this%maml, "fields:")) call schema_maml_push_line(this%maml, "fields:")
+        if (.not. maml_line_exists(this%maml, "fields:")) call maml_push_line(this%maml, "fields:")
 
-        call schema_maml_push_line(this%maml, "- name: " // trim(name))
-        if (present(unit)) call schema_maml_push_line(this%maml, "  unit: " // trim(unit))
-        if (present(info)) call schema_maml_push_line(this%maml, "  info: " // trim(info))
-        if (present(ucd))  call schema_maml_push_line(this%maml, "  ucd: " // trim(ucd))
-        call schema_maml_push_line(this%maml, "  data_type: " // trim(data_type))
+        call maml_push_line(this%maml, "- name: " // trim(name))
+        if (present(unit)) call maml_push_line(this%maml, "  unit: " // trim(unit))
+        if (present(info)) call maml_push_line(this%maml, "  info: " // trim(info))
+        if (present(ucd))  call maml_push_line(this%maml, "  ucd: " // trim(ucd))
+        call maml_push_line(this%maml, "  data_type: " // trim(data_type))
 
         if (present(array_size)) then
             write(buf, '(I0)') array_size
-            call schema_maml_push_line(this%maml, "  array_size: " // trim(buf))
+            call maml_push_line(this%maml, "  array_size: " // trim(buf))
         end if
         if (present(col_size)) then
             write(buf, '(I0)') col_size
-            call schema_maml_push_line(this%maml, "  col_size: " // trim(buf))
+            call maml_push_line(this%maml, "  col_size: " // trim(buf))
         end if
 
         if ((present(qc_min) .and. len_trim(qc_min) > 0) .or. &
             (present(qc_max) .and. len_trim(qc_max) > 0) .or. &
             (present(qc_miss) .and. len_trim(qc_miss) > 0)) then
-            call schema_maml_push_line(this%maml, "  qc:")
+            call maml_push_line(this%maml, "  qc:")
             if (present(qc_min)) then
                 if (len_trim(qc_min) > 0) &
-                    call schema_maml_push_line(this%maml, "    min: '" // trim(adjustl(qc_min)) // "'")
+                    call maml_push_line(this%maml, "    min: '" // trim(adjustl(qc_min)) // "'")
             end if
             if (present(qc_max)) then
                 if (len_trim(qc_max) > 0) &
-                    call schema_maml_push_line(this%maml, "    max: '" // trim(adjustl(qc_max)) // "'")
+                    call maml_push_line(this%maml, "    max: '" // trim(adjustl(qc_max)) // "'")
             end if
             if (present(qc_miss)) then
                 if (len_trim(qc_miss) > 0) &
-                    call schema_maml_push_line(this%maml, "    miss: " // trim(adjustl(qc_miss)))
+                    call maml_push_line(this%maml, "    miss: " // trim(adjustl(qc_miss)))
             end if
         end if
 
@@ -345,11 +345,11 @@ contains
     ! %maml. Absent optional arguments propagate unchanged.
 
     module procedure set_column_available
-        call this%cinfo%set_available(name)
+        call this%cinfo%set_column_available(name)
     end procedure set_column_available
 
     module procedure set_column_unavailable
-        call this%cinfo%set_unavailable(name)
+        call this%cinfo%set_column_unavailable(name)
     end procedure set_column_unavailable
 
     module procedure schema_get_column_index
@@ -505,7 +505,7 @@ contains
             ! existing (base) column's own name: if it did, that other base
             ! column -- whether or not this user MAML mentions it -- would
             ! collide with the renamed one the moment it's ever activated
-            ! (e.g. via set_available), since both would then share the same
+            ! (e.g. via set_column_available), since both would then share the same
             ! output_name in the written schema.
             if (allocated(base_cinfo%col)) then
                 do j = 1, size(base_cinfo%col)
@@ -1701,7 +1701,7 @@ contains
         if (present(name)) then
             idx = this%get_column_index(name)
             if (this%col(idx)%is_deactivated) then
-                error stop "parquet_column_info%set_unavailable: column is deactivated: " // trim(name)
+                error stop "parquet_column_info%set_column_unavailable: column is deactivated: " // trim(name)
             end if
             this%col(idx)%is_set = .false.
         else if (allocated(this%col)) then
@@ -1717,7 +1717,7 @@ contains
         if (present(name)) then
             idx = this%get_column_index(name)
             if (this%col(idx)%is_deactivated) then
-                error stop "parquet_column_info%set_available: column is deactivated: " // trim(name)
+                error stop "parquet_column_info%set_column_available: column is deactivated: " // trim(name)
             end if
             this%col(idx)%is_set = .true.
         else if (allocated(this%col)) then
@@ -2319,7 +2319,7 @@ contains
     ! the file. Messages follow the "<proc>: <message>" error stop convention
     ! used throughout this module.
 
-    integer function pgm_find_index(metadata, key) result(idx)
+    integer function parquet_metadata_find_index(metadata, key) result(idx)
         type(parquet_table_metadata), intent(in) :: metadata
         character(len=*), intent(in) :: key
         integer :: i
@@ -2333,27 +2333,27 @@ contains
                 return
             end if
         end do
-    end function pgm_find_index
+    end function parquet_metadata_find_index
 
-    logical function pgm_parse_int64(str, val) result(ok)
+    logical function parquet_metadata_parse_int64(str, val) result(ok)
         character(len=*), intent(in) :: str
         integer(int64), intent(out) :: val
         integer :: ios
 
         read(str, *, iostat=ios) val
         ok = (ios == 0)
-    end function pgm_parse_int64
+    end function parquet_metadata_parse_int64
 
-    logical function pgm_parse_real64(str, val) result(ok)
+    logical function parquet_metadata_parse_real64(str, val) result(ok)
         character(len=*), intent(in) :: str
         real(real64), intent(out) :: val
         integer :: ios
 
         read(str, *, iostat=ios) val
         ok = (ios == 0)
-    end function pgm_parse_real64
+    end function parquet_metadata_parse_real64
 
-    logical function pgm_parse_logical(str, val) result(ok)
+    logical function parquet_metadata_parse_logical(str, val) result(ok)
         character(len=*), intent(in) :: str
         logical, intent(out) :: val
         character(len=:), allocatable :: t
@@ -2368,19 +2368,19 @@ contains
         else
             ok = .false.
         end if
-    end function pgm_parse_logical
+    end function parquet_metadata_parse_logical
 
-    logical function pgm_int32_fits(v) result(ok)
+    logical function parquet_metadata_int32_fits(v) result(ok)
         integer(int64), intent(in) :: v
 
         ok = (v >= -int(huge(0_int32), int64) - 1_int64) .and. (v <= int(huge(0_int32), int64))
-    end function pgm_int32_fits
+    end function parquet_metadata_int32_fits
 
     !> Splits an add_metadata_*_array-formatted string ("[v1, v2, ...]") into
     !> its comma-separated, trimmed elements. tokens(:) is a uniform-length
     !> (deferred-length) character array sized to the longest element; n==0
     !> for an empty "[]".
-    subroutine pgm_split_array(raw, tokens, n)
+    subroutine parquet_metadata_split_array(raw, tokens, n)
         character(len=*), intent(in) :: raw
         character(len=:), allocatable, intent(out) :: tokens(:)
         integer, intent(out) :: n
@@ -2427,31 +2427,31 @@ contains
                 end if
             end do
         end if
-    end subroutine pgm_split_array
+    end subroutine parquet_metadata_split_array
 
-    subroutine pgm_warn_default_used(key, filename)
+    subroutine parquet_metadata_warn_default_used(key, filename)
         character(len=*), intent(in) :: key, filename
         print '(a)', "WARNING: parquet_get_metadata: metadata key '" // trim(key) // "' not found in file '" // &
             trim(filename) // "', using default value"
-    end subroutine pgm_warn_default_used
+    end subroutine parquet_metadata_warn_default_used
 
-    subroutine pgm_warn_conversion_failed(key, filename, raw, target_desc)
+    subroutine parquet_metadata_warn_conversion_failed(key, filename, raw, target_desc)
         character(len=*), intent(in) :: key, filename, raw, target_desc
         print '(a)', "WARNING: parquet_get_metadata: metadata key '" // trim(key) // "' in file '" // trim(filename) // &
             "' has value '" // trim(raw) // "' that cannot be converted to " // trim(target_desc)
-    end subroutine pgm_warn_conversion_failed
+    end subroutine parquet_metadata_warn_conversion_failed
 
-    subroutine pgm_stop_missing(key, filename)
+    subroutine parquet_metadata_stop_missing(key, filename)
         character(len=*), intent(in) :: key, filename
         error stop "parquet_get_metadata: metadata key '" // trim(key) // "' not found in file '" // trim(filename) // "'"
-    end subroutine pgm_stop_missing
+    end subroutine parquet_metadata_stop_missing
 
-    subroutine pgm_stop_conversion(key, filename, raw, target_desc)
+    subroutine parquet_metadata_stop_conversion(key, filename, raw, target_desc)
         character(len=*), intent(in) :: key, filename, raw, target_desc
         error stop "parquet_get_metadata: metadata key '" // trim(key) // "' in file '" // trim(filename) // &
             "' has value '" // trim(raw) // "' that cannot be converted to " // trim(target_desc) // &
             " and no default was given"
-    end subroutine pgm_stop_conversion
+    end subroutine parquet_metadata_stop_conversion
 
     module procedure parquet_get_metadata_int32
         integer :: idx
@@ -2461,28 +2461,28 @@ contains
         warn_value = .true.
         if (present(warn)) warn_value = warn
 
-        idx = pgm_find_index(reader%metadata, key)
+        idx = parquet_metadata_find_index(reader%metadata, key)
         if (idx > 0) then
-            if (pgm_parse_int64(reader%metadata%items(idx)%value, parsed)) then
-                if (pgm_int32_fits(parsed)) then
+            if (parquet_metadata_parse_int64(reader%metadata%items(idx)%value, parsed)) then
+                if (parquet_metadata_int32_fits(parsed)) then
                     value = int(parsed, kind=int32)
                     return
                 end if
             end if
-            call pgm_warn_conversion_failed(key, reader%filename, reader%metadata%items(idx)%value, "a 32-bit integer")
+            call parquet_metadata_warn_conversion_failed(key, reader%filename, reader%metadata%items(idx)%value, "a 32-bit integer")
             if (present(default)) then
                 value = default
                 return
             end if
-            call pgm_stop_conversion(key, reader%filename, reader%metadata%items(idx)%value, "a 32-bit integer")
+            call parquet_metadata_stop_conversion(key, reader%filename, reader%metadata%items(idx)%value, "a 32-bit integer")
         end if
 
         if (present(default)) then
             value = default
-            if (warn_value) call pgm_warn_default_used(key, reader%filename)
+            if (warn_value) call parquet_metadata_warn_default_used(key, reader%filename)
             return
         end if
-        call pgm_stop_missing(key, reader%filename)
+        call parquet_metadata_stop_missing(key, reader%filename)
     end procedure parquet_get_metadata_int32
 
     module procedure parquet_get_metadata_int64
@@ -2493,26 +2493,26 @@ contains
         warn_value = .true.
         if (present(warn)) warn_value = warn
 
-        idx = pgm_find_index(reader%metadata, key)
+        idx = parquet_metadata_find_index(reader%metadata, key)
         if (idx > 0) then
-            if (pgm_parse_int64(reader%metadata%items(idx)%value, parsed)) then
+            if (parquet_metadata_parse_int64(reader%metadata%items(idx)%value, parsed)) then
                 value = parsed
                 return
             end if
-            call pgm_warn_conversion_failed(key, reader%filename, reader%metadata%items(idx)%value, "a 64-bit integer")
+            call parquet_metadata_warn_conversion_failed(key, reader%filename, reader%metadata%items(idx)%value, "a 64-bit integer")
             if (present(default)) then
                 value = default
                 return
             end if
-            call pgm_stop_conversion(key, reader%filename, reader%metadata%items(idx)%value, "a 64-bit integer")
+            call parquet_metadata_stop_conversion(key, reader%filename, reader%metadata%items(idx)%value, "a 64-bit integer")
         end if
 
         if (present(default)) then
             value = default
-            if (warn_value) call pgm_warn_default_used(key, reader%filename)
+            if (warn_value) call parquet_metadata_warn_default_used(key, reader%filename)
             return
         end if
-        call pgm_stop_missing(key, reader%filename)
+        call parquet_metadata_stop_missing(key, reader%filename)
     end procedure parquet_get_metadata_int64
 
     module procedure parquet_get_metadata_float32
@@ -2523,26 +2523,26 @@ contains
         warn_value = .true.
         if (present(warn)) warn_value = warn
 
-        idx = pgm_find_index(reader%metadata, key)
+        idx = parquet_metadata_find_index(reader%metadata, key)
         if (idx > 0) then
-            if (pgm_parse_real64(reader%metadata%items(idx)%value, parsed)) then
+            if (parquet_metadata_parse_real64(reader%metadata%items(idx)%value, parsed)) then
                 value = real(parsed, kind=real32)
                 return
             end if
-            call pgm_warn_conversion_failed(key, reader%filename, reader%metadata%items(idx)%value, "a 32-bit real")
+            call parquet_metadata_warn_conversion_failed(key, reader%filename, reader%metadata%items(idx)%value, "a 32-bit real")
             if (present(default)) then
                 value = default
                 return
             end if
-            call pgm_stop_conversion(key, reader%filename, reader%metadata%items(idx)%value, "a 32-bit real")
+            call parquet_metadata_stop_conversion(key, reader%filename, reader%metadata%items(idx)%value, "a 32-bit real")
         end if
 
         if (present(default)) then
             value = default
-            if (warn_value) call pgm_warn_default_used(key, reader%filename)
+            if (warn_value) call parquet_metadata_warn_default_used(key, reader%filename)
             return
         end if
-        call pgm_stop_missing(key, reader%filename)
+        call parquet_metadata_stop_missing(key, reader%filename)
     end procedure parquet_get_metadata_float32
 
     module procedure parquet_get_metadata_float64
@@ -2553,26 +2553,26 @@ contains
         warn_value = .true.
         if (present(warn)) warn_value = warn
 
-        idx = pgm_find_index(reader%metadata, key)
+        idx = parquet_metadata_find_index(reader%metadata, key)
         if (idx > 0) then
-            if (pgm_parse_real64(reader%metadata%items(idx)%value, parsed)) then
+            if (parquet_metadata_parse_real64(reader%metadata%items(idx)%value, parsed)) then
                 value = parsed
                 return
             end if
-            call pgm_warn_conversion_failed(key, reader%filename, reader%metadata%items(idx)%value, "a 64-bit real")
+            call parquet_metadata_warn_conversion_failed(key, reader%filename, reader%metadata%items(idx)%value, "a 64-bit real")
             if (present(default)) then
                 value = default
                 return
             end if
-            call pgm_stop_conversion(key, reader%filename, reader%metadata%items(idx)%value, "a 64-bit real")
+            call parquet_metadata_stop_conversion(key, reader%filename, reader%metadata%items(idx)%value, "a 64-bit real")
         end if
 
         if (present(default)) then
             value = default
-            if (warn_value) call pgm_warn_default_used(key, reader%filename)
+            if (warn_value) call parquet_metadata_warn_default_used(key, reader%filename)
             return
         end if
-        call pgm_stop_missing(key, reader%filename)
+        call parquet_metadata_stop_missing(key, reader%filename)
     end procedure parquet_get_metadata_float64
 
     module procedure parquet_get_metadata_logical
@@ -2582,26 +2582,26 @@ contains
         warn_value = .true.
         if (present(warn)) warn_value = warn
 
-        idx = pgm_find_index(reader%metadata, key)
+        idx = parquet_metadata_find_index(reader%metadata, key)
         if (idx > 0) then
-            if (pgm_parse_logical(reader%metadata%items(idx)%value, parsed)) then
+            if (parquet_metadata_parse_logical(reader%metadata%items(idx)%value, parsed)) then
                 value = parsed
                 return
             end if
-            call pgm_warn_conversion_failed(key, reader%filename, reader%metadata%items(idx)%value, "a logical")
+            call parquet_metadata_warn_conversion_failed(key, reader%filename, reader%metadata%items(idx)%value, "a logical")
             if (present(default)) then
                 value = default
                 return
             end if
-            call pgm_stop_conversion(key, reader%filename, reader%metadata%items(idx)%value, "a logical")
+            call parquet_metadata_stop_conversion(key, reader%filename, reader%metadata%items(idx)%value, "a logical")
         end if
 
         if (present(default)) then
             value = default
-            if (warn_value) call pgm_warn_default_used(key, reader%filename)
+            if (warn_value) call parquet_metadata_warn_default_used(key, reader%filename)
             return
         end if
-        call pgm_stop_missing(key, reader%filename)
+        call parquet_metadata_stop_missing(key, reader%filename)
     end procedure parquet_get_metadata_logical
 
     module procedure parquet_get_metadata_string
@@ -2611,7 +2611,7 @@ contains
         warn_value = .true.
         if (present(warn)) warn_value = warn
 
-        idx = pgm_find_index(reader%metadata, key)
+        idx = parquet_metadata_find_index(reader%metadata, key)
         if (idx > 0) then
             value = reader%metadata%items(idx)%value
             return
@@ -2619,10 +2619,10 @@ contains
 
         if (present(default)) then
             value = trim(default)
-            if (warn_value) call pgm_warn_default_used(key, reader%filename)
+            if (warn_value) call parquet_metadata_warn_default_used(key, reader%filename)
             return
         end if
-        call pgm_stop_missing(key, reader%filename)
+        call parquet_metadata_stop_missing(key, reader%filename)
     end procedure parquet_get_metadata_string
 
     module procedure parquet_get_metadata_int32_array
@@ -2634,34 +2634,34 @@ contains
         warn_value = .true.
         if (present(warn)) warn_value = warn
 
-        idx = pgm_find_index(reader%metadata, key)
+        idx = parquet_metadata_find_index(reader%metadata, key)
         if (idx > 0) then
-            call pgm_split_array(reader%metadata%items(idx)%value, tokens, n)
+            call parquet_metadata_split_array(reader%metadata%items(idx)%value, tokens, n)
             allocate(value(n))
             ok = .true.
             do i = 1, n
-                ok = pgm_parse_int64(tokens(i), parsed)
-                if (ok) ok = pgm_int32_fits(parsed)
+                ok = parquet_metadata_parse_int64(tokens(i), parsed)
+                if (ok) ok = parquet_metadata_int32_fits(parsed)
                 if (.not. ok) exit
                 value(i) = int(parsed, kind=int32)
             end do
             if (ok) return
             deallocate(value)
-            call pgm_warn_conversion_failed(key, reader%filename, reader%metadata%items(idx)%value, &
+            call parquet_metadata_warn_conversion_failed(key, reader%filename, reader%metadata%items(idx)%value, &
                 "a 32-bit integer array")
             if (present(default)) then
                 value = default
                 return
             end if
-            call pgm_stop_conversion(key, reader%filename, reader%metadata%items(idx)%value, "a 32-bit integer array")
+            call parquet_metadata_stop_conversion(key, reader%filename, reader%metadata%items(idx)%value, "a 32-bit integer array")
         end if
 
         if (present(default)) then
             value = default
-            if (warn_value) call pgm_warn_default_used(key, reader%filename)
+            if (warn_value) call parquet_metadata_warn_default_used(key, reader%filename)
             return
         end if
-        call pgm_stop_missing(key, reader%filename)
+        call parquet_metadata_stop_missing(key, reader%filename)
     end procedure parquet_get_metadata_int32_array
 
     module procedure parquet_get_metadata_int64_array
@@ -2673,33 +2673,33 @@ contains
         warn_value = .true.
         if (present(warn)) warn_value = warn
 
-        idx = pgm_find_index(reader%metadata, key)
+        idx = parquet_metadata_find_index(reader%metadata, key)
         if (idx > 0) then
-            call pgm_split_array(reader%metadata%items(idx)%value, tokens, n)
+            call parquet_metadata_split_array(reader%metadata%items(idx)%value, tokens, n)
             allocate(value(n))
             ok = .true.
             do i = 1, n
-                ok = pgm_parse_int64(tokens(i), parsed)
+                ok = parquet_metadata_parse_int64(tokens(i), parsed)
                 if (.not. ok) exit
                 value(i) = parsed
             end do
             if (ok) return
             deallocate(value)
-            call pgm_warn_conversion_failed(key, reader%filename, reader%metadata%items(idx)%value, &
+            call parquet_metadata_warn_conversion_failed(key, reader%filename, reader%metadata%items(idx)%value, &
                 "a 64-bit integer array")
             if (present(default)) then
                 value = default
                 return
             end if
-            call pgm_stop_conversion(key, reader%filename, reader%metadata%items(idx)%value, "a 64-bit integer array")
+            call parquet_metadata_stop_conversion(key, reader%filename, reader%metadata%items(idx)%value, "a 64-bit integer array")
         end if
 
         if (present(default)) then
             value = default
-            if (warn_value) call pgm_warn_default_used(key, reader%filename)
+            if (warn_value) call parquet_metadata_warn_default_used(key, reader%filename)
             return
         end if
-        call pgm_stop_missing(key, reader%filename)
+        call parquet_metadata_stop_missing(key, reader%filename)
     end procedure parquet_get_metadata_int64_array
 
     module procedure parquet_get_metadata_float32_array
@@ -2711,33 +2711,33 @@ contains
         warn_value = .true.
         if (present(warn)) warn_value = warn
 
-        idx = pgm_find_index(reader%metadata, key)
+        idx = parquet_metadata_find_index(reader%metadata, key)
         if (idx > 0) then
-            call pgm_split_array(reader%metadata%items(idx)%value, tokens, n)
+            call parquet_metadata_split_array(reader%metadata%items(idx)%value, tokens, n)
             allocate(value(n))
             ok = .true.
             do i = 1, n
-                ok = pgm_parse_real64(tokens(i), parsed)
+                ok = parquet_metadata_parse_real64(tokens(i), parsed)
                 if (.not. ok) exit
                 value(i) = real(parsed, kind=real32)
             end do
             if (ok) return
             deallocate(value)
-            call pgm_warn_conversion_failed(key, reader%filename, reader%metadata%items(idx)%value, &
+            call parquet_metadata_warn_conversion_failed(key, reader%filename, reader%metadata%items(idx)%value, &
                 "a 32-bit real array")
             if (present(default)) then
                 value = default
                 return
             end if
-            call pgm_stop_conversion(key, reader%filename, reader%metadata%items(idx)%value, "a 32-bit real array")
+            call parquet_metadata_stop_conversion(key, reader%filename, reader%metadata%items(idx)%value, "a 32-bit real array")
         end if
 
         if (present(default)) then
             value = default
-            if (warn_value) call pgm_warn_default_used(key, reader%filename)
+            if (warn_value) call parquet_metadata_warn_default_used(key, reader%filename)
             return
         end if
-        call pgm_stop_missing(key, reader%filename)
+        call parquet_metadata_stop_missing(key, reader%filename)
     end procedure parquet_get_metadata_float32_array
 
     module procedure parquet_get_metadata_float64_array
@@ -2749,33 +2749,33 @@ contains
         warn_value = .true.
         if (present(warn)) warn_value = warn
 
-        idx = pgm_find_index(reader%metadata, key)
+        idx = parquet_metadata_find_index(reader%metadata, key)
         if (idx > 0) then
-            call pgm_split_array(reader%metadata%items(idx)%value, tokens, n)
+            call parquet_metadata_split_array(reader%metadata%items(idx)%value, tokens, n)
             allocate(value(n))
             ok = .true.
             do i = 1, n
-                ok = pgm_parse_real64(tokens(i), parsed)
+                ok = parquet_metadata_parse_real64(tokens(i), parsed)
                 if (.not. ok) exit
                 value(i) = parsed
             end do
             if (ok) return
             deallocate(value)
-            call pgm_warn_conversion_failed(key, reader%filename, reader%metadata%items(idx)%value, &
+            call parquet_metadata_warn_conversion_failed(key, reader%filename, reader%metadata%items(idx)%value, &
                 "a 64-bit real array")
             if (present(default)) then
                 value = default
                 return
             end if
-            call pgm_stop_conversion(key, reader%filename, reader%metadata%items(idx)%value, "a 64-bit real array")
+            call parquet_metadata_stop_conversion(key, reader%filename, reader%metadata%items(idx)%value, "a 64-bit real array")
         end if
 
         if (present(default)) then
             value = default
-            if (warn_value) call pgm_warn_default_used(key, reader%filename)
+            if (warn_value) call parquet_metadata_warn_default_used(key, reader%filename)
             return
         end if
-        call pgm_stop_missing(key, reader%filename)
+        call parquet_metadata_stop_missing(key, reader%filename)
     end procedure parquet_get_metadata_float64_array
 
     module procedure parquet_get_metadata_logical_array
@@ -2786,32 +2786,32 @@ contains
         warn_value = .true.
         if (present(warn)) warn_value = warn
 
-        idx = pgm_find_index(reader%metadata, key)
+        idx = parquet_metadata_find_index(reader%metadata, key)
         if (idx > 0) then
-            call pgm_split_array(reader%metadata%items(idx)%value, tokens, n)
+            call parquet_metadata_split_array(reader%metadata%items(idx)%value, tokens, n)
             allocate(value(n))
             ok = .true.
             do i = 1, n
-                ok = pgm_parse_logical(tokens(i), parsed)
+                ok = parquet_metadata_parse_logical(tokens(i), parsed)
                 if (.not. ok) exit
                 value(i) = parsed
             end do
             if (ok) return
             deallocate(value)
-            call pgm_warn_conversion_failed(key, reader%filename, reader%metadata%items(idx)%value, "a logical array")
+            call parquet_metadata_warn_conversion_failed(key, reader%filename, reader%metadata%items(idx)%value, "a logical array")
             if (present(default)) then
                 value = default
                 return
             end if
-            call pgm_stop_conversion(key, reader%filename, reader%metadata%items(idx)%value, "a logical array")
+            call parquet_metadata_stop_conversion(key, reader%filename, reader%metadata%items(idx)%value, "a logical array")
         end if
 
         if (present(default)) then
             value = default
-            if (warn_value) call pgm_warn_default_used(key, reader%filename)
+            if (warn_value) call parquet_metadata_warn_default_used(key, reader%filename)
             return
         end if
-        call pgm_stop_missing(key, reader%filename)
+        call parquet_metadata_stop_missing(key, reader%filename)
     end procedure parquet_get_metadata_logical_array
 
     module procedure parquet_get_metadata_string_array
@@ -2822,19 +2822,19 @@ contains
         warn_value = .true.
         if (present(warn)) warn_value = warn
 
-        idx = pgm_find_index(reader%metadata, key)
+        idx = parquet_metadata_find_index(reader%metadata, key)
         if (idx > 0) then
-            call pgm_split_array(reader%metadata%items(idx)%value, tokens, n)
+            call parquet_metadata_split_array(reader%metadata%items(idx)%value, tokens, n)
             value = tokens
             return
         end if
 
         if (present(default)) then
             value = default
-            if (warn_value) call pgm_warn_default_used(key, reader%filename)
+            if (warn_value) call parquet_metadata_warn_default_used(key, reader%filename)
             return
         end if
-        call pgm_stop_missing(key, reader%filename)
+        call parquet_metadata_stop_missing(key, reader%filename)
     end procedure parquet_get_metadata_string_array
 
 end submodule parquet_metadata

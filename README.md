@@ -40,23 +40,12 @@ See [Reading parquet files](#reading-parquet-files-from-your-fortran-code) and [
 
 ## Minimal setup to depend on this library
 
-The Homebrew example below is illustrative, not independently verified end-to-end — if it doesn't match your platform or package manager (e.g. MacPorts, Linux, a manual Arrow build), treat [Environment variables](#environment-variables) as the authoritative, verified reference instead.
+Quickstart outline — see [Prerequisites](#prerequisites) and [Environment variables](#environment-variables) for the authoritative, per-platform details:
 
-```bash
-# 1) Install Arrow/Parquet C++ library (example: macOS Homebrew)
-brew install apache-arrow
-
-# 2) Point FPM to Arrow headers/libs -- example for the install above on macOS
-#    (see Environment variables below for Linux and other details)
-export LIBRARY_PATH="$(brew --prefix apache-arrow)/lib:$LIBRARY_PATH"
-export FPM_FFLAGS="-I$(brew --prefix apache-arrow)/include"
-export FPM_CXXFLAGS="-std=c++20 -stdlib=libc++ -I$(brew --prefix apache-arrow)/include"
-export FPM_LDFLAGS="-L$(brew --prefix apache-arrow)/lib -lc++"
-
-# 3) In your own fpm.toml, add parquet-fortran + link = ["arrow", "parquet", "c++"]
-# 4) Build/test your project
-fpm test
-```
+1. Install the Arrow/Parquet C++ library (e.g. macOS Homebrew: `brew install apache-arrow`).
+2. Set `LIBRARY_PATH`, `FPM_FFLAGS`, `FPM_CXXFLAGS`, `FPM_LDFLAGS` to point at Arrow's `include`/`lib` — see [Environment variables](#environment-variables).
+3. Add `parquet-fortran` to your own `fpm.toml` with `link = ["arrow", "parquet", "c++"]` — see [Reading parquet files](#reading-parquet-files-from-your-fortran-code).
+4. Build/test your project with `fpm test`.
 
 ## Important behavior
 
@@ -74,14 +63,16 @@ See [Error handling](#error-handling) and [Limitations](#limitations) for full d
 - [Prerequisites](#prerequisites)
   - [Environment variables](#environment-variables)
 - [Embedding your own MAML schemas in your own project](#embedding-your-own-maml-schemas-in-your-own-project)
-- [Reading parquet files from your fortran code](#reading-parquet-files-from-your-fortran-code)
+- [Reading parquet files from your Fortran code](#reading-parquet-files-from-your-fortran-code)
   - [Reading only touches the columns you ask for](#reading-only-touches-the-columns-you-ask-for)
   - [Prefetching multiple columns at once](#prefetching-multiple-columns-at-once-with-parquet_prefetch_columns)
-  - [Printing reader statistics](#printing-reader-statistics-with-parquet_close_readerprint_stattrue)
+  - [Printing reader statistics](#printing-reader-statistics-with-parquet_close_reader-print_stattrue)
   - [Row filtering with parquet_filter](#row-filtering-with-parquet_filter)
   - [Read-time quality control with a qc-maml](#read-time-quality-control-with-a-qc-maml)
-- [Writing parquet files from your fortran code](#writing-parquet-files-from-your-fortran-code)
+  - [Reading table metadata with parquet_get_metadata](#reading-table-metadata-with-parquet_get_metadata)
+- [Writing parquet files from your Fortran code](#writing-parquet-files-from-your-fortran-code)
   - [Saving the source MAML alongside the parquet file](#saving-the-source-maml-alongside-the-parquet-file)
+- [Building a schema in code with schema%init and schema%add_field](#building-a-schema-in-code-with-schemainit-and-schemaadd_field)
 - [The MAML metadata format](#the-maml-metadata-format)
   - [Renaming columns for output with `col_map:`](#renaming-columns-for-output-with-col_map)
 - [Combined example: MAML schema, vector columns and metadata](#combined-example-maml-schema-vector-columns-and-metadata)
@@ -163,7 +154,7 @@ Note: `-std=c++20` is required on every platform (Arrow/Parquet headers use `std
 
 Note: the exact variable set can vary by operating system and compiler toolchain.
 
-For genuine multi-threaded (OpenMP) use, the compiler's OpenMP flag (e.g. `-fopenmp` for gfortran, `-qopenmp` for ifx) is also required, supplied via `FPM_FFLAGS` — see [Thread safety](#thread-safety) for why.
+For genuine multi-threaded (OpenMP) use, your compiler's OpenMP flag must also be supplied via `FPM_FFLAGS` — see [Thread safety](#thread-safety) for the per-compiler flags and why.
 
 To build/test this repository itself (as opposed to depending on it from your own project), see [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -178,7 +169,7 @@ To build/test this repository itself (as opposed to depending on it from your ow
 
 The generated `parquet_maml` module depends on `parquet` (`parquet_maml_file`, `parquet_validate_maml`, etc.) but not on `parquet_maml_base` directly — `parquet_maml_base` is this library's own internal module and isn't meant to be `use`d directly by consuming projects. (If you're contributing to `parquet-fortran` itself and need to regenerate its own built-in schema module, see [CONTRIBUTING.md](CONTRIBUTING.md).)
 
-## Reading parquet files from your fortran code
+## Reading parquet files from your Fortran code
 
 To use this library in another Fortran project, add it as an FPM dependency in your project's `fpm.toml`:
 
@@ -227,11 +218,11 @@ Notes:
 
 ### Reading only touches the columns you ask for
 
-`parquet_open_reader` only parses the file's footer (schema, row count, row-group layout) — it does not read or decompress any column's actual data. Each column is only read from disk the first time you ask for it (`parquet_read_column`, `parquet_get_col_size`, `parquet_get_string_length`, etc.); after that, it's cached in memory for the lifetime of that `reader`, so asking for the same column twice doesn't re-read it. Columns you never ask for are never read at all. This is a direct consequence of Parquet's on-disk layout — each column's data is stored as its own contiguous byte range, independent of every other column, so the reader can seek straight to just the bytes it needs — and holds regardless of which [compression codec](#compression-and-row-group-size) was used to write the file. Practically: opening a large file with many columns and reading only a handful of them is cheap, both in I/O and memory, no matter how large the *other*, unrequested columns are.
+`parquet_open_reader` only parses the file's footer (schema, row count, row-group layout) — it does not read or decompress any column's data. Each column is read from disk only the first time you ask for it (`parquet_read_column`, `parquet_get_col_size`, `parquet_get_string_length`, etc.), then cached for the lifetime of that `reader`; asking for it again doesn't re-read it, and columns you never ask for are never read at all. This follows from Parquet's layout — each column is its own contiguous byte range, so the reader seeks straight to just the bytes it needs, regardless of [compression codec](#compression-and-row-group-size). So opening a large file with many columns and reading only a handful is cheap in both I/O and memory, no matter how large the unrequested columns are.
 
 ### Prefetching multiple columns at once with `parquet_prefetch_columns`
 
-`parquet_prefetch_columns(reader, names)` reads several named columns in one call, filling the same per-column cache that `parquet_read_column` would otherwise populate lazily, one column at a time, on first use. Since Arrow's internal `use_threads` is always on for this library (see [Compression and row group size](#compression-and-row-group-size)), reading several columns together like this lets Arrow decode them across its internal thread pool concurrently, instead of strictly one column at a time as each is lazily requested — it's purely a throughput optimization on top of the existing lazy-read design, never a requirement: a column you don't pass to `parquet_prefetch_columns` still works exactly as before, via `parquet_read_column`'s normal lazy, read-on-first-request path. Every name is validated against the file's actual schema before any data is read; a name that isn't a real column in the file fails immediately with `error stop`, naming the offending column. Calling `parquet_prefetch_columns` more than once (e.g. with a column set that partially overlaps an earlier call) is safe and efficient: columns already cached from an earlier prefetch, or already read lazily, are not re-read — only the columns not yet cached are fetched, so the cache after several calls holds the union of every column named across all of them.
+`parquet_prefetch_columns(reader, names)` reads several named columns in one call, filling the same per-column cache `parquet_read_column` otherwise populates lazily. Because this library keeps Arrow's `use_threads` on (see [Multi-threaded decoding/encoding](#multi-threaded-decodingencoding-use_threads-and-thread-pool-size)), decoding them together lets Arrow use its thread pool concurrently instead of one column at a time — purely a throughput optimization, never a requirement: a column you don't prefetch still works via the normal lazy path. Every name is validated against the file's schema first; an unknown column fails immediately with `error stop`, naming it. Calling it more than once is safe and efficient — already-cached columns are not re-read, so the cache ends up holding the union of every name across all calls.
 
 The column names can be given in either of two forms — `parquet_prefetch_columns` is generic:
 
@@ -342,7 +333,7 @@ call parquet_read_column(reader, "ra", ra_back)
 call parquet_close_reader(reader)
 ```
 
-#### Building a qc-maml in code with `add_col_qc` and `get_col_qc`
+### Building a qc-maml in code with `add_col_qc` and `get_col_qc`
 
 Instead of authoring a `.maml` file, you can build the qc-maml in memory a column at a time from a compact, comma-separated string, then pass it straight to `parquet_open_reader(..., schema=)`. The `type(parquet_schema)` type provides two forms of the same builder — they append the identical field entry and differ only in how the parsed column name comes back:
 
@@ -383,9 +374,17 @@ Both forms share the same input format and validation:
 - `qc: miss: Null` (or `NA`) means Nulls are *expected* for that field: no violation is raised if the column contains one. Leaving `miss:` empty or omitting it (the default) means Nulls are *not* expected: reading a Null in that column is a violation — regardless of whether you also pass `null_value=`/`is_valid=` to actually read it. A field with no `qc:` block at all (just a bare `name:`) gets no checking whatsoever, the same as a field never mentioned in the maml.
 - qc only ever runs for a column this reader actually touches — read (`parquet_read_column`/`parquet_read_array_row_mode`/`parquet_read_array_element_mode`, scalar or vector), prefetched (`parquet_prefetch_columns`), or referenced by a [`parquet_filter`](#row-filtering-with-parquet_filter) — and, when a filter is active, only ever sees the already-filtered rows. Boolean columns skip the min/max check entirely (never meaningful there) but still get the Null-presence check.
 - In soft mode, each of the two violation categories (Null-presence, range) prints **at most once per column** for the whole lifetime of the reader, even if that column is read multiple times (in hard mode the first violation aborts, so this never comes up); the message notes it's based on incomplete (whatever's been decoded so far) column information.
-- Requires linking `arrow_compute` (see [Printing reader statistics](#printing-reader-statistics-with-parquet_close_readerprint_stattrue) above) — same as `print_stat`, and for the same reason (min/max calculation).
+- Requires linking `arrow_compute` (see [Printing reader statistics](#printing-reader-statistics-with-parquet_close_reader-print_stattrue) above) — same as `print_stat`, and for the same reason (min/max calculation).
 
-## Writing parquet files from your fortran code
+### Reading table metadata with `parquet_get_metadata`
+
+`parquet_get_metadata(reader, key, value [, default] [, warn])` reads one table-level metadata entry back out of a file — the read-side counterpart to the writer's [`schema%add_metadata`](#maml-and-metadata). It is generic: the declared type/kind of `value` (a scalar or 1D array of any [supported type](#supported-data-types)) selects the variant and how the stored text is parsed back, since all metadata is stored as strings in the file. Table metadata is read once, at `parquet_open_reader` time, and cached, so each call only scans that in-memory copy. Any key present in the file works, including the reserved/internal ones the writer emits (`DATE`, `name`, per-column `column.<name>.*`, ...), not just keys added via `add_metadata`.
+
+- A **missing** `key` triggers `error stop`, unless the optional `default` (same type/kind as `value`) is given, in which case `value` is set to it.
+- A **present but unconvertible** stored value (e.g. non-numeric text, or an integer too large for the requested kind) always prints a `WARNING`, then falls back to `default` if given, else `error stop`.
+- `warn` (optional `logical`, default `.true.`) only governs the missing-key-with-`default` case; pass `warn=.false.` to suppress that warning. It has no effect when the key is present.
+
+## Writing parquet files from your Fortran code
 
 Minimal writer example:
 
@@ -418,6 +417,8 @@ call parquet_parse_maml("maml_example.maml", schema)
 call parquet_open_writer(writer, "data.parquet", schema)
 ```
 
+You can also build a `parquet_schema` entirely in memory, without a `.maml` file — see [Building a schema in code](#building-a-schema-in-code-with-schemainit-and-schemaadd_field).
+
 A `parquet_schema` bundles the parsed MAML source (`schema%maml`), the column definitions (`schema%cinfo`) and the table-level metadata (`schema%metadata`) into one value; `parquet_parse_maml` populates all three. If `schema` is omitted, `parquet_open_writer` does not enforce a fixed schema: each column's type, string length and array size are inferred from the first `parquet_write_column` call that writes it. If `schema` is given, only columns marked `is_set = .true.` (see `set_column_available`/`set_column_unavailable` below) are written, and calling `parquet_write_column` with a name that is not in the schema fails immediately with `error stop`.
 
 Passing `schema` writes both parts of the parquet file's VOTable-style header at once: `schema%cinfo` supplies each column's own `unit`/`info`/`ucd` attributes, while `schema%metadata` supplies table-level entries (author, description, `keyarray:`, etc. — see [The MAML metadata format](#the-maml-metadata-format)).
@@ -444,6 +445,15 @@ Notes:
 - Every call to `parquet_write_column` writes one full column.
 - All columns in one file must contain the same number of rows. The first `parquet_write_column` call fixes the row count for the whole file; any later call with a different row count fails immediately with `error stop`, naming the column and both row counts.
 - Close the writer with `parquet_close_writer` to flush data and finalize the file.
+
+## Building a schema in code with `schema%init` and `schema%add_field`
+
+A `parquet_schema` normally comes from a MAML file (via `parquet_parse_maml`), but it can also be built entirely in memory, with no `.maml` file, using two type-bound procedures on `parquet_schema`. This is the schema-authoring counterpart to [building a qc-maml in code](#building-a-qc-maml-in-code-with-add_col_qc-and-get_col_qc), and produces a full write schema (columns + table metadata), not just qc bounds.
+
+- **`call schema%init(table [, survey, dataset, version, date, author, description, license, maml_version])`** — starts a fresh schema and sets its top-level metadata. Only `table` is required (and must be non-empty); every other argument is an optional scalar top-level MAML key. Must be called before `add_field`, and only once per schema — a second `init`, or an empty `table`, fails with `error stop`.
+- **`call schema%add_field(name, data_type [, unit, info, ucd, array_size, col_size, qc_min, qc_max, qc_miss])`** — appends one `fields:` entry. `name` and `data_type` are required (`data_type` one of the [supported types](#supported-data-types)); the rest are optional and mirror the MAML `fields:` attributes, with `qc_min`/`qc_max`/`qc_miss` forming an optional `qc:` block (same operator/`miss:` rules as [`add_col_qc`](#building-a-qc-maml-in-code-with-add_col_qc-and-get_col_qc)). Everything is validated immediately (empty/duplicate `name`, invalid `data_type`, reversed qc operator, bad `qc_miss` value, ...), each failing with `error stop`; calling it before `schema%init` also fails.
+
+Both build the schema's underlying MAML text, so you still call `parquet_parse_maml(schema)` afterwards to populate `schema%cinfo`/`schema%metadata` before writing, exactly as for a schema loaded from disk. List-shaped top-level sections (`coauthors:`, `comments:`, `keyarray:`, `extra:`, ...) are out of scope for `init`: use `add_metadata` for `keyarray:`-style entries, or author a `.maml` file for the rest.
 
 ## The MAML metadata format
 
@@ -677,9 +687,9 @@ This only applies when writing against a MAML-derived schema (`parquet_open_writ
 ```fortran
 call parquet_open_writer(writer, "data.parquet", compression="zstd", compression_level=9, chunk_size=100000)
 ```
-- `compression` — one of `"uncompressed"`, `"snappy"` (the default), `"gzip"`, `"zstd"`, `"brotli"`, `"lz4"` (case-insensitive); an unrecognized name fails immediately with `error stop`. Note that Parquet-the-library's own built-in default is actually `"uncompressed"` — this library deliberately follows the ecosystem convention (pyarrow, Spark, ...) of defaulting to `"snappy"` instead, since writing uncompressed files was never an intentional choice, just an unset option. Rough guidance: `snappy`/`lz4` for fastest read/write at a modest size reduction; `gzip`/`brotli` for the smallest files at the cost of slower compression; `zstd` for the best all-round balance of the two (and the only one of these with a meaningfully tunable `compression_level`, roughly 1–22 for higher-ratio/slower).
+- `compression` — one of `"uncompressed"`, `"snappy"` (the default), `"gzip"`, `"zstd"`, `"brotli"`, `"lz4"` (case-insensitive); an unrecognized name fails immediately with `error stop`. The default is `"snappy"`, following the ecosystem convention (pyarrow, Spark, ...) rather than Parquet's own unset-by-default `"uncompressed"`. Rough guidance: `snappy`/`lz4` for fastest read/write at a modest size reduction; `gzip`/`brotli` for the smallest files at slower speed; `zstd` for the best balance (and the only one here with a meaningfully tunable `compression_level`, roughly 1–22).
 - `compression_level` — optional integer tuning the chosen codec's compression level (mainly meaningful for `zstd`/`gzip`/`brotli`); omitted means "use that codec's own default level".
-- `chunk_size` — **advanced/optional: most callers never need to set this.** It's the maximum number of rows per Parquet row group. If omitted (the default, and the recommended setting for normal use), it is auto-sized once `parquet_close_writer` runs, targeting a row group size of roughly 256 MiB based on the table's actual in-memory byte size — not a flat row count — so both a handful of narrow `int32` columns and a table with wide vector columns (large `col_size`) end up with sensibly-sized row groups without any tuning on your part, all the way up to very large files (hundreds of millions of rows). The auto-sized value is clamped between 1,000 and 10,000,000 rows per row group, so a pathologically wide or narrow row still produces something reasonable rather than an absurd number of tiny row groups or one single enormous one. Pass an explicit value only if you need to override this — e.g. to force multiple row groups in a small file for testing (as some of this library's own tests do), or to hand-tune the read/write memory-vs-overhead trade-off described below for a workload you've actually measured. Larger values reduce per-row-group overhead and can improve compression (more data for the compressor to find patterns in), at the cost of more per-row-group encoder state (dictionaries, statistics) held in memory while writing — see [Performance and memory](#performance-and-memory). Smaller values let *other* tools that support row-group-level pruning skip more of the file when reading it back; this library's own reads always materialize a full requested column regardless of row group count (see [Performance and memory](#performance-and-memory) again), since it doesn't do row-group-scoped or predicate-pushdown reads (see [Limitations](#limitations)).
+- `chunk_size` — **advanced/optional: most callers never need to set this.** It's the maximum number of rows per Parquet row group. If omitted (the default, recommended for normal use), it is auto-sized once `parquet_close_writer` runs, targeting ~256 MiB per row group based on the table's actual in-memory byte size — not a flat row count — so both narrow `int32` columns and wide vector columns (large `col_size`) end up sensibly sized without tuning, up to very large files (hundreds of millions of rows). The auto-sized value is clamped between 1,000 and 10,000,000 rows. Pass an explicit value only to override this — e.g. to force multiple row groups in a small file (as some of this library's own tests do), or to hand-tune the memory-vs-overhead trade-off for a workload you've measured: larger values reduce per-row-group overhead and can improve compression, at the cost of more per-row-group encoder state (dictionaries, statistics) held in memory while writing (see [Performance and memory](#performance-and-memory)).
 
 ### Multi-threaded decoding/encoding (`use_threads`) and thread pool size
 
@@ -756,7 +766,7 @@ List of public callable procedures available with `use parquet`:
 
 ### Utility
 
-- `call parquet_get_version(ver_string[, internal])` — sets `ver_string` (`character`, `intent(out)`) to the library version. By default (or `internal=.false.`) returns just the release number without a `v` prefix, e.g. `"0.9.0"` (matching `VERSION.txt`, substituted in at build time via fpm). Pass `internal=.true.` to instead get the full internal version string embedded in the source, e.g. `"v0.9.0 (2026-07-10)"` (includes a `v` prefix and the last-updated date). If the two disagree (e.g. the library was built without going through fpm's version substitution), a `WARNING` is printed to stdout.
+- `parquet_get_version(ver_string[, internal])` — sets `ver_string` (`character`, `intent(out)`) to the library version. By default (or `internal=.false.`) returns just the release number without a `v` prefix, e.g. `"0.9.0"` (matching `VERSION.txt`, substituted in at build time via fpm). Pass `internal=.true.` to instead get the full internal version string embedded in the source, e.g. `"v0.9.0 (2026-07-10)"` (includes a `v` prefix and the last-updated date). If the two disagree (e.g. the library was built without going through fpm's version substitution), a `WARNING` is printed to stdout.
 - `parquet_set_max_threads(n)` — sets the capacity (number of worker threads) of Arrow's global CPU thread pool to `n`. This is process-global, not per-reader/per-writer; see [Multi-threaded decoding/encoding](#multi-threaded-decodingencoding-use_threads-and-thread-pool-size). `n < 1` fails immediately with `error stop`.
 
 ### MAML and metadata
@@ -774,6 +784,8 @@ List of public callable procedures available with `use parquet`:
 - `schema%set_column_unavailable([name])` — marks the named column as not set (`is_set = .false.`), so it is skipped when the schema is written. Missing columns fail immediately with `error stop`. If `name` is omitted, marks every column unavailable at once. Use this to drop columns from a base MAML schema without writing a separate MAML file for each combination of active columns.
 - `schema%set_column_available([name])` — the inverse of `set_column_unavailable`: marks the named column (or, if `name` is omitted, every column) as set (`is_set = .true.`).
 - `schema%add_metadata(key, value[, description][, fmt])` — attaches a table-level key/value pair (e.g. provenance, units, free-text notes) that is written into the parquet file's VOTable-style header. `value` may be a scalar or 1D array of any [supported type](#supported-data-types) (`integer(int32/int64)`, `real(real32/real64)`, `logical`, `character`). The optional `description` (`character`) is a free-text note stored alongside the value. The optional `fmt` (`character`) sets a display/print format string for the value, otherwise a type-appropriate default is used; it has no effect on how the value itself is stored.
+- `call schema%init(table[, survey, dataset, version, date, author, description, license, maml_version])` — begins a `parquet_schema` built from scratch in memory (no `.maml` file), setting `table` (required, non-empty) and any optional scalar top-level metadata keys. Call once, before `add_field`; a second `init` or an empty `table` fails with `error stop`. See [Building a schema in code](#building-a-schema-in-code-with-schemainit-and-schemaadd_field).
+- `call schema%add_field(name, data_type[, unit, info, ucd, array_size, col_size, qc_min, qc_max, qc_miss])` — appends one column definition to an `init`-ed schema; `name`/`data_type` required, the rest optional (including an optional `qc:` block via `qc_min`/`qc_max`/`qc_miss`). Validates eagerly, each failure via `error stop`. See [Building a schema in code](#building-a-schema-in-code-with-schemainit-and-schemaadd_field).
 
 ### Writer
 
@@ -796,12 +808,13 @@ List of public callable procedures available with `use parquet`:
 - `type(parquet_filter)` with `call filt%add(rule)` — builds a row filter to pass as `parquet_open_reader(..., filter=filt)`. Each `%add` appends one rule; multiple rules combine with AND. A `rule` has the shape `"<column> <op> <value>"` (or `"<column> is_null"`/`"<column> is_not_null"`). See [Row filtering with parquet_filter](#row-filtering-with-parquet_filter) for the supported operators, value syntax, and validation.
 - `parquet_open_reader(reader, filename[, use_threads, filter, schema, qc, qc_soft])` — opens an existing parquet file for reading. `use_threads` (optional, `logical`, default `.true.`) — decode across Arrow's internal thread pool. See [Multi-threaded decoding/encoding](#multi-threaded-decodingencoding-use_threads-and-thread-pool-size). `filter` (optional, `type(parquet_filter)`) restricts the reader to only rows matching the filter — see [Row filtering with parquet_filter](#row-filtering-with-parquet_filter). `schema`/`qc`/`qc_soft` (optional, `type(parquet_schema)`/`logical`/`logical`) enable read-time qc range/Null checks; a violation aborts by default (`qc_soft=.false.`) or, with `qc_soft=.true.`, only warns — see [Read-time quality control with a qc-maml](#read-time-quality-control-with-a-qc-maml).
 - `parquet_load_qc_maml_file(filename)` — loads a qc-maml to pass as `parquet_open_reader(..., schema=)`; its full description is under [MAML and metadata](#maml-and-metadata) above, alongside the other MAML loaders.
-- `parquet_close_reader(reader[, print_stat])` — releases resources associated with `reader`. Fails with `error stop` if `reader` was never opened, or was already closed. `print_stat` (optional `logical`, default `.false.`) prints a diagnostic summary of the reader's activity to stdout first — see [Printing reader statistics](#printing-reader-statistics-with-parquet_close_readerprint_stattrue).
+- `parquet_close_reader(reader[, print_stat])` — releases resources associated with `reader`. Fails with `error stop` if `reader` was never opened, or was already closed. `print_stat` (optional `logical`, default `.false.`) prints a diagnostic summary of the reader's activity to stdout first — see [Printing reader statistics](#printing-reader-statistics-with-parquet_close_reader-print_stattrue).
 - `parquet_get_nrows(reader, nrows)` — returns the number of table rows in `nrows` (`integer(int32)` or `integer(int64)`).
 - `parquet_get_col_size(reader, name, col_size)` — returns the fixed row length of vector column `name` in `col_size`. Call this before allocating the output array for `parquet_read_column`/`parquet_read_array_row_mode`/`parquet_read_array_element_mode` on that column.
 - `parquet_get_column_total_elements(reader, name, total_elements)` — returns the total number of elements in column `name` across all rows (`total_elements = col_size * nrows` for vector columns), in `total_elements` (`integer(int32)` or `integer(int64)`).
 - `parquet_get_string_length(reader, name, max_string_length)` — returns the longest string found in string column `name`. Call this before allocating a `character(len=...)` array for `parquet_read_column`, since the allocated length must be at least `max_string_length`.
 - `parquet_prefetch_columns(reader, names)` — reads several named columns in a single call, warming the lazy-read cache for all of them at once. `names` is either a `character(len=*)` array (`["ra ", "dec"]`, elements sharing one declared length) or a single scalar string with the names separated by commas and/or semicolons (`"ra; dec, mag"`); the generic dispatches on which you pass. The string form is recommended for names of differing lengths — see [Prefetching multiple columns at once](#prefetching-multiple-columns-at-once-with-parquet_prefetch_columns).
+- `parquet_get_metadata(reader, key, value[, default, warn])` — reads one table-level metadata entry (written via `schema%add_metadata`) back out of the file. Generic over the [supported types](#supported-data-types), scalar or 1D array: `value`'s type/kind picks the variant and how the stored text is parsed. A missing key `error stop`s unless `default` (same type/kind) is given; an unconvertible stored value warns then falls back to `default` or `error stop`s; `warn` (default `.true.`) only silences the missing-key-with-`default` warning. See [Reading table metadata with parquet_get_metadata](#reading-table-metadata-with-parquet_get_metadata).
 
 ### Reader (reads column data)
 
@@ -825,7 +838,7 @@ Most build failures come from the Arrow/Parquet C++ dependency not being visible
 
 - **`fatal error: arrow/api.h: No such file or directory`** (or similar for `parquet/api/reader.h`) — `FPM_FFLAGS`/`FPM_CXXFLAGS` is not pointing `-I` at Arrow's `include` directory.
 - **Link errors like `undefined reference to arrow::...` or `cannot find -lparquet`** — `LIBRARY_PATH`/`FPM_LDFLAGS` is not pointing `-L` at Arrow's `lib` directory, or the `link = ["arrow", "parquet", "c++"]` entry is missing from the consuming project's `fpm.toml`. (`parquet-fortran`'s own `fpm.toml` also links `arrow_compute`, needed for `parquet_close_reader(..., print_stat=.true.)`'s min/max calculation — Arrow ships its compute kernels in a separate library from core `arrow` — and fpm propagates that automatically to consumers, so it does not need to be listed again here.)
-- **Linker errors mentioning `std::span` or other C++20-only symbols** — `-std=c++20` is missing from `FPM_CXXFLAGS`; this is required on every platform since Arrow/Parquet headers use `std::span` unconditionally.
+- **Linker errors mentioning `std::span` or other C++20-only symbols** — `-std=c++20` is missing from `FPM_CXXFLAGS` (required on every platform — see [Environment variables](#environment-variables)).
 - **Undefined references to `std::__1::...` (macOS) or `std::...` (Linux) at the final link step** — the C++ standard library is missing from `FPM_LDFLAGS`. Add `-lc++` on macOS/Clang or `-lstdc++` on Linux/GCC (see [Environment variables](#environment-variables)).
 - **At runtime, `dyld: Library not loaded` / `error while loading shared libraries` for `libarrow`/`libparquet`** — the Arrow/Parquet shared libraries are not on the dynamic linker's search path at run time; add their directory to `DYLD_LIBRARY_PATH` (macOS) or `LD_LIBRARY_PATH` (Linux) in addition to `LIBRARY_PATH` used at build time.
 - **Program aborts with an `ERROR STOP` message instead of returning a status code** — this is expected; see [Error handling](#error-handling). The message text (e.g. naming a missing column or file) indicates the failing precondition.

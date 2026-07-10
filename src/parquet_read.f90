@@ -133,7 +133,7 @@ contains
 
     !> Packs a fixed-width character array into the same "n fixed-width items
     !> back to back" convention used for names_packed elsewhere in this file
-    !> (see parquet_prefetch_columns) -- shared here since apply_parquet_filter
+    !> (see parquet_prefetch_columns) -- shared here since parquet_apply_filter
     !> needs it for three separate arrays (names/ops/values).
     subroutine pack_fixed_width_strings(strs, packed)
         character(len=*), intent(in) :: strs(:)
@@ -154,13 +154,13 @@ contains
 
     !> Validates+parses `maml` (parquet_parse_qc_maml) and hands the
     !> resulting per-column qc: rules to parquet_reader_set_qc -- called from
-    !> parquet_open_reader BEFORE apply_parquet_filter, so that any column
+    !> parquet_open_reader BEFORE parquet_apply_filter, so that any column
     !> the filter itself touches while evaluating its clauses is already
     !> covered by qc (see run_qc_checks/parquet_reader_set_filter in
     !> parquet_wrapper.cpp). A field with no qc: block at all is already
     !> excluded by parquet_parse_qc_maml, so every entry in `rules` here
     !> really does need to reach parquet_reader_set_qc.
-    subroutine apply_parquet_qc(reader, maml, qc_soft)
+    subroutine parquet_apply_qc(reader, maml, qc_soft)
         type(parquet_reader), intent(inout) :: reader
         type(parquet_maml_file), intent(in) :: maml
         logical, intent(in) :: qc_soft
@@ -202,7 +202,7 @@ contains
             has_max_flags, max_ops_packed, int(len(max_ops), kind=c_long_long), &
             max_texts_packed, int(len(max_texts), kind=c_long_long), &
             null_allowed_flags, int(n, kind=c_long_long), merge(1_c_int8_t, 0_c_int8_t, qc_soft))
-    end subroutine apply_parquet_qc
+    end subroutine parquet_apply_qc
 
     !> Batch-prefetches the distinct columns named by `filter` in a single
     !> (thread-parallel, with use_threads) ReadTable, so parquet_reader_set_filter
@@ -215,7 +215,7 @@ contains
     !>    column is left untouched here so parquet_reader_set_filter still
     !>    reports it with its exact "unknown column in filter: ..." message
     !>    rather than this prefetch aborting first with a different one.
-    !>  - Must be called from parquet_open_reader BEFORE apply_parquet_qc: while
+    !>  - Must be called from parquet_open_reader BEFORE parquet_apply_qc: while
     !>    qc is still disabled, prefetching does not run read-time qc on the
     !>    (still unfiltered) columns. The qc check for filter columns stays in
     !>    parquet_reader_set_filter, on the filtered rows, exactly as before.
@@ -235,7 +235,7 @@ contains
         list = ""
         do i = 1, filter%n
             call parquet_tokenize_filter_rule(filter%rules(i), name, op, value, is_string, ok, errmsg)
-            ! A malformed rule is left for apply_parquet_filter to report.
+            ! A malformed rule is left for parquet_apply_filter to report.
             if (.not. ok) cycle
             ! Unknown columns: skip, so parquet_reader_set_filter owns the error.
             if (parquet_reader_has_column(reader%handle, trim(name)//char(0)) == 0) cycle
@@ -258,7 +258,7 @@ contains
     !> parquet_get_nrows and every column read afterward already reflect the
     !> filtered row set (see parquet_reader_set_filter in parquet_wrapper.cpp
     !> for the actual validation/masking).
-    subroutine apply_parquet_filter(reader, filter)
+    subroutine parquet_apply_filter(reader, filter)
         type(parquet_reader), intent(inout) :: reader
         type(parquet_filter), intent(in) :: filter
         character(len=64), allocatable :: names(:)
@@ -298,7 +298,7 @@ contains
             is_string_flags, int(n, kind=c_long_long), c_err, int(len(c_err), kind=c_long_long))
 
         if (status /= 0) error stop "parquet_open_reader: " // trim(c_err)
-    end subroutine apply_parquet_filter
+    end subroutine parquet_apply_filter
 
     !> Called once by parquet_open_reader, right after the handle is created:
     !> copies the file's flat key-value table metadata (whatever add_metadata
@@ -359,10 +359,10 @@ contains
         if (present(qc)) qc_effective = qc
         qc_soft_value = .false.
         if (present(qc_soft)) qc_soft_value = qc_soft
-        if (present(schema) .and. qc_effective) call apply_parquet_qc(reader, schema%maml, qc_soft_value)
+        if (present(schema) .and. qc_effective) call parquet_apply_qc(reader, schema%maml, qc_soft_value)
 
         if (present(filter)) then
-            if (filter%n > 0) call apply_parquet_filter(reader, filter)
+            if (filter%n > 0) call parquet_apply_filter(reader, filter)
         end if
     end procedure parquet_open_reader
 

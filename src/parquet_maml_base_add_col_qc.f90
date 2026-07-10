@@ -100,7 +100,7 @@ contains
         col_name = trim(name_str)
 
         ! 2) the column must not already be declared in this MAML.
-        if (field_name_exists(self, col_name)) then
+        if (maml_field_name_exists(self, col_name)) then
             error stop "parquet_maml_file add_col_qc/get_col_qc: column '" // col_name // &
                 "' is already declared in this qc-maml"
         end if
@@ -121,18 +121,18 @@ contains
         ! --- emit lines ---
 
         ! Ensure a fields: header exists (add one on first use).
-        if (.not. line_exists(self, "fields:")) call push_line(self, "fields:")
+        if (.not. maml_line_exists(self, "fields:")) call maml_push_line(self, "fields:")
 
-        call push_line(self, "- name: " // col_name)
+        call maml_push_line(self, "- name: " // col_name)
 
         has_qc = (len_trim(min_str) > 0) .or. (len_trim(max_str) > 0) .or. (len_trim(miss_str) > 0)
         if (has_qc) then
-            call push_line(self, "  qc:")
+            call maml_push_line(self, "  qc:")
             ! min:/max: are single-quoted so a leading > or < is not mistaken
             ! for a YAML block-scalar indicator; the qc-maml parser unquotes.
-            if (len_trim(min_str) > 0) call push_line(self, "    min: '" // trim(adjustl(min_str)) // "'")
-            if (len_trim(max_str) > 0) call push_line(self, "    max: '" // trim(adjustl(max_str)) // "'")
-            if (len_trim(miss_str) > 0) call push_line(self, "    miss: " // trim(adjustl(miss_str)))
+            if (len_trim(min_str) > 0) call maml_push_line(self, "    min: '" // trim(adjustl(min_str)) // "'")
+            if (len_trim(max_str) > 0) call maml_push_line(self, "    max: '" // trim(adjustl(max_str)) // "'")
+            if (len_trim(miss_str) > 0) call maml_push_line(self, "    miss: " // trim(adjustl(miss_str)))
         end if
 
     contains
@@ -231,7 +231,7 @@ contains
 
     !> True if any line of self%lines equals `target` after trimming leading
     !> and trailing blanks (used for the fields: header check).
-    pure function line_exists(self, target) result(found)
+    pure function maml_line_exists(self, target) result(found)
         type(parquet_maml_file), intent(in) :: self
         character(len=*), intent(in) :: target
         logical :: found
@@ -244,13 +244,13 @@ contains
                 return
             end if
         end do
-    end function line_exists
+    end function maml_line_exists
 
     !> True if self%lines already declares a fields: entry named `name`, i.e.
     !> a "- name: <name>" line (matched the same way the qc-maml parser finds
     !> field names). Comparison of the name itself is case-sensitive, as
     !> parquet column names are.
-    pure function field_name_exists(self, name) result(found)
+    pure function maml_field_name_exists(self, name) result(found)
         type(parquet_maml_file), intent(in) :: self
         character(len=*), intent(in) :: name
         logical :: found
@@ -280,13 +280,13 @@ contains
                 return
             end if
         end do
-    end function field_name_exists
+    end function maml_field_name_exists
 
     !> Appends one line to self%lines, growing the (deferred-length) array and
     !> renormalizing its element length to fit. Only the significant (non-
     !> trailing-blank) part of `s` is stored, but any leading indentation is
     !> preserved.
-    subroutine push_line(self, s)
+    subroutine maml_push_line(self, s)
         type(parquet_maml_file), intent(inout) :: self
         character(len=*), intent(in) :: s
         character(len=:), allocatable :: tmp(:)
@@ -307,6 +307,6 @@ contains
         end do
         tmp(n + 1) = s
         call move_alloc(tmp, self%lines)
-    end subroutine push_line
+    end subroutine maml_push_line
 
 end submodule parquet_maml_base_add_col_qc

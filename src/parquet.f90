@@ -10,7 +10,7 @@ module parquet
     implicit none
     private
     !
-    character(len=*),parameter:: cversion = "v0.8.0 (2026-07-08)" !< version info
+    character(len=*),parameter:: cversion = "v0.9.0 (2026-07-10)" !< version info
 #ifndef RELEASE_VERSION
 #  define RELEASE_VERSION 0.1
 #endif
@@ -168,6 +168,11 @@ module parquet
                                  ! enabled_columns/write_counts below don't exist): every name
                                  ! parquet_write_column has already written, so a repeat can still be
                                  ! caught -- see parquet_mark_column_written.
+        character(len=:), allocatable :: maml_name ! Set from schema%maml%name by parquet_open_writer
+                                 ! when a schema is given (unallocated for a schema-less writer, or if
+                                 ! the schema's own %maml%name was never set); solely so
+                                 ! parquet_write_column's "column not defined"/"type mismatch" errors
+                                 ! can name which maml the schema came from -- see writer_maml_suffix.
     contains
         final :: writer_finalize
     end type parquet_writer

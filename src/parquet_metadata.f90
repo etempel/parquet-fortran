@@ -640,10 +640,19 @@ contains
     module procedure parquet_parse_qc_maml
         character(len=1024) :: line
         character(len=:), allocatable :: tline, key, cvalue, raw, errors, miss_lower
+        character(len=:), allocatable :: qc_maml_suffix
         logical :: in_fields, have_current, in_qc
         integer :: i, j, n
         character(len=32) :: idx_buf
         type(parquet_qc_rule), allocatable :: tmp(:)
+
+        ! "" if maml%name was never set (e.g. a qc-maml built in memory via
+        ! add_col_qc); otherwise " (maml: X)", appended to every error stop
+        ! below so it names which qc-maml file failed validation.
+        qc_maml_suffix = ""
+        if (allocated(maml%name)) then
+            if (len_trim(maml%name) > 0) qc_maml_suffix = " (maml: " // trim(maml%name) // ")"
+        end if
 
         ! Reuses the same top-level-section/sub-key name schema every other
         ! MAML validation path checks against (allowed_maml_sections/
@@ -656,7 +665,7 @@ contains
         errors = ""
         call parquet_validate_maml_sections(maml%lines, errors)
         if (len_trim(errors) > 0) then
-            error stop "parquet_open_reader: invalid qc maml: " // trim(errors)
+            error stop "parquet_open_reader: invalid qc maml: " // trim(errors) // qc_maml_suffix
         end if
 
         in_fields = .false.
@@ -708,7 +717,7 @@ contains
                         tmp(n)%null_values_allowed = .true.
                     else
                         error stop "parquet_open_reader: invalid qc maml: qc: miss: value '" // trim(miss_lower) // &
-                            "' for field '" // trim(tmp(n)%name) // "' is not recognized (expected Null/NA or empty)"
+                            "' for field '" // trim(tmp(n)%name) // "' is not recognized (expected Null/NA or empty)" // qc_maml_suffix
                     end if
                     cycle
                 case default
@@ -731,11 +740,13 @@ contains
         do i = 1, n
             if (len_trim(tmp(i)%name) == 0) then
                 write(idx_buf, '(I0)') i
-                error stop "parquet_open_reader: invalid qc maml: field #" // trim(idx_buf) // " is missing required 'name'"
+                error stop "parquet_open_reader: invalid qc maml: field #" // trim(idx_buf) // &
+                    " is missing required 'name'" // qc_maml_suffix
             end if
             do j = 1, i - 1
                 if (trim(tmp(j)%name) == trim(tmp(i)%name)) then
-                    error stop "parquet_open_reader: invalid qc maml: duplicate field name '" // trim(tmp(i)%name) // "'"
+                    error stop "parquet_open_reader: invalid qc maml: duplicate field name '" // trim(tmp(i)%name) // &
+                        "'" // qc_maml_suffix
                 end if
             end do
             ! qc: min: must be a lower bound (>= or >), qc: max: an upper
@@ -744,11 +755,13 @@ contains
             ! data_type -- a qc-maml has none -- so it applies to every field.
             if (tmp(i)%has_min .and. tmp(i)%min_op(1:1) == "<") then
                 error stop "parquet_open_reader: invalid qc maml: qc: min: for field '" // trim(tmp(i)%name) // &
-                    "' uses a '" // trim(tmp(i)%min_op) // "' operator; min: accepts only >= or > (use max: for an upper bound)"
+                    "' uses a '" // trim(tmp(i)%min_op) // "' operator; min: accepts only >= or > (use max: for an upper bound)" &
+                    // qc_maml_suffix
             end if
             if (tmp(i)%has_max .and. tmp(i)%max_op(1:1) == ">") then
                 error stop "parquet_open_reader: invalid qc maml: qc: max: for field '" // trim(tmp(i)%name) // &
-                    "' uses a '" // trim(tmp(i)%max_op) // "' operator; max: accepts only <= or < (use min: for a lower bound)"
+                    "' uses a '" // trim(tmp(i)%max_op) // "' operator; max: accepts only <= or < (use min: for a lower bound)" &
+                    // qc_maml_suffix
             end if
         end do
 

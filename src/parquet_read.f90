@@ -307,6 +307,7 @@ contains
         if (present(use_threads)) use_threads_value = use_threads
 
         reader%handle = create_parquet_reader(trim(filename)//char(0), merge(1_c_int, 0_c_int, use_threads_value))
+        reader%filename = trim(filename)
 
         ! Warm the filter's columns in one batched (thread-parallel) read
         ! BEFORE qc is enabled, so parquet_reader_set_filter reads them from
@@ -444,15 +445,45 @@ contains
         end if
     end procedure reader_finalize
 
+    !> Shared by both parquet_get_nrows overloads' check_positive=.true. path.
+    !> nrows64 is always <= 0 here (never negative in practice, but the check
+    !> itself is written against <= 0 to also cover that impossible case).
+    !> If a filter narrowed the row count, parquet_reader_get_total_nrows
+    !> differs from nrows64 (the post-filter count), so that case names the
+    !> unfiltered total too, rather than just repeating "zero" twice.
+    subroutine check_nrows_positive(reader, nrows64)
+        type(parquet_reader), intent(in) :: reader
+        integer(int64), intent(in) :: nrows64
+        integer(int64) :: total_nrows
+        character(len=32) :: buf
+
+        if (nrows64 > 0) return
+
+        total_nrows = int(parquet_reader_get_total_nrows(reader%handle), kind=int64)
+        if (total_nrows /= nrows64) then
+            write(buf, '(I0)') total_nrows
+            error stop "parquet_get_nrows: file " // trim(reader%filename) // &
+                " has zero rows after filtering (" // trim(buf) // " total)"
+        else
+            error stop "parquet_get_nrows: file " // trim(reader%filename) // " has zero rows"
+        end if
+    end subroutine check_nrows_positive
+
     module procedure parquet_get_nrows_int64
         call check_reader_open(reader, "parquet_get_nrows")
         nrows = int(parquet_reader_get_nrows(reader%handle), kind=int64)
+        if (present(check_positive)) then
+            if (check_positive) call check_nrows_positive(reader, nrows)
+        end if
     end procedure parquet_get_nrows_int64
 
     module procedure parquet_get_nrows_int32
         integer(int64) :: nrows64
         call check_reader_open(reader, "parquet_get_nrows")
         nrows64 = int(parquet_reader_get_nrows(reader%handle), kind=int64)
+        if (present(check_positive)) then
+            if (check_positive) call check_nrows_positive(reader, nrows64)
+        end if
         if (nrows64 > huge(0_int32)) then
             error stop "parquet_get_nrows: number of rows exceeds int32 range"
         end if

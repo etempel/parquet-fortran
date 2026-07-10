@@ -26,7 +26,7 @@ module parquet_bindings
     public :: parquet_append_float32_column, parquet_append_float64_column
     public :: parquet_append_bool8_column
     public :: parquet_append_string_column, parquet_append_string_array_column
-    public :: parquet_reader_get_nrows, parquet_reader_get_column_col_size
+    public :: parquet_reader_get_nrows, parquet_reader_get_total_nrows, parquet_reader_get_column_col_size
     public :: parquet_reader_get_column_total_elements, parquet_reader_get_string_length
     public :: parquet_reader_prefetch_columns, parquet_reader_has_column
     public :: parquet_reader_set_filter
@@ -213,6 +213,13 @@ module parquet_bindings
             import
             type(c_ptr), value :: reader
             integer(c_long_long) :: nrows
+        end function
+
+        function parquet_reader_get_total_nrows(reader) &
+                bind(C, name="parquet_reader_get_total_nrows") result(total_nrows)
+            import
+            type(c_ptr), value :: reader
+            integer(c_long_long) :: total_nrows
         end function
 
         subroutine parquet_reader_prefetch_columns(reader, names_packed, item_len, n) &

@@ -66,8 +66,8 @@ lines.append('!===========================================')
 lines.append('!')
 lines.append(f'module {module_name}')
 if not is_base:
-    lines.append('    use parquet, only: parquet_maml_file, parquet_load_maml_file')
-    lines.append('    use parquet, only: parquet_validate_maml, parquet_validate_user_maml')
+    lines.append('    use parquet, only: parquet_schema, parquet_load_maml_file')
+    lines.append('    use parquet, only: parquet_parse_maml, parquet_validate_user_maml')
 lines.append('    implicit none')
 lines.append('    private')
 lines.append('')
@@ -158,49 +158,68 @@ for path in maml_files:
     max_len = max((len(x) for x in file_lines), default=1)
     rel_name = path.relative_to(docs_dir).as_posix()
 
+    # Non-base (downstream) mode returns a fully parsed parquet_schema --
+    # parquet_parse_maml populates %cinfo/%metadata from %maml right here,
+    # so callers get a ready-to-use schema with no separate parse step.
+    # Base mode keeps returning the raw parquet_maml_file: it's this
+    # library's own internal fixture accessor (parquet_maml_base sits below
+    # parquet.f90/parquet_schema in the module stack, so it cannot return a
+    # parquet_schema without a circular dependency), and its own callers
+    # parse the result themselves via parquet_parse_maml.
+    result_var = 'maml' if is_base else 'schema'
+    result_type = 'parquet_maml_file' if is_base else 'parquet_schema'
+    name_target = f'{result_var}%name' if is_base else f'{result_var}%maml%name'
+    lines_target = f'{result_var}%lines' if is_base else f'{result_var}%maml%lines'
+
     block = []
-    block.append(f'    function {identifier}() result(maml)')
-    block.append('        type(parquet_maml_file) :: maml')
+    block.append(f'    function {identifier}() result({result_var})')
+    block.append(f'        type({result_type}) :: {result_var}')
     block.append('')
-    block.append(f'        maml%name = {fstr(rel_name)}')
+    block.append(f'        {name_target} = {fstr(rel_name)}')
     if file_lines:
-        block.append(f'        allocate(character(len={max_len}) :: maml%lines({len(file_lines)}))')
+        block.append(f'        allocate(character(len={max_len}) :: {lines_target}({len(file_lines)}))')
         for idx, text in enumerate(file_lines):
-            block.extend(emit_assignment(f'maml%lines({idx + 1})', text))
+            block.extend(emit_assignment(f'{lines_target}({idx + 1})', text))
     else:
-        block.append('        allocate(character(len=1) :: maml%lines(0))')
+        block.append(f'        allocate(character(len=1) :: {lines_target}(0))')
+    if not is_base:
+        block.append(f'        call parquet_parse_maml({result_var})')
     block.append(f'    end function {identifier}')
     function_blocks.append('\n'.join(block))
 
     case_blocks.append(f'        case ({fstr(rel_name)})')
-    case_blocks.append(f'            maml = {identifier}()')
+    case_blocks.append(f'            {result_var} = {identifier}()')
     case_blocks.append(f'        case ({fstr(Path(rel_name).stem)})')
-    case_blocks.append(f'            maml = {identifier}()')
+    case_blocks.append(f'            {result_var} = {identifier}()')
 
 for public_name in public_names:
     lines.append(f'    public :: {public_name}')
 lines.append('')
 lines.append('contains')
 lines.append('')
-lines.append('    function get_parquet_maml(name) result(maml)')
+result_var = 'maml' if is_base else 'schema'
+result_type = 'parquet_maml_file' if is_base else 'parquet_schema'
+lines.append(f'    function get_parquet_maml(name) result({result_var})')
 lines.append('        character(len=*), intent(in) :: name')
-lines.append('        type(parquet_maml_file) :: maml')
+lines.append(f'        type({result_type}) :: {result_var}')
 lines.append('')
 lines.append('        select case (trim(name))')
 lines.extend(case_blocks)
 lines.append('        case default')
 lines.append('            error stop "get_parquet_maml: unknown internal MAML file: " // trim(name)')
 lines.append('        end select')
-if not is_base:
-    lines.append('        call parquet_validate_maml(maml)')
+# No explicit validate call needed here in either mode: base mode never
+# validated at this point (its own callers parse/validate explicitly), and
+# non-base no longer needs to either -- each per-file function above already
+# ran parquet_parse_maml (which validates first) before returning its schema.
 lines.append('    end function get_parquet_maml')
 lines.append('')
 if not is_base:
-    lines.append('    function set_maml(maml_default, maml_file) result(maml)')
+    lines.append('    function set_maml(maml_default, maml_file) result(schema)')
     lines.append("        character(len=*),intent(in) :: maml_default       ! < default MAML name (input to get_parquet_maml)")
     lines.append("        character(len=*),intent(in),optional :: maml_file ! < MAML file name (if provided, overrides default)")
-    lines.append('        type(parquet_maml_file) :: maml')
-    lines.append('        type(parquet_maml_file) :: maml_base')
+    lines.append('        type(parquet_schema) :: schema')
+    lines.append('        type(parquet_schema) :: schema_base')
     lines.append('        logical :: has_maml_file')
     lines.append('        !')
     lines.append('        has_maml_file = present(maml_file)')
@@ -210,13 +229,14 @@ if not is_base:
     lines.append('        !')
     lines.append('        if (has_maml_file) then')
     lines.append('            ! read MAML from file')
-    lines.append('            maml = parquet_load_maml_file(trim(maml_file))')
-    lines.append('            ! validate user defined MAML file')
-    lines.append('            maml_base = get_parquet_maml(trim(maml_default))')
-    lines.append('            call parquet_validate_user_maml(maml_base, maml)')
+    lines.append('            schema%maml = parquet_load_maml_file(trim(maml_file))')
+    lines.append('            ! validate user defined MAML file against the default (base) schema')
+    lines.append('            schema_base = get_parquet_maml(trim(maml_default))')
+    lines.append('            call parquet_validate_user_maml(schema_base%maml, schema%maml)')
+    lines.append('            call parquet_parse_maml(schema)')
     lines.append('        else')
     lines.append('            ! no MAML provided, use default MAML')
-    lines.append('            maml = get_parquet_maml(trim(maml_default))')
+    lines.append('            schema = get_parquet_maml(trim(maml_default))')
     lines.append('        end if')
     lines.append('        !')
     lines.append('    end function set_maml')

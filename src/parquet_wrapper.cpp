@@ -1257,6 +1257,16 @@ extern "C"
 		return reader_handle->nrows;
 	}
 
+	// The file's true, unfiltered row count (equal to parquet_reader_get_nrows's
+	// result until a filter narrows it -- see total_nrows's own comment on
+	// ParquetReaderHandle). Used only by parquet_get_nrows(..., check_positive=)
+	// to report "N total" alongside a zero post-filter row count.
+	int64_t parquet_reader_get_total_nrows(void *handle)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		return reader_handle->total_nrows;
+	}
+
 	// Read-time QC support for parquet_open_reader(..., maml=, qc=). Every
 	// field the qc-maml declared has already been validated and parsed on
 	// the Fortran side (parquet_parse_qc_maml, parquet_metadata.f90) --

@@ -175,6 +175,10 @@ module parquet
     type parquet_reader
         private
         type(c_ptr) :: handle = c_null_ptr
+        ! Set by parquet_open_reader from its own `filename` argument, solely
+        ! so parquet_get_nrows(..., check_positive=.true.) can name the file
+        ! in its error message; not used for anything else.
+        character(len=:), allocatable :: filename
     contains
         final :: reader_finalize
     end type parquet_reader
@@ -849,14 +853,16 @@ module parquet
             type(parquet_reader), intent(inout) :: this
         end subroutine reader_finalize
 
-        module subroutine parquet_get_nrows_int64(reader, nrows)
+        module subroutine parquet_get_nrows_int64(reader, nrows, check_positive)
             type(parquet_reader), intent(in) :: reader
             integer(int64), intent(out) :: nrows
+            logical, intent(in), optional :: check_positive
         end subroutine parquet_get_nrows_int64
 
-        module subroutine parquet_get_nrows_int32(reader, nrows)
+        module subroutine parquet_get_nrows_int32(reader, nrows, check_positive)
             type(parquet_reader), intent(in) :: reader
             integer(int32), intent(out) :: nrows
+            logical, intent(in), optional :: check_positive
         end subroutine parquet_get_nrows_int32
 
         module subroutine parquet_get_col_size(reader, name, col_size)

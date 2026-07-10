@@ -195,6 +195,26 @@ program error_scenarios
         call scenario_get_metadata_missing_key_no_default()
     case ("get_metadata_conversion_failure_no_default")
         call scenario_get_metadata_conversion_failure_no_default()
+    case ("schema_add_field_before_init")
+        call scenario_schema_add_field_before_init()
+    case ("schema_init_twice")
+        call scenario_schema_init_twice()
+    case ("schema_init_empty_table")
+        call scenario_schema_init_empty_table()
+    case ("schema_add_field_empty_name")
+        call scenario_schema_add_field_empty_name()
+    case ("schema_add_field_duplicate_name")
+        call scenario_schema_add_field_duplicate_name()
+    case ("schema_add_field_invalid_data_type")
+        call scenario_schema_add_field_invalid_data_type()
+    case ("schema_add_field_qc_min_reversed_operator")
+        call scenario_schema_add_field_qc_min_reversed_operator()
+    case ("schema_add_field_qc_max_reversed_operator")
+        call scenario_schema_add_field_qc_max_reversed_operator()
+    case ("schema_add_field_qc_operator_without_value")
+        call scenario_schema_add_field_qc_operator_without_value()
+    case ("schema_add_field_bad_qc_miss_value")
+        call scenario_schema_add_field_bad_qc_miss_value()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -1681,5 +1701,103 @@ contains
         call parquet_get_metadata(reader, "not_a_number", value)
         print '(a,i0)', "unexpectedly read an unparsable metadata value with no default without error: ", value
     end subroutine scenario_get_metadata_conversion_failure_no_default
+
+    !> schema%add_field error stops if schema%init was never called first --
+    !> there is no "fields:" header (or even a %maml) to append to yet.
+    subroutine scenario_schema_add_field_before_init()
+        type(parquet_schema) :: schema
+
+        call schema%add_field("x", "int32")
+        print '(a)', "unexpectedly added a field to a never-initialized schema without error"
+    end subroutine scenario_schema_add_field_before_init
+
+    !> schema%init error stops if called a second time on the same schema --
+    !> otherwise a second call would silently discard any fields already
+    !> added via the first init/add_field sequence.
+    subroutine scenario_schema_init_twice()
+        type(parquet_schema) :: schema
+
+        call schema%init(table="t1")
+        call schema%init(table="t2")
+        print '(a)', "unexpectedly re-initialized an already-initialized schema without error"
+    end subroutine scenario_schema_init_twice
+
+    !> schema%init error stops on an empty table: value, the one top-level
+    !> key parquet_validate_maml requires to be non-empty.
+    subroutine scenario_schema_init_empty_table()
+        type(parquet_schema) :: schema
+
+        call schema%init(table="")
+        print '(a)', "unexpectedly initialized a schema with an empty table without error"
+    end subroutine scenario_schema_init_empty_table
+
+    !> schema%add_field error stops on an empty field name.
+    subroutine scenario_schema_add_field_empty_name()
+        type(parquet_schema) :: schema
+
+        call schema%init(table="t")
+        call schema%add_field("", "int32")
+        print '(a)', "unexpectedly added a field with an empty name without error"
+    end subroutine scenario_schema_add_field_empty_name
+
+    !> schema%add_field error stops on a field name already declared earlier
+    !> in the same schema.
+    subroutine scenario_schema_add_field_duplicate_name()
+        type(parquet_schema) :: schema
+
+        call schema%init(table="t")
+        call schema%add_field("ra", "float64")
+        call schema%add_field("ra", "int32")
+        print '(a)', "unexpectedly added a duplicate field name without error"
+    end subroutine scenario_schema_add_field_duplicate_name
+
+    !> schema%add_field error stops on a data_type that isn't one of the
+    !> supported types (int32/int64/string/boolean/float32/float64).
+    subroutine scenario_schema_add_field_invalid_data_type()
+        type(parquet_schema) :: schema
+
+        call schema%init(table="t")
+        call schema%add_field("x", "not_a_real_type")
+        print '(a)', "unexpectedly added a field with an invalid data_type without error"
+    end subroutine scenario_schema_add_field_invalid_data_type
+
+    !> schema%add_field rejects a qc_min with a reversed ('<'/'<=') operator,
+    !> the same rule %add_col_qc enforces for its own min: field.
+    subroutine scenario_schema_add_field_qc_min_reversed_operator()
+        type(parquet_schema) :: schema
+
+        call schema%init(table="t")
+        call schema%add_field("ra", "float64", qc_min="<5")
+        print '(a)', "unexpectedly accepted a reversed qc_min operator in schema%add_field"
+    end subroutine scenario_schema_add_field_qc_min_reversed_operator
+
+    !> schema%add_field rejects a qc_max with a reversed ('>'/'>=') operator,
+    !> the same rule %add_col_qc enforces for its own max: field.
+    subroutine scenario_schema_add_field_qc_max_reversed_operator()
+        type(parquet_schema) :: schema
+
+        call schema%init(table="t")
+        call schema%add_field("ra", "float64", qc_max=">360")
+        print '(a)', "unexpectedly accepted a reversed qc_max operator in schema%add_field"
+    end subroutine scenario_schema_add_field_qc_max_reversed_operator
+
+    !> schema%add_field rejects a qc_min/qc_max that is only an operator with
+    !> no value following it.
+    subroutine scenario_schema_add_field_qc_operator_without_value()
+        type(parquet_schema) :: schema
+
+        call schema%init(table="t")
+        call schema%add_field("ra", "float64", qc_min=">")
+        print '(a)', "unexpectedly accepted an operator with no value for qc_min in schema%add_field"
+    end subroutine scenario_schema_add_field_qc_operator_without_value
+
+    !> schema%add_field rejects a qc_miss value other than Null/NA/empty.
+    subroutine scenario_schema_add_field_bad_qc_miss_value()
+        type(parquet_schema) :: schema
+
+        call schema%init(table="t")
+        call schema%add_field("ra", "float64", qc_miss="garbage")
+        print '(a)', "unexpectedly accepted an invalid qc_miss value in schema%add_field"
+    end subroutine scenario_schema_add_field_bad_qc_miss_value
 
 end program error_scenarios

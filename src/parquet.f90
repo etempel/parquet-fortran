@@ -105,7 +105,15 @@ module parquet
         type(parquet_maml_file)      :: maml
         type(parquet_column_info)    :: cinfo
         type(parquet_table_metadata) :: metadata
+        ! Set by %init: guards %add_field, which otherwise has no "fields:"
+        ! header (or even a %maml at all) to append to. Only %init and
+        ! %add_field are meaningful for a schema being built from scratch in
+        ! memory -- a schema populated via parquet_parse_maml (from a real
+        ! MAML file/object) never calls %init and never needs %add_field.
+        logical, private :: is_initialized = .false.
     contains
+        procedure :: init => schema_init
+        procedure :: add_field => schema_add_field
         procedure :: set_column_available
         procedure :: set_column_unavailable
         procedure :: get_column_index => schema_get_column_index
@@ -608,6 +616,55 @@ module parquet
         module subroutine parquet_parse_maml_from_object(schema)
             type(parquet_schema), intent(inout) :: schema
         end subroutine parquet_parse_maml_from_object
+
+        !> Initializes a from-scratch parquet_schema: sets the (required)
+        !> table: key and any of the optional scalar top-level MAML keys
+        !> given, and marks this schema ready for %add_field. Error stops if
+        !> called twice on the same schema. List-shaped top-level sections
+        !> (coauthors:, comments:, keywords:, DOIs:, depends:, keyarray:,
+        !> extra:) are out of scope here -- keyarray: already has its own
+        !> API (add_metadata); the others aren't supported by %init/%add_field
+        !> at all yet.
+        module subroutine schema_init(this, table, survey, dataset, version, date, author, description, license, &
+                maml_version)
+            class(parquet_schema), intent(inout) :: this
+            character(len=*), intent(in) :: table
+            character(len=*), intent(in), optional :: survey
+            character(len=*), intent(in), optional :: dataset
+            character(len=*), intent(in), optional :: version
+            character(len=*), intent(in), optional :: date
+            character(len=*), intent(in), optional :: author
+            character(len=*), intent(in), optional :: description
+            character(len=*), intent(in), optional :: license
+            character(len=*), intent(in), optional :: maml_version
+        end subroutine schema_init
+
+        !> Appends one fields: entry to a schema built from scratch (%init
+        !> must be called first). name/data_type are required (data_type
+        !> must be one of the supported types); unit/info/ucd/array_size/
+        !> col_size and qc_min/qc_max/qc_miss are optional, the latter three
+        !> forming an optional qc: sub-block (same min:/max: operator-direction
+        !> and miss: Null/NA rules %add_col_qc enforces, checked independently
+        !> here -- %add_field is a distinct API from %add_col_qc, not built on
+        !> top of it: %add_col_qc is for read-time qc-mamls (name + qc: only,
+        !> no data_type) and explicitly rejects a column already declared as a
+        !> field, so it cannot be layered onto a field %add_field just added).
+        !> Validates eagerly (name/data_type/duplicate/qc all checked here,
+        !> not deferred to parquet_validate_maml).
+        module subroutine schema_add_field(this, name, data_type, unit, info, ucd, array_size, col_size, &
+                qc_min, qc_max, qc_miss)
+            class(parquet_schema), intent(inout) :: this
+            character(len=*), intent(in) :: name
+            character(len=*), intent(in) :: data_type
+            character(len=*), intent(in), optional :: unit
+            character(len=*), intent(in), optional :: info
+            character(len=*), intent(in), optional :: ucd
+            integer, intent(in), optional :: array_size
+            integer, intent(in), optional :: col_size
+            character(len=*), intent(in), optional :: qc_min
+            character(len=*), intent(in), optional :: qc_max
+            character(len=*), intent(in), optional :: qc_miss
+        end subroutine schema_add_field
 
         ! Flat convenience passthroughs on parquet_schema -- each forwards to
         ! the matching procedure on %cinfo, %metadata or %maml.

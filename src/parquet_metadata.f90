@@ -100,6 +100,246 @@ contains
         schema%metadata%source_maml_lines = schema%maml%lines
     end procedure parquet_parse_maml_from_object
 
+    ! ---- schema%init / schema%add_field: building a MAML from scratch -----
+    ! These emit raw MAML text lines into schema%maml%lines, the same
+    ! representation parquet_parse_maml_lines below eventually parses --
+    ! %add_field validates eagerly (name/data_type/duplicate/qc) but the
+    ! result is still just text, so parquet_parse_maml must be called
+    ! afterward to populate %cinfo/%metadata, exactly as for a MAML loaded
+    ! from disk.
+
+    !> Appends one line to maml%lines, growing the (deferred-length) array and
+    !> renormalizing its element length to fit. A smaller, independent copy of
+    !> the identically-named helper in parquet_maml_base_add_col_qc.f90 -- that
+    !> one is private to a different module (parquet_maml_base sits below this
+    !> one in the module stack) and cannot be reused here without a new public
+    !> API neither add_col_qc nor add_field need for anything else.
+    subroutine schema_maml_push_line(maml, s)
+        type(parquet_maml_file), intent(inout) :: maml
+        character(len=*), intent(in) :: s
+        character(len=:), allocatable :: tmp(:)
+        integer :: n, newlen, i
+
+        if (allocated(maml%lines)) then
+            n = size(maml%lines)
+        else
+            n = 0
+        end if
+        newlen = len_trim(s)
+        if (n > 0) newlen = max(newlen, len(maml%lines))
+        if (newlen < 1) newlen = 1
+
+        allocate(character(len=newlen) :: tmp(n + 1))
+        do i = 1, n
+            tmp(i) = maml%lines(i)
+        end do
+        tmp(n + 1) = s
+        call move_alloc(tmp, maml%lines)
+    end subroutine schema_maml_push_line
+
+    !> True if any line of maml%lines equals `target` after trimming leading
+    !> and trailing blanks (used for the fields: header check).
+    logical function schema_maml_line_exists(maml, target) result(found)
+        type(parquet_maml_file), intent(in) :: maml
+        character(len=*), intent(in) :: target
+        integer :: i
+
+        found = .false.
+        if (.not. allocated(maml%lines)) return
+        do i = 1, size(maml%lines)
+            if (trim(adjustl(maml%lines(i))) == trim(target)) then
+                found = .true.
+                return
+            end if
+        end do
+    end function schema_maml_line_exists
+
+    !> True if maml%lines already declares a fields: entry named `name`, i.e.
+    !> a "- name: <name>" line.
+    logical function schema_maml_field_name_exists(maml, name) result(found)
+        type(parquet_maml_file), intent(in) :: maml
+        character(len=*), intent(in) :: name
+        integer :: i, colon
+        character(len=:), allocatable :: t, key, val
+
+        found = .false.
+        if (.not. allocated(maml%lines)) return
+        do i = 1, size(maml%lines)
+            t = trim(adjustl(maml%lines(i)))
+            if (len(t) == 0) cycle
+            if (t(1:1) /= "-") cycle
+            t = trim(adjustl(t(2:)))
+            colon = index(t, ":")
+            if (colon <= 1) cycle
+            key = trim(adjustl(t(1:colon-1)))
+            if (parquet_to_lower(key) /= "name") cycle
+            val = trim(adjustl(t(colon+1:)))
+            if (len(val) >= 2) then
+                if ((val(1:1) == '"' .and. val(len(val):len(val)) == '"') .or. &
+                    (val(1:1) == "'" .and. val(len(val):len(val)) == "'")) then
+                    val = val(2:len(val)-1)
+                end if
+            end if
+            if (trim(val) == trim(name)) then
+                found = .true.
+                return
+            end if
+        end do
+    end function schema_maml_field_name_exists
+
+    module procedure schema_init
+        if (this%is_initialized) then
+            error stop "parquet_schema%init: schema is already initialized"
+        end if
+        if (len_trim(table) == 0) then
+            error stop "parquet_schema%init: table must not be empty"
+        end if
+
+        call schema_maml_push_line(this%maml, "table: " // trim(table))
+        if (present(survey))       call schema_maml_push_line(this%maml, "survey: " // trim(survey))
+        if (present(dataset))      call schema_maml_push_line(this%maml, "dataset: " // trim(dataset))
+        if (present(version))     call schema_maml_push_line(this%maml, "version: " // trim(version))
+        if (present(date))         call schema_maml_push_line(this%maml, "date: " // trim(date))
+        if (present(author))      call schema_maml_push_line(this%maml, "author: " // trim(author))
+        if (present(description)) call schema_maml_push_line(this%maml, "description: " // trim(description))
+        if (present(license))     call schema_maml_push_line(this%maml, "license: " // trim(license))
+        if (present(maml_version)) call schema_maml_push_line(this%maml, "MAML_version: " // trim(maml_version))
+
+        this%is_initialized = .true.
+    end procedure schema_init
+
+    module procedure schema_add_field
+        logical :: type_ok
+        integer :: j
+        character(len=:), allocatable :: miss_low
+        character(len=32) :: buf
+
+        if (.not. this%is_initialized) then
+            error stop "parquet_schema%add_field: call schema%init(...) before adding fields"
+        end if
+
+        if (len_trim(name) == 0) then
+            error stop "parquet_schema%add_field: field name must not be empty"
+        end if
+
+        if (schema_maml_field_name_exists(this%maml, trim(name))) then
+            error stop "parquet_schema%add_field: duplicate field name '" // trim(name) // "'"
+        end if
+
+        type_ok = .false.
+        do j = 1, size(valid_maml_data_types)
+            if (trim(data_type) == trim(valid_maml_data_types(j))) then
+                type_ok = .true.
+                exit
+            end if
+        end do
+        if (.not. type_ok) then
+            error stop "parquet_schema%add_field: field '" // trim(name) // "' has invalid data_type '" // &
+                trim(data_type) // "'"
+        end if
+
+        call validate_qc_bound(qc_min, .true.)
+        call validate_qc_bound(qc_max, .false.)
+
+        if (present(qc_miss)) then
+            if (len_trim(qc_miss) > 0) then
+                miss_low = parquet_to_lower(trim(adjustl(qc_miss)))
+                if (.not. (miss_low == "null" .or. miss_low == "na")) then
+                    error stop "parquet_schema%add_field: invalid qc_miss value '" // trim(adjustl(qc_miss)) // &
+                        "' for field '" // trim(name) // "' (expected Null/NA or empty)"
+                end if
+            end if
+        end if
+
+        if (.not. schema_maml_line_exists(this%maml, "fields:")) call schema_maml_push_line(this%maml, "fields:")
+
+        call schema_maml_push_line(this%maml, "- name: " // trim(name))
+        if (present(unit)) call schema_maml_push_line(this%maml, "  unit: " // trim(unit))
+        if (present(info)) call schema_maml_push_line(this%maml, "  info: " // trim(info))
+        if (present(ucd))  call schema_maml_push_line(this%maml, "  ucd: " // trim(ucd))
+        call schema_maml_push_line(this%maml, "  data_type: " // trim(data_type))
+
+        if (present(array_size)) then
+            write(buf, '(I0)') array_size
+            call schema_maml_push_line(this%maml, "  array_size: " // trim(buf))
+        end if
+        if (present(col_size)) then
+            write(buf, '(I0)') col_size
+            call schema_maml_push_line(this%maml, "  col_size: " // trim(buf))
+        end if
+
+        if ((present(qc_min) .and. len_trim(qc_min) > 0) .or. &
+            (present(qc_max) .and. len_trim(qc_max) > 0) .or. &
+            (present(qc_miss) .and. len_trim(qc_miss) > 0)) then
+            call schema_maml_push_line(this%maml, "  qc:")
+            if (present(qc_min)) then
+                if (len_trim(qc_min) > 0) &
+                    call schema_maml_push_line(this%maml, "    min: '" // trim(adjustl(qc_min)) // "'")
+            end if
+            if (present(qc_max)) then
+                if (len_trim(qc_max) > 0) &
+                    call schema_maml_push_line(this%maml, "    max: '" // trim(adjustl(qc_max)) // "'")
+            end if
+            if (present(qc_miss)) then
+                if (len_trim(qc_miss) > 0) &
+                    call schema_maml_push_line(this%maml, "    miss: " // trim(adjustl(qc_miss)))
+            end if
+        end if
+
+    contains
+
+        !> Validates one qc_min/qc_max bound (absent or empty -- nothing to
+        !> check). If an operator prefix is present it must point the right
+        !> way (min: >=/>, max: <=/<) and be followed by a non-empty value; a
+        !> bare value with no operator is accepted as-is. Mirrors the rule
+        !> %add_col_qc enforces for its own min:/max: fields, checked
+        !> independently here -- see schema_add_field's doc comment (parquet.f90)
+        !> for why these two aren't unified into one implementation.
+        subroutine validate_qc_bound(raw, is_min)
+            character(len=*), intent(in), optional :: raw
+            logical, intent(in) :: is_min
+            character(len=:), allocatable :: t, rem
+            character(len=2) :: op
+            logical :: has_op
+
+            if (.not. present(raw)) return
+            t = trim(adjustl(raw))
+            if (len_trim(t) == 0) return
+
+            has_op = .true.
+            if (index(t, ">=") == 1) then
+                op = ">="; rem = trim(adjustl(t(3:)))
+            else if (index(t, "<=") == 1) then
+                op = "<="; rem = trim(adjustl(t(3:)))
+            else if (index(t, ">") == 1) then
+                op = "> "; rem = trim(adjustl(t(2:)))
+            else if (index(t, "<") == 1) then
+                op = "< "; rem = trim(adjustl(t(2:)))
+            else
+                has_op = .false.; rem = t
+            end if
+
+            if (has_op) then
+                if (is_min .and. op(1:1) == "<") then
+                    error stop "parquet_schema%add_field: qc_min for field '" // trim(name) // "' uses a '" // &
+                        trim(op) // "' operator; qc_min accepts only >= or > (use qc_max for an upper bound)"
+                end if
+                if (.not. is_min .and. op(1:1) == ">") then
+                    error stop "parquet_schema%add_field: qc_max for field '" // trim(name) // "' uses a '" // &
+                        trim(op) // "' operator; qc_max accepts only <= or < (use qc_min for a lower bound)"
+                end if
+                if (len_trim(rem) == 0) then
+                    if (is_min) then
+                        error stop "parquet_schema%add_field: bad qc_min value provided for field '" // trim(name) // "'"
+                    else
+                        error stop "parquet_schema%add_field: bad qc_max value provided for field '" // trim(name) // "'"
+                    end if
+                end if
+            end if
+        end subroutine validate_qc_bound
+
+    end procedure schema_add_field
+
     ! ---- parquet_schema flat convenience passthroughs ---------------------
     ! Each simply forwards to the matching procedure on %cinfo, %metadata or
     ! %maml. Absent optional arguments propagate unchanged.

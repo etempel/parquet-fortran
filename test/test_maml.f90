@@ -3,9 +3,11 @@
 !===========================================
 !
 !> Unit tests for MAML parsing/validation and parquet_column_info helpers.
-!> Only the "happy path" is covered here: every negative case in this module's
-!> functions triggers `error stop`, which aborts the whole test process, so
-!> those are covered as subprocess scenarios in test_errors.f90 instead.
+!> Mostly "happy path": most negative cases in this module's functions
+!> trigger `error stop`, which aborts the whole test process, so those run as
+!> subprocess scenarios (test/error_scenarios.f90) instead -- some via
+!> check_scenario_exit_status directly below (schema%init/add_field), others
+!> in test_errors.f90.
 !>
 !> NB: always pass the failure message directly to `check(error, cond, message)`.
 !> Do NOT follow a failed `check` with a separate `test_failed` call on the same
@@ -17,8 +19,9 @@
 module test_maml
     use parquet
     use parquet_maml_base, only : parquet_maml_file, get_parquet_maml
-    use iso_fortran_env, only : real64
+    use iso_fortran_env, only : int32, real32, real64
     use testdrive, only : new_unittest, unittest_type, error_type, check
+    use test_errors, only : check_scenario_exit_status
     !
     implicit none
     private
@@ -43,7 +46,32 @@ contains
             new_unittest("add_col_qc builds a qc-maml from compact strings", test_add_col_qc_builds_maml), &
             new_unittest("add_col_qc result reads back through parquet_open_reader", test_add_col_qc_roundtrip), &
             new_unittest("add_col_qc with an empty input is a no-op", test_add_col_qc_empty_input_is_noop), &
-            new_unittest("get_col_qc (function form) returns the name in place", test_get_col_qc) &
+            new_unittest("get_col_qc (function form) returns the name in place", test_get_col_qc), &
+            new_unittest("schema%init emits the requested top-level keys", test_schema_init_builds_top_level_lines), &
+            new_unittest("schema%add_field builds exact fields: lines (incl. a qc: block)", &
+                test_schema_add_field_builds_maml_lines), &
+            new_unittest("schema%init + add_field round-trips through parquet_parse_maml", &
+                test_schema_init_add_field_parses_correctly), &
+            new_unittest("schema%init + add_field writes/reads a real parquet file", &
+                test_schema_init_add_field_write_read_roundtrip), &
+            new_unittest("schema%add_field accepts a bare qc_min with no operator", &
+                test_schema_add_field_bare_qc_bound), &
+            new_unittest("schema%add_field before schema%init aborts", test_schema_add_field_before_init_aborts), &
+            new_unittest("schema%init called twice aborts", test_schema_init_twice_aborts), &
+            new_unittest("schema%init with an empty table aborts", test_schema_init_empty_table_aborts), &
+            new_unittest("schema%add_field with an empty name aborts", test_schema_add_field_empty_name_aborts), &
+            new_unittest("schema%add_field with a duplicate name aborts", &
+                test_schema_add_field_duplicate_name_aborts), &
+            new_unittest("schema%add_field with an invalid data_type aborts", &
+                test_schema_add_field_invalid_data_type_aborts), &
+            new_unittest("schema%add_field: reversed qc_min operator aborts", &
+                test_schema_add_field_qc_min_reversed_operator_aborts), &
+            new_unittest("schema%add_field: reversed qc_max operator aborts", &
+                test_schema_add_field_qc_max_reversed_operator_aborts), &
+            new_unittest("schema%add_field: qc operator with no value aborts", &
+                test_schema_add_field_qc_operator_without_value_aborts), &
+            new_unittest("schema%add_field: invalid qc_miss value aborts", &
+                test_schema_add_field_bad_qc_miss_value_aborts) &
             ]
     end subroutine collect_tests_parquet_maml
 
@@ -366,5 +394,259 @@ contains
         call check(error, len(r) == 0 .and. .not. allocated(m2%lines), &
             "get_col_qc('') should be a no-op returning an empty string")
     end subroutine test_get_col_qc
+
+    !> schema%init builds a from-scratch MAML's top-level scalar keys: table:
+    !> is unconditional, every other optional argument only emits its line
+    !> when actually supplied, in the fixed order schema_init writes them.
+    subroutine test_schema_init_builds_top_level_lines(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+
+        call schema%init(table="input_table", survey="The Big Survey", dataset="ds", &
+            version="1.0", date="2026-01-01", author="Dave Smith", description="An example", &
+            license="Copyright [Private]", maml_version="1.2")
+
+        call check(error, size(schema%maml%lines) == 9, "schema%init produced an unexpected number of lines")
+        if (allocated(error)) return
+
+        call check(error, &
+            trim(schema%maml%lines(1)) == "table: input_table"           .and. &
+            trim(schema%maml%lines(2)) == "survey: The Big Survey"       .and. &
+            trim(schema%maml%lines(3)) == "dataset: ds"                  .and. &
+            trim(schema%maml%lines(4)) == "version: 1.0"                 .and. &
+            trim(schema%maml%lines(5)) == "date: 2026-01-01"             .and. &
+            trim(schema%maml%lines(6)) == "author: Dave Smith"           .and. &
+            trim(schema%maml%lines(7)) == "description: An example"      .and. &
+            trim(schema%maml%lines(8)) == "license: Copyright [Private]" .and. &
+            trim(schema%maml%lines(9)) == "MAML_version: 1.2", &
+            "schema%init generated unexpected top-level lines")
+    end subroutine test_schema_init_builds_top_level_lines
+
+    !> schema%add_field builds one "- name:" entry per call, with only the
+    !> optional sub-keys actually supplied, and a qc: block only when at
+    !> least one of qc_min/qc_max/qc_miss is given (min/max quoted, exactly
+    !> like %add_col_qc quotes its own min:/max: values). The "fields:"
+    !> header is created once, on the first call.
+    subroutine test_schema_add_field_builds_maml_lines(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+
+        call schema%init(table="t")
+        call schema%add_field("id0", "int32", unit="unitless", info="ID field.", ucd="meta.id;meta.main")
+        call schema%add_field("ra", "float64", unit="deg", info="Right ascension", &
+            qc_min=">=0", qc_max="<360", qc_miss="Null")
+        call schema%add_field("name", "string", array_size=18)
+        call schema%add_field("arr", "float32", col_size=5)
+
+        ! schema%maml%lines(1) is schema%init's own "table: t"; fields:
+        ! content starts at line 2.
+        call check(error, size(schema%maml%lines) == 21, "schema%add_field produced an unexpected number of lines")
+        if (allocated(error)) return
+
+        call check(error, &
+            trim(schema%maml%lines(1))  == "table: t"                 .and. &
+            trim(schema%maml%lines(2))  == "fields:"                  .and. &
+            trim(schema%maml%lines(3))  == "- name: id0"              .and. &
+            trim(schema%maml%lines(4))  == "  unit: unitless"         .and. &
+            trim(schema%maml%lines(5))  == "  info: ID field."        .and. &
+            trim(schema%maml%lines(6))  == "  ucd: meta.id;meta.main" .and. &
+            trim(schema%maml%lines(7))  == "  data_type: int32"       .and. &
+            trim(schema%maml%lines(8))  == "- name: ra"               .and. &
+            trim(schema%maml%lines(9))  == "  unit: deg"              .and. &
+            trim(schema%maml%lines(10)) == "  info: Right ascension"  .and. &
+            trim(schema%maml%lines(11)) == "  data_type: float64"     .and. &
+            trim(schema%maml%lines(12)) == "  qc:"                    .and. &
+            trim(schema%maml%lines(13)) == "    min: '>=0'"           .and. &
+            trim(schema%maml%lines(14)) == "    max: '<360'"          .and. &
+            trim(schema%maml%lines(15)) == "    miss: Null"           .and. &
+            trim(schema%maml%lines(16)) == "- name: name"             .and. &
+            trim(schema%maml%lines(17)) == "  data_type: string"      .and. &
+            trim(schema%maml%lines(18)) == "  array_size: 18"         .and. &
+            trim(schema%maml%lines(19)) == "- name: arr"              .and. &
+            trim(schema%maml%lines(20)) == "  data_type: float32"     .and. &
+            trim(schema%maml%lines(21)) == "  col_size: 5", &
+            "schema%add_field generated unexpected fields: lines")
+    end subroutine test_schema_add_field_builds_maml_lines
+
+    !> The lines schema%init/add_field build are still just text: this checks
+    !> parquet_parse_maml turns them into the same structured schema%cinfo/
+    !> schema%metadata a MAML loaded from disk would produce.
+    subroutine test_schema_init_add_field_parses_correctly(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        integer :: idx, i
+        logical :: found_table
+
+        call schema%init(table="input_table", author="Dave Smith")
+        ! "count" (not "unitless"): parquet_parse_maml_lines normalizes a
+        ! unit: of "unitless" down to an empty string (a documented sentinel
+        ! for "no unit"), so a real unit is needed here to check that %unit
+        ! itself round-trips correctly.
+        call schema%add_field("id0", "int32", unit="count", info="ID field.")
+        call schema%add_field("ra", "float64", qc_min=">=0", qc_max="<360")
+        call schema%add_field("flag", "boolean")
+
+        call parquet_parse_maml(schema)
+
+        call check(error, size(schema%cinfo%col) == 3, "expected 3 parsed fields")
+        if (allocated(error)) return
+
+        idx = schema%get_column_index("id0")
+        call check(error, trim(schema%cinfo%col(idx)%data_type) == "int32" .and. &
+            trim(schema%cinfo%col(idx)%unit) == "count" .and. &
+            trim(schema%cinfo%col(idx)%info) == "ID field.", &
+            "'id0' field attributes were not parsed as expected")
+        if (allocated(error)) return
+
+        idx = schema%get_column_index("ra")
+        call check(error, trim(schema%cinfo%col(idx)%data_type) == "float64" .and. &
+            schema%cinfo%col(idx)%has_qc_min .and. trim(schema%cinfo%col(idx)%qc_min_raw) == "0" .and. &
+            schema%cinfo%col(idx)%has_qc_max .and. trim(schema%cinfo%col(idx)%qc_max_raw) == "360", &
+            "'ra' field's qc: min:/max: were not parsed as expected")
+        if (allocated(error)) return
+
+        idx = schema%get_column_index("flag")
+        call check(error, trim(schema%cinfo%col(idx)%data_type) == "boolean", &
+            "'flag' field data_type was not parsed as expected")
+        if (allocated(error)) return
+
+        found_table = .false.
+        do i = 1, size(schema%metadata%items)
+            if (trim(schema%metadata%items(i)%key) == "table" .and. &
+                trim(schema%metadata%items(i)%value) == "input_table") found_table = .true.
+        end do
+        call check(error, found_table, "expected schema%init's table: key to be present in schema%metadata")
+    end subroutine test_schema_init_add_field_parses_correctly
+
+    !> End-to-end: a schema built entirely in memory via schema%init/add_field
+    !> (no MAML file on disk at all) must write and read back a real parquet
+    !> file exactly like a schema loaded from a .maml file would.
+    subroutine test_schema_init_add_field_write_read_roundtrip(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: id0(3) = [1_int32, 2_int32, 3_int32]
+        real(real64) :: ra(3) = [10.0_real64, 20.0_real64, 30.0_real64]
+        integer(int32) :: id0_back(3)
+        real(real64) :: ra_back(3)
+        integer :: nrows
+        character(len=*), parameter :: out_file = "test_run/schema_init_add_field_roundtrip.parquet"
+
+        call schema%init(table="input_table")
+        call schema%add_field("id0", "int32")
+        call schema%add_field("ra", "float64")
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "id0", id0)
+        call parquet_write_column(writer, "ra", ra)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 3, "expected 3 rows after the round-trip")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+
+        call parquet_read_column(reader, "id0", id0_back)
+        call parquet_read_column(reader, "ra", ra_back)
+        call parquet_close_reader(reader)
+
+        call check(error, all(id0_back == id0), "'id0' column did not round-trip correctly")
+        if (allocated(error)) return
+        call check(error, all(abs(ra_back - ra) < 1.0e-9_real64), "'ra' column did not round-trip correctly")
+    end subroutine test_schema_init_add_field_write_read_roundtrip
+
+    !> A qc_min/qc_max with no operator prefix (a bare value) is accepted
+    !> as-is, the same rule %add_col_qc applies to its own min:/max: fields.
+    subroutine test_schema_add_field_bare_qc_bound(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+
+        call schema%init(table="t")
+        call schema%add_field("mag", "float32", qc_min="5")
+
+        call check(error, size(schema%maml%lines) == 6 .and. &
+            trim(schema%maml%lines(1)) == "table: t" .and. &
+            trim(schema%maml%lines(2)) == "fields:" .and. &
+            trim(schema%maml%lines(3)) == "- name: mag" .and. &
+            trim(schema%maml%lines(4)) == "  data_type: float32" .and. &
+            trim(schema%maml%lines(5)) == "  qc:" .and. &
+            trim(schema%maml%lines(6)) == "    min: '5'", &
+            "a bare (operator-less) qc_min value was not accepted/emitted as expected")
+    end subroutine test_schema_add_field_bare_qc_bound
+
+    subroutine test_schema_add_field_before_init_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "schema_add_field_before_init", expect_abort=.true., &
+            failure_message="schema%add_field before schema%init was expected to error stop")
+    end subroutine test_schema_add_field_before_init_aborts
+
+    subroutine test_schema_init_twice_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "schema_init_twice", expect_abort=.true., &
+            failure_message="calling schema%init twice was expected to error stop")
+    end subroutine test_schema_init_twice_aborts
+
+    subroutine test_schema_init_empty_table_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "schema_init_empty_table", expect_abort=.true., &
+            failure_message="schema%init with an empty table was expected to error stop")
+    end subroutine test_schema_init_empty_table_aborts
+
+    subroutine test_schema_add_field_empty_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "schema_add_field_empty_name", expect_abort=.true., &
+            failure_message="schema%add_field with an empty name was expected to error stop")
+    end subroutine test_schema_add_field_empty_name_aborts
+
+    subroutine test_schema_add_field_duplicate_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "schema_add_field_duplicate_name", expect_abort=.true., &
+            failure_message="schema%add_field with a duplicate field name was expected to error stop")
+    end subroutine test_schema_add_field_duplicate_name_aborts
+
+    subroutine test_schema_add_field_invalid_data_type_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "schema_add_field_invalid_data_type", expect_abort=.true., &
+            failure_message="schema%add_field with an invalid data_type was expected to error stop")
+    end subroutine test_schema_add_field_invalid_data_type_aborts
+
+    subroutine test_schema_add_field_qc_min_reversed_operator_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "schema_add_field_qc_min_reversed_operator", expect_abort=.true., &
+            failure_message="schema%add_field with a reversed qc_min operator was expected to error stop")
+    end subroutine test_schema_add_field_qc_min_reversed_operator_aborts
+
+    subroutine test_schema_add_field_qc_max_reversed_operator_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "schema_add_field_qc_max_reversed_operator", expect_abort=.true., &
+            failure_message="schema%add_field with a reversed qc_max operator was expected to error stop")
+    end subroutine test_schema_add_field_qc_max_reversed_operator_aborts
+
+    subroutine test_schema_add_field_qc_operator_without_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "schema_add_field_qc_operator_without_value", expect_abort=.true., &
+            failure_message="schema%add_field with a qc operator but no value was expected to error stop")
+    end subroutine test_schema_add_field_qc_operator_without_value_aborts
+
+    subroutine test_schema_add_field_bad_qc_miss_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "schema_add_field_bad_qc_miss_value", expect_abort=.true., &
+            failure_message="schema%add_field with an invalid qc_miss value was expected to error stop")
+    end subroutine test_schema_add_field_bad_qc_miss_value_aborts
     !
 end module test_maml

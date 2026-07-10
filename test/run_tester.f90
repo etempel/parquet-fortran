@@ -104,17 +104,17 @@ program tester
     !
 contains
 
-    !> "writing" and "errors" contain tests that call execute_command_line
-    !> (fork()+exec() under the hood) to drive the error_scenarios helper
-    !> as a subprocess. test-drive runs the tests within a suite
-    !> concurrently via `!$omp parallel do` by default; forking while
-    !> sibling OpenMP worker threads are alive mid-barrier is unsafe with
-    !> libiomp5 (observed: deterministic SIGSEGV inside
-    !> __kmp_invoke_microtask). Run those two suites' tests sequentially
-    !> instead so the fork always happens with no other team threads active.
+    !> "writing", "errors", "metadata" and "maml" contain tests that call
+    !> execute_command_line (fork()+exec() under the hood) to drive the
+    !> error_scenarios helper as a subprocess. test-drive runs the tests
+    !> within a suite concurrently via `!$omp parallel do` by default;
+    !> forking while sibling OpenMP worker threads are alive mid-barrier is
+    !> unsafe with libiomp5 (observed: deterministic SIGSEGV inside
+    !> __kmp_invoke_microtask). Run those suites' tests sequentially instead
+    !> so the fork always happens with no other team threads active.
     logical function suite_is_safe_to_parallelize(name) result(safe)
         character(len=*), intent(in) :: name
-        safe = .not. (name == "writing" .or. name == "errors" .or. name == "metadata")
+        safe = .not. (name == "writing" .or. name == "errors" .or. name == "metadata" .or. name == "maml")
     end function suite_is_safe_to_parallelize
 
 end program tester

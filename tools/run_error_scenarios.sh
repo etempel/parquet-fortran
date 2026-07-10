@@ -97,6 +97,16 @@ scenarios=(
     "qc_silently_ignored_for_boolean:0"
     "get_metadata_missing_key_no_default:1"
     "get_metadata_conversion_failure_no_default:1"
+    "schema_add_field_before_init:1"
+    "schema_init_twice:1"
+    "schema_init_empty_table:1"
+    "schema_add_field_empty_name:1"
+    "schema_add_field_duplicate_name:1"
+    "schema_add_field_invalid_data_type:1"
+    "schema_add_field_qc_min_reversed_operator:1"
+    "schema_add_field_qc_max_reversed_operator:1"
+    "schema_add_field_qc_operator_without_value:1"
+    "schema_add_field_bad_qc_miss_value:1"
 )
 
 # concurrent_calls_into_shared_reader/writer are deliberately not in the list

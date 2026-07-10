@@ -204,6 +204,55 @@ contains
             null_allowed_flags, int(n, kind=c_long_long), merge(1_c_int8_t, 0_c_int8_t, qc_soft))
     end subroutine apply_parquet_qc
 
+    !> Batch-prefetches the distinct columns named by `filter` in a single
+    !> (thread-parallel, with use_threads) ReadTable, so parquet_reader_set_filter
+    !> later reads each from column_cache instead of issuing a separate
+    !> single-column ReadColumn per clause (see get_single_chunk_array).
+    !>
+    !> Two deliberate constraints:
+    !>  - Only columns that actually exist are prefetched (checked via the
+    !>    non-throwing parquet_reader_has_column). A filter naming an unknown
+    !>    column is left untouched here so parquet_reader_set_filter still
+    !>    reports it with its exact "unknown column in filter: ..." message
+    !>    rather than this prefetch aborting first with a different one.
+    !>  - Must be called from parquet_open_reader BEFORE apply_parquet_qc: while
+    !>    qc is still disabled, prefetching does not run read-time qc on the
+    !>    (still unfiltered) columns. The qc check for filter columns stays in
+    !>    parquet_reader_set_filter, on the filtered rows, exactly as before.
+    !>
+    !> The column list is built as one comma-separated scalar string and passed
+    !> to the string form of parquet_prefetch_columns, avoiding the fixed-width
+    !> character-array pitfall where a too-short declared length would truncate
+    !> a longer column name. Duplicate columns (same column in two clauses) are
+    !> dropped with a delimiter-guarded membership test.
+    subroutine prefetch_filter_columns(reader, filter)
+        type(parquet_reader), intent(inout) :: reader
+        type(parquet_filter), intent(in) :: filter
+        character(len=:), allocatable :: name, op, value, errmsg, list
+        logical :: is_string, ok
+        integer :: i
+
+        list = ""
+        do i = 1, filter%n
+            call parquet_tokenize_filter_rule(filter%rules(i), name, op, value, is_string, ok, errmsg)
+            ! A malformed rule is left for apply_parquet_filter to report.
+            if (.not. ok) cycle
+            ! Unknown columns: skip, so parquet_reader_set_filter owns the error.
+            if (parquet_reader_has_column(reader%handle, trim(name)//char(0)) == 0) cycle
+            ! Delimiter-guarded dedup (so "ra" is not matched inside "gal_ra").
+            if (len(list) > 0) then
+                if (index(","//list//",", ","//trim(name)//",") > 0) cycle
+            end if
+            if (len(list) == 0) then
+                list = trim(name)
+            else
+                list = list//","//trim(name)
+            end if
+        end do
+
+        if (len(list) > 0) call parquet_prefetch_columns(reader, list)
+    end subroutine prefetch_filter_columns
+
     !> Tokenizes and applies every rule in `filter` to `reader` -- called from
     !> parquet_open_reader right after the reader itself is created, so
     !> parquet_get_nrows and every column read afterward already reflect the
@@ -258,6 +307,16 @@ contains
         if (present(use_threads)) use_threads_value = use_threads
 
         reader%handle = create_parquet_reader(trim(filename)//char(0), merge(1_c_int, 0_c_int, use_threads_value))
+
+        ! Warm the filter's columns in one batched (thread-parallel) read
+        ! BEFORE qc is enabled, so parquet_reader_set_filter reads them from
+        ! cache instead of a serial ReadColumn per clause, and so this prefetch
+        ! does not run read-time qc on the still-unfiltered data -- qc for those
+        ! columns still runs later, in set_filter, on the filtered rows. See
+        ! prefetch_filter_columns for the ordering/error-handling rationale.
+        if (present(filter)) then
+            if (filter%n > 0) call prefetch_filter_columns(reader, filter)
+        end if
 
         ! qc setup must happen before the filter is applied: the filter's own
         ! clause evaluation already counts as "touching" a column (see

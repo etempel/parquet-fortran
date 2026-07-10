@@ -254,6 +254,10 @@ extern "C"
 		// back to Fortran -- and every column_cache entry -- reflects only the
 		// matching rows, transparently, once a filter is set.
 		std::shared_ptr<arrow::BooleanArray> filter_mask;
+		// Per-column filter clauses retained solely for parquet_reader_print_stat's
+		// "filter" column: each entry is one clause's operator+value with the
+		// column name stripped (e.g. ">=0.0"), in the order set_filter saw them.
+		std::unordered_map<int, std::vector<std::string>> filter_clauses;
 		// Access bookkeeping for parquet_reader_print_stat only: was_prefetched
 		// is set for every column index named in a parquet_reader_prefetch_columns
 		// call (whether or not it actually triggered a read that time -- see
@@ -1539,6 +1543,11 @@ extern "C"
 				std::snprintf(err_out, static_cast<size_t>(err_cap), "filter rule: %s", err.c_str());
 				return 1;
 			}
+
+			// Retain this clause (operator+value, column name stripped) for the
+			// print_stat "filter" column; multiple clauses on one column are kept
+			// in order and joined with ", " at print time.
+			reader_handle->filter_clauses[idx].push_back(value.empty() ? op : op + value);
 		}
 
 		arrow::BooleanBuilder mask_builder;
@@ -1741,7 +1750,7 @@ extern "C"
 
 		std::vector<std::string> headers = {
 			"col", "parquet_type", "output_type", "col_size", "len_str",
-			"nulls", "min", "max", "prefetc", "read"};
+			"nulls", "min", "max", "qcmin", "qcmax", "qcmiss", "prefetc", "read", "filter"};
 		std::vector<std::vector<std::string>> rows;
 
 		for (int idx : touched)
@@ -1796,6 +1805,31 @@ extern "C"
 			auto output_type_it = reader_handle->output_type_used.find(idx);
 			std::string output_type_str = output_type_it != reader_handle->output_type_used.end() ? output_type_it->second : "";
 
+			// qc bound/miss declarations for this column (blank when none),
+			// shown operator+value like the maml declared them (e.g. ">=0").
+			std::string qcmin_str, qcmax_str, qcmiss_str;
+			auto qc_it = reader_handle->qc_rules.find(idx);
+			if (qc_it != reader_handle->qc_rules.end())
+			{
+				const QcRule &rule = qc_it->second;
+				if (rule.has_min) qcmin_str = rule.min_op + rule.min_raw;
+				if (rule.has_max) qcmax_str = rule.max_op + rule.max_raw;
+				if (rule.null_values_allowed) qcmiss_str = "Null";
+			}
+
+			// Filter clauses on this column (blank when none), column name
+			// stripped, joined with ", " -- e.g. ">=0.0, <360.0".
+			std::string filter_str;
+			auto flt_it = reader_handle->filter_clauses.find(idx);
+			if (flt_it != reader_handle->filter_clauses.end())
+			{
+				for (size_t i = 0; i < flt_it->second.size(); ++i)
+				{
+					if (i) filter_str += ", ";
+					filter_str += flt_it->second[i];
+				}
+			}
+
 			rows.push_back({
 				field->name(),
 				describe_parquet_type(field),
@@ -1805,8 +1839,12 @@ extern "C"
 				nulls_str,
 				min_str,
 				max_str,
+				qcmin_str,
+				qcmax_str,
+				qcmiss_str,
 				reader_handle->was_prefetched.count(idx) ? "yes" : "no",
 				reader_handle->was_read.count(idx) ? "yes" : "no",
+				filter_str,
 			});
 		}
 

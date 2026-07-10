@@ -300,6 +300,35 @@ contains
         if (status /= 0) error stop "parquet_open_reader: " // trim(c_err)
     end subroutine apply_parquet_filter
 
+    !> Called once by parquet_open_reader, right after the handle is created:
+    !> copies the file's flat key-value table metadata (whatever add_metadata
+    !> wrote on the write side) into reader%metadata, so every later
+    !> parquet_get_metadata call only scans this in-memory copy instead of
+    !> re-reading the file. See parquet_reader_get_table_metadata_count and
+    !> friends in parquet_bindings.f90/parquet_wrapper.cpp; `index` there is
+    !> 0-based.
+    subroutine populate_reader_metadata(reader)
+        type(parquet_reader), intent(inout) :: reader
+        integer(c_long_long) :: count, klen, vlen, i
+        character(len=:), allocatable :: kbuf, vbuf
+
+        count = parquet_reader_get_table_metadata_count(reader%handle)
+        if (count <= 0) return
+
+        allocate(reader%metadata%items(int(count)))
+        do i = 1, count
+            klen = parquet_reader_get_table_metadata_key_length(reader%handle, i - 1)
+            vlen = parquet_reader_get_table_metadata_value_length(reader%handle, i - 1)
+            allocate(character(len=int(klen)) :: kbuf)
+            allocate(character(len=int(vlen)) :: vbuf)
+            if (klen > 0) call parquet_reader_get_table_metadata_key(reader%handle, i - 1, kbuf, klen)
+            if (vlen > 0) call parquet_reader_get_table_metadata_value(reader%handle, i - 1, vbuf, vlen)
+            reader%metadata%items(int(i))%key = kbuf
+            reader%metadata%items(int(i))%value = vbuf
+            deallocate(kbuf, vbuf)
+        end do
+    end subroutine populate_reader_metadata
+
     module procedure parquet_open_reader
         logical :: use_threads_value, qc_effective, qc_soft_value
 
@@ -308,6 +337,7 @@ contains
 
         reader%handle = create_parquet_reader(trim(filename)//char(0), merge(1_c_int, 0_c_int, use_threads_value))
         reader%filename = trim(filename)
+        call populate_reader_metadata(reader)
 
         ! Warm the filter's columns in one batched (thread-parallel) read
         ! BEFORE qc is enabled, so parquet_reader_set_filter reads them from

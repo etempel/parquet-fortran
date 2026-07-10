@@ -246,6 +246,13 @@ extern "C"
 		int64_t nrows = 0; // effective row count: equal to total_nrows until a filter narrows it (see parquet_reader_set_filter).
 		int64_t total_nrows = 0; // the file's true, unfiltered row count -- kept for parquet_reader_print_stat's "of N total".
 		std::unordered_map<int, std::shared_ptr<arrow::Array>> column_cache;
+		// Flat key-value table metadata (parquet_add_table_metadata's own
+		// key/value pairs, as written into the Arrow schema's KeyValueMetadata
+		// by build_file_metadata -- NOT re-parsed from the embedded VOTable
+		// XML). Populated once by create_parquet_reader, so parquet_get_metadata
+		// (parquet_metadata.f90) never re-reads the file: every call just
+		// scans this in-memory copy.
+		std::vector<std::pair<std::string, std::string>> table_metadata_cache;
 		// Set once by parquet_reader_set_filter: a plain (never-null) boolean
 		// mask, one entry per row of the *unfiltered* file, true for rows that
 		// pass every filter clause. get_single_chunk_array and
@@ -1174,6 +1181,16 @@ extern "C"
 
 		handle->nrows = handle->reader->parquet_reader()->metadata()->num_rows();
 		handle->total_nrows = handle->nrows;
+
+		auto kv_metadata = handle->schema->metadata();
+		if (kv_metadata)
+		{
+			for (int i = 0; i < kv_metadata->size(); ++i)
+			{
+				handle->table_metadata_cache.emplace_back(kv_metadata->key(i), kv_metadata->value(i));
+			}
+		}
+
 		return handle;
 	}
 
@@ -1681,6 +1698,55 @@ extern "C"
 			max_len = std::max(max_len, static_cast<int64_t>(vals->GetView(i).size()));
 		}
 		return max_len;
+	}
+
+	// parquet_get_metadata (parquet_metadata.f90) reads the whole
+	// table_metadata_cache once, right after parquet_open_reader, via these
+	// four accessors -- length-then-copy, the same two-step convention
+	// parquet_reader_get_string_length/parquet_read_string_column already use
+	// for variable-length strings. `index` is 0-based.
+	int64_t parquet_reader_get_table_metadata_count(void *handle)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		return static_cast<int64_t>(reader_handle->table_metadata_cache.size());
+	}
+
+	static const std::pair<std::string, std::string> &table_metadata_entry_at(
+		ParquetReaderHandle *reader_handle, int64_t index, const char *context)
+	{
+		if (index < 0 || index >= static_cast<int64_t>(reader_handle->table_metadata_cache.size()))
+		{
+			report_fatal_error(context, "table metadata index out of range");
+		}
+		return reader_handle->table_metadata_cache[static_cast<size_t>(index)];
+	}
+
+	int64_t parquet_reader_get_table_metadata_key_length(void *handle, int64_t index)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		return static_cast<int64_t>(
+			table_metadata_entry_at(reader_handle, index, "parquet_reader_get_table_metadata_key_length").first.size());
+	}
+
+	int64_t parquet_reader_get_table_metadata_value_length(void *handle, int64_t index)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		return static_cast<int64_t>(
+			table_metadata_entry_at(reader_handle, index, "parquet_reader_get_table_metadata_value_length").second.size());
+	}
+
+	void parquet_reader_get_table_metadata_key(void *handle, int64_t index, char *buf, int64_t buf_len)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		const auto &entry = table_metadata_entry_at(reader_handle, index, "parquet_reader_get_table_metadata_key");
+		copy_string_with_padding(buf, buf_len, entry.first);
+	}
+
+	void parquet_reader_get_table_metadata_value(void *handle, int64_t index, char *buf, int64_t buf_len)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		const auto &entry = table_metadata_entry_at(reader_handle, index, "parquet_reader_get_table_metadata_value");
+		copy_string_with_padding(buf, buf_len, entry.second);
 	}
 
 	static std::string describe_parquet_type(const std::shared_ptr<arrow::Field> &field)

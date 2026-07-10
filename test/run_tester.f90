@@ -18,6 +18,7 @@ program tester
     use test_maml, only : collect_tests_parquet_maml
     use test_errors, only : collect_tests_parquet_errors
     use test_examples, only : collect_tests_parquet_examples
+    use test_metadata, only : collect_tests_parquet_metadata
     use test_openmp, only : collect_tests_parquet_openmp_write, collect_tests_parquet_openmp
     use parquet_bindings, only : parquet_warmup_memory_pool
     !
@@ -50,6 +51,7 @@ program tester
         new_testsuite("maml", collect_tests_parquet_maml), &
         new_testsuite("errors", collect_tests_parquet_errors), &
         new_testsuite("examples", collect_tests_parquet_examples), &
+        new_testsuite("metadata", collect_tests_parquet_metadata), &
         ! openmp_write must run (and fully complete) as its own suite before
         ! openmp: testdrive runs every test *within* one suite concurrently
         ! with each other by default, but different suites still run
@@ -112,7 +114,7 @@ contains
     !> instead so the fork always happens with no other team threads active.
     logical function suite_is_safe_to_parallelize(name) result(safe)
         character(len=*), intent(in) :: name
-        safe = .not. (name == "writing" .or. name == "errors")
+        safe = .not. (name == "writing" .or. name == "errors" .or. name == "metadata")
     end function suite_is_safe_to_parallelize
 
 end program tester

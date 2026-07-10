@@ -24,8 +24,8 @@ module parquet
                                            ! is_valid mask with any .false. entry is passed for such a column.
         logical :: has_qc_min = .false.
         logical :: has_qc_max = .false.
-        character(len=2) :: qc_min_op = ">=" ! one of ">", "<", ">=", "<="; default when qc: min: has no operator prefix.
-        character(len=2) :: qc_max_op = "<=" ! default when qc: max: has no operator prefix.
+        character(len=2) :: qc_min_op = ">=" ! one of ">", ">="; default when qc: min: has no operator prefix.
+        character(len=2) :: qc_max_op = "<=" ! one of "<", "<="; default when qc: max: has no operator prefix.
         character(len=:), allocatable :: qc_min_raw ! qc: min: bound text, operator prefix already stripped/trimmed;
                                                      ! numeric for int32/int64/float32/float64, literal for string.
         character(len=:), allocatable :: qc_max_raw ! qc: max: bound text, same convention as qc_min_raw.
@@ -184,6 +184,14 @@ module parquet
         ! so parquet_get_nrows(..., check_positive=.true.) can name the file
         ! in its error message; not used for anything else.
         character(len=:), allocatable :: filename
+        ! Flat key-value table metadata (whatever add_metadata wrote on the
+        ! write side), copied once by parquet_open_reader from the underlying
+        ! Arrow schema's KeyValueMetadata -- see parquet_reader_get_table_metadata_count
+        ! and friends in parquet_bindings.f90. Every parquet_get_metadata call
+        ! only scans this in-memory copy; it never re-reads the file. %description
+        ! is never populated on this side (Arrow's flat KV store has no
+        ! description field), only %key/%value.
+        type(parquet_table_metadata) :: metadata
     contains
         final :: reader_finalize
     end type parquet_reader
@@ -296,6 +304,37 @@ module parquet
         module procedure parquet_get_nrows_int32
     end interface parquet_get_nrows
 
+    !> Reads back one key's value from the flat key-value table metadata a
+    !> parquet_writer wrote via add_metadata (see parquet_reader%metadata,
+    !> populated once by parquet_open_reader). `value`'s declared type/kind
+    !> selects the specific procedure, so it also selects which stored
+    !> representation is expected -- the stored string (always written by
+    !> add_metadata as plain text, see parquet_metadata.f90) is parsed back
+    !> into that type. Any key is allowed, including the writer's own
+    !> reserved/internal keys (e.g. "DATE", "column.<name>.unit").
+    !>
+    !> If `key` is missing: returns `default` if given (printing a WARNING
+    !> unless warn=.false.), else error stops. If `key` is present but its
+    !> stored text cannot be converted to the requested type (including a
+    !> stored integer that overflows a 32-bit target): always prints a
+    !> WARNING, then falls back to `default` if given, else error stops.
+    !> `default` must be the same type/kind as `value`; `warn` defaults to
+    !> .true. and only affects the "key missing, default used" case.
+    interface parquet_get_metadata
+        module procedure parquet_get_metadata_int32
+        module procedure parquet_get_metadata_int64
+        module procedure parquet_get_metadata_float32
+        module procedure parquet_get_metadata_float64
+        module procedure parquet_get_metadata_logical
+        module procedure parquet_get_metadata_string
+        module procedure parquet_get_metadata_int32_array
+        module procedure parquet_get_metadata_int64_array
+        module procedure parquet_get_metadata_float32_array
+        module procedure parquet_get_metadata_float64_array
+        module procedure parquet_get_metadata_logical_array
+        module procedure parquet_get_metadata_string_array
+    end interface parquet_get_metadata
+
     interface parquet_get_column_total_elements
         module procedure parquet_get_column_total_elements_int64
         module procedure parquet_get_column_total_elements_int32
@@ -335,6 +374,7 @@ module parquet
     public :: parquet_get_col_size
     public :: parquet_get_column_total_elements
     public :: parquet_get_string_length
+    public :: parquet_get_metadata
     public :: parquet_read_column
     public :: parquet_read_array_row_mode
     public :: parquet_read_array_element_mode
@@ -907,6 +947,102 @@ module parquet
             character(len=*), intent(in) :: name
             integer, intent(out) :: max_string_length
         end subroutine parquet_get_string_length
+
+        module subroutine parquet_get_metadata_int32(reader, key, value, default, warn)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: key
+            integer(int32), intent(out) :: value
+            integer(int32), intent(in), optional :: default
+            logical, intent(in), optional :: warn
+        end subroutine parquet_get_metadata_int32
+
+        module subroutine parquet_get_metadata_int64(reader, key, value, default, warn)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: key
+            integer(int64), intent(out) :: value
+            integer(int64), intent(in), optional :: default
+            logical, intent(in), optional :: warn
+        end subroutine parquet_get_metadata_int64
+
+        module subroutine parquet_get_metadata_float32(reader, key, value, default, warn)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: key
+            real(real32), intent(out) :: value
+            real(real32), intent(in), optional :: default
+            logical, intent(in), optional :: warn
+        end subroutine parquet_get_metadata_float32
+
+        module subroutine parquet_get_metadata_float64(reader, key, value, default, warn)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: key
+            real(real64), intent(out) :: value
+            real(real64), intent(in), optional :: default
+            logical, intent(in), optional :: warn
+        end subroutine parquet_get_metadata_float64
+
+        module subroutine parquet_get_metadata_logical(reader, key, value, default, warn)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: key
+            logical, intent(out) :: value
+            logical, intent(in), optional :: default
+            logical, intent(in), optional :: warn
+        end subroutine parquet_get_metadata_logical
+
+        module subroutine parquet_get_metadata_string(reader, key, value, default, warn)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: key
+            character(len=:), allocatable, intent(out) :: value
+            character(len=*), intent(in), optional :: default
+            logical, intent(in), optional :: warn
+        end subroutine parquet_get_metadata_string
+
+        module subroutine parquet_get_metadata_int32_array(reader, key, value, default, warn)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: key
+            integer(int32), allocatable, intent(out) :: value(:)
+            integer(int32), intent(in), optional :: default(:)
+            logical, intent(in), optional :: warn
+        end subroutine parquet_get_metadata_int32_array
+
+        module subroutine parquet_get_metadata_int64_array(reader, key, value, default, warn)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: key
+            integer(int64), allocatable, intent(out) :: value(:)
+            integer(int64), intent(in), optional :: default(:)
+            logical, intent(in), optional :: warn
+        end subroutine parquet_get_metadata_int64_array
+
+        module subroutine parquet_get_metadata_float32_array(reader, key, value, default, warn)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: key
+            real(real32), allocatable, intent(out) :: value(:)
+            real(real32), intent(in), optional :: default(:)
+            logical, intent(in), optional :: warn
+        end subroutine parquet_get_metadata_float32_array
+
+        module subroutine parquet_get_metadata_float64_array(reader, key, value, default, warn)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: key
+            real(real64), allocatable, intent(out) :: value(:)
+            real(real64), intent(in), optional :: default(:)
+            logical, intent(in), optional :: warn
+        end subroutine parquet_get_metadata_float64_array
+
+        module subroutine parquet_get_metadata_logical_array(reader, key, value, default, warn)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: key
+            logical, allocatable, intent(out) :: value(:)
+            logical, intent(in), optional :: default(:)
+            logical, intent(in), optional :: warn
+        end subroutine parquet_get_metadata_logical_array
+
+        module subroutine parquet_get_metadata_string_array(reader, key, value, default, warn)
+            type(parquet_reader), intent(in) :: reader
+            character(len=*), intent(in) :: key
+            character(len=:), allocatable, intent(out) :: value(:)
+            character(len=*), intent(in), optional :: default(:)
+            logical, intent(in), optional :: warn
+        end subroutine parquet_get_metadata_string_array
 
         module subroutine parquet_read_int32_column_1d(reader, name, values, null_value, is_valid)
             type(parquet_reader), intent(in) :: reader

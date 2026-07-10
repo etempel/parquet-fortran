@@ -191,6 +191,10 @@ program error_scenarios
         call scenario_concurrent_calls_into_shared_reader()
     case ("concurrent_calls_into_shared_writer")
         call scenario_concurrent_calls_into_shared_writer()
+    case ("get_metadata_missing_key_no_default")
+        call scenario_get_metadata_missing_key_no_default()
+    case ("get_metadata_conversion_failure_no_default")
+        call scenario_get_metadata_conversion_failure_no_default()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -1634,5 +1638,48 @@ contains
         call parquet_close_writer(writer)
         print '(a)', "unexpectedly finished concurrent writes into a shared writer without the concurrency guard firing"
     end subroutine scenario_concurrent_calls_into_shared_writer
+
+    !> parquet_get_metadata with no `default` given error stops the moment
+    !> the requested key isn't present in the file's table metadata (see
+    !> pgm_stop_missing in parquet_metadata.f90).
+    subroutine scenario_get_metadata_missing_key_no_default()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: id(1) = [1_int32]
+        integer(int32) :: value
+
+        call parquet_open_writer(writer, "test_run/error_scenario_get_metadata_missing.parquet")
+        call parquet_write_column(writer, "id", id)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, "test_run/error_scenario_get_metadata_missing.parquet")
+        call parquet_get_metadata(reader, "does_not_exist", value)
+        print '(a,i0)', "unexpectedly read a missing metadata key with no default without error: ", value
+    end subroutine scenario_get_metadata_missing_key_no_default
+
+    !> parquet_get_metadata with no `default` given error stops when the
+    !> key is present but its stored text cannot be converted to the
+    !> requested type (see pgm_stop_conversion in parquet_metadata.f90).
+    subroutine scenario_get_metadata_conversion_failure_no_default()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_schema) :: schema
+        integer(int32) :: id(1) = [1_int32]
+        integer(int32) :: value
+
+        schema%maml = get_parquet_maml("maml_example.maml")
+        call parquet_parse_maml(schema)
+        call schema%set_column_unavailable()
+        call schema%set_column_available("id0")
+        call schema%add_metadata("not_a_number", "not_a_number")
+
+        call parquet_open_writer(writer, "test_run/error_scenario_get_metadata_bad_type.parquet", schema)
+        call parquet_write_column(writer, "id0", id)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, "test_run/error_scenario_get_metadata_bad_type.parquet")
+        call parquet_get_metadata(reader, "not_a_number", value)
+        print '(a,i0)', "unexpectedly read an unparsable metadata value with no default without error: ", value
+    end subroutine scenario_get_metadata_conversion_failure_no_default
 
 end program error_scenarios

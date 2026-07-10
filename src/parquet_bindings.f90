@@ -28,6 +28,9 @@ module parquet_bindings
     public :: parquet_append_string_column, parquet_append_string_array_column
     public :: parquet_reader_get_nrows, parquet_reader_get_total_nrows, parquet_reader_get_column_col_size
     public :: parquet_reader_get_column_total_elements, parquet_reader_get_string_length
+    public :: parquet_reader_get_table_metadata_count
+    public :: parquet_reader_get_table_metadata_key_length, parquet_reader_get_table_metadata_value_length
+    public :: parquet_reader_get_table_metadata_key, parquet_reader_get_table_metadata_value
     public :: parquet_reader_prefetch_columns, parquet_reader_has_column
     public :: parquet_reader_set_filter
     public :: parquet_reader_set_qc
@@ -304,6 +307,47 @@ module parquet_bindings
             character(kind=c_char) :: name(*)
             integer(c_long_long) :: strlen_max
         end function
+
+        function parquet_reader_get_table_metadata_count(reader) &
+                bind(C, name="parquet_reader_get_table_metadata_count") result(count)
+            import
+            type(c_ptr), value :: reader
+            integer(c_long_long) :: count
+        end function
+
+        function parquet_reader_get_table_metadata_key_length(reader, index) &
+                bind(C, name="parquet_reader_get_table_metadata_key_length") result(strlen)
+            import
+            type(c_ptr), value :: reader
+            integer(c_long_long), value :: index
+            integer(c_long_long) :: strlen
+        end function
+
+        function parquet_reader_get_table_metadata_value_length(reader, index) &
+                bind(C, name="parquet_reader_get_table_metadata_value_length") result(strlen)
+            import
+            type(c_ptr), value :: reader
+            integer(c_long_long), value :: index
+            integer(c_long_long) :: strlen
+        end function
+
+        subroutine parquet_reader_get_table_metadata_key(reader, index, buf, buf_len) &
+                bind(C, name="parquet_reader_get_table_metadata_key")
+            import
+            type(c_ptr), value :: reader
+            integer(c_long_long), value :: index
+            character(kind=c_char) :: buf(*)
+            integer(c_long_long), value :: buf_len
+        end subroutine
+
+        subroutine parquet_reader_get_table_metadata_value(reader, index, buf, buf_len) &
+                bind(C, name="parquet_reader_get_table_metadata_value")
+            import
+            type(c_ptr), value :: reader
+            integer(c_long_long), value :: index
+            character(kind=c_char) :: buf(*)
+            integer(c_long_long), value :: buf_len
+        end subroutine
 
         subroutine parquet_read_int32_column(reader, name, data, nrows, valid_out) &
                 bind(C, name="parquet_read_int32_column")

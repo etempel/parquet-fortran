@@ -95,6 +95,8 @@ scenarios=(
     "qc_warning_numeric:0"
     "qc_warning_string:0"
     "qc_silently_ignored_for_boolean:0"
+    "get_metadata_missing_key_no_default:1"
+    "get_metadata_conversion_failure_no_default:1"
 )
 
 # concurrent_calls_into_shared_reader/writer are deliberately not in the list

@@ -84,3 +84,30 @@ from the first element of an array/vector column (e.g. the string-vector-column 
 the first element is deliberately the extreme/shortest case and a later element is longer.
 A fixture where the first element happens to be the longest (or same-length) can pass even
 if the underlying bug is still present.
+
+## Public numeric arguments: provide both int32 and int64 kinds
+
+When adding a public procedure argument that holds a row count / size / index (any integer a
+caller might naturally declare as a plain `INTEGER`), make it generic over **both**
+`integer(int32)` and `integer(int64)`, following the existing `parquet_get_nrows_int32`/
+`parquet_get_nrows_int64` overload pattern. An `integer(int64)`-only dummy forces callers
+with a default-kind `INTEGER` variable into a `Type mismatch ... passed INTEGER(4) to
+INTEGER(8)` compile error (this shipped once for `parquet_open_reader`'s `nrows=` before
+being fixed).
+
+Fortran constraint that shapes this: an *optional* dummy that differs only by kind cannot be
+the sole disambiguator between specific procedures in a generic interface (a call omitting it
+is ambiguous). So when such an argument is optional, carry the argument-absent case as its
+own separate specific rather than an optional dummy — see `parquet_open_reader`'s split into
+`parquet_open_reader_base` (no `nrows`) plus `parquet_open_reader_nrows_int32`/`_int64`
+(required `nrows`), all under one generic interface.
+
+## Error stop messages: include file/schema context
+
+New `error stop` messages in the read/write/schema-building paths should append the relevant
+file and, where applicable, schema/maml name using the existing helpers — `writer_context_suffix`
+(`parquet_write.f90`), `reader_filename_suffix` (`parquet_read.f90`), `maml_name_suffix`
+(`parquet_metadata.f90`) — rather than naming only the offending column/field, so a failure is
+identifiable when several readers/writers/schemas are in play at once. These are only
+meaningful once the reader/writer/schema knows its file/name (i.e. post-open), so the
+guard-clause "…has not been opened" messages are exempt.

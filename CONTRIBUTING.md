@@ -4,6 +4,7 @@ This file covers developing, testing, and extending this repository itself. If y
 
 ## Contents
 
+- [Conventions](#conventions)
 - [Building and testing this repository](#building-and-testing-this-repository)
   - [Running the error-path tests](#running-the-error-path-tests)
   - [Regenerating the test fixtures](#regenerating-the-test-fixtures)
@@ -12,6 +13,14 @@ This file covers developing, testing, and extending this repository itself. If y
 - [Extending the MAML schema](#extending-the-maml-schema)
 - [Error-handling conventions in `parquet_wrapper.cpp`](#error-handling-conventions-in-parquet_wrappercpp)
 - [Features considered but not implemented](#features-considered-but-not-implemented)
+
+## Conventions
+
+Two project conventions worth knowing before contributing (both are applied in day-to-day development and enforced in review):
+
+**Naming.** Public module-level API — everything in `src/parquet.f90`'s `public ::` list — carries the `parquet_` prefix (e.g. `parquet_open_reader`, `parquet_get_metadata`). Type-bound procedures (`schema%init`, `reader%...`) are namespaced by their type and do not. The `maml_` prefix is reserved for MAML-parsing/building internal helpers. When in doubt, grep for an existing analogous name before inventing a new one.
+
+**New features need tests and docs.** A new feature should land together with (1) unit-test coverage in the relevant `test/*.f90` suite — plus error-path coverage via `test/error_scenarios.f90` + `test/test_errors.f90` + `tools/run_error_scenarios.sh` if it has failure modes that `error stop` — and (2) documentation updates: the [README](README.md) / [user manual](MANUAL.md) for any public API or behavior, this file if it affects contributor workflow, and a `CHANGELOG.md` entry under `[Unreleased]`.
 
 ## Building and testing this repository
 
@@ -37,7 +46,7 @@ The executable is placed in the `my_path/bin` directory. It only prints the parq
 
 ### Running the error-path tests
 
-Most of this library's failure modes (invalid MAML, unknown columns, type mismatches, etc.) are reported via Fortran's `error stop`, which aborts the whole process — see [README.md's Error handling section](README.md#error-handling). Since test-drive assertions can't survive an `error stop` in the same process, these paths are exercised out-of-process by a small helper program, `test/error_scenarios.f90`, which is built as its own `fpm` test target named `error_scenarios`.
+Most of this library's failure modes (invalid MAML, unknown columns, type mismatches, etc.) are reported via Fortran's `error stop`, which aborts the whole process — see [README.md's Error handling section](MANUAL.md#error-handling). Since test-drive assertions can't survive an `error stop` in the same process, these paths are exercised out-of-process by a small helper program, `test/error_scenarios.f90`, which is built as its own `fpm` test target named `error_scenarios`.
 
 `error_scenarios` takes a single scenario name as a command-line argument and deliberately triggers the corresponding failure:
 
@@ -101,7 +110,7 @@ export FPM_FFLAGS="-fopenmp"
 fpm test
 ```
 
-The OpenMP flag is compiler-dependent (see [README's Thread safety section](README.md#thread-safety) for the per-compiler flags), so it can't be hardcoded in `fpm.toml` and must come from `FPM_FFLAGS` as shown. The two concurrency error-scenario tests are **self-adapting**: they check `omp_get_max_threads()` and, when it's `1` (no OpenMP flag, or `OMP_NUM_THREADS=1`), the shared-reader/writer race cannot occur, so they skip and pass trivially. So plain `fpm test` (no `FPM_FFLAGS`) is still green — it just doesn't meaningfully exercise these specific concurrency checks; set `FPM_FFLAGS="-fopenmp"` to actually verify the guard fires.
+The OpenMP flag is compiler-dependent (see [README's Thread safety section](MANUAL.md#thread-safety) for the per-compiler flags), so it can't be hardcoded in `fpm.toml` and must come from `FPM_FFLAGS` as shown. The two concurrency error-scenario tests are **self-adapting**: they check `omp_get_max_threads()` and, when it's `1` (no OpenMP flag, or `OMP_NUM_THREADS=1`), the shared-reader/writer race cannot occur, so they skip and pass trivially. So plain `fpm test` (no `FPM_FFLAGS`) is still green — it just doesn't meaningfully exercise these specific concurrency checks; set `FPM_FFLAGS="-fopenmp"` to actually verify the guard fires.
 
 ## Regenerating the built-in MAML module
 
@@ -117,7 +126,7 @@ tools/generate_parquet_maml.sh base   # (re)generates src/parquet_maml_base.f90
 
 The generated file carries a header stating it is auto-generated — do not hand-edit `src/parquet_maml_base.f90`; instead edit the source `.maml` files under `docs/` and re-run the script.
 
-(The same script's other, no-argument mode is a separate, consumer-facing feature for embedding schemas in a downstream project — see [README.md's "Embedding your own MAML schemas in your own project"](README.md#embedding-your-own-maml-schemas-in-your-own-project).)
+(The same script's other, no-argument mode is a separate, consumer-facing feature for embedding schemas in a downstream project — see [README.md's "Embedding your own MAML schemas in your own project"](MANUAL.md#embedding-your-own-maml-schemas-in-your-own-project).)
 
 ## Extending the MAML schema
 
@@ -133,12 +142,12 @@ These were looked at (during an audit comparing this library against Arrow C++'s
 
 **Plausible future candidates, if needed:**
 - `date`/`timestamp` scalar types — Arrow supports these natively; would likely slot into the existing six-type scheme as new entries.
-- Streaming/incremental writes — `parquet_write_column` currently buffers a full column in memory before `parquet_close_writer` writes anything (see [README.md's Performance and memory section](README.md#performance-and-memory)); Arrow's `parquet::arrow::FileWriter` supports writing row batches incrementally, which would resolve this but requires reworking the writer's internal buffering model.
+- Streaming/incremental writes — `parquet_write_column` currently buffers a full column in memory before `parquet_close_writer` writes anything (see [README.md's Performance and memory section](MANUAL.md#performance-and-memory)); Arrow's `parquet::arrow::FileWriter` supports writing row batches incrementally, which would resolve this but requires reworking the writer's internal buffering model.
 - Row-group-level partial reads — `parquet::arrow::FileReader::ReadRowGroup` exists and is unused; would be a bounded step toward "read only some rows," short of full predicate pushdown.
 - Per-column writer properties (e.g. `disable_statistics()` for write-heavy/throwaway files, explicit dictionary-encoding toggles) — small, additive, doesn't touch the type system.
 
 **Bigger lifts, worth being cautious about:**
-- Predicate pushdown (statistics-based I/O skipping) — *not to be confused with row filtering, which is already implemented* (`parquet_filter` / `parquet_open_reader(..., filter=)`, see [README.md's Row filtering section](README.md#row-filtering-with-parquet_filter)). That existing filter is post-decode: it narrows the rows your code sees but still reads and decodes every referenced column in full. Genuine predicate pushdown — using per-row-group statistics (or Arrow's expression/compute-filter machinery) to skip reading matching row groups off disk entirely — is the unimplemented part, and the current "no random-access read" limitation treats it as an intentional non-goal for now.
+- Predicate pushdown (statistics-based I/O skipping) — *not to be confused with row filtering, which is already implemented* (`parquet_filter` / `parquet_open_reader(..., filter=)`, see [README.md's Row filtering section](MANUAL.md#row-filtering-with-parquet_filter)). That existing filter is post-decode: it narrows the rows your code sees but still reads and decodes every referenced column in full. Genuine predicate pushdown — using per-row-group statistics (or Arrow's expression/compute-filter machinery) to skip reading matching row groups off disk entirely — is the unimplemented part, and the current "no random-access read" limitation treats it as an intentional non-goal for now.
 - Nested/struct/map/variable-length-list types — Arrow supports these natively, but they'd break the library's core "flat columns + fixed `col_size` vectors" data model that the whole Fortran-side API is built around; this would be a redesign, not an addition.
 - Additional scalar types (`int8`/`int16`/unsigned integers/`decimal`) — straightforward from Arrow's side, but each new type multiplies the `parquet_write_*`/`parquet_read_*` interface surface (a dedicated subroutine pair per type already exists for each of the six supported types).
 

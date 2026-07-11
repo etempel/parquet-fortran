@@ -347,7 +347,7 @@ contains
         end do
     end subroutine populate_reader_metadata
 
-    module procedure parquet_open_reader
+    module procedure parquet_open_reader_base
         logical :: use_threads_value, qc_effective, qc_soft_value
 
         use_threads_value = .true.
@@ -382,12 +382,17 @@ contains
         if (present(filter)) then
             if (filter%n > 0) call parquet_apply_filter(reader, filter)
         end if
+    end procedure parquet_open_reader_base
 
-        ! Computed last, after the filter is applied, so this is the
-        ! post-filter row count -- see parquet_get_nrows/check_nrows_positive
-        ! for the check_positive=.true. behavior on zero rows.
-        if (present(nrows)) call parquet_get_nrows(reader, nrows, check_positive=.true.)
-    end procedure parquet_open_reader
+    module procedure parquet_open_reader_nrows_int64
+        call parquet_open_reader_base(reader, filename, use_threads, filter, schema, qc, qc_soft)
+        call parquet_get_nrows(reader, nrows, check_positive=.true.)
+    end procedure parquet_open_reader_nrows_int64
+
+    module procedure parquet_open_reader_nrows_int32
+        call parquet_open_reader_base(reader, filename, use_threads, filter, schema, qc, qc_soft)
+        call parquet_get_nrows(reader, nrows, check_positive=.true.)
+    end procedure parquet_open_reader_nrows_int32
 
     module procedure parquet_close_reader
         if (.not. c_associated(reader%handle)) then

@@ -1359,6 +1359,12 @@ contains
     !> filter narrows the rows, and the unfiltered total otherwise. The
     !> zero-matching-rows abort path itself is covered separately by the
     !> open_reader_nrows_zero_rows error scenario, since it error stops.
+    !>
+    !> nrows= is generic over integer(int32)/integer(int64) (see
+    !> parquet_open_reader's interface in src/parquet.f90), so this also
+    !> checks the int32 form -- including a plain default INTEGER actual
+    !> argument, the form most callers reach for and the one a caller who
+    !> only declares `integer :: nrows` (no explicit kind) would use.
     subroutine test_open_reader_nrows_arg(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_writer) :: writer
@@ -1366,6 +1372,8 @@ contains
         type(parquet_filter) :: filt
         integer(int32) :: id(6)
         integer(int64) :: nrows
+        integer(int32) :: nrows32
+        integer :: nrows_default
         character(len=*), parameter :: out_file = "test_run/test_open_reader_nrows_arg.parquet"
         integer :: i
 
@@ -1383,6 +1391,17 @@ contains
         call filt%add("id > 3")
         call parquet_open_reader(reader, out_file, filter=filt, nrows=nrows)
         call check(error, nrows == 3_int64, "parquet_open_reader(nrows=) did not return the post-filter row count")
+        call parquet_close_reader(reader)
+        if (allocated(error)) return
+
+        call parquet_open_reader(reader, out_file, nrows=nrows32)
+        call check(error, nrows32 == 6_int32, "parquet_open_reader(nrows=) with an integer(int32) actual did not return the row count")
+        call parquet_close_reader(reader)
+        if (allocated(error)) return
+
+        call parquet_open_reader(reader, out_file, nrows=nrows_default)
+        call check(error, nrows_default == 6, &
+            "parquet_open_reader(nrows=) with a plain default-INTEGER actual did not return the row count")
         call parquet_close_reader(reader)
     end subroutine test_open_reader_nrows_arg
 

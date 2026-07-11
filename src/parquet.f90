@@ -341,6 +341,19 @@ module parquet
         module procedure parquet_get_nrows_int32
     end interface parquet_get_nrows
 
+    ! nrows= is generic over integer(int32)/integer(int64) (parquet_open_reader_nrows_int32/
+    ! _int64), plus the original nrows-less form (parquet_open_reader_base) for when nrows
+    ! isn't wanted at all. This mirrors parquet_get_nrows's own int32/int64 overload above;
+    ! nrows is required (not optional) in the two typed specifics -- an optional dummy that
+    ! may be absent can't be the sole thing distinguishing two specific procedures in a
+    ! generic interface (a call omitting it would be ambiguous), so parquet_open_reader_base
+    ! carries the nrows-absent case as a separate specific instead.
+    interface parquet_open_reader
+        module procedure parquet_open_reader_base
+        module procedure parquet_open_reader_nrows_int64
+        module procedure parquet_open_reader_nrows_int32
+    end interface parquet_open_reader
+
     !> Reads back one key's value from the flat key-value table metadata a
     !> parquet_writer wrote via add_metadata (see parquet_reader%metadata,
     !> populated once by parquet_open_reader). `value`'s declared type/kind
@@ -1000,16 +1013,11 @@ module parquet
             character(len=:), allocatable :: out
         end function parquet_to_lower
 
-        !> nrows (optional, integer(int64)): if present, filled in with the
-        !> post-filter row count via parquet_get_nrows(reader, nrows,
-        !> check_positive=.true.) -- so, exactly like that check_positive
-        !> path, a file (or filter result) with zero rows fails immediately
-        !> with error stop instead of silently returning nrows=0. Omit nrows
-        !> (as before) if you want to open a reader that may legitimately
-        !> have zero matching rows -- call parquet_get_nrows yourself
-        !> afterwards, without check_positive, to get 0 back instead of
-        !> aborting.
-        module subroutine parquet_open_reader(reader, filename, use_threads, filter, schema, qc, qc_soft, nrows)
+        !> The nrows-less form of parquet_open_reader (see the generic
+        !> interface above): opens as usual, filling in none of the
+        !> post-filter row count. Called directly by the two nrows= forms
+        !> below, which then call parquet_get_nrows themselves.
+        module subroutine parquet_open_reader_base(reader, filename, use_threads, filter, schema, qc, qc_soft)
             type(parquet_reader), intent(out) :: reader
             character(len=*), intent(in) :: filename
             logical, intent(in), optional :: use_threads
@@ -1017,8 +1025,43 @@ module parquet
             type(parquet_schema), intent(in), optional :: schema
             logical, intent(in), optional :: qc
             logical, intent(in), optional :: qc_soft
-            integer(int64), intent(out), optional :: nrows
-        end subroutine parquet_open_reader
+        end subroutine parquet_open_reader_base
+
+        !> nrows (integer(int64)): filled in with the post-filter row count
+        !> via parquet_get_nrows(reader, nrows, check_positive=.true.) -- so,
+        !> exactly like that check_positive path, a file (or filter result)
+        !> with zero rows fails immediately with error stop instead of
+        !> silently returning nrows=0. Omit nrows entirely (dispatches to
+        !> parquet_open_reader_base above) if you want to open a reader that
+        !> may legitimately have zero matching rows -- call parquet_get_nrows
+        !> yourself afterwards, without check_positive, to get 0 back instead
+        !> of aborting.
+        module subroutine parquet_open_reader_nrows_int64(reader, filename, use_threads, filter, schema, qc, qc_soft, nrows)
+            type(parquet_reader), intent(out) :: reader
+            character(len=*), intent(in) :: filename
+            logical, intent(in), optional :: use_threads
+            type(parquet_filter), intent(in), optional :: filter
+            type(parquet_schema), intent(in), optional :: schema
+            logical, intent(in), optional :: qc
+            logical, intent(in), optional :: qc_soft
+            integer(int64), intent(out) :: nrows
+        end subroutine parquet_open_reader_nrows_int64
+
+        !> Same as parquet_open_reader_nrows_int64, but for a caller-supplied
+        !> integer(int32) nrows -- also fails with error stop (via
+        !> parquet_get_nrows_int32) if the actual row count overflows int32,
+        !> exactly as a direct parquet_get_nrows(reader, nrows) call with an
+        !> integer(int32) nrows would.
+        module subroutine parquet_open_reader_nrows_int32(reader, filename, use_threads, filter, schema, qc, qc_soft, nrows)
+            type(parquet_reader), intent(out) :: reader
+            character(len=*), intent(in) :: filename
+            logical, intent(in), optional :: use_threads
+            type(parquet_filter), intent(in), optional :: filter
+            type(parquet_schema), intent(in), optional :: schema
+            logical, intent(in), optional :: qc
+            logical, intent(in), optional :: qc_soft
+            integer(int32), intent(out) :: nrows
+        end subroutine parquet_open_reader_nrows_int32
 
         module subroutine parquet_close_reader(reader, print_stat)
             type(parquet_reader), intent(inout) :: reader

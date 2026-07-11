@@ -21,7 +21,7 @@ module test_maml
     use parquet_maml_base, only : parquet_maml_file, get_parquet_maml
     use iso_fortran_env, only : int32, real32, real64
     use testdrive, only : new_unittest, unittest_type, error_type, check
-    use test_errors, only : check_scenario_exit_status
+    use test_errors, only : check_scenario_exit_status, check_scenario_exit_status_and_stderr
     !
     implicit none
     private
@@ -42,6 +42,8 @@ contains
             new_unittest("col_map: renames a field to an internal name", test_validate_user_maml_col_map_ok), &
             new_unittest("load a MAML file from disk", test_load_maml_file), &
             new_unittest("get_column_index finds an existing column", test_get_column_index_found), &
+            new_unittest("get_num_fields/get_field_name report all fields, unfiltered", &
+                test_get_num_fields_and_field_name), &
             new_unittest("set_unavailable/set_available toggle is_set", test_set_available_unavailable), &
             new_unittest("add_col_qc builds a qc-maml from compact strings", test_add_col_qc_builds_maml), &
             new_unittest("add_col_qc result reads back through parquet_open_reader", test_add_col_qc_roundtrip), &
@@ -235,6 +237,40 @@ contains
         idx = schema%get_column_index("idarr")
         call check(error, idx == 2, "get_column_index('idarr') did not return the expected index")
     end subroutine test_get_column_index_found
+
+    !> get_num_fields/get_field_name report every field declared in maml
+    !> source order, regardless of set_column_unavailable -- unlike
+    !> get_column_index, they are not a "currently active" view.
+    subroutine test_get_num_fields_and_field_name(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+
+        schema%maml = get_parquet_maml("maml_example.maml")
+        call parquet_parse_maml(schema)
+
+        call check(error, schema%get_num_fields() == 13, &
+            "get_num_fields did not return the expected total field count")
+        if (allocated(error)) return
+
+        call check(error, trim(schema%get_field_name(1)) == "id0", &
+            "get_field_name(1) did not return the first declared field")
+        if (allocated(error)) return
+
+        call check(error, trim(schema%get_field_name(13)) == "flag_array", &
+            "get_field_name(13) did not return the last declared field")
+        if (allocated(error)) return
+
+        ! Deactivating a field must not change the count or shift indices --
+        ! get_num_fields/get_field_name see every declared field, not just
+        ! the currently-active ones.
+        call schema%set_column_unavailable("id0")
+        call check(error, schema%get_num_fields() == 13, &
+            "get_num_fields changed after set_column_unavailable")
+        if (allocated(error)) return
+
+        call check(error, trim(schema%get_field_name(1)) == "id0", &
+            "get_field_name(1) changed after set_column_unavailable")
+    end subroutine test_get_num_fields_and_field_name
 
     subroutine test_set_available_unavailable(error)
         type(error_type), allocatable, intent(out) :: error
@@ -633,11 +669,15 @@ contains
             failure_message="schema%add_field with an empty name was expected to error stop")
     end subroutine test_schema_add_field_empty_name_aborts
 
+    !> Also checks the error names which schema/maml it came from: schema%init
+    !> (table="t" in this scenario) always gives an in-memory schema the name
+    !> "internal:t" -- see maml_name_suffix in src/parquet_metadata.f90.
     subroutine test_schema_add_field_duplicate_name_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
-        call check_scenario_exit_status(error, "schema_add_field_duplicate_name", expect_abort=.true., &
-            failure_message="schema%add_field with a duplicate field name was expected to error stop")
+        call check_scenario_exit_status_and_stderr(error, "schema_add_field_duplicate_name", expect_abort=.true., &
+            failure_message="schema%add_field with a duplicate field name was expected to error stop", &
+            required_stderr="parquet_schema%add_field: duplicate field name 'ra' (maml: internal:t)")
     end subroutine test_schema_add_field_duplicate_name_aborts
 
     subroutine test_schema_add_field_invalid_data_type_aborts(error)

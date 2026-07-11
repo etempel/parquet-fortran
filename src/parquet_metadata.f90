@@ -195,6 +195,11 @@ contains
             error stop "parquet_schema%init: table must not be empty"
         end if
 
+        ! Gives an in-memory schema (no source .maml file) a name anyway, so
+        ! writer_maml_suffix and parquet_close_writer's missing-write error
+        ! can still identify which schema they're complaining about.
+        this%maml%name = "internal:" // trim(table)
+
         call maml_push_line(this%maml, "table: " // trim(table))
         if (present(survey))       call maml_push_line(this%maml, "survey: " // trim(survey))
         if (present(dataset))      call maml_push_line(this%maml, "dataset: " // trim(dataset))
@@ -213,6 +218,21 @@ contains
                 author=author, description=description, license=license, maml_version=maml_version)
     end procedure parquet_schema_new
 
+    !> "" if maml%name was never set; otherwise " (maml: X)". schema%add_field
+    !> can only be reached after schema%init (checked below), and %init/
+    !> parquet_schema(...) always give an in-memory schema a name
+    !> ("internal:<table>"), so this is effectively always populated for
+    !> every add_field error below it.
+    function maml_name_suffix(maml) result(suffix)
+        type(parquet_maml_file), intent(in) :: maml
+        character(len=:), allocatable :: suffix
+
+        suffix = ""
+        if (allocated(maml%name)) then
+            if (len_trim(maml%name) > 0) suffix = " (maml: " // trim(maml%name) // ")"
+        end if
+    end function maml_name_suffix
+
     module procedure schema_add_field
         logical :: type_ok
         integer :: j
@@ -224,11 +244,11 @@ contains
         end if
 
         if (len_trim(name) == 0) then
-            error stop "parquet_schema%add_field: field name must not be empty"
+            error stop "parquet_schema%add_field: field name must not be empty" // maml_name_suffix(this%maml)
         end if
 
         if (maml_field_name_exists(this%maml, trim(name))) then
-            error stop "parquet_schema%add_field: duplicate field name '" // trim(name) // "'"
+            error stop "parquet_schema%add_field: duplicate field name '" // trim(name) // "'" // maml_name_suffix(this%maml)
         end if
 
         type_ok = .false.
@@ -240,7 +260,7 @@ contains
         end do
         if (.not. type_ok) then
             error stop "parquet_schema%add_field: field '" // trim(name) // "' has invalid data_type '" // &
-                trim(data_type) // "'"
+                trim(data_type) // "'" // maml_name_suffix(this%maml)
         end if
 
         call validate_qc_bound(qc_min, .true.)
@@ -251,7 +271,7 @@ contains
                 miss_low = parquet_to_lower(trim(adjustl(qc_miss)))
                 if (.not. (miss_low == "null" .or. miss_low == "na")) then
                     error stop "parquet_schema%add_field: invalid qc_miss value '" // trim(adjustl(qc_miss)) // &
-                        "' for field '" // trim(name) // "' (expected Null/NA or empty)"
+                        "' for field '" // trim(name) // "' (expected Null/NA or empty)" // maml_name_suffix(this%maml)
                 end if
             end if
         end if
@@ -327,17 +347,21 @@ contains
             if (has_op) then
                 if (is_min .and. op(1:1) == "<") then
                     error stop "parquet_schema%add_field: qc_min for field '" // trim(name) // "' uses a '" // &
-                        trim(op) // "' operator; qc_min accepts only >= or > (use qc_max for an upper bound)"
+                        trim(op) // "' operator; qc_min accepts only >= or > (use qc_max for an upper bound)" // &
+                        maml_name_suffix(this%maml)
                 end if
                 if (.not. is_min .and. op(1:1) == ">") then
                     error stop "parquet_schema%add_field: qc_max for field '" // trim(name) // "' uses a '" // &
-                        trim(op) // "' operator; qc_max accepts only <= or < (use qc_min for a lower bound)"
+                        trim(op) // "' operator; qc_max accepts only <= or < (use qc_min for a lower bound)" // &
+                        maml_name_suffix(this%maml)
                 end if
                 if (len_trim(rem) == 0) then
                     if (is_min) then
-                        error stop "parquet_schema%add_field: bad qc_min value provided for field '" // trim(name) // "'"
+                        error stop "parquet_schema%add_field: bad qc_min value provided for field '" // trim(name) // &
+                            "'" // maml_name_suffix(this%maml)
                     else
-                        error stop "parquet_schema%add_field: bad qc_max value provided for field '" // trim(name) // "'"
+                        error stop "parquet_schema%add_field: bad qc_max value provided for field '" // trim(name) // &
+                            "'" // maml_name_suffix(this%maml)
                     end if
                 end if
             end if
@@ -360,6 +384,14 @@ contains
     module procedure schema_get_column_index
         schema_get_column_index = this%cinfo%get_column_index(name)
     end procedure schema_get_column_index
+
+    module procedure schema_get_num_fields
+        schema_get_num_fields = this%cinfo%get_num_fields()
+    end procedure schema_get_num_fields
+
+    module procedure schema_get_field_name
+        name = this%cinfo%get_field_name(index)
+    end procedure schema_get_field_name
 
     module procedure schema_add_col_qc
         call this%maml%add_col_qc(qc_input, col_name)
@@ -1699,6 +1731,27 @@ contains
             error stop "parquet_column_info%get_column_index: column not found: " // trim(name)
         end if
     end procedure get_column_index
+
+    module procedure get_num_fields
+        if (allocated(this%col)) then
+            get_num_fields = size(this%col)
+        else
+            get_num_fields = 0
+        end if
+    end procedure get_num_fields
+
+    module procedure get_field_name
+        character(len=16) :: index_str, count_str
+
+        if (index < 1 .or. index > this%get_num_fields()) then
+            write(index_str, '(I0)') index
+            write(count_str, '(I0)') this%get_num_fields()
+            error stop "parquet_column_info%get_field_name: index " // trim(index_str) // &
+                " out of range (1.." // trim(count_str) // ")"
+        end if
+
+        name = this%col(index)%name
+    end procedure get_field_name
 
     module procedure set_unavailable
         integer :: idx, i

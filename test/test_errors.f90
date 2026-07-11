@@ -65,6 +65,9 @@ contains
             new_unittest("col_map: output name coincides with an existing base column aborts", &
                 test_validate_col_map_output_matches_other_field_aborts), &
             new_unittest("get_column_index on unknown column aborts", test_get_column_index_not_found_aborts), &
+            new_unittest("get_field_name with an index below 1 aborts", test_get_field_name_index_too_low_aborts), &
+            new_unittest("get_field_name with an index past get_num_fields aborts", &
+                test_get_field_name_index_too_high_aborts), &
             new_unittest("write_maml without metadata aborts", test_write_maml_without_metadata_aborts), &
             new_unittest("reading a column with genuine Null values aborts", &
                 test_read_column_with_nulls_aborts), &
@@ -114,6 +117,8 @@ contains
                 test_close_reader_before_open_aborts), &
             new_unittest("closing a never-opened writer aborts", &
                 test_close_writer_before_open_aborts), &
+            new_unittest("closing a writer with an unwritten enabled column aborts", &
+                test_close_writer_missing_write_aborts), &
             new_unittest("reading an unknown column via parquet_read_column aborts", &
                 test_read_unknown_column_aborts), &
             new_unittest("opening a nonexistent file for reading aborts", &
@@ -170,11 +175,15 @@ contains
             failure_message="control scenario 'ok' was expected to exit cleanly")
     end subroutine test_ok_scenario_exits_cleanly
 
+    !> Also checks the error names both the output file and the schema's
+    !> maml -- see writer_context_suffix in src/parquet_write.f90.
     subroutine test_write_undeclared_column_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
-        call check_scenario_exit_status(error, "write_undeclared_column", expect_abort=.true., &
-            failure_message="writing an undeclared column was expected to error stop")
+        call check_scenario_exit_status_and_stderr(error, "write_undeclared_column", expect_abort=.true., &
+            failure_message="writing an undeclared column was expected to error stop", &
+            required_stderr="parquet_write_column: column not defined in parquet_open_writer: not_a_real_column " // &
+                "(file: test_run/error_scenario_undeclared.parquet, maml: maml_example.maml)")
     end subroutine test_write_undeclared_column_aborts
 
     subroutine test_write_type_mismatch_aborts(error)
@@ -331,6 +340,20 @@ contains
         call check_scenario_exit_status(error, "get_column_index_not_found", expect_abort=.true., &
             failure_message="get_column_index on an unknown column was expected to error stop")
     end subroutine test_get_column_index_not_found_aborts
+
+    subroutine test_get_field_name_index_too_low_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "get_field_name_index_too_low", expect_abort=.true., &
+            failure_message="get_field_name(0) was expected to error stop")
+    end subroutine test_get_field_name_index_too_low_aborts
+
+    subroutine test_get_field_name_index_too_high_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "get_field_name_index_too_high", expect_abort=.true., &
+            failure_message="get_field_name(get_num_fields()+1) was expected to error stop")
+    end subroutine test_get_field_name_index_too_high_aborts
 
     subroutine test_write_maml_without_metadata_aborts(error)
         type(error_type), allocatable, intent(out) :: error
@@ -603,15 +626,30 @@ contains
             required_stderr="parquet_close_writer: writer has not been opened, or was already closed")
     end subroutine test_close_writer_before_open_aborts
 
+    !> parquet_close_writer's missing-write abort names the schema as
+    !> "internal:<table>" for a schema built via parquet_schema(...) (never
+    !> loaded from a .maml file) -- see schema_init in src/parquet_metadata.f90
+    !> and parquet_close_writer in src/parquet_write.f90.
+    subroutine test_close_writer_missing_write_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "close_writer_missing_write", expect_abort=.true., &
+            failure_message="closing a writer with an unwritten enabled column was expected to abort", &
+            required_stderr="parquet_close_writer: schema: internal:demo")
+    end subroutine test_close_writer_missing_write_aborts
+
     !> parquet_read_column now validates the column name against the file's
     !> schema and error stops, instead of letting the C++ side's uncaught
-    !> "Column not found" exception abort the process.
+    !> "Column not found" exception abort the process. Also checks the error
+    !> names the file being read -- see reader_filename_suffix in
+    !> src/parquet_read.f90.
     subroutine test_read_unknown_column_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
         call check_scenario_exit_status_and_stderr(error, "read_unknown_column", expect_abort=.true., &
             failure_message="reading an unknown column via parquet_read_column was expected to abort", &
-            required_stderr="parquet_read_column: column not found in parquet file: not_a_real_column")
+            required_stderr="parquet_read_column: column not found in parquet file: not_a_real_column " // &
+                "(file: test/fixtures/has_null.parquet)")
     end subroutine test_read_unknown_column_aborts
 
     !> create_parquet_reader (parquet_wrapper.cpp) now checks Arrow's file-open
@@ -748,11 +786,16 @@ contains
             failure_message="get_col_qc with a reversed min operator was expected to error stop")
     end subroutine test_get_col_qc_reversed_operator_aborts
 
+    !> Also checks the error now names the column, output file and maml --
+    !> previously it named none of those (see writer_context_suffix in
+    !> src/parquet_write.f90).
     subroutine test_write_values_not_divisible_by_col_size_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
-        call check_scenario_exit_status(error, "write_values_not_divisible_by_col_size", expect_abort=.true., &
-            failure_message="writing a values(:) array whose length isn't divisible by col_size was expected to error stop")
+        call check_scenario_exit_status_and_stderr(error, "write_values_not_divisible_by_col_size", expect_abort=.true., &
+            failure_message="writing a values(:) array whose length isn't divisible by col_size was expected to error stop", &
+            required_stderr="parquet_write_int32_column: values size is not divisible by col_size for column v " // &
+                "(file: test_run/error_scenario_col_size_mismatch.parquet, maml: col_size_mismatch.maml)")
     end subroutine test_write_values_not_divisible_by_col_size_aborts
 
     subroutine test_set_max_threads_below_one_aborts(error)

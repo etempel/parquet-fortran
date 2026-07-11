@@ -37,6 +37,23 @@ contains
         end if
     end subroutine check_reader_open
 
+    !> "" if reader%filename was never set; otherwise " (file: X)". Every
+    !> caller of this is reached only once the reader is open, at which
+    !> point parquet_open_reader has already set %filename, so this is
+    !> effectively always populated in practice -- the allocated() guard is
+    !> just defensive. Appended to post-open read errors so they name which
+    !> parquet file failed, without needing that file to be threaded through
+    !> every intermediate call.
+    function reader_filename_suffix(reader) result(suffix)
+        type(parquet_reader), intent(in) :: reader
+        character(len=:), allocatable :: suffix
+
+        suffix = ""
+        if (allocated(reader%filename)) then
+            if (len_trim(reader%filename) > 0) suffix = " (file: " // trim(reader%filename) // ")"
+        end if
+    end function reader_filename_suffix
+
     !> Every reader-taking procedure that also names a specific column calls
     !> this right after check_reader_open: an unrecognized column name used
     !> to reach the C++ side's own "Column not found" exception uncaught
@@ -50,7 +67,7 @@ contains
         type(parquet_reader), intent(in) :: reader
         character(len=*), intent(in) :: name, context
         if (parquet_reader_has_column(reader%handle, trim(name)//char(0)) == 0) then
-            error stop trim(context) // ": column not found in parquet file: " // trim(name)
+            error stop trim(context) // ": column not found in parquet file: " // trim(name) // reader_filename_suffix(reader)
         end if
     end subroutine check_column_exists
 
@@ -278,9 +295,10 @@ contains
         do i = 1, n
             call parquet_tokenize_filter_rule(filter%rules(i), parsed_name, parsed_op, parsed_value, &
                 parsed_is_string, ok, errmsg)
-            if (.not. ok) error stop "parquet_open_reader: invalid filter rule: " // errmsg
+            if (.not. ok) error stop "parquet_open_reader: invalid filter rule: " // errmsg // reader_filename_suffix(reader)
             if (len(parsed_name) > len(names) .or. len(parsed_op) > len(ops) .or. len(parsed_value) > len(values)) then
-                error stop "parquet_open_reader: filter rule exceeds an internal length limit: " // trim(filter%rules(i))
+                error stop "parquet_open_reader: filter rule exceeds an internal length limit: " // trim(filter%rules(i)) // &
+                    reader_filename_suffix(reader)
             end if
             names(i) = parsed_name
             ops(i) = parsed_op
@@ -297,7 +315,7 @@ contains
             ops_packed, int(len(ops), kind=c_long_long), values_packed, int(len(values), kind=c_long_long), &
             is_string_flags, int(n, kind=c_long_long), c_err, int(len(c_err), kind=c_long_long))
 
-        if (status /= 0) error stop "parquet_open_reader: " // trim(c_err)
+        if (status /= 0) error stop "parquet_open_reader: " // trim(c_err) // reader_filename_suffix(reader)
     end subroutine parquet_apply_filter
 
     !> Called once by parquet_open_reader, right after the handle is created:
@@ -393,7 +411,8 @@ contains
 
         do i = 1, n
             if (parquet_reader_has_column(reader%handle, trim(names(i))//char(0)) == 0) then
-                error stop "parquet_prefetch_columns: column not found in parquet file: " // trim(names(i))
+                error stop "parquet_prefetch_columns: column not found in parquet file: " // trim(names(i)) // &
+                    reader_filename_suffix(reader)
             end if
         end do
 
@@ -515,7 +534,7 @@ contains
             if (check_positive) call check_nrows_positive(reader, nrows64)
         end if
         if (nrows64 > huge(0_int32)) then
-            error stop "parquet_get_nrows: number of rows exceeds int32 range"
+            error stop "parquet_get_nrows: number of rows exceeds int32 range" // reader_filename_suffix(reader)
         end if
         nrows = int(nrows64, kind=int32)
     end procedure parquet_get_nrows_int32
@@ -538,7 +557,8 @@ contains
         call check_column_exists(reader, name, "parquet_get_column_total_elements")
         nelem64 = int(parquet_reader_get_column_total_elements(reader%handle, trim(name)//char(0)), kind=int64)
         if (nelem64 > huge(0_int32)) then
-            error stop "parquet_get_column_total_elements: number of elements exceeds int32 range for column: " // trim(name)
+            error stop "parquet_get_column_total_elements: number of elements exceeds int32 range for column: " // &
+                trim(name) // reader_filename_suffix(reader)
         end if
         total_elements = int(nelem64, kind=int32)
     end procedure parquet_get_column_total_elements_int32
@@ -558,7 +578,8 @@ contains
             write(expected_str, '(i0)') file_nrows
             write(got_str, '(i0)') given_nrows
             error stop "parquet_read_column: row count mismatch for column " // trim(name) // &
-                ": file has " // trim(expected_str) // " rows but the values array implies " // trim(got_str)
+                ": file has " // trim(expected_str) // " rows but the values array implies " // trim(got_str) // &
+                reader_filename_suffix(reader)
         end if
     end procedure parquet_check_read_row_count
 

@@ -10,7 +10,7 @@ module parquet
     implicit none
     private
     !
-    character(len=*),parameter:: cversion = "v0.9.0 (2026-07-10)" !< version info
+    character(len=*),parameter:: cversion = "v0.9.0 (2026-07-11)" !< version info
 #ifndef RELEASE_VERSION
 #  define RELEASE_VERSION 0.1
 #endif
@@ -50,6 +50,8 @@ module parquet
         type(parquet_column_type), allocatable :: col(:)
     contains
         procedure :: get_column_index
+        procedure :: get_num_fields
+        procedure :: get_field_name
         ! Exposed as set_column_available/set_column_unavailable to match the
         ! same-named methods on parquet_schema (the primary public API); the
         ! backing module procedures keep the shorter set_available/set_unavailable
@@ -121,6 +123,8 @@ module parquet
         procedure :: set_column_available
         procedure :: set_column_unavailable
         procedure :: get_column_index => schema_get_column_index
+        procedure :: get_num_fields => schema_get_num_fields
+        procedure :: get_field_name => schema_get_field_name
         ! add_col_qc/get_col_qc build a read-time qc-maml. Two intentional
         ! naming choices here: (1) "col_qc" is a deliberate domain abbreviation
         ! for "column quality-control" (the qc: block of a fields: entry) --
@@ -202,6 +206,10 @@ module parquet
                                  ! the schema's own %maml%name was never set); solely so
                                  ! parquet_write_column's "column not defined"/"type mismatch" errors
                                  ! can name which maml the schema came from -- see writer_maml_suffix.
+        ! Set by parquet_open_writer from its own `filename` argument, solely
+        ! so parquet_close_writer's missing-write error can name the output
+        ! file; not used for anything else.
+        character(len=:), allocatable :: filename
     contains
         final :: writer_finalize
     end type parquet_writer
@@ -722,6 +730,16 @@ module parquet
             character(len=*), intent(in) :: name
         end function schema_get_column_index
 
+        module integer function schema_get_num_fields(this)
+            class(parquet_schema), intent(in) :: this
+        end function schema_get_num_fields
+
+        module function schema_get_field_name(this, index) result(name)
+            class(parquet_schema), intent(in) :: this
+            integer, intent(in) :: index
+            character(len=:), allocatable :: name
+        end function schema_get_field_name
+
         module subroutine schema_add_col_qc(this, qc_input, col_name)
             class(parquet_schema), intent(inout) :: this
             character(len=*), intent(in) :: qc_input
@@ -832,6 +850,23 @@ module parquet
             class(parquet_column_info), intent(in) :: this
             character(len=*), intent(in) :: name
         end function get_column_index
+
+        !> Total number of fields defined in this column_info, in maml source
+        !> order, with no filtering by is_set/is_deactivated -- i.e. every
+        !> field that was ever declared (via a fields: entry or %add_field).
+        module integer function get_num_fields(this)
+            class(parquet_column_info), intent(in) :: this
+        end function get_num_fields
+
+        !> Name of the field at the given 1-based position in maml source
+        !> order (same order get_num_fields counts). index must be between 1
+        !> and get_num_fields(this); anything outside that range fails with
+        !> error stop.
+        module function get_field_name(this, index) result(name)
+            class(parquet_column_info), intent(in) :: this
+            integer, intent(in) :: index
+            character(len=:), allocatable :: name
+        end function get_field_name
 
         module subroutine set_unavailable(this, name)
             class(parquet_column_info), intent(inout) :: this

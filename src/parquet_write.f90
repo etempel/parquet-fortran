@@ -277,19 +277,38 @@ contains
         end select
     end subroutine parquet_append_as_schema_float64
 
-    !> "" for a schema-less writer, or a schema whose %maml%name was never set
-    !> (e.g. a hand-built in-memory schema); otherwise " (maml: X)", appended
-    !> to parquet_write_column's schema-mismatch errors ("column not defined"/
-    !> "type mismatch") so they name which maml the schema came from.
-    function writer_maml_suffix(writer) result(suffix)
+    !> "" for a schema-less writer with no output filename set either;
+    !> otherwise " (file: X)", " (maml: Y)", or " (file: X, maml: Y)"
+    !> depending on which of writer%filename/writer%maml_name are set
+    !> (writer%filename is set by parquet_open_writer as soon as the writer
+    !> is created, so it is virtually always present here; writer%maml_name
+    !> is unset only for a schema assembled by hand without going through
+    !> schema%init/parquet_schema(...), which always set it to
+    !> "internal:<table>"). Appended to parquet_write_column's
+    !> schema-mismatch and completeness errors so they're diagnosable
+    !> without needing to know which parquet_open_writer call produced them.
+    function writer_context_suffix(writer) result(suffix)
         type(parquet_writer), intent(in) :: writer
         character(len=:), allocatable :: suffix
+        character(len=:), allocatable :: parts
+
+        parts = ""
+        if (allocated(writer%filename)) then
+            if (len_trim(writer%filename) > 0) parts = "file: " // trim(writer%filename)
+        end if
+        if (allocated(writer%maml_name)) then
+            if (len_trim(writer%maml_name) > 0) then
+                if (len(parts) > 0) then
+                    parts = parts // ", maml: " // trim(writer%maml_name)
+                else
+                    parts = "maml: " // trim(writer%maml_name)
+                end if
+            end if
+        end if
 
         suffix = ""
-        if (allocated(writer%maml_name)) then
-            if (len_trim(writer%maml_name) > 0) suffix = " (maml: " // trim(writer%maml_name) // ")"
-        end if
-    end function writer_maml_suffix
+        if (len(parts) > 0) suffix = " (" // parts // ")"
+    end function writer_context_suffix
 
     module procedure parquet_assert_column_type
         integer :: idx
@@ -298,14 +317,13 @@ contains
 
         idx = parquet_get_defined_column_index(writer, name)
         if (idx == 0) then
-            error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_maml_suffix(writer) // &
-                writer_maml_suffix(writer)
+            error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
         end if
 
         if (.not. parquet_is_type_compatible(writer%all_columns(idx)%data_type, expected_type)) then
             error stop "parquet_write_column: type mismatch for column " // trim(name) // &
                                   " (expected " // trim(expected_type) // ", got " // trim(writer%all_columns(idx)%data_type) // ")" // &
-                                  writer_maml_suffix(writer)
+                                  writer_context_suffix(writer)
         end if
     end procedure parquet_assert_column_type
 
@@ -321,7 +339,7 @@ contains
         if (idx == 0) return
 
         if (writer%write_counts(idx) > 0) then
-            error stop "parquet_write_column: column written more than once: " // trim(name)
+            error stop "parquet_write_column: column written more than once: " // trim(name) // writer_context_suffix(writer)
         end if
         writer%write_counts(idx) = writer%write_counts(idx) + 1
     end procedure parquet_mark_column_written
@@ -341,7 +359,8 @@ contains
         if (allocated(writer%written_names)) then
             do i = 1, size(writer%written_names)
                 if (trim(writer%written_names(i)) == trim(name)) then
-                    error stop "parquet_write_column: column written more than once: " // trim(name)
+                    error stop "parquet_write_column: column written more than once: " // trim(name) // &
+                        writer_context_suffix(writer)
                 end if
             end do
             n = size(writer%written_names)
@@ -388,7 +407,8 @@ contains
             write(expected_str, '(i0)') writer%expected_nrows
             write(got_str, '(i0)') nrows
             error stop "parquet_write_column: row count mismatch for column " // trim(name) // &
-                ": expected " // trim(expected_str) // " rows (from an earlier column) but got " // trim(got_str)
+                ": expected " // trim(expected_str) // " rows (from an earlier column) but got " // trim(got_str) // &
+                writer_context_suffix(writer)
         end if
     end procedure parquet_check_row_count
 
@@ -402,6 +422,7 @@ contains
             "uncompressed", "snappy", "gzip", "zstd", "brotli", "lz4"]
 
         writer%handle = create_parquet_writer(trim(filename)//char(0))
+        writer%filename = trim(filename)
         writer%is_schema_enforced = present(schema)
         if (present(qc)) writer%qc = qc
 
@@ -422,7 +443,7 @@ contains
         end do
         if (.not. comp_ok) then
             error stop "parquet_open_writer: unknown compression codec '" // trim(compression_name) // &
-                "' (expected one of: uncompressed, snappy, gzip, zstd, brotli, lz4)"
+                "' (expected one of: uncompressed, snappy, gzip, zstd, brotli, lz4) (file: " // trim(filename) // ")"
         end if
 
         level_value = -huge(level_value) - 1 ! Arrow's kUseDefaultCompressionLevel sentinel (INT_MIN): "use the codec's own default".
@@ -491,11 +512,11 @@ contains
             if (write_maml) then
                 if (.not. present(schema)) then
                     error stop "parquet_open_writer: write_maml=.true. requires a schema " // &
-                        "(prepared by parquet_parse_maml) to be present"
+                        "(prepared by parquet_parse_maml) to be present (file: " // trim(filename) // ")"
                 end if
                 if (.not. allocated(schema%metadata%source_maml_lines)) then
                     error stop "parquet_open_writer: write_maml=.true. requires a schema " // &
-                        "obtained from parquet_parse_maml (no source MAML content found)"
+                        "obtained from parquet_parse_maml (no source MAML content found) (file: " // trim(filename) // ")"
                 end if
                 block
                     character(len=:), allocatable :: sidecar_lines(:)
@@ -897,7 +918,7 @@ contains
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
-            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_maml_suffix(writer)
+            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
             if (.not. writer%all_columns(idx)%is_set) return
         end if
 
@@ -907,7 +928,7 @@ contains
         call parquet_mark_column_written(writer, name)
 
         asize = parquet_get_column_col_size(writer, name)
-        if (mod(size(values), asize) /= 0) error stop "parquet_write_int32_column: values size is not divisible by col_size"
+        if (mod(size(values), asize) /= 0) error stop "parquet_write_int32_column: values size is not divisible by col_size for column " // trim(name) // writer_context_suffix(writer)
         nrows = size(values) / asize
 
         if (present(is_valid)) then
@@ -940,7 +961,7 @@ contains
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
-            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_maml_suffix(writer)
+            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
             if (.not. writer%all_columns(idx)%is_set) return
             if (writer%all_columns(idx)%col_size /= asize) then
                 error stop "parquet_write_column: array size mismatch for column " // trim(name)
@@ -982,7 +1003,7 @@ contains
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
-            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_maml_suffix(writer)
+            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
             if (.not. writer%all_columns(idx)%is_set) return
         end if
 
@@ -992,7 +1013,7 @@ contains
         call parquet_mark_column_written(writer, name)
 
         asize = parquet_get_column_col_size(writer, name)
-        if (mod(size(values), asize) /= 0) error stop "parquet_write_int64_column: values size is not divisible by col_size"
+        if (mod(size(values), asize) /= 0) error stop "parquet_write_int64_column: values size is not divisible by col_size for column " // trim(name) // writer_context_suffix(writer)
         nrows = size(values) / asize
 
         if (present(is_valid)) then
@@ -1025,7 +1046,7 @@ contains
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
-            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_maml_suffix(writer)
+            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
             if (.not. writer%all_columns(idx)%is_set) return
             if (writer%all_columns(idx)%col_size /= asize) then
                 error stop "parquet_write_column: array size mismatch for column " // trim(name)
@@ -1067,7 +1088,7 @@ contains
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
-            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_maml_suffix(writer)
+            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
             if (.not. writer%all_columns(idx)%is_set) return
         end if
 
@@ -1077,7 +1098,7 @@ contains
         call parquet_mark_column_written(writer, name)
 
         asize = parquet_get_column_col_size(writer, name)
-        if (mod(size(values), asize) /= 0) error stop "parquet_write_float32_column: values size is not divisible by col_size"
+        if (mod(size(values), asize) /= 0) error stop "parquet_write_float32_column: values size is not divisible by col_size for column " // trim(name) // writer_context_suffix(writer)
         nrows = size(values) / asize
 
         if (present(is_valid)) then
@@ -1110,7 +1131,7 @@ contains
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
-            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_maml_suffix(writer)
+            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
             if (.not. writer%all_columns(idx)%is_set) return
             if (writer%all_columns(idx)%col_size /= asize) then
                 error stop "parquet_write_column: array size mismatch for column " // trim(name)
@@ -1152,7 +1173,7 @@ contains
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
-            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_maml_suffix(writer)
+            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
             if (.not. writer%all_columns(idx)%is_set) return
         end if
 
@@ -1162,7 +1183,7 @@ contains
         call parquet_mark_column_written(writer, name)
 
         asize = parquet_get_column_col_size(writer, name)
-        if (mod(size(values), asize) /= 0) error stop "parquet_write_float64_column: values size is not divisible by col_size"
+        if (mod(size(values), asize) /= 0) error stop "parquet_write_float64_column: values size is not divisible by col_size for column " // trim(name) // writer_context_suffix(writer)
         nrows = size(values) / asize
 
         if (present(is_valid)) then
@@ -1195,7 +1216,7 @@ contains
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
-            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_maml_suffix(writer)
+            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
             if (.not. writer%all_columns(idx)%is_set) return
             if (writer%all_columns(idx)%col_size /= asize) then
                 error stop "parquet_write_column: array size mismatch for column " // trim(name)
@@ -1238,7 +1259,7 @@ contains
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
-            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_maml_suffix(writer)
+            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
             if (.not. writer%all_columns(idx)%is_set) return
         end if
 
@@ -1248,7 +1269,7 @@ contains
         call parquet_mark_column_written(writer, name)
 
         asize = parquet_get_column_col_size(writer, name)
-        if (mod(size(values), asize) /= 0) error stop "parquet_write_logical_column: values size is not divisible by col_size"
+        if (mod(size(values), asize) /= 0) error stop "parquet_write_logical_column: values size is not divisible by col_size for column " // trim(name) // writer_context_suffix(writer)
         nrows = size(values) / asize
 
         allocate(bool_data(size(values)))
@@ -1286,7 +1307,7 @@ contains
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
-            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_maml_suffix(writer)
+            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
             if (.not. writer%all_columns(idx)%is_set) return
             if (writer%all_columns(idx)%col_size /= asize) then
                 error stop "parquet_write_column: array size mismatch for column " // trim(name)
@@ -1328,7 +1349,7 @@ contains
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
-            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_maml_suffix(writer)
+            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
             if (.not. writer%all_columns(idx)%is_set) return
         end if
 
@@ -1340,7 +1361,7 @@ contains
         asize = parquet_get_column_col_size(writer, name)
         nitems = size(values)
         if (nitems <= 0) return
-        if (mod(nitems, asize) /= 0) error stop "parquet_write_string_column: values size is not divisible by col_size"
+        if (mod(nitems, asize) /= 0) error stop "parquet_write_string_column: values size is not divisible by col_size for column " // trim(name) // writer_context_suffix(writer)
 
         if (writer%is_schema_enforced) then
             max_string_len = max(1, writer%all_columns(idx)%array_size)
@@ -1406,7 +1427,7 @@ contains
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
-            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_maml_suffix(writer)
+            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
             if (.not. writer%all_columns(idx)%is_set) return
             if (writer%all_columns(idx)%col_size /= asize) then
                 error stop "parquet_write_column: array size mismatch for column " // trim(name)
@@ -1472,6 +1493,14 @@ contains
         if (writer%is_schema_enforced .and. allocated(writer%enabled_columns)) then
             do i = 1, size(writer%enabled_columns)
                 if (writer%write_counts(i) == 0) then
+                    ! Filename/schema name go on their own print lines rather
+                    ! than into the error stop text, to keep that text short.
+                    if (allocated(writer%filename)) print '(a)', "parquet_close_writer: output file: " // trim(writer%filename)
+                    if (allocated(writer%maml_name)) then
+                        print '(a)', "parquet_close_writer: schema: " // trim(writer%maml_name)
+                    else
+                        print '(a)', "parquet_close_writer: schema: (unnamed, built in-memory)"
+                    end if
                     error stop "parquet_close_writer: missing write for enabled column: " // trim(writer%enabled_columns(i)%name)
                 end if
             end do

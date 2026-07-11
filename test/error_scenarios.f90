@@ -77,6 +77,10 @@ program error_scenarios
         call scenario_validate_col_map_output_matches_other_field()
     case ("get_column_index_not_found")
         call scenario_get_column_index_not_found()
+    case ("get_field_name_index_too_low")
+        call scenario_get_field_name_index_too_low()
+    case ("get_field_name_index_too_high")
+        call scenario_get_field_name_index_too_high()
     case ("write_maml_without_metadata")
         call scenario_write_maml_without_metadata()
     case ("read_column_with_nulls")
@@ -137,6 +141,8 @@ program error_scenarios
         call scenario_close_reader_before_open()
     case ("close_writer_before_open")
         call scenario_close_writer_before_open()
+    case ("close_writer_missing_write")
+        call scenario_close_writer_missing_write()
     case ("read_unknown_column")
         call scenario_read_unknown_column()
     case ("open_reader_missing_file")
@@ -239,6 +245,29 @@ contains
         call parquet_write_column(writer, "not_a_real_column", data)
         call parquet_close_writer(writer)
     end subroutine scenario_write_undeclared_column
+
+    !> An in-memory schema (parquet_schema(...), not loaded from a .maml file)
+    !> declares three columns but only two are written before parquet_close_writer
+    !> -- checks the missing-write abort also prints the output filename and
+    !> the schema's name, "internal:demo" here since %init/parquet_schema(...)
+    !> name an in-memory schema "internal:<table>".
+    subroutine scenario_close_writer_missing_write()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int32) :: data(1) = [1_int32]
+
+        schema = parquet_schema(table="demo")
+        call schema%add_field("col_a", "int32")
+        call schema%add_field("col_b", "int32")
+        call schema%add_field("col_c", "int32")
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_missing_write.parquet", schema)
+        call parquet_write_column(writer, "col_a", data)
+        call parquet_write_column(writer, "col_b", data)
+        ! col_c is never written.
+        call parquet_close_writer(writer)
+    end subroutine scenario_close_writer_missing_write
 
     subroutine scenario_write_type_mismatch()
         type(parquet_schema) :: schema
@@ -581,6 +610,28 @@ contains
         idx = schema%get_column_index("not_a_real_column")
         print '(a,i0)', "unexpectedly found index: ", idx
     end subroutine scenario_get_column_index_not_found
+
+    subroutine scenario_get_field_name_index_too_low()
+        type(parquet_schema) :: schema
+        character(len=:), allocatable :: name
+
+        schema%maml = get_parquet_maml("maml_example.maml")
+        call parquet_parse_maml(schema)
+
+        name = schema%get_field_name(0)
+        print '(a,a)', "unexpectedly found name: ", name
+    end subroutine scenario_get_field_name_index_too_low
+
+    subroutine scenario_get_field_name_index_too_high()
+        type(parquet_schema) :: schema
+        character(len=:), allocatable :: name
+
+        schema%maml = get_parquet_maml("maml_example.maml")
+        call parquet_parse_maml(schema)
+
+        name = schema%get_field_name(schema%get_num_fields() + 1)
+        print '(a,a)', "unexpectedly found name: ", name
+    end subroutine scenario_get_field_name_index_too_high
 
     !> test/fixtures/has_null.parquet is a fixture this library cannot write
     !> itself (it never calls Arrow's AppendNull anywhere on the write path):

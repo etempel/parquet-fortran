@@ -770,13 +770,26 @@ contains
 
     subroutine test_get_library_version(error)
         type(error_type), allocatable, intent(out) :: error
-        character(len=:), allocatable :: ver_string
+        character(len=:), allocatable :: ver_string, internal_ver_string
 
         call parquet_get_version(ver_string)
 
         call check(error, len_trim(ver_string) > 0)
         if (allocated(error)) then
             call test_failed(error, "library version string is empty")
+            return
+        end if
+
+        ! internal=.true. returns the full internal version string (e.g.
+        ! "v0.9.0 (2026-07-11)": v-prefixed, with a trailing date), as opposed
+        ! to the default release-number-only form (e.g. "0.9.0") -- see the
+        ! parquet_get_version entry in MANUAL.md's "parquet module API".
+        call parquet_get_version(internal_ver_string, internal=.true.)
+
+        call check(error, len_trim(internal_ver_string) > 0 .and. internal_ver_string(1:1) == "v" .and. &
+            index(internal_ver_string, "(") > 0)
+        if (allocated(error)) then
+            call test_failed(error, "parquet_get_version(internal=.true.) did not return a v-prefixed, dated internal version string")
             return
         end if
     end subroutine test_get_library_version

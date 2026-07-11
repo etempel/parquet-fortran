@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `parquet_schema(table[, ...])` — structure-constructor form of `schema%init(...)`, building and returning an initialized schema in one expression (`schema = parquet_schema(table="t")`) as an alternative to declaring the variable and calling `%init` separately. Same arguments and validation as `schema%init`.
+
 ## [0.9.0] - 2026-07-10
 
 ### Added

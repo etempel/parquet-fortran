@@ -152,6 +152,14 @@ module parquet
                                     schema_add_metadata_logical_array, schema_add_metadata_string_array
     end type parquet_schema
 
+    ! Overrides the default structure constructor so a schema can be built
+    ! in one expression (my_maml = parquet_schema(table="my_table")) as an
+    ! alternative to call my_maml%init(table="my_table"); both call
+    ! parquet_schema_new/schema_init under the hood.
+    interface parquet_schema
+        module procedure parquet_schema_new
+    end interface parquet_schema
+
     ! parquet_writer/parquet_reader own a handle to a C++-side Arrow/Parquet
     ! object with no automatic Fortran cleanup. Always prefer an explicit
     ! parquet_close_writer/parquet_close_reader call; the FINAL procedures
@@ -651,6 +659,24 @@ module parquet
             character(len=*), intent(in), optional :: license
             character(len=*), intent(in), optional :: maml_version
         end subroutine schema_init
+
+        !> Structure-constructor form of %init: builds and returns an
+        !> initialized parquet_schema in one expression instead of
+        !> declaring the variable and calling %init separately. Same
+        !> arguments and error-stop conditions as schema_init.
+        module function parquet_schema_new(table, survey, dataset, version, date, author, description, license, &
+                maml_version) result(this)
+            character(len=*), intent(in) :: table
+            character(len=*), intent(in), optional :: survey
+            character(len=*), intent(in), optional :: dataset
+            character(len=*), intent(in), optional :: version
+            character(len=*), intent(in), optional :: date
+            character(len=*), intent(in), optional :: author
+            character(len=*), intent(in), optional :: description
+            character(len=*), intent(in), optional :: license
+            character(len=*), intent(in), optional :: maml_version
+            type(parquet_schema) :: this
+        end function parquet_schema_new
 
         !> Appends one fields: entry to a schema built from scratch (%init
         !> must be called first). name/data_type are required (data_type

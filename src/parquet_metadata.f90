@@ -208,6 +208,11 @@ contains
         this%is_initialized = .true.
     end procedure schema_init
 
+    module procedure parquet_schema_new
+        call this%init(table=table, survey=survey, dataset=dataset, version=version, date=date, &
+                author=author, description=description, license=license, maml_version=maml_version)
+    end procedure parquet_schema_new
+
     module procedure schema_add_field
         logical :: type_ok
         integer :: j

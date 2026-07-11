@@ -48,6 +48,8 @@ contains
             new_unittest("add_col_qc with an empty input is a no-op", test_add_col_qc_empty_input_is_noop), &
             new_unittest("get_col_qc (function form) returns the name in place", test_get_col_qc), &
             new_unittest("schema%init emits the requested top-level keys", test_schema_init_builds_top_level_lines), &
+            new_unittest("parquet_schema(...) constructor matches schema%init", &
+                test_schema_constructor_matches_init), &
             new_unittest("schema%add_field builds exact fields: lines (incl. a qc: block)", &
                 test_schema_add_field_builds_maml_lines), &
             new_unittest("schema%init + add_field round-trips through parquet_parse_maml", &
@@ -421,6 +423,30 @@ contains
             trim(schema%maml%lines(9)) == "MAML_version: 1.2", &
             "schema%init generated unexpected top-level lines")
     end subroutine test_schema_init_builds_top_level_lines
+
+    !> parquet_schema(...) is the structure-constructor alternative to
+    !> declaring a schema and calling %init separately -- it must produce
+    !> the exact same MAML lines as schema%init for the same arguments.
+    subroutine test_schema_constructor_matches_init(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema_via_init
+        type(parquet_schema) :: schema_via_constructor
+
+        call schema_via_init%init(table="input_table", survey="The Big Survey", dataset="ds", &
+            version="1.0", date="2026-01-01", author="Dave Smith", description="An example", &
+            license="Copyright [Private]", maml_version="1.2")
+
+        schema_via_constructor = parquet_schema(table="input_table", survey="The Big Survey", dataset="ds", &
+            version="1.0", date="2026-01-01", author="Dave Smith", description="An example", &
+            license="Copyright [Private]", maml_version="1.2")
+
+        call check(error, size(schema_via_constructor%maml%lines) == size(schema_via_init%maml%lines), &
+            "parquet_schema(...) produced a different number of lines than schema%init")
+        if (allocated(error)) return
+
+        call check(error, all(schema_via_constructor%maml%lines(:) == schema_via_init%maml%lines(:)), &
+            "parquet_schema(...) produced different MAML lines than schema%init")
+    end subroutine test_schema_constructor_matches_init
 
     !> schema%add_field builds one "- name:" entry per call, with only the
     !> optional sub-keys actually supplied, and a qc: block only when at

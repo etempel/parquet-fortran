@@ -7,18 +7,56 @@ Whenever asked to implement a new feature in this repository, always:
 1. Add unit test coverage for it (in the relevant `test/*.f90` suite; add abort/error-path
    coverage via `test/error_scenarios.f90` + `test/test_errors.f90` +
    `tools/run_error_scenarios.sh` if the feature has failure modes that `error stop`).
-2. Update documentation: README.md (public API/behavior), CONTRIBUTING.md (if it affects
-   contributor workflow), and CHANGELOG.md (an entry under `[Unreleased]`).
+2. Update documentation — see [Documentation structure](#documentation-structure) for what
+   goes where. In brief: user-facing API/behavior/how-to (plus a per-procedure entry in the
+   "parquet module API" reference) go in MANUAL.md; touch README.md only if the landing-page
+   story changes (a new entry in its compact "API overview" index, a new limitation, a setup
+   change); update CONTRIBUTING.md if it affects contributor workflow.
 
 Do this without being asked separately each time — it applies by default to any
 "implement/add feature" request in this repo, not just when explicitly reminded.
 
+**CHANGELOG is paused until release.** The project is pre-release; the changelog will only be
+maintained from the first public release (1.0) onward — do **not** add `CHANGELOG.md`
+`[Unreleased]` entries in the meantime.
+
 ## Checking documentation links
 
-After editing headings or `#anchor` links in README.md/CONTRIBUTING.md/CHANGELOG.md, run
+After editing headings or `#anchor` links in README.md/MANUAL.md/CONTRIBUTING.md/CHANGELOG.md, run
 `tools/check_doc_anchors.py` to verify every in-page and cross-file anchor link still
 resolves against GitHub's actual heading-slug rules. It exits nonzero and lists any broken
 link.
+
+## Documentation structure
+
+User- and contributor-facing docs are split across three files — keep new content in the right one:
+
+- **README.md** — the lean *landing page*: what the library is, features, one quick example,
+  install / prerequisites / environment variables, "important behavior", a compact **API
+  overview** index, limitations, and license/contributing pointers. Keep it short — do **not**
+  let it grow back into a manual; deep-dive and reference material goes in MANUAL.md.
+- **MANUAL.md** — the full *user manual*: reading, writing, the MAML metadata format, worked
+  examples, error handling, thread safety, supported data types, performance, the complete
+  per-procedure **parquet module API** reference, and troubleshooting.
+- **CONTRIBUTING.md** — *contributor-facing*: building/testing this repo, the error-path test
+  harness, fixtures, OpenMP testing, MAML regeneration, C++ error conventions, the project
+  Conventions section, and "features considered but not implemented".
+
+Working rules:
+
+- A new public procedure gets its full entry in **MANUAL.md**'s "parquet module API" section
+  **and** its name in **README.md**'s "API overview" index; keep the two in sync on any
+  rename/removal.
+- Every section heading must appear in that file's own **Contents** ToC.
+- Moving content between README.md and MANUAL.md turns in-page `#anchor` links into cross-file
+  `MANUAL.md#…` / `README.md#…` links — repoint them, and fix now-stale relative wording
+  ("above", "below", "this README"). Re-run `tools/check_doc_anchors.py` afterward (it checks
+  cross-file links too).
+- **Diagrams: plain text, not Mermaid.** This project's GitLab does not reliably render Mermaid
+  diagrams, so draw flows as plain-text/ASCII inside a normal code fence (renders identically
+  everywhere) — see the MAML→header flow in MANUAL.md's "The MAML metadata format".
+- **Badges: static only for now** (license / language / fpm). Defer dynamic/CI badges (build,
+  coverage) until the project is public with a CI pipeline to point them at.
 
 ## Report before implementing on analysis/audit requests
 

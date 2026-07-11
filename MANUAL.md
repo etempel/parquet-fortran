@@ -341,12 +341,20 @@ Both build the schema's underlying MAML text, so you still call `parquet_parse_m
 
 The library turns a MAML (YAML) metadata file into the VOTable-style header embedded in the `.parquet` file — the flow is:
 
-```mermaid
-flowchart LR
-    A["<b>.maml file</b><br/>YAML metadata"] -->|parquet_parse_maml| B["<b>parquet_schema</b><br/>%cinfo — column defs<br/>%metadata — table-level"]
-    B -->|parquet_open_writer| C["<b>.parquet file</b>"]
-    C --- D["VOTable-style header<br/>per-column unit / info / ucd<br/>+ table author / description / keyarray…"]
-    C --- E["column data"]
+```
+  .maml file  (YAML metadata)
+       |
+       |  parquet_parse_maml
+       v
+  parquet_schema
+    %cinfo    ->  per-column definitions
+    %metadata ->  table-level metadata
+       |
+       |  parquet_open_writer
+       v
+  .parquet file
+    * VOTable-style header  (per-column unit/info/ucd + table author/description/keyarray, ...)
+    * column data
 ```
 
 A [MAML](https://github.com/asgr/MAML-Format) file is YAML. Table-level metadata (author, description, ...) is given as top-level keys, and column definitions are given as a list under the `fields:` key. **Only a fixed, known set of top-level keys is accepted** — `survey`, `dataset`, `table`, `version`, `date`, `author`, `coauthors`, `dois`, `depends`, `description`, `comments`, `license`, `keywords`, `maml_version`, `keyarray`, `extra`, and `fields` (matched case-insensitively; see `allowed_maml_sections` in `src/parquet_metadata.f90`) — any other top-level key fails `parquet_validate_maml` as an unknown section. To attach your own custom metadata not covered by that list, nest it under `extra:` instead, which accepts arbitrary structure unvalidated (see [Renaming columns for output with `col_map:`](#renaming-columns-for-output-with-col_map) for an example of `extra:`'s own nested keys). `parquet_parse_maml` always runs this same validation before parsing a MAML into a `parquet_schema`, so an invalid MAML is caught immediately rather than silently parsed. Three full worked examples are checked into the repository under `docs/`:

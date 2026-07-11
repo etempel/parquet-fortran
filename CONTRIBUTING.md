@@ -20,11 +20,11 @@ Two project conventions worth knowing before contributing (both are applied in d
 
 **Naming.** Public module-level API — everything in `src/parquet.f90`'s `public ::` list — carries the `parquet_` prefix (e.g. `parquet_open_reader`, `parquet_get_metadata`). Type-bound procedures (`schema%init`, `reader%...`) are namespaced by their type and do not. The `maml_` prefix is reserved for MAML-parsing/building internal helpers. When in doubt, grep for an existing analogous name before inventing a new one.
 
-**New features need tests and docs.** A new feature should land together with (1) unit-test coverage in the relevant `test/*.f90` suite — plus error-path coverage via `test/error_scenarios.f90` + `test/test_errors.f90` + `tools/run_error_scenarios.sh` if it has failure modes that `error stop` — and (2) documentation updates: the [README](README.md) / [user manual](MANUAL.md) for any public API or behavior, this file if it affects contributor workflow, and a `CHANGELOG.md` entry under `[Unreleased]`.
+**New features need tests and docs.** A new feature should land together with (1) unit-test coverage in the relevant `test/*.f90` suite — plus error-path coverage via `test/error_scenarios.f90` + `test/test_errors.f90` + `tools/run_error_scenarios.sh` if it has failure modes that `error stop` — and (2) documentation updates: the [README](README.md) / [user manual](MANUAL.md) for any public API or behavior, and this file if it affects contributor workflow. (`CHANGELOG.md` updates are paused pre-1.0 — see CLAUDE.md.)
 
 ## Building and testing this repository
 
-The commands below assume Arrow/Parquet and the environment variables from [README.md's Prerequisites/Environment variables sections](README.md#prerequisites) are already set up — they're needed here too, since this repository builds itself the same way a consuming project would.
+The commands below assume Arrow/Parquet and the environment variables from [README.md's Prerequisites](README.md#prerequisites) / [Environment variables](README.md#environment-variables) sections are already set up — they're needed here too, since this repository builds itself the same way a consuming project would.
 
 To test the code:
 
@@ -46,7 +46,7 @@ The executable is placed in the `my_path/bin` directory. It only prints the parq
 
 ### Running the error-path tests
 
-Most of this library's failure modes (invalid MAML, unknown columns, type mismatches, etc.) are reported via Fortran's `error stop`, which aborts the whole process — see [README.md's Error handling section](MANUAL.md#error-handling). Since test-drive assertions can't survive an `error stop` in the same process, these paths are exercised out-of-process by a small helper program, `test/error_scenarios.f90`, which is built as its own `fpm` test target named `error_scenarios`.
+Most of this library's failure modes (invalid MAML, unknown columns, type mismatches, etc.) are reported via Fortran's `error stop`, which aborts the whole process — see [MANUAL.md's Error handling section](MANUAL.md#error-handling). Since test-drive assertions can't survive an `error stop` in the same process, these paths are exercised out-of-process by a small helper program, `test/error_scenarios.f90`, which is built as its own `fpm` test target named `error_scenarios`.
 
 `error_scenarios` takes a single scenario name as a command-line argument and deliberately triggers the corresponding failure:
 
@@ -91,7 +91,7 @@ Because these files are committed, a normal `fpm test` never needs to regenerate
 tools/run_generate_fixtures.sh
 ```
 
-This compiles `generate_fixtures.cpp` with `clang++` and runs it from the repository root, rewriting every fixture under `test/fixtures/`. It needs the same `FPM_CXXFLAGS`/`FPM_LDFLAGS` (Arrow/Parquet include/link flags) used to build the project itself — see [README.md's Environment variables section](README.md#prerequisites); the script errors out early if they are unset.
+This compiles `generate_fixtures.cpp` with `clang++` and runs it from the repository root, rewriting every fixture under `test/fixtures/`. It needs the same `FPM_CXXFLAGS`/`FPM_LDFLAGS` (Arrow/Parquet include/link flags) used to build the project itself — see [README.md's Environment variables section](README.md#environment-variables); the script errors out early if they are unset.
 
 (Two unrelated helpers live in the same folder: `tools/count_lines.py` reports code/comment/blank line counts for `src/` and `test/`, a convenience for repository metrics; `tools/check_doc_anchors.py` validates every `#anchor` link in this repository's `*.md` files — same-file and cross-file — against the anchors GitHub would actually generate for each file's headings (using GitHub's real slugging rules, including the `-1`/`-2` suffixing for repeated headings), and exits nonzero if any link doesn't resolve. Run it after editing headings or anchor links in README.md/CONTRIBUTING.md:
 

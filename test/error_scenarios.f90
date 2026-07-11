@@ -147,10 +147,14 @@ program error_scenarios
         call scenario_read_unknown_column()
     case ("open_reader_missing_file")
         call scenario_open_reader_missing_file()
+    case ("open_reader_nrows_zero_rows")
+        call scenario_open_reader_nrows_zero_rows()
     case ("open_writer_bad_path")
         call scenario_open_writer_bad_path()
     case ("write_string_matrix_exceeds_array_size")
         call scenario_write_string_matrix_exceeds_array_size()
+    case ("write_string_exceeds_array_size")
+        call scenario_write_string_exceeds_array_size()
     case ("validate_protected_cols_unknown_name")
         call scenario_validate_protected_cols_unknown_name()
     case ("write_protected_column_with_null")
@@ -1318,6 +1322,26 @@ contains
         print '(a)', "unexpectedly opened a nonexistent file for reading without error"
     end subroutine scenario_open_reader_missing_file
 
+    !> parquet_open_reader(nrows=) internally calls parquet_get_nrows with
+    !> check_positive=.true., so a filter matching zero rows must abort at
+    !> open time instead of silently returning nrows=0 -- see the nrows
+    !> doc comment on parquet_open_reader in src/parquet.f90.
+    subroutine scenario_open_reader_nrows_zero_rows()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: nrows
+        character(len=*), parameter :: out_file = "test_run/open_reader_nrows_zero_rows.parquet"
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id", [1, 2, 3])
+        call parquet_close_writer(writer)
+
+        call filt%add("id > 100")
+        call parquet_open_reader(reader, out_file, filter=filt, nrows=nrows)
+        print '(a,i0)', "unexpectedly opened a reader with zero filtered rows, nrows=", nrows
+    end subroutine scenario_open_reader_nrows_zero_rows
+
     !> Same as scenario_open_reader_missing_file but for the write side: a
     !> path under a nonexistent directory can never be opened for writing.
     subroutine scenario_open_writer_bad_path()
@@ -1356,6 +1380,37 @@ contains
         call parquet_close_writer(writer)
         print '(a)', "unexpectedly wrote an over-length string into a fixed-size string matrix column without error"
     end subroutine scenario_write_string_matrix_exceeds_array_size
+
+    !> Same check as scenario_write_string_matrix_exceeds_array_size, but for
+    !> parquet_write_string_column's 1D/flat form (values(:), dispatched to
+    !> for a rank-1 actual argument -- used for both a plain scalar string
+    !> column and a flattened string-vector column like this one). Its
+    !> max_item_len = maxval(len_trim(values)) check (src/parquet_write.f90)
+    !> is the same pattern as the matrix form's, but had no dedicated test.
+    subroutine scenario_write_string_exceeds_array_size()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        character(len=20) :: values(2)
+
+        schema%maml%name = "string_flat_array_size.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: string_flat_table", &
+            "fields:", &
+            "- name: s", &
+            "  data_type: string", &
+            "  array_size: 5", &
+            "  col_size: 2" ]
+
+        call parquet_parse_maml(schema)
+
+        values(1) = "short"
+        values(2) = "this_is_way_too_long"
+
+        call parquet_open_writer(writer, "test_run/error_scenario_string_flat_array_size.parquet", schema)
+        call parquet_write_column(writer, "s", values)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote an over-length string into a fixed-size string vector column (flat form) without error"
+    end subroutine scenario_write_string_exceeds_array_size
 
     subroutine scenario_validate_protected_cols_unknown_name()
         type(parquet_maml_file) :: maml

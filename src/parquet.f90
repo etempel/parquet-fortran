@@ -1000,7 +1000,16 @@ module parquet
             character(len=:), allocatable :: out
         end function parquet_to_lower
 
-        module subroutine parquet_open_reader(reader, filename, use_threads, filter, schema, qc, qc_soft)
+        !> nrows (optional, integer(int64)): if present, filled in with the
+        !> post-filter row count via parquet_get_nrows(reader, nrows,
+        !> check_positive=.true.) -- so, exactly like that check_positive
+        !> path, a file (or filter result) with zero rows fails immediately
+        !> with error stop instead of silently returning nrows=0. Omit nrows
+        !> (as before) if you want to open a reader that may legitimately
+        !> have zero matching rows -- call parquet_get_nrows yourself
+        !> afterwards, without check_positive, to get 0 back instead of
+        !> aborting.
+        module subroutine parquet_open_reader(reader, filename, use_threads, filter, schema, qc, qc_soft, nrows)
             type(parquet_reader), intent(out) :: reader
             character(len=*), intent(in) :: filename
             logical, intent(in), optional :: use_threads
@@ -1008,6 +1017,7 @@ module parquet
             type(parquet_schema), intent(in), optional :: schema
             logical, intent(in), optional :: qc
             logical, intent(in), optional :: qc_soft
+            integer(int64), intent(out), optional :: nrows
         end subroutine parquet_open_reader
 
         module subroutine parquet_close_reader(reader, print_stat)

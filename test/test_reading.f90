@@ -32,7 +32,7 @@ contains
             new_unittest("read array modes", test_read_array_modes), &
             new_unittest("read array modes for int32/float64/boolean vectors", &
                 test_read_array_modes_more_types), &
-            new_unittest("read string vector with a short first element (row & element mode)", &
+            new_unittest("read string vector with a short first element (row/element/matrix modes, get_string_length)", &
                 test_read_string_vector_short_first), &
             new_unittest("get library version", test_get_library_version), &
             new_unittest("get parquet maml examples", test_get_parquet_maml_examples), &
@@ -638,6 +638,14 @@ contains
     !> string and fails an assertion below. Also exercises the string
     !> specialization of both array-read modes, which the fixture-based tests
     !> above do not cover.
+    !>
+    !> Also covers two related paths the row/element-mode checks above don't
+    !> reach, both against the same shortest-first fixture (plus a scalar
+    !> "note" column, also shortest-first, for the scalar case):
+    !>   * a full 2D matrix read (parquet_read_column into values(:,:)), not
+    !>     just single row/element reads;
+    !>   * parquet_get_string_length, which must report the true maximum
+    !>     across the whole column rather than the first element's length.
     subroutine test_read_string_vector_short_first(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_schema) :: schema
@@ -646,8 +654,10 @@ contains
         character(len=1), parameter :: letters(9) = &
             ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i']
         character(len=12) :: tags(9)
+        character(len=12) :: note(3)
         character(len=12) :: row_buf(3), elem_buf(3)
-        integer :: nrows, k
+        character(len=12) :: tags_mat(3, 3)
+        integer :: nrows, k, strlen_max
         character(len=*), parameter :: out_file = "test_run/string_vector_short_first.parquet"
 
         ! tags(k) is a run of letters(k) of length k, laid out row-major as
@@ -656,12 +666,18 @@ contains
             tags(k) = repeat(letters(k), k)
         end do
 
+        ! note is a plain (col_size=1) string column, one value per row,
+        ! also deliberately shortest-first: "z", "zzzz", "zzzzzzzzzz".
+        note = [character(len=12) :: "z", repeat("z", 4), repeat("z", 10)]
+
         call schema%init(table="string_vector_table")
         call schema%add_field("tags", "string", array_size=12, col_size=3)
+        call schema%add_field("note", "string", array_size=12)
         call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, out_file, schema)
         call parquet_write_column(writer, "tags", tags)
+        call parquet_write_column(writer, "note", note)
         call parquet_close_writer(writer)
 
         call parquet_open_reader(reader, out_file)
@@ -712,6 +728,40 @@ contains
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "element-mode element 3 strings truncated or wrong")
+            return
+        end if
+
+        ! --- full 2D matrix read (parquet_read_column into values(:,:)),
+        ! not just row/element mode -- same short-first fixture, checked at
+        ! both the shortest (row 1) and longest (row 3) ends. ---
+        call parquet_read_column(reader, "tags", tags_mat)
+        call check(error, trim(tags_mat(1,1)) == repeat("a", 1) .and. &
+                          trim(tags_mat(2,1)) == repeat("b", 2) .and. &
+                          trim(tags_mat(3,1)) == repeat("c", 3) .and. &
+                          trim(tags_mat(1,3)) == repeat("g", 7) .and. &
+                          trim(tags_mat(2,3)) == repeat("h", 8) .and. &
+                          trim(tags_mat(3,3)) == repeat("i", 9))
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "full matrix read of a string-vector column truncated or wrong (short first element)")
+            return
+        end if
+
+        ! --- parquet_get_string_length must reflect the true maximum across
+        ! the whole column, not just the (deliberately shortest) first value. ---
+        call parquet_get_string_length(reader, "tags", strlen_max)
+        call check(error, strlen_max == 9)
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "parquet_get_string_length for a string-vector column ignored a longer, later element")
+            return
+        end if
+
+        call parquet_get_string_length(reader, "note", strlen_max)
+        call check(error, strlen_max == 10)
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "parquet_get_string_length for a scalar string column ignored a longer, later element")
             return
         end if
 

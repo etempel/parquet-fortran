@@ -382,6 +382,11 @@ contains
         if (present(filter)) then
             if (filter%n > 0) call parquet_apply_filter(reader, filter)
         end if
+
+        ! Computed last, after the filter is applied, so this is the
+        ! post-filter row count -- see parquet_get_nrows/check_nrows_positive
+        ! for the check_positive=.true. behavior on zero rows.
+        if (present(nrows)) call parquet_get_nrows(reader, nrows, check_positive=.true.)
     end procedure parquet_open_reader
 
     module procedure parquet_close_reader

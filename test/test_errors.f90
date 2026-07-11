@@ -123,10 +123,14 @@ contains
                 test_read_unknown_column_aborts), &
             new_unittest("opening a nonexistent file for reading aborts", &
                 test_open_reader_missing_file_aborts), &
+            new_unittest("parquet_open_reader(nrows=) with a filter matching zero rows aborts", &
+                test_open_reader_nrows_zero_rows_aborts), &
             new_unittest("opening a writer at a bad path aborts", &
                 test_open_writer_bad_path_aborts), &
             new_unittest("writing an over-length string into a fixed-size string matrix column aborts", &
                 test_write_string_matrix_exceeds_array_size_aborts), &
+            new_unittest("writing an over-length string into a fixed-size string vector column (flat form) aborts", &
+                test_write_string_exceeds_array_size_aborts), &
             new_unittest("protected_cols: referencing an unknown field aborts", &
                 test_validate_protected_cols_unknown_name_aborts), &
             new_unittest("writing a Null into a protected column aborts", &
@@ -663,6 +667,18 @@ contains
             failure_message="opening a nonexistent file for reading was expected to abort")
     end subroutine test_open_reader_missing_file_aborts
 
+    !> parquet_open_reader(nrows=) implies check_positive=.true., so a filter
+    !> matching zero rows must abort at open time, exactly like
+    !> parquet_get_nrows(..., check_positive=.true.) would.
+    subroutine test_open_reader_nrows_zero_rows_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "open_reader_nrows_zero_rows", expect_abort=.true., &
+            failure_message="parquet_open_reader(nrows=) with a filter matching zero rows was expected to abort", &
+            required_stderr="parquet_get_nrows: file test_run/open_reader_nrows_zero_rows.parquet " // &
+                "has zero rows after filtering (3 total)")
+    end subroutine test_open_reader_nrows_zero_rows_aborts
+
     subroutine test_open_writer_bad_path_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
@@ -679,6 +695,16 @@ contains
         call check_scenario_exit_status(error, "write_string_matrix_exceeds_array_size", expect_abort=.true., &
             failure_message="writing an over-length string into a fixed-size string matrix column was expected to error stop")
     end subroutine test_write_string_matrix_exceeds_array_size_aborts
+
+    !> Same check as test_write_string_matrix_exceeds_array_size_aborts, but
+    !> for parquet_write_string_column's 1D/flat form (a flattened
+    !> string-vector column written as values(:) rather than values(:,:)).
+    subroutine test_write_string_exceeds_array_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_string_exceeds_array_size", expect_abort=.true., &
+            failure_message="writing an over-length string into a fixed-size string vector column (flat form) was expected to error stop")
+    end subroutine test_write_string_exceeds_array_size_aborts
 
     subroutine test_validate_protected_cols_unknown_name_aborts(error)
         type(error_type), allocatable, intent(out) :: error

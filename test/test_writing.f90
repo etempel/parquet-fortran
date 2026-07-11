@@ -113,6 +113,8 @@ contains
                 test_filter_prefetch_after_open), &
             new_unittest("parquet_open_reader(filter=) with zero matching rows still works", &
                 test_filter_zero_matching_rows), &
+            new_unittest("parquet_open_reader(nrows=) fills in the post-filter row count", &
+                test_open_reader_nrows_arg), &
             new_unittest("use_threads=.false. on writer and reader still round-trips", &
                 test_use_threads_false_still_round_trips), &
             new_unittest("parquet_set_max_threads with a valid value does not break a round-trip", &
@@ -1350,6 +1352,39 @@ contains
 
         call check(error, size(id_back) == 0, "reading a zero-length filtered column did not behave correctly")
     end subroutine test_filter_zero_matching_rows
+
+    !> parquet_open_reader(nrows=) is sugar for opening then calling
+    !> parquet_get_nrows(reader, nrows, check_positive=.true.) -- checks it
+    !> returns the post-filter count (not the file's raw total) when a
+    !> filter narrows the rows, and the unfiltered total otherwise. The
+    !> zero-matching-rows abort path itself is covered separately by the
+    !> open_reader_nrows_zero_rows error scenario, since it error stops.
+    subroutine test_open_reader_nrows_arg(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32) :: id(6)
+        integer(int64) :: nrows
+        character(len=*), parameter :: out_file = "test_run/test_open_reader_nrows_arg.parquet"
+        integer :: i
+
+        id = [(i, i=1,6)]
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file, nrows=nrows)
+        call check(error, nrows == 6_int64, "parquet_open_reader(nrows=) did not return the unfiltered row count")
+        call parquet_close_reader(reader)
+        if (allocated(error)) return
+
+        call filt%add("id > 3")
+        call parquet_open_reader(reader, out_file, filter=filt, nrows=nrows)
+        call check(error, nrows == 3_int64, "parquet_open_reader(nrows=) did not return the post-filter row count")
+        call parquet_close_reader(reader)
+    end subroutine test_open_reader_nrows_arg
 
     !> use_threads=.false. must still be a fully functional writer/reader --
     !> it only turns off Arrow's internal thread pool for that instance, it

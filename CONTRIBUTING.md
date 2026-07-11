@@ -6,6 +6,7 @@ This file covers developing, testing, and extending this repository itself. If y
 
 - [Building and testing this repository](#building-and-testing-this-repository)
   - [Running the error-path tests](#running-the-error-path-tests)
+  - [Regenerating the test fixtures](#regenerating-the-test-fixtures)
   - [Testing genuine OpenMP concurrency](#testing-genuine-openmp-concurrency)
 - [Regenerating the built-in MAML module](#regenerating-the-built-in-maml-module)
 - [Extending the MAML schema](#extending-the-maml-schema)
@@ -66,6 +67,30 @@ tools/run_error_scenarios.sh
 ```
 
 This prints a `[PASS]`/`[FAIL]` line per scenario and exits nonzero if any scenario's exit code didn't match what was expected — useful for a quick manual check or a CI step that doesn't need the full `fpm test` output. Keep this script's scenario list in sync with `test/error_scenarios.f90`'s `select case` — it's meant to be a complete mirror, not a curated subset.
+
+### Regenerating the test fixtures
+
+A handful of tests read pre-built Parquet files committed under `test/fixtures/` rather than files this library writes itself. These deliberately contain shapes this library's own writer *cannot* produce — genuine Arrow validity-bitmap Nulls, an unsupported physical column type, and a list-encoded (per-row array) vector column — so that the reader's handling of them can be exercised. They are built directly against the Arrow/Parquet C++ API by `tools/generate_fixtures.cpp` (one function per fixture):
+
+- `has_null.parquet` — columns with real Nulls (not sentinel values), read by the `errors`/`reading` suites.
+- `unsupported_type.parquet` — a column of a physical type this library refuses to read.
+- `list_vector.parquet` — a vector column stored as Parquet `LIST` rather than the fixed-size layout this library writes.
+
+Because these files are committed, a normal `fpm test` never needs to regenerate them. Rebuild them only when you change `generate_fixtures.cpp` or otherwise need a fixture recreated, via:
+
+```bash
+tools/run_generate_fixtures.sh
+```
+
+This compiles `generate_fixtures.cpp` with `clang++` and runs it from the repository root, rewriting every fixture under `test/fixtures/`. It needs the same `FPM_CXXFLAGS`/`FPM_LDFLAGS` (Arrow/Parquet include/link flags) used to build the project itself — see [README.md's Environment variables section](README.md#prerequisites); the script errors out early if they are unset.
+
+(Two unrelated helpers live in the same folder: `tools/count_lines.py` reports code/comment/blank line counts for `src/` and `test/`, a convenience for repository metrics; `tools/check_doc_anchors.py` validates every `#anchor` link in this repository's `*.md` files — same-file and cross-file — against the anchors GitHub would actually generate for each file's headings (using GitHub's real slugging rules, including the `-1`/`-2` suffixing for repeated headings), and exits nonzero if any link doesn't resolve. Run it after editing headings or anchor links in README.md/CONTRIBUTING.md:
+
+```bash
+tools/check_doc_anchors.py
+```
+
+Neither is part of the build or test flow.)
 
 ### Testing genuine OpenMP concurrency
 

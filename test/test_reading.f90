@@ -30,6 +30,10 @@ contains
             new_unittest("read parquet file", test_read_parquet_file), &
             new_unittest("read column info", test_read_column_info), &
             new_unittest("read array modes", test_read_array_modes), &
+            new_unittest("read array modes for int32/float64/boolean vectors", &
+                test_read_array_modes_more_types), &
+            new_unittest("read string vector with a short first element (row & element mode)", &
+                test_read_string_vector_short_first), &
             new_unittest("get library version", test_get_library_version), &
             new_unittest("get parquet maml examples", test_get_parquet_maml_examples), &
             new_unittest("read scalar column with null_value", test_read_scalar_null_value), &
@@ -479,6 +483,240 @@ contains
 
         call parquet_close_reader(reader)
     end subroutine test_read_array_modes
+
+    !> Companion to test_read_array_modes, which only exercises the float32
+    !> ("arr") and int64 ("idarr") specializations of parquet_read_array_row_mode
+    !> / parquet_read_array_element_mode. This covers the remaining numeric/logical
+    !> kinds -- int32 ("iarr"), float64 ("arrlong") and boolean ("flag_array") --
+    !> reading the same test_run/test_parquet.parquet fixture written by the
+    !> "writing" suite. Expected values mirror init_test_data in test_writing.f90:
+    !> row i holds iarr=[i+1,i+2,i+3], arrlong=[i*10+1 .. i*10+5] and
+    !> flag_array=[mod(i+j,2)==0, j=1..6].
+    subroutine test_read_array_modes_more_types(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        integer(int64) :: nrows
+        integer :: n
+        integer(int32) :: iarr_row(3), iarr_elem(20)
+        real(real64) :: arrlong_row(5), arrlong_elem(20)
+        logical :: flag_row(6), flag_elem(20)
+        logical :: exists
+        character(len=*), parameter :: in_file = "test_run/test_parquet.parquet"
+
+        inquire(file=in_file, exist=exists)
+        call check(error, exists)
+        if (allocated(error)) then
+            call test_failed(error, "input parquet file missing: expected test_run/test_parquet.parquet")
+            return
+        end if
+
+        call parquet_open_reader(reader, in_file)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 20_int64)
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "unexpected number of rows in parquet file")
+            return
+        end if
+        n = int(nrows)
+
+        ! --- int32 vector "iarr" (col_size 3): row i = [i+1, i+2, i+3] ---
+        call parquet_read_array_row_mode(reader, "iarr", iarr_row, 1)
+        call check(error, all(iarr_row == [2_int32, 3_int32, 4_int32]))
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "iarr row_mode values do not match expected values for row 1")
+            return
+        end if
+
+        call parquet_read_array_row_mode(reader, "iarr", iarr_row, n)
+        call check(error, all(iarr_row == [21_int32, 22_int32, 23_int32]))
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "iarr row_mode values do not match expected values for last row")
+            return
+        end if
+
+        call parquet_read_array_element_mode(reader, "iarr", iarr_elem, 1)
+        call check(error, iarr_elem(1) == 2_int32 .and. iarr_elem(n) == 21_int32)
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "iarr element_mode values do not match expected values for element 1")
+            return
+        end if
+
+        call parquet_read_array_element_mode(reader, "iarr", iarr_elem, 3)
+        call check(error, iarr_elem(1) == 4_int32 .and. iarr_elem(n) == 23_int32)
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "iarr element_mode values do not match expected values for element 3")
+            return
+        end if
+
+        ! --- float64 vector "arrlong" (col_size 5): row i = [i*10+1 .. i*10+5] ---
+        call parquet_read_array_row_mode(reader, "arrlong", arrlong_row, 1)
+        call check(error, all(abs(arrlong_row - [11.0_real64, 12.0_real64, 13.0_real64, &
+            14.0_real64, 15.0_real64]) < 1.0e-9_real64))
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "arrlong row_mode values do not match expected values for row 1")
+            return
+        end if
+
+        call parquet_read_array_row_mode(reader, "arrlong", arrlong_row, n)
+        call check(error, all(abs(arrlong_row - [201.0_real64, 202.0_real64, 203.0_real64, &
+            204.0_real64, 205.0_real64]) < 1.0e-9_real64))
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "arrlong row_mode values do not match expected values for last row")
+            return
+        end if
+
+        call parquet_read_array_element_mode(reader, "arrlong", arrlong_elem, 1)
+        call check(error, abs(arrlong_elem(1) - 11.0_real64) < 1.0e-9_real64 .and. &
+                          abs(arrlong_elem(n) - 201.0_real64) < 1.0e-9_real64)
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "arrlong element_mode values do not match expected values for element 1")
+            return
+        end if
+
+        call parquet_read_array_element_mode(reader, "arrlong", arrlong_elem, 5)
+        call check(error, abs(arrlong_elem(1) - 15.0_real64) < 1.0e-9_real64 .and. &
+                          abs(arrlong_elem(n) - 205.0_real64) < 1.0e-9_real64)
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "arrlong element_mode values do not match expected values for element 5")
+            return
+        end if
+
+        ! --- boolean vector "flag_array" (col_size 6): row i = [mod(i+j,2)==0, j=1..6] ---
+        call parquet_read_array_row_mode(reader, "flag_array", flag_row, 1)
+        call check(error, all(flag_row .eqv. [.true., .false., .true., .false., .true., .false.]))
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "flag_array row_mode values do not match expected values for row 1")
+            return
+        end if
+
+        call parquet_read_array_row_mode(reader, "flag_array", flag_row, n)
+        call check(error, all(flag_row .eqv. [.false., .true., .false., .true., .false., .true.]))
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "flag_array row_mode values do not match expected values for last row")
+            return
+        end if
+
+        call parquet_read_array_element_mode(reader, "flag_array", flag_elem, 1)
+        call check(error, flag_elem(1) .eqv. .true. .and. flag_elem(n) .eqv. .false.)
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "flag_array element_mode values do not match expected values for element 1")
+            return
+        end if
+
+        call parquet_read_array_element_mode(reader, "flag_array", flag_elem, 6)
+        call check(error, flag_elem(1) .eqv. .false. .and. flag_elem(n) .eqv. .true.)
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "flag_array element_mode values do not match expected values for element 6")
+            return
+        end if
+
+        call parquet_close_reader(reader)
+    end subroutine test_read_array_modes_more_types
+
+    !> Regression guard for a past bug where a string vector column was sized
+    !> from the length of the FIRST string it read, truncating every longer
+    !> string that followed. The fixture written here is a 3-row x 3-element
+    !> string vector whose element at flattened position k has length k, so:
+    !>   * within a row (row mode) the first element is the shortest --
+    !>     row 1 -> lengths 1,2,3;
+    !>   * within one element index across rows (element mode) the first row is
+    !>     the shortest -- element 1 -> row lengths 1,4,7.
+    !> Either truncation bug therefore corrupts a strictly-longer trailing
+    !> string and fails an assertion below. Also exercises the string
+    !> specialization of both array-read modes, which the fixture-based tests
+    !> above do not cover.
+    subroutine test_read_string_vector_short_first(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=1), parameter :: letters(9) = &
+            ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i']
+        character(len=12) :: tags(9)
+        character(len=12) :: row_buf(3), elem_buf(3)
+        integer :: nrows, k
+        character(len=*), parameter :: out_file = "test_run/string_vector_short_first.parquet"
+
+        ! tags(k) is a run of letters(k) of length k, laid out row-major as
+        ! three rows of three elements (flattened index = (row-1)*3 + col).
+        do k = 1, 9
+            tags(k) = repeat(letters(k), k)
+        end do
+
+        call schema%init(table="string_vector_table")
+        call schema%add_field("tags", "string", array_size=12, col_size=3)
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "tags", tags)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 3)
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "expected 3 rows in the string-vector fixture")
+            return
+        end if
+
+        ! --- row mode: each row's three strings, first element the shortest ---
+        call parquet_read_array_row_mode(reader, "tags", row_buf, 1)
+        call check(error, trim(row_buf(1)) == repeat("a", 1) .and. &
+                          trim(row_buf(2)) == repeat("b", 2) .and. &
+                          trim(row_buf(3)) == repeat("c", 3))
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "row-mode row 1 strings truncated or wrong (short first element)")
+            return
+        end if
+
+        call parquet_read_array_row_mode(reader, "tags", row_buf, 3)
+        call check(error, trim(row_buf(1)) == repeat("g", 7) .and. &
+                          trim(row_buf(2)) == repeat("h", 8) .and. &
+                          trim(row_buf(3)) == repeat("i", 9))
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "row-mode row 3 strings truncated or wrong")
+            return
+        end if
+
+        ! --- element mode: one element index across all rows, first row shortest ---
+        call parquet_read_array_element_mode(reader, "tags", elem_buf, 1)
+        call check(error, trim(elem_buf(1)) == repeat("a", 1) .and. &
+                          trim(elem_buf(2)) == repeat("d", 4) .and. &
+                          trim(elem_buf(3)) == repeat("g", 7))
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "element-mode element 1 strings truncated or wrong (short first row)")
+            return
+        end if
+
+        call parquet_read_array_element_mode(reader, "tags", elem_buf, 3)
+        call check(error, trim(elem_buf(1)) == repeat("c", 3) .and. &
+                          trim(elem_buf(2)) == repeat("f", 6) .and. &
+                          trim(elem_buf(3)) == repeat("i", 9))
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "element-mode element 3 strings truncated or wrong")
+            return
+        end if
+
+        call parquet_close_reader(reader)
+    end subroutine test_read_string_vector_short_first
 
     subroutine test_get_library_version(error)
         type(error_type), allocatable, intent(out) :: error

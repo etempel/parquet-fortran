@@ -9,6 +9,7 @@ This file covers developing, testing, and extending this repository itself. If y
   - [Running the error-path tests](#running-the-error-path-tests)
   - [Regenerating the test fixtures](#regenerating-the-test-fixtures)
   - [Testing genuine OpenMP concurrency](#testing-genuine-openmp-concurrency)
+  - [Continuous integration (GitLab CI)](#continuous-integration-gitlab-ci)
 - [Regenerating the built-in MAML module](#regenerating-the-built-in-maml-module)
 - [Extending the MAML schema](#extending-the-maml-schema)
 - [Error-handling conventions in `parquet_wrapper.cpp`](#error-handling-conventions-in-parquet_wrappercpp)
@@ -111,6 +112,19 @@ fpm test
 ```
 
 The OpenMP flag is compiler-dependent (see [README's Thread safety section](MANUAL.md#thread-safety) for the per-compiler flags), so it can't be hardcoded in `fpm.toml` and must come from `FPM_FFLAGS` as shown. The two concurrency error-scenario tests are **self-adapting**: they check `omp_get_max_threads()` and, when it's `1` (no OpenMP flag, or `OMP_NUM_THREADS=1`), the shared-reader/writer race cannot occur, so they skip and pass trivially. So plain `fpm test` (no `FPM_FFLAGS`) is still green — it just doesn't meaningfully exercise these specific concurrency checks; set `FPM_FFLAGS="-fopenmp"` to actually verify the guard fires.
+
+### Continuous integration (GitLab CI)
+
+`.gitlab-ci.yml` runs the full `fpm test` suite (with OpenMP and coverage) on a GitLab Docker-executor runner. It builds the whole toolchain from scratch in the container's `before_script`, so it also serves as an executable, always-current recipe for building this project on a clean Debian/Ubuntu system.
+
+A few choices in that file are load-bearing — each one cost a debugging round when it was wrong, so preserve them if you touch it:
+
+- **Base image `ubuntu:24.04`** (pinned with `image:`, since the runner's own default image is older). 24.04 is the oldest Ubuntu that satisfies *every* toolchain requirement at once: gfortran 13 (gfortran ≤ 11 miscompiles the optional allocatable-character argument in `schema%add_col_qc` — see [README's Prerequisites](README.md#prerequisites)), a g++ new enough for C++20 / `std::span`, `pipx` in the repos (used to install `fpm`), and current Arrow apt packages. Its default `gcov` also matches its default compiler, so `gcovr` needs no `--gcov-executable` override.
+- **`git lfs pull`** before running tests. The `test/fixtures/*.parquet` files are Git-LFS-tracked (see `.gitattributes`); without pulling them the reader tests read LFS *pointer* files and fail. `git lfs install --skip-repo` sets up only the global filter config (CI never pushes, so the repo-local hooks are deliberately skipped — installing them fails if the checkout already has one).
+- **`libarrow-compute-dev`** installed alongside `libarrow-dev` / `libparquet-dev`: Arrow ships its compute kernels in a separate package, and `fpm.toml` links `arrow_compute` (see [MANUAL's Troubleshooting](MANUAL.md#troubleshooting)). Omitting it fails the C++ compile on `arrow/compute/*.h`.
+- **`FPM_FFLAGS="--coverage -fopenmp -ffree-line-length-none"`.** Some source lines exceed the 132-column free-form limit; recent gfortran ignores that limit by default but older versions (e.g. gfortran 11) truncate and error, so the flag is passed unconditionally. Setting `FPM_FFLAGS` *replaces* fpm's default profile — which would otherwise supply `-ffree-line-length-none` — so it must be passed explicitly here. `FPM_CXXFLAGS="-std=c++20"` and `FPM_LDFLAGS="-lstdc++"` follow [README's Environment variables](README.md#environment-variables).
+
+Coverage is computed by `gcovr` over `src/` and surfaced through GitLab's `coverage:` regex. For the same line-coverage report locally, `tools/coverage.sh` does the equivalent — it builds with `--coverage`, runs the suite plus every error scenario, and prints per-file and total `src/` coverage (resolving the `gcov` that matches your `gfortran` automatically).
 
 ## Regenerating the built-in MAML module
 

@@ -71,8 +71,9 @@ test:
   script:
     # -ffree-line-length-none: the source has free-form lines longer than the
     # standard 132-column limit. gfortran's default limit varies by version
-    # (recent gfortran effectively removed it, but older gfortran, e.g. 11/13,
-    # still truncates at 132 and errors). Setting FPM_FFLAGS replaces fpm's
-    # default profile, which would otherwise supply this flag, so pass it here.
+    # (recent gfortran effectively removed it, but older gfortran, e.g. 11,
+    # truncates at 132 and errors), so pass it unconditionally. Setting
+    # FPM_FFLAGS replaces fpm's default profile, which would otherwise supply
+    # this flag, so it must be given here.
     - FPM_FFLAGS="--coverage -fopenmp -ffree-line-length-none" fpm test --verbose
     - gcovr -r . --filter 'src/*' --exclude 'src/test*'

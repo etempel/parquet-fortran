@@ -55,8 +55,9 @@ Working rules:
 - **Diagrams: plain text, not Mermaid.** This project's GitLab does not reliably render Mermaid
   diagrams, so draw flows as plain-text/ASCII inside a normal code fence (renders identically
   everywhere) — see the MAML→header flow in MANUAL.md's "The MAML metadata format".
-- **Badges: static only for now** (license / language / fpm). Defer dynamic/CI badges (build,
-  coverage) until the project is public with a CI pipeline to point them at.
+- **Badges: static only for now** (license / language / fpm). A GitLab CI pipeline now exists
+  (`.gitlab-ci.yml`, running `fpm test` with coverage), but still defer dynamic build/coverage
+  badges until the project is public with a stable URL to point them at.
 
 ## Report before implementing on analysis/audit requests
 
@@ -70,6 +71,18 @@ explicitly asked to implement/fix/add something directly.
 If `fpm test` behaves unexpectedly after source changes (e.g. a test target seems to run
 old code), try `fpm clean --all` to force a clean rebuild before spending time debugging —
 fpm's build cache can serve a stale binary.
+
+## Build and compiler notes
+
+- **Long free-form lines are fine.** The source has lines past the standard 132-column
+  free-form limit; builds rely on `-ffree-line-length-none` (fpm's default profile supplies
+  it, and the CI job passes it explicitly since setting `FPM_FFLAGS` drops that profile).
+  Match the surrounding style — don't reflow long lines just to fit 132 columns.
+- **Minimum gfortran is 13; don't work around compiler bugs in source.** gfortran ≤ 11
+  miscompiles the optional allocatable-`character` argument in `schema%add_col_qc` /
+  `schema%get_col_qc` (corrupted column name → a spurious "column not found" abort at
+  runtime — see README.md's Prerequisites). That's the reason for the version floor; don't
+  refactor otherwise-correct source to accommodate an old compiler.
 
 ## Renames/refactors: only apply low-blast-radius changes
 
@@ -113,6 +126,22 @@ run_tester -- reading`), or `fpm test run_tester -- <suite> "<test name>"` to ru
 named test within it. Prefer this over a full `fpm test` while iterating — the full suite
 (including OpenMP/error-scenario subprocess tests) takes much longer than the one suite
 relevant to a given change.
+
+## Measuring test coverage
+
+Run `tools/coverage.sh` for per-file and total `src/` line coverage plus the uncovered line
+ranges; pass one run_tester suite name to scope it (e.g. `tools/coverage.sh reading`), or no
+argument for a full run (which also runs every error scenario). It auto-selects the `gcov`
+matching the active `gfortran` — a mismatched gcov fails with "Invalid .gcno file!".
+
+When closing coverage gaps, sort each uncovered line by type first: an `error stop`/abort
+line can *only* be covered by an out-of-process scenario (`test/error_scenarios.f90` + a
+`test/test_errors.f90` wrapper + a `tools/run_error_scenarios.sh` entry), never by an
+in-process test-drive test (the abort kills the process); a normal branch is usually
+reachable by extending an existing test with different data/arguments. Genuinely not
+coverable and not worth chasing: `end module`/`end submodule` lines, implicit finalizers,
+and interface-only / `extern "C"` files (`parquet_bindings.f90`, and `parquet_wrapper.cpp`,
+which the local gcov toolchain doesn't instrument at all).
 
 ## Regression tests for "sized/typed from the first element" bugs
 

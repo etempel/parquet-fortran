@@ -5,7 +5,15 @@ before_script:
   - apt-get update -y
   - apt-get upgrade -y
   - apt-get install -y --no-install-recommends ca-certificates lsb-release wget gnupg
-        gfortran make git git-lfs gcovr
+        gfortran make libcfitsio-dev libcurl4-openssl-dev git git-lfs gcovr
+  
+  # Installing FPM (Fortran Package Manager) via pipx
+  - apt-get install -y python3-venv
+  - apt-get install -y pipx
+  - pipx ensurepath
+  - pipx install fpm
+  - export PATH=~/.local/bin:$PATH
+  
   # test/fixtures/*.parquet are tracked via git-lfs (see .gitattributes) --
   # pull the real file contents before the test suite tries to read them.
   # --skip-repo: only sets up git-lfs's global filter config (needed for
@@ -26,13 +34,6 @@ before_script:
   - apt-get install -y -V ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
   - apt-get update -y
   - apt-get install -y -V libarrow-dev libparquet-dev
-
-  # Installing FPM (Fortran Package Manager) via pipx
-  - apt-get install -y python3-venv
-  - apt-get install -y pipx
-  - pipx ensurepath
-  - pipx install fpm
-  - export PATH=~/.local/bin:$PATH
 
 stages:
   - test

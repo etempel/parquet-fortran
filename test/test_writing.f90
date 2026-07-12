@@ -46,6 +46,8 @@ contains
             new_unittest("write_maml=.true. saves a sidecar .maml file", test_write_maml_sidecar), &
             new_unittest("write_maml=.true. does not prune when every column is enabled", &
                 test_write_maml_sidecar_no_pruning_when_all_enabled), &
+            new_unittest("write_maml=.true. prunes correctly with a blank line between field blocks", &
+                test_write_maml_sidecar_prune_with_blank_line_between_fields), &
             new_unittest("add_metadata after parquet_parse_maml is reflected in the sidecar", &
                 test_write_maml_sidecar_with_runtime_metadata), &
             new_unittest("add_metadata inserts keyarray: before an existing extra:", &
@@ -240,6 +242,54 @@ contains
             if (allocated(error)) return
         end do
     end subroutine test_write_maml_sidecar_no_pruning_when_all_enabled
+
+    !> parquet_prune_disabled_fields's field-block scan must skip over a blank
+    !> line between two "- name:" entries -- ordinary MAML authoring style
+    !> (a blank separator line for readability) that docs/maml_example.maml
+    !> happens not to use anywhere, so it's built in-memory here instead of
+    !> loaded from a fixture, specifically to exercise that blank-line case.
+    subroutine test_write_maml_sidecar_prune_with_blank_line_between_fields(error)
+        implicit none
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_schema) :: schema, sidecar_schema
+        integer(int32) :: id0(3) = [1_int32, 2_int32, 3_int32]
+        logical :: exists
+        character(len=*), parameter :: out_file = "test_run/test_write_maml_blank_line.parquet"
+        character(len=*), parameter :: sidecar_file = "test_run/test_write_maml_blank_line.maml"
+
+        schema%maml%name = "blank_line_between_fields.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: blank_line_table", &
+            "fields:", &
+            "- name: id0", &
+            "  data_type: int32", &
+            "", &
+            "- name: extra", &
+            "  data_type: int32" ]
+
+        call parquet_parse_maml(schema)
+        call schema%set_column_unavailable()
+        call schema%set_column_available("id0")
+
+        call parquet_open_writer(writer, out_file, schema, write_maml=.true.)
+        call parquet_write_column(writer, "id0", id0)
+        call parquet_close_writer(writer)
+
+        inquire(file=sidecar_file, exist=exists)
+        call check(error, exists, "write_maml=.true. did not create the expected sidecar .maml file")
+        if (allocated(error)) return
+
+        call parquet_parse_maml(sidecar_file, sidecar_schema)
+
+        call check(error, size(sidecar_schema%cinfo%col) == 1, &
+            "expected the sidecar .maml to only list the one enabled column ('id0') when a blank " // &
+            "line separates field blocks in the source MAML")
+        if (allocated(error)) return
+        call check(error, trim(sidecar_schema%cinfo%col(1)%name) == "id0", &
+            "expected the sidecar .maml's only field entry to be 'id0' when a blank line " // &
+            "separates field blocks in the source MAML")
+    end subroutine test_write_maml_sidecar_prune_with_blank_line_between_fields
     !
     subroutine test_write_maml_sidecar_with_runtime_metadata(error)
         implicit none

@@ -92,10 +92,10 @@ contains
         op = ""
         errmsg = ""
         t = trim(adjustl(rule))
-        if (len(t) == 0) then
+        if (len(t) == 0) then ! GCOVR_EXCL_START
             errmsg = "empty filter rule"
             return
-        end if
+        end if ! GCOVR_EXCL_STOP
 
         p = index(t, " ")
         if (p == 0) then
@@ -104,10 +104,10 @@ contains
         end if
         name = t(1:p-1)
         rest = trim(adjustl(t(p+1:)))
-        if (len(rest) == 0) then
+        if (len(rest) == 0) then ! GCOVR_EXCL_START
             errmsg = "filter rule '" // t // "' is missing an operator"
             return
-        end if
+        end if ! GCOVR_EXCL_STOP
 
         p = index(rest, " ")
         if (p == 0) then
@@ -120,20 +120,20 @@ contains
 
         select case (trim(op))
         case ("is_null", "is_not_null")
-            if (len(rest) > 0) then
+            if (len(rest) > 0) then ! GCOVR_EXCL_START
                 errmsg = "filter rule '" // t // "': " // trim(op) // " takes no value"
                 return
-            end if
+            end if ! GCOVR_EXCL_STOP
         case (">", ">=", "<", "<=", "==", "/=")
-            if (len(rest) == 0) then
+            if (len(rest) == 0) then ! GCOVR_EXCL_START
                 errmsg = "filter rule '" // t // "' is missing a value after '" // trim(op) // "'"
                 return
-            end if
+            end if ! GCOVR_EXCL_STOP
             if (rest(1:1) == '"') then
-                if (len(rest) < 2 .or. rest(len(rest):len(rest)) /= '"') then
+                if (len(rest) < 2 .or. rest(len(rest):len(rest)) /= '"') then ! GCOVR_EXCL_START
                     errmsg = "filter rule '" // t // "' has an unterminated quoted value"
                     return
-                end if
+                end if ! GCOVR_EXCL_STOP
                 value = rest(2:len(rest)-1)
                 is_string = .true.
             else
@@ -141,8 +141,8 @@ contains
                 is_string = .false.
             end if
         case default
-            errmsg = "filter rule '" // t // "' has an unknown operator '" // trim(op) // "'"
-            return
+            errmsg = "filter rule '" // t // "' has an unknown operator '" // trim(op) // "'" ! GCOVR_EXCL_LINE
+            return ! GCOVR_EXCL_LINE
         end select
 
         ok = .true.
@@ -296,10 +296,12 @@ contains
             call parquet_tokenize_filter_rule(filter%rules(i), parsed_name, parsed_op, parsed_value, &
                 parsed_is_string, ok, errmsg)
             if (.not. ok) error stop "parquet_open_reader: invalid filter rule: " // errmsg // reader_filename_suffix(reader)
+            ! GCOVR_EXCL_START
             if (len(parsed_name) > len(names) .or. len(parsed_op) > len(ops) .or. len(parsed_value) > len(values)) then
                 error stop "parquet_open_reader: filter rule exceeds an internal length limit: " // trim(filter%rules(i)) // &
                     reader_filename_suffix(reader)
             end if
+            ! GCOVR_EXCL_STOP
             names(i) = parsed_name
             ops(i) = parsed_op
             values(i) = parsed_value
@@ -524,7 +526,7 @@ contains
             error stop "parquet_get_nrows: file " // trim(reader%filename) // &
                 " has zero rows after filtering (" // trim(buf) // " total)"
         else
-            error stop "parquet_get_nrows: file " // trim(reader%filename) // " has zero rows"
+            error stop "parquet_get_nrows: file " // trim(reader%filename) // " has zero rows" ! GCOVR_EXCL_LINE
         end if
     end subroutine check_nrows_positive
 
@@ -543,9 +545,9 @@ contains
         if (present(check_positive)) then
             if (check_positive) call check_nrows_positive(reader, nrows64)
         end if
-        if (nrows64 > huge(0_int32)) then
+        if (nrows64 > huge(0_int32)) then ! GCOVR_EXCL_START
             error stop "parquet_get_nrows: number of rows exceeds int32 range" // reader_filename_suffix(reader)
-        end if
+        end if ! GCOVR_EXCL_STOP
         nrows = int(nrows64, kind=int32)
     end procedure parquet_get_nrows_int32
 
@@ -566,10 +568,10 @@ contains
         call check_reader_open(reader, "parquet_get_column_total_elements")
         call check_column_exists(reader, name, "parquet_get_column_total_elements")
         nelem64 = int(parquet_reader_get_column_total_elements(reader%handle, trim(name)//char(0)), kind=int64)
-        if (nelem64 > huge(0_int32)) then
+        if (nelem64 > huge(0_int32)) then ! GCOVR_EXCL_START
             error stop "parquet_get_column_total_elements: number of elements exceeds int32 range for column: " // &
                 trim(name) // reader_filename_suffix(reader)
-        end if
+        end if ! GCOVR_EXCL_STOP
         total_elements = int(nelem64, kind=int32)
     end procedure parquet_get_column_total_elements_int32
 

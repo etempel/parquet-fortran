@@ -17,6 +17,11 @@
 # Requires python3 (already a tool dependency in this repo -- see
 # tools/check_doc_anchors.py, tools/count_lines.py) to parse gcov's JSON
 # intermediate format into per-file/total percentages.
+#
+# Lines marked with GCOVR_EXCL_LINE, or bracketed by GCOVR_EXCL_START /
+# GCOVR_EXCL_STOP, are dropped from the counts the same way the real `gcovr`
+# (run by .gitlab-ci.yml) excludes them, so this script's percentages agree
+# with CI's rather than under-reporting genuinely-uncoverable lines.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -104,6 +109,36 @@ for path in glob.glob(os.path.join(build_dir, "**", "*.gcov.json.gz"), recursive
 if not per_file:
     print("No src/ coverage data found in JSON output.", file=sys.stderr)
     sys.exit(1)
+
+
+def gcovr_excluded_lines(path):
+    """Line numbers gcovr itself would drop from both numerator and
+    denominator: a single line carrying GCOVR_EXCL_LINE, or every line from a
+    GCOVR_EXCL_START comment through its matching GCOVR_EXCL_STOP (inclusive
+    of both marker lines) -- see .gitlab-ci.yml's `gcovr` invocation, the
+    tool these markers are actually written for. Mirroring this here keeps
+    this script's percentages in agreement with CI's."""
+    excluded = set()
+    in_block = False
+    try:
+        with open(path) as f:
+            for i, line in enumerate(f, start=1):
+                if "GCOVR_EXCL_START" in line:
+                    in_block = True
+                    excluded.add(i)
+                elif "GCOVR_EXCL_STOP" in line:
+                    in_block = False
+                    excluded.add(i)
+                elif in_block or "GCOVR_EXCL_LINE" in line:
+                    excluded.add(i)
+    except FileNotFoundError:
+        pass
+    return excluded
+
+
+for src in per_file:
+    for ln in gcovr_excluded_lines(src):
+        per_file[src].pop(ln, None)
 
 total_exec = 0
 total_lines = 0

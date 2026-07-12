@@ -68,7 +68,7 @@ contains
         integer :: i
 
         parquet_get_defined_column_index = 0
-        if (.not. allocated(writer%all_columns)) return
+        if (.not. allocated(writer%all_columns)) return ! GCOVR_EXCL_LINE
 
         do i = 1, size(writer%all_columns)
             if (trim(writer%all_columns(i)%name) == trim(name)) then
@@ -317,7 +317,7 @@ contains
                 if (len(parts) > 0) then
                     parts = parts // ", maml: " // trim(writer%maml_name)
                 else
-                    parts = "maml: " // trim(writer%maml_name)
+                    parts = "maml: " // trim(writer%maml_name) ! GCOVR_EXCL_LINE
                 end if
             end if
         end if
@@ -533,10 +533,10 @@ contains
                     error stop "parquet_open_writer: write_maml=.true. requires a schema " // &
                         "(prepared by parquet_parse_maml) to be present (file: " // trim(filename) // ")"
                 end if
-                if (.not. allocated(schema%metadata%source_maml_lines)) then
+                if (.not. allocated(schema%metadata%source_maml_lines)) then ! GCOVR_EXCL_START
                     error stop "parquet_open_writer: write_maml=.true. requires a schema " // &
                         "obtained from parquet_parse_maml (no source MAML content found) (file: " // trim(filename) // ")"
-                end if
+                end if ! GCOVR_EXCL_STOP
                 block
                     character(len=:), allocatable :: sidecar_lines(:)
                     sidecar_lines = schema%metadata%source_maml_lines

@@ -165,6 +165,10 @@ contains
                 test_add_col_qc_empty_column_name_aborts), &
             new_unittest("add_col_qc: duplicate column name aborts", &
                 test_add_col_qc_duplicate_column_aborts), &
+            new_unittest("add_col_qc: duplicate column name (single-quoted existing entry) aborts", &
+                test_add_col_qc_duplicate_column_single_quoted_aborts), &
+            new_unittest("add_col_qc: duplicate column name (double-quoted existing entry) aborts", &
+                test_add_col_qc_duplicate_column_double_quoted_aborts), &
             new_unittest("get_col_qc: reversed min operator aborts (shared validation)", &
                 test_get_col_qc_reversed_operator_aborts), &
             new_unittest("writing values(:) not divisible by col_size aborts", &
@@ -843,6 +847,26 @@ contains
         call check_scenario_exit_status(error, "add_col_qc_duplicate_column", expect_abort=.true., &
             failure_message="add_col_qc with a duplicate column name was expected to error stop")
     end subroutine test_add_col_qc_duplicate_column_aborts
+
+    !> A pre-existing "- name: 'dup'" entry (single-quoted) must still be
+    !> recognized as declaring "dup" -- the duplicate-name check strips a
+    !> single pair of surrounding quotes before comparing.
+    subroutine test_add_col_qc_duplicate_column_single_quoted_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "add_col_qc_duplicate_column_single_quoted", expect_abort=.true., &
+            failure_message="add_col_qc with a duplicate column name behind a single-quoted " // &
+                "existing entry was expected to error stop")
+    end subroutine test_add_col_qc_duplicate_column_single_quoted_aborts
+
+    !> Same as above, for a double-quoted existing entry ('- name: "dup"').
+    subroutine test_add_col_qc_duplicate_column_double_quoted_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "add_col_qc_duplicate_column_double_quoted", expect_abort=.true., &
+            failure_message="add_col_qc with a duplicate column name behind a double-quoted " // &
+                "existing entry was expected to error stop")
+    end subroutine test_add_col_qc_duplicate_column_double_quoted_aborts
 
     subroutine test_get_col_qc_reversed_operator_aborts(error)
         type(error_type), allocatable, intent(out) :: error

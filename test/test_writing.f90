@@ -115,6 +115,10 @@ contains
                 test_filter_zero_matching_rows), &
             new_unittest("parquet_open_reader(nrows=) fills in the post-filter row count", &
                 test_open_reader_nrows_arg), &
+            new_unittest("re-opening an already-open reader without closing it finalizes the old handle", &
+                test_reopen_reader_without_closing_finalizes_old_handle), &
+            new_unittest("re-opening an already-open writer without closing it finalizes the old handle", &
+                test_reopen_writer_without_closing_finalizes_old_handle), &
             new_unittest("use_threads=.false. on writer and reader still round-trips", &
                 test_use_threads_false_still_round_trips), &
             new_unittest("parquet_set_max_threads with a valid value does not break a round-trip", &
@@ -1411,6 +1415,76 @@ contains
             "parquet_open_reader(nrows=) with a plain default-INTEGER actual did not return the row count")
         call parquet_close_reader(reader)
     end subroutine test_open_reader_nrows_arg
+
+    !> A parquet_reader variable that's still open (never explicitly closed)
+    !> when parquet_open_reader is called on it again must not leak or crash:
+    !> since `reader` is an intent(out) argument, Fortran finalizes the old
+    !> handle automatically first (see reader_finalize, and MANUAL.md's
+    !> "Important behavior" note on re-opening). This exercises
+    !> reader_finalize's actual cleanup branch (a still-open handle), not
+    !> just its no-op path (which every already-closed reader hits).
+    subroutine test_reopen_reader_without_closing_finalizes_old_handle(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: id(4)
+        integer(int64) :: nrows
+        character(len=*), parameter :: out_file = "test_run/test_reopen_reader.parquet"
+        integer :: i
+
+        id = [(i, i=1,4)]
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file, nrows=nrows)
+        call check(error, nrows == 4_int64, "first parquet_open_reader(nrows=) did not return the expected row count")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+
+        ! reader is intentionally NOT closed here -- re-opening it below must
+        ! finalize (free) the still-open handle automatically.
+        call parquet_open_reader(reader, out_file, nrows=nrows)
+        call check(error, nrows == 4_int64, &
+            "re-opening an already-open reader (without closing it first) did not return the expected row count")
+        call parquet_close_reader(reader)
+    end subroutine test_reopen_reader_without_closing_finalizes_old_handle
+
+    !> Same as above, for the write side: re-opening an open parquet_writer
+    !> without closing it first must finalize (free) the old handle
+    !> automatically -- see writer_finalize, which deliberately skips
+    !> parquet_close_writer's "missing required column" check for exactly
+    !> this case (an incomplete write must not surprise-abort from an
+    !> implicit finalizer).
+    subroutine test_reopen_writer_without_closing_finalizes_old_handle(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: id(3)
+        integer(int64) :: nrows
+        character(len=*), parameter :: out_file = "test_run/test_reopen_writer.parquet"
+        integer :: i
+
+        id = [(i, i=1,3)]
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id", id)
+
+        ! writer is intentionally NOT closed here -- re-opening it below must
+        ! finalize (free) the still-open handle automatically, without
+        ! erroring over the incomplete previous write.
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file, nrows=nrows)
+        call check(error, nrows == 3_int64, &
+            "file written after re-opening an already-open writer did not round-trip the expected row count")
+        call parquet_close_reader(reader)
+    end subroutine test_reopen_writer_without_closing_finalizes_old_handle
 
     !> use_threads=.false. must still be a fully functional writer/reader --
     !> it only turns off Arrow's internal thread pool for that instance, it

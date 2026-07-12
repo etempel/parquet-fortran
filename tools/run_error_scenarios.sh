@@ -65,6 +65,8 @@ scenarios=(
     "add_col_qc_too_many_fields:1"
     "add_col_qc_empty_column_name:1"
     "add_col_qc_duplicate_column:1"
+    "add_col_qc_duplicate_column_single_quoted:1"
+    "add_col_qc_duplicate_column_double_quoted:1"
     "get_col_qc_reversed_operator:1"
     "get_column_index_not_found:1"
     "get_field_name_index_too_low:1"

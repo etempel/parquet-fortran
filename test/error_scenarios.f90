@@ -189,6 +189,10 @@ program error_scenarios
         call scenario_add_col_qc_empty_column_name()
     case ("add_col_qc_duplicate_column")
         call scenario_add_col_qc_duplicate_column()
+    case ("add_col_qc_duplicate_column_single_quoted")
+        call scenario_add_col_qc_duplicate_column_single_quoted()
+    case ("add_col_qc_duplicate_column_double_quoted")
+        call scenario_add_col_qc_duplicate_column_double_quoted()
     case ("get_col_qc_reversed_operator")
         call scenario_get_col_qc_reversed_operator()
     case ("qc_warning_numeric")
@@ -1335,6 +1339,31 @@ contains
         call maml%add_col_qc("ra, <10", col_name)
         print '(a)', "unexpectedly accepted a duplicate column name in add_col_qc"
     end subroutine scenario_add_col_qc_duplicate_column
+
+    !> maml_field_name_exists strips a single pair of surrounding quotes off a
+    !> "- name: ..." value before comparing -- exercised here with a
+    !> single-quoted existing entry ("- name: 'dup'"), so add_col_qc must still
+    !> recognize "dup" as already declared and reject it as a duplicate.
+    subroutine scenario_add_col_qc_duplicate_column_single_quoted()
+        type(parquet_maml_file) :: maml
+        character(len=:), allocatable :: col_name
+
+        maml%lines = [character(len=20) :: "fields:", "- name: 'dup'"]
+        call maml%add_col_qc("dup, >0", col_name)
+        print '(a)', "unexpectedly accepted a duplicate column name (single-quoted) in add_col_qc"
+    end subroutine scenario_add_col_qc_duplicate_column_single_quoted
+
+    !> Same as scenario_add_col_qc_duplicate_column_single_quoted, but for a
+    !> double-quoted existing entry ('- name: "dup"'), so both quote styles
+    !> the qc-maml parser accepts for a name: value are covered.
+    subroutine scenario_add_col_qc_duplicate_column_double_quoted()
+        type(parquet_maml_file) :: maml
+        character(len=:), allocatable :: col_name
+
+        maml%lines = [character(len=20) :: "fields:", '- name: "dup"']
+        call maml%add_col_qc("dup, >0", col_name)
+        print '(a)', "unexpectedly accepted a duplicate column name (double-quoted) in add_col_qc"
+    end subroutine scenario_add_col_qc_duplicate_column_double_quoted
 
     !> The get_col_qc function form shares add_col_qc's worker, so it enforces
     !> the same validation -- e.g. a reversed min: operator aborts here too.

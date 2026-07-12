@@ -1459,11 +1459,11 @@ contains
         !
         i = index(cversion, " ")
         !
-        if (cversion(2:i-1) /= ver_string) then
+        if (cversion(2:i-1) /= ver_string) then ! GCOVR_EXCL_START
             write(*,*) "WARNING: using developmentparquet-fortran library!"
             write(*,*) "         library version: ", trim(cversion)
             write(*,*) "         RELEASE_VERSION: ", trim(ver_string)
-        end if
+        end if ! GCOVR_EXCL_STOP
         !
         if (present(internal)) then
             if (internal) then

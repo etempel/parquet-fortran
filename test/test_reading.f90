@@ -41,7 +41,9 @@ contains
             new_unittest("read scalar column with both null_value and is_valid", test_read_scalar_both), &
             new_unittest("read string column with null_value and is_valid", test_read_string_null), &
             new_unittest("read array column with null_value and is_valid", test_read_array_null), &
-            new_unittest("read list-encoded vector column", test_read_list_vector_column) &
+            new_unittest("read list-encoded vector column", test_read_list_vector_column), &
+            new_unittest("null_value on a Null-containing vector column (full/row/element modes, every type)", &
+                test_read_vector_null_value_all_types) &
             ]
     end subroutine collect_tests_parquet_reading
 
@@ -770,13 +772,24 @@ contains
 
     subroutine test_get_library_version(error)
         type(error_type), allocatable, intent(out) :: error
-        character(len=:), allocatable :: ver_string, internal_ver_string
+        character(len=:), allocatable :: ver_string, explicit_ver_string, internal_ver_string
 
         call parquet_get_version(ver_string)
 
         call check(error, len_trim(ver_string) > 0)
         if (allocated(error)) then
             call test_failed(error, "library version string is empty")
+            return
+        end if
+
+        ! internal=.false. is the explicit form of the default (release number
+        ! only, no v prefix); it must return exactly what the no-argument call
+        ! above does, exercising the else branch in parquet_get_version.
+        call parquet_get_version(explicit_ver_string, internal=.false.)
+
+        call check(error, explicit_ver_string == ver_string)
+        if (allocated(error)) then
+            call test_failed(error, "parquet_get_version(internal=.false.) did not match the default (no-argument) form")
             return
         end if
 
@@ -1056,5 +1069,134 @@ contains
             return
         end if
     end subroutine test_read_list_vector_column
+
+    !> The existing null_value tests read only int32/string scalar columns;
+    !> this covers the null-replacement branch inside every *vector*-column read
+    !> variant -- parquet_read_column (full 2D), parquet_read_array_row_mode,
+    !> and parquet_read_array_element_mode -- for all six types, plus the scalar
+    !> (col_size=1) read variants for the remaining numeric/logical types
+    !> (int64/float32/float64/logical). A 3-row fixture is written with the last
+    !> vector element (col 2, row 3) and the last scalar element (row 3)
+    !> deliberately Null (is_valid=.false. there); each read passes null_value=
+    !> and must substitute it exactly at the Null position, leaving the rest intact.
+    subroutine test_read_vector_null_value_all_types(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        logical :: vmask(2, 3), smask(3)
+        integer(int32) :: i32v(2, 3), i32_full(2, 3), i32_row(2), i32_elem(3)
+        integer(int64) :: i64v(2, 3), i64_full(2, 3), i64_row(2), i64_elem(3)
+        real(real32) :: f32v(2, 3), f32_full(2, 3), f32_row(2), f32_elem(3)
+        real(real64) :: f64v(2, 3), f64_full(2, 3), f64_row(2), f64_elem(3)
+        logical :: boolv(2, 3), bool_full(2, 3), bool_row(2), bool_elem(3)
+        character(len=8) :: strv(2, 3), str_full(2, 3), str_row(2), str_elem(3)
+        integer(int64) :: i64s(3), i64s_back(3)
+        real(real32) :: f32s(3), f32s_back(3)
+        real(real64) :: f64s(3), f64s_back(3)
+        logical :: bools(3), bools_back(3)
+        logical :: ok
+        character(len=*), parameter :: out_file = "test_run/vector_null_value_all_types.parquet"
+
+        ! Element (col 2, row 3) is Null; all other elements carry known values.
+        vmask = .true.
+        vmask(2, 3) = .false.
+        ! Scalar columns: the last row (row 3) is Null.
+        smask = [.true., .true., .false.]
+
+        i32v = reshape([10_int32, 20_int32, 30_int32, 40_int32, 50_int32, 60_int32], [2, 3])
+        i64v = reshape([11_int64, 21_int64, 31_int64, 41_int64, 51_int64, 61_int64], [2, 3])
+        f32v = reshape([1.5_real32, 2.5_real32, 3.5_real32, 4.5_real32, 5.5_real32, 6.5_real32], [2, 3])
+        f64v = reshape([1.25_real64, 2.25_real64, 3.25_real64, 4.25_real64, 5.25_real64, 6.25_real64], [2, 3])
+        boolv = reshape([.true., .false., .true., .false., .true., .false.], [2, 3])
+        strv = reshape(["aaa", "bbb", "ccc", "ddd", "eee", "fff"], [2, 3])
+        i64s = [101_int64, 102_int64, 103_int64]
+        f32s = [10.5_real32, 20.5_real32, 30.5_real32]
+        f64s = [10.25_real64, 20.25_real64, 30.25_real64]
+        bools = [.true., .false., .true.]
+
+        call schema%init(table="vector_null_table")
+        call schema%add_field("i32v", "int32", col_size=2)
+        call schema%add_field("i64v", "int64", col_size=2)
+        call schema%add_field("f32v", "float32", col_size=2)
+        call schema%add_field("f64v", "float64", col_size=2)
+        call schema%add_field("boolv", "boolean", col_size=2)
+        call schema%add_field("strv", "string", array_size=8, col_size=2)
+        call schema%add_field("i64s", "int64")
+        call schema%add_field("f32s", "float32")
+        call schema%add_field("f64s", "float64")
+        call schema%add_field("bools", "boolean")
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "i32v", i32v, is_valid=vmask)
+        call parquet_write_column(writer, "i64v", i64v, is_valid=vmask)
+        call parquet_write_column(writer, "f32v", f32v, is_valid=vmask)
+        call parquet_write_column(writer, "f64v", f64v, is_valid=vmask)
+        call parquet_write_column(writer, "boolv", boolv, is_valid=vmask)
+        call parquet_write_column(writer, "strv", strv, is_valid=vmask)
+        call parquet_write_column(writer, "i64s", i64s, is_valid=smask)
+        call parquet_write_column(writer, "f32s", f32s, is_valid=smask)
+        call parquet_write_column(writer, "f64s", f64s, is_valid=smask)
+        call parquet_write_column(writer, "bools", bools, is_valid=smask)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+
+        ! --- scalar (col_size=1) reads: row 3 is Null ---
+        call parquet_read_column(reader, "i64s", i64s_back, null_value=-222_int64)
+        call parquet_read_column(reader, "f32s", f32s_back, null_value=-3.5_real32)
+        call parquet_read_column(reader, "f64s", f64s_back, null_value=-4.5_real64)
+        call parquet_read_column(reader, "bools", bools_back, null_value=.true.)
+
+        ! --- full 2D reads: the Null lands at (2,3) ---
+        call parquet_read_column(reader, "i32v", i32_full, null_value=-111_int32)
+        call parquet_read_column(reader, "i64v", i64_full, null_value=-222_int64)
+        call parquet_read_column(reader, "f32v", f32_full, null_value=-3.5_real32)
+        call parquet_read_column(reader, "f64v", f64_full, null_value=-4.5_real64)
+        call parquet_read_column(reader, "boolv", bool_full, null_value=.true.)
+        call parquet_read_column(reader, "strv", str_full, null_value="NULL")
+
+        ! --- row mode: row 3 is [<col1>, Null] ---
+        call parquet_read_array_row_mode(reader, "i32v", i32_row, 3, null_value=-111_int32)
+        call parquet_read_array_row_mode(reader, "i64v", i64_row, 3, null_value=-222_int64)
+        call parquet_read_array_row_mode(reader, "f32v", f32_row, 3, null_value=-3.5_real32)
+        call parquet_read_array_row_mode(reader, "f64v", f64_row, 3, null_value=-4.5_real64)
+        call parquet_read_array_row_mode(reader, "boolv", bool_row, 3, null_value=.true.)
+        call parquet_read_array_row_mode(reader, "strv", str_row, 3, null_value="NULL")
+
+        ! --- element mode: element 2 across rows is [<row1>, <row2>, Null] ---
+        call parquet_read_array_element_mode(reader, "i32v", i32_elem, 2, null_value=-111_int32)
+        call parquet_read_array_element_mode(reader, "i64v", i64_elem, 2, null_value=-222_int64)
+        call parquet_read_array_element_mode(reader, "f32v", f32_elem, 2, null_value=-3.5_real32)
+        call parquet_read_array_element_mode(reader, "f64v", f64_elem, 2, null_value=-4.5_real64)
+        call parquet_read_array_element_mode(reader, "boolv", bool_elem, 2, null_value=.true.)
+        call parquet_read_array_element_mode(reader, "strv", str_elem, 2, null_value="NULL")
+
+        call parquet_close_reader(reader)
+
+        ! Null position substituted with null_value in every mode, and a
+        ! representative non-null element left untouched.
+        ok = i32_full(2, 3) == -111_int32 .and. i32_full(1, 1) == 10_int32 .and. &
+             i32_row(2) == -111_int32 .and. i32_row(1) == 50_int32 .and. &
+             i32_elem(3) == -111_int32 .and. i32_elem(1) == 20_int32
+        ok = ok .and. i64_full(2, 3) == -222_int64 .and. i64_row(2) == -222_int64 .and. &
+             i64_elem(3) == -222_int64 .and. i64_elem(1) == 21_int64
+        ok = ok .and. abs(f32_full(2, 3) + 3.5_real32) < 1.0e-5_real32 .and. &
+             abs(f32_row(2) + 3.5_real32) < 1.0e-5_real32 .and. abs(f32_elem(3) + 3.5_real32) < 1.0e-5_real32
+        ok = ok .and. abs(f64_full(2, 3) + 4.5_real64) < 1.0e-10_real64 .and. &
+             abs(f64_row(2) + 4.5_real64) < 1.0e-10_real64 .and. abs(f64_elem(3) + 4.5_real64) < 1.0e-10_real64
+        ok = ok .and. bool_full(2, 3) .and. bool_row(2) .and. bool_elem(3)
+        ok = ok .and. trim(str_full(2, 3)) == "NULL" .and. trim(str_row(2)) == "NULL" .and. &
+             trim(str_elem(3)) == "NULL" .and. trim(str_full(1, 1)) == "aaa"
+        ! Scalar reads: row 3 substituted, rows 1-2 untouched.
+        ok = ok .and. i64s_back(3) == -222_int64 .and. i64s_back(1) == 101_int64 .and. &
+             abs(f32s_back(3) + 3.5_real32) < 1.0e-5_real32 .and. abs(f32s_back(1) - 10.5_real32) < 1.0e-5_real32 .and. &
+             abs(f64s_back(3) + 4.5_real64) < 1.0e-10_real64 .and. abs(f64s_back(1) - 10.25_real64) < 1.0e-10_real64 .and. &
+             bools_back(3) .and. bools_back(1) .and. (.not. bools_back(2))
+
+        call check(error, ok, &
+            "null_value substitution failed for one or more scalar/vector-column read variants/types")
+    end subroutine test_read_vector_null_value_all_types
     !
 end module test_reading

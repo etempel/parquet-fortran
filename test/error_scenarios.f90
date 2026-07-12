@@ -11,7 +11,7 @@
 program error_scenarios
     use parquet
     use parquet_maml_base, only: parquet_maml_file, get_parquet_maml
-    use iso_fortran_env, only : int32, int64, real64
+    use iso_fortran_env, only : int32, int64, real32, real64
     !$ use omp_lib, only : omp_get_max_threads, omp_get_thread_num
     implicit none
 
@@ -95,6 +95,8 @@ program error_scenarios
         call scenario_filter_vector_column()
     case ("filter_malformed_rule")
         call scenario_filter_malformed_rule()
+    case ("filter_rule_too_long")
+        call scenario_filter_rule_too_long()
     case ("filter_bad_numeric_value")
         call scenario_filter_bad_numeric_value()
     case ("filter_unquoted_string_value")
@@ -173,8 +175,12 @@ program error_scenarios
         call scenario_qc_maml_min_wrong_operator()
     case ("add_col_qc_min_reversed_operator")
         call scenario_add_col_qc_min_reversed_operator()
+    case ("add_col_qc_max_reversed_operator")
+        call scenario_add_col_qc_max_reversed_operator()
     case ("add_col_qc_operator_without_value")
         call scenario_add_col_qc_operator_without_value()
+    case ("add_col_qc_max_operator_without_value")
+        call scenario_add_col_qc_max_operator_without_value()
     case ("add_col_qc_bad_miss_value")
         call scenario_add_col_qc_bad_miss_value()
     case ("add_col_qc_too_many_fields")
@@ -215,6 +221,24 @@ program error_scenarios
         call scenario_get_metadata_missing_key_no_default()
     case ("get_metadata_conversion_failure_no_default")
         call scenario_get_metadata_conversion_failure_no_default()
+    case ("get_metadata_missing_int64_no_default")
+        call scenario_get_metadata_missing_int64_no_default()
+    case ("get_metadata_missing_float32_no_default")
+        call scenario_get_metadata_missing_float32_no_default()
+    case ("get_metadata_missing_float64_no_default")
+        call scenario_get_metadata_missing_float64_no_default()
+    case ("get_metadata_missing_logical_no_default")
+        call scenario_get_metadata_missing_logical_no_default()
+    case ("get_metadata_missing_string_no_default")
+        call scenario_get_metadata_missing_string_no_default()
+    case ("get_metadata_conversion_int64_no_default")
+        call scenario_get_metadata_conversion_int64_no_default()
+    case ("get_metadata_conversion_float32_no_default")
+        call scenario_get_metadata_conversion_float32_no_default()
+    case ("get_metadata_conversion_float64_no_default")
+        call scenario_get_metadata_conversion_float64_no_default()
+    case ("get_metadata_conversion_logical_no_default")
+        call scenario_get_metadata_conversion_logical_no_default()
     case ("schema_add_field_before_init")
         call scenario_schema_add_field_before_init()
     case ("schema_init_twice")
@@ -901,6 +925,15 @@ contains
         print '(a)', "unexpectedly opened a reader with a malformed filter rule"
     end subroutine scenario_filter_malformed_rule
 
+    !> parquet_filter%add rejects a rule longer than the fixed 512-character
+    !> per-rule storage, erroring inside %add itself (before any open_reader).
+    subroutine scenario_filter_rule_too_long()
+        type(parquet_filter) :: filt
+
+        call filt%add(repeat("a", 513))
+        print '(a)', "unexpectedly accepted a filter rule longer than 512 characters"
+    end subroutine scenario_filter_rule_too_long
+
     !> A rule whose shape is fine ("<column> <op> <value>") but whose value
     !> isn't a valid number for a numeric column reports a clean error stop
     !> naming the bad value and the column, from parquet_reader_set_filter
@@ -1235,6 +1268,17 @@ contains
         print '(a)', "unexpectedly accepted a reversed qc min operator in add_col_qc"
     end subroutine scenario_add_col_qc_min_reversed_operator
 
+    !> Mirror of the min case for the max bound: max: accepts only < / <=, so a
+    !> '>' operator on the max bound (third field) must be rejected. Covers the
+    !> max-direction branch of check_bound, distinct from the min one above.
+    subroutine scenario_add_col_qc_max_reversed_operator()
+        type(parquet_maml_file) :: maml
+        character(len=:), allocatable :: col_name
+
+        call maml%add_col_qc("ra, , >5", col_name)
+        print '(a)', "unexpectedly accepted a reversed qc max operator in add_col_qc"
+    end subroutine scenario_add_col_qc_max_reversed_operator
+
     !> maml%add_col_qc rejects a bound that is only an operator with no value.
     subroutine scenario_add_col_qc_operator_without_value()
         type(parquet_maml_file) :: maml
@@ -1243,6 +1287,17 @@ contains
         call maml%add_col_qc("ra, >", col_name)
         print '(a)', "unexpectedly accepted an operator with no value in add_col_qc"
     end subroutine scenario_add_col_qc_operator_without_value
+
+    !> As above but for the max bound: an operator with no value (e.g. "<" with
+    !> nothing after it) on the max field must also be rejected -- covers the
+    !> max branch of check_bound's empty-value guard, distinct from the min one.
+    subroutine scenario_add_col_qc_max_operator_without_value()
+        type(parquet_maml_file) :: maml
+        character(len=:), allocatable :: col_name
+
+        call maml%add_col_qc("ra, , <", col_name)
+        print '(a)', "unexpectedly accepted a max operator with no value in add_col_qc"
+    end subroutine scenario_add_col_qc_max_operator_without_value
 
     !> maml%add_col_qc rejects a miss value other than Null/NA/empty.
     subroutine scenario_add_col_qc_bad_miss_value()
@@ -1573,6 +1628,10 @@ contains
         type(parquet_writer) :: writer
         character(len=8) :: values(3) = ["banana  ", "apple   ", "cherry  "]
 
+        ! Both min: and max: are declared so the violation warning's bounds
+        ! description includes its "max ..." clause (exercises the has_qc_max
+        ! branch of parquet_check_qc_string's bounds_desc). "apple" still
+        ! violates min:'banana'; max:'cherry' is satisfied by every value.
         schema%maml%name = "qc_warning_string.maml"
         schema%maml%lines = [character(len=40) :: &
             "table: qc_table", &
@@ -1581,7 +1640,8 @@ contains
             "  data_type: string", &
             "  array_size: 10", &
             "  qc:", &
-            "    min: 'banana'" ]
+            "    min: 'banana'", &
+            "    max: 'cherry'" ]
 
         call parquet_parse_maml(schema)
 
@@ -1907,6 +1967,113 @@ contains
         call parquet_get_metadata(reader, "not_a_number", value)
         print '(a,i0)', "unexpectedly read an unparsable metadata value with no default without error: ", value
     end subroutine scenario_get_metadata_conversion_failure_no_default
+
+    !> Writes a small parquet file carrying one metadata entry whose value
+    !> ("not_a_number") is unparsable as any numeric/logical type, and opens a
+    !> reader on it. Shared by the per-type get_metadata abort scenarios below:
+    !> a missing-key abort reads an absent key from it, a conversion abort reads
+    !> the "not_a_number" key -- both with no `default`, so the specific scalar
+    !> variant's stop_missing / stop_conversion call site fires.
+    subroutine open_metadata_abort_reader(filename, reader)
+        character(len=*), intent(in) :: filename
+        type(parquet_reader), intent(out) :: reader
+        type(parquet_writer) :: writer
+        type(parquet_schema) :: schema
+        integer(int32) :: id(1) = [1_int32]
+
+        schema%maml = get_parquet_maml("maml_example.maml")
+        call parquet_parse_maml(schema)
+        call schema%set_column_unavailable()
+        call schema%set_column_available("id0")
+        call schema%add_metadata("not_a_number", "not_a_number")
+
+        call parquet_open_writer(writer, filename, schema)
+        call parquet_write_column(writer, "id0", id)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, filename)
+    end subroutine open_metadata_abort_reader
+
+    subroutine scenario_get_metadata_missing_int64_no_default()
+        type(parquet_reader) :: reader
+        integer(int64) :: value
+
+        call open_metadata_abort_reader("test_run/error_scenario_get_metadata_missing_i64.parquet", reader)
+        call parquet_get_metadata(reader, "does_not_exist", value)
+        print '(a,i0)', "unexpectedly read a missing int64 metadata key with no default without error: ", value
+    end subroutine scenario_get_metadata_missing_int64_no_default
+
+    subroutine scenario_get_metadata_missing_float32_no_default()
+        type(parquet_reader) :: reader
+        real(real32) :: value
+
+        call open_metadata_abort_reader("test_run/error_scenario_get_metadata_missing_f32.parquet", reader)
+        call parquet_get_metadata(reader, "does_not_exist", value)
+        print '(a,g0)', "unexpectedly read a missing float32 metadata key with no default without error: ", value
+    end subroutine scenario_get_metadata_missing_float32_no_default
+
+    subroutine scenario_get_metadata_missing_float64_no_default()
+        type(parquet_reader) :: reader
+        real(real64) :: value
+
+        call open_metadata_abort_reader("test_run/error_scenario_get_metadata_missing_f64.parquet", reader)
+        call parquet_get_metadata(reader, "does_not_exist", value)
+        print '(a,g0)', "unexpectedly read a missing float64 metadata key with no default without error: ", value
+    end subroutine scenario_get_metadata_missing_float64_no_default
+
+    subroutine scenario_get_metadata_missing_logical_no_default()
+        type(parquet_reader) :: reader
+        logical :: value
+
+        call open_metadata_abort_reader("test_run/error_scenario_get_metadata_missing_lg.parquet", reader)
+        call parquet_get_metadata(reader, "does_not_exist", value)
+        print '(a,l1)', "unexpectedly read a missing logical metadata key with no default without error: ", value
+    end subroutine scenario_get_metadata_missing_logical_no_default
+
+    subroutine scenario_get_metadata_missing_string_no_default()
+        type(parquet_reader) :: reader
+        character(len=:), allocatable :: value
+
+        call open_metadata_abort_reader("test_run/error_scenario_get_metadata_missing_str.parquet", reader)
+        call parquet_get_metadata(reader, "does_not_exist", value)
+        print '(a,a)', "unexpectedly read a missing string metadata key with no default without error: ", trim(value)
+    end subroutine scenario_get_metadata_missing_string_no_default
+
+    subroutine scenario_get_metadata_conversion_int64_no_default()
+        type(parquet_reader) :: reader
+        integer(int64) :: value
+
+        call open_metadata_abort_reader("test_run/error_scenario_get_metadata_conv_i64.parquet", reader)
+        call parquet_get_metadata(reader, "not_a_number", value)
+        print '(a,i0)', "unexpectedly read an unparsable int64 metadata value with no default without error: ", value
+    end subroutine scenario_get_metadata_conversion_int64_no_default
+
+    subroutine scenario_get_metadata_conversion_float32_no_default()
+        type(parquet_reader) :: reader
+        real(real32) :: value
+
+        call open_metadata_abort_reader("test_run/error_scenario_get_metadata_conv_f32.parquet", reader)
+        call parquet_get_metadata(reader, "not_a_number", value)
+        print '(a,g0)', "unexpectedly read an unparsable float32 metadata value with no default without error: ", value
+    end subroutine scenario_get_metadata_conversion_float32_no_default
+
+    subroutine scenario_get_metadata_conversion_float64_no_default()
+        type(parquet_reader) :: reader
+        real(real64) :: value
+
+        call open_metadata_abort_reader("test_run/error_scenario_get_metadata_conv_f64.parquet", reader)
+        call parquet_get_metadata(reader, "not_a_number", value)
+        print '(a,g0)', "unexpectedly read an unparsable float64 metadata value with no default without error: ", value
+    end subroutine scenario_get_metadata_conversion_float64_no_default
+
+    subroutine scenario_get_metadata_conversion_logical_no_default()
+        type(parquet_reader) :: reader
+        logical :: value
+
+        call open_metadata_abort_reader("test_run/error_scenario_get_metadata_conv_lg.parquet", reader)
+        call parquet_get_metadata(reader, "not_a_number", value)
+        print '(a,l1)', "unexpectedly read an unparsable logical metadata value with no default without error: ", value
+    end subroutine scenario_get_metadata_conversion_logical_no_default
 
     !> schema%add_field error stops if schema%init was never called first --
     !> there is no "fields:" header (or even a %maml) to append to yet.

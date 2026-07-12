@@ -34,10 +34,30 @@ contains
             new_unittest("unparsable value falls back to default", test_conversion_failure_default), &
             new_unittest("int64-range value requested as int32 overflows and falls back to default", &
                 test_int32_overflow_default), &
+            new_unittest("unparsable scalar value falls back to default (int64/float32/float64/logical)", &
+                test_scalar_conversion_failure_default_all_types), &
+            new_unittest("missing scalar key returns default (int64/float32/float64/logical/string)", &
+                test_scalar_missing_key_default_all_types), &
             new_unittest("array element conversion failure falls back to the whole default array", &
                 test_array_conversion_failure_default), &
+            new_unittest("unparsable array falls back to default (int64/float32/float64/logical)", &
+                test_array_conversion_failure_default_all_types), &
+            new_unittest("missing array key returns default (int64/float32/float64/logical/string)", &
+                test_array_missing_key_default_all_types), &
             new_unittest("missing key with no default aborts", test_missing_key_no_default_aborts), &
-            new_unittest("unparsable value with no default aborts", test_conversion_failure_no_default_aborts) &
+            new_unittest("unparsable value with no default aborts", test_conversion_failure_no_default_aborts), &
+            new_unittest("missing int64 key with no default aborts", test_missing_int64_no_default_aborts), &
+            new_unittest("missing float32 key with no default aborts", test_missing_float32_no_default_aborts), &
+            new_unittest("missing float64 key with no default aborts", test_missing_float64_no_default_aborts), &
+            new_unittest("missing logical key with no default aborts", test_missing_logical_no_default_aborts), &
+            new_unittest("missing string key with no default aborts", test_missing_string_no_default_aborts), &
+            new_unittest("unparsable int64 value with no default aborts", test_conversion_int64_no_default_aborts), &
+            new_unittest("unparsable float32 value with no default aborts", &
+                test_conversion_float32_no_default_aborts), &
+            new_unittest("unparsable float64 value with no default aborts", &
+                test_conversion_float64_no_default_aborts), &
+            new_unittest("unparsable logical value with no default aborts", &
+                test_conversion_logical_no_default_aborts) &
             ]
     end subroutine collect_tests_parquet_metadata
 
@@ -331,6 +351,22 @@ contains
         end if
 
         call parquet_close_reader(reader)
+
+        ! test/fixtures/has_null.parquet is written by generate_fixtures.cpp
+        ! with no key-value metadata at all, so the reader never allocates its
+        ! in-memory metadata table -- reading any key must still cleanly fall
+        ! back to the default (exercises the "no metadata items" early return
+        ! in parquet_metadata_find_index that library-written files, which
+        ! always carry reserved metadata, can't reach).
+        call parquet_open_reader(reader, "test/fixtures/has_null.parquet")
+        call parquet_get_metadata(reader, "does_not_exist", i32, default=13_int32, warn=.false.)
+        call parquet_close_reader(reader)
+
+        call check(error, i32 == 13_int32)
+        if (allocated(error)) then
+            call test_failed(error, "missing key on a file with no metadata did not return the default value")
+            return
+        end if
     end subroutine test_missing_key_default_no_warn
 
     subroutine test_conversion_failure_default(error)
@@ -372,6 +408,80 @@ contains
         call parquet_close_reader(reader)
     end subroutine test_int32_overflow_default
 
+    !> The int32 scalar conversion-failure-with-default path is covered above
+    !> (test_conversion_failure_default); this exercises the same
+    !> warn-then-fall-back-to-default branch in each of the other scalar
+    !> variants (int64/float32/float64/logical), since they are near-identical
+    !> copies and a per-type copy-paste slip (wrong parse fn / default handling)
+    !> would otherwise go uncaught. string has no conversion-failure branch (any
+    !> stored text is a valid string), so it is not included here.
+    subroutine test_scalar_conversion_failure_default_all_types(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        integer(int64) :: i64
+        real(real32) :: f32
+        real(real64) :: f64
+        logical :: lg
+
+        call write_metadata_fixture("test_run/metadata_scalar_conv_fail_all.parquet", reader)
+
+        ! meta_not_a_number holds "not_a_number", unparsable as any numeric or
+        ! logical type -- every variant must warn and return the given default.
+        call parquet_get_metadata(reader, "meta_not_a_number", i64, default=-21_int64)
+        call parquet_get_metadata(reader, "meta_not_a_number", f32, default=-2.5_real32)
+        call parquet_get_metadata(reader, "meta_not_a_number", f64, default=-3.5_real64)
+        call parquet_get_metadata(reader, "meta_not_a_number", lg, default=.true.)
+        call parquet_close_reader(reader)
+
+        call check(error, i64 == -21_int64 .and. abs(f32 + 2.5_real32) < 1.0e-5_real32 .and. &
+            abs(f64 + 3.5_real64) < 1.0e-10_real64 .and. (lg .eqv. .true.))
+        if (allocated(error)) then
+            call test_failed(error, &
+                "an unparsable scalar value with a default did not fall back to it for one or more types")
+            return
+        end if
+    end subroutine test_scalar_conversion_failure_default_all_types
+
+    !> Mirrors test_missing_key_default_warns/no_warn (int32) across the other
+    !> scalar variants: a missing key with a default returns the default (and,
+    !> with warn=.true. by default, prints the "using default" WARNING); a
+    !> second read per type passes warn=.false. to also exercise each variant's
+    !> present(warn) branch and confirm it suppresses the warning path.
+    subroutine test_scalar_missing_key_default_all_types(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        integer(int64) :: i64, i64b
+        real(real32) :: f32, f32b
+        real(real64) :: f64, f64b
+        logical :: lg, lgb
+        character(len=:), allocatable :: sval, svalb
+
+        call write_metadata_fixture("test_run/metadata_scalar_missing_all.parquet", reader)
+
+        call parquet_get_metadata(reader, "does_not_exist", i64, default=-11_int64)
+        call parquet_get_metadata(reader, "does_not_exist", i64b, default=-12_int64, warn=.false.)
+        call parquet_get_metadata(reader, "does_not_exist", f32, default=-1.5_real32)
+        call parquet_get_metadata(reader, "does_not_exist", f32b, default=-1.6_real32, warn=.false.)
+        call parquet_get_metadata(reader, "does_not_exist", f64, default=-2.5_real64)
+        call parquet_get_metadata(reader, "does_not_exist", f64b, default=-2.6_real64, warn=.false.)
+        call parquet_get_metadata(reader, "does_not_exist", lg, default=.true.)
+        call parquet_get_metadata(reader, "does_not_exist", lgb, default=.true., warn=.false.)
+        call parquet_get_metadata(reader, "does_not_exist", sval, default="fallback")
+        call parquet_get_metadata(reader, "does_not_exist", svalb, default="fallback2", warn=.false.)
+        call parquet_close_reader(reader)
+
+        call check(error, i64 == -11_int64 .and. i64b == -12_int64 .and. &
+            abs(f32 + 1.5_real32) < 1.0e-5_real32 .and. abs(f32b + 1.6_real32) < 1.0e-5_real32 .and. &
+            abs(f64 + 2.5_real64) < 1.0e-10_real64 .and. abs(f64b + 2.6_real64) < 1.0e-10_real64 .and. &
+            (lg .eqv. .true.) .and. (lgb .eqv. .true.) .and. &
+            trim(sval) == "fallback" .and. trim(svalb) == "fallback2")
+        if (allocated(error)) then
+            call test_failed(error, &
+                "a missing scalar key with a default did not return the default for one or more types")
+            return
+        end if
+    end subroutine test_scalar_missing_key_default_all_types
+
     subroutine test_array_conversion_failure_default(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_writer) :: writer
@@ -408,6 +518,98 @@ contains
         call parquet_close_reader(reader)
     end subroutine test_array_conversion_failure_default
 
+    !> Same as test_array_conversion_failure_default (int32 array) but for the
+    !> other array variants: a stored array with an unparsable element must
+    !> warn and fall back to the whole default array, never a partially-parsed
+    !> one. int64/float32/float64 reuse a bad numeric array; logical needs a
+    !> non-true/false token, so it gets its own bad logical array.
+    subroutine test_array_conversion_failure_default_all_types(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_schema) :: schema
+        integer(int32) :: id0(3) = [1_int32, 2_int32, 3_int32]
+        integer(int64), allocatable :: i64arr(:)
+        real(real32), allocatable :: f32arr(:)
+        real(real64), allocatable :: f64arr(:)
+        logical, allocatable :: lgarr(:)
+        integer(int64), parameter :: i64_fb(2) = [-9_int64, -8_int64]
+        real(real32), parameter :: f32_fb(2) = [-9.5_real32, -8.5_real32]
+        real(real64), parameter :: f64_fb(2) = [-9.25_real64, -8.25_real64]
+        logical, parameter :: lg_fb(2) = [.false., .true.]
+        character(len=*), parameter :: out_file = "test_run/metadata_array_conv_fail_all.parquet"
+
+        call parquet_parse_maml("docs/maml_example.maml", schema)
+        call schema%set_column_unavailable()
+        call schema%set_column_available("id0")
+
+        ! "bad" is unparsable as any numeric type; "x" is unparsable as logical
+        ! (which accepts only true/false) -- each read must reject the whole
+        ! array and return the default.
+        call schema%add_metadata("bad_num_arr", ["1  ", "bad", "3  "])
+        call schema%add_metadata("bad_bool_arr", ["true ", "x    ", "false"])
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "id0", id0)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_metadata(reader, "bad_num_arr", i64arr, default=i64_fb)
+        call parquet_get_metadata(reader, "bad_num_arr", f32arr, default=f32_fb)
+        call parquet_get_metadata(reader, "bad_num_arr", f64arr, default=f64_fb)
+        call parquet_get_metadata(reader, "bad_bool_arr", lgarr, default=lg_fb)
+        call parquet_close_reader(reader)
+
+        call check(error, all(i64arr == i64_fb) .and. all(abs(f32arr - f32_fb) < 1.0e-5_real32) .and. &
+            all(abs(f64arr - f64_fb) < 1.0e-10_real64) .and. all(lgarr .eqv. lg_fb))
+        if (allocated(error)) then
+            call test_failed(error, &
+                "an array with an unparsable element did not fall back to the default array for one or more types")
+            return
+        end if
+    end subroutine test_array_conversion_failure_default_all_types
+
+    !> Missing-key-with-default across every array variant (int64/float32/
+    !> float64/logical/string): each returns the default array. int32 array's
+    !> equivalent branch; the other variants are near-identical copies, so this
+    !> guards against a per-type slip. int32 is included here too (its
+    !> missing-with-default branch is otherwise only reached on the abort path).
+    subroutine test_array_missing_key_default_all_types(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        integer(int32), allocatable :: i32arr(:)
+        integer(int64), allocatable :: i64arr(:)
+        real(real32), allocatable :: f32arr(:)
+        real(real64), allocatable :: f64arr(:)
+        logical, allocatable :: lgarr(:)
+        character(len=:), allocatable :: sarr(:)
+        integer(int32), parameter :: i32_fb(2) = [-3_int32, -4_int32]
+        integer(int64), parameter :: i64_fb(2) = [-1_int64, -2_int64]
+        real(real32), parameter :: f32_fb(2) = [-1.5_real32, -2.5_real32]
+        real(real64), parameter :: f64_fb(2) = [-1.25_real64, -2.25_real64]
+        logical, parameter :: lg_fb(2) = [.true., .false.]
+
+        call write_metadata_fixture("test_run/metadata_array_missing_all.parquet", reader)
+
+        call parquet_get_metadata(reader, "no_such_array", i32arr, default=i32_fb)
+        call parquet_get_metadata(reader, "no_such_array", i64arr, default=i64_fb)
+        call parquet_get_metadata(reader, "no_such_array", f32arr, default=f32_fb)
+        call parquet_get_metadata(reader, "no_such_array", f64arr, default=f64_fb)
+        call parquet_get_metadata(reader, "no_such_array", lgarr, default=lg_fb)
+        call parquet_get_metadata(reader, "no_such_array", sarr, default=["aa", "bb"])
+        call parquet_close_reader(reader)
+
+        call check(error, all(i32arr == i32_fb) .and. all(i64arr == i64_fb) .and. &
+            all(abs(f32arr - f32_fb) < 1.0e-5_real32) .and. &
+            all(abs(f64arr - f64_fb) < 1.0e-10_real64) .and. all(lgarr .eqv. lg_fb) .and. &
+            size(sarr) == 2 .and. trim(sarr(1)) == "aa" .and. trim(sarr(2)) == "bb")
+        if (allocated(error)) then
+            call test_failed(error, &
+                "a missing array key with a default did not return the default array for one or more types")
+            return
+        end if
+    end subroutine test_array_missing_key_default_all_types
+
     subroutine test_missing_key_no_default_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
@@ -423,5 +625,84 @@ contains
             expect_abort=.true., &
             failure_message="reading an unparsable metadata value with no default was expected to abort")
     end subroutine test_conversion_failure_no_default_aborts
+
+    ! The two int32 abort scenarios above cover the shared stop_missing/
+    ! stop_conversion helpers; these per-type variants additionally exercise
+    ! each scalar variant's own call site into them (a distinct line per type),
+    ! mirroring how the int32 scalar variant is covered. Array variants are not
+    ! given abort scenarios here -- matching the int32 array variant, which has
+    ! only an in-process default-fallback test and no abort scenario.
+
+    subroutine test_missing_int64_no_default_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "get_metadata_missing_int64_no_default", &
+            expect_abort=.true., &
+            failure_message="reading a missing int64 metadata key with no default was expected to abort")
+    end subroutine test_missing_int64_no_default_aborts
+
+    subroutine test_missing_float32_no_default_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "get_metadata_missing_float32_no_default", &
+            expect_abort=.true., &
+            failure_message="reading a missing float32 metadata key with no default was expected to abort")
+    end subroutine test_missing_float32_no_default_aborts
+
+    subroutine test_missing_float64_no_default_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "get_metadata_missing_float64_no_default", &
+            expect_abort=.true., &
+            failure_message="reading a missing float64 metadata key with no default was expected to abort")
+    end subroutine test_missing_float64_no_default_aborts
+
+    subroutine test_missing_logical_no_default_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "get_metadata_missing_logical_no_default", &
+            expect_abort=.true., &
+            failure_message="reading a missing logical metadata key with no default was expected to abort")
+    end subroutine test_missing_logical_no_default_aborts
+
+    subroutine test_missing_string_no_default_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "get_metadata_missing_string_no_default", &
+            expect_abort=.true., &
+            failure_message="reading a missing string metadata key with no default was expected to abort")
+    end subroutine test_missing_string_no_default_aborts
+
+    subroutine test_conversion_int64_no_default_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "get_metadata_conversion_int64_no_default", &
+            expect_abort=.true., &
+            failure_message="reading an unparsable int64 metadata value with no default was expected to abort")
+    end subroutine test_conversion_int64_no_default_aborts
+
+    subroutine test_conversion_float32_no_default_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "get_metadata_conversion_float32_no_default", &
+            expect_abort=.true., &
+            failure_message="reading an unparsable float32 metadata value with no default was expected to abort")
+    end subroutine test_conversion_float32_no_default_aborts
+
+    subroutine test_conversion_float64_no_default_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "get_metadata_conversion_float64_no_default", &
+            expect_abort=.true., &
+            failure_message="reading an unparsable float64 metadata value with no default was expected to abort")
+    end subroutine test_conversion_float64_no_default_aborts
+
+    subroutine test_conversion_logical_no_default_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "get_metadata_conversion_logical_no_default", &
+            expect_abort=.true., &
+            failure_message="reading an unparsable logical metadata value with no default was expected to abort")
+    end subroutine test_conversion_logical_no_default_aborts
 
 end module test_metadata

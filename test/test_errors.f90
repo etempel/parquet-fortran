@@ -81,6 +81,8 @@ contains
                 test_filter_vector_column_aborts), &
             new_unittest("filter: malformed rule aborts", &
                 test_filter_malformed_rule_aborts), &
+            new_unittest("filter: rule longer than 512 characters aborts", &
+                test_filter_rule_too_long_aborts), &
             new_unittest("filter: non-numeric value against a numeric column aborts", &
                 test_filter_bad_numeric_value_aborts), &
             new_unittest("filter: unquoted value against a string column aborts", &
@@ -149,8 +151,12 @@ contains
                 test_qc_maml_min_wrong_operator_aborts), &
             new_unittest("add_col_qc: reversed min operator aborts", &
                 test_add_col_qc_min_reversed_operator_aborts), &
+            new_unittest("add_col_qc: reversed max operator aborts", &
+                test_add_col_qc_max_reversed_operator_aborts), &
             new_unittest("add_col_qc: operator with no value aborts", &
                 test_add_col_qc_operator_without_value_aborts), &
+            new_unittest("add_col_qc: max operator with no value aborts", &
+                test_add_col_qc_max_operator_without_value_aborts), &
             new_unittest("add_col_qc: invalid miss value aborts", &
                 test_add_col_qc_bad_miss_value_aborts), &
             new_unittest("add_col_qc: more than four fields aborts", &
@@ -447,6 +453,14 @@ contains
             failure_message="opening a reader with a malformed filter rule was expected to abort", &
             required_stderr="invalid filter rule")
     end subroutine test_filter_malformed_rule_aborts
+
+    subroutine test_filter_rule_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_rule_too_long", expect_abort=.true., &
+            failure_message="adding a filter rule longer than 512 characters was expected to abort", &
+            required_stderr="parquet_filter%add: rule exceeds the maximum supported length")
+    end subroutine test_filter_rule_too_long_aborts
 
     !> A non-numeric value against a numeric filter column (rule shape is
     !> fine, the value itself isn't) aborts with a message naming the value
@@ -780,12 +794,26 @@ contains
             failure_message="add_col_qc with a reversed min operator was expected to error stop")
     end subroutine test_add_col_qc_min_reversed_operator_aborts
 
+    subroutine test_add_col_qc_max_reversed_operator_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "add_col_qc_max_reversed_operator", expect_abort=.true., &
+            failure_message="add_col_qc with a reversed max operator was expected to error stop")
+    end subroutine test_add_col_qc_max_reversed_operator_aborts
+
     subroutine test_add_col_qc_operator_without_value_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
         call check_scenario_exit_status(error, "add_col_qc_operator_without_value", expect_abort=.true., &
             failure_message="add_col_qc with an operator but no value was expected to error stop")
     end subroutine test_add_col_qc_operator_without_value_aborts
+
+    subroutine test_add_col_qc_max_operator_without_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "add_col_qc_max_operator_without_value", expect_abort=.true., &
+            failure_message="add_col_qc with a max operator but no value was expected to error stop")
+    end subroutine test_add_col_qc_max_operator_without_value_aborts
 
     subroutine test_add_col_qc_bad_miss_value_aborts(error)
         type(error_type), allocatable, intent(out) :: error

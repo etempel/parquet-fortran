@@ -120,7 +120,11 @@ contains
             new_unittest("parquet_set_max_threads with a valid value does not break a round-trip", &
                 test_set_max_threads_valid_value_does_not_break_round_trip), &
             new_unittest("writing a numeric kind that differs from the schema's declared data_type " // &
-                "converts to match it", test_write_cross_type_schema_coercion) &
+                "converts to match it", test_write_cross_type_schema_coercion), &
+            new_unittest("float32 scalar (with is_valid) and float32/boolean vector columns round-trip", &
+                test_write_float32_boolean_vector_columns), &
+            new_unittest("vector columns written through a qc-enabled schema round-trip (with/without is_valid)", &
+                test_write_vector_columns_schema_qc) &
             ]
         !
     end subroutine collect_tests_parquet_writing
@@ -1479,6 +1483,7 @@ contains
         integer(int64) :: src_i32_from_i64(3)
         real(real64)   :: src_i32_from_f64(3)
         real(real32)   :: src_i32_from_f32(3)
+        integer(int32) :: src_i64_from_i32(3)
         real(real64)   :: src_i64_from_f64(3)
         real(real32)   :: src_i64_from_f32(3)
         integer(int32) :: src_f32_from_i32(3)
@@ -1488,7 +1493,7 @@ contains
         integer(int64) :: src_f64_from_i64(3)
         real(real32)   :: src_f64_from_f32(3)
         integer(int32) :: i32_from_i64_back(3), i32_from_f64_back(3), i32_from_f32_back(3)
-        integer(int64) :: i64_from_f64_back(3), i64_from_f32_back(3)
+        integer(int64) :: i64_from_i32_back(3), i64_from_f64_back(3), i64_from_f32_back(3)
         real(real32)   :: f32_from_i32_back(3), f32_from_i64_back(3), f32_from_f64_back(3)
         real(real64)   :: f64_from_i32_back(3), f64_from_i64_back(3), f64_from_f32_back(3)
         character(len=*), parameter :: out_file = "test_run/test_write_cross_type_schema_coercion.parquet"
@@ -1496,6 +1501,7 @@ contains
         src_i32_from_i64 = [1_int64, 2_int64, 3_int64]
         src_i32_from_f64 = [1.0_real64, 2.0_real64, 3.0_real64]
         src_i32_from_f32 = [1.0_real32, 2.0_real32, 3.0_real32]
+        src_i64_from_i32 = [1_int32, 2_int32, 3_int32]
         src_i64_from_f64 = [1.0_real64, 2.0_real64, 3.0_real64]
         src_i64_from_f32 = [1.0_real32, 2.0_real32, 3.0_real32]
         src_f32_from_i32 = [1_int32, 2_int32, 3_int32]
@@ -1509,6 +1515,7 @@ contains
         call schema%add_field("i32_from_i64", "int32")
         call schema%add_field("i32_from_f64", "int32")
         call schema%add_field("i32_from_f32", "int32")
+        call schema%add_field("i64_from_i32", "int64")
         call schema%add_field("i64_from_f64", "int64")
         call schema%add_field("i64_from_f32", "int64")
         call schema%add_field("f32_from_i32", "float32")
@@ -1523,6 +1530,7 @@ contains
         call parquet_write_column(writer, "i32_from_i64", src_i32_from_i64)
         call parquet_write_column(writer, "i32_from_f64", src_i32_from_f64)
         call parquet_write_column(writer, "i32_from_f32", src_i32_from_f32)
+        call parquet_write_column(writer, "i64_from_i32", src_i64_from_i32)
         call parquet_write_column(writer, "i64_from_f64", src_i64_from_f64)
         call parquet_write_column(writer, "i64_from_f32", src_i64_from_f32)
         call parquet_write_column(writer, "f32_from_i32", src_f32_from_i32)
@@ -1537,6 +1545,7 @@ contains
         call parquet_read_column(reader, "i32_from_i64", i32_from_i64_back)
         call parquet_read_column(reader, "i32_from_f64", i32_from_f64_back)
         call parquet_read_column(reader, "i32_from_f32", i32_from_f32_back)
+        call parquet_read_column(reader, "i64_from_i32", i64_from_i32_back)
         call parquet_read_column(reader, "i64_from_f64", i64_from_f64_back)
         call parquet_read_column(reader, "i64_from_f32", i64_from_f32_back)
         call parquet_read_column(reader, "f32_from_i32", f32_from_i32_back)
@@ -1550,6 +1559,7 @@ contains
         call check(error, all(i32_from_i64_back == [1_int32, 2_int32, 3_int32]) .and. &
             all(i32_from_f64_back == [1_int32, 2_int32, 3_int32]) .and. &
             all(i32_from_f32_back == [1_int32, 2_int32, 3_int32]) .and. &
+            all(i64_from_i32_back == [1_int64, 2_int64, 3_int64]) .and. &
             all(i64_from_f64_back == [1_int64, 2_int64, 3_int64]) .and. &
             all(i64_from_f32_back == [1_int64, 2_int64, 3_int64]) .and. &
             all(f32_from_i32_back == [1.0_real32, 2.0_real32, 3.0_real32]) .and. &
@@ -1560,6 +1570,160 @@ contains
             all(f64_from_f32_back == [1.0_real64, 2.0_real64, 3.0_real64]), &
             "cross-type schema coercion did not round-trip one or more columns correctly")
     end subroutine test_write_cross_type_schema_coercion
+
+    !> Existing is_valid/matrix write tests only exercise int32; this covers the
+    !> float32 scalar-with-is_valid path and the float32 and boolean vector
+    !> (matrix) write procedures (parquet_write_float32_matrix_column /
+    !> parquet_write_logical_matrix_column), which were otherwise never written.
+    !> Schema-less writer, so it exercises the non-schema-enforced branch of each.
+    subroutine test_write_float32_boolean_vector_columns(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        real(real32) :: f32_scalar(3) = [1.5_real32, 2.5_real32, 3.5_real32]
+        real(real32) :: f32_scalar_back(3)
+        logical :: f32_valid_in(3) = [.true., .false., .true.]
+        logical :: f32_valid_out(3)
+        real(real32) :: f32_vec(2, 3), f32_vec_back(2, 3)
+        logical :: bool_vec(2, 3), bool_vec_back(2, 3)
+        logical :: bool_valid_in(2, 3), bool_valid_out(2, 3)
+        character(len=*), parameter :: out_file = "test_run/test_write_f32_bool_vectors.parquet"
+
+        f32_vec = reshape([1.0_real32, 2.0_real32, 3.0_real32, 4.0_real32, 5.0_real32, 6.0_real32], [2, 3])
+        bool_vec = reshape([.true., .false., .true., .true., .false., .false.], [2, 3])
+        bool_valid_in = .true.
+        bool_valid_in(2, 3) = .false.
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "f32_scalar", f32_scalar, is_valid=f32_valid_in)
+        call parquet_write_column(writer, "f32_vec", f32_vec)
+        call parquet_write_column(writer, "bool_vec", bool_vec, is_valid=bool_valid_in)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "f32_scalar", f32_scalar_back, is_valid=f32_valid_out)
+        call parquet_read_column(reader, "f32_vec", f32_vec_back)
+        call parquet_read_column(reader, "bool_vec", bool_vec_back, is_valid=bool_valid_out)
+        call parquet_close_reader(reader)
+
+        call check(error, f32_valid_out(1) .and. (.not. f32_valid_out(2)) .and. f32_valid_out(3), &
+            "float32 scalar is_valid mask did not round-trip")
+        if (allocated(error)) return
+
+        call check(error, abs(f32_scalar_back(1) - 1.5_real32) < 1.0e-5_real32 .and. &
+            abs(f32_scalar_back(3) - 3.5_real32) < 1.0e-5_real32, &
+            "float32 scalar values did not round-trip")
+        if (allocated(error)) return
+
+        call check(error, all(abs(f32_vec_back - f32_vec) < 1.0e-5_real32), &
+            "float32 vector column did not round-trip")
+        if (allocated(error)) return
+
+        call check(error, all(bool_vec_back(:, 1:2) .eqv. bool_vec(:, 1:2)) .and. &
+            bool_vec_back(1, 3) .eqv. bool_vec(1, 3), &
+            "boolean vector column did not round-trip")
+        if (allocated(error)) return
+
+        call check(error, all(bool_valid_out(:, 1:2)) .and. bool_valid_out(1, 3) .and. &
+            (.not. bool_valid_out(2, 3)), &
+            "boolean vector column is_valid mask did not round-trip")
+    end subroutine test_write_float32_boolean_vector_columns
+
+    !> Writes int32/int64/float32/float64 *scalar* and int32/int64/float32/
+    !> float64/boolean/string *vector* columns through a MAML schema (built via
+    !> schema%init/add_field) with qc=.true., which exercises the schema-enforced
+    !> + qc branches inside both the scalar and matrix writers for every numeric
+    !> type -- previously unhit for int64 (never written under qc) and for the
+    !> scalar-column qc paths (only vector columns were written under qc). Two
+    !> writers cover both the with-is_valid and without-is_valid qc branches. The
+    !> f64 scalar and the string column use strict >/< qc operators (rather than
+    !> the default >=/<=), exercising the ">" and "<" cases of the numeric and
+    !> string qc comparison helpers. Data is deliberately in range, so qc prints
+    !> no warning (the qc check path still runs, which is what's being covered).
+    subroutine test_write_vector_columns_schema_qc(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: i32s(3)
+        integer(int64) :: i64s(3)
+        real(real32) :: f32s(3)
+        real(real64) :: f64s(3)
+        integer(int32) :: i32v(2, 3), i32v_back(2, 3)
+        integer(int64) :: i64v(2, 3), i64v_back(2, 3)
+        real(real32) :: f32v(2, 3)
+        real(real64) :: f64v(2, 3)
+        logical :: boolv(2, 3)
+        character(len=8) :: strv(2, 3)
+        logical :: valid_in(2, 3), svalid(3)
+        character(len=*), parameter :: out_valid = "test_run/test_vector_schema_qc_valid.parquet"
+        character(len=*), parameter :: out_novalid = "test_run/test_vector_schema_qc_novalid.parquet"
+
+        i32s = [1_int32, 2_int32, 3_int32]
+        i64s = [1_int64, 2_int64, 3_int64]
+        f32s = [1.0_real32, 2.0_real32, 3.0_real32]
+        f64s = [1.0_real64, 2.0_real64, 3.0_real64]
+        i32v = reshape([1_int32, 2_int32, 3_int32, 4_int32, 5_int32, 6_int32], [2, 3])
+        i64v = reshape([1_int64, 2_int64, 3_int64, 4_int64, 5_int64, 6_int64], [2, 3])
+        f32v = reshape([1.0_real32, 2.0_real32, 3.0_real32, 4.0_real32, 5.0_real32, 6.0_real32], [2, 3])
+        f64v = reshape([1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64, 6.0_real64], [2, 3])
+        boolv = reshape([.true., .false., .true., .false., .true., .false.], [2, 3])
+        ! All strictly greater than "aa" and less than "zz" (strict qc bounds).
+        strv = reshape(["ab", "bb", "cc", "dd", "ee", "ff"], [2, 3])
+        valid_in = .true.
+        svalid = .true.
+
+        call schema%init(table="vector_qc_table")
+        call schema%add_field("i32s", "int32", qc_min="0", qc_max="100")
+        call schema%add_field("i64s", "int64", qc_min="0", qc_max="100")
+        call schema%add_field("f32s", "float32", qc_min="0", qc_max="100")
+        call schema%add_field("f64s", "float64", qc_min=">0", qc_max="<100")
+        call schema%add_field("i32v", "int32", col_size=2, qc_min="0", qc_max="100")
+        call schema%add_field("i64v", "int64", col_size=2, qc_min="0", qc_max="100")
+        call schema%add_field("f32v", "float32", col_size=2, qc_min="0", qc_max="100")
+        call schema%add_field("f64v", "float64", col_size=2, qc_min="0", qc_max="100")
+        call schema%add_field("boolv", "boolean", col_size=2)
+        call schema%add_field("strv", "string", col_size=2, array_size=8, qc_min=">aa", qc_max="<zz")
+        call parquet_parse_maml(schema)
+
+        ! Writer 1: every column written WITH is_valid -> the is_valid + qc
+        ! (present(is_valid)) branch of each scalar/matrix writer.
+        call parquet_open_writer(writer, out_valid, schema, qc=.true.)
+        call parquet_write_column(writer, "i32s", i32s, is_valid=svalid)
+        call parquet_write_column(writer, "i64s", i64s, is_valid=svalid)
+        call parquet_write_column(writer, "f32s", f32s, is_valid=svalid)
+        call parquet_write_column(writer, "f64s", f64s, is_valid=svalid)
+        call parquet_write_column(writer, "i32v", i32v, is_valid=valid_in)
+        call parquet_write_column(writer, "i64v", i64v, is_valid=valid_in)
+        call parquet_write_column(writer, "f32v", f32v, is_valid=valid_in)
+        call parquet_write_column(writer, "f64v", f64v, is_valid=valid_in)
+        call parquet_write_column(writer, "boolv", boolv, is_valid=valid_in)
+        call parquet_write_column(writer, "strv", strv, is_valid=valid_in)
+        call parquet_close_writer(writer)
+
+        ! Writer 2: every column written WITHOUT is_valid -> the else (no
+        ! is_valid) qc branch of each scalar/matrix writer.
+        call parquet_open_writer(writer, out_novalid, schema, qc=.true.)
+        call parquet_write_column(writer, "i32s", i32s)
+        call parquet_write_column(writer, "i64s", i64s)
+        call parquet_write_column(writer, "f32s", f32s)
+        call parquet_write_column(writer, "f64s", f64s)
+        call parquet_write_column(writer, "i32v", i32v)
+        call parquet_write_column(writer, "i64v", i64v)
+        call parquet_write_column(writer, "f32v", f32v)
+        call parquet_write_column(writer, "f64v", f64v)
+        call parquet_write_column(writer, "boolv", boolv)
+        call parquet_write_column(writer, "strv", strv)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_novalid)
+        call parquet_read_column(reader, "i32v", i32v_back)
+        call parquet_read_column(reader, "i64v", i64v_back)
+        call parquet_close_reader(reader)
+
+        call check(error, all(i32v_back == i32v) .and. all(i64v_back == i64v), &
+            "vector columns written through a qc-enabled schema did not round-trip")
+    end subroutine test_write_vector_columns_schema_qc
 
     subroutine test_write_parquet_file(error)
         type(error_type), allocatable, intent(out) :: error

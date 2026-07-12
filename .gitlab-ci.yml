@@ -28,7 +28,8 @@ before_script:
   - apt-get install -y -V libarrow-dev libparquet-dev
 
   # Installing FPM (Fortran Package Manager) via pipx
-  - apt-get install -y python3-venv pipx
+  - apt-get install -y python3-venv
+  - apt-get install -y pipx
   - pipx ensurepath
   - pipx install fpm
   - export PATH=~/.local/bin:$PATH

@@ -1,11 +1,15 @@
-# Pin the container image explicitly: this is a Docker-executor runner, and
-# its default image is ubuntu:20.04 (focal), whose default gcc/g++ is too old
-# for this project's C++20 requirement (parquet_wrapper.cpp needs
-# __cplusplus >= 202002L, which GCC only reports from version 11; focal tops
-# out at GCC 10, reporting the pre-final 201709L). ubuntu:22.04 (jammy) ships
-# GCC 11 by default -- and also has pipx and the modern Arrow apt packages --
-# so no per-compiler (gfortran-11/gcov-11) overrides are needed below.
-image: ubuntu:22.04
+# Pin the container image explicitly: this is a Docker-executor runner whose
+# default image is ubuntu:20.04 (focal), which is too old on two counts --
+# its gcc (10) predates C++20's finalized __cplusplus value (202002L, needed
+# by parquet_wrapper.cpp; GCC reports it only from 11), and it has no pipx.
+# ubuntu:22.04 (GCC/gfortran 11) clears both, but gfortran 11 miscompiles the
+# optional-allocatable-character argument pass-through in schema%add_col_qc
+# (returns a corrupted column name -> a spurious "column not found" abort).
+# ubuntu:24.04 ships gfortran 13, where that is fixed, and still has pipx, the
+# modern Arrow apt packages, and a C++20-capable g++ -- and its default gcov
+# matches the default compiler, so no per-compiler overrides are needed below.
+# See README.md's Prerequisites for the minimum-gfortran note.
+image: ubuntu:24.04
 
 variables:
   DEBIAN_FRONTEND: noninteractive
@@ -49,7 +53,7 @@ stages:
 
 test:
   # Selects the Docker-executor runner; the image: above overrides its default
-  # ubuntu:20.04 container with ubuntu:22.04.
+  # ubuntu:20.04 container with ubuntu:24.04.
   tags:
     - focal
   stage: test
@@ -67,7 +71,7 @@ test:
   script:
     # -ffree-line-length-none: the source has free-form lines longer than the
     # standard 132-column limit. gfortran's default limit varies by version
-    # (recent gfortran effectively removed it, but the 22.04 image's gfortran 11
+    # (recent gfortran effectively removed it, but older gfortran, e.g. 11/13,
     # still truncates at 132 and errors). Setting FPM_FFLAGS replaces fpm's
     # default profile, which would otherwise supply this flag, so pass it here.
     - FPM_FFLAGS="--coverage -fopenmp -ffree-line-length-none" fpm test --verbose

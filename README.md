@@ -83,15 +83,23 @@ The code compiles successfully with the following compilers and libraries. It mi
 
 - Fortran compiler:
     - Intel Fortran (ifx) v2025.3.0
-    - Gfortran v15.2.0
+    - Gfortran v15.2.0 (development), v13 (CI)
+    - **Minimum gfortran: 13.** gfortran 11 and earlier (e.g. Ubuntu 22.04's
+      default compiler) miscompile the optional deferred-length allocatable
+      `character` argument returned by `schema%add_col_qc` / `schema%get_col_qc`,
+      yielding a corrupted column name at runtime (a spurious "column not found"
+      abort) rather than a build error. Use gfortran 13 or newer.
 - FPM ([Fortran Package Manager](https://fpm.fortran-lang.org/))
+- A C++20-capable C++ compiler (Arrow/Parquet headers use `std::span`
+  unconditionally): e.g. GCC ≥ 11 / a recent Clang. `-std=c++20` must be set
+  (see [Environment variables](#environment-variables)).
 - [apache-arrow](https://arrow.apache.org) (C++ library for parquet) v24.0.0
 
 Installing the Arrow/Parquet C++ library itself (not a Fortran package, so it isn't installed by FPM):
 
 - macOS (Homebrew): `brew install apache-arrow`
 - macOS (MacPorts): `sudo port install apache-arrow`
-- Debian/Ubuntu: follow [Arrow's official apt repository instructions](https://arrow.apache.org/install/) and install `libarrow-dev`/`libparquet-dev`
+- Debian/Ubuntu: follow [Arrow's official apt repository instructions](https://arrow.apache.org/install/) and install `libarrow-dev`, `libarrow-compute-dev` and `libparquet-dev` (the separate `libarrow-compute-dev` provides the `arrow_compute` library that `fpm.toml` links — see [MANUAL.md's Troubleshooting](MANUAL.md#troubleshooting))
 - conda-forge: `conda install -c conda-forge libarrow libparquet`
 
 Whichever route you use, take note of the resulting `include`/`lib` directories — they're what the environment variables below need to point at.

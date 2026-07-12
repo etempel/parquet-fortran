@@ -5,7 +5,7 @@ before_script:
   - apt-get update -y
   - apt-get upgrade -y
   - apt-get install -y --no-install-recommends ca-certificates lsb-release wget gnupg
-        gfortran make libcfitsio-dev libcurl4-openssl-dev git git-lfs gcovr
+        gfortran make git git-lfs gcovr
   
   # Installing FPM (Fortran Package Manager) via pipx
   - apt-get install -y python3-venv
@@ -39,6 +39,8 @@ stages:
   - test
 
 test:
+  tags:
+    - focal
   stage: test
   variables:
     # See README.md's Environment variables section: `-std=c++20` is required

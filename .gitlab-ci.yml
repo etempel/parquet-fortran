@@ -8,7 +8,13 @@ before_script:
         gfortran make git git-lfs gcovr
   # test/fixtures/*.parquet are tracked via git-lfs (see .gitattributes) --
   # pull the real file contents before the test suite tries to read them.
-  - git lfs install
+  # --skip-repo: only sets up git-lfs's global filter config (needed for
+  # `pull` to smudge the pointer files); it deliberately skips installing
+  # repo-local hooks (pre-push etc.), which GitLab's own checkout may already
+  # have created -- CI never pushes from this checkout, so those hooks would
+  # be both unnecessary and (per the error above) a reason for this step to
+  # fail outright if one already exists.
+  - git lfs install --skip-repo
   - git lfs pull
 
   # Install the Arrow/Parquet C++ library from Arrow's own apt repository --

@@ -25,7 +25,7 @@ before_script:
   - wget "https://packages.apache.org/artifactory/arrow/$(lsb_release --id --short | tr 'A-Z' 'a-z')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb"
   - apt-get install -y -V ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
   - apt-get update -y
-  - apt-get install -y -V libarrow-dev libarrow-compute-dev libparquet-dev
+  - apt-get install -y -V libarrow-dev libparquet-dev
 
   # Installing FPM (Fortran Package Manager) via pipx
   - apt-get install -y python3-venv pipx

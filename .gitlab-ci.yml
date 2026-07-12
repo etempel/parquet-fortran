@@ -4,8 +4,14 @@ variables:
 before_script:
   - apt-get update -y
   - apt-get upgrade -y
+  # Ubuntu focal's default gcc/g++/gfortran is 9, whose g++ rejects -std=c++20
+  # (and lacks a usable <span>, which Arrow's headers require). Install the
+  # GCC 10 toolchain from focal's universe repo instead and point fpm at it
+  # via FPM_FC/FPM_CC/FPM_CXX below; gcov-10 (from the gcc-10 package) is also
+  # what gcovr must use, since it has to match the compiler that wrote the
+  # .gcno/.gcda coverage data.
   - apt-get install -y --no-install-recommends ca-certificates lsb-release wget gnupg
-        gfortran make git git-lfs gcovr
+        gfortran-10 gcc-10 g++-10 make git git-lfs gcovr
   
   # Installing FPM (Fortran Package Manager) via pipx
   - apt-get install -y python3-venv
@@ -43,6 +49,12 @@ test:
     - focal
   stage: test
   variables:
+    # Use the GCC 10 toolchain installed above (focal's default 9 is too old
+    # for -std=c++20 / <span>). fpm honours these to pick the Fortran, C and
+    # C++ compilers.
+    FPM_FC: gfortran-10
+    FPM_CC: gcc-10
+    FPM_CXX: g++-10
     # See README.md's Environment variables section: `-std=c++20` is required
     # on every platform (Arrow/Parquet headers use std::span unconditionally).
     # FPM_LDFLAGS supplies the C++ runtime (-lstdc++ on Linux/GCC), since
@@ -55,4 +67,6 @@ test:
   coverage: /^TOTAL.*\s+(\d+\%)$/
   script:
     - FPM_FFLAGS="--coverage -fopenmp" fpm test --verbose
-    - gcovr -r . --filter 'src/*' --exclude 'src/test*'
+    # --gcov-executable gcov-10: gcovr must use the gcov matching gcc-10, or it
+    # rejects the .gcno/.gcda files with a version-mismatch error.
+    - gcovr -r . --filter 'src/*' --exclude 'src/test*' --gcov-executable gcov-10

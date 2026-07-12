@@ -4,6 +4,7 @@ This file covers developing, testing, and extending this repository itself. If y
 
 ## Contents
 
+- [AI assistance](#ai-assistance)
 - [Conventions](#conventions)
 - [Building and testing this repository](#building-and-testing-this-repository)
   - [Running the error-path tests](#running-the-error-path-tests)
@@ -14,6 +15,10 @@ This file covers developing, testing, and extending this repository itself. If y
 - [Extending the MAML schema](#extending-the-maml-schema)
 - [Error-handling conventions in `parquet_wrapper.cpp`](#error-handling-conventions-in-parquet_wrappercpp)
 - [Features considered but not implemented](#features-considered-but-not-implemented)
+
+## AI assistance
+
+Portions of this codebase, including its documentation, were developed with AI assistance (Claude Code).
 
 ## Conventions
 

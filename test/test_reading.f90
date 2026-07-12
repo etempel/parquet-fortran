@@ -802,7 +802,8 @@ contains
         call check(error, len_trim(internal_ver_string) > 0 .and. internal_ver_string(1:1) == "v" .and. &
             index(internal_ver_string, "(") > 0)
         if (allocated(error)) then
-            call test_failed(error, "parquet_get_version(internal=.true.) did not return a v-prefixed, dated internal version string")
+            call test_failed(error, "parquet_get_version(internal=.true.) did not return a v-prefixed, " // &
+                "dated internal version string")
             return
         end if
     end subroutine test_get_library_version

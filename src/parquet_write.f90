@@ -178,17 +178,21 @@ contains
         case ("int64")
             allocate(i64values(size(values)))
             i64values = int(values, kind=int64)
-            call parquet_append_int64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), i64values, nrows, asize, valid_ptr)
+            call parquet_append_int64_column(writer%handle, &
+                trim(parquet_resolve_output_name(writer, name))//char(0), i64values, nrows, asize, valid_ptr)
         case ("float32")
             allocate(f32values(size(values)))
             f32values = real(values, kind=real32)
-            call parquet_append_float32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), f32values, nrows, asize, valid_ptr)
+            call parquet_append_float32_column(writer%handle, &
+                trim(parquet_resolve_output_name(writer, name))//char(0), f32values, nrows, asize, valid_ptr)
         case ("float64")
             allocate(f64values(size(values)))
             f64values = real(values, kind=real64)
-            call parquet_append_float64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), f64values, nrows, asize, valid_ptr)
+            call parquet_append_float64_column(writer%handle, &
+                trim(parquet_resolve_output_name(writer, name))//char(0), f64values, nrows, asize, valid_ptr)
         case default
-            call parquet_append_int32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), values, nrows, asize, valid_ptr)
+            call parquet_append_int32_column(writer%handle, &
+                trim(parquet_resolve_output_name(writer, name))//char(0), values, nrows, asize, valid_ptr)
         end select
     end subroutine parquet_append_as_schema_int32
 
@@ -207,17 +211,21 @@ contains
         select case (schema_type)
         case ("int32")
             i32values = parquet_narrow_int64_to_int32(name, values)
-            call parquet_append_int32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), i32values, nrows, asize, valid_ptr)
+            call parquet_append_int32_column(writer%handle, &
+                trim(parquet_resolve_output_name(writer, name))//char(0), i32values, nrows, asize, valid_ptr)
         case ("float32")
             allocate(f32values(size(values)))
             f32values = real(values, kind=real32)
-            call parquet_append_float32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), f32values, nrows, asize, valid_ptr)
+            call parquet_append_float32_column(writer%handle, &
+                trim(parquet_resolve_output_name(writer, name))//char(0), f32values, nrows, asize, valid_ptr)
         case ("float64")
             allocate(f64values(size(values)))
             f64values = real(values, kind=real64)
-            call parquet_append_float64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), f64values, nrows, asize, valid_ptr)
+            call parquet_append_float64_column(writer%handle, &
+                trim(parquet_resolve_output_name(writer, name))//char(0), f64values, nrows, asize, valid_ptr)
         case default
-            call parquet_append_int64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), values, nrows, asize, valid_ptr)
+            call parquet_append_int64_column(writer%handle, &
+                trim(parquet_resolve_output_name(writer, name))//char(0), values, nrows, asize, valid_ptr)
         end select
     end subroutine parquet_append_as_schema_int64
 
@@ -236,16 +244,20 @@ contains
         select case (schema_type)
         case ("int32")
             i32values = parquet_float64_to_int32(name, real(values, kind=real64))
-            call parquet_append_int32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), i32values, nrows, asize, valid_ptr)
+            call parquet_append_int32_column(writer%handle, &
+                trim(parquet_resolve_output_name(writer, name))//char(0), i32values, nrows, asize, valid_ptr)
         case ("int64")
             i64values = parquet_float64_to_int64(name, real(values, kind=real64))
-            call parquet_append_int64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), i64values, nrows, asize, valid_ptr)
+            call parquet_append_int64_column(writer%handle, &
+                trim(parquet_resolve_output_name(writer, name))//char(0), i64values, nrows, asize, valid_ptr)
         case ("float64")
             allocate(f64values(size(values)))
             f64values = real(values, kind=real64)
-            call parquet_append_float64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), f64values, nrows, asize, valid_ptr)
+            call parquet_append_float64_column(writer%handle, &
+                trim(parquet_resolve_output_name(writer, name))//char(0), f64values, nrows, asize, valid_ptr)
         case default
-            call parquet_append_float32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), values, nrows, asize, valid_ptr)
+            call parquet_append_float32_column(writer%handle, &
+                trim(parquet_resolve_output_name(writer, name))//char(0), values, nrows, asize, valid_ptr)
         end select
     end subroutine parquet_append_as_schema_float32
 
@@ -264,16 +276,20 @@ contains
         select case (schema_type)
         case ("int32")
             i32values = parquet_float64_to_int32(name, values)
-            call parquet_append_int32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), i32values, nrows, asize, valid_ptr)
+            call parquet_append_int32_column(writer%handle, &
+                trim(parquet_resolve_output_name(writer, name))//char(0), i32values, nrows, asize, valid_ptr)
         case ("int64")
             i64values = parquet_float64_to_int64(name, values)
-            call parquet_append_int64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), i64values, nrows, asize, valid_ptr)
+            call parquet_append_int64_column(writer%handle, &
+                trim(parquet_resolve_output_name(writer, name))//char(0), i64values, nrows, asize, valid_ptr)
         case ("float32")
             allocate(f32values(size(values)))
             f32values = real(values, kind=real32)
-            call parquet_append_float32_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), f32values, nrows, asize, valid_ptr)
+            call parquet_append_float32_column(writer%handle, &
+                trim(parquet_resolve_output_name(writer, name))//char(0), f32values, nrows, asize, valid_ptr)
         case default
-            call parquet_append_float64_column(writer%handle, trim(parquet_resolve_output_name(writer, name))//char(0), values, nrows, asize, valid_ptr)
+            call parquet_append_float64_column(writer%handle, &
+                trim(parquet_resolve_output_name(writer, name))//char(0), values, nrows, asize, valid_ptr)
         end select
     end subroutine parquet_append_as_schema_float64
 
@@ -317,12 +333,14 @@ contains
 
         idx = parquet_get_defined_column_index(writer, name)
         if (idx == 0) then
-            error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
+            error stop "parquet_write_column: column not defined in parquet_open_writer: " // &
+                                  trim(name) // writer_context_suffix(writer)
         end if
 
         if (.not. parquet_is_type_compatible(writer%all_columns(idx)%data_type, expected_type)) then
             error stop "parquet_write_column: type mismatch for column " // trim(name) // &
-                                  " (expected " // trim(expected_type) // ", got " // trim(writer%all_columns(idx)%data_type) // ")" // &
+                                  " (expected " // trim(expected_type) // ", got " // &
+                                  trim(writer%all_columns(idx)%data_type) // ")" // &
                                   writer_context_suffix(writer)
         end if
     end procedure parquet_assert_column_type
@@ -446,7 +464,8 @@ contains
                 "' (expected one of: uncompressed, snappy, gzip, zstd, brotli, lz4) (file: " // trim(filename) // ")"
         end if
 
-        level_value = -huge(level_value) - 1 ! Arrow's kUseDefaultCompressionLevel sentinel (INT_MIN): "use the codec's own default".
+        level_value = -huge(level_value) - 1 ! Arrow's kUseDefaultCompressionLevel sentinel (INT_MIN):
+                                              ! "use the codec's own default".
         if (present(compression_level)) level_value = compression_level
 
         chunk_size_value = -1 ! <= 0 tells the C++ side "not set": auto-size from the final row count at close time.
@@ -789,17 +808,21 @@ contains
             end if
 
             ok = .true.
-            if (have_min_bound) ok = ok .and. parquet_qc_numeric_satisfies(values64(i), min_bound, writer%all_columns(idx)%qc_min_op)
-            if (have_max_bound) ok = ok .and. parquet_qc_numeric_satisfies(values64(i), max_bound, writer%all_columns(idx)%qc_max_op)
+            if (have_min_bound) ok = ok .and. &
+                parquet_qc_numeric_satisfies(values64(i), min_bound, writer%all_columns(idx)%qc_min_op)
+            if (have_max_bound) ok = ok .and. &
+                parquet_qc_numeric_satisfies(values64(i), max_bound, writer%all_columns(idx)%qc_max_op)
             if (.not. ok) n_violate = n_violate + 1
         end do
         if (.not. any_valid .or. n_violate == 0) return
 
         bounds_desc = ""
-        if (have_min_bound) bounds_desc = "min " // trim(writer%all_columns(idx)%qc_min_op) // " " // parquet_qc_format_real(min_bound)
+        if (have_min_bound) bounds_desc = "min " // trim(writer%all_columns(idx)%qc_min_op) // " " // &
+            parquet_qc_format_real(min_bound)
         if (have_max_bound) then
             if (len_trim(bounds_desc) > 0) bounds_desc = bounds_desc // ", "
-            bounds_desc = bounds_desc // "max " // trim(writer%all_columns(idx)%qc_max_op) // " " // parquet_qc_format_real(max_bound)
+            bounds_desc = bounds_desc // "max " // trim(writer%all_columns(idx)%qc_max_op) // " " // &
+                parquet_qc_format_real(max_bound)
         end if
 
         print '(a)', "WARNING: qc violation for column '" // trim(name) // "': declared " // bounds_desc // &
@@ -918,7 +941,8 @@ contains
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
-            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
+            if (idx == 0) error stop &
+                "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
             if (.not. writer%all_columns(idx)%is_set) return
         end if
 
@@ -928,7 +952,9 @@ contains
         call parquet_mark_column_written(writer, name)
 
         asize = parquet_get_column_col_size(writer, name)
-        if (mod(size(values), asize) /= 0) error stop "parquet_write_int32_column: values size is not divisible by col_size for column " // trim(name) // writer_context_suffix(writer)
+        if (mod(size(values), asize) /= 0) error stop &
+            "parquet_write_int32_column: values size is not divisible by col_size for column " // &
+            trim(name) // writer_context_suffix(writer)
         nrows = size(values) / asize
 
         if (present(is_valid)) then
@@ -961,7 +987,8 @@ contains
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
-            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
+            if (idx == 0) error stop &
+                "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
             if (.not. writer%all_columns(idx)%is_set) return
             if (writer%all_columns(idx)%col_size /= asize) then
                 error stop "parquet_write_column: array size mismatch for column " // trim(name)
@@ -1003,7 +1030,8 @@ contains
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
-            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
+            if (idx == 0) error stop &
+                "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
             if (.not. writer%all_columns(idx)%is_set) return
         end if
 
@@ -1013,7 +1041,9 @@ contains
         call parquet_mark_column_written(writer, name)
 
         asize = parquet_get_column_col_size(writer, name)
-        if (mod(size(values), asize) /= 0) error stop "parquet_write_int64_column: values size is not divisible by col_size for column " // trim(name) // writer_context_suffix(writer)
+        if (mod(size(values), asize) /= 0) error stop &
+            "parquet_write_int64_column: values size is not divisible by col_size for column " // &
+            trim(name) // writer_context_suffix(writer)
         nrows = size(values) / asize
 
         if (present(is_valid)) then
@@ -1046,7 +1076,8 @@ contains
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
-            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
+            if (idx == 0) error stop &
+                "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
             if (.not. writer%all_columns(idx)%is_set) return
             if (writer%all_columns(idx)%col_size /= asize) then
                 error stop "parquet_write_column: array size mismatch for column " // trim(name)
@@ -1088,7 +1119,8 @@ contains
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
-            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
+            if (idx == 0) error stop &
+                "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
             if (.not. writer%all_columns(idx)%is_set) return
         end if
 
@@ -1098,7 +1130,9 @@ contains
         call parquet_mark_column_written(writer, name)
 
         asize = parquet_get_column_col_size(writer, name)
-        if (mod(size(values), asize) /= 0) error stop "parquet_write_float32_column: values size is not divisible by col_size for column " // trim(name) // writer_context_suffix(writer)
+        if (mod(size(values), asize) /= 0) error stop &
+            "parquet_write_float32_column: values size is not divisible by col_size for column " // &
+            trim(name) // writer_context_suffix(writer)
         nrows = size(values) / asize
 
         if (present(is_valid)) then
@@ -1131,7 +1165,8 @@ contains
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
-            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
+            if (idx == 0) error stop &
+                "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
             if (.not. writer%all_columns(idx)%is_set) return
             if (writer%all_columns(idx)%col_size /= asize) then
                 error stop "parquet_write_column: array size mismatch for column " // trim(name)
@@ -1173,7 +1208,8 @@ contains
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
-            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
+            if (idx == 0) error stop &
+                "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
             if (.not. writer%all_columns(idx)%is_set) return
         end if
 
@@ -1183,7 +1219,9 @@ contains
         call parquet_mark_column_written(writer, name)
 
         asize = parquet_get_column_col_size(writer, name)
-        if (mod(size(values), asize) /= 0) error stop "parquet_write_float64_column: values size is not divisible by col_size for column " // trim(name) // writer_context_suffix(writer)
+        if (mod(size(values), asize) /= 0) error stop &
+            "parquet_write_float64_column: values size is not divisible by col_size for column " // &
+            trim(name) // writer_context_suffix(writer)
         nrows = size(values) / asize
 
         if (present(is_valid)) then
@@ -1216,7 +1254,8 @@ contains
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
-            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
+            if (idx == 0) error stop &
+                "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
             if (.not. writer%all_columns(idx)%is_set) return
             if (writer%all_columns(idx)%col_size /= asize) then
                 error stop "parquet_write_column: array size mismatch for column " // trim(name)
@@ -1259,7 +1298,8 @@ contains
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
-            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
+            if (idx == 0) error stop &
+                "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
             if (.not. writer%all_columns(idx)%is_set) return
         end if
 
@@ -1269,7 +1309,9 @@ contains
         call parquet_mark_column_written(writer, name)
 
         asize = parquet_get_column_col_size(writer, name)
-        if (mod(size(values), asize) /= 0) error stop "parquet_write_logical_column: values size is not divisible by col_size for column " // trim(name) // writer_context_suffix(writer)
+        if (mod(size(values), asize) /= 0) error stop &
+            "parquet_write_logical_column: values size is not divisible by col_size for column " // &
+            trim(name) // writer_context_suffix(writer)
         nrows = size(values) / asize
 
         allocate(bool_data(size(values)))
@@ -1307,7 +1349,8 @@ contains
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
-            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
+            if (idx == 0) error stop &
+                "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
             if (.not. writer%all_columns(idx)%is_set) return
             if (writer%all_columns(idx)%col_size /= asize) then
                 error stop "parquet_write_column: array size mismatch for column " // trim(name)
@@ -1349,7 +1392,8 @@ contains
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
-            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
+            if (idx == 0) error stop &
+                "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
             if (.not. writer%all_columns(idx)%is_set) return
         end if
 
@@ -1361,7 +1405,9 @@ contains
         asize = parquet_get_column_col_size(writer, name)
         nitems = size(values)
         if (nitems <= 0) return
-        if (mod(nitems, asize) /= 0) error stop "parquet_write_string_column: values size is not divisible by col_size for column " // trim(name) // writer_context_suffix(writer)
+        if (mod(nitems, asize) /= 0) error stop &
+            "parquet_write_string_column: values size is not divisible by col_size for column " // &
+            trim(name) // writer_context_suffix(writer)
 
         if (writer%is_schema_enforced) then
             max_string_len = max(1, writer%all_columns(idx)%array_size)
@@ -1427,7 +1473,8 @@ contains
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
-            if (idx == 0) error stop "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
+            if (idx == 0) error stop &
+                "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // writer_context_suffix(writer)
             if (.not. writer%all_columns(idx)%is_set) return
             if (writer%all_columns(idx)%col_size /= asize) then
                 error stop "parquet_write_column: array size mismatch for column " // trim(name)

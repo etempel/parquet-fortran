@@ -1401,7 +1401,8 @@ contains
         if (allocated(error)) return
 
         call parquet_open_reader(reader, out_file, nrows=nrows32)
-        call check(error, nrows32 == 6_int32, "parquet_open_reader(nrows=) with an integer(int32) actual did not return the row count")
+        call check(error, nrows32 == 6_int32, "parquet_open_reader(nrows=) with an integer(int32) actual " // &
+            "did not return the row count")
         call parquet_close_reader(reader)
         if (allocated(error)) return
 

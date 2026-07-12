@@ -204,9 +204,11 @@ contains
                 end if
                 if (len_trim(rem) == 0) then
                     if (is_min) then
-                        error stop "parquet_maml_file add_col_qc/get_col_qc: bad qc min value provided for column '" // trim(colname) // "'"
+                        error stop "parquet_maml_file add_col_qc/get_col_qc: bad qc min value provided for column '" // &
+                            trim(colname) // "'"
                     else
-                        error stop "parquet_maml_file add_col_qc/get_col_qc: bad qc max value provided for column '" // trim(colname) // "'"
+                        error stop "parquet_maml_file add_col_qc/get_col_qc: bad qc max value provided for column '" // &
+                            trim(colname) // "'"
                     end if
                 end if
             end if

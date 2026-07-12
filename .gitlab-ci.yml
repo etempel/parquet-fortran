@@ -69,11 +69,9 @@ test:
     FPM_LDFLAGS: "-lstdc++"
   coverage: /^TOTAL.*\s+(\d+\%)$/
   script:
-    # -ffree-line-length-none: the source has free-form lines longer than the
-    # standard 132-column limit. gfortran's default limit varies by version
-    # (recent gfortran effectively removed it, but older gfortran, e.g. 11,
-    # truncates at 132 and errors), so pass it unconditionally. Setting
-    # FPM_FFLAGS replaces fpm's default profile, which would otherwise supply
-    # this flag, so it must be given here.
-    - FPM_FFLAGS="--coverage -fopenmp -ffree-line-length-none" fpm test --verbose
+    # Source is kept within the standard 132-column free-form limit, so no
+    # -ffree-line-length-none override is needed; FPM_FFLAGS only adds the
+    # coverage/OpenMP flags fpm test itself needs. Note it still replaces
+    # fpm's default profile flags, same as before.
+    - FPM_FFLAGS="--coverage -fopenmp" fpm test --verbose
     - gcovr -r . --filter 'src/*' --exclude 'src/test*'

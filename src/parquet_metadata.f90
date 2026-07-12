@@ -994,7 +994,8 @@ contains
                         tmp(n)%null_values_allowed = .true.
                     else
                         error stop "parquet_open_reader: invalid qc maml: qc: miss: value '" // trim(miss_lower) // &
-                            "' for field '" // trim(tmp(n)%name) // "' is not recognized (expected Null/NA or empty)" // qc_maml_suffix
+                            "' for field '" // trim(tmp(n)%name) // &
+                            "' is not recognized (expected Null/NA or empty)" // qc_maml_suffix
                     end if
                     cycle
                 case default

@@ -72,12 +72,24 @@ If `fpm test` behaves unexpectedly after source changes (e.g. a test target seem
 old code), try `fpm clean --all` to force a clean rebuild before spending time debugging —
 fpm's build cache can serve a stale binary.
 
+## Don't run the GitLab CI pipeline yourself
+
+The user runs `.gitlab-ci.yml` on their own GitLab server — don't attempt to execute it
+(e.g. via `gitlab-runner`, docker, or otherwise) as part of verifying changes. Verify
+locally instead (`fpm build`/`fpm test` with the same `FPM_FFLAGS`/`FPM_CXXFLAGS`/
+`FPM_LDFLAGS` the CI job sets, minus anything CI-environment-specific like the apt installs).
+
 ## Build and compiler notes
 
-- **Long free-form lines are fine.** The source has lines past the standard 132-column
-  free-form limit; builds rely on `-ffree-line-length-none` (fpm's default profile supplies
-  it, and the CI job passes it explicitly since setting `FPM_FFLAGS` drops that profile).
-  Match the surrounding style — don't reflow long lines just to fit 132 columns.
+- **132-column line limit is enforced — do not reintroduce `-ffree-line-length-none`.** As of
+  2026-07-12, `src/*.f90` and `test/*.f90` are held strictly within the standard 132-column
+  free-form limit, including comments (both whole-line and trailing end-of-line) — a comment
+  pushing a line past 132 columns is a violation just like code would be. `.gitlab-ci.yml`'s
+  `FPM_FFLAGS` no longer passes `-ffree-line-length-none`, so a line over 132 columns now fails
+  CI on older gfortran (and is a style violation regardless of compiler). When a line runs
+  long, wrap it with `&` continuations (code/strings) or split it across multiple `!`-prefixed
+  comment lines — don't reach for the compiler flag again, and don't add per-file/per-line
+  suppressions.
 - **Minimum gfortran is 13; don't work around compiler bugs in source.** gfortran ≤ 11
   miscompiles the optional allocatable-`character` argument in `schema%add_col_qc` /
   `schema%get_col_qc` (corrupted column name → a spurious "column not found" abort at

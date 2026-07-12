@@ -727,7 +727,8 @@ contains
         type(error_type), allocatable, intent(out) :: error
 
         call check_scenario_exit_status(error, "write_string_exceeds_array_size", expect_abort=.true., &
-            failure_message="writing an over-length string into a fixed-size string vector column (flat form) was expected to error stop")
+            failure_message="writing an over-length string into a fixed-size string vector column " // &
+                "(flat form) was expected to error stop")
     end subroutine test_write_string_exceeds_array_size_aborts
 
     subroutine test_validate_protected_cols_unknown_name_aborts(error)

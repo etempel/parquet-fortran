@@ -18,7 +18,8 @@ module parquet
     type parquet_column_type
         logical :: is_set = .false.
         logical :: is_deactivated = .false. ! true for columns merged in from a base MAML that the user's MAML excluded;
-                                          ! protects is_set from being changed by set_column_available/set_column_unavailable (bulk or by name).
+                                          ! protects is_set from being changed by
+                                          ! set_column_available/set_column_unavailable (bulk or by name).
         logical :: is_protected = .false. ! true if this column's name is listed under extra: protected_cols: in
                                            ! whichever MAML built this cinfo; parquet_write_column error stops if an
                                            ! is_valid mask with any .false. entry is passed for such a column.

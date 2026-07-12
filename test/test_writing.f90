@@ -118,7 +118,9 @@ contains
             new_unittest("use_threads=.false. on writer and reader still round-trips", &
                 test_use_threads_false_still_round_trips), &
             new_unittest("parquet_set_max_threads with a valid value does not break a round-trip", &
-                test_set_max_threads_valid_value_does_not_break_round_trip) &
+                test_set_max_threads_valid_value_does_not_break_round_trip), &
+            new_unittest("writing a numeric kind that differs from the schema's declared data_type " // &
+                "converts to match it", test_write_cross_type_schema_coercion) &
             ]
         !
     end subroutine collect_tests_parquet_writing
@@ -1456,6 +1458,108 @@ contains
         call check(error, all(read_back == values), &
             "parquet_set_max_threads(2) broke a subsequent write/read round-trip")
     end subroutine test_set_max_threads_valid_value_does_not_break_round_trip
+
+    !> parquet_write_column is generic over the *declared kind of the `values`
+    !> array you pass in*, not the schema's own data_type for that column -- as
+    !> long as the conversion is a supported one, the writer converts to match
+    !> the schema (narrowing int64->int32 checked for overflow; float->int
+    !> checked for both range and a non-integral value; everything else is an
+    !> unchecked direct conversion). Exercises every schema/values kind pairing
+    !> that has a dedicated conversion branch in parquet_write.f90's
+    !> parquet_append_as_schema_* family; the reversed-direction failure modes
+    !> (overflow, non-integral) are covered separately as error_scenarios.
+    subroutine test_write_cross_type_schema_coercion(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        ! Column name suffix "_from_<kind>" names the kind of the `values`
+        ! array passed to parquet_write_column; the schema declares each
+        ! column's data_type as the prefix (i32/i64/f32/f64) instead.
+        integer(int64) :: src_i32_from_i64(3)
+        real(real64)   :: src_i32_from_f64(3)
+        real(real32)   :: src_i32_from_f32(3)
+        real(real64)   :: src_i64_from_f64(3)
+        real(real32)   :: src_i64_from_f32(3)
+        integer(int32) :: src_f32_from_i32(3)
+        integer(int64) :: src_f32_from_i64(3)
+        real(real64)   :: src_f32_from_f64(3)
+        integer(int32) :: src_f64_from_i32(3)
+        integer(int64) :: src_f64_from_i64(3)
+        real(real32)   :: src_f64_from_f32(3)
+        integer(int32) :: i32_from_i64_back(3), i32_from_f64_back(3), i32_from_f32_back(3)
+        integer(int64) :: i64_from_f64_back(3), i64_from_f32_back(3)
+        real(real32)   :: f32_from_i32_back(3), f32_from_i64_back(3), f32_from_f64_back(3)
+        real(real64)   :: f64_from_i32_back(3), f64_from_i64_back(3), f64_from_f32_back(3)
+        character(len=*), parameter :: out_file = "test_run/test_write_cross_type_schema_coercion.parquet"
+
+        src_i32_from_i64 = [1_int64, 2_int64, 3_int64]
+        src_i32_from_f64 = [1.0_real64, 2.0_real64, 3.0_real64]
+        src_i32_from_f32 = [1.0_real32, 2.0_real32, 3.0_real32]
+        src_i64_from_f64 = [1.0_real64, 2.0_real64, 3.0_real64]
+        src_i64_from_f32 = [1.0_real32, 2.0_real32, 3.0_real32]
+        src_f32_from_i32 = [1_int32, 2_int32, 3_int32]
+        src_f32_from_i64 = [1_int64, 2_int64, 3_int64]
+        src_f32_from_f64 = [1.0_real64, 2.0_real64, 3.0_real64]
+        src_f64_from_i32 = [1_int32, 2_int32, 3_int32]
+        src_f64_from_i64 = [1_int64, 2_int64, 3_int64]
+        src_f64_from_f32 = [1.0_real32, 2.0_real32, 3.0_real32]
+
+        call schema%init(table="cross_type_table")
+        call schema%add_field("i32_from_i64", "int32")
+        call schema%add_field("i32_from_f64", "int32")
+        call schema%add_field("i32_from_f32", "int32")
+        call schema%add_field("i64_from_f64", "int64")
+        call schema%add_field("i64_from_f32", "int64")
+        call schema%add_field("f32_from_i32", "float32")
+        call schema%add_field("f32_from_i64", "float32")
+        call schema%add_field("f32_from_f64", "float32")
+        call schema%add_field("f64_from_i32", "float64")
+        call schema%add_field("f64_from_i64", "float64")
+        call schema%add_field("f64_from_f32", "float64")
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "i32_from_i64", src_i32_from_i64)
+        call parquet_write_column(writer, "i32_from_f64", src_i32_from_f64)
+        call parquet_write_column(writer, "i32_from_f32", src_i32_from_f32)
+        call parquet_write_column(writer, "i64_from_f64", src_i64_from_f64)
+        call parquet_write_column(writer, "i64_from_f32", src_i64_from_f32)
+        call parquet_write_column(writer, "f32_from_i32", src_f32_from_i32)
+        call parquet_write_column(writer, "f32_from_i64", src_f32_from_i64)
+        call parquet_write_column(writer, "f32_from_f64", src_f32_from_f64)
+        call parquet_write_column(writer, "f64_from_i32", src_f64_from_i32)
+        call parquet_write_column(writer, "f64_from_i64", src_f64_from_i64)
+        call parquet_write_column(writer, "f64_from_f32", src_f64_from_f32)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "i32_from_i64", i32_from_i64_back)
+        call parquet_read_column(reader, "i32_from_f64", i32_from_f64_back)
+        call parquet_read_column(reader, "i32_from_f32", i32_from_f32_back)
+        call parquet_read_column(reader, "i64_from_f64", i64_from_f64_back)
+        call parquet_read_column(reader, "i64_from_f32", i64_from_f32_back)
+        call parquet_read_column(reader, "f32_from_i32", f32_from_i32_back)
+        call parquet_read_column(reader, "f32_from_i64", f32_from_i64_back)
+        call parquet_read_column(reader, "f32_from_f64", f32_from_f64_back)
+        call parquet_read_column(reader, "f64_from_i32", f64_from_i32_back)
+        call parquet_read_column(reader, "f64_from_i64", f64_from_i64_back)
+        call parquet_read_column(reader, "f64_from_f32", f64_from_f32_back)
+        call parquet_close_reader(reader)
+
+        call check(error, all(i32_from_i64_back == [1_int32, 2_int32, 3_int32]) .and. &
+            all(i32_from_f64_back == [1_int32, 2_int32, 3_int32]) .and. &
+            all(i32_from_f32_back == [1_int32, 2_int32, 3_int32]) .and. &
+            all(i64_from_f64_back == [1_int64, 2_int64, 3_int64]) .and. &
+            all(i64_from_f32_back == [1_int64, 2_int64, 3_int64]) .and. &
+            all(f32_from_i32_back == [1.0_real32, 2.0_real32, 3.0_real32]) .and. &
+            all(f32_from_i64_back == [1.0_real32, 2.0_real32, 3.0_real32]) .and. &
+            all(f32_from_f64_back == [1.0_real32, 2.0_real32, 3.0_real32]) .and. &
+            all(f64_from_i32_back == [1.0_real64, 2.0_real64, 3.0_real64]) .and. &
+            all(f64_from_i64_back == [1.0_real64, 2.0_real64, 3.0_real64]) .and. &
+            all(f64_from_f32_back == [1.0_real64, 2.0_real64, 3.0_real64]), &
+            "cross-type schema coercion did not round-trip one or more columns correctly")
+    end subroutine test_write_cross_type_schema_coercion
 
     subroutine test_write_parquet_file(error)
         type(error_type), allocatable, intent(out) :: error

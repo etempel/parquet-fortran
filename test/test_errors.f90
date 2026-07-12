@@ -163,6 +163,16 @@ contains
                 test_get_col_qc_reversed_operator_aborts), &
             new_unittest("writing values(:) not divisible by col_size aborts", &
                 test_write_values_not_divisible_by_col_size_aborts), &
+            new_unittest("writing an out-of-int32-range int64 value to an int32 schema column aborts", &
+                test_write_int64_to_int32_overflow_aborts), &
+            new_unittest("writing a non-integral float64 value to an int32 schema column aborts", &
+                test_write_float_to_int32_non_integral_aborts), &
+            new_unittest("writing an out-of-int32-range float64 value to an int32 schema column aborts", &
+                test_write_float_to_int32_out_of_range_aborts), &
+            new_unittest("writing a non-integral float64 value to an int64 schema column aborts", &
+                test_write_float_to_int64_non_integral_aborts), &
+            new_unittest("writing an out-of-int64-range float64 value to an int64 schema column aborts", &
+                test_write_float_to_int64_out_of_range_aborts), &
             new_unittest("parquet_set_max_threads(0) aborts", &
                 test_set_max_threads_below_one_aborts), &
             new_unittest("concurrent calls into a shared parquet_reader abort", &
@@ -823,6 +833,49 @@ contains
             required_stderr="parquet_write_int32_column: values size is not divisible by col_size for column v " // &
                 "(file: test_run/error_scenario_col_size_mismatch.parquet, maml: col_size_mismatch.maml)")
     end subroutine test_write_values_not_divisible_by_col_size_aborts
+
+    subroutine test_write_int64_to_int32_overflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "write_int64_to_int32_overflow", expect_abort=.true., &
+            failure_message="writing an out-of-int32-range int64 value to an int32 schema column " // &
+                "was expected to error stop", &
+            required_stderr="parquet_write_column: int64 value out of int32 range for column v")
+    end subroutine test_write_int64_to_int32_overflow_aborts
+
+    subroutine test_write_float_to_int32_non_integral_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "write_float_to_int32_non_integral", expect_abort=.true., &
+            failure_message="writing a non-integral float64 value to an int32 schema column was expected to error stop", &
+            required_stderr="parquet_write_column: non-integral float value written to int column v")
+    end subroutine test_write_float_to_int32_non_integral_aborts
+
+    subroutine test_write_float_to_int32_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "write_float_to_int32_out_of_range", expect_abort=.true., &
+            failure_message="writing an out-of-int32-range float64 value to an int32 schema column " // &
+                "was expected to error stop", &
+            required_stderr="parquet_write_column: float value out of int32 range for column v")
+    end subroutine test_write_float_to_int32_out_of_range_aborts
+
+    subroutine test_write_float_to_int64_non_integral_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "write_float_to_int64_non_integral", expect_abort=.true., &
+            failure_message="writing a non-integral float64 value to an int64 schema column was expected to error stop", &
+            required_stderr="parquet_write_column: non-integral float value written to int column v")
+    end subroutine test_write_float_to_int64_non_integral_aborts
+
+    subroutine test_write_float_to_int64_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "write_float_to_int64_out_of_range", expect_abort=.true., &
+            failure_message="writing an out-of-int64-range float64 value to an int64 schema column " // &
+                "was expected to error stop", &
+            required_stderr="parquet_write_column: float value out of int64 range for column v")
+    end subroutine test_write_float_to_int64_out_of_range_aborts
 
     subroutine test_set_max_threads_below_one_aborts(error)
         type(error_type), allocatable, intent(out) :: error

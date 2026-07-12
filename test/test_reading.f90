@@ -839,6 +839,27 @@ contains
             call test_failed(error, "get_parquet_maml('maml_example2') returned unexpected content")
             return
         end if
+
+        maml = parquet_maml_maml_example3()
+        call check(error, trim(maml%name) == "maml_example3.maml" .and. size(maml%lines) == 48)
+        if (allocated(error)) then
+            call test_failed(error, "parquet_maml_maml_example3 returned unexpected content")
+            return
+        end if
+
+        maml = get_parquet_maml("maml_example3.maml")
+        call check(error, trim(maml%name) == "maml_example3.maml")
+        if (allocated(error)) then
+            call test_failed(error, "get_parquet_maml('maml_example3.maml') returned unexpected content")
+            return
+        end if
+
+        maml = get_parquet_maml("maml_example3")
+        call check(error, trim(maml%name) == "maml_example3.maml")
+        if (allocated(error)) then
+            call test_failed(error, "get_parquet_maml('maml_example3') returned unexpected content")
+            return
+        end if
     end subroutine test_get_parquet_maml_examples
 
     subroutine test_read_scalar_null_value(error)

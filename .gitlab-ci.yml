@@ -1,0 +1,48 @@
+variables:
+  DEBIAN_FRONTEND: noninteractive
+
+before_script:
+  - apt-get update -y
+  - apt-get upgrade -y
+  - apt-get install -y --no-install-recommends ca-certificates lsb-release wget gnupg
+        gfortran make git git-lfs gcovr
+  # test/fixtures/*.parquet are tracked via git-lfs (see .gitattributes) --
+  # pull the real file contents before the test suite tries to read them.
+  - git lfs install
+  - git lfs pull
+
+  # Install the Arrow/Parquet C++ library from Arrow's own apt repository --
+  # see README.md's Prerequisites section. libarrow-compute-dev provides
+  # libarrow_compute (Arrow ships its compute kernels, used for
+  # parquet_close_reader(..., print_stat=.true.)'s min/max calculation, in a
+  # separate library from core libarrow), which fpm.toml's link list needs.
+  - wget "https://packages.apache.org/artifactory/arrow/$(lsb_release --id --short | tr 'A-Z' 'a-z')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb"
+  - apt-get install -y -V ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
+  - apt-get update -y
+  - apt-get install -y -V libarrow-dev libarrow-compute-dev libparquet-dev
+
+  # Installing FPM (Fortran Package Manager) via pipx
+  - apt-get install -y python3-venv pipx
+  - pipx ensurepath
+  - pipx install fpm
+  - export PATH=~/.local/bin:$PATH
+
+stages:
+  - test
+
+test:
+  stage: test
+  variables:
+    # See README.md's Environment variables section: `-std=c++20` is required
+    # on every platform (Arrow/Parquet headers use std::span unconditionally).
+    # FPM_LDFLAGS supplies the C++ runtime (-lstdc++ on Linux/GCC), since
+    # parquet-fortran's own fpm.toml link list doesn't include it (consumers,
+    # including this CI job, are expected to supply it via FPM_LDFLAGS). No
+    # -I/-L path is needed for either: the apt packages above install Arrow
+    # to the standard system prefix, already on gcc/ld's default search path.
+    FPM_CXXFLAGS: "-std=c++20"
+    FPM_LDFLAGS: "-lstdc++"
+  coverage: /^TOTAL.*\s+(\d+\%)$/
+  script:
+    - FPM_FFLAGS="--coverage -fopenmp" fpm test --verbose
+    - gcovr -r . --filter 'src/*' --exclude 'src/test*'

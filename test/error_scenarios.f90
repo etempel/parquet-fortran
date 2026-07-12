@@ -11,7 +11,7 @@
 program error_scenarios
     use parquet
     use parquet_maml_base, only: parquet_maml_file, get_parquet_maml
-    use iso_fortran_env, only : int32, int64
+    use iso_fortran_env, only : int32, int64, real64
     !$ use omp_lib, only : omp_get_max_threads, omp_get_thread_num
     implicit none
 
@@ -195,6 +195,16 @@ program error_scenarios
         call scenario_write_unknown_compression()
     case ("write_values_not_divisible_by_col_size")
         call scenario_write_values_not_divisible_by_col_size()
+    case ("write_int64_to_int32_overflow")
+        call scenario_write_int64_to_int32_overflow()
+    case ("write_float_to_int32_non_integral")
+        call scenario_write_float_to_int32_non_integral()
+    case ("write_float_to_int32_out_of_range")
+        call scenario_write_float_to_int32_out_of_range()
+    case ("write_float_to_int64_non_integral")
+        call scenario_write_float_to_int64_non_integral()
+    case ("write_float_to_int64_out_of_range")
+        call scenario_write_float_to_int64_out_of_range()
     case ("set_max_threads_below_one")
         call scenario_set_max_threads_below_one()
     case ("concurrent_calls_into_shared_reader")
@@ -1640,6 +1650,96 @@ contains
         call parquet_close_writer(writer)
         print '(a)', "unexpectedly wrote a values(:) array whose length isn't divisible by col_size without error"
     end subroutine scenario_write_values_not_divisible_by_col_size
+
+    !> Writing to a schema-declared int32 column with an int64 values(:)
+    !> array is normally allowed (parquet_narrow_int64_to_int32 converts), but
+    !> a value outside int32's range must error stop rather than silently
+    !> wrapping.
+    subroutine scenario_write_int64_to_int32_overflow()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int64) :: values(1) = [huge(0_int32) + 1_int64]
+
+        call schema%init(table="int64_overflow_table")
+        call schema%add_field("v", "int32")
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_int64_to_int32_overflow.parquet", schema)
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote an out-of-int32-range int64 value to an int32 schema column without error"
+    end subroutine scenario_write_int64_to_int32_overflow
+
+    !> A float64 values(:) array written to an int32 schema column converts
+    !> only if every value is integral (src(i) == anint(src(i))); a
+    !> non-integral value must error stop rather than silently truncating.
+    subroutine scenario_write_float_to_int32_non_integral()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real64) :: values(1) = [3.5_real64]
+
+        call schema%init(table="float_non_integral_table")
+        call schema%add_field("v", "int32")
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_float_to_int32_non_integral.parquet", schema)
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote a non-integral float64 value to an int32 schema column without error"
+    end subroutine scenario_write_float_to_int32_non_integral
+
+    !> Same conversion as above, but the value is integral and simply out of
+    !> int32's representable range -- also must error stop.
+    subroutine scenario_write_float_to_int32_out_of_range()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real64) :: values(1) = [real(huge(0_int32), real64) + 1.0_real64]
+
+        call schema%init(table="float_out_of_range_table")
+        call schema%add_field("v", "int32")
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_float_to_int32_out_of_range.parquet", schema)
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote an out-of-int32-range float64 value to an int32 schema column without error"
+    end subroutine scenario_write_float_to_int32_out_of_range
+
+    !> Same non-integral check as scenario_write_float_to_int32_non_integral,
+    !> but for the int64 schema-column conversion path
+    !> (parquet_float64_to_int64), which has its own identical check.
+    subroutine scenario_write_float_to_int64_non_integral()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real64) :: values(1) = [3.5_real64]
+
+        call schema%init(table="float_non_integral_i64_table")
+        call schema%add_field("v", "int64")
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_float_to_int64_non_integral.parquet", schema)
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote a non-integral float64 value to an int64 schema column without error"
+    end subroutine scenario_write_float_to_int64_non_integral
+
+    !> Same out-of-range check as scenario_write_float_to_int32_out_of_range,
+    !> but for the int64 schema-column conversion path
+    !> (parquet_float64_to_int64), which has its own identical check.
+    subroutine scenario_write_float_to_int64_out_of_range()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real64) :: values(1) = [real(huge(0_int64), real64) * 2.0_real64]
+
+        call schema%init(table="float_out_of_range_i64_table")
+        call schema%add_field("v", "int64")
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_float_to_int64_out_of_range.parquet", schema)
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote an out-of-int64-range float64 value to an int64 schema column without error"
+    end subroutine scenario_write_float_to_int64_out_of_range
 
     !> n < 1 is not a valid thread pool capacity -- must error stop rather
     !> than silently passing an invalid value down to Arrow.

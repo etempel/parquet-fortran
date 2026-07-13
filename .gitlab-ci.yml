@@ -50,6 +50,7 @@ before_script:
 
 stages:
   - test
+  - docs
 
 test:
   # Selects the Docker-executor runner; the image: above overrides its default
@@ -75,3 +76,30 @@ test:
     # fpm's default profile flags, same as before.
     - FPM_FFLAGS="--coverage -fopenmp" fpm test --verbose
     - gcovr -r . --filter 'src/*' --exclude 'src/test*'
+
+# GitLab Pages: the job must be named exactly "pages" (classic, broadly-compatible
+# activation mechanism -- works regardless of the GitLab server version) and must
+# produce its output under a "public/" artifact directory. Deliberately overrides
+# the top-level before_script: generating docs from source comments only needs a
+# C preprocessor (cpp, pulled in by the gcc package) and FORD itself -- none of the
+# test job's Arrow/Parquet/fpm/git-lfs setup is needed here, so skip it for a
+# faster, more isolated job. See docs.md/fpm.toml's [extra.ford] for FORD's own
+# configuration (preprocessor, page_dir, etc.).
+pages:
+  stage: docs
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  allow_failure: true
+  before_script:
+    - apt-get update -y
+    - apt-get install -y --no-install-recommends gcc python3-venv pipx
+    - pipx ensurepath
+    - pipx install ford
+    - export PATH=~/.local/bin:$PATH
+  script:
+    - ford docs.md
+    - rm -rf public
+    - mv ford-doc public
+  artifacts:
+    paths:
+      - public

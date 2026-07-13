@@ -5,6 +5,9 @@ author = "Elmo Tempel"
 maintainer = "elmo.tempel@ut.ee"
 copyright = "Copyright 2026, Elmo Tempel"
 description = "Parquet Fortran is a Fortran library for reading and writing Parquet files."
+homepage = "https://github.com/etempel/parquet-fortran"
+keywords = ["parquet", "arrow", "io", "columnar", "maml"]
+categories = ["io"]
 
 [[executable]]
 name = "run_parquet_fortran"
@@ -36,3 +39,24 @@ test = false
 [preprocess.cpp]
 suffixes = ["f90"]
 macros=["RELEASE_VERSION={version}"]
+
+[extra.ford]
+project = "parquet-fortran"
+summary = "Fortran library for reading and writing Parquet files"
+project_github = "https://github.com/etempel/parquet-fortran"
+src_dir = ["./src"]
+exclude_dir = ["./test"]
+exclude = ["**/parquet_bindings.f90"]
+page_dir = "./doc/pages"
+output_dir = "./ford-doc"
+media_dir = "./doc/media"
+display = ["public", "protected"]
+source = true
+graph = true
+search = true
+preprocessor = "cpp -traditional-cpp -E"
+md_extensions = ["markdown.extensions.toc"]
+
+[extra.ford.extra_mods]
+iso_fortran_env = "https://gcc.gnu.org/onlinedocs/gfortran/ISO_005fFORTRAN_005fENV.html"
+iso_c_binding = "https://gcc.gnu.org/onlinedocs/gfortran/ISO_005fC_005fBINDING.html"

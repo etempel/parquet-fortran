@@ -59,24 +59,282 @@ Working rules:
   (`.gitlab-ci.yml`, running `fpm test` with coverage), but still defer dynamic build/coverage
   badges until the project is public with a stable URL to point them at.
 
-## Planned: FORD-generated API documentation (not started)
+## FORD-generated docs + fpm package-index publication (layout done, doc-comments not started)
 
-Considering migrating the hand-maintained "parquet module API" reference in MANUAL.md to
-[FORD](https://forddocs.readthedocs.io/) (FORtran Documenter) — a mature, actively maintained
-(v7.0.13 as of 2026-02), fortran-lang.org-listed tool that auto-generates HTML API docs from
-in-source `!>`/`!!` doc comments (`src/parquet.f90` already uses `!>` in places, e.g. around
-the MAML-parsing interfaces) and correctly resolves this project's real `submodule` blocks
-(`parquet_read.f90`, `parquet_write.f90`, `parquet_metadata.f90`,
-`parquet_maml_base_add_col_qc.f90`) back to their parent-module interfaces.
+Plan and implementation status for migrating API docs to [FORD](https://forddocs.readthedocs.io/)
+and publishing this project to the fortran-lang package index. Researched and decided
+2026-07-13; layout implemented same day. **Remaining work (doc-comment coverage, enabling
+GitHub Pages, PACKAGES.md PR) is parked — pick it back up only when asked, don't start it
+unprompted.** This section is written to be self-sufficient for a fresh session with no prior
+conversation memory.
 
-Decision so far: **keep the current hand-maintained MANUAL.md "parquet module API" section for
-now.** Don't remove or shrink it in favor of FORD until a FORD-generated site has actually been
-stood up (project file, CI `pages` job, doc comments filled in across the public API) and
-proven good enough. Only then revisit dropping/shrinking the hand-maintained section per the
-"Documentation structure" working rules above.
+**GitHub mirror path (decided 2026-07-13): `https://github.com/etempel/parquet-fortran`** —
+already used in `fpm.toml`'s `[extra.ford]`/`homepage` and `.github/workflows/docs.yml` below;
+kept in sync with this GitLab repo manually by the user, no mirroring automation exists or is
+wanted.
 
-This is a parked migration, not an active task — pick it back up when asked, don't start it
-unprompted.
+### Target: fortran-lang package index, not `fpm publish`
+
+There are two distinct fortran-lang "registries" — don't conflate them:
+
+- **Package index** (fortran-lang.org/packages) — human-curated, PR-reviewed directory. This is
+  the target. Submission is a PR to `fortran-lang/fortran-lang.org` following
+  [`PACKAGES.md`](https://github.com/fortran-lang/fortran-lang.org/blob/master/PACKAGES.md),
+  needing ≥3 community approvals. Requires (checked against this repo as of 2026-07-13): a
+  license file in-source (have: `LICENSE`, BSD-3-Clause) and a README stating purpose/build
+  info (have). Also gates on ≥5 GitHub stars once the repo is public there — not a docs
+  concern, just a fact to know.
+- **`fpm publish` registry** (registry-phi.vercel.app) — a separate, *machine* registry for
+  resolving `[dependencies]` without git URLs. Explicitly in playground/testing status (reports
+  of hangs, unresolved email verification, undeletable uploads). **Decision: skip this for
+  now**, package-index listing only. Revisit only if asked — cost of adding later is low
+  (`version`/`license` are already registry-valid: semver `0.9.5`, SPDX `BSD-3-Clause`).
+
+### Publishing topology
+
+This repo's only remote is a private self-hosted GitLab (`gitlab.4most.eu`). **Decision: this
+project will be mirrored to a public GitHub repo**, kept in sync **manually by the user** — no
+CI/automation for the mirroring itself is needed or wanted. All FORD/CI work below assumes the
+GitHub mirror as the public-facing repo (GitHub Actions + GitHub Pages, not GitLab Pages). The
+existing `.gitlab-ci.yml` stays focused on `fpm test`/coverage and is untouched by this work.
+
+### FORD config: `[extra.ford]` in `fpm.toml` — DONE
+
+Config lives in `fpm.toml`'s `[extra.ford]` table (fpm never parses `[extra]`, only requires
+valid TOML; subtable name = tool name, per the manifest spec), not a standalone `ford.md`.
+FORD auto-detects `[extra.ford]` and uses it. Precedent: `toml-f/toml-f`'s real `fpm.toml` does
+exactly this. Already added to `fpm.toml` — see that file for the live config (project,
+summary, `project_github`/`homepage` pointing at `github.com/etempel/parquet-fortran`,
+`src_dir`, `exclude_dir = ["./test"]`, `exclude = ["parquet_bindings.f90"]`,
+`page_dir = "./doc/pages"`, `output_dir = "./ford-doc"`, `media_dir = "./doc/media"`,
+`display`, `source`/`graph`/`search`, and `[extra.ford.extra_mods]` for
+`iso_fortran_env`/`iso_c_binding`). Top-level `homepage`/`keywords`/`categories` were also
+added to `fpm.toml`.
+
+Root-level project-file body — **created as `docs.md`** — is still required even with
+`[extra.ford]` present (it supplies the generated front page's body, `[TOC]`, narrative; with
+`[extra.ford]` present it needs no metadata block, just body content). It reuses the README via
+FORD's `{!filename!}` include directive (same technique `fortran-lang/http-client` and
+`urbanjost/M_CLI2` use) rather than duplicating it:
+
+```markdown
+{!README.md!}
+```
+
+### Doc-comment style: no migration needed, but coverage is NOT DONE — next step
+
+`src/parquet.f90`'s existing `!>` comments (e.g. around the MAML-parsing interfaces, ~line
+291-371) are already placed *before* the entity they document — this is exactly FORD's default
+**predoc** convention already, no marker/placement change required. **What's still needed, and
+is the next actual step in this whole effort:** an audit of which public procedures/types/
+modules still lack a `!>`/`!!` block, since FORD only documents what's annotated, then filling
+that coverage in across `src/*.f90`. This is source-file work and was explicitly deferred — the
+2026-07-13 implementation session only did the non-`src/` layout/migration/CI work below,
+per the user's instruction not to touch `src/` yet. FORD correctly resolves this project's real
+`submodule` blocks (`parquet_read.f90`, `parquet_write.f90`, `parquet_metadata.f90`,
+`parquet_maml_base_add_col_qc.f90`) back to their parent-module interfaces, so submodule
+implementation files don't need separate doc comments from the interface declarations.
+
+### MANUAL.md migration: DONE (content migrated); deletion NOT YET DONE
+
+**Decision: do not maintain MANUAL.md alongside the FORD site long-term.** Its content has been
+migrated into FORD `page_dir` pages under `doc/pages/` (2026-07-13) — MANUAL.md itself is
+**still present, deliberately not yet deleted**. Delete it only after: (a) doc-comment coverage
+above is filled in, (b) the FORD site has actually been generated and verified live/good on the
+GitHub mirror, and (c) **explicit user confirmation is obtained first**, per this project's
+general destructive-action caution. Until then MANUAL.md and `doc/pages/` intentionally coexist
+(the migration copied content out, it did not yet remove the source).
+
+`doc/pages/` layout actually created (one file per MANUAL.md top-level `##` section, mirroring
+its old Contents ToC order — matches the decided granularity):
+
+- `doc/pages/index.md` — page_dir landing page, `ordered_subpage:` list preserving the
+  original section order, links to every page below plus the FORD-generated module/proc index.
+- `doc/pages/embedding-maml-schemas.md`, `reading.md`, `writing.md`,
+  `building-schema-in-code.md`, `maml-format.md`, `combined-example.md`, `error-handling.md`,
+  `thread-safety.md`, `supported-data-types.md`, `performance.md`, `troubleshooting.md`.
+- MANUAL.md's old **"parquet module API" section was *not* migrated** — it's superseded
+  entirely by FORD's auto-generated pages once doc-comment coverage (above) is sufficient, per
+  the original plan; nothing to do there besides finishing the doc-comment audit.
+
+Cross-link rewriting already applied while migrating (so a fresh session doesn't need to
+re-derive the mapping):
+- Same-page anchors (e.g. a `reading.md` subsection linking another `reading.md` subsection)
+  were left as bare `#anchor`.
+- Cross-page anchors (e.g. `reading.md` linking a `supported-data-types.md` subsection) were
+  rewritten to `<page>.html#anchor`.
+- Links to README.md sections were rewritten to `../index.html#anchor` (root project-file body
+  renders as the site's `index.html`; pages sit one level down under `page/`).
+- Links to CONTRIBUTING.md (kept GitHub-repo-only, see below) and to the `docs/*.maml` fixture
+  files were rewritten to absolute `https://github.com/etempel/parquet-fortran/blob/main/...`
+  URLs, since neither is part of the generated FORD site.
+- FORD's `[[entity_name]]` auto-link syntax was **not** applied to inline procedure-name
+  mentions in the migrated pages (left as plain backtick code spans) — deferred as a polish
+  pass to do once doc-comment coverage (above) exists and entity names/pages can be verified
+  against a real FORD build, rather than guessing syntax now.
+- **README.md is not migrated away** — it remains the landing page (both in the repo and, via
+  the `{!README.md!}` include, as the FORD site's front page).
+- **CONTRIBUTING.md and CHANGELOG.md stay GitHub-repo-only, not part of the generated FORD
+  site** (decided) — consistent with this project's existing README/MANUAL/CONTRIBUTING split
+  where CONTRIBUTING is contributor-facing, not user-facing; no `page_dir` entries for them.
+
+**Still to do once MANUAL.md is actually deleted** (not done yet, don't do it as part of this
+note): revisit every place that currently links to it (README.md's cross-references, this
+CLAUDE.md's "Documentation structure" section above, `tools/check_doc_anchors.py` scope) and
+rewrite the "Documentation structure" section itself to describe the new README + FORD-site
+split instead of the current README/MANUAL/CONTRIBUTING three-way split.
+
+### CI: GitHub Actions on the mirror, GitHub Pages hosting — workflow file DONE, not yet enabled/verified
+
+`.github/workflows/docs.yml` has been created (2026-07-13), following the modern
+`actions/deploy-pages` pattern used by `toml-f/toml-f`: on push to `main` (and PRs, build-only)
+it installs FORD via pip, runs `ford docs.md`, and deploys the `ford-doc` output directory to
+GitHub Pages via `actions/upload-pages-artifact` + `actions/deploy-pages`. **Not yet done, and
+deliberately deferred (confirmed 2026-07-13):** this workflow can't actually run/deploy until
+(a) the GitHub mirror at `github.com/etempel/parquet-fortran` exists and this file is pushed to
+it, and (b) GitHub Pages is switched to "GitHub Actions" as its source in the mirror repo's
+Settings — both are one-time manual steps the user does themselves once they actually migrate
+to GitHub, **not something to attempt to automate or prompt about before then.**
+
+### CI: GitLab Pages on gitlab.4most.eu — job DONE, not yet enabled/verified
+
+Decided 2026-07-13: **keep publishing docs on both hosts**, not GitHub-only — GitLab remains
+the system of record + existing `test` CI job, GitHub is a manually-synced mirror mainly for
+fpm-ecosystem visibility (see the "is it worth abandoning GitLab" discussion this session).
+Added a `pages` job to the existing `.gitlab-ci.yml` (new `docs` stage, after `test`):
+installs just `gcc` (for `cpp`, FORD's configured preprocessor) + `pipx install ford` — a much
+lighter `before_script` than the `test` job's, deliberately overridden rather than inherited,
+since generating docs from source comments needs no Arrow/Parquet/git-lfs setup at all; then
+runs `ford docs.md` and moves `ford-doc/` to `public/`. Gated to the default branch only
+(`rules: if $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH`) and `allow_failure: true` so a docs hiccup
+never fails the pipeline. `public/` added to `.gitignore` (build artifact, like `ford-doc/`).
+
+Job **must be named exactly `pages`** — that's the classic, broadly-version-compatible way
+GitLab recognizes a Pages-deploying job (works regardless of the specific GitLab server
+version, unlike the newer explicit `pages: true` keyword which needs GitLab 17.4+ and wasn't
+used here since gitlab.4most.eu's version is unknown).
+
+**Verified locally (not via the actual pipeline, per this file's own "don't run GitLab CI
+yourself" rule):** the YAML parses correctly, and the job's `script:` steps
+(`ford docs.md; rm -rf public; mv ford-doc public`) were dry-run directly in this environment
+and produce a working `public/index.html`. The `apt-get`/`pipx install ford` setup steps were
+**not** exercised locally (would require root and pollute this dev machine) — first real
+pipeline run on gitlab.4most.eu is the actual test of that part.
+
+**Not yet done, deliberately deferred, same shape as the GitHub side:** (a) push this
+`.gitlab-ci.yml` change so the job actually runs once, and (b) **GitLab Pages must be enabled
+at the instance/admin level on gitlab.4most.eu** — unlike GitHub Pages (a per-repo toggle) or
+gitlab.com (Pages on by default), **self-managed GitLab instances often have Pages disabled
+entirely until a sysadmin enables the feature and configures a wildcard Pages domain** for the
+whole instance. If the first real pipeline run's `pages` job succeeds but no Pages URL appears
+in the project's Settings → Pages, that's the likely cause — something only the gitlab.4most.eu
+admin (may or may not be the user) can fix, not something fixable from this repo alone.
+
+### Local FORD build: DONE, verified working (2026-07-13)
+
+The user installed FORD (`ford version 7.0.13`, via `uv tool install ford`, executable at
+`~/.local/bin/ford` — separate from the `pyastro` venv `python3` on `PATH`, so
+`python3 -c "import ford"` will still fail there; that's expected and not a problem, only the
+`ford` CLI matters). `ford docs.md` from the repo root was run and now completes cleanly. Three
+real bugs surfaced and were fixed as part of this validation:
+
+1. **`preprocess`'s default tool (`pcpp`) wasn't installed**, and `src/parquet.f90` genuinely
+   needs real cpp preprocessing (its version-string logic uses `#ifdef __GFORTRAN__`/
+   `#define`/stringify macros — not valid Fortran without expansion, so turning preprocessing
+   off outright was not an option). Fixed by adding
+   `preprocessor = "cpp -traditional-cpp -E"` to `[extra.ford]` in `fpm.toml`, using the system
+   `cpp` (`/usr/bin/cpp`, already present since it ships with gcc) instead.
+2. **No markdown heading got an `id` attribute at all** — FORD's default Python-Markdown setup
+   doesn't enable the `toc` extension, so every `#anchor` link this session wrote across
+   `doc/pages/*.md` (and every in-page anchor already in README.md, since it's pulled in
+   verbatim via `{!README.md!}`) silently pointed at nothing. Fixed by adding
+   `md_extensions = ["markdown.extensions.toc"]` to `[extra.ford]` — matches the real
+   precedent in `toml-f/toml-f`'s own `fpm.toml`. **This is a load-bearing setting — removing it
+   silently breaks every same-page and cross-page anchor link across the whole site again**,
+   with no error/warning from FORD when it happens.
+3. `doc/pages/index.md` linked to `../module/index.html`/`../proc/index.html` for the
+   module/procedure listings — those paths don't exist. FORD actually generates
+   `lists/modules.html` and `lists/procedures.html` for those indexes; fixed in `index.md`.
+
+Minor cleanups also applied: `exclude = ["parquet_bindings.f90"]` → `["**/parquet_bindings.f90"]`
+in `[extra.ford]` (silences a "not relative to any source directory" warning, FORD's own
+recommended fix); created `doc/media/` (with a `.gitkeep`) since `media_dir` pointed at a
+directory that didn't exist yet (harmless warning otherwise, no favicon/logo picked yet — still
+open, see below); added `ford-doc/` to `.gitignore` (it's `ford`'s build output, like
+`build/`); documented the one-line `ford docs.md` build command in README.md's Contributing
+section (per direct 2026-07-13 instruction — normally build-tooling docs would go in
+CONTRIBUTING.md per the "Documentation structure" rules, but this was an explicit exception).
+
+**Verification method**: every `href="...html..."` and every `#anchor` fragment across
+`ford-doc/page/*.html` and `ford-doc/index.html` was checked programmatically (target file
+exists, and target actually has a matching `id`/`name`) — all resolve cleanly as of this fix,
+*except* one known, pre-existing, out-of-scope issue:
+
+- ~~`index.html` (rendered from README.md via `{!README.md!}`) contained several dead
+  `MANUAL.md#anchor` links~~ **First fix (2026-07-13):** rewritten to absolute GitHub blob URLs.
+  **Superseded same day** — the user then asked to *completely remove* any dependency on
+  MANUAL.md (it's being deleted eventually; no references at all should remain, not even
+  working ones). All 18 README.md references were rewritten again, this time to **repo-relative
+  `doc/pages/*.md` links** (e.g. `doc/pages/reading.md`, `doc/pages/thread-safety.md`) — the
+  actual migrated content now lives there. MANUAL.md itself was **not** touched, per
+  instruction (and its own repo-relative links to itself, from other files, are untouched too —
+  only README.md's references were in scope for this request).
+  - The "API overview" section's five category links (Utility/MAML and metadata/Writer/Reader
+    table & column info/Reader column data) had **no** `doc/pages/*.md` equivalent to point at
+    (that whole "parquet module API" section of MANUAL.md was never migrated — see above, it's
+    superseded by FORD generation instead) — de-linked to plain bold text instead of inventing
+    a broken or misleading target.
+  - `tools/check_doc_anchors.py` (per this file's own "Checking documentation links" rule)
+    caught a real bug in the first attempt: several links included an anchor fragment matching
+    the *page's own title* (e.g. `doc/pages/thread-safety.md#thread-safety`) — invalid, because
+    every migrated page deliberately has **no** in-body heading duplicating its frontmatter
+    `title:` (see the MANUAL.md migration section above), so no such heading/anchor exists in
+    the raw markdown for GitHub's slugger to find. It only appeared to work in the FORD-rendered
+    HTML because FORD synthesizes a heading from `title:` in its own template. Fixed by dropping
+    the anchor fragment on all six such "whole-page" references (linking to the file is
+    sufficient; an anchor to its own top is redundant). `tools/check_doc_anchors.py` now passes
+    clean (all 6 checked files, zero broken links).
+  - **Known, accepted, pre-existing-pattern trade-off, not fixed:** these repo-relative
+    `doc/pages/*.md` links (like the already-pre-existing `CONTRIBUTING.md`/`LICENSE`/
+    `CHANGELOG.md` links elsewhere in README.md) do **not** resolve inside the generated FORD
+    site itself — FORD's output tree doesn't mirror the repo layout (`doc/pages/reading.md`
+    source becomes `page/reading.html` output; `CONTRIBUTING.md`/`LICENSE`/`CHANGELOG.md` aren't
+    copied into the build at all). Verified programmatically: 20 such repo-relative hrefs in the
+    generated `index.html` don't resolve to a file in `ford-doc/`. Not addressed, because (a)
+    the FORD site isn't deployed anywhere yet, so it has zero real readers today, (b) the only
+    alternative fixes are either duplicating README content specifically for the FORD front
+    page, or reintroducing off-site absolute/GitHub links — the exact pattern just explicitly
+    rejected in favor of full removal. Revisit only if asked, e.g. once the FORD site is
+    actually live and this becomes a real user-facing problem.
+
+- **`[[entity_name]]` auto-linking pass** over the migrated `doc/pages/*.md` files (converting
+  plain backtick procedure-name mentions into FORD's clickable entity links) is still not done
+  — still deliberately deferred, unchanged from before this validation pass.
+- **Favicon/media**: `doc/media/` now exists (empty, just a `.gitkeep`) but still has no actual
+  logo/icon/favicon — still open, not blocking.
+- Exact wording/placement of the "Documentation structure" section rewrite in this file once
+  MANUAL.md is gone (noted above, but the precise new text wasn't drafted).
+- **Doc-comment coverage (`!>`/`!!` audit across `src/*.f90`) is intentionally not being worked
+  on right now** (confirmed 2026-07-13) — do not start this without being asked again, even
+  though it's nominally "next" in the sequencing below. Note from this validation pass: FORD
+  already generates pages for every public interface/type regardless (see `ford-doc/interface/`,
+  `ford-doc/type/`, `ford-doc/module/` — e.g. `parquet_open_reader.html`,
+  `parquet_schema.html` already exist and look correct structurally), just without prose until
+  those doc comments are written.
+
+### Sequencing (updated — steps 1/3/4 done, 2/5/6 remain)
+
+1. ~~`fpm.toml`: add `[extra.ford]`, `homepage`/`keywords`/`categories`, root `docs.md`.~~ DONE.
+2. **NEXT:** audit + fill `!>`/`!!` doc-comment coverage across the public API in `src/*.f90`.
+3. ~~Stand up the GitHub Actions workflow~~ workflow file DONE (`.github/workflows/docs.yml`);
+   actually running/verifying it needs the GitHub mirror to exist first (see CI section above).
+4. ~~Migrate MANUAL.md sections into `doc/pages/*.md`~~ DONE — see MANUAL.md migration section
+   above for exactly what was and wasn't carried over.
+5. Once doc-comment coverage (step 2) is done and the FORD site is verified live and good on
+   the GitHub mirror: confirm with the user, then delete MANUAL.md and update this file's
+   "Documentation structure" section and any remaining cross-references to it.
+6. Only after all the above: prepare the `fortran-lang/fortran-lang.org` PACKAGES.md PR for
+   package-index listing.
 
 ## Report before implementing on analysis/audit requests
 

@@ -1,0 +1,31 @@
+---
+title: User guide
+ordered_subpage: embedding-maml-schemas.md
+ordered_subpage: reading.md
+ordered_subpage: writing.md
+ordered_subpage: building-schema-in-code.md
+ordered_subpage: maml-format.md
+ordered_subpage: combined-example.md
+ordered_subpage: error-handling.md
+ordered_subpage: thread-safety.md
+ordered_subpage: supported-data-types.md
+ordered_subpage: performance.md
+ordered_subpage: troubleshooting.md
+---
+
+The complete usage guide for **parquet-fortran**, beyond the quick-start overview on the
+front page. For the full per-procedure API reference (every public type/function/subroutine
+under `use parquet`), see the [modules](../lists/modules.html) and
+[procedures](../lists/procedures.html) listings generated from source.
+
+- [Embedding your own MAML schemas in your own project](embedding-maml-schemas.html)
+- [Reading parquet files from your Fortran code](reading.html)
+- [Writing parquet files from your Fortran code](writing.html)
+- [Building a schema in code with `schema%init`/`schema%add_field`](building-schema-in-code.html)
+- [The MAML metadata format](maml-format.html)
+- [Combined example: MAML schema, vector columns and metadata](combined-example.html)
+- [Error handling](error-handling.html)
+- [Thread safety](thread-safety.html)
+- [Supported data types](supported-data-types.html)
+- [Performance and memory](performance.html)
+- [Troubleshooting](troubleshooting.html)

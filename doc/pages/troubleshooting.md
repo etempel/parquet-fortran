@@ -1,0 +1,12 @@
+---
+title: Troubleshooting
+---
+
+Most build failures come from the Arrow/Parquet C++ dependency not being visible to FPM at compile or link time. See [Environment variables](../index.html#environment-variables) in the README for the full variable list; the following are the most common symptoms:
+
+- **`fatal error: arrow/api.h: No such file or directory`** (or similar for `parquet/api/reader.h`) — `FPM_FFLAGS`/`FPM_CXXFLAGS` is not pointing `-I` at Arrow's `include` directory.
+- **Link errors like `undefined reference to arrow::...` or `cannot find -lparquet`** — `LIBRARY_PATH`/`FPM_LDFLAGS` is not pointing `-L` at Arrow's `lib` directory, or the `link = ["arrow", "parquet", "c++"]` entry is missing from the consuming project's `fpm.toml`. (`parquet-fortran`'s own `fpm.toml` also links `arrow_compute`, needed for `parquet_close_reader(..., print_stat=.true.)`'s min/max calculation — Arrow ships its compute kernels in a separate library from core `arrow` — and fpm propagates that automatically to consumers, so it does not need to be listed again here.)
+- **Linker errors mentioning `std::span` or other C++20-only symbols** — `-std=c++20` is missing from `FPM_CXXFLAGS` (required on every platform — see [Environment variables](../index.html#environment-variables)).
+- **Undefined references to `std::__1::...` (macOS) or `std::...` (Linux) at the final link step** — the C++ standard library is missing from `FPM_LDFLAGS`. Add `-lc++` on macOS/Clang or `-lstdc++` on Linux/GCC (see [Environment variables](../index.html#environment-variables)).
+- **At runtime, `dyld: Library not loaded` / `error while loading shared libraries` for `libarrow`/`libparquet`** — the Arrow/Parquet shared libraries are not on the dynamic linker's search path at run time; add their directory to `DYLD_LIBRARY_PATH` (macOS) or `LD_LIBRARY_PATH` (Linux) in addition to `LIBRARY_PATH` used at build time.
+- **Program aborts with an `ERROR STOP` message instead of returning a status code** — this is expected; see [Error handling](error-handling.html). The message text (e.g. naming a missing column or file) indicates the failing precondition.

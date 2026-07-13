@@ -1,0 +1,8 @@
+/* The front page embeds README.md verbatim (via docs.md's {!README.md!}),
+   whose own top-level "# parquet-fortran" heading duplicates FORD's own
+   auto-generated page title. FORD's own title has no id attribute; only
+   markdown-derived headings (via the toc extension) do, so this only
+   matches the README-embedded duplicate, not FORD's own title elsewhere. */
+#text h1[id] {
+    display: none;
+}

@@ -104,12 +104,57 @@ Config lives in `fpm.toml`'s `[extra.ford]` table (fpm never parses `[extra]`, o
 valid TOML; subtable name = tool name, per the manifest spec), not a standalone `ford.md`.
 FORD auto-detects `[extra.ford]` and uses it. Precedent: `toml-f/toml-f`'s real `fpm.toml` does
 exactly this. Already added to `fpm.toml` — see that file for the live config (project,
-summary, `project_github`/`homepage` pointing at `github.com/etempel/parquet-fortran`,
-`src_dir`, `exclude_dir = ["./test"]`, `exclude = ["parquet_bindings.f90"]`,
+summary, `src_dir`, `exclude_dir = ["./test"]`, `exclude = ["parquet_bindings.f90"]`,
 `page_dir = "./doc/pages"`, `output_dir = "./ford-doc"`, `media_dir = "./doc/media"`,
-`display`, `source`/`graph`/`search`, and `[extra.ford.extra_mods]` for
-`iso_fortran_env`/`iso_c_binding`). Top-level `homepage`/`keywords`/`categories` were also
-added to `fpm.toml`.
+`display`, `source`/`graph`/`search`, `preprocessor`, `md_extensions`, and
+`[extra.ford.extra_mods]` for `iso_fortran_env`/`iso_c_binding`). Top-level `homepage`/
+`keywords`/`categories` were also added to `fpm.toml` (unaffected by the `project_github`
+removal below — that top-level `homepage` is unrelated fpm registry metadata, not FORD's own).
+
+**`project_github` deliberately removed from `[extra.ford]` (2026-07-13, on request).** It was
+originally set to `https://github.com/etempel/parquet-fortran`, which rendered a "Find us
+on…" + GitHub button block on the FORD site's front page (`index.html`'s "jumbotron", above the
+embedded README content) — the user found this disruptive once docs were actually live on the
+gitlab.4most.eu docserver. Checked FORD's own installed template source directly before
+removing it (not guessed): `project_github` is referenced in exactly one place across every
+FORD template, `templates/index.html`'s jumbotron block (the "Find us on…" button row, shared
+with `project_gitlab`/`project_bitbucket`/`project_sourceforge`/`project_website` — any one of
+those being set triggers the block) — confirmed via `grep -rn project_github` across the entire
+installed `ford` package, not just `templates/`. No other FORD behavior depends on it (e.g. no
+per-sourcefile "view on GitHub" link — FORD's own `source: true` links point at its own
+generated `sourcefile/*.html` pages instead). So removing it is a clean, side-effect-free fix:
+verified by rebuilding — the "Find us on" block is gone, the `summary` line (unconditional,
+independent of `project_github`) still renders normally.
+
+**Duplicate front-page `<h1>parquet-fortran</h1>` heading fixed via `css` option, same session
+(2026-07-13, on request).** Root cause (found by reading FORD's own template, not guessed):
+`templates/index.html` unconditionally renders `<h1>{{ project }}</h1>` (no `{% if %}` guard)
+immediately before `{{ proj_docs }}` (the rendered `docs.md` body, i.e. our `{!README.md!}`
+include) — and since README.md's own first line is `# parquet-fortran`, that becomes a second,
+visually identical `<h1 id="parquet-fortran">` right below it. **No FORD/`markdown_include`
+mechanism exists to skip just the first line of an included file** (checked
+`markdown_include`'s actual source — `INC_SYNTAX` only captures a bare filename, no line-range
+syntax; its only heading-related options are `inheritHeadingDepth`/`headingOffset`, which
+*adjust* depth, not suppress a specific heading) — so editing README.md's own heading, or
+hand-splitting the include, were the only content-level alternatives, both rejected in favor of
+a presentation-only fix that touches neither README.md nor doc/pages content.
+
+Fixed instead via FORD's `css` project-file option (`css = "./doc/user.css"` in
+`[extra.ford]`) — an officially-supported mechanism: FORD copies the given file to
+`output_dir/css/user.css` and links it last in `<head>` (after all default stylesheets), so
+same-specificity rules there win the cascade with no `!important` needed. New file
+`doc/user.css` contains one rule: `#text h1[id] { display: none; }`. Why this is safe and fully
+scoped (verified, not assumed): FORD's own auto-generated headings (`<h1>{{ project }}</h1>` on
+the front page, `<h1>{{ page.title }}</h1>` on every `page_dir` page) never carry an `id`
+attribute — only markdown-content-derived headings do (via the `toc` extension already enabled
+for anchors, see above) — and only the front page's `{!README.md!}`-embedded content sits
+inside an `id="text"` wrapper *and* contains a heading at all (every `doc/pages/*.md` file
+deliberately has no top-level heading in its body, only `###` subsections, per the earlier
+MANUAL.md migration). Swept the **entire generated site** for any `<h1 id="...">` after
+rebuilding: found exactly one, the intended target on `index.html` — confirms the rule can never
+accidentally hide anything else, on this page or any other. The duplicate `<h1>` is hidden, not
+removed from the markup (`display: none`), so its `#parquet-fortran` anchor id still technically
+exists, harmlessly, even though nothing links to it.
 
 Root-level project-file body — **created as `docs.md`** — is still required even with
 `[extra.ford]` present (it supplies the generated front page's body, `[TOC]`, narrative; with

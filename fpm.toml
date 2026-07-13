@@ -43,13 +43,13 @@ macros=["RELEASE_VERSION={version}"]
 [extra.ford]
 project = "parquet-fortran"
 summary = "Fortran library for reading and writing Parquet files"
-project_github = "https://github.com/etempel/parquet-fortran"
 src_dir = ["./src"]
 exclude_dir = ["./test"]
 exclude = ["**/parquet_bindings.f90"]
 page_dir = "./doc/pages"
 output_dir = "./ford-doc"
 media_dir = "./doc/media"
+css = "./doc/user.css"
 display = ["public", "protected"]
 source = true
 graph = true

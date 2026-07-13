@@ -31,7 +31,7 @@ module parquet_bindings
     public :: parquet_reader_get_table_metadata_count
     public :: parquet_reader_get_table_metadata_key_length, parquet_reader_get_table_metadata_value_length
     public :: parquet_reader_get_table_metadata_key, parquet_reader_get_table_metadata_value
-    public :: parquet_reader_prefetch_columns, parquet_reader_has_column
+    public :: parquet_reader_prefetch_columns, parquet_reader_prefetch_all_columns, parquet_reader_has_column
     public :: parquet_reader_set_filter
     public :: parquet_reader_set_qc
     public :: parquet_read_int32_column, parquet_read_int64_column
@@ -232,6 +232,12 @@ module parquet_bindings
             character(kind=c_char) :: names_packed(*)
             integer(c_long_long), value :: item_len
             integer(c_long_long), value :: n
+        end subroutine
+
+        subroutine parquet_reader_prefetch_all_columns(reader) &
+                bind(C, name="parquet_reader_prefetch_all_columns")
+            import
+            type(c_ptr), value :: reader
         end subroutine
 
         function parquet_reader_has_column(reader, name) &

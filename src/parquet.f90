@@ -10,7 +10,7 @@ module parquet
     implicit none
     private
     !
-    character(len=*),parameter:: cversion = "v5 (2026-07-12)" !< version info
+    character(len=*),parameter:: cversion = "v0.9.1 (2026-07-13)" !< version info
 #ifndef RELEASE_VERSION
 #  define RELEASE_VERSION 0.1
 #endif
@@ -1018,7 +1018,15 @@ module parquet
         !> interface above): opens as usual, filling in none of the
         !> post-filter row count. Called directly by the two nrows= forms
         !> below, which then call parquet_get_nrows themselves.
-        module subroutine parquet_open_reader_base(reader, filename, use_threads, filter, schema, qc, qc_soft)
+        !>
+        !> prefetch (default .false.): when .true., every column in the file is
+        !> read and cached right away, after any filter has been applied (see
+        !> parquet_open_reader_base's implementation for why that ordering
+        !> matters), instead of each column being read lazily on first request.
+        !> Equivalent to calling parquet_prefetch_columns for every column in
+        !> the file immediately after opening. Materializes the whole file in
+        !> memory up front -- see MANUAL.md's "Performance and memory" section.
+        module subroutine parquet_open_reader_base(reader, filename, use_threads, filter, schema, qc, qc_soft, prefetch)
             type(parquet_reader), intent(out) :: reader
             character(len=*), intent(in) :: filename
             logical, intent(in), optional :: use_threads
@@ -1026,6 +1034,7 @@ module parquet
             type(parquet_schema), intent(in), optional :: schema
             logical, intent(in), optional :: qc
             logical, intent(in), optional :: qc_soft
+            logical, intent(in), optional :: prefetch
         end subroutine parquet_open_reader_base
 
         !> nrows (integer(int64)): filled in with the post-filter row count
@@ -1037,7 +1046,8 @@ module parquet
         !> may legitimately have zero matching rows -- call parquet_get_nrows
         !> yourself afterwards, without check_positive, to get 0 back instead
         !> of aborting.
-        module subroutine parquet_open_reader_nrows_int64(reader, filename, use_threads, filter, schema, qc, qc_soft, nrows)
+        module subroutine parquet_open_reader_nrows_int64(reader, filename, use_threads, filter, schema, qc, qc_soft, &
+                nrows, prefetch)
             type(parquet_reader), intent(out) :: reader
             character(len=*), intent(in) :: filename
             logical, intent(in), optional :: use_threads
@@ -1046,6 +1056,7 @@ module parquet
             logical, intent(in), optional :: qc
             logical, intent(in), optional :: qc_soft
             integer(int64), intent(out) :: nrows
+            logical, intent(in), optional :: prefetch
         end subroutine parquet_open_reader_nrows_int64
 
         !> Same as parquet_open_reader_nrows_int64, but for a caller-supplied
@@ -1053,7 +1064,8 @@ module parquet
         !> parquet_get_nrows_int32) if the actual row count overflows int32,
         !> exactly as a direct parquet_get_nrows(reader, nrows) call with an
         !> integer(int32) nrows would.
-        module subroutine parquet_open_reader_nrows_int32(reader, filename, use_threads, filter, schema, qc, qc_soft, nrows)
+        module subroutine parquet_open_reader_nrows_int32(reader, filename, use_threads, filter, schema, qc, qc_soft, &
+                nrows, prefetch)
             type(parquet_reader), intent(out) :: reader
             character(len=*), intent(in) :: filename
             logical, intent(in), optional :: use_threads
@@ -1062,6 +1074,7 @@ module parquet
             logical, intent(in), optional :: qc
             logical, intent(in), optional :: qc_soft
             integer(int32), intent(out) :: nrows
+            logical, intent(in), optional :: prefetch
         end subroutine parquet_open_reader_nrows_int32
 
         module subroutine parquet_close_reader(reader, print_stat)

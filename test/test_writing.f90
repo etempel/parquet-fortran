@@ -95,6 +95,10 @@ contains
                 test_prefetch_columns_repeated_overlapping_calls), &
             new_unittest("parquet_prefetch_columns accepts a comma/semicolon string of names", &
                 test_prefetch_columns_string_form), &
+            new_unittest("parquet_open_reader(prefetch=.true.) warms every column and still reads correctly", &
+                test_open_reader_prefetch_true), &
+            new_unittest("parquet_open_reader(prefetch=.true.) with an active filter still returns filtered rows", &
+                test_open_reader_prefetch_true_with_filter), &
             new_unittest("parquet_close_reader(print_stat=.true.) does not disturb a normal close", &
                 test_close_reader_print_stat_smoke), &
             new_unittest("qc: range violation prints a WARNING but does not abort", &
@@ -1224,6 +1228,81 @@ contains
         call check(error, all(a_back == a_values) .and. all(xa_back == xa_values) .and. all(b_back == b_values), &
             "the string form of parquet_prefetch_columns did not prefetch a/xa/b correctly")
     end subroutine test_prefetch_columns_string_form
+
+    !> parquet_open_reader(..., prefetch=.true.) must warm every column in
+    !> the file at open time -- reading any of them afterward (in any order)
+    !> must still return the correct data, exactly as if prefetch had never
+    !> been requested.
+    subroutine test_open_reader_prefetch_true(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: a_values(5), b_values(5), c_values(5)
+        integer(int32) :: a_back(5), b_back(5), c_back(5)
+        character(len=*), parameter :: out_file = "test_run/test_open_reader_prefetch.parquet"
+        integer :: i
+
+        a_values = [(i, i=1,5)]
+        b_values = [(i*10, i=1,5)]
+        c_values = [(i*100, i=1,5)]
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "a", a_values)
+        call parquet_write_column(writer, "b", b_values)
+        call parquet_write_column(writer, "c", c_values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file, prefetch=.true.)
+        call parquet_read_column(reader, "c", c_back)
+        call parquet_read_column(reader, "a", a_back)
+        call parquet_read_column(reader, "b", b_back)
+        call parquet_close_reader(reader)
+
+        call check(error, all(a_back == a_values) .and. all(b_back == b_values) .and. all(c_back == c_values), &
+            "parquet_open_reader(..., prefetch=.true.) did not correctly prefetch every column")
+    end subroutine test_open_reader_prefetch_true
+
+    !> Regression test for the ordering loophole where prefetch-all runs
+    !> before the filter mask is set: a column NOT referenced by the filter
+    !> must still come back correctly filtered when prefetch=.true. and a
+    !> filter are both used together -- see parquet_open_reader_base's own
+    !> comment (parquet_read.f90) on why prefetch must run after
+    !> parquet_apply_filter.
+    subroutine test_open_reader_prefetch_true_with_filter(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32) :: id(6), payload(6)
+        integer(int32) :: nrows
+        integer(int32), allocatable :: id_back(:), payload_back(:)
+        character(len=*), parameter :: out_file = "test_run/test_open_reader_prefetch_filter.parquet"
+        integer :: i
+
+        id = [(i, i=1,6)]
+        payload = [(i*1000, i=1,6)]
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_write_column(writer, "payload", payload)
+        call parquet_close_writer(writer)
+
+        call filt%add("id > 4")
+        call parquet_open_reader(reader, out_file, filter=filt, prefetch=.true.)
+        call parquet_get_nrows(reader, nrows)
+
+        allocate(id_back(nrows), payload_back(nrows))
+        ! "payload" is never referenced by the filter -- it is only ever
+        ! touched via the prefetch=.true. all-columns warm-up, so this is
+        ! exactly the case that would silently return unfiltered data if
+        ! prefetch-all ran before the filter mask existed.
+        call parquet_read_column(reader, "payload", payload_back)
+        call parquet_read_column(reader, "id", id_back)
+        call parquet_close_reader(reader)
+
+        call check(error, nrows == 2 .and. all(id_back == [5, 6]) .and. all(payload_back == [5000, 6000]), &
+            "prefetch=.true. combined with an active filter returned unfiltered data for a non-filter column")
+    end subroutine test_open_reader_prefetch_true_with_filter
 
     !> print_stat=.true. always prints to stdout -- run out-of-process (see
     !> scenario_print_stat_smoke in error_scenarios.f90) so that output is

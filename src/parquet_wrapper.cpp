@@ -1268,6 +1268,58 @@ extern "C"
 		}
 	}
 
+	// Same as parquet_reader_prefetch_columns, but for every column in the
+	// file (used by parquet_open_reader(..., prefetch=.true.)) -- built from
+	// the schema directly instead of a caller-supplied name list, since
+	// Fortran has no way to enumerate column names itself. Must be called
+	// AFTER parquet_reader_set_filter (if a filter is used): a column cached
+	// here before filter_mask is set would stay raw/unfiltered forever, since
+	// set_filter only re-masks the filter clauses' own columns, not the
+	// whole column_cache -- see parquet_open_reader_base in parquet_read.f90
+	// for the call-site ordering this depends on.
+	void parquet_reader_prefetch_all_columns(void *handle)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		int num_fields = reader_handle->schema->num_fields();
+		if (num_fields <= 0) return;
+
+		std::vector<int> indices;
+		std::vector<std::string> names;
+		indices.reserve(static_cast<size_t>(num_fields));
+		names.reserve(static_cast<size_t>(num_fields));
+		for (int idx = 0; idx < num_fields; ++idx)
+		{
+			auto cached = reader_handle->column_cache.find(idx);
+			if (cached != reader_handle->column_cache.end())
+			{
+				// Already decoded -- still counts as "touched" by this
+				// prefetch, so QC still runs for it here, mirroring
+				// parquet_reader_prefetch_columns's own cache-hit handling.
+				run_qc_checks(reader_handle, idx, reader_handle->schema->field(idx)->name(), cached->second);
+				continue;
+			}
+			indices.push_back(idx);
+			names.push_back(reader_handle->schema->field(idx)->name());
+		}
+
+		if (indices.empty()) return;
+
+		std::shared_ptr<arrow::Table> table;
+		auto status = reader_handle->reader->ReadTable(indices, &table);
+		if (!status.ok())
+		{
+			throw std::runtime_error(status.ToString());
+		}
+
+		for (size_t i = 0; i < indices.size(); ++i)
+		{
+			auto chunked = table->column(static_cast<int>(i));
+			auto array = apply_filter_mask(reader_handle, combine_column_chunks(chunked, names[i]));
+			reader_handle->column_cache[indices[i]] = array;
+			run_qc_checks(reader_handle, indices[i], names[i], array);
+		}
+	}
+
 	int64_t parquet_reader_get_nrows(void *handle)
 	{
 		auto reader_handle = as_reader_handle(handle);

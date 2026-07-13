@@ -384,15 +384,27 @@ contains
         if (present(filter)) then
             if (filter%n > 0) call parquet_apply_filter(reader, filter)
         end if
+
+        ! Must run AFTER parquet_apply_filter: a column cached before the
+        ! filter mask exists would stay raw/unfiltered forever, since
+        ! set_filter only re-masks the filter clauses' own columns, not the
+        ! whole cache (see parquet_reader_prefetch_all_columns's own comment
+        ! in parquet_wrapper.cpp). Filter columns prefetched earlier by
+        ! prefetch_filter_columns are skipped here (already cached and
+        ! correctly re-masked by set_filter), so this only reads the
+        ! remaining columns.
+        if (present(prefetch)) then
+            if (prefetch) call parquet_reader_prefetch_all_columns(reader%handle)
+        end if
     end procedure parquet_open_reader_base
 
     module procedure parquet_open_reader_nrows_int64
-        call parquet_open_reader_base(reader, filename, use_threads, filter, schema, qc, qc_soft)
+        call parquet_open_reader_base(reader, filename, use_threads, filter, schema, qc, qc_soft, prefetch)
         call parquet_get_nrows(reader, nrows, check_positive=.true.)
     end procedure parquet_open_reader_nrows_int64
 
     module procedure parquet_open_reader_nrows_int32
-        call parquet_open_reader_base(reader, filename, use_threads, filter, schema, qc, qc_soft)
+        call parquet_open_reader_base(reader, filename, use_threads, filter, schema, qc, qc_soft, prefetch)
         call parquet_get_nrows(reader, nrows, check_positive=.true.)
     end procedure parquet_open_reader_nrows_int32
 

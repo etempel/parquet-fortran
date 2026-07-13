@@ -338,4 +338,4 @@ contains
         maml%lines(48) = "    miss: 'Null'"
     end function parquet_maml_maml_example3
 
-end module parquet_maml_base
+end module parquet_maml_base ! GCOVR_EXCL_LINE

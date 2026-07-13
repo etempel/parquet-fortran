@@ -1826,7 +1826,7 @@ extern "C"
 
 		std::vector<std::string> headers = {
 			"col", "parquet_type", "output_type", "col_size", "len_str",
-			"nulls", "min", "max", "qcmin", "qcmax", "qcmiss", "prefetc", "read", "filter"};
+			"nulls", "min", "max", "qcmin", "qcmax", "qcmiss", "fetched", "read", "filter"};
 		std::vector<std::vector<std::string>> rows;
 
 		for (int idx : touched)

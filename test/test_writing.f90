@@ -46,8 +46,10 @@ contains
             new_unittest("write_maml=.true. saves a sidecar .maml file", test_write_maml_sidecar), &
             new_unittest("write_maml=.true. does not prune when every column is enabled", &
                 test_write_maml_sidecar_no_pruning_when_all_enabled), &
-            new_unittest("write_maml=.true. prunes correctly with a blank line between field blocks", &
-                test_write_maml_sidecar_prune_with_blank_line_between_fields), &
+            new_unittest("write_maml=.true. prunes correctly across blank/comment lines and reordered keys", &
+                test_write_maml_sidecar_prune_scan_edge_cases), &
+            new_unittest("write_maml=.true. appends .maml for a non-.parquet output filename", &
+                test_write_maml_sidecar_non_parquet_filename), &
             new_unittest("add_metadata after parquet_parse_maml is reflected in the sidecar", &
                 test_write_maml_sidecar_with_runtime_metadata), &
             new_unittest("add_metadata inserts keyarray: before an existing extra:", &
@@ -70,6 +72,8 @@ contains
                 test_qc_parsing_plain_and_operator_forms), &
             new_unittest("qc=.true. prints a WARNING for an out-of-range numeric value", &
                 test_qc_warning_printed_for_numeric_violation), &
+            new_unittest("qc=.true. WARNING for a fractional bound uses fractional formatting", &
+                test_qc_warning_printed_for_fractional_bound), &
             new_unittest("qc=.true. prints a WARNING for an out-of-range string value", &
                 test_qc_warning_printed_for_string_violation), &
             new_unittest("qc: on a boolean field is accepted but never enforced", &
@@ -95,6 +99,8 @@ contains
                 test_close_reader_print_stat_smoke), &
             new_unittest("qc: range violation prints a WARNING but does not abort", &
                 test_qc_range_violation_warns), &
+            new_unittest("qc-maml: a stray no-colon line before qc: still warns correctly", &
+                test_qc_maml_stray_no_colon_line_ok), &
             new_unittest("qc: unexpected Null prints a WARNING but does not abort", &
                 test_qc_null_violation_warns), &
             new_unittest("qc: miss: Null suppresses the Null-presence WARNING", &
@@ -243,30 +249,38 @@ contains
         end do
     end subroutine test_write_maml_sidecar_no_pruning_when_all_enabled
 
-    !> parquet_prune_disabled_fields's field-block scan must skip over a blank
-    !> line between two "- name:" entries -- ordinary MAML authoring style
-    !> (a blank separator line for readability) that docs/maml_example.maml
-    !> happens not to use anywhere, so it's built in-memory here instead of
-    !> loaded from a fixture, specifically to exercise that blank-line case.
-    subroutine test_write_maml_sidecar_prune_with_blank_line_between_fields(error)
+    !> parquet_prune_disabled_fields's field-block scan must handle three
+    !> real-world MAML authoring variations that docs/maml_example.maml
+    !> happens not to use anywhere, so this schema is built in-memory instead
+    !> of loaded from a fixture:
+    !>   1. an indented comment line right after "fields:", before the first
+    !>      "- name:" entry (outer scan's blank/non-block-line fallthrough);
+    !>   2. a blank line between two "- name:" blocks (ordinary readability
+    !>      formatting);
+    !>   3. a field block ("extra") whose "name:" key is not the first
+    !>      attribute -- valid, order-independent MAML (the real field parser
+    !>      in parquet_metadata.f90 doesn't require any key ordering), just an
+    !>      unconventional style no existing fixture happens to use.
+    subroutine test_write_maml_sidecar_prune_scan_edge_cases(error)
         implicit none
         type(error_type), allocatable, intent(out) :: error
         type(parquet_writer) :: writer
         type(parquet_schema) :: schema, sidecar_schema
         integer(int32) :: id0(3) = [1_int32, 2_int32, 3_int32]
         logical :: exists
-        character(len=*), parameter :: out_file = "test_run/test_write_maml_blank_line.parquet"
-        character(len=*), parameter :: sidecar_file = "test_run/test_write_maml_blank_line.maml"
+        character(len=*), parameter :: out_file = "test_run/test_write_maml_scan_edge_cases.parquet"
+        character(len=*), parameter :: sidecar_file = "test_run/test_write_maml_scan_edge_cases.maml"
 
-        schema%maml%name = "blank_line_between_fields.maml"
+        schema%maml%name = "prune_scan_edge_cases.maml"
         schema%maml%lines = [character(len=40) :: &
-            "table: blank_line_table", &
+            "table: edge_case_table", &
             "fields:", &
+            "  # comment before the first field", &
             "- name: id0", &
             "  data_type: int32", &
             "", &
-            "- name: extra", &
-            "  data_type: int32" ]
+            "- data_type: int32", &
+            "  name: extra" ]
 
         call parquet_parse_maml(schema)
         call schema%set_column_unavailable()
@@ -283,13 +297,67 @@ contains
         call parquet_parse_maml(sidecar_file, sidecar_schema)
 
         call check(error, size(sidecar_schema%cinfo%col) == 1, &
-            "expected the sidecar .maml to only list the one enabled column ('id0') when a blank " // &
-            "line separates field blocks in the source MAML")
+            "expected the sidecar .maml to only list the one enabled column ('id0') " // &
+            "with a leading comment, a blank line, and a reordered-key field block present")
         if (allocated(error)) return
         call check(error, trim(sidecar_schema%cinfo%col(1)%name) == "id0", &
-            "expected the sidecar .maml's only field entry to be 'id0' when a blank line " // &
-            "separates field blocks in the source MAML")
-    end subroutine test_write_maml_sidecar_prune_with_blank_line_between_fields
+            "expected the sidecar .maml's only field entry to be 'id0' " // &
+            "with a leading comment, a blank line, and a reordered-key field block present")
+    end subroutine test_write_maml_sidecar_prune_scan_edge_cases
+
+    !> parquet_write_maml_sidecar derives the sidecar path from the output
+    !> filename: a trailing ".parquet" is replaced with ".maml", but for any
+    !> other extension (or none) ".maml" is simply appended instead. Covers
+    !> both branches of that function's length-safety guard (parquet_write.f90
+    !> checks len >= 8 before indexing the last 8 characters to compare
+    !> against ".parquet"): a filename >= 8 characters that doesn't end in
+    !> ".parquet", and one under 8 characters (too short to even hold
+    !> ".parquet", so the substring comparison is skipped entirely). The short
+    !> case can't live under test_run/ (whose own prefix is already 9
+    !> characters), so it's written to, and cleaned up from, the current
+    !> working directory instead.
+    subroutine test_write_maml_sidecar_non_parquet_filename(error)
+        implicit none
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_schema) :: schema
+        integer(int32) :: id0(2) = [1_int32, 2_int32]
+        logical :: exists
+        integer :: unit, ios
+
+        schema%maml%name = "non_parquet_filename.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: non_parquet_filename_table", &
+            "fields:", &
+            "- name: id0", &
+            "  data_type: int32" ]
+        call parquet_parse_maml(schema)
+
+        ! Long enough (>= 8 characters) but no ".parquet" suffix.
+        call parquet_open_writer(writer, "test_run/plainfile.dat", schema, write_maml=.true.)
+        call parquet_write_column(writer, "id0", id0)
+        call parquet_close_writer(writer)
+
+        inquire(file="test_run/plainfile.dat.maml", exist=exists)
+        call check(error, exists, &
+            "write_maml=.true. with a non-.parquet, >=8-character filename did not append .maml")
+        if (allocated(error)) return
+
+        ! Too short to hold ".parquet" (< 8 characters).
+        call parquet_open_writer(writer, "s.dat", schema, write_maml=.true.)
+        call parquet_write_column(writer, "id0", id0)
+        call parquet_close_writer(writer)
+
+        inquire(file="s.dat.maml", exist=exists)
+
+        open(newunit=unit, file="s.dat", status="old", iostat=ios)
+        if (ios == 0) close(unit, status="delete")
+        open(newunit=unit, file="s.dat.maml", status="old", iostat=ios)
+        if (ios == 0) close(unit, status="delete")
+
+        call check(error, exists, &
+            "write_maml=.true. with a short (<8-character) filename did not append .maml")
+    end subroutine test_write_maml_sidecar_non_parquet_filename
     !
     subroutine test_write_maml_sidecar_with_runtime_metadata(error)
         implicit none
@@ -347,11 +415,15 @@ contains
             "pre-existing keyarray entries from the source MAML were lost when appending runtime metadata")
     end subroutine test_write_maml_sidecar_with_runtime_metadata
     !
+    !> Covers both of parquet_locate_keyarray_insert's header-less fallbacks
+    !> (src/parquet_metadata.f90): inserting before an existing "extra:"
+    !> section when there's no "keyarray:" yet, and -- when there's neither
+    !> "keyarray:" nor "extra:" -- inserting before "fields:" instead.
     subroutine test_add_metadata_inserts_before_extra(error)
         implicit none
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_schema) :: schema
-        integer :: idx_keyarray, idx_extra, i
+        type(parquet_schema) :: schema, schema_no_extra
+        integer :: idx_keyarray, idx_extra, idx_fields, i
 
         ! Built in-memory (rather than loaded from docs/) so this test does not
         ! depend on whether the on-disk fixture happens to have a keyarray:
@@ -400,6 +472,36 @@ contains
         if (allocated(error)) return
         call check(error, trim(adjustl(schema%metadata%source_maml_lines(idx_keyarray+3))) == "comment: added comment", &
             "unexpected comment line for the new keyarray entry")
+        if (allocated(error)) return
+
+        ! Second case: no "extra:" section either -- the synthesized
+        ! "keyarray:" header must land right before "fields:" instead.
+        schema_no_extra%maml%name = "no_keyarray_no_extra.maml"
+        schema_no_extra%maml%lines = [character(len=40) :: &
+            "table: no_keyarray_no_extra_table", &
+            "fields:", &
+            "- name: id0", &
+            "  data_type: int32" ]
+
+        call parquet_parse_maml(schema_no_extra)
+        call schema_no_extra%add_metadata("added_key", "42", "added comment")
+
+        idx_keyarray = 0
+        idx_fields = 0
+        do i = 1, size(schema_no_extra%metadata%source_maml_lines)
+            if (schema_no_extra%metadata%source_maml_lines(i)(1:1) /= " " .and. &
+                trim(adjustl(schema_no_extra%metadata%source_maml_lines(i))) == "keyarray:") idx_keyarray = i
+            if (schema_no_extra%metadata%source_maml_lines(i)(1:1) /= " " .and. &
+                trim(adjustl(schema_no_extra%metadata%source_maml_lines(i))) == "fields:") idx_fields = i
+        end do
+
+        call check(error, idx_keyarray > 0, &
+            "expected a synthesized 'keyarray:' header in source_maml_lines (no extra: case)")
+        if (allocated(error)) return
+        call check(error, idx_fields > 0, "expected the pre-existing 'fields:' header to still be present")
+        if (allocated(error)) return
+        call check(error, idx_keyarray < idx_fields, &
+            "expected the synthesized 'keyarray:' block to be inserted before 'fields:' when no extra: exists")
     end subroutine test_add_metadata_inserts_before_extra
     !
     !> A col_map:-renamed column ("id0" -> "my_id") is written/read using the
@@ -726,6 +828,34 @@ contains
         call check(error, exitstat == 0, &
             "qc=.true. with an out-of-range numeric value should not error stop (warning only)")
     end subroutine test_qc_warning_printed_for_numeric_violation
+
+    !> Same as test_qc_warning_printed_for_numeric_violation, but the qc:
+    !> bound is fractional ("0.5") rather than a whole number, so the WARNING
+    !> text's bounds_desc must go through parquet_qc_format_real's
+    !> fractional-value (g0.7) formatting branch instead of its whole-number
+    !> (i0) one -- checked directly by looking for "0.5" in the captured
+    !> output, not just the presence of a WARNING.
+    subroutine test_qc_warning_printed_for_fractional_bound(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: exitstat, cmdstat
+        character(len=*), parameter :: out_file = "test_run/qc_warning_fractional_bound_output.txt"
+        logical :: found_bound_text
+
+        call execute_command_line("mkdir -p test_run", wait=.true.)
+        call execute_command_line( &
+            "fpm test error_scenarios -- qc_warning_fractional_bound > " // out_file // " 2>&1", &
+            wait=.true., exitstat=exitstat, cmdstat=cmdstat)
+
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper program via fpm")
+        if (allocated(error)) return
+        call check(error, exitstat == 0, &
+            "qc=.true. with an out-of-range fractional-bound value should not error stop (warning only)")
+        if (allocated(error)) return
+
+        call file_contains(out_file, "0.5", found_bound_text)
+        call check(error, found_bound_text, &
+            "expected the qc violation WARNING to include the fractionally-formatted bound '0.5'")
+    end subroutine test_qc_warning_printed_for_fractional_bound
 
     subroutine test_qc_warning_printed_for_string_violation(error)
         type(error_type), allocatable, intent(out) :: error
@@ -1119,6 +1249,18 @@ contains
             failure_message="a qc: range violation must warn, not abort", &
             required_stderr="WARNING: qc violation for column 'ra'")
     end subroutine test_qc_range_violation_warns
+
+    !> A stray line with no colon inside a qc-maml field block (before its
+    !> qc: sub-block) must be silently skipped rather than breaking parsing
+    !> -- checked by confirming the qc: min: bound declared right after it
+    !> is still correctly recognized and enforced (the WARNING fires).
+    subroutine test_qc_maml_stray_no_colon_line_ok(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "qc_maml_stray_no_colon_line", expect_abort=.false., &
+            failure_message="a qc-maml with a stray no-colon line before its qc: block must still warn, not abort", &
+            required_stderr="WARNING: qc violation for column 'ra'")
+    end subroutine test_qc_maml_stray_no_colon_line_ok
 
     subroutine test_qc_null_violation_warns(error)
         type(error_type), allocatable, intent(out) :: error

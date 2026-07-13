@@ -57,7 +57,27 @@ contains
             new_unittest("unparsable float64 value with no default aborts", &
                 test_conversion_float64_no_default_aborts), &
             new_unittest("unparsable logical value with no default aborts", &
-                test_conversion_logical_no_default_aborts) &
+                test_conversion_logical_no_default_aborts), &
+            new_unittest("missing int32 array key with no default aborts", test_missing_int32_array_no_default_aborts), &
+            new_unittest("unparsable int32 array value with no default aborts", &
+                test_conversion_int32_array_no_default_aborts), &
+            new_unittest("missing int64 array key with no default aborts", test_missing_int64_array_no_default_aborts), &
+            new_unittest("unparsable int64 array value with no default aborts", &
+                test_conversion_int64_array_no_default_aborts), &
+            new_unittest("missing float32 array key with no default aborts", &
+                test_missing_float32_array_no_default_aborts), &
+            new_unittest("unparsable float32 array value with no default aborts", &
+                test_conversion_float32_array_no_default_aborts), &
+            new_unittest("missing float64 array key with no default aborts", &
+                test_missing_float64_array_no_default_aborts), &
+            new_unittest("unparsable float64 array value with no default aborts", &
+                test_conversion_float64_array_no_default_aborts), &
+            new_unittest("missing logical array key with no default aborts", &
+                test_missing_logical_array_no_default_aborts), &
+            new_unittest("unparsable logical array value with no default aborts", &
+                test_conversion_logical_array_no_default_aborts), &
+            new_unittest("missing string array key with no default aborts", &
+                test_missing_string_array_no_default_aborts) &
             ]
     end subroutine collect_tests_parquet_metadata
 
@@ -83,11 +103,12 @@ contains
         call schema%add_metadata("meta_f32", 3.5_real32)
         call schema%add_metadata("meta_f64", 3.14159265358979_real64)
         call schema%add_metadata("meta_bool", .true.)
+        call schema%add_metadata("meta_bool_false", .false.)
         call schema%add_metadata("meta_str", "hello world")
         call schema%add_metadata("meta_not_a_number", "not_a_number")
         call schema%add_metadata("meta_i32_arr", [1_int32, 2_int32, 3_int32])
         call schema%add_metadata("meta_i64_arr", [10_int64, 20_int64, 30_int64])
-        call schema%add_metadata("meta_f32_arr", [1.5_real32, 2.5_real32])
+        call schema%add_metadata("meta_f32_arr", [1.5_real32, 2.5_real32], fmt='F0.2')
         call schema%add_metadata("meta_f64_arr", [1.25_real64, 2.25_real64])
         call schema%add_metadata("meta_bool_arr", [.true., .false., .true.])
 
@@ -147,6 +168,14 @@ contains
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "logical metadata did not round-trip")
+            return
+        end if
+
+        call parquet_get_metadata(reader, "meta_bool_false", lg)
+        call check(error, lg .eqv. .false.)
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "logical .false. metadata did not round-trip")
             return
         end if
 
@@ -704,5 +733,99 @@ contains
             expect_abort=.true., &
             failure_message="reading an unparsable logical metadata value with no default was expected to abort")
     end subroutine test_conversion_logical_no_default_aborts
+
+    !> Array-typed counterparts of the no-default abort tests above: every
+    !> scalar getter's missing-key/conversion-failure abort was already
+    !> tested, but the *_array getters (which call the same
+    !> parquet_metadata_stop_missing/parquet_metadata_stop_conversion helpers)
+    !> never were.
+
+    subroutine test_missing_int32_array_no_default_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "get_metadata_missing_int32_array_no_default", &
+            expect_abort=.true., &
+            failure_message="reading a missing int32 array metadata key with no default was expected to abort")
+    end subroutine test_missing_int32_array_no_default_aborts
+
+    subroutine test_conversion_int32_array_no_default_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "get_metadata_conversion_int32_array_no_default", &
+            expect_abort=.true., &
+            failure_message="reading an unparsable int32 array metadata value with no default was expected to abort")
+    end subroutine test_conversion_int32_array_no_default_aborts
+
+    subroutine test_missing_int64_array_no_default_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "get_metadata_missing_int64_array_no_default", &
+            expect_abort=.true., &
+            failure_message="reading a missing int64 array metadata key with no default was expected to abort")
+    end subroutine test_missing_int64_array_no_default_aborts
+
+    subroutine test_conversion_int64_array_no_default_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "get_metadata_conversion_int64_array_no_default", &
+            expect_abort=.true., &
+            failure_message="reading an unparsable int64 array metadata value with no default was expected to abort")
+    end subroutine test_conversion_int64_array_no_default_aborts
+
+    subroutine test_missing_float32_array_no_default_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "get_metadata_missing_float32_array_no_default", &
+            expect_abort=.true., &
+            failure_message="reading a missing float32 array metadata key with no default was expected to abort")
+    end subroutine test_missing_float32_array_no_default_aborts
+
+    subroutine test_conversion_float32_array_no_default_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "get_metadata_conversion_float32_array_no_default", &
+            expect_abort=.true., &
+            failure_message="reading an unparsable float32 array metadata value with no default was expected to abort")
+    end subroutine test_conversion_float32_array_no_default_aborts
+
+    subroutine test_missing_float64_array_no_default_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "get_metadata_missing_float64_array_no_default", &
+            expect_abort=.true., &
+            failure_message="reading a missing float64 array metadata key with no default was expected to abort")
+    end subroutine test_missing_float64_array_no_default_aborts
+
+    subroutine test_conversion_float64_array_no_default_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "get_metadata_conversion_float64_array_no_default", &
+            expect_abort=.true., &
+            failure_message="reading an unparsable float64 array metadata value with no default was expected to abort")
+    end subroutine test_conversion_float64_array_no_default_aborts
+
+    subroutine test_missing_logical_array_no_default_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "get_metadata_missing_logical_array_no_default", &
+            expect_abort=.true., &
+            failure_message="reading a missing logical array metadata key with no default was expected to abort")
+    end subroutine test_missing_logical_array_no_default_aborts
+
+    subroutine test_conversion_logical_array_no_default_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "get_metadata_conversion_logical_array_no_default", &
+            expect_abort=.true., &
+            failure_message="reading an unparsable logical array metadata value with no default was expected to abort")
+    end subroutine test_conversion_logical_array_no_default_aborts
+
+    subroutine test_missing_string_array_no_default_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "get_metadata_missing_string_array_no_default", &
+            expect_abort=.true., &
+            failure_message="reading a missing string array metadata key with no default was expected to abort")
+    end subroutine test_missing_string_array_no_default_aborts
 
 end module test_metadata

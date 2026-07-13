@@ -38,6 +38,10 @@ contains
                 "list-form ucd:, keyarray:)", test_validate_maml_example2_ok), &
             new_unittest("validate maml_example2.maml by filename (parquet_validate_maml overload)", &
                 test_validate_maml_by_filename_ok), &
+            new_unittest("keyarray:/DOIs:/depends: entries parse correctly with a bare dash and first-key " // &
+                "variations", test_keyarray_dois_depends_key_variations), &
+            new_unittest("a generic (non-comments/coauthors/keywords) top-level list section parses, " // &
+                "skipping a malformed indented line", test_generic_list_section_and_malformed_line), &
             new_unittest("validate a user MAML that is a valid subset", test_validate_user_maml_ok), &
             new_unittest("col_map: renames a field to an internal name", test_validate_user_maml_col_map_ok), &
             new_unittest("load a MAML file from disk", test_load_maml_file), &
@@ -119,6 +123,133 @@ contains
 
         call check(error, .true.)
     end subroutine test_validate_maml_by_filename_ok
+
+    !> docs/maml_example.maml/maml_example2.maml (and every other fixture)
+    !> always put keyarray:'s "key:" inline with the leading dash ("- key:
+    !> X"), and depends:'s dash-line entries always start with "survey:"
+    !> first. Both are just conventions, not requirements: parquet_parse_maml_lines
+    !> (src/parquet_metadata.f90) also accepts a bare "-" line followed by
+    !> "key:"/"doi:" on their own indented line, and depends: entries whose
+    !> first (dash-line) key is "dataset:"/"table:" instead of "survey:",
+    !> with "survey:" itself then appearing as a later indented continuation
+    !> line. This test is the only one exercising those variations. It also
+    !> spells the fields: header "Fields:" -- the fast-path literal check
+    !> for "fields:" is case-sensitive, but the fallback generic key/value
+    !> path (reached because none of keyarray:/DOIs:/depends:/extra: match
+    !> either) lowercases the key first, so "Fields:" still works; no other
+    !> fixture in this repo uses anything but lowercase "fields:".
+    subroutine test_keyarray_dois_depends_key_variations(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        integer :: i
+        logical :: found_keyarray, found_doi, found_depends1, found_depends2
+
+        schema%maml%name = "key_variations.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: key_variations_table", &
+            "keyarray:", &
+            "-", &
+            "  key: test_bare", &
+            "  value: 1.5", &
+            "  comment: bare form", &
+            "DOIs:", &
+            "-", &
+            "  doi: 10.9999/bare", &
+            "  type: dataset", &
+            "depends:", &
+            "- dataset: SpecZ", &
+            "  survey: The Medium Survey", &
+            "- table: Phot_South", &
+            "  version: 2", &
+            "Fields:", &
+            "- name: id0", &
+            "  data_type: int32" ]
+
+        call parquet_parse_maml(schema)
+
+        found_keyarray = .false.
+        found_doi = .false.
+        found_depends1 = .false.
+        found_depends2 = .false.
+
+        do i = 1, size(schema%metadata%items)
+            if (trim(schema%metadata%items(i)%key) == "test_bare") then
+                found_keyarray = .true.
+                call check(error, trim(schema%metadata%items(i)%value) == "1.5" .and. &
+                    trim(schema%metadata%items(i)%description) == "bare form", &
+                    "keyarray: entry with a bare dash and indented key: did not parse as expected")
+                if (allocated(error)) return
+            else if (trim(schema%metadata%items(i)%key) == "DOI_1") then
+                found_doi = .true.
+                call check(error, trim(schema%metadata%items(i)%value) == "10.9999/bare" .and. &
+                    trim(schema%metadata%items(i)%description) == "dataset", &
+                    "DOIs: entry with a bare dash and indented doi: did not parse as expected")
+                if (allocated(error)) return
+            else if (trim(schema%metadata%items(i)%key) == "depends_1") then
+                found_depends1 = .true.
+                call check(error, trim(schema%metadata%items(i)%value) == "The Medium Survey;SpecZ;;", &
+                    "depends: entry starting with 'dataset:' (dash-line) did not parse as expected")
+                if (allocated(error)) return
+            else if (trim(schema%metadata%items(i)%key) == "depends_2") then
+                found_depends2 = .true.
+                call check(error, trim(schema%metadata%items(i)%value) == ";;Phot_South;2", &
+                    "depends: entry starting with 'table:' (dash-line) did not parse as expected")
+                if (allocated(error)) return
+            end if
+        end do
+
+        call check(error, found_keyarray, "expected keyarray: entry 'test_bare' not found")
+        if (allocated(error)) return
+        call check(error, found_doi, "expected DOIs: entry 'DOI_1' not found")
+        if (allocated(error)) return
+        call check(error, found_depends1, "expected depends: entry 'depends_1' not found")
+        if (allocated(error)) return
+        call check(error, found_depends2, "expected depends: entry 'depends_2' not found")
+    end subroutine test_keyarray_dois_depends_key_variations
+
+    !> Any top-level plain-string list section other than comments:/coauthors:/
+    !> keywords: falls through to the generic per-item
+    !> metadata%add_metadata(list_key, ...) branch -- one metadata entry per
+    !> item, all sharing the section's own key. license: is normally a plain
+    !> scalar, but nothing in allowed_maml_sections restricts it to that form
+    !> (it declares no subkeys, so parquet_validate_maml_sections leaves its
+    !> content unvalidated), so it doubles as a convenient stand-in here for
+    !> an otherwise-untested generic list section. Also checks that a stray
+    !> indented "key: value" line inside such a list (neither a "- " item
+    !> nor a new top-level section) is silently skipped rather than breaking
+    !> the list or being misparsed as a new section.
+    subroutine test_generic_list_section_and_malformed_line(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        integer :: i, license_count
+
+        schema%maml%name = "generic_list.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: generic_list_table", &
+            "license:", &
+            "- first term", &
+            "  stray: junk", &
+            "- second term", &
+            "fields:", &
+            "- name: id0", &
+            "  data_type: int32" ]
+
+        call parquet_parse_maml(schema)
+
+        license_count = 0
+        do i = 1, size(schema%metadata%items)
+            if (trim(schema%metadata%items(i)%key) == "license") then
+                license_count = license_count + 1
+                call check(error, trim(schema%metadata%items(i)%value) == "first term" .or. &
+                    trim(schema%metadata%items(i)%value) == "second term", &
+                    "unexpected value for a generic 'license' list item")
+                if (allocated(error)) return
+            end if
+        end do
+
+        call check(error, license_count == 2, &
+            "expected exactly 2 'license' metadata entries (the stray indented line must not add one)")
+    end subroutine test_generic_list_section_and_malformed_line
 
     subroutine test_validate_user_maml_ok(error)
         type(error_type), allocatable, intent(out) :: error
@@ -347,16 +478,24 @@ contains
     !> A qc-maml built purely with add_col_qc is accepted by parquet_open_reader
     !> and drives the read-side qc checks: ra in the list_vector fixture is
     !> [1.5,2.5,3.5,4.5], within [>=0, <=10], so no violation occurs and the
-    !> column reads back correctly.
+    !> column reads back correctly. Also exercises the schema-level
+    !> get_col_qc wrapper (schema_get_col_qc in src/parquet_metadata.f90, a
+    !> thin forward to maml%get_col_qc) -- declared here for a column absent
+    !> from the fixture, which is fine (a qc-maml may declare columns the
+    !> file doesn't have; see test_qc_column_not_in_file in test_writing.f90).
     subroutine test_add_col_qc_roundtrip(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_schema) :: schema
         type(parquet_reader) :: reader
-        character(len=:), allocatable :: cn
+        character(len=:), allocatable :: cn, cn2
         integer :: nrows
         real(real64), allocatable :: ra(:)
 
         call schema%add_col_qc("ra, >=0, <=10", cn)
+
+        cn2 = schema%get_col_qc("extra_dummy, >=0")
+        call check(error, cn2 == "extra_dummy", "schema%get_col_qc did not return the parsed column name")
+        if (allocated(error)) return
 
         call parquet_open_reader(reader, "test/fixtures/list_vector.parquet", schema=schema)
         call parquet_get_nrows(reader, nrows)
@@ -545,7 +684,7 @@ contains
         ! for "no unit"), so a real unit is needed here to check that %unit
         ! itself round-trips correctly.
         call schema%add_field("id0", "int32", unit="count", info="ID field.")
-        call schema%add_field("ra", "float64", qc_min=">=0", qc_max="<360")
+        call schema%add_field("ra", "float64", qc_min=">=0", qc_max="<=360")
         call schema%add_field("flag", "boolean")
 
         call parquet_parse_maml(schema)
@@ -561,9 +700,13 @@ contains
         if (allocated(error)) return
 
         idx = schema%get_column_index("ra")
+        ! qc_max="<=360" (rather than the more common "<360") specifically
+        ! exercises validate_qc_bound's "<=" operator-recognition branch in
+        ! src/parquet_metadata.f90, which no other test happened to reach.
         call check(error, trim(schema%cinfo%col(idx)%data_type) == "float64" .and. &
             schema%cinfo%col(idx)%has_qc_min .and. trim(schema%cinfo%col(idx)%qc_min_raw) == "0" .and. &
-            schema%cinfo%col(idx)%has_qc_max .and. trim(schema%cinfo%col(idx)%qc_max_raw) == "360", &
+            schema%cinfo%col(idx)%has_qc_max .and. trim(schema%cinfo%col(idx)%qc_max_raw) == "360" .and. &
+            trim(schema%cinfo%col(idx)%qc_max_op) == "<=", &
             "'ra' field's qc: min:/max: were not parsed as expected")
         if (allocated(error)) return
 

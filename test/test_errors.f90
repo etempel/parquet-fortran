@@ -34,6 +34,50 @@ contains
         testsuite = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
             new_unittest("write to undeclared column aborts", test_write_undeclared_column_aborts), &
+            new_unittest("writing an undeclared int64 column aborts", &
+                test_write_undeclared_column_int64_aborts), &
+            new_unittest("writing an undeclared float32 column aborts", &
+                test_write_undeclared_column_float32_aborts), &
+            new_unittest("writing an undeclared float64 column aborts", &
+                test_write_undeclared_column_float64_aborts), &
+            new_unittest("writing an undeclared logical column aborts", &
+                test_write_undeclared_column_logical_aborts), &
+            new_unittest("writing an undeclared string column aborts", &
+                test_write_undeclared_column_string_aborts), &
+            new_unittest("writing an undeclared int32 matrix column aborts", &
+                test_write_undeclared_column_int32_matrix_aborts), &
+            new_unittest("writing an undeclared int64 matrix column aborts", &
+                test_write_undeclared_column_int64_matrix_aborts), &
+            new_unittest("writing an undeclared float32 matrix column aborts", &
+                test_write_undeclared_column_float32_matrix_aborts), &
+            new_unittest("writing an undeclared float64 matrix column aborts", &
+                test_write_undeclared_column_float64_matrix_aborts), &
+            new_unittest("writing an undeclared logical matrix column aborts", &
+                test_write_undeclared_column_logical_matrix_aborts), &
+            new_unittest("writing an undeclared string matrix column aborts", &
+                test_write_undeclared_column_string_matrix_aborts), &
+            new_unittest("writing a int64 values(:) array not divisible by col_size aborts", &
+                test_write_not_divisible_int64_aborts), &
+            new_unittest("writing a float32 values(:) array not divisible by col_size aborts", &
+                test_write_not_divisible_float32_aborts), &
+            new_unittest("writing a float64 values(:) array not divisible by col_size aborts", &
+                test_write_not_divisible_float64_aborts), &
+            new_unittest("writing a logical values(:) array not divisible by col_size aborts", &
+                test_write_not_divisible_logical_aborts), &
+            new_unittest("writing a string values(:) array not divisible by col_size aborts", &
+                test_write_not_divisible_string_aborts), &
+            new_unittest("writing a int32 matrix with a col_size mismatch aborts", &
+                test_write_array_mismatch_int32_matrix_aborts), &
+            new_unittest("writing a int64 matrix with a col_size mismatch aborts", &
+                test_write_array_mismatch_int64_matrix_aborts), &
+            new_unittest("writing a float32 matrix with a col_size mismatch aborts", &
+                test_write_array_mismatch_float32_matrix_aborts), &
+            new_unittest("writing a float64 matrix with a col_size mismatch aborts", &
+                test_write_array_mismatch_float64_matrix_aborts), &
+            new_unittest("writing a logical matrix with a col_size mismatch aborts", &
+                test_write_array_mismatch_logical_matrix_aborts), &
+            new_unittest("writing a string matrix with a col_size mismatch aborts", &
+                test_write_array_mismatch_string_matrix_aborts), &
             new_unittest("write with type mismatch aborts", test_write_type_mismatch_aborts), &
             new_unittest("writing the same column twice aborts", test_write_column_twice_aborts), &
             new_unittest("writing the same column twice on a schema-less writer aborts", &
@@ -45,6 +89,10 @@ contains
             new_unittest("validating a duplicate field name aborts", test_validate_duplicate_name_aborts), &
             new_unittest("validating a MAML without table: aborts", test_validate_missing_table_aborts), &
             new_unittest("validating a MAML without fields aborts", test_validate_no_fields_aborts), &
+            new_unittest("a MAML with a trailing, unclosed depends: list and no fields: aborts", &
+                test_validate_trailing_depends_no_fields_aborts), &
+            new_unittest("a MAML with a trailing, unclosed keywords: list and no fields: aborts", &
+                test_validate_trailing_keywords_no_fields_aborts), &
             new_unittest("validating a MAML with an unknown top-level section aborts", &
                 test_validate_unknown_top_level_section_aborts), &
             new_unittest("validating a MAML with an unknown field sub-key aborts", &
@@ -64,6 +112,10 @@ contains
                 test_validate_col_map_internal_also_in_fields_aborts), &
             new_unittest("col_map: output name coincides with an existing base column aborts", &
                 test_validate_col_map_output_matches_other_field_aborts), &
+            new_unittest("set_column_available on a deactivated column aborts", &
+                test_set_column_available_deactivated_aborts), &
+            new_unittest("set_column_unavailable on a deactivated column aborts", &
+                test_set_column_unavailable_deactivated_aborts), &
             new_unittest("get_column_index on unknown column aborts", test_get_column_index_not_found_aborts), &
             new_unittest("get_field_name with an index below 1 aborts", test_get_field_name_index_too_low_aborts), &
             new_unittest("get_field_name with an index past get_num_fields aborts", &
@@ -121,6 +173,8 @@ contains
                 test_close_writer_before_open_aborts), &
             new_unittest("closing a writer with an unwritten enabled column aborts", &
                 test_close_writer_missing_write_aborts), &
+            new_unittest("closing a hand-built-schema writer with an unwritten enabled column " // &
+                "aborts with an unnamed-schema message", test_close_writer_missing_write_unnamed_schema_aborts), &
             new_unittest("reading an unknown column via parquet_read_column aborts", &
                 test_read_unknown_column_aborts), &
             new_unittest("opening a nonexistent file for reading aborts", &
@@ -149,6 +203,10 @@ contains
                 test_validate_qc_max_wrong_operator_aborts), &
             new_unittest("qc-maml: min value with a reversed (</<=) operator aborts", &
                 test_qc_maml_min_wrong_operator_aborts), &
+            new_unittest("qc-maml: max value with a reversed (>/>=) operator aborts", &
+                test_qc_maml_max_wrong_operator_aborts), &
+            new_unittest("schema%add_field: qc_max operator with no value aborts", &
+                test_schema_add_field_qc_max_operator_without_value_aborts), &
             new_unittest("add_col_qc: reversed min operator aborts", &
                 test_add_col_qc_min_reversed_operator_aborts), &
             new_unittest("add_col_qc: reversed max operator aborts", &
@@ -209,6 +267,160 @@ contains
             required_stderr="parquet_write_column: column not defined in parquet_open_writer: not_a_real_column " // &
                 "(file: test_run/error_scenario_undeclared.parquet, maml: maml_example.maml)")
     end subroutine test_write_undeclared_column_aborts
+
+    subroutine test_write_undeclared_column_int64_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_undeclared_column_int64", expect_abort=.true., &
+            failure_message="writing an undeclared int64 column was expected to error stop")
+    end subroutine test_write_undeclared_column_int64_aborts
+
+    subroutine test_write_undeclared_column_float32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_undeclared_column_float32", expect_abort=.true., &
+            failure_message="writing an undeclared float32 column was expected to error stop")
+    end subroutine test_write_undeclared_column_float32_aborts
+
+    subroutine test_write_undeclared_column_float64_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_undeclared_column_float64", expect_abort=.true., &
+            failure_message="writing an undeclared float64 column was expected to error stop")
+    end subroutine test_write_undeclared_column_float64_aborts
+
+    subroutine test_write_undeclared_column_logical_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_undeclared_column_logical", expect_abort=.true., &
+            failure_message="writing an undeclared logical column was expected to error stop")
+    end subroutine test_write_undeclared_column_logical_aborts
+
+    subroutine test_write_undeclared_column_string_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_undeclared_column_string", expect_abort=.true., &
+            failure_message="writing an undeclared string column was expected to error stop")
+    end subroutine test_write_undeclared_column_string_aborts
+
+    subroutine test_write_undeclared_column_int32_matrix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_undeclared_column_int32_matrix", expect_abort=.true., &
+            failure_message="writing an undeclared int32 matrix column was expected to error stop")
+    end subroutine test_write_undeclared_column_int32_matrix_aborts
+
+    subroutine test_write_undeclared_column_int64_matrix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_undeclared_column_int64_matrix", expect_abort=.true., &
+            failure_message="writing an undeclared int64 matrix column was expected to error stop")
+    end subroutine test_write_undeclared_column_int64_matrix_aborts
+
+    subroutine test_write_undeclared_column_float32_matrix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_undeclared_column_float32_matrix", expect_abort=.true., &
+            failure_message="writing an undeclared float32 matrix column was expected to error stop")
+    end subroutine test_write_undeclared_column_float32_matrix_aborts
+
+    subroutine test_write_undeclared_column_float64_matrix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_undeclared_column_float64_matrix", expect_abort=.true., &
+            failure_message="writing an undeclared float64 matrix column was expected to error stop")
+    end subroutine test_write_undeclared_column_float64_matrix_aborts
+
+    subroutine test_write_undeclared_column_logical_matrix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_undeclared_column_logical_matrix", expect_abort=.true., &
+            failure_message="writing an undeclared logical matrix column was expected to error stop")
+    end subroutine test_write_undeclared_column_logical_matrix_aborts
+
+    subroutine test_write_undeclared_column_string_matrix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_undeclared_column_string_matrix", expect_abort=.true., &
+            failure_message="writing an undeclared string matrix column was expected to error stop")
+    end subroutine test_write_undeclared_column_string_matrix_aborts
+
+    subroutine test_write_not_divisible_int64_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_not_divisible_int64", expect_abort=.true., &
+            failure_message="writing a int64 values(:) array not divisible by col_size was expected to error stop")
+    end subroutine test_write_not_divisible_int64_aborts
+
+    subroutine test_write_not_divisible_float32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_not_divisible_float32", expect_abort=.true., &
+            failure_message="writing a float32 values(:) array not divisible by col_size was expected to error stop")
+    end subroutine test_write_not_divisible_float32_aborts
+
+    subroutine test_write_not_divisible_float64_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_not_divisible_float64", expect_abort=.true., &
+            failure_message="writing a float64 values(:) array not divisible by col_size was expected to error stop")
+    end subroutine test_write_not_divisible_float64_aborts
+
+    subroutine test_write_not_divisible_logical_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_not_divisible_logical", expect_abort=.true., &
+            failure_message="writing a logical values(:) array not divisible by col_size was expected to error stop")
+    end subroutine test_write_not_divisible_logical_aborts
+
+    subroutine test_write_not_divisible_string_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_not_divisible_string", expect_abort=.true., &
+            failure_message="writing a string values(:) array not divisible by col_size was expected to error stop")
+    end subroutine test_write_not_divisible_string_aborts
+
+    subroutine test_write_array_mismatch_int32_matrix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_array_mismatch_int32_matrix", expect_abort=.true., &
+            failure_message="writing a int32 matrix with a col_size mismatch was expected to error stop")
+    end subroutine test_write_array_mismatch_int32_matrix_aborts
+
+    subroutine test_write_array_mismatch_int64_matrix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_array_mismatch_int64_matrix", expect_abort=.true., &
+            failure_message="writing a int64 matrix with a col_size mismatch was expected to error stop")
+    end subroutine test_write_array_mismatch_int64_matrix_aborts
+
+    subroutine test_write_array_mismatch_float32_matrix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_array_mismatch_float32_matrix", expect_abort=.true., &
+            failure_message="writing a float32 matrix with a col_size mismatch was expected to error stop")
+    end subroutine test_write_array_mismatch_float32_matrix_aborts
+
+    subroutine test_write_array_mismatch_float64_matrix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_array_mismatch_float64_matrix", expect_abort=.true., &
+            failure_message="writing a float64 matrix with a col_size mismatch was expected to error stop")
+    end subroutine test_write_array_mismatch_float64_matrix_aborts
+
+    subroutine test_write_array_mismatch_logical_matrix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_array_mismatch_logical_matrix", expect_abort=.true., &
+            failure_message="writing a logical matrix with a col_size mismatch was expected to error stop")
+    end subroutine test_write_array_mismatch_logical_matrix_aborts
+
+    subroutine test_write_array_mismatch_string_matrix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_array_mismatch_string_matrix", expect_abort=.true., &
+            failure_message="writing a string matrix with a col_size mismatch was expected to error stop")
+    end subroutine test_write_array_mismatch_string_matrix_aborts
 
     subroutine test_write_type_mismatch_aborts(error)
         type(error_type), allocatable, intent(out) :: error
@@ -287,6 +499,22 @@ contains
             failure_message="validating a MAML file without fields was expected to error stop")
     end subroutine test_validate_no_fields_aborts
 
+    subroutine test_validate_trailing_depends_no_fields_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "validate_trailing_depends_no_fields", expect_abort=.true., &
+            failure_message="a MAML with a trailing, unclosed depends: list and no fields: " // &
+                "was expected to error stop")
+    end subroutine test_validate_trailing_depends_no_fields_aborts
+
+    subroutine test_validate_trailing_keywords_no_fields_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "validate_trailing_keywords_no_fields", expect_abort=.true., &
+            failure_message="a MAML with a trailing, unclosed keywords: list and no fields: " // &
+                "was expected to error stop")
+    end subroutine test_validate_trailing_keywords_no_fields_aborts
+
     subroutine test_validate_unknown_top_level_section_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
@@ -322,11 +550,16 @@ contains
             failure_message="col_map: referencing an internal column not in the base MAML was expected to error stop")
     end subroutine test_validate_col_map_unknown_internal_aborts
 
+    !> Asserts the specific "duplicate internal column" message (not just
+    !> that something aborted), since this scenario's fixture is carefully
+    !> built to avoid tripping the (unrelated) generic "duplicate field
+    !> name" check first -- see its doc comment in error_scenarios.f90.
     subroutine test_validate_col_map_duplicate_internal_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
-        call check_scenario_exit_status(error, "validate_col_map_duplicate_internal", expect_abort=.true., &
-            failure_message="col_map: a duplicate internal column key was expected to error stop")
+        call check_scenario_exit_status_and_stderr(error, "validate_col_map_duplicate_internal", expect_abort=.true., &
+            failure_message="col_map: a duplicate internal column key was expected to error stop", &
+            required_stderr="col_map: duplicate internal column 'a'")
     end subroutine test_validate_col_map_duplicate_internal_aborts
 
     subroutine test_validate_col_map_output_collision_aborts(error)
@@ -357,6 +590,20 @@ contains
         call check_scenario_exit_status(error, "validate_col_map_output_matches_other_field", expect_abort=.true., &
             failure_message="col_map: output name coinciding with an existing base column was expected to error stop")
     end subroutine test_validate_col_map_output_matches_other_field_aborts
+
+    subroutine test_set_column_available_deactivated_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "set_column_available_deactivated", expect_abort=.true., &
+            failure_message="set_column_available on a deactivated column was expected to error stop")
+    end subroutine test_set_column_available_deactivated_aborts
+
+    subroutine test_set_column_unavailable_deactivated_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "set_column_unavailable_deactivated", expect_abort=.true., &
+            failure_message="set_column_unavailable on a deactivated column was expected to error stop")
+    end subroutine test_set_column_unavailable_deactivated_aborts
 
     subroutine test_get_column_index_not_found_aborts(error)
         type(error_type), allocatable, intent(out) :: error
@@ -670,6 +917,21 @@ contains
             required_stderr="parquet_close_writer: schema: internal:demo")
     end subroutine test_close_writer_missing_write_aborts
 
+    !> Same as test_close_writer_missing_write_aborts, but for a schema built
+    !> fully by hand (schema%maml%lines set directly, never going through
+    !> %init/parquet_schema(...)) -- the missing-write abort must fall back
+    !> to "(unnamed, built in-memory)" since such a schema's %maml%name is
+    !> never set.
+    subroutine test_close_writer_missing_write_unnamed_schema_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "close_writer_missing_write_unnamed_schema", &
+            expect_abort=.true., &
+            failure_message="closing a hand-built-schema writer with an unwritten enabled column " // &
+                "was expected to abort", &
+            required_stderr="parquet_close_writer: schema: (unnamed, built in-memory)")
+    end subroutine test_close_writer_missing_write_unnamed_schema_aborts
+
     !> parquet_read_column now validates the column name against the file's
     !> schema and error stops, instead of letting the C++ side's uncaught
     !> "Column not found" exception abort the process. Also checks the error
@@ -791,6 +1053,20 @@ contains
         call check_scenario_exit_status(error, "qc_maml_min_wrong_operator", expect_abort=.true., &
             failure_message="qc-maml qc: min: with a reversed (</<=) operator was expected to error stop")
     end subroutine test_qc_maml_min_wrong_operator_aborts
+
+    subroutine test_qc_maml_max_wrong_operator_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "qc_maml_max_wrong_operator", expect_abort=.true., &
+            failure_message="qc-maml qc: max: with a reversed (>/>=) operator was expected to error stop")
+    end subroutine test_qc_maml_max_wrong_operator_aborts
+
+    subroutine test_schema_add_field_qc_max_operator_without_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "schema_add_field_qc_max_operator_without_value", expect_abort=.true., &
+            failure_message="schema%add_field with a qc_max operator but no value was expected to error stop")
+    end subroutine test_schema_add_field_qc_max_operator_without_value_aborts
 
     subroutine test_add_col_qc_min_reversed_operator_aborts(error)
         type(error_type), allocatable, intent(out) :: error

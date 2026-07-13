@@ -35,6 +35,50 @@ program error_scenarios
         call scenario_print_stat_smoke()
     case ("write_undeclared_column")
         call scenario_write_undeclared_column()
+    case ("write_undeclared_column_int64")
+        call scenario_write_undeclared_column_int64()
+    case ("write_undeclared_column_float32")
+        call scenario_write_undeclared_column_float32()
+    case ("write_undeclared_column_float64")
+        call scenario_write_undeclared_column_float64()
+    case ("write_undeclared_column_logical")
+        call scenario_write_undeclared_column_logical()
+    case ("write_undeclared_column_string")
+        call scenario_write_undeclared_column_string()
+    case ("write_undeclared_column_int32_matrix")
+        call scenario_write_undeclared_column_int32_matrix()
+    case ("write_undeclared_column_int64_matrix")
+        call scenario_write_undeclared_column_int64_matrix()
+    case ("write_undeclared_column_float32_matrix")
+        call scenario_write_undeclared_column_float32_matrix()
+    case ("write_undeclared_column_float64_matrix")
+        call scenario_write_undeclared_column_float64_matrix()
+    case ("write_undeclared_column_logical_matrix")
+        call scenario_write_undeclared_column_logical_matrix()
+    case ("write_undeclared_column_string_matrix")
+        call scenario_write_undeclared_column_string_matrix()
+    case ("write_not_divisible_int64")
+        call scenario_write_not_divisible_int64()
+    case ("write_not_divisible_float32")
+        call scenario_write_not_divisible_float32()
+    case ("write_not_divisible_float64")
+        call scenario_write_not_divisible_float64()
+    case ("write_not_divisible_logical")
+        call scenario_write_not_divisible_logical()
+    case ("write_not_divisible_string")
+        call scenario_write_not_divisible_string()
+    case ("write_array_mismatch_int32_matrix")
+        call scenario_write_array_mismatch_int32_matrix()
+    case ("write_array_mismatch_int64_matrix")
+        call scenario_write_array_mismatch_int64_matrix()
+    case ("write_array_mismatch_float32_matrix")
+        call scenario_write_array_mismatch_float32_matrix()
+    case ("write_array_mismatch_float64_matrix")
+        call scenario_write_array_mismatch_float64_matrix()
+    case ("write_array_mismatch_logical_matrix")
+        call scenario_write_array_mismatch_logical_matrix()
+    case ("write_array_mismatch_string_matrix")
+        call scenario_write_array_mismatch_string_matrix()
     case ("write_type_mismatch")
         call scenario_write_type_mismatch()
     case ("write_column_twice")
@@ -55,6 +99,10 @@ program error_scenarios
         call scenario_validate_missing_table()
     case ("validate_no_fields")
         call scenario_validate_no_fields()
+    case ("validate_trailing_depends_no_fields")
+        call scenario_validate_trailing_depends_no_fields()
+    case ("validate_trailing_keywords_no_fields")
+        call scenario_validate_trailing_keywords_no_fields()
     case ("validate_unknown_top_level_section")
         call scenario_validate_unknown_top_level_section()
     case ("validate_unknown_field_subkey")
@@ -75,6 +123,10 @@ program error_scenarios
         call scenario_validate_col_map_internal_also_in_fields()
     case ("validate_col_map_output_matches_other_field")
         call scenario_validate_col_map_output_matches_other_field()
+    case ("set_column_available_deactivated")
+        call scenario_set_column_available_deactivated()
+    case ("set_column_unavailable_deactivated")
+        call scenario_set_column_unavailable_deactivated()
     case ("get_column_index_not_found")
         call scenario_get_column_index_not_found()
     case ("get_field_name_index_too_low")
@@ -107,6 +159,8 @@ program error_scenarios
         call scenario_filter_bool_ordering_not_supported()
     case ("qc_range_violation_warns")
         call scenario_qc_range_violation_warns()
+    case ("qc_maml_stray_no_colon_line")
+        call scenario_qc_maml_stray_no_colon_line()
     case ("qc_null_violation_warns")
         call scenario_qc_null_violation_warns()
     case ("qc_range_violation_hard_aborts")
@@ -145,6 +199,8 @@ program error_scenarios
         call scenario_close_writer_before_open()
     case ("close_writer_missing_write")
         call scenario_close_writer_missing_write()
+    case ("close_writer_missing_write_unnamed_schema")
+        call scenario_close_writer_missing_write_unnamed_schema()
     case ("read_unknown_column")
         call scenario_read_unknown_column()
     case ("open_reader_missing_file")
@@ -173,6 +229,8 @@ program error_scenarios
         call scenario_validate_qc_max_wrong_operator()
     case ("qc_maml_min_wrong_operator")
         call scenario_qc_maml_min_wrong_operator()
+    case ("qc_maml_max_wrong_operator")
+        call scenario_qc_maml_max_wrong_operator()
     case ("add_col_qc_min_reversed_operator")
         call scenario_add_col_qc_min_reversed_operator()
     case ("add_col_qc_max_reversed_operator")
@@ -197,6 +255,8 @@ program error_scenarios
         call scenario_get_col_qc_reversed_operator()
     case ("qc_warning_numeric")
         call scenario_qc_warning_numeric()
+    case ("qc_warning_fractional_bound")
+        call scenario_qc_warning_fractional_bound()
     case ("qc_warning_string")
         call scenario_qc_warning_string()
     case ("qc_silently_ignored_for_boolean")
@@ -243,6 +303,28 @@ program error_scenarios
         call scenario_get_metadata_conversion_float64_no_default()
     case ("get_metadata_conversion_logical_no_default")
         call scenario_get_metadata_conversion_logical_no_default()
+    case ("get_metadata_missing_int32_array_no_default")
+        call scenario_get_metadata_missing_int32_array_no_default()
+    case ("get_metadata_conversion_int32_array_no_default")
+        call scenario_get_metadata_conversion_int32_array_no_default()
+    case ("get_metadata_missing_int64_array_no_default")
+        call scenario_get_metadata_missing_int64_array_no_default()
+    case ("get_metadata_conversion_int64_array_no_default")
+        call scenario_get_metadata_conversion_int64_array_no_default()
+    case ("get_metadata_missing_float32_array_no_default")
+        call scenario_get_metadata_missing_float32_array_no_default()
+    case ("get_metadata_conversion_float32_array_no_default")
+        call scenario_get_metadata_conversion_float32_array_no_default()
+    case ("get_metadata_missing_float64_array_no_default")
+        call scenario_get_metadata_missing_float64_array_no_default()
+    case ("get_metadata_conversion_float64_array_no_default")
+        call scenario_get_metadata_conversion_float64_array_no_default()
+    case ("get_metadata_missing_logical_array_no_default")
+        call scenario_get_metadata_missing_logical_array_no_default()
+    case ("get_metadata_conversion_logical_array_no_default")
+        call scenario_get_metadata_conversion_logical_array_no_default()
+    case ("get_metadata_missing_string_array_no_default")
+        call scenario_get_metadata_missing_string_array_no_default()
     case ("schema_add_field_before_init")
         call scenario_schema_add_field_before_init()
     case ("schema_init_twice")
@@ -261,6 +343,8 @@ program error_scenarios
         call scenario_schema_add_field_qc_max_reversed_operator()
     case ("schema_add_field_qc_operator_without_value")
         call scenario_schema_add_field_qc_operator_without_value()
+    case ("schema_add_field_qc_max_operator_without_value")
+        call scenario_schema_add_field_qc_max_operator_without_value()
     case ("schema_add_field_bad_qc_miss_value")
         call scenario_schema_add_field_bad_qc_miss_value()
     case default
@@ -288,6 +372,280 @@ contains
         call parquet_close_writer(writer)
     end subroutine scenario_write_undeclared_column
 
+    !> Schema shared by the write_undeclared_column_*/write_not_divisible_*/
+    !> write_array_mismatch_* scenarios below: one col_size=3 vector field per
+    !> supported type, so each scenario just needs to write badly-named or
+    !> badly-shaped data to it (idx==0 / not-divisible / array-mismatch
+    !> checks are otherwise identical copy-pasted logic per type, only ever
+    !> exercised for int32 elsewhere).
+    function multitype_vector_schema() result(schema)
+        type(parquet_schema) :: schema
+
+        call schema%init(table="multitype_table")
+        call schema%add_field("i32", "int32", col_size=3)
+        call schema%add_field("i64", "int64", col_size=3)
+        call schema%add_field("f32", "float32", col_size=3)
+        call schema%add_field("f64", "float64", col_size=3)
+        call schema%add_field("lg", "boolean", col_size=3)
+        call schema%add_field("str", "string", col_size=3, array_size=8)
+        call parquet_parse_maml(schema)
+    end function multitype_vector_schema
+
+    subroutine scenario_write_undeclared_column_int64()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int64) :: data(3) = [1_int64, 2_int64, 3_int64]
+
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_undeclared_int64.parquet", schema)
+        call parquet_write_column(writer, "not_a_real_column", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_undeclared_column_int64
+
+    subroutine scenario_write_undeclared_column_float32()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real32) :: data(3) = [1.0_real32, 2.0_real32, 3.0_real32]
+
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_undeclared_float32.parquet", schema)
+        call parquet_write_column(writer, "not_a_real_column", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_undeclared_column_float32
+
+    subroutine scenario_write_undeclared_column_float64()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real64) :: data(3) = [1.0_real64, 2.0_real64, 3.0_real64]
+
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_undeclared_float64.parquet", schema)
+        call parquet_write_column(writer, "not_a_real_column", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_undeclared_column_float64
+
+    subroutine scenario_write_undeclared_column_logical()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        logical :: data(3) = [.true., .false., .true.]
+
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_undeclared_logical.parquet", schema)
+        call parquet_write_column(writer, "not_a_real_column", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_undeclared_column_logical
+
+    subroutine scenario_write_undeclared_column_string()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        character(len=8) :: data(3) = ["aa     ", "bb     ", "cc     "]
+
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_undeclared_string.parquet", schema)
+        call parquet_write_column(writer, "not_a_real_column", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_undeclared_column_string
+
+    subroutine scenario_write_undeclared_column_int32_matrix()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int32) :: data(3,2)
+
+        data = reshape([1_int32, 2_int32, 3_int32, 4_int32, 5_int32, 6_int32], [3, 2])
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_undeclared_int32_matrix.parquet", schema)
+        call parquet_write_column(writer, "not_a_real_column", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_undeclared_column_int32_matrix
+
+    subroutine scenario_write_undeclared_column_int64_matrix()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int64) :: data(3,2)
+
+        data = reshape([1_int64, 2_int64, 3_int64, 4_int64, 5_int64, 6_int64], [3, 2])
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_undeclared_int64_matrix.parquet", schema)
+        call parquet_write_column(writer, "not_a_real_column", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_undeclared_column_int64_matrix
+
+    subroutine scenario_write_undeclared_column_float32_matrix()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real32) :: data(3,2)
+
+        data = reshape([1.0_real32, 2.0_real32, 3.0_real32, 4.0_real32, 5.0_real32, 6.0_real32], [3, 2])
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_undeclared_float32_matrix.parquet", schema)
+        call parquet_write_column(writer, "not_a_real_column", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_undeclared_column_float32_matrix
+
+    subroutine scenario_write_undeclared_column_float64_matrix()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real64) :: data(3,2)
+
+        data = reshape([1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64, 6.0_real64], [3, 2])
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_undeclared_float64_matrix.parquet", schema)
+        call parquet_write_column(writer, "not_a_real_column", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_undeclared_column_float64_matrix
+
+    subroutine scenario_write_undeclared_column_logical_matrix()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        logical :: data(3,2)
+
+        data = reshape([.true., .false., .true., .false., .true., .false.], [3, 2])
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_undeclared_logical_matrix.parquet", schema)
+        call parquet_write_column(writer, "not_a_real_column", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_undeclared_column_logical_matrix
+
+    subroutine scenario_write_undeclared_column_string_matrix()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        character(len=8) :: data(3,2)
+
+        data = reshape(["aa     ", "bb     ", "cc     ", "dd     ", "ee     ", "ff     "], [3, 2])
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_undeclared_string_matrix.parquet", schema)
+        call parquet_write_column(writer, "not_a_real_column", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_undeclared_column_string_matrix
+
+    subroutine scenario_write_not_divisible_int64()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int64) :: data(4) = [1_int64, 2_int64, 3_int64, 4_int64]
+
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_not_divisible_int64.parquet", schema)
+        call parquet_write_column(writer, "i64", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_not_divisible_int64
+
+    subroutine scenario_write_not_divisible_float32()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real32) :: data(4) = [1.0_real32, 2.0_real32, 3.0_real32, 4.0_real32]
+
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_not_divisible_float32.parquet", schema)
+        call parquet_write_column(writer, "f32", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_not_divisible_float32
+
+    subroutine scenario_write_not_divisible_float64()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real64) :: data(4) = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_not_divisible_float64.parquet", schema)
+        call parquet_write_column(writer, "f64", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_not_divisible_float64
+
+    subroutine scenario_write_not_divisible_logical()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        logical :: data(4) = [.true., .false., .true., .false.]
+
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_not_divisible_logical.parquet", schema)
+        call parquet_write_column(writer, "lg", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_not_divisible_logical
+
+    subroutine scenario_write_not_divisible_string()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        character(len=8) :: data(4) = ["aa     ", "bb     ", "cc     ", "dd     "]
+
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_not_divisible_string.parquet", schema)
+        call parquet_write_column(writer, "str", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_not_divisible_string
+
+    subroutine scenario_write_array_mismatch_int32_matrix()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int32) :: data(2,3)
+
+        data = reshape([1_int32, 2_int32, 3_int32, 4_int32, 5_int32, 6_int32], [2, 3])
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_array_mismatch_int32_matrix.parquet", schema)
+        call parquet_write_column(writer, "i32", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_array_mismatch_int32_matrix
+
+    subroutine scenario_write_array_mismatch_int64_matrix()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int64) :: data(2,3)
+
+        data = reshape([1_int64, 2_int64, 3_int64, 4_int64, 5_int64, 6_int64], [2, 3])
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_array_mismatch_int64_matrix.parquet", schema)
+        call parquet_write_column(writer, "i64", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_array_mismatch_int64_matrix
+
+    subroutine scenario_write_array_mismatch_float32_matrix()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real32) :: data(2,3)
+
+        data = reshape([1.0_real32, 2.0_real32, 3.0_real32, 4.0_real32, 5.0_real32, 6.0_real32], [2, 3])
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_array_mismatch_float32_matrix.parquet", schema)
+        call parquet_write_column(writer, "f32", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_array_mismatch_float32_matrix
+
+    subroutine scenario_write_array_mismatch_float64_matrix()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real64) :: data(2,3)
+
+        data = reshape([1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64, 6.0_real64], [2, 3])
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_array_mismatch_float64_matrix.parquet", schema)
+        call parquet_write_column(writer, "f64", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_array_mismatch_float64_matrix
+
+    subroutine scenario_write_array_mismatch_logical_matrix()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        logical :: data(2,3)
+
+        data = reshape([.true., .false., .true., .false., .true., .false.], [2, 3])
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_array_mismatch_logical_matrix.parquet", schema)
+        call parquet_write_column(writer, "lg", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_array_mismatch_logical_matrix
+
+    subroutine scenario_write_array_mismatch_string_matrix()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        character(len=8) :: data(2,3)
+
+        data = reshape(["aa     ", "bb     ", "cc     ", "dd     ", "ee     ", "ff     "], [2, 3])
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_array_mismatch_string_matrix.parquet", schema)
+        call parquet_write_column(writer, "str", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_array_mismatch_string_matrix
+
+
     !> An in-memory schema (parquet_schema(...), not loaded from a .maml file)
     !> declares three columns but only two are written before parquet_close_writer
     !> -- checks the missing-write abort also prints the output filename and
@@ -310,6 +668,32 @@ contains
         ! col_c is never written.
         call parquet_close_writer(writer)
     end subroutine scenario_close_writer_missing_write
+
+    !> Same as scenario_close_writer_missing_write, but the schema is built
+    !> fully by hand (schema%maml%lines set directly, never going through
+    !> %init/parquet_schema(...)) -- schema%maml%name is therefore left
+    !> unallocated, so writer%maml_name stays unallocated too, and the
+    !> missing-write abort must fall back to printing "(unnamed, built
+    !> in-memory)" instead of a schema name.
+    subroutine scenario_close_writer_missing_write_unnamed_schema()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int32) :: data(1) = [1_int32]
+
+        schema%maml%lines = [character(len=40) :: &
+            "table: unnamed_table", &
+            "fields:", &
+            "- name: col_a", &
+            "  data_type: int32", &
+            "- name: col_b", &
+            "  data_type: int32" ]
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_missing_write_unnamed.parquet", schema)
+        call parquet_write_column(writer, "col_a", data)
+        ! col_b is never written.
+        call parquet_close_writer(writer)
+    end subroutine scenario_close_writer_missing_write_unnamed_schema
 
     subroutine scenario_write_type_mismatch()
         type(parquet_schema) :: schema
@@ -421,6 +805,47 @@ contains
         call parquet_validate_maml(maml)
     end subroutine scenario_validate_no_fields
 
+    !> depends:'s per-item state (survey/dataset/table/version) is normally
+    !> flushed to metadata either when the next top-level section appears, or
+    !> -- if depends: is the very last section in the file, as here -- via a
+    !> dedicated end-of-loop flush once parquet_parse_maml_lines runs out of
+    !> lines (src/parquet_metadata.f90). Since fields: must always be last in
+    !> a real MAML (nothing can follow it -- the parser exits its loop the
+    !> moment a non-indented, non-"- " line appears after fields: starts),
+    !> depends: can only ever be "last" in a MAML with no fields: at all,
+    !> which always fails validation regardless -- so this specifically
+    !> checks that trailing, unclosed depends: content doesn't crash or
+    !> otherwise misbehave on the way to the (expected) "no fields defined"
+    !> abort, rather than checking the flushed content itself (unobservable
+    !> once the process aborts).
+    subroutine scenario_validate_trailing_depends_no_fields()
+        type(parquet_maml_file) :: maml
+
+        maml%name = "trailing_depends.maml"
+        maml%lines = [character(len=40) :: &
+            "table: trailing_depends_table", &
+            "depends:", &
+            "- survey: Some Survey", &
+            "  dataset: Some Dataset" ]
+
+        call parquet_validate_maml(maml)
+    end subroutine scenario_validate_trailing_depends_no_fields
+
+    !> Same as scenario_validate_trailing_depends_no_fields, but for
+    !> keywords:'s end-of-loop flush (parquet_flush_keywords).
+    subroutine scenario_validate_trailing_keywords_no_fields()
+        type(parquet_maml_file) :: maml
+
+        maml%name = "trailing_keywords.maml"
+        maml%lines = [character(len=40) :: &
+            "table: trailing_keywords_table", &
+            "keywords:", &
+            "- tag_one", &
+            "- tag_two" ]
+
+        call parquet_validate_maml(maml)
+    end subroutine scenario_validate_trailing_keywords_no_fields
+
     subroutine scenario_validate_unknown_top_level_section()
         type(parquet_maml_file) :: maml
 
@@ -509,6 +934,13 @@ contains
         call parquet_validate_user_maml(base_maml, user_maml)
     end subroutine scenario_validate_col_map_unknown_internal
 
+    !> Two col_map entries both mapping internal column "a" to different
+    !> output names ("b" and "c"). Neither "b" nor "c" is actually declared
+    !> under fields: here (deliberately -- if either were, parquet_parse_maml_lines
+    !> would rename that field's %name back to "a", making it collide with
+    !> the other, which would trip parquet_validate_maml's own generic
+    !> "duplicate field name" check first and mask the col_map-specific
+    !> "duplicate internal column" check this scenario exists to exercise).
     subroutine scenario_validate_col_map_duplicate_internal()
         type(parquet_maml_file) :: base_maml, user_maml
 
@@ -527,9 +959,7 @@ contains
             "  - a: b", &
             "  - a: c", &
             "fields:", &
-            "- name: b", &
-            "  data_type: int32", &
-            "- name: c", &
+            "- name: unrelated", &
             "  data_type: int32" ]
 
         call parquet_validate_user_maml(base_maml, user_maml)
@@ -641,6 +1071,68 @@ contains
         ! (e.g. via set_available) would collide with the renamed field.
         call parquet_validate_user_maml(base_maml, user_maml)
     end subroutine scenario_validate_col_map_output_matches_other_field
+
+    !> parquet_column_info%set_available (bound as schema%set_column_available)
+    !> rejects toggling a column that's deactivated -- merged in as an
+    !> inactive placeholder because a base MAML declared it but the user
+    !> MAML excluded it (see is_deactivated's doc comment in src/parquet.f90).
+    !> Base declares "a"/"b"; the user MAML only declares "a", so "b" merges
+    !> in deactivated.
+    subroutine scenario_set_column_available_deactivated()
+        type(parquet_maml_file) :: base_maml
+        type(parquet_schema) :: schema
+
+        base_maml%name = "base.maml"
+        base_maml%lines = [character(len=40) :: &
+            "table: base_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32", &
+            "- name: b", &
+            "  data_type: int32" ]
+
+        schema%maml%name = "user.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: user_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32" ]
+
+        call parquet_validate_user_maml(base_maml, schema%maml)
+        call parquet_parse_maml(schema)
+
+        call schema%set_column_available("b")
+        print '(a)', "unexpectedly toggled a deactivated column available by name"
+    end subroutine scenario_set_column_available_deactivated
+
+    !> Same as scenario_set_column_available_deactivated, but for
+    !> set_column_unavailable (schema%cinfo%set_unavailable).
+    subroutine scenario_set_column_unavailable_deactivated()
+        type(parquet_maml_file) :: base_maml
+        type(parquet_schema) :: schema
+
+        base_maml%name = "base.maml"
+        base_maml%lines = [character(len=40) :: &
+            "table: base_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32", &
+            "- name: b", &
+            "  data_type: int32" ]
+
+        schema%maml%name = "user.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: user_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32" ]
+
+        call parquet_validate_user_maml(base_maml, schema%maml)
+        call parquet_parse_maml(schema)
+
+        call schema%set_column_unavailable("b")
+        print '(a)', "unexpectedly toggled a deactivated column unavailable by name"
+    end subroutine scenario_set_column_unavailable_deactivated
 
     subroutine scenario_get_column_index_not_found()
         type(parquet_schema) :: schema
@@ -1045,12 +1537,46 @@ contains
         call parquet_close_reader(reader)
     end subroutine scenario_qc_range_violation_warns
 
+    !> A stray line with no colon inside a qc-maml field block (not blank,
+    !> not "#"-prefixed) is silently skipped by parquet_split_key_value's
+    !> no-colon branch (src/parquet_metadata.f90) -- parsing continues
+    !> normally rather than erroring, matching the deliberate leniency every
+    !> other MAML-parsing call site of parquet_split_key_value relies on
+    !> (only 2 of its 17 call sites pre-check for a colon; the rest, like
+    !> this one, just treat the resulting empty key as "skip this line").
+    !> Uses an out-of-range value so the qc: min: bound declared *after* the
+    !> stray line still triggers its usual WARNING -- proving the stray line
+    !> didn't corrupt or swallow the qc: block that follows it, not just
+    !> that nothing crashed.
+    subroutine scenario_qc_maml_stray_no_colon_line()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: ra(3), ra_back(3)
+
+        ra = [10, -5, 30] ! -5 violates the qc: min: 0 bound below
+
+        call parquet_open_writer(writer, "test_run/qc_stray_line.parquet")
+        call parquet_write_column(writer, "ra", ra)
+        call parquet_close_writer(writer)
+
+        call write_text_file("test_run/qc_stray_line.maml", [character(len=32) :: &
+            "fields:", "- name: ra", "  some garbage text", "  qc:", "    min: 0"])
+
+        call parquet_open_reader(reader, "test_run/qc_stray_line.parquet", &
+            schema=parquet_load_qc_maml_file("test_run/qc_stray_line.maml"), qc_soft=.true.)
+        call parquet_read_column(reader, "ra", ra_back)
+        call parquet_close_reader(reader)
+    end subroutine scenario_qc_maml_stray_no_colon_line
+
     !> A column with a genuine Parquet Null, read with is_valid= (so the
-    !> read itself doesn't abort), against a qc-maml field with no qc:
-    !> miss: declared (Nulls unexpected by default) must print exactly one
-    !> aggregate Null-presence WARNING with qc_soft=.true. (The default,
-    !> qc_soft=.false., aborts instead -- see
-    !> scenario_qc_null_violation_hard_aborts.)
+    !> read itself doesn't abort), against a qc-maml field with a bare
+    !> "miss:" key (present but no value after the colon) must behave
+    !> exactly like omitting miss: entirely -- Nulls still unexpected by
+    !> default -- and print exactly one aggregate Null-presence WARNING with
+    !> qc_soft=.true. (The default, qc_soft=.false., aborts instead -- see
+    !> scenario_qc_null_violation_hard_aborts.) The bare "miss:" line
+    !> exercises parquet_parse_qc_maml's empty-value branch specifically
+    !> (src/parquet_metadata.f90), distinct from miss: being absent.
     subroutine scenario_qc_null_violation_warns()
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
@@ -1065,7 +1591,7 @@ contains
         call parquet_close_writer(writer)
 
         call write_text_file("test_run/qc_null.maml", [character(len=32) :: &
-            "fields:", "- name: id", "  qc:", "    min: 0"])
+            "fields:", "- name: id", "  qc:", "    min: 0", "    miss:"])
 
         call parquet_open_reader(reader, "test_run/qc_null.parquet", &
             schema=parquet_load_qc_maml_file("test_run/qc_null.maml"), qc_soft=.true.)
@@ -1260,6 +1786,20 @@ contains
             schema=parquet_load_qc_maml_file("test_run/qc_min_wrong_op.maml"))
         print '(a)', "unexpectedly opened a reader with a reversed qc: min: operator"
     end subroutine scenario_qc_maml_min_wrong_operator
+
+    !> Same as scenario_qc_maml_min_wrong_operator, but for qc: max:, which
+    !> must be an upper bound (<= or <) -- a reversed '>'/'>=' operator is
+    !> rejected the same way.
+    subroutine scenario_qc_maml_max_wrong_operator()
+        type(parquet_reader) :: reader
+
+        call write_text_file("test_run/qc_max_wrong_op.maml", [character(len=32) :: &
+            "fields:", "- name: ra", "  qc:", "    max: '> 5'"])
+
+        call parquet_open_reader(reader, "test/fixtures/has_null.parquet", &
+            schema=parquet_load_qc_maml_file("test_run/qc_max_wrong_op.maml"))
+        print '(a)', "unexpectedly opened a reader with a reversed qc: max: operator"
+    end subroutine scenario_qc_maml_max_wrong_operator
 
     !> maml%add_col_qc rejects a reversed min: operator ('<'/'<=' is an upper
     !> bound), the same rule the qc-maml parser and the write-side validator
@@ -1651,6 +2191,32 @@ contains
         call parquet_write_column(writer, "a", values)
         call parquet_close_writer(writer)
     end subroutine scenario_qc_warning_numeric
+
+    !> Same as scenario_qc_warning_numeric, but with a genuinely fractional
+    !> qc: min: bound ("0.5") rather than a whole number -- every existing
+    !> numeric qc-warning scenario uses whole-number bounds, so the WARNING
+    !> text's bounds_desc always went through parquet_qc_format_real's
+    !> whole-number (i0) branch, never its fractional (g0.7) one.
+    subroutine scenario_qc_warning_fractional_bound()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real32) :: values(3) = [1.0_real32, 0.1_real32, 2.0_real32]
+
+        schema%maml%name = "qc_warning_fractional.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: qc_table", &
+            "fields:", &
+            "- name: f", &
+            "  data_type: float32", &
+            "  qc:", &
+            "    min: 0.5" ]
+
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_qc_warning_fractional.parquet", schema, qc=.true.)
+        call parquet_write_column(writer, "f", values)
+        call parquet_close_writer(writer)
+    end subroutine scenario_qc_warning_fractional_bound
 
     subroutine scenario_qc_warning_string()
         type(parquet_schema) :: schema
@@ -2104,6 +2670,120 @@ contains
         print '(a,l1)', "unexpectedly read an unparsable logical metadata value with no default without error: ", value
     end subroutine scenario_get_metadata_conversion_logical_no_default
 
+    !> Array-typed counterparts of the scalar get_metadata no-default abort
+    !> scenarios above: parquet_metadata_stop_missing/parquet_metadata_stop_conversion
+    !> are called from the *_array getters too, but that was previously only
+    !> ever exercised for scalars. Reuses open_metadata_abort_reader's fixture
+    !> unchanged -- parquet_metadata_split_array treats a plain (non-bracketed,
+    !> comma-less) value like "not_a_number" as a single-element array, so the
+    !> same "not_a_number" key that fails to parse as a scalar also fails to
+    !> parse as a one-element array.
+    subroutine scenario_get_metadata_missing_int32_array_no_default()
+        type(parquet_reader) :: reader
+        integer(int32), allocatable :: value(:)
+
+        call open_metadata_abort_reader("test_run/error_scenario_get_metadata_missing_i32_arr.parquet", reader)
+        call parquet_get_metadata(reader, "does_not_exist", value)
+        print '(a,i0)', "unexpectedly read a missing int32 array metadata key with no default without error: ", size(value)
+    end subroutine scenario_get_metadata_missing_int32_array_no_default
+
+    subroutine scenario_get_metadata_conversion_int32_array_no_default()
+        type(parquet_reader) :: reader
+        integer(int32), allocatable :: value(:)
+
+        call open_metadata_abort_reader("test_run/error_scenario_get_metadata_conv_i32_arr.parquet", reader)
+        call parquet_get_metadata(reader, "not_a_number", value)
+        print '(a,i0)', "unexpectedly read an unparsable int32 array metadata value with no default without error: ", &
+            size(value)
+    end subroutine scenario_get_metadata_conversion_int32_array_no_default
+
+    subroutine scenario_get_metadata_missing_int64_array_no_default()
+        type(parquet_reader) :: reader
+        integer(int64), allocatable :: value(:)
+
+        call open_metadata_abort_reader("test_run/error_scenario_get_metadata_missing_i64_arr.parquet", reader)
+        call parquet_get_metadata(reader, "does_not_exist", value)
+        print '(a,i0)', "unexpectedly read a missing int64 array metadata key with no default without error: ", size(value)
+    end subroutine scenario_get_metadata_missing_int64_array_no_default
+
+    subroutine scenario_get_metadata_conversion_int64_array_no_default()
+        type(parquet_reader) :: reader
+        integer(int64), allocatable :: value(:)
+
+        call open_metadata_abort_reader("test_run/error_scenario_get_metadata_conv_i64_arr.parquet", reader)
+        call parquet_get_metadata(reader, "not_a_number", value)
+        print '(a,i0)', "unexpectedly read an unparsable int64 array metadata value with no default without error: ", &
+            size(value)
+    end subroutine scenario_get_metadata_conversion_int64_array_no_default
+
+    subroutine scenario_get_metadata_missing_float32_array_no_default()
+        type(parquet_reader) :: reader
+        real(real32), allocatable :: value(:)
+
+        call open_metadata_abort_reader("test_run/error_scenario_get_metadata_missing_f32_arr.parquet", reader)
+        call parquet_get_metadata(reader, "does_not_exist", value)
+        print '(a,i0)', "unexpectedly read a missing float32 array metadata key with no default without error: ", size(value)
+    end subroutine scenario_get_metadata_missing_float32_array_no_default
+
+    subroutine scenario_get_metadata_conversion_float32_array_no_default()
+        type(parquet_reader) :: reader
+        real(real32), allocatable :: value(:)
+
+        call open_metadata_abort_reader("test_run/error_scenario_get_metadata_conv_f32_arr.parquet", reader)
+        call parquet_get_metadata(reader, "not_a_number", value)
+        print '(a,i0)', "unexpectedly read an unparsable float32 array metadata value with no default without error: ", &
+            size(value)
+    end subroutine scenario_get_metadata_conversion_float32_array_no_default
+
+    subroutine scenario_get_metadata_missing_float64_array_no_default()
+        type(parquet_reader) :: reader
+        real(real64), allocatable :: value(:)
+
+        call open_metadata_abort_reader("test_run/error_scenario_get_metadata_missing_f64_arr.parquet", reader)
+        call parquet_get_metadata(reader, "does_not_exist", value)
+        print '(a,i0)', "unexpectedly read a missing float64 array metadata key with no default without error: ", size(value)
+    end subroutine scenario_get_metadata_missing_float64_array_no_default
+
+    subroutine scenario_get_metadata_conversion_float64_array_no_default()
+        type(parquet_reader) :: reader
+        real(real64), allocatable :: value(:)
+
+        call open_metadata_abort_reader("test_run/error_scenario_get_metadata_conv_f64_arr.parquet", reader)
+        call parquet_get_metadata(reader, "not_a_number", value)
+        print '(a,i0)', "unexpectedly read an unparsable float64 array metadata value with no default without error: ", &
+            size(value)
+    end subroutine scenario_get_metadata_conversion_float64_array_no_default
+
+    subroutine scenario_get_metadata_missing_logical_array_no_default()
+        type(parquet_reader) :: reader
+        logical, allocatable :: value(:)
+
+        call open_metadata_abort_reader("test_run/error_scenario_get_metadata_missing_lg_arr.parquet", reader)
+        call parquet_get_metadata(reader, "does_not_exist", value)
+        print '(a,i0)', "unexpectedly read a missing logical array metadata key with no default without error: ", size(value)
+    end subroutine scenario_get_metadata_missing_logical_array_no_default
+
+    subroutine scenario_get_metadata_conversion_logical_array_no_default()
+        type(parquet_reader) :: reader
+        logical, allocatable :: value(:)
+
+        call open_metadata_abort_reader("test_run/error_scenario_get_metadata_conv_lg_arr.parquet", reader)
+        call parquet_get_metadata(reader, "not_a_number", value)
+        print '(a,i0)', "unexpectedly read an unparsable logical array metadata value with no default without error: ", &
+            size(value)
+    end subroutine scenario_get_metadata_conversion_logical_array_no_default
+
+    !> String arrays have no "conversion failure" abort path (every token is
+    !> already a valid string, nothing to parse) -- only missing-key.
+    subroutine scenario_get_metadata_missing_string_array_no_default()
+        type(parquet_reader) :: reader
+        character(len=:), allocatable :: value(:)
+
+        call open_metadata_abort_reader("test_run/error_scenario_get_metadata_missing_str_arr.parquet", reader)
+        call parquet_get_metadata(reader, "does_not_exist", value)
+        print '(a,i0)', "unexpectedly read a missing string array metadata key with no default without error: ", size(value)
+    end subroutine scenario_get_metadata_missing_string_array_no_default
+
     !> schema%add_field error stops if schema%init was never called first --
     !> there is no "fields:" header (or even a %maml) to append to yet.
     subroutine scenario_schema_add_field_before_init()
@@ -2192,6 +2872,18 @@ contains
         call schema%add_field("ra", "float64", qc_min=">")
         print '(a)', "unexpectedly accepted an operator with no value for qc_min in schema%add_field"
     end subroutine scenario_schema_add_field_qc_operator_without_value
+
+    !> Same as scenario_schema_add_field_qc_operator_without_value, but for
+    !> qc_max -- validate_qc_bound's two branches (is_min vs. not) are
+    !> separate specific checks, so only testing qc_min leaves qc_max's own
+    !> "bad qc_max value provided" error stop uncovered.
+    subroutine scenario_schema_add_field_qc_max_operator_without_value()
+        type(parquet_schema) :: schema
+
+        call schema%init(table="t")
+        call schema%add_field("ra", "float64", qc_max="<")
+        print '(a)', "unexpectedly accepted an operator with no value for qc_max in schema%add_field"
+    end subroutine scenario_schema_add_field_qc_max_operator_without_value
 
     !> schema%add_field rejects a qc_miss value other than Null/NA/empty.
     subroutine scenario_schema_add_field_bad_qc_miss_value()

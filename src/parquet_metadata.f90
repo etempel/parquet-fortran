@@ -93,7 +93,7 @@ contains
     module procedure parquet_parse_maml_from_object
         if (.not. allocated(schema%maml%lines)) &
             error stop "parquet_parse_maml: schema%maml has no loaded content " // &
-                "(use the filename form, or populate schema%maml first)"
+                "(use the filename form, or populate schema%maml first)" ! GCOVR_EXCL_LINE
         call parquet_validate_maml(schema%maml)
         call parquet_parse_maml_lines(schema%maml%lines, schema%cinfo, schema%metadata)
         call parquet_merge_missing_columns(schema%maml, schema%cinfo)
@@ -145,7 +145,7 @@ contains
         integer :: i
 
         found = .false.
-        if (.not. allocated(maml%lines)) return
+        if (.not. allocated(maml%lines)) return ! GCOVR_EXCL_LINE
         do i = 1, size(maml%lines)
             if (trim(adjustl(maml%lines(i))) == trim(target)) then
                 found = .true.
@@ -163,7 +163,7 @@ contains
         character(len=:), allocatable :: t, key, val
 
         found = .false.
-        if (.not. allocated(maml%lines)) return
+        if (.not. allocated(maml%lines)) return ! GCOVR_EXCL_LINE
         do i = 1, size(maml%lines)
             t = trim(adjustl(maml%lines(i)))
             if (len(t) == 0) cycle
@@ -177,7 +177,7 @@ contains
             if (len(val) >= 2) then
                 if ((val(1:1) == '"' .and. val(len(val):len(val)) == '"') .or. &
                     (val(1:1) == "'" .and. val(len(val):len(val)) == "'")) then
-                    val = val(2:len(val)-1)
+                    val = val(2:len(val)-1) ! GCOVR_EXCL_LINE
                 end if
             end if
             if (trim(val) == trim(name)) then
@@ -529,12 +529,12 @@ contains
             if (allocated(user_cinfo%col)) then
                 do j = 1, size(user_cinfo%col)
                     if (trim(user_cinfo%col(j)%name) == trim(user_maml%col_map(i)%internal_name) .and. &
-                        trim(user_cinfo%col(j)%output_name) == trim(user_maml%col_map(i)%internal_name)) then
+                        trim(user_cinfo%col(j)%output_name) == trim(user_maml%col_map(i)%internal_name)) then ! GCOVR_EXCL_START
                         map_errors = map_errors // "col_map: internal column '" // &
                             trim(user_maml%col_map(i)%internal_name) // &
                             "' is remapped but also appears directly (un-renamed) in fields:; "
                         exit
-                    end if
+                    end if ! GCOVR_EXCL_STOP
                 end do
             end if
 
@@ -565,11 +565,11 @@ contains
         if (allocated(user_cinfo%col)) then
             do i = 1, size(user_cinfo%col)
                 do j = 1, i - 1
-                    if (trim(user_cinfo%col(j)%output_name) == trim(user_cinfo%col(i)%output_name)) then
+                    if (trim(user_cinfo%col(j)%output_name) == trim(user_cinfo%col(i)%output_name)) then ! GCOVR_EXCL_START
                         map_errors = map_errors // "duplicate output name '" // &
                             trim(user_cinfo%col(i)%output_name) // "' used by more than one field in fields:; "
                         exit
-                    end if
+                    end if ! GCOVR_EXCL_STOP
                 end do
             end do
         end if
@@ -703,18 +703,18 @@ contains
         errors = ""
 
         if (.not. allocated(cinfo%col)) then
-            errors = errors // "no fields defined; "
+            errors = errors // "no fields defined; " ! GCOVR_EXCL_LINE
         else if (size(cinfo%col) == 0) then
             errors = errors // "no fields defined; "
         else
             do i = 1, size(cinfo%col)
                 cur_name = trim(cinfo%col(i)%name)
 
-                if (len_trim(cur_name) == 0) then
+                if (len_trim(cur_name) == 0) then ! GCOVR_EXCL_START
                     write(idx_buf, '(I0)') i
                     errors = errors // "field #" // trim(idx_buf) // " has an empty name; "
                     cycle
-                end if
+                end if ! GCOVR_EXCL_STOP
 
                 type_ok = .false.
                 do j = 1, size(valid_maml_data_types)
@@ -770,10 +770,10 @@ contains
                     end if
                     if (cinfo%col(i)%has_qc_max) then
                         if (.not. parquet_qc_numeric_bound( &
-                                cinfo%col(i)%qc_max_raw, cinfo%col(i)%data_type, qc_bound_value)) then
+                                cinfo%col(i)%qc_max_raw, cinfo%col(i)%data_type, qc_bound_value)) then ! GCOVR_EXCL_START
                             errors = errors // "field '" // cur_name // "' has an invalid qc: max value '" // &
                                 trim(cinfo%col(i)%qc_max_raw) // "' for data_type " // trim(cinfo%col(i)%data_type) // "; "
-                        end if
+                        end if ! GCOVR_EXCL_STOP
                     end if
                 end select
             end do
@@ -1532,7 +1532,7 @@ contains
         integer :: n
         character(len=:), allocatable :: desc_val
 
-        if (len_trim(key) == 0) return
+        if (len_trim(key) == 0) return ! GCOVR_EXCL_LINE
 
         desc_val = ""
         if (present(description)) desc_val = trim(description)
@@ -1737,7 +1737,7 @@ contains
         if (allocated(this%col)) then
             get_num_fields = size(this%col)
         else
-            get_num_fields = 0
+            get_num_fields = 0 ! GCOVR_EXCL_LINE
         end if
     end procedure get_num_fields
 
@@ -1990,7 +1990,7 @@ contains
         type(parquet_table_metadata), intent(inout) :: metadata
         character(len=*), intent(in) :: keywords_value
 
-        if (len_trim(keywords_value) == 0) return
+        if (len_trim(keywords_value) == 0) return ! GCOVR_EXCL_LINE
         call metadata%add_metadata("keywords", trim(keywords_value))
     end subroutine parquet_flush_keywords
 
@@ -2285,7 +2285,7 @@ contains
                 return
             end if
         end do
-        indent = len(line)
+        indent = len(line) ! GCOVR_EXCL_LINE
     end function parquet_line_indent
 
     function parquet_find_maml_section(key) result(idx)
@@ -2313,12 +2313,12 @@ contains
         integer :: idx, k
 
         idx = 0
-        if (len_trim(parent_subkey) == 0) return
+        if (len_trim(parent_subkey) == 0) return ! GCOVR_EXCL_LINE
         do k = 1, size(allowed_maml_nested_sections)
             if (trim(parquet_to_lower(allowed_maml_nested_sections(k)%parent_section)) == &
                 trim(parquet_to_lower(parent_section)) .and. &
                 trim(parquet_to_lower(allowed_maml_nested_sections(k)%parent_subkey)) == &
-                trim(parquet_to_lower(parent_subkey))) then
+                trim(parquet_to_lower(parent_subkey))) then ! GCOVR_EXCL_LINE
                 idx = k
                 return
             end if

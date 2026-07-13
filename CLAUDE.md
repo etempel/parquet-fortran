@@ -59,6 +59,25 @@ Working rules:
   (`.gitlab-ci.yml`, running `fpm test` with coverage), but still defer dynamic build/coverage
   badges until the project is public with a stable URL to point them at.
 
+## Planned: FORD-generated API documentation (not started)
+
+Considering migrating the hand-maintained "parquet module API" reference in MANUAL.md to
+[FORD](https://forddocs.readthedocs.io/) (FORtran Documenter) — a mature, actively maintained
+(v7.0.13 as of 2026-02), fortran-lang.org-listed tool that auto-generates HTML API docs from
+in-source `!>`/`!!` doc comments (`src/parquet.f90` already uses `!>` in places, e.g. around
+the MAML-parsing interfaces) and correctly resolves this project's real `submodule` blocks
+(`parquet_read.f90`, `parquet_write.f90`, `parquet_metadata.f90`,
+`parquet_maml_base_add_col_qc.f90`) back to their parent-module interfaces.
+
+Decision so far: **keep the current hand-maintained MANUAL.md "parquet module API" section for
+now.** Don't remove or shrink it in favor of FORD until a FORD-generated site has actually been
+stood up (project file, CI `pages` job, doc comments filled in across the public API) and
+proven good enough. Only then revisit dropping/shrinking the hand-maintained section per the
+"Documentation structure" working rules above.
+
+This is a parked migration, not an active task — pick it back up when asked, don't start it
+unprompted.
+
 ## Report before implementing on analysis/audit requests
 
 When asked to analyze, audit, or review something (naming conventions, documentation

@@ -189,7 +189,7 @@ contains
         character(len=*), parameter :: out_file = "test_run/test_write_maml.parquet"
         character(len=*), parameter :: sidecar_file = "test_run/test_write_maml.maml"
 
-        call parquet_parse_maml("docs/maml_example.maml", schema)
+        call parquet_parse_maml("schemas/maml_example.maml", schema)
         call schema%set_column_unavailable()
         call schema%set_column_available("id0")
 
@@ -229,7 +229,7 @@ contains
         character(len=*), parameter :: sidecar_file = "test_run/test_write_maml_full.maml"
         integer :: i
 
-        call parquet_parse_maml("docs/maml_example.maml", schema)
+        call parquet_parse_maml("schemas/maml_example.maml", schema)
         call init_test_data(test_data, 5)
         call write_test_data(out_file, test_data, schema, write_maml=.true.)
 
@@ -237,7 +237,7 @@ contains
         call check(error, exists, "write_maml=.true. did not create the expected sidecar .maml file")
         if (allocated(error)) return
 
-        source_maml = parquet_load_maml_file("docs/maml_example.maml")
+        source_maml = parquet_load_maml_file("schemas/maml_example.maml")
         sidecar_maml = parquet_load_maml_file(sidecar_file)
 
         call check(error, size(sidecar_maml%lines) == size(source_maml%lines), &
@@ -254,7 +254,7 @@ contains
     end subroutine test_write_maml_sidecar_no_pruning_when_all_enabled
 
     !> parquet_prune_disabled_fields's field-block scan must handle three
-    !> real-world MAML authoring variations that docs/maml_example.maml
+    !> real-world MAML authoring variations that schemas/maml_example.maml
     !> happens not to use anywhere, so this schema is built in-memory instead
     !> of loaded from a fixture:
     !>   1. an indented comment line right after "fields:", before the first
@@ -375,7 +375,7 @@ contains
         integer :: i
         logical :: found
 
-        call parquet_parse_maml("docs/maml_example.maml", schema)
+        call parquet_parse_maml("schemas/maml_example.maml", schema)
         call schema%set_column_unavailable()
         call schema%set_column_available("id0")
 
@@ -429,7 +429,7 @@ contains
         type(parquet_schema) :: schema, schema_no_extra
         integer :: idx_keyarray, idx_extra, idx_fields, i
 
-        ! Built in-memory (rather than loaded from docs/) so this test does not
+        ! Built in-memory (rather than loaded from schemas/) so this test does not
         ! depend on whether the on-disk fixture happens to have a keyarray:
         ! block already: this specifically covers the "no existing keyarray:,
         ! but an extra: section is present" case.

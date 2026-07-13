@@ -165,9 +165,11 @@ re-derive the mapping):
   rewritten to `<page>.html#anchor`.
 - Links to README.md sections were rewritten to `../index.html#anchor` (root project-file body
   renders as the site's `index.html`; pages sit one level down under `page/`).
-- Links to CONTRIBUTING.md (kept GitHub-repo-only, see below) and to the `docs/*.maml` fixture
-  files were rewritten to absolute `https://github.com/etempel/parquet-fortran/blob/main/...`
-  URLs, since neither is part of the generated FORD site.
+- Links to CONTRIBUTING.md (kept GitHub-repo-only, see below) and to the `schemas/*.maml`
+  fixture files (renamed from `docs/*.maml` later the same day — see the "MAML fixture
+  directory rename" section below) were rewritten to absolute
+  `https://github.com/etempel/parquet-fortran/blob/main/...` URLs, since neither is part of the
+  generated FORD site.
 - FORD's `[[entity_name]]` auto-link syntax was **not** applied to inline procedure-name
   mentions in the migrated pages (left as plain backtick code spans) — deferred as a polish
   pass to do once doc-comment coverage (above) exists and entity names/pages can be verified
@@ -335,6 +337,66 @@ exists, and target actually has a matching `id`/`name`) — all resolve cleanly 
    "Documentation structure" section and any remaining cross-references to it.
 6. Only after all the above: prepare the `fortran-lang/fortran-lang.org` PACKAGES.md PR for
    package-index listing.
+
+## MAML fixture directory rename: `docs/` → `schemas/` (DONE, 2026-07-13)
+
+The `doc/` (new, FORD `page_dir`/`media_dir`) vs `docs/` (pre-existing, this project's `.maml`
+example/fixture files) directory-name collision was flagged as confusing once `doc/` existed.
+Decision: **rename the fixture directory, not the FORD one** — `docs/` → `schemas/`. Reasoning
+for that direction (not the reverse): `docs/` was the *established, externally-facing*
+convention — hardcoded into `tools/generate_parquet_maml.sh` (the reusable script other
+projects copy to embed their own MAML schemas) and referenced in ~36 places across tests/docs —
+whereas `doc/` was created the same day with zero external dependents. That reasoning turned
+out to be superseded by the user's actual goal: **`schemas/` isn't just avoiding a naming
+clash, it's establishing this project's opinion on where `.maml` files ought to live**, since no
+prior convention exists elsewhere. Confirmed explicitly: no external "other projects" convention
+already exists to match — this repository is now the one *defining* that default for others.
+
+What changed:
+- `docs/` → `schemas/` via `git mv` (preserves history for the 3 example files:
+  `maml_example.maml`, `maml_example2.maml`, `maml_example3.maml`).
+- **`tools/generate_parquet_maml.sh` gained a `--dir=<name>` / `--dir <name>` argument**
+  (order-independent relative to the existing positional `mode` argument, `base`/empty),
+  defaulting to `schemas`. Previously the directory was hardcoded (`docs_dir = work_dir /
+  'docs'`); now downstream projects with their own existing convention aren't forced to match
+  this one. Internal python variable renamed `docs_dir` → `maml_source_dir` for clarity while
+  in there. The generated-file header comment (`! Instead, edit the MAML files under X/ ...`)
+  is now dynamic, reflecting whatever `--dir` was actually used, not hardcoded to `docs/`.
+- `src/parquet_maml_base.f90` regenerated via `tools/generate_parquet_maml.sh base` (this
+  project's own regeneration never needs `--dir`, since its fixtures live at the new default
+  `schemas/` path already).
+- All `docs/maml_example*.maml` path references updated to `schemas/...`: 24 occurrences across
+  `test/test_examples.f90`, `test_writing.f90`, `test_maml.f90`, `test_metadata.f90` (real
+  runtime string literals, not just prose); plus CONTRIBUTING.md, MANUAL.md, and the
+  already-migrated `doc/pages/maml-format.md`/`combined-example.md`/`embedding-maml-schemas.md`
+  (kept in sync with MANUAL.md's wording, per the "no duplication, migrate faithfully" approach
+  used throughout the FORD migration above).
+- "Embedding your own MAML schemas" (MANUAL.md and its `doc/pages/embedding-maml-schemas.md`
+  twin) and CONTRIBUTING.md's "Regenerating the built-in MAML module" both updated to document
+  the new `--dir` flag, not just the renamed default.
+
+**Side-effect from the regeneration, since FIXED (same day, on request):** the regeneration
+above initially dropped a `! GCOVR_EXCL_LINE` marker that `src/parquet_maml_base.f90`'s final
+`end module` line previously carried — the generator template never actually emitted that
+marker (confirmed by grepping the script), so it must have been a manual one-off addition to a
+"do not hand-edit" generated file at some point, which any regeneration would always have
+dropped. Fixed properly at the template level, not by hand-patching the generated file again
+(which would just be dropped on the next regen): `tools/generate_parquet_maml.sh`'s `end
+module` line template now emits `end module {module_name} ! GCOVR_EXCL_LINE` unconditionally —
+applies to both `base` mode (`parquet_maml_base`) and the downstream/consumer-facing default
+mode (`parquet_maml`), verified by regenerating both (the latter in a scratch dir, since this
+project itself never generates a `parquet_maml` module). `src/parquet_maml_base.f90`
+regenerated again to pick it up; confirmed via `git diff` that the only change versus the
+previously-committed file is the `docs/` → `schemas/` text, i.e. the marker is back exactly as
+before. This one's worth remembering if `tools/generate_parquet_maml.sh`'s `end module` template
+line ever gets touched again — don't let the marker silently disappear a second time.
+Historical note, no longer relevant to current behavior: CLAUDE.md's coverage notes elsewhere
+say `end module`/`end submodule` lines are generally "not worth chasing" for coverage — that
+guidance still holds for *hand-written* files; it just doesn't mean the marker on this
+*generated* file's line should be allowed to silently vanish once someone already added it and
+depends on it.
+coverage-percentage diff looks slightly different after this change and someone goes looking
+for why.
 
 ## Report before implementing on analysis/audit requests
 

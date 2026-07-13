@@ -81,7 +81,7 @@ contains
             ]
     end subroutine collect_tests_parquet_metadata
 
-    !> Builds a schema (docs/maml_example.maml, "id0" only) carrying one
+    !> Builds a schema (schemas/maml_example.maml, "id0" only) carrying one
     !> metadata entry of every add_metadata scalar/array type, writes
     !> `out_file`, and returns a freshly opened reader on it -- shared by
     !> every round-trip/default-fallback test below. Each caller passes its
@@ -94,7 +94,7 @@ contains
         type(parquet_schema) :: schema
         integer(int32) :: id0(3) = [1_int32, 2_int32, 3_int32]
 
-        call parquet_parse_maml("docs/maml_example.maml", schema)
+        call parquet_parse_maml("schemas/maml_example.maml", schema)
         call schema%set_column_unavailable()
         call schema%set_column_available("id0")
 
@@ -279,7 +279,7 @@ contains
         character(len=:), allocatable :: sarr(:)
         character(len=*), parameter :: out_file = "test_run/metadata_string_array_mixed.parquet"
 
-        call parquet_parse_maml("docs/maml_example.maml", schema)
+        call parquet_parse_maml("schemas/maml_example.maml", schema)
         call schema%set_column_unavailable()
         call schema%set_column_available("id0")
 
@@ -521,7 +521,7 @@ contains
         integer(int32), parameter :: fallback(2) = [-9_int32, -8_int32]
         character(len=*), parameter :: out_file = "test_run/metadata_array_conversion_failure.parquet"
 
-        call parquet_parse_maml("docs/maml_example.maml", schema)
+        call parquet_parse_maml("schemas/maml_example.maml", schema)
         call schema%set_column_unavailable()
         call schema%set_column_available("id0")
 
@@ -568,7 +568,7 @@ contains
         logical, parameter :: lg_fb(2) = [.false., .true.]
         character(len=*), parameter :: out_file = "test_run/metadata_array_conv_fail_all.parquet"
 
-        call parquet_parse_maml("docs/maml_example.maml", schema)
+        call parquet_parse_maml("schemas/maml_example.maml", schema)
         call schema%set_column_unavailable()
         call schema%set_column_available("id0")
 

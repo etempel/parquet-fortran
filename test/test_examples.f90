@@ -86,7 +86,7 @@ contains
         integer(int64) :: nrows
 
         ! README: call parquet_parse_maml("maml_example.maml", schema)
-        call parquet_parse_maml("docs/maml_example.maml", schema)
+        call parquet_parse_maml("schemas/maml_example.maml", schema)
 
         ! Only write the one column this test provides data for.
         call schema%set_column_unavailable()
@@ -130,7 +130,7 @@ contains
         integer(int64), allocatable :: idarr_read(:,:)
 
         ! Parse column definitions + table metadata from the MAML file.
-        call parquet_parse_maml("docs/maml_example.maml", schema)
+        call parquet_parse_maml("schemas/maml_example.maml", schema)
 
         ! This schema defines more columns than we have data for in this example;
         ! disable everything, then re-enable only the columns we are about to write.
@@ -161,7 +161,7 @@ contains
     end subroutine test_readme_combined_example
     !
     !> Writes a four-column ("id", "name", "RA", "Dec") table using
-    !> docs/maml_example2.maml's schema, with write_maml=.true. so a sidecar
+    !> schemas/maml_example2.maml's schema, with write_maml=.true. so a sidecar
     !> .maml is produced alongside the parquet file. Checks that:
     !> - the schema (including list-form `ucd:` on "id"/"Dec" and the blank
     !>   array_size:/col_size: on "RA"/"Dec" defaulting to 1) parses correctly,
@@ -180,15 +180,15 @@ contains
         character(len=*), parameter :: out_file = "test_run/maml_example2.parquet"
         character(len=*), parameter :: sidecar_file = "test_run/maml_example2.maml"
 
-        call parquet_parse_maml("docs/maml_example2.maml", schema)
+        call parquet_parse_maml("schemas/maml_example2.maml", schema)
 
-        call check_keyarray_entries(error, schema%metadata, "in-memory metadata parsed from docs/maml_example2.maml")
+        call check_keyarray_entries(error, schema%metadata, "in-memory metadata parsed from schemas/maml_example2.maml")
         if (allocated(error)) return
 
-        call check_field_schema(error, schema%cinfo, "in-memory cinfo parsed from docs/maml_example2.maml")
+        call check_field_schema(error, schema%cinfo, "in-memory cinfo parsed from schemas/maml_example2.maml")
         if (allocated(error)) return
 
-        call check_scalar_metadata(error, schema%metadata, "in-memory metadata parsed from docs/maml_example2.maml")
+        call check_scalar_metadata(error, schema%metadata, "in-memory metadata parsed from schemas/maml_example2.maml")
         if (allocated(error)) return
 
         id = [1_int32, 2_int32, 3_int32]

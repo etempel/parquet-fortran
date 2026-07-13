@@ -42,8 +42,8 @@ The complete usage reference for **parquet-fortran**. For a quick-start overview
 `tools/generate_parquet_maml.sh` (bundled with this library) is a generic tool any project depending on `parquet-fortran` can reuse to embed *its own* `.maml` schemas directly into compiled Fortran source, so a downstream pipeline doesn't need to locate/ship `.maml` files at run time. To do this in your own project:
 
 1. Copy `tools/generate_parquet_maml.sh` into your own project (e.g. under your own `tools/`).
-2. Put your own `.maml` schema files under a `docs/` directory at your project's root.
-3. Run it with no argument from your project's root: `tools/generate_parquet_maml.sh` — this writes `src/parquet_maml.f90` in *your* project, generated from *your* `docs/*.maml` files.
+2. Put your own `.maml` schema files under a `schemas/` directory at your project's root — this is `parquet-fortran`'s own convention (see below) and the default the script looks for, but not required: pass `--dir=<name>` (or `--dir <name>`) to use a different directory name if your project already has its own convention.
+3. Run it from your project's root: `tools/generate_parquet_maml.sh` (or `tools/generate_parquet_maml.sh --dir=<name>` for a non-default directory) — this writes `src/parquet_maml.f90` in *your* project, generated from *your* `.maml` files.
 4. `use parquet_maml` (the module the script just generated for you) alongside `use parquet` in your code, to call `get_parquet_maml("your_schema.maml")` or `set_maml(...)` the same way this library's own tests do internally.
 
 The generated `parquet_maml` module depends on `parquet` (`parquet_maml_file`, `parquet_validate_maml`, etc.) but not on `parquet_maml_base` directly — `parquet_maml_base` is this library's own internal module and isn't meant to be `use`d directly by consuming projects. (If you're contributing to `parquet-fortran` itself and need to regenerate its own built-in schema module, see [CONTRIBUTING.md](CONTRIBUTING.md).)
@@ -369,10 +369,10 @@ The library turns a MAML (YAML) metadata file into the VOTable-style header embe
     * column data
 ```
 
-A [MAML](https://github.com/asgr/MAML-Format) file is YAML. Table-level metadata (author, description, ...) is given as top-level keys, and column definitions are given as a list under the `fields:` key. **Only a fixed, known set of top-level keys is accepted** — `survey`, `dataset`, `table`, `version`, `date`, `author`, `coauthors`, `dois`, `depends`, `description`, `comments`, `license`, `keywords`, `maml_version`, `keyarray`, `extra`, and `fields` (matched case-insensitively; see `allowed_maml_sections` in `src/parquet_metadata.f90`) — any other top-level key fails `parquet_validate_maml` as an unknown section. To attach your own custom metadata not covered by that list, nest it under `extra:` instead, which accepts arbitrary structure unvalidated (see [Renaming columns for output with `col_map:`](#renaming-columns-for-output-with-col_map) for an example of `extra:`'s own nested keys). `parquet_parse_maml` always runs this same validation before parsing a MAML into a `parquet_schema`, so an invalid MAML is caught immediately rather than silently parsed. Three full worked examples are checked into the repository under `docs/`:
-- [docs/maml_example.maml](docs/maml_example.maml) — the base example used throughout these docs.
-- [docs/maml_example2.maml](docs/maml_example2.maml) — adds `string` fields and `qc: min:`/`max:` bounds (both the plain-number and the quoted-operator forms).
-- [docs/maml_example3.maml](docs/maml_example3.maml) — adds `extra: col_map:` column renaming (e.g. `id` → `uberid`, `RA` → `ra_J2000`) alongside `qc:`.
+A [MAML](https://github.com/asgr/MAML-Format) file is YAML. Table-level metadata (author, description, ...) is given as top-level keys, and column definitions are given as a list under the `fields:` key. **Only a fixed, known set of top-level keys is accepted** — `survey`, `dataset`, `table`, `version`, `date`, `author`, `coauthors`, `dois`, `depends`, `description`, `comments`, `license`, `keywords`, `maml_version`, `keyarray`, `extra`, and `fields` (matched case-insensitively; see `allowed_maml_sections` in `src/parquet_metadata.f90`) — any other top-level key fails `parquet_validate_maml` as an unknown section. To attach your own custom metadata not covered by that list, nest it under `extra:` instead, which accepts arbitrary structure unvalidated (see [Renaming columns for output with `col_map:`](#renaming-columns-for-output-with-col_map) for an example of `extra:`'s own nested keys). `parquet_parse_maml` always runs this same validation before parsing a MAML into a `parquet_schema`, so an invalid MAML is caught immediately rather than silently parsed. Three full worked examples are checked into the repository under `schemas/`:
+- [schemas/maml_example.maml](schemas/maml_example.maml) — the base example used throughout these docs.
+- [schemas/maml_example2.maml](schemas/maml_example2.maml) — adds `string` fields and `qc: min:`/`max:` bounds (both the plain-number and the quoted-operator forms).
+- [schemas/maml_example3.maml](schemas/maml_example3.maml) — adds `extra: col_map:` column renaming (e.g. `id` → `uberid`, `RA` → `ra_J2000`) alongside `qc:`.
 
 If you're new to MAML in this library, focus first on `table:` and `fields:` (`name` + `data_type` for each field). Everything else is optional metadata or advanced behavior.
 
@@ -411,7 +411,7 @@ Notes on the `fields:` entries:
 - `array_size` sets the maximum string length for `string` columns; it is ignored for other types.
   > Don't confuse `col_size` with `array_size` — despite the similar-sounding names, they're unrelated: `col_size` is how many elements a vector column's row holds, `array_size` is how many characters a `string` column's values can hold.
 - `unit`, `info` and `ucd` are optional and are carried through into the parquet file's VOTable-style header for that column.
-- Run `parquet_validate_maml` on a MAML file to catch structural mistakes (duplicate names, missing `data_type`, missing `table`, unknown top-level sections or sub-keys, etc.) before using it to open a writer. It accepts either a `parquet_maml_file` (e.g. from `parquet_load_maml_file`, or built in memory) or a filename directly (`call parquet_validate_maml("docs/maml_example2.maml")`, loading it from disk internally).
+- Run `parquet_validate_maml` on a MAML file to catch structural mistakes (duplicate names, missing `data_type`, missing `table`, unknown top-level sections or sub-keys, etc.) before using it to open a writer. It accepts either a `parquet_maml_file` (e.g. from `parquet_load_maml_file`, or built in memory) or a filename directly (`call parquet_validate_maml("schemas/maml_example2.maml")`, loading it from disk internally).
 
 A second MAML file may be validated against a "base" MAML with `parquet_validate_user_maml`, to check it only reuses column names that already exist in the base schema — useful when different pipeline stages should write a subset of a shared schema.
 
@@ -466,7 +466,7 @@ program write_parquet_combined_example
     integer(int64) :: idarr(2, 3)   ! (col_size, nrows) for the "idarr" vector column
 
     ! Parse column definitions + table metadata from the MAML file.
-    call parquet_parse_maml("docs/maml_example.maml", schema)
+    call parquet_parse_maml("schemas/maml_example.maml", schema)
 
     ! This schema defines more columns than we have data for in this example;
     ! disable everything, then re-enable only the columns we are about to write.

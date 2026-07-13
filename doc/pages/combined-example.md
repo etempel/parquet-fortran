@@ -16,7 +16,7 @@ program write_parquet_combined_example
     integer(int64) :: idarr(2, 3)   ! (col_size, nrows) for the "idarr" vector column
 
     ! Parse column definitions + table metadata from the MAML file.
-    call parquet_parse_maml("docs/maml_example.maml", schema)
+    call parquet_parse_maml("schemas/maml_example.maml", schema)
 
     ! This schema defines more columns than we have data for in this example;
     ! disable everything, then re-enable only the columns we are about to write.

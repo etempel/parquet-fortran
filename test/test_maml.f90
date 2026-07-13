@@ -95,7 +95,7 @@ contains
         call check(error, .true.)
     end subroutine test_validate_maml_ok
 
-    !> docs/maml_example2.maml exercises several things maml_example.maml does
+    !> schemas/maml_example2.maml exercises several things maml_example.maml does
     !> not: extra top-level keys (survey, version, date, depends:, keywords:,
     !> MAML_version), an extra: block, list-form ucd: on some fields, and
     !> blank array_size:/col_size: values -- none of which parquet_validate_maml
@@ -104,7 +104,7 @@ contains
         type(error_type), allocatable, intent(out) :: error
         type(parquet_maml_file) :: maml
 
-        maml = parquet_load_maml_file("docs/maml_example2.maml")
+        maml = parquet_load_maml_file("schemas/maml_example2.maml")
 
         ! Should not error stop: this is a well-formed MAML file.
         call parquet_validate_maml(maml)
@@ -119,12 +119,12 @@ contains
         type(error_type), allocatable, intent(out) :: error
 
         ! Should not error stop: this is a well-formed MAML file.
-        call parquet_validate_maml("docs/maml_example2.maml")
+        call parquet_validate_maml("schemas/maml_example2.maml")
 
         call check(error, .true.)
     end subroutine test_validate_maml_by_filename_ok
 
-    !> docs/maml_example.maml/maml_example2.maml (and every other fixture)
+    !> schemas/maml_example.maml/maml_example2.maml (and every other fixture)
     !> always put keyarray:'s "key:" inline with the leading dash ("- key:
     !> X"), and depends:'s dash-line entries always start with "survey:"
     !> first. Both are just conventions, not requirements: parquet_parse_maml_lines
@@ -347,9 +347,9 @@ contains
         type(error_type), allocatable, intent(out) :: error
         type(parquet_maml_file) :: maml
 
-        maml = parquet_load_maml_file("docs/maml_example.maml")
+        maml = parquet_load_maml_file("schemas/maml_example.maml")
 
-        call check(error, trim(maml%name) == "docs/maml_example.maml" .and. size(maml%lines) == 91, &
+        call check(error, trim(maml%name) == "schemas/maml_example.maml" .and. size(maml%lines) == 91, &
             "parquet_load_maml_file returned unexpected content")
     end subroutine test_load_maml_file
 

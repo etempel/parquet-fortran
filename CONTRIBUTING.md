@@ -135,7 +135,7 @@ Coverage is computed by `gcovr` over `src/` and surfaced through GitLab's `cover
 
 ## Regenerating the built-in MAML module
 
-Every `.maml` file under `docs/` is compiled directly into this library via `tools/generate_parquet_maml.sh`, which scans `docs/*.maml` and writes a Fortran module embedding each file's contents as a string array, keyed by filename — this is what makes a default schema available without shipping or locating a `.maml` file at run time.
+Every `.maml` file under `schemas/` is compiled directly into this library via `tools/generate_parquet_maml.sh`, which scans `schemas/*.maml` and writes a Fortran module embedding each file's contents as a string array, keyed by filename — this is what makes a default schema available without shipping or locating a `.maml` file at run time.
 
 Run it from the repository root in `base` mode to regenerate this repository's own embedded module:
 
@@ -143,9 +143,11 @@ Run it from the repository root in `base` mode to regenerate this repository's o
 tools/generate_parquet_maml.sh base   # (re)generates src/parquet_maml_base.f90
 ```
 
-`base` mode generates `parquet_maml_base`, which additionally defines the `parquet_maml_file`/`parquet_maml_missing_column` derived types used throughout the library. Run this whenever `docs/*.maml` changes, or whenever those types themselves change.
+`base` mode generates `parquet_maml_base`, which additionally defines the `parquet_maml_file`/`parquet_maml_missing_column` derived types used throughout the library. Run this whenever `schemas/*.maml` changes, or whenever those types themselves change.
 
-The generated file carries a header stating it is auto-generated — do not hand-edit `src/parquet_maml_base.f90`; instead edit the source `.maml` files under `docs/` and re-run the script.
+The script also accepts `--dir=<name>` (or `--dir <name>`) to scan a different directory than the default `schemas/` — this project's own regeneration above never needs it (its fixtures live under `schemas/`), but it exists so downstream projects following ["Embedding your own MAML schemas"](MANUAL.md#embedding-your-own-maml-schemas-in-your-own-project) can match whatever convention their own project already uses.
+
+The generated file carries a header stating it is auto-generated — do not hand-edit `src/parquet_maml_base.f90`; instead edit the source `.maml` files under `schemas/` and re-run the script.
 
 (The same script's other, no-argument mode is a separate, consumer-facing feature for embedding schemas in a downstream project — see [README.md's "Embedding your own MAML schemas in your own project"](MANUAL.md#embedding-your-own-maml-schemas-in-your-own-project).)
 

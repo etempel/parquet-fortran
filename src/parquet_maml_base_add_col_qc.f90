@@ -1,20 +1,18 @@
-!===========================================
-! Hand-written submodule of parquet_maml_base (NOT generated). Implements the
-! parquet_maml_file%add_col_qc (subroutine) and %get_col_qc (function) type-bound
-! procedures, whose deferred module-procedure interfaces are declared in the
-! (generated) src/parquet_maml_base.f90. Both share one worker (add_col_qc_impl)
-! and differ only in how the parsed column name is returned: add_col_qc via an
-! optional out-argument, get_col_qc as the function result (so it can be assigned
-! back into the source variable, which the subroutine cannot do due to aliasing).
-!
-! add_col_qc/get_col_qc build a read-time qc-maml incrementally from a compact
-! one-line "col, min, max, miss" string, appending a fields: entry with a qc: block.
-! It is deliberately self-contained (only intrinsic string handling): its
-! parent module sits at the bottom of the module stack, so it cannot reuse the
-! qc-maml validation helpers in parquet_metadata without creating a dependency
-! cycle. The operator-direction and miss-value rules it enforces mirror those
-! in parquet_metadata's parquet_parse_qc_maml / parquet_validate_maml_internal.
-!===========================================
+!> Hand-written submodule of parquet_maml_base (NOT generated). Implements the
+!> parquet_maml_file%add_col_qc (subroutine) and %get_col_qc (function) type-bound
+!> procedures, whose deferred module-procedure interfaces are declared in the
+!> (generated) src/parquet_maml_base.f90. Both share one worker (add_col_qc_impl)
+!> and differ only in how the parsed column name is returned: add_col_qc via an
+!> optional out-argument, get_col_qc as the function result (so it can be assigned
+!> back into the source variable, which the subroutine cannot do due to aliasing).
+!>
+!> add_col_qc/get_col_qc build a read-time qc-maml incrementally from a compact
+!> one-line "col, min, max, miss" string, appending a fields: entry with a qc: block.
+!> It is deliberately self-contained (only intrinsic string handling): its
+!> parent module sits at the bottom of the module stack, so it cannot reuse the
+!> qc-maml validation helpers in parquet_metadata without creating a dependency
+!> cycle. The operator-direction and miss-value rules it enforces mirror those
+!> in parquet_metadata's parquet_parse_qc_maml / parquet_validate_maml_internal.
 submodule (parquet_maml_base) parquet_maml_base_add_col_qc
     implicit none
 contains
@@ -26,9 +24,9 @@ contains
     !> (the intent(out) deallocation destroys the input first). Use the
     !> get_col_qc function form for an in-place `col = maml%get_col_qc(col)`.
     module subroutine parquet_maml_add_col_qc(self, qc_input, col_name)
-        class(parquet_maml_file), intent(inout) :: self
-        character(len=*), intent(in) :: qc_input
-        character(len=:), allocatable, intent(out), optional :: col_name
+        class(parquet_maml_file), intent(inout) :: self !! qc-maml being built; gains one fields: entry.
+        character(len=*), intent(in) :: qc_input !! compact "col, min, max, miss" string.
+        character(len=:), allocatable, intent(out), optional :: col_name !! parsed column name, if requested.
         character(len=:), allocatable :: nm
 
         call add_col_qc_impl(self, qc_input, nm)
@@ -42,9 +40,9 @@ contains
     !> NB: like add_col_qc it mutates `self` (adds the entry), despite the
     !> get_ name; it is a builder that also returns the name, not a pure query.
     module function parquet_maml_get_col_qc(self, qc_input) result(col_name)
-        class(parquet_maml_file), intent(inout) :: self
-        character(len=*), intent(in) :: qc_input
-        character(len=:), allocatable :: col_name
+        class(parquet_maml_file), intent(inout) :: self !! qc-maml being built; gains one fields: entry.
+        character(len=*), intent(in) :: qc_input !! compact "col, min, max, miss" string.
+        character(len=:), allocatable :: col_name !! parsed column name.
 
         call add_col_qc_impl(self, qc_input, col_name)
     end function parquet_maml_get_col_qc
@@ -54,9 +52,9 @@ contains
     !> name in col_name (an empty string for an empty/all-blank input, which
     !> is a no-op that adds nothing).
     subroutine add_col_qc_impl(self, qc_input, col_name)
-        class(parquet_maml_file), intent(inout) :: self
-        character(len=*), intent(in) :: qc_input
-        character(len=:), allocatable, intent(out) :: col_name
+        class(parquet_maml_file), intent(inout) :: self !! qc-maml being built; gains one fields: entry.
+        character(len=*), intent(in) :: qc_input !! compact "col, min, max, miss" string.
+        character(len=:), allocatable, intent(out) :: col_name !! parsed column name (empty for a no-op input).
         !
         integer :: ntok, i
         character(len=:), allocatable :: name_str, min_str, max_str, miss_str
@@ -140,9 +138,9 @@ contains
         !> Returns field n (1-based) of a comma-separated string, trimmed of
         !> surrounding blanks; an empty string if n is beyond the last field.
         pure function nth_field(s, n) result(field)
-            character(len=*), intent(in) :: s
-            integer, intent(in) :: n
-            character(len=:), allocatable :: field
+            character(len=*), intent(in) :: s !! comma-separated source string.
+            integer, intent(in) :: n !! 1-based field index to extract.
+            character(len=:), allocatable :: field !! trimmed field n, or "" if n is out of range.
             integer :: k, start, cur
 
             start = 1
@@ -170,9 +168,9 @@ contains
         !> present it must point the right way (min: >=/>, max: <=/<) and be
         !> followed by a non-empty value.
         subroutine check_bound(raw, is_min, colname)
-            character(len=*), intent(in) :: raw
-            logical, intent(in) :: is_min
-            character(len=*), intent(in) :: colname
+            character(len=*), intent(in) :: raw !! raw min:/max: text (may be empty, bare, or "op value").
+            logical, intent(in) :: is_min !! .true. when validating min: (accepts >=/>); .false. for max: (<=/<).
+            character(len=*), intent(in) :: colname !! column name, used only in error-stop messages.
             character(len=:), allocatable :: t, rem
             character(len=2) :: op
             logical :: has_op
@@ -218,8 +216,8 @@ contains
 
     !> Case-insensitive lowercase of ASCII letters.
     pure function to_lower(s) result(out)
-        character(len=*), intent(in) :: s
-        character(len=len(s)) :: out
+        character(len=*), intent(in) :: s !! input string.
+        character(len=len(s)) :: out !! s with every ASCII A-Z lowercased; other characters unchanged.
         integer :: i, c
         do i = 1, len(s)
             c = iachar(s(i:i))
@@ -234,9 +232,9 @@ contains
     !> True if any line of self%lines equals `target` after trimming leading
     !> and trailing blanks (used for the fields: header check).
     pure function maml_line_exists(self, target) result(found)
-        type(parquet_maml_file), intent(in) :: self
-        character(len=*), intent(in) :: target
-        logical :: found
+        type(parquet_maml_file), intent(in) :: self !! qc-maml whose self%lines is searched.
+        character(len=*), intent(in) :: target !! line text to look for (matched after trim(adjustl(...))).
+        logical :: found !! .true. if a matching line exists.
         integer :: i
         found = .false.
         if (.not. allocated(self%lines)) return
@@ -253,9 +251,9 @@ contains
     !> field names). Comparison of the name itself is case-sensitive, as
     !> parquet column names are.
     pure function maml_field_name_exists(self, name) result(found)
-        type(parquet_maml_file), intent(in) :: self
-        character(len=*), intent(in) :: name
-        logical :: found
+        type(parquet_maml_file), intent(in) :: self !! qc-maml whose self%lines is searched.
+        character(len=*), intent(in) :: name !! field name to look for (case-sensitive).
+        logical :: found !! .true. if a "- name: <name>" line already exists.
         integer :: i, colon
         character(len=:), allocatable :: t, key, val
         found = .false.
@@ -289,8 +287,8 @@ contains
     !> trailing-blank) part of `s` is stored, but any leading indentation is
     !> preserved.
     subroutine maml_push_line(self, s)
-        type(parquet_maml_file), intent(inout) :: self
-        character(len=*), intent(in) :: s
+        type(parquet_maml_file), intent(inout) :: self !! qc-maml whose self%lines gains one more entry.
+        character(len=*), intent(in) :: s !! line to append (trailing blanks dropped, indentation kept).
         character(len=:), allocatable :: tmp(:)
         integer :: n, newlen, i
 

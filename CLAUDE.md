@@ -8,10 +8,12 @@ Whenever asked to implement a new feature in this repository, always:
    coverage via `test/error_scenarios.f90` + `test/test_errors.f90` +
    `tools/run_error_scenarios.sh` if the feature has failure modes that `error stop`).
 2. Update documentation — see [Documentation structure](#documentation-structure) for what
-   goes where. In brief: user-facing API/behavior/how-to (plus a per-procedure entry in the
-   "parquet module API" reference) go in MANUAL.md; touch README.md only if the landing-page
-   story changes (a new entry in its compact "API overview" index, a new limitation, a setup
-   change); update CONTRIBUTING.md if it affects contributor workflow.
+   goes where. In brief: every new public procedure/type gets its own `!>`/`!!` doc-comment
+   (picked up automatically by the FORD-generated API reference — no hand-maintained table to
+   update); user-facing behavior/how-to goes in the relevant `doc/pages/*.md` guide page; touch
+   README.md only if the landing-page story changes (a new entry in its compact "API overview"
+   index, a new limitation, a setup change); update CONTRIBUTING.md if it affects contributor
+   workflow.
 
 Do this without being asked separately each time — it applies by default to any
 "implement/add feature" request in this repo, not just when explicitly reminded.
@@ -22,85 +24,113 @@ maintained from the first public release (1.0) onward — do **not** add `CHANGE
 
 ## Checking documentation links
 
-After editing headings or `#anchor` links in README.md/MANUAL.md/CONTRIBUTING.md/CHANGELOG.md, run
-`tools/check_doc_anchors.py` to verify every in-page and cross-file anchor link still
+After editing headings or `#anchor` links in README.md/CONTRIBUTING.md/CHANGELOG.md/CLAUDE.md/docs.md,
+run `tools/check_doc_anchors.py` to verify every in-page and cross-file anchor link still
 resolves against GitHub's actual heading-slug rules. It exits nonzero and lists any broken
-link.
+link. Note: it does not currently scan `doc/pages/*.md` — check links into/within those pages
+by hand (or by cross-referencing an existing internal link to the same heading, e.g.
+`doc/pages/reading.md`'s own `#row-filtering-with-parquet_filter` anchor) until that's added.
 
 ## Documentation structure
 
-User- and contributor-facing docs are split across three files — keep new content in the right one:
+User- and contributor-facing docs are split across three layers — keep new content in the right one:
 
 - **README.md** — the lean *landing page*: what the library is, features, one quick example,
   install / prerequisites / environment variables, "important behavior", a compact **API
-  overview** index, limitations, and license/contributing pointers. Keep it short — do **not**
-  let it grow back into a manual; deep-dive and reference material goes in MANUAL.md.
-- **MANUAL.md** — the full *user manual*: reading, writing, the MAML metadata format, worked
-  examples, error handling, thread safety, supported data types, performance, the complete
-  per-procedure **parquet module API** reference, and troubleshooting.
+  overview** index (plain-text procedure/type names, no per-procedure detail), limitations, and
+  license/contributing pointers. Keep it short — do **not** let it grow back into a manual;
+  deep-dive/how-to content goes in `doc/pages/`, and the per-procedure reference is generated
+  by FORD, not hand-written here.
+- **`doc/pages/*.md`** — the full *user guide*, one file per topic (reading, writing, building a
+  schema in code, the MAML metadata format, a combined example, error handling, thread safety,
+  supported data types, performance, troubleshooting, embedding your own MAML schemas), rendered
+  as FORD narrative pages (`doc/pages/index.md` is the landing page for this guide, with an
+  `ordered_subpage:` frontmatter entry + body bullet per page). Never a hand-maintained
+  per-procedure API table here either — link to the generated reference instead.
+- **FORD-generated API reference** — every public procedure/type/module gets its own `!>`
+  (leading) doc-comment plus a trailing `!!` tag on every dummy argument/function result (see
+  the "FORD-generated docs" section below); FORD turns these into the browsable
+  modules/procedures/types reference automatically. This is the *only* place the per-procedure
+  reference lives — there is no hand-written equivalent to keep in sync.
 - **CONTRIBUTING.md** — *contributor-facing*: building/testing this repo, the error-path test
   harness, fixtures, OpenMP testing, MAML regeneration, C++ error conventions, the project
   Conventions section, and "features considered but not implemented".
 
 Working rules:
 
-- A new public procedure gets its full entry in **MANUAL.md**'s "parquet module API" section
-  **and** its name in **README.md**'s "API overview" index; keep the two in sync on any
-  rename/removal.
-- Every section heading must appear in that file's own **Contents** ToC.
-- Moving content between README.md and MANUAL.md turns in-page `#anchor` links into cross-file
-  `MANUAL.md#…` / `README.md#…` links — repoint them, and fix now-stale relative wording
-  ("above", "below", "this README"). Re-run `tools/check_doc_anchors.py` afterward (it checks
-  cross-file links too).
+- A new public procedure gets a `!>`/`!!` doc-comment (see "FORD-generated docs" below) **and**
+  its name in **README.md**'s "API overview" index; keep the two in sync on any rename/removal.
+- Every section heading must appear in that file's own **Contents** ToC (README.md/CONTRIBUTING.md);
+  `doc/pages/*.md` pages don't need one — FORD generates in-page navigation from headings itself.
+- Moving content between README.md and a `doc/pages/*.md` page turns in-page `#anchor` links
+  into cross-file `doc/pages/<page>.md#…` / `README.md#…` links — repoint them, and fix
+  now-stale relative wording ("above", "below", "this README"). Re-run `tools/check_doc_anchors.py`
+  afterward for the files it covers (see "Checking documentation links" above; it doesn't scan
+  `doc/pages/*.md` itself yet).
 - **Diagrams: plain text, not Mermaid.** This project's GitLab does not reliably render Mermaid
   diagrams, so draw flows as plain-text/ASCII inside a normal code fence (renders identically
-  everywhere) — see the MAML→header flow in MANUAL.md's "The MAML metadata format".
+  everywhere) — see the MAML→header flow in `doc/pages/maml-format.md`'s "The MAML metadata format".
 - **Badges: static only for now** (license / language / fpm). A GitLab CI pipeline now exists
   (`.gitlab-ci.yml`, running `fpm test` with coverage), but still defer dynamic build/coverage
   badges until the project is public with a stable URL to point them at.
 
-## FORD-generated docs + fpm package-index publication — remaining: doc-comment coverage
+## FORD-generated docs + fpm package-index publication — remaining: publication steps only
 
-Layout, migration, and CI are complete and live. The only remaining active task is the
-doc-comment (`!>`/`!!`) coverage audit in `src/*.f90` — don't start it unless asked.
+Layout, migration, CI, doc-comment coverage, and MANUAL.md retirement are all complete and
+live. What's left is outside-this-repo publication steps (see "Remaining" below) — nothing
+here needs source changes anymore.
 
 **Done:**
 - FORD config lives in `fpm.toml`'s `[extra.ford]` (not a standalone `ford.md`); `docs.md` is
-  `{!README.md!}`; `doc/pages/*.md` holds the migrated user guide (one file per old MANUAL.md
-  section, `doc/pages/index.md` as the landing page, granularity/cross-links already settled);
-  `doc/user.css` fixes a duplicate front-page `<h1>` (FORD's own auto-title plus README's own
-  `# parquet-fortran` heading rendering twice).
+  `{!README.md!}`; `doc/pages/*.md` holds the full user guide (`doc/pages/index.md` as its
+  landing page, granularity/cross-links settled); `doc/user.css` fixes a duplicate front-page
+  `<h1>` (FORD's own auto-title plus README's own `# parquet-fortran` heading rendering twice).
 - Two working CI paths: `.github/workflows/docs.yml` (GitHub Actions → GitHub Pages, ready but
   waiting on the GitHub mirror — see below) and `.gitlab-ci.yml`'s `readthedocs` job (GitLab CI
   → gitlab.4most.eu's readthedocs-style docserver at `escience.aip.de/readthedocs/webhooks/upload`
   using the instance-provided `$DOCSERVER_TOKEN`; **confirmed working end-to-end** by the user).
   GitLab Pages is not available on gitlab.4most.eu and won't be — this docserver replaces it.
-- README.md has zero remaining references to MANUAL.md (rewritten to link into `doc/pages/`
-  instead); the "parquet module API" category links there were de-linked to plain text, since
-  that whole section was never migrated (superseded by FORD generation once coverage exists).
+- **Doc-comment coverage is complete across all of `src/*.f90`** (every module, type, public and
+  private procedure, dummy argument/function result, and type-bound procedure binding carries a
+  `!>`/`!!` doc-comment) and **validated end-to-end with `ford docs.md`** (clean run besides the
+  expected "Graphviz not installed" environment warning — install `graphviz` locally to also get
+  call graphs, not required). Two durable conventions this pass established, still apply to any
+  new code:
+  - **Every dummy argument and function result gets its own trailing `!!` tag**, not just a
+    procedure-level `!>` prose block above the signature (e.g.
+    `character(len=*), intent(in) :: key !! metadata key to look up.`). This applies wherever
+    the argument list is actually written out: the canonical `module subroutine`/`module
+    function` spec in `parquet.f90`, and also any submodule body that *restates* the full
+    interface (`module subroutine name(args)` with the arguments redeclared, the pattern
+    `parquet_maml_base_add_col_qc.f90` and `parquet_metadata_sections.f90`'s
+    `parquet_validate_maml_sections` use) — only the abbreviated `module procedure name ...
+    end procedure name` form (no restated arguments) is exempt, since there's nothing to tag.
+    **`!<` is not a FORD marker at all** (that's Doxygen) — the trailing/postdoc marker is
+    always `!!`. Also watch for a doc-comment's very first word being a bare `word:` (e.g. a
+    line starting "qc: min: ...") — FORD parses that as an attempted metadata key, either
+    warning (unrecognized key) or, worse, *silently* consuming the line if it happens to match
+    a real FORD key (`date:`, `author:`, `version:`, `summary:`, ...); reword so the line
+    doesn't open with a bare `word:`.
+  - **Every type-bound procedure binding** (`procedure ::`, `generic ::`, `final ::` inside a
+    type's `contains` block) needs its own short trailing `!!` description too — this is
+    separate from documenting the procedure it binds to, and easy to forget since the bound
+    procedure's own doc feels like it "covers" the binding. One line each is enough, e.g.
+    `procedure :: add => parquet_filter_add !! Appends one AND-combined rule clause.`.
+- `MANUAL.md` has been deleted; every cross-reference to it (README.md, CONTRIBUTING.md, this
+  file) now points into the equivalent `doc/pages/*.md` page or the FORD-generated reference.
 - Target for publication is the fortran-lang.org **package index** (PR to
   `fortran-lang/fortran-lang.org` per `PACKAGES.md`), not the separate `fpm publish` registry
   (still in playground/testing status — skipped deliberately). Publishing repo is a GitHub
   mirror at `github.com/etempel/parquet-fortran`, synced manually by the user (no automation).
 
-**Remaining:**
-1. **Doc-comment coverage (`src/*.f90`) — the only step needing source changes.** Audit which
-   public procedures/types/modules still lack a `!>`/`!!` block (existing ones already use
-   correct predoc `!>` placement, no marker migration needed); FORD only documents what's
-   annotated, and already resolves this project's `submodule` blocks back to their
-   parent-module interfaces automatically, so submodule files don't need their own comments.
-2. Once (1) is done, validate with `ford docs.md` (FORD is installed locally at
-   `~/.local/bin/ford`, separate from the `pyastro` venv's `python3`).
-3. Once (1)+(2) look good and the FORD site is verified live on the GitHub mirror: **ask for
-   explicit confirmation before deleting MANUAL.md**, then rewrite this file's "Documentation
-   structure" section (still describes the old README/MANUAL/CONTRIBUTING three-way split) and
-   fix any remaining cross-references to it.
-4. Optional polish, independent of 1–3: a `[[entity_name]]` auto-link pass over
-   `doc/pages/*.md`'s inline procedure-name mentions (plain backtick spans today); a
-   favicon/logo for `doc/media/` (exists, currently empty besides a `.gitkeep`).
-5. Outside this repo, user's own manual steps: create/push to the GitHub mirror, then enable
-   GitHub Pages there (Settings → Pages → source "GitHub Actions").
-6. Final step, only after everything above: the `fortran-lang/fortran-lang.org` PACKAGES.md PR.
+**Remaining (all outside this repo / user's own manual steps):**
+1. Optional polish, no urgency: a `[[entity_name]]` auto-link pass over `doc/pages/*.md`'s
+   inline procedure-name mentions (plain backtick spans today); a favicon/logo for `doc/media/`
+   (exists, currently empty besides a `.gitkeep`); extending `tools/check_doc_anchors.py` to
+   also scan `doc/pages/*.md` (not covered today — see "Checking documentation links" above).
+2. Create/push to the GitHub mirror, then enable GitHub Pages there (Settings → Pages → source
+   "GitHub Actions").
+3. Final step, only after (2): the `fortran-lang/fortran-lang.org` PACKAGES.md PR.
 
 **Gotchas if this config is touched again:**
 - `md_extensions = ["markdown.extensions.toc"]` in `[extra.ford]` is **load-bearing** — without

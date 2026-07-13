@@ -1,7 +1,10 @@
 !===========================================
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
 !===========================================
-!
+!> Bodies of the read-path module procedures declared in parquet.f90's
+!> interface block (parquet_read_column's specifics, parquet_open_reader,
+!> parquet_get_metadata's specifics, ...), plus private helpers for row
+!> filtering, qc: enforcement on read, and validity-buffer plumbing.
 submodule (parquet) parquet_read
 contains
 
@@ -10,10 +13,10 @@ contains
     !> is_valid present); otherwise valid_ptr stays c_null_ptr so the C++ side
     !> keeps its default strict (error-on-null) behavior.
     subroutine make_valid_buf(want_report, n, valid_buf, valid_ptr)
-        logical, intent(in) :: want_report
-        integer, intent(in) :: n
-        integer(c_int8_t), allocatable, target, intent(out) :: valid_buf(:)
-        type(c_ptr), intent(out) :: valid_ptr
+        logical, intent(in) :: want_report !! .true. if null_value and/or is_valid was given by the caller.
+        integer, intent(in) :: n !! number of elements to allocate.
+        integer(c_int8_t), allocatable, target, intent(out) :: valid_buf(:) !! int8 validity buffer backing valid_ptr.
+        type(c_ptr), intent(out) :: valid_ptr !! c_loc(valid_buf), or c_null_ptr if want_report is .false.
 
         if (want_report) then
             allocate(valid_buf(n))
@@ -30,8 +33,8 @@ contains
     !> unopened reader previously crashed with an unhelpful SIGSEGV instead of
     !> a clean, diagnosable error.
     subroutine check_reader_open(reader, context)
-        type(parquet_reader), intent(in) :: reader
-        character(len=*), intent(in) :: context
+        type(parquet_reader), intent(in) :: reader !! reader to check.
+        character(len=*), intent(in) :: context !! calling procedure's name, used in the error-stop message.
         if (.not. c_associated(reader%handle)) then
             error stop trim(context) // ": reader has not been opened (call parquet_open_reader first)"
         end if
@@ -45,8 +48,8 @@ contains
     !> parquet file failed, without needing that file to be threaded through
     !> every intermediate call.
     function reader_filename_suffix(reader) result(suffix)
-        type(parquet_reader), intent(in) :: reader
-        character(len=:), allocatable :: suffix
+        type(parquet_reader), intent(in) :: reader !! reader whose filename is reported.
+        character(len=:), allocatable :: suffix !! " (file: X)"-style suffix, or "".
 
         suffix = ""
         if (allocated(reader%filename)) then
@@ -64,8 +67,9 @@ contains
     !> reason). Reuses parquet_reader_has_column, the same non-throwing
     !> schema lookup parquet_prefetch_columns uses.
     subroutine check_column_exists(reader, name, context)
-        type(parquet_reader), intent(in) :: reader
-        character(len=*), intent(in) :: name, context
+        type(parquet_reader), intent(in) :: reader !! open reader to check against.
+        character(len=*), intent(in) :: name !! column name to look up.
+        character(len=*), intent(in) :: context !! calling procedure's name, used in the error-stop message.
         if (parquet_reader_has_column(reader%handle, trim(name)//char(0)) == 0) then
             error stop trim(context) // ": column not found in parquet file: " // trim(name) // reader_filename_suffix(reader)
         end if
@@ -79,9 +83,13 @@ contains
     !> parser: exactly one clause per rule, no AND/OR/parens inside the string
     !> itself -- see the parquet_filter type's own doc comment.
     subroutine parquet_tokenize_filter_rule(rule, name, op, value, is_string, ok, errmsg)
-        character(len=*), intent(in) :: rule
-        character(len=:), allocatable, intent(out) :: name, op, value, errmsg
-        logical, intent(out) :: is_string, ok
+        character(len=*), intent(in) :: rule !! raw "<column> <op> [value]" rule text.
+        character(len=:), allocatable, intent(out) :: name !! parsed column name.
+        character(len=:), allocatable, intent(out) :: op !! parsed operator.
+        character(len=:), allocatable, intent(out) :: value !! parsed value (unquoted); "" if the operator takes none.
+        character(len=:), allocatable, intent(out) :: errmsg !! parse-failure message; "" if ok is .true.
+        logical, intent(out) :: is_string !! .true. if value was double-quoted in the source rule.
+        logical, intent(out) :: ok !! .true. if rule parsed successfully.
         character(len=:), allocatable :: t, rest
         integer :: p
 
@@ -153,8 +161,8 @@ contains
     !> (see parquet_prefetch_columns) -- shared here since parquet_apply_filter
     !> needs it for three separate arrays (names/ops/values).
     subroutine pack_fixed_width_strings(strs, packed)
-        character(len=*), intent(in) :: strs(:)
-        character(kind=c_char), allocatable, intent(out) :: packed(:)
+        character(len=*), intent(in) :: strs(:) !! fixed-width strings to pack.
+        character(kind=c_char), allocatable, intent(out) :: packed(:) !! flattened "n fixed-width items back to back" buffer.
         integer :: i, j, k, item_len, n
 
         item_len = len(strs)
@@ -178,9 +186,9 @@ contains
     !> excluded by parquet_parse_qc_maml, so every entry in `rules` here
     !> really does need to reach parquet_reader_set_qc.
     subroutine parquet_apply_qc(reader, maml, qc_soft)
-        type(parquet_reader), intent(inout) :: reader
-        type(parquet_maml_file), intent(in) :: maml
-        logical, intent(in) :: qc_soft
+        type(parquet_reader), intent(inout) :: reader !! open reader gaining qc: enforcement.
+        type(parquet_maml_file), intent(in) :: maml !! schema/qc-maml whose qc: rules are applied.
+        logical, intent(in) :: qc_soft !! .true. warns on a qc violation instead of error-stopping.
         type(parquet_qc_rule), allocatable :: rules(:)
         character(len=64), allocatable :: names(:), min_ops(:), max_ops(:)
         character(len=256), allocatable :: min_texts(:), max_texts(:)
@@ -243,8 +251,8 @@ contains
     !> a longer column name. Duplicate columns (same column in two clauses) are
     !> dropped with a delimiter-guarded membership test.
     subroutine prefetch_filter_columns(reader, filter)
-        type(parquet_reader), intent(inout) :: reader
-        type(parquet_filter), intent(in) :: filter
+        type(parquet_reader), intent(inout) :: reader !! open reader whose filter columns are warmed.
+        type(parquet_filter), intent(in) :: filter !! filter whose distinct column names are prefetched.
         character(len=:), allocatable :: name, op, value, errmsg, list
         logical :: is_string, ok
         integer :: i
@@ -276,8 +284,8 @@ contains
     !> filtered row set (see parquet_reader_set_filter in parquet_wrapper.cpp
     !> for the actual validation/masking).
     subroutine parquet_apply_filter(reader, filter)
-        type(parquet_reader), intent(inout) :: reader
-        type(parquet_filter), intent(in) :: filter
+        type(parquet_reader), intent(inout) :: reader !! open reader the filter is applied to.
+        type(parquet_filter), intent(in) :: filter !! filter whose rules are tokenized, validated, and applied.
         character(len=64), allocatable :: names(:)
         character(len=16), allocatable :: ops(:)
         character(len=512), allocatable :: values(:)
@@ -328,7 +336,7 @@ contains
     !> friends in parquet_bindings.f90/parquet_wrapper.cpp; `index` there is
     !> 0-based.
     subroutine populate_reader_metadata(reader)
-        type(parquet_reader), intent(inout) :: reader
+        type(parquet_reader), intent(inout) :: reader !! open reader whose %metadata is populated.
         integer(c_long_long) :: count, klen, vlen, i
         character(len=:), allocatable :: kbuf, vbuf
 
@@ -525,8 +533,8 @@ contains
     !> differs from nrows64 (the post-filter count), so that case names the
     !> unfiltered total too, rather than just repeating "zero" twice.
     subroutine check_nrows_positive(reader, nrows64)
-        type(parquet_reader), intent(in) :: reader
-        integer(int64), intent(in) :: nrows64
+        type(parquet_reader), intent(in) :: reader !! open reader; named in the error-stop message.
+        integer(int64), intent(in) :: nrows64 !! post-filter row count; error stops here since it is <= 0.
         integer(int64) :: total_nrows
         character(len=32) :: buf
 

@@ -3,44 +3,53 @@
 ! Instead, edit the MAML files under schemas/ and run generate_parquet_maml.sh to regenerate this file.
 ! Generator script: parquet-fortran/tools/generate_parquet_maml.sh
 !===========================================
-!
+!> Base-library MAML fixtures: embeds every .maml file under schemas/ bundled
+!> with this library as a compiled-in string array, addressable by filename via
+!> get_parquet_maml, plus the shared parquet_maml_file type and its
+!> add_col_qc/get_col_qc qc-maml builders.
 module parquet_maml_base
     implicit none
     private
 
+    !> One schema field the base MAML declares but a user-supplied MAML omits;
+    !> populated by parquet_validate_user_maml, one entry per missing field.
     type, public :: parquet_maml_missing_column
-        character(len=:), allocatable :: name      ! The name of the field [required].
-        character(len=:), allocatable :: unit      ! The unit of measurement for the field.
-        character(len=:), allocatable :: info      ! A short description of the field.
-        character(len=:), allocatable :: ucd       ! Unified Content Descriptor for IVOA (can have many).
-        character(len=:), allocatable :: data_type ! The data type of the field [required].
-        integer :: array_size = 1 ! Maximum length of character strings.
-        integer :: col_size = 1   ! The number of elements in the vector column.
+        character(len=:), allocatable :: name      !! The name of the field [required].
+        character(len=:), allocatable :: unit      !! The unit of measurement for the field.
+        character(len=:), allocatable :: info      !! A short description of the field.
+        character(len=:), allocatable :: ucd       !! Unified Content Descriptor for IVOA (can have many).
+        character(len=:), allocatable :: data_type !! The data type of the field [required].
+        integer :: array_size = 1 !! Maximum length of character strings.
+        integer :: col_size = 1   !! The number of elements in the vector column.
     end type parquet_maml_missing_column
 
-    ! One col_map: entry: `- <internal_name>: <output_name>`, i.e. the field
-    ! declared as `output_name` in this MAML fields: actually corresponds to
-    ! the internal/canonical column named `internal_name`.
+    !> One col_map: entry: `- <internal_name>: <output_name>`, i.e. the field
+    !> declared as `output_name` in this MAML fields: actually corresponds to
+    !> the internal/canonical column named `internal_name`.
     type, public :: parquet_maml_col_map_entry
-        character(len=:), allocatable :: internal_name
-        character(len=:), allocatable :: output_name
+        character(len=:), allocatable :: internal_name !! Canonical (internal) column name.
+        character(len=:), allocatable :: output_name   !! Renamed name as declared in fields:.
     end type parquet_maml_col_map_entry
 
+    !> One embedded or user-supplied MAML file: its raw source lines plus, once
+    !> parsed/validated, the columns missing relative to the base schema and any
+    !> col_map: renames it declares. add_col_qc/get_col_qc build a qc-maml
+    !> incrementally (see parquet_maml_base_add_col_qc.f90).
     type, public :: parquet_maml_file
-        logical :: user_maml = .false. !< true if this is a user defined MAML file
-        character(len=:), allocatable :: name
-        character(len=:), allocatable :: lines(:)
-        ! columns present in the base MAML but missing from this (user) MAML;
-        ! populated by parquet_validate_user_maml, consumed by parquet_read_maml
+        logical :: user_maml = .false. !! true if this is a user defined MAML file
+        character(len=:), allocatable :: name !! This MAML file name (embedded fixture name or path).
+        character(len=:), allocatable :: lines(:) !! Raw MAML source, one array element per line.
+        !> Columns present in the base MAML but missing from this (user) MAML;
+        !> populated by parquet_validate_user_maml, consumed by parquet_read_maml.
         type(parquet_maml_missing_column), allocatable :: missing_columns(:)
-        ! parsed col_map: section (see parquet_maml_col_map_entry): exposes the
-        ! renames this MAML declares, for inspection; populated by
-        ! parquet_validate_user_maml. Renames are applied automatically whenever
-        ! this MAML lines are parsed, independent of whether this is set.
+        !> Parsed col_map: section (see parquet_maml_col_map_entry): exposes the
+        !> renames this MAML declares, for inspection; populated by
+        !> parquet_validate_user_maml. Renames are applied automatically whenever
+        !> this MAML lines are parsed, independent of whether this is set.
         type(parquet_maml_col_map_entry), allocatable :: col_map(:)
     contains
-        procedure :: add_col_qc => parquet_maml_add_col_qc
-        procedure :: get_col_qc => parquet_maml_get_col_qc
+        procedure :: add_col_qc => parquet_maml_add_col_qc !! Appends one qc: field entry.
+        procedure :: get_col_qc => parquet_maml_get_col_qc !! Function form; returns the parsed name.
     end type parquet_maml_file
 
     interface
@@ -49,18 +58,18 @@ module parquet_maml_base
         !> parsed column name. Implemented in the submodule
         !> src/parquet_maml_base_add_col_qc.f90.
         module subroutine parquet_maml_add_col_qc(self, qc_input, col_name)
-            class(parquet_maml_file), intent(inout) :: self
-            character(len=*), intent(in) :: qc_input
-            character(len=:), allocatable, intent(out), optional :: col_name
+            class(parquet_maml_file), intent(inout) :: self !! qc-maml being built; gains a fields: entry.
+            character(len=*), intent(in) :: qc_input !! compact "col, min, max, miss" string.
+            character(len=:), allocatable, intent(out), optional :: col_name !! parsed column name.
         end subroutine parquet_maml_add_col_qc
         !> Function form of add_col_qc: appends the same qc: field entry and
         !> returns the parsed column name as the result, so it may be assigned
         !> back into the argument variable (col = maml%get_col_qc(col)). NB it
         !> mutates self (adds the entry) despite the get_ name.
         module function parquet_maml_get_col_qc(self, qc_input) result(col_name)
-            class(parquet_maml_file), intent(inout) :: self
-            character(len=*), intent(in) :: qc_input
-            character(len=:), allocatable :: col_name
+            class(parquet_maml_file), intent(inout) :: self !! qc-maml being built; gains a fields: entry.
+            character(len=*), intent(in) :: qc_input !! compact "col, min, max, miss" string.
+            character(len=:), allocatable :: col_name !! parsed column name.
         end function parquet_maml_get_col_qc
     end interface
 
@@ -71,9 +80,12 @@ module parquet_maml_base
 
 contains
 
+    !> Returns the named embedded .maml fixture from schemas/ as a raw parquet_maml_file
+    !> (unparsed lines only); error stops on an unknown name. Names are matched
+    !> both with and without the .maml extension.
     function get_parquet_maml(name) result(maml)
-        character(len=*), intent(in) :: name
-        type(parquet_maml_file) :: maml
+        character(len=*), intent(in) :: name !! embedded fixture name, with or without .maml.
+        type(parquet_maml_file) :: maml !! the matching MAML, unparsed (raw lines only).
 
         select case (trim(name))
         case ("maml_example.maml")
@@ -93,8 +105,9 @@ contains
         end select
     end function get_parquet_maml
 
+    !> Returns the embedded maml_example.maml MAML fixture, unparsed (raw lines only).
     function parquet_maml_maml_example() result(maml)
-        type(parquet_maml_file) :: maml
+        type(parquet_maml_file) :: maml !! the maml_example.maml MAML, unparsed.
 
         maml%name = "maml_example.maml"
         allocate(character(len=104) :: maml%lines(91))
@@ -192,8 +205,9 @@ contains
         maml%lines(90) = "  data_type: boolean"
         maml%lines(91) = "  col_size: 6"
     end function parquet_maml_maml_example
+    !> Returns the embedded maml_example2.maml MAML fixture, unparsed (raw lines only).
     function parquet_maml_maml_example2() result(maml)
-        type(parquet_maml_file) :: maml
+        type(parquet_maml_file) :: maml !! the maml_example2.maml MAML, unparsed.
 
         maml%name = "maml_example2.maml"
         allocate(character(len=104) :: maml%lines(83))
@@ -283,8 +297,9 @@ contains
         maml%lines(82) = "    max: 90"
         maml%lines(83) = "    miss: 'Null'"
     end function parquet_maml_maml_example2
+    !> Returns the embedded maml_example3.maml MAML fixture, unparsed (raw lines only).
     function parquet_maml_maml_example3() result(maml)
-        type(parquet_maml_file) :: maml
+        type(parquet_maml_file) :: maml !! the maml_example3.maml MAML, unparsed.
 
         maml%name = "maml_example3.maml"
         allocate(character(len=53) :: maml%lines(48))

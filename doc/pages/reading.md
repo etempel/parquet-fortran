@@ -91,6 +91,7 @@ call parquet_read_column(reader, "id", id)
 `parquet_close_reader(reader, print_stat=.true.)` prints a debug/diagnostic summary of the reader's activity to stdout, right before actually closing it. `print_stat` is optional and defaults to `.false.` (no output).
 
 The summary has two parts:
+
 - Table-level: the filename, the total number of columns in the file, how many of those are actually shown below (see below), and the total row count.
 - One row per column that was either prefetched (`parquet_prefetch_columns`) or actually read (`parquet_read_column`/`parquet_read_array_row_mode`/`parquet_read_array_element_mode`) at some point during the reader's lifetime — a column never touched at all is left out of the list entirely, rather than decoding it just to fill in a report:
 

@@ -29,7 +29,7 @@ Three project conventions worth knowing before contributing (all are applied in 
 
 **Line length.** Every line in `src/*.f90` and `test/*.f90` — code and comments alike, including trailing end-of-line comments — must stay at or under 132 columns, the standard Fortran free-form limit. Wrap long expressions/strings with `&` continuations and long comments across multiple `!`-prefixed lines rather than letting a line run past 132 columns; don't reach for a compiler flag to paper over it (see `.gitlab-ci.yml`'s `FPM_FFLAGS`, which no longer passes `-ffree-line-length-none`).
 
-**New features need tests and docs.** A new feature should land together with (1) unit-test coverage in the relevant `test/*.f90` suite — plus error-path coverage via `test/error_scenarios.f90` + `test/test_errors.f90` + `tools/run_error_scenarios.sh` if it has failure modes that `error stop` — and (2) documentation updates: the [README](README.md) / [user manual](MANUAL.md) for any public API or behavior, and this file if it affects contributor workflow. (`CHANGELOG.md` updates are paused pre-1.0 — see CLAUDE.md.)
+**New features need tests and docs.** A new feature should land together with (1) unit-test coverage in the relevant `test/*.f90` suite — plus error-path coverage via `test/error_scenarios.f90` + `test/test_errors.f90` + `tools/run_error_scenarios.sh` if it has failure modes that `error stop` — and (2) documentation updates: a `!>`/`!!` doc-comment on the new public API (picked up automatically by the [FORD-generated reference](https://www.4most.eu/readthedocs/etempel/parquet-fortran/main)), the relevant [user guide page](doc/pages/index.md) for any new behavior/how-to, the [README](README.md) if the landing-page story changes, and this file if it affects contributor workflow. (`CHANGELOG.md` updates are paused pre-1.0 — see CLAUDE.md.)
 
 ## Building and testing this repository
 
@@ -55,7 +55,7 @@ The executable is placed in the `my_path/bin` directory. It only prints the parq
 
 ### Running the error-path tests
 
-Most of this library's failure modes (invalid MAML, unknown columns, type mismatches, etc.) are reported via Fortran's `error stop`, which aborts the whole process — see [MANUAL.md's Error handling section](MANUAL.md#error-handling). Since test-drive assertions can't survive an `error stop` in the same process, these paths are exercised out-of-process by a small helper program, `test/error_scenarios.f90`, which is built as its own `fpm` test target named `error_scenarios`.
+Most of this library's failure modes (invalid MAML, unknown columns, type mismatches, etc.) are reported via Fortran's `error stop`, which aborts the whole process — see the [Error handling guide](doc/pages/error-handling.md). Since test-drive assertions can't survive an `error stop` in the same process, these paths are exercised out-of-process by a small helper program, `test/error_scenarios.f90`, which is built as its own `fpm` test target named `error_scenarios`.
 
 `error_scenarios` takes a single scenario name as a command-line argument and deliberately triggers the corresponding failure:
 
@@ -119,7 +119,7 @@ export FPM_FFLAGS="-fopenmp"
 fpm test
 ```
 
-The OpenMP flag is compiler-dependent (see [README's Thread safety section](MANUAL.md#thread-safety) for the per-compiler flags), so it can't be hardcoded in `fpm.toml` and must come from `FPM_FFLAGS` as shown. The two concurrency error-scenario tests are **self-adapting**: they check `omp_get_max_threads()` and, when it's `1` (no OpenMP flag, or `OMP_NUM_THREADS=1`), the shared-reader/writer race cannot occur, so they skip and pass trivially. So plain `fpm test` (no `FPM_FFLAGS`) is still green — it just doesn't meaningfully exercise these specific concurrency checks; set `FPM_FFLAGS="-fopenmp"` to actually verify the guard fires.
+The OpenMP flag is compiler-dependent (see the [Thread safety guide](doc/pages/thread-safety.md) for the per-compiler flags), so it can't be hardcoded in `fpm.toml` and must come from `FPM_FFLAGS` as shown. The two concurrency error-scenario tests are **self-adapting**: they check `omp_get_max_threads()` and, when it's `1` (no OpenMP flag, or `OMP_NUM_THREADS=1`), the shared-reader/writer race cannot occur, so they skip and pass trivially. So plain `fpm test` (no `FPM_FFLAGS`) is still green — it just doesn't meaningfully exercise these specific concurrency checks; set `FPM_FFLAGS="-fopenmp"` to actually verify the guard fires.
 
 ### Continuous integration (GitLab CI)
 
@@ -129,7 +129,7 @@ A few choices in that file are load-bearing — each one cost a debugging round 
 
 - **Base image `ubuntu:24.04`** (pinned with `image:`, since the runner's own default image is older). 24.04 is the oldest Ubuntu that satisfies *every* toolchain requirement at once: gfortran 13 (gfortran ≤ 11 miscompiles the optional allocatable-character argument in `schema%add_col_qc` — see [README's Prerequisites](README.md#prerequisites)), a g++ new enough for C++20 / `std::span`, `pipx` in the repos (used to install `fpm`), and current Arrow apt packages. Its default `gcov` also matches its default compiler, so `gcovr` needs no `--gcov-executable` override.
 - **`git lfs pull`** before running tests. The `test/fixtures/*.parquet` files are Git-LFS-tracked (see `.gitattributes`); without pulling them the reader tests read LFS *pointer* files and fail. `git lfs install --skip-repo` sets up only the global filter config (CI never pushes, so the repo-local hooks are deliberately skipped — installing them fails if the checkout already has one).
-- **`libarrow-compute-dev`** installed alongside `libarrow-dev` / `libparquet-dev`: Arrow ships its compute kernels in a separate package, and `fpm.toml` links `arrow_compute` (see [MANUAL's Troubleshooting](MANUAL.md#troubleshooting)). Omitting it fails the C++ compile on `arrow/compute/*.h`.
+- **`libarrow-compute-dev`** installed alongside `libarrow-dev` / `libparquet-dev`: Arrow ships its compute kernels in a separate package, and `fpm.toml` links `arrow_compute` (see the [Troubleshooting guide](doc/pages/troubleshooting.md)). Omitting it fails the C++ compile on `arrow/compute/*.h`.
 - **`FPM_FFLAGS="--coverage -fopenmp"`.** Source is kept within the standard 132-column free-form limit (see [Conventions](#conventions)), so no `-ffree-line-length-none` override is needed. Setting `FPM_FFLAGS` still *replaces* fpm's default profile flags, so the coverage/OpenMP flags this job needs must be passed explicitly here regardless. `FPM_CXXFLAGS="-std=c++20"` and `FPM_LDFLAGS="-lstdc++"` follow [README's Environment variables](README.md#environment-variables).
 
 Coverage is computed by `gcovr` over `src/` and surfaced through GitLab's `coverage:` regex. For the same line-coverage report locally, `tools/coverage.sh` does the equivalent — it builds with `--coverage`, runs the suite plus every error scenario, and prints per-file and total `src/` coverage (resolving the `gcov` that matches your `gfortran` automatically).
@@ -172,15 +172,15 @@ tools/generate_parquet_maml.sh base   # (re)generates src/parquet_maml_base.f90
 
 `base` mode generates `parquet_maml_base`, which additionally defines the `parquet_maml_file`/`parquet_maml_missing_column` derived types used throughout the library. Run this whenever `schemas/*.maml` changes, or whenever those types themselves change.
 
-The script also accepts `--dir=<name>` (or `--dir <name>`) to scan a different directory than the default `schemas/` — this project's own regeneration above never needs it (its fixtures live under `schemas/`), but it exists so downstream projects following ["Embedding your own MAML schemas"](MANUAL.md#embedding-your-own-maml-schemas-in-your-own-project) can match whatever convention their own project already uses.
+The script also accepts `--dir=<name>` (or `--dir <name>`) to scan a different directory than the default `schemas/` — this project's own regeneration above never needs it (its fixtures live under `schemas/`), but it exists so downstream projects following ["Embedding your own MAML schemas"](doc/pages/embedding-maml-schemas.md) can match whatever convention their own project already uses.
 
 The generated file carries a header stating it is auto-generated — do not hand-edit `src/parquet_maml_base.f90`; instead edit the source `.maml` files under `schemas/` and re-run the script.
 
-(The same script's other, no-argument mode is a separate, consumer-facing feature for embedding schemas in a downstream project — see [README.md's "Embedding your own MAML schemas in your own project"](MANUAL.md#embedding-your-own-maml-schemas-in-your-own-project).)
+(The same script's other, no-argument mode is a separate, consumer-facing feature for embedding schemas in a downstream project — see ["Embedding your own MAML schemas in your own project"](doc/pages/embedding-maml-schemas.md).)
 
 ## Extending the MAML schema
 
-`parquet_validate_maml` checks that section names and known sub-keys are registered in [src/parquet_metadata.f90](src/parquet_metadata.f90) (`allowed_maml_sections`). This checks key presence, not semantic value meaning. To allow a new top-level section or map-list sub-key, add it there. Validation is strict for the known schema (`fields`, `keyarray`, `DOIs`, etc.), permissive for `extra:`, and intentionally shallow beyond the explicitly registered nested blocks — if you extend MAML structure in this library, update `allowed_maml_sections` and (where needed) `allowed_maml_nested_sections` in [src/parquet_metadata.f90](src/parquet_metadata.f90).
+`parquet_validate_maml` checks that section names and known sub-keys are registered in [src/parquet_metadata_sections.f90](src/parquet_metadata_sections.f90) (`allowed_maml_sections`). This checks key presence, not semantic value meaning. To allow a new top-level section or map-list sub-key, add it there. Validation is strict for the known schema (`fields`, `keyarray`, `DOIs`, etc.), permissive for `extra:`, and intentionally shallow beyond the explicitly registered nested blocks — if you extend MAML structure in this library, update `allowed_maml_sections` and (where needed) `allowed_maml_nested_sections` in [src/parquet_metadata_sections.f90](src/parquet_metadata_sections.f90).
 
 ## Error-handling conventions in `parquet_wrapper.cpp`
 
@@ -192,12 +192,12 @@ These were looked at (during an audit comparing this library against Arrow C++'s
 
 **Plausible future candidates, if needed:**
 - `date`/`timestamp` scalar types — Arrow supports these natively; would likely slot into the existing six-type scheme as new entries.
-- Streaming/incremental writes — `parquet_write_column` currently buffers a full column in memory before `parquet_close_writer` writes anything (see [README.md's Performance and memory section](MANUAL.md#performance-and-memory)); Arrow's `parquet::arrow::FileWriter` supports writing row batches incrementally, which would resolve this but requires reworking the writer's internal buffering model.
+- Streaming/incremental writes — `parquet_write_column` currently buffers a full column in memory before `parquet_close_writer` writes anything (see the [Performance and memory guide](doc/pages/performance.md)); Arrow's `parquet::arrow::FileWriter` supports writing row batches incrementally, which would resolve this but requires reworking the writer's internal buffering model.
 - Row-group-level partial reads — `parquet::arrow::FileReader::ReadRowGroup` exists and is unused; would be a bounded step toward "read only some rows," short of full predicate pushdown.
 - Per-column writer properties (e.g. `disable_statistics()` for write-heavy/throwaway files, explicit dictionary-encoding toggles) — small, additive, doesn't touch the type system.
 
 **Bigger lifts, worth being cautious about:**
-- Predicate pushdown (statistics-based I/O skipping) — *not to be confused with row filtering, which is already implemented* (`parquet_filter` / `parquet_open_reader(..., filter=)`, see [README.md's Row filtering section](MANUAL.md#row-filtering-with-parquet_filter)). That existing filter is post-decode: it narrows the rows your code sees but still reads and decodes every referenced column in full. Genuine predicate pushdown — using per-row-group statistics (or Arrow's expression/compute-filter machinery) to skip reading matching row groups off disk entirely — is the unimplemented part, and the current "no random-access read" limitation treats it as an intentional non-goal for now.
+- Predicate pushdown (statistics-based I/O skipping) — *not to be confused with row filtering, which is already implemented* (`parquet_filter` / `parquet_open_reader(..., filter=)`, see the [Row filtering section](doc/pages/reading.md#row-filtering-with-parquet_filter)). That existing filter is post-decode: it narrows the rows your code sees but still reads and decodes every referenced column in full. Genuine predicate pushdown — using per-row-group statistics (or Arrow's expression/compute-filter machinery) to skip reading matching row groups off disk entirely — is the unimplemented part, and the current "no random-access read" limitation treats it as an intentional non-goal for now.
 - Nested/struct/map/variable-length-list types — Arrow supports these natively, but they'd break the library's core "flat columns + fixed `col_size` vectors" data model that the whole Fortran-side API is built around; this would be a redesign, not an addition.
 - Additional scalar types (`int8`/`int16`/unsigned integers/`decimal`) — straightforward from Arrow's side, but each new type multiplies the `parquet_write_*`/`parquet_read_*` interface surface (a dedicated subroutine pair per type already exists for each of the six supported types).
 

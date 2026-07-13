@@ -1,7 +1,10 @@
 !===========================================
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
 !===========================================
-!
+!> Bodies of the write-path module procedures declared in parquet.f90's
+!> interface block (parquet_write_column's specifics, parquet_open_writer,
+!> parquet_close_writer, ...), plus private helpers for schema type-widening,
+!> qc: enforcement on write, and the write_maml=.true. sidecar .maml.
 submodule (parquet) parquet_write
 contains
 
@@ -12,7 +15,7 @@ contains
     !> unopened writer previously crashed with an unhelpful SIGSEGV instead of
     !> a clean, diagnosable error.
     subroutine check_writer_open(writer)
-        type(parquet_writer), intent(in) :: writer
+        type(parquet_writer), intent(in) :: writer !! writer to check.
         if (.not. c_associated(writer%handle)) then
             error stop "parquet_write_column: writer has not been opened (call parquet_open_writer first)"
         end if
@@ -23,8 +26,8 @@ contains
     !> to name defensively handles a parquet_column_type built without going
     !> through parquet_read_maml (output_name left unallocated).
     function parquet_column_output_name(col) result(output_name)
-        type(parquet_column_type), intent(in) :: col
-        character(len=:), allocatable :: output_name
+        type(parquet_column_type), intent(in) :: col !! column whose output name is wanted.
+        character(len=:), allocatable :: output_name !! col%output_name if set, else col%name.
 
         output_name = col%name
         if (allocated(col%output_name)) then
@@ -37,9 +40,9 @@ contains
     !> to the C++ append_* calls -- its col_map:-renamed output_name, or
     !> `name` itself if there's no schema (schema-less writer) or no match.
     function parquet_resolve_output_name(writer, name) result(output_name)
-        type(parquet_writer), intent(in) :: writer
-        character(len=*), intent(in) :: name
-        character(len=:), allocatable :: output_name
+        type(parquet_writer), intent(in) :: writer !! open writer.
+        character(len=*), intent(in) :: name !! internal (caller-facing) column name.
+        character(len=:), allocatable :: output_name !! name to actually pass to the C++ append_* calls.
         integer :: idx
 
         idx = parquet_get_enabled_column_index(writer, name)
@@ -98,10 +101,14 @@ contains
         end select
     end procedure parquet_is_type_compatible
 
+    !> The schema-declared data_type for `name` on a schema-enforced writer,
+    !> or "" for a schema-less writer or an undefined column. Used by the
+    !> parquet_append_as_schema_* family to decide whether a write call's own
+    !> values need widening to match the schema's declared type.
     function parquet_get_schema_type(writer, name) result(schema_type)
-        type(parquet_writer), intent(in) :: writer
-        character(len=*), intent(in) :: name
-        character(len=:), allocatable :: schema_type
+        type(parquet_writer), intent(in) :: writer !! writer to check.
+        character(len=*), intent(in) :: name !! column name.
+        character(len=:), allocatable :: schema_type !! schema-declared data_type, or "".
         integer :: idx
 
         schema_type = ""
@@ -111,10 +118,13 @@ contains
         schema_type = trim(writer%all_columns(idx)%data_type)
     end function parquet_get_schema_type
 
+    !> Narrows int64 `src` to int32, error stopping if any value is outside
+    !> int32's representable range. Used when a schema declares a column
+    !> int32 but the caller's parquet_write_column values are int64.
     function parquet_narrow_int64_to_int32(name, src) result(dst)
-        character(len=*), intent(in) :: name
-        integer(int64), intent(in) :: src(:)
-        integer(int32), allocatable :: dst(:)
+        character(len=*), intent(in) :: name !! column name, named only in the error-stop message.
+        integer(int64), intent(in) :: src(:) !! values to narrow.
+        integer(int32), allocatable :: dst(:) !! narrowed values.
         integer :: i
 
         allocate(dst(size(src)))
@@ -126,10 +136,14 @@ contains
         end do
     end function parquet_narrow_int64_to_int32
 
+    !> Converts float64 `src` to int32, error stopping if any value is
+    !> non-integral or outside int32's representable range. Used when a
+    !> schema declares a column int32 but the caller's parquet_write_column
+    !> values are float32/float64.
     function parquet_float64_to_int32(name, src) result(dst)
-        character(len=*), intent(in) :: name
-        real(real64), intent(in) :: src(:)
-        integer(int32), allocatable :: dst(:)
+        character(len=*), intent(in) :: name !! column name, named only in the error-stop message.
+        real(real64), intent(in) :: src(:) !! values to convert.
+        integer(int32), allocatable :: dst(:) !! converted values.
         integer :: i
 
         allocate(dst(size(src)))
@@ -144,10 +158,14 @@ contains
         end do
     end function parquet_float64_to_int32
 
+    !> Converts float64 `src` to int64, error stopping if any value is
+    !> non-integral or outside int64's representable range. Used when a
+    !> schema declares a column int64 but the caller's parquet_write_column
+    !> values are float32/float64.
     function parquet_float64_to_int64(name, src) result(dst)
-        character(len=*), intent(in) :: name
-        real(real64), intent(in) :: src(:)
-        integer(int64), allocatable :: dst(:)
+        character(len=*), intent(in) :: name !! column name, named only in the error-stop message.
+        real(real64), intent(in) :: src(:) !! values to convert.
+        integer(int64), allocatable :: dst(:) !! converted values.
         integer :: i
 
         allocate(dst(size(src)))
@@ -162,12 +180,18 @@ contains
         end do
     end function parquet_float64_to_int64
 
+    !> Appends an int32 column to the C++ writer, widening `values` first if
+    !> the schema declares this column as a wider/different numeric type
+    !> (int64/float32/float64); calls the matching parquet_append_*_column
+    !> C binding either way, so the data actually stored always matches the
+    !> schema's declared type.
     subroutine parquet_append_as_schema_int32(writer, name, values, nrows, asize, valid_ptr)
-        type(parquet_writer), intent(in) :: writer
-        character(len=*), intent(in) :: name
-        integer(int32), intent(in) :: values(:)
-        integer(c_long_long), intent(in) :: nrows, asize
-        type(c_ptr), intent(in) :: valid_ptr
+        type(parquet_writer), intent(in) :: writer !! open writer.
+        character(len=*), intent(in) :: name !! column name.
+        integer(int32), intent(in) :: values(:) !! values as passed to parquet_write_column.
+        integer(c_long_long), intent(in) :: nrows !! row count.
+        integer(c_long_long), intent(in) :: asize !! vector-column element count (1 for a scalar column).
+        type(c_ptr), intent(in) :: valid_ptr !! validity buffer, or c_null_ptr.
         character(len=:), allocatable :: schema_type
         integer(int64), allocatable :: i64values(:)
         real(real32), allocatable :: f32values(:)
@@ -196,12 +220,16 @@ contains
         end select
     end subroutine parquet_append_as_schema_int32
 
+    !> Appends an int64 column to the C++ writer, narrowing/widening `values`
+    !> first if the schema declares this column as a different numeric type
+    !> (int32/float32/float64); see parquet_append_as_schema_int32.
     subroutine parquet_append_as_schema_int64(writer, name, values, nrows, asize, valid_ptr)
-        type(parquet_writer), intent(in) :: writer
-        character(len=*), intent(in) :: name
-        integer(int64), intent(in) :: values(:)
-        integer(c_long_long), intent(in) :: nrows, asize
-        type(c_ptr), intent(in) :: valid_ptr
+        type(parquet_writer), intent(in) :: writer !! open writer.
+        character(len=*), intent(in) :: name !! column name.
+        integer(int64), intent(in) :: values(:) !! values as passed to parquet_write_column.
+        integer(c_long_long), intent(in) :: nrows !! row count.
+        integer(c_long_long), intent(in) :: asize !! vector-column element count (1 for a scalar column).
+        type(c_ptr), intent(in) :: valid_ptr !! validity buffer, or c_null_ptr.
         character(len=:), allocatable :: schema_type
         integer(int32), allocatable :: i32values(:)
         real(real32), allocatable :: f32values(:)
@@ -229,12 +257,16 @@ contains
         end select
     end subroutine parquet_append_as_schema_int64
 
+    !> Appends a float32 column to the C++ writer, converting `values` first
+    !> if the schema declares this column as a different numeric type
+    !> (int32/int64/float64); see parquet_append_as_schema_int32.
     subroutine parquet_append_as_schema_float32(writer, name, values, nrows, asize, valid_ptr)
-        type(parquet_writer), intent(in) :: writer
-        character(len=*), intent(in) :: name
-        real(real32), intent(in) :: values(:)
-        integer(c_long_long), intent(in) :: nrows, asize
-        type(c_ptr), intent(in) :: valid_ptr
+        type(parquet_writer), intent(in) :: writer !! open writer.
+        character(len=*), intent(in) :: name !! column name.
+        real(real32), intent(in) :: values(:) !! values as passed to parquet_write_column.
+        integer(c_long_long), intent(in) :: nrows !! row count.
+        integer(c_long_long), intent(in) :: asize !! vector-column element count (1 for a scalar column).
+        type(c_ptr), intent(in) :: valid_ptr !! validity buffer, or c_null_ptr.
         character(len=:), allocatable :: schema_type
         integer(int32), allocatable :: i32values(:)
         integer(int64), allocatable :: i64values(:)
@@ -261,12 +293,16 @@ contains
         end select
     end subroutine parquet_append_as_schema_float32
 
+    !> Appends a float64 column to the C++ writer, converting `values` first
+    !> if the schema declares this column as a different numeric type
+    !> (int32/int64/float32); see parquet_append_as_schema_int32.
     subroutine parquet_append_as_schema_float64(writer, name, values, nrows, asize, valid_ptr)
-        type(parquet_writer), intent(in) :: writer
-        character(len=*), intent(in) :: name
-        real(real64), intent(in) :: values(:)
-        integer(c_long_long), intent(in) :: nrows, asize
-        type(c_ptr), intent(in) :: valid_ptr
+        type(parquet_writer), intent(in) :: writer !! open writer.
+        character(len=*), intent(in) :: name !! column name.
+        real(real64), intent(in) :: values(:) !! values as passed to parquet_write_column.
+        integer(c_long_long), intent(in) :: nrows !! row count.
+        integer(c_long_long), intent(in) :: asize !! vector-column element count (1 for a scalar column).
+        type(c_ptr), intent(in) :: valid_ptr !! validity buffer, or c_null_ptr.
         character(len=:), allocatable :: schema_type
         integer(int32), allocatable :: i32values(:)
         integer(int64), allocatable :: i64values(:)
@@ -304,8 +340,8 @@ contains
     !> schema-mismatch and completeness errors so they're diagnosable
     !> without needing to know which parquet_open_writer call produced them.
     function writer_context_suffix(writer) result(suffix)
-        type(parquet_writer), intent(in) :: writer
-        character(len=:), allocatable :: suffix
+        type(parquet_writer), intent(in) :: writer !! writer whose filename/maml_name is reported.
+        character(len=:), allocatable :: suffix !! " (file: X, maml: Y)"-style suffix, or "".
         character(len=:), allocatable :: parts
 
         parts = ""
@@ -369,8 +405,8 @@ contains
     !> fine here since it only holds as many entries as columns actually
     !> written (typically a handful to a few dozen), unlike a per-row buffer.
     subroutine parquet_check_and_mark_written_name(writer, name)
-        type(parquet_writer), intent(inout) :: writer
-        character(len=*), intent(in) :: name
+        type(parquet_writer), intent(inout) :: writer !! schema-less writer whose written_names gains one entry.
+        character(len=*), intent(in) :: name !! column name just written.
         character(len=256), allocatable :: tmp(:)
         integer :: n, i
 
@@ -559,8 +595,8 @@ contains
     !> out fields: entirely, since a MAML file with no fields fails
     !> parquet_validate_maml on the next read.
     subroutine parquet_prune_disabled_fields(lines, cinfo)
-        character(len=:), allocatable, intent(inout) :: lines(:)
-        type(parquet_column_info), intent(in) :: cinfo
+        character(len=:), allocatable, intent(inout) :: lines(:) !! working copy of source MAML lines, pruned in place.
+        type(parquet_column_info), intent(in) :: cinfo !! schema whose disabled columns' fields: entries are removed.
         logical, allocatable :: keep(:)
         character(len=:), allocatable :: tline, key, cvalue, field_name
         character(len=:), allocatable :: new_lines(:)
@@ -662,8 +698,8 @@ contains
     !> path with a trailing ".parquet" replaced by ".maml", or ".maml" appended if
     !> there is no ".parquet" suffix.
     subroutine parquet_write_maml_sidecar(parquet_filename, lines)
-        character(len=*), intent(in) :: parquet_filename
-        character(len=*), intent(in) :: lines(:)
+        character(len=*), intent(in) :: parquet_filename !! output .parquet path; sidecar name is derived from this.
+        character(len=*), intent(in) :: lines(:) !! MAML source lines to write verbatim.
         character(len=:), allocatable :: maml_filename
         integer :: unit, i, n
 
@@ -697,9 +733,13 @@ contains
             int(col_size, kind=c_long_long) )
     end procedure parquet_add_column_info
 
+    !> True if `value` satisfies `bound` under the min:/max: operator `op`
+    !> (">=", "<=", ">", "<"); any other `op` is treated as "no constraint"
+    !> (always .true.).
     logical function parquet_qc_numeric_satisfies(value, bound, op) result(ok)
-        real(real64), intent(in) :: value, bound
-        character(len=*), intent(in) :: op
+        real(real64), intent(in) :: value !! value being checked.
+        real(real64), intent(in) :: bound !! declared qc: min:/max: bound.
+        character(len=*), intent(in) :: op !! comparison operator (">=", "<=", ">", "<").
 
         select case (trim(op))
         case (">=")
@@ -715,9 +755,13 @@ contains
         end select
     end function parquet_qc_numeric_satisfies
 
+    !> String form of parquet_qc_numeric_satisfies: compares `value` against
+    !> `bound` lexicographically (Fortran's intrinsic character relational
+    !> operators) under min:/max: operator `op`.
     logical function parquet_qc_string_satisfies(value, bound, op) result(ok)
-        character(len=*), intent(in) :: value, bound
-        character(len=*), intent(in) :: op
+        character(len=*), intent(in) :: value !! value being checked.
+        character(len=*), intent(in) :: bound !! declared qc: min:/max: bound.
+        character(len=*), intent(in) :: op !! comparison operator (">=", "<=", ">", "<").
 
         select case (trim(op))
         case (">=")
@@ -733,9 +777,11 @@ contains
         end select
     end function parquet_qc_string_satisfies
 
+    !> Formats `value` for a qc-violation WARNING message: as a bare integer
+    !> if it's exactly integral and within +/-1e15, else with 7 significant digits.
     function parquet_qc_format_real(value) result(text)
-        real(real64), intent(in) :: value
-        character(len=:), allocatable :: text
+        real(real64), intent(in) :: value !! value to format.
+        character(len=:), allocatable :: text !! formatted, trimmed text.
         character(len=64) :: buf
 
         if (value == anint(value) .and. abs(value) < 1.0e15_real64) then
@@ -746,9 +792,10 @@ contains
         text = trim(adjustl(buf))
     end function parquet_qc_format_real
 
+    !> Formats `value` as a trimmed plain integer for a qc-violation WARNING message.
     function parquet_qc_format_int(value) result(text)
-        integer, intent(in) :: value
-        character(len=:), allocatable :: text
+        integer, intent(in) :: value !! value to format.
+        character(len=:), allocatable :: text !! formatted, trimmed text.
         character(len=32) :: buf
 
         write(buf, '(i0)') value
@@ -765,10 +812,10 @@ contains
     !> regardless. No-op for a schema-less writer, a column without qc:, or
     !> when there are no valid elements to check at all.
     subroutine parquet_check_qc_numeric(writer, name, values64, is_valid_flat)
-        type(parquet_writer), intent(in) :: writer
-        character(len=*), intent(in) :: name
-        real(real64), intent(in) :: values64(:)
-        logical, intent(in) :: is_valid_flat(:)
+        type(parquet_writer), intent(in) :: writer !! open (schema-enforced) writer.
+        character(len=*), intent(in) :: name !! numeric column name.
+        real(real64), intent(in) :: values64(:) !! flattened column values, widened to real64.
+        logical, intent(in) :: is_valid_flat(:) !! flattened validity mask (.true. => checked).
         integer :: idx, i, n_valid, n_violate
         real(real64) :: min_bound, max_bound, data_min, data_max
         logical :: any_valid, have_min_bound, have_max_bound, ok
@@ -834,10 +881,10 @@ contains
     !> compared as literal Fortran character strings (lexicographic, via the
     !> intrinsic relational operators) rather than parsed as numbers.
     subroutine parquet_check_qc_string(writer, name, values, is_valid_flat)
-        type(parquet_writer), intent(in) :: writer
-        character(len=*), intent(in) :: name
-        character(len=*), intent(in) :: values(:)
-        logical, intent(in) :: is_valid_flat(:)
+        type(parquet_writer), intent(in) :: writer !! open (schema-enforced) writer.
+        character(len=*), intent(in) :: name !! string column name.
+        character(len=*), intent(in) :: values(:) !! flattened column values.
+        logical, intent(in) :: is_valid_flat(:) !! flattened validity mask (.true. => checked).
         integer :: idx, i, n_valid, n_violate
         logical :: any_valid, ok
         character(len=:), allocatable :: data_min, data_max, bounds_desc
@@ -896,9 +943,9 @@ contains
     !> (see parquet_parse_protected_cols) and `is_valid_flat` contains any
     !> .false. entry. A no-op for a schema-less writer or an unlisted column.
     subroutine parquet_check_protected(writer, name, is_valid_flat)
-        type(parquet_writer), intent(in) :: writer
-        character(len=*), intent(in) :: name
-        logical, intent(in) :: is_valid_flat(:)
+        type(parquet_writer), intent(in) :: writer !! open (schema-enforced) writer.
+        character(len=*), intent(in) :: name !! column name.
+        logical, intent(in) :: is_valid_flat(:) !! flattened validity mask for this write call.
         integer :: idx
 
         if (.not. writer%is_schema_enforced) return
@@ -917,9 +964,9 @@ contains
     !> which keeps every column non-nullable by default -- exactly today's
     !> behavior.
     subroutine parquet_make_valid_buf_write(is_valid_flat, valid_buf, valid_ptr)
-        logical, intent(in), optional :: is_valid_flat(:)
-        integer(c_int8_t), allocatable, target, intent(out) :: valid_buf(:)
-        type(c_ptr), intent(out) :: valid_ptr
+        logical, intent(in), optional :: is_valid_flat(:) !! flattened validity mask, or absent for a non-nullable write.
+        integer(c_int8_t), allocatable, target, intent(out) :: valid_buf(:) !! int8 validity buffer backing valid_ptr.
+        type(c_ptr), intent(out) :: valid_ptr !! c_loc(valid_buf), or c_null_ptr if is_valid_flat is absent.
         integer :: i
 
         if (present(is_valid_flat)) then

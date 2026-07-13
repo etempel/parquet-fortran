@@ -138,11 +138,13 @@ extern "C"
 	// std::mutex would deadlock a single thread locking it twice.
 	static std::recursive_mutex g_maml_mutex;
 
+	// Acquires g_maml_mutex; see its own comment for why it must be recursive.
 	void parquet_maml_lock()
 	{
 		g_maml_mutex.lock();
 	}
 
+	// Releases the mutex acquired by parquet_maml_lock.
 	void parquet_maml_unlock()
 	{
 		g_maml_mutex.unlock();
@@ -302,11 +304,13 @@ extern "C"
 		std::atomic<bool> busy{false}; // guards against two threads calling into the same reader at once; see ConcurrencyGuard.
 	};
 
+	// Wraps a raw writer handle in a ConcurrencyGuard for the duration of one extern "C" call.
 	static ConcurrencyGuard<ParquetWriterHandle> as_handle(void *handle)
 	{
 		return ConcurrencyGuard<ParquetWriterHandle>(static_cast<ParquetWriterHandle *>(handle), "parquet_writer");
 	}
 
+	// Wraps a raw reader handle in a ConcurrencyGuard for the duration of one extern "C" call.
 	static ConcurrencyGuard<ParquetReaderHandle> as_reader_handle(void *handle)
 	{
 		return ConcurrencyGuard<ParquetReaderHandle>(static_cast<ParquetReaderHandle *>(handle), "parquet_reader");
@@ -328,6 +332,7 @@ extern "C"
 		std::abort();
 	}
 
+	// Returns the schema field index of `name`, or throws if it isn't a column.
 	static int64_t get_column_index(const ParquetReaderHandle *reader_handle, const char *name)
 	{
 		auto idx = reader_handle->schema->GetFieldIndex(name);
@@ -442,6 +447,7 @@ extern "C"
 		return array;
 	}
 
+	// Formats `v` with 6 significant digits for a parquet_reader_print_stat line.
 	static std::string format_stat_double(double v)
 	{
 		char buf[64];
@@ -463,6 +469,7 @@ extern "C"
 		return true;
 	}
 
+	// Strict (whole-string, no trailing junk) floating-point parsing of a raw maml/filter text value.
 	static bool parse_double_strict(const std::string &s, double &out)
 	{
 		if (s.empty()) return false;
@@ -699,6 +706,7 @@ extern "C"
 		run_qc_checks(reader_handle, idx, name, reader_handle->column_cache.at(idx));
 	}
 
+	// Same as mark_read, but also records the declared string item_len (for parquet_reader_print_stat).
 	static void mark_read_string(ParquetReaderHandle *reader_handle, const char *name, int64_t item_len)
 	{
 		auto idx = static_cast<int>(get_column_index(reader_handle, name));
@@ -708,6 +716,7 @@ extern "C"
 		run_qc_checks(reader_handle, idx, name, reader_handle->column_cache.at(idx));
 	}
 
+	// Returns the vector-column element count of a fixed-size-list or list array (0 for a scalar column).
 	static int64_t get_col_size(const std::shared_ptr<arrow::Array> &array)
 	{
 		if (array->type_id() == arrow::Type::FIXED_SIZE_LIST)
@@ -812,6 +821,7 @@ extern "C"
 			" (expected fixed_size_list/list/large_list, got " + array->type()->ToString() + ")");
 	}
 
+	// Copies `src` into `dst` (a fixed-width, space-padded Fortran character buffer of length item_len).
 	static void copy_string_with_padding(char *dst, int64_t item_len, const std::string_view &src)
 	{
 		std::memset(dst, ' ', static_cast<size_t>(item_len));
@@ -822,6 +832,7 @@ extern "C"
 		}
 	}
 
+	// Escapes the 5 reserved XML characters (& < > " ') in `s`, for build_votable_xml.
 	static std::string xml_escape(const std::string &s)
 	{
 		std::string out;
@@ -853,6 +864,7 @@ extern "C"
 		return out;
 	}
 
+	// Returns the current UTC time as an ISO-8601 "YYYY-MM-DDTHH:MM:SS" string.
 	static std::string current_utc_timestamp()
 	{
 		std::time_t now = std::time(nullptr);
@@ -867,6 +879,7 @@ extern "C"
 		return std::string(buffer);
 	}
 
+	// Strips trailing spaces and NUL bytes (Fortran fixed-width buffer padding) from `s`.
 	static std::string trim_right_spaces_and_nuls(const std::string &s)
 	{
 		size_t end = s.size();
@@ -877,6 +890,7 @@ extern "C"
 		return s.substr(0, end);
 	}
 
+	// Builds the VOTable-style XML sidecar/header text describing the table's columns and metadata.
 	static std::string build_votable_xml(const std::string &table_name,
 									const std::vector<ColumnMetadata> &columns,
 									const std::vector<TableMetadataEntry> &table_metadata,
@@ -961,6 +975,7 @@ extern "C"
 		return arrow::field(name, value_type, nullable);
 	}
 
+	// True if any of the first `n` entries of `valid_in` is 0 (a Null); false if valid_in is nullptr.
 	static bool has_any_null(const int8_t *valid_in, int64_t n)
 	{
 		if (valid_in == nullptr) return false;
@@ -971,6 +986,8 @@ extern "C"
 		return false;
 	}
 
+	// Stores `field`/`array` for `name`, at its schema-declared position if the writer has a
+	// schema (error stops on a repeat write), or appended in write order for a schema-less writer.
 	static void append_column(
 		ParquetWriterHandle *writer_handle,
 		const std::string &name,
@@ -1014,6 +1031,9 @@ extern "C"
 		writer_handle->arrays.push_back(array);
 	}
 
+	// Builds the flat key-value file metadata: the VOTable XML sidecar (if any columns are
+	// declared), the DATE/name/version keys, every table_metadata entry, and per-column
+	// unit/description/ucd/datatype keys.
 	static std::shared_ptr<arrow::KeyValueMetadata> build_file_metadata(
 		const std::vector<ColumnMetadata> &column_metadata,
 		const std::vector<TableMetadataEntry> &table_metadata)
@@ -1069,6 +1089,7 @@ extern "C"
 		return std::make_shared<arrow::KeyValueMetadata>(keys, values);
 	}
 
+	// Creates filename and returns an opaque handle to a new parquet writer for it.
 	void *create_parquet_writer(const char *filename)
 	{
 		auto *handle = new ParquetWriterHandle{};
@@ -1098,6 +1119,7 @@ extern "C"
 		throw std::runtime_error("Unknown compression codec: " + compression_name);
 	}
 
+	// Sets compression codec/level, row-group chunk size, and threading on `handle`.
 	void parquet_set_writer_options(void *handle, const char *compression_name, int compression_level, int64_t chunk_size, int use_threads)
 	{
 		auto writer_handle = as_handle(handle);
@@ -1194,6 +1216,7 @@ extern "C"
 		return handle;
 	}
 
+	// Closes `handle`, freeing the underlying reader object.
 	void close_parquet_reader(void *handle)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -1320,6 +1343,7 @@ extern "C"
 		}
 	}
 
+	// Returns `handle`'s post-filter row count.
 	int64_t parquet_reader_get_nrows(void *handle)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -1682,6 +1706,7 @@ extern "C"
 		return reader_handle->schema->GetFieldIndex(name) >= 0 ? 1 : 0;
 	}
 
+	// Returns the declared vector-column element count of `name` (0 for a scalar column).
 	int64_t parquet_reader_get_column_col_size(void *handle, const char *name)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -1689,6 +1714,7 @@ extern "C"
 		return get_col_size(array);
 	}
 
+	// Returns the total element count (nrows * col_size) of vector column `name`.
 	int64_t parquet_reader_get_column_total_elements(void *handle, const char *name)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -1703,6 +1729,7 @@ extern "C"
 		return nrows * asize;
 	}
 
+	// Returns the longest non-null string value actually present in string column `name`.
 	int64_t parquet_reader_get_string_length(void *handle, const char *name)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -1763,6 +1790,8 @@ extern "C"
 		return static_cast<int64_t>(reader_handle->table_metadata_cache.size());
 	}
 
+	// Returns the (key, value) pair at `index` in the reader's table_metadata_cache, or aborts
+	// via report_fatal_error(context, ...) if index is out of range.
 	static const std::pair<std::string, std::string> &table_metadata_entry_at(
 		ParquetReaderHandle *reader_handle, int64_t index, const char *context)
 	{
@@ -1773,6 +1802,7 @@ extern "C"
 		return reader_handle->table_metadata_cache[static_cast<size_t>(index)];
 	}
 
+	// Returns the byte length of table metadata entry `index`'s key.
 	int64_t parquet_reader_get_table_metadata_key_length(void *handle, int64_t index)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -1780,6 +1810,7 @@ extern "C"
 			table_metadata_entry_at(reader_handle, index, "parquet_reader_get_table_metadata_key_length").first.size());
 	}
 
+	// Returns the byte length of table metadata entry `index`'s value.
 	int64_t parquet_reader_get_table_metadata_value_length(void *handle, int64_t index)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -1787,6 +1818,7 @@ extern "C"
 			table_metadata_entry_at(reader_handle, index, "parquet_reader_get_table_metadata_value_length").second.size());
 	}
 
+	// Copies table metadata entry `index`'s key into `buf`.
 	void parquet_reader_get_table_metadata_key(void *handle, int64_t index, char *buf, int64_t buf_len)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -1794,6 +1826,7 @@ extern "C"
 		copy_string_with_padding(buf, buf_len, entry.first);
 	}
 
+	// Copies table metadata entry `index`'s value into `buf`.
 	void parquet_reader_get_table_metadata_value(void *handle, int64_t index, char *buf, int64_t buf_len)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -1801,6 +1834,8 @@ extern "C"
 		copy_string_with_padding(buf, buf_len, entry.second);
 	}
 
+	// Returns a short human-readable type description for parquet_reader_print_stat,
+	// e.g. "list<double>" for a vector column, else the plain Arrow type name.
 	static std::string describe_parquet_type(const std::shared_ptr<arrow::Field> &field)
 	{
 		auto type = field->type();
@@ -2126,6 +2161,8 @@ extern "C"
 		}
 	}
 
+	// Zero-fills every entry of `data` marked invalid in `valid_out` (a harmless default value
+	// for the Fortran side to overwrite with null_value itself, if given).
 	template <typename T>
 	static void fill_null_default(T *data, const int8_t *valid_out, int64_t n)
 	{
@@ -2136,6 +2173,7 @@ extern "C"
 		}
 	}
 
+	// String form of fill_null_default: blanks every invalid entry's fixed-width buffer.
 	static void fill_null_default_string(char *data, int64_t item_len, const int8_t *valid_out, int64_t n)
 	{
 		if (!valid_out) return;
@@ -2240,6 +2278,7 @@ extern "C"
 		}
 	}
 
+	// Same as convert_values_to_int32, but widening/narrowing to int64.
 	static void convert_values_to_int64(
 		const std::shared_ptr<arrow::Array> &vals, int64_t *data, int64_t n, const char *name, const char *context,
 		int64_t stride = 1, int64_t offset = 0)
@@ -2264,6 +2303,7 @@ extern "C"
 		}
 	}
 
+	// Same as convert_values_to_int32, but converting to float32.
 	static void convert_values_to_float32(
 		const std::shared_ptr<arrow::Array> &vals, float *data, int64_t n, const char *name, const char *context,
 		int64_t stride = 1, int64_t offset = 0)
@@ -2300,6 +2340,7 @@ extern "C"
 		}
 	}
 
+	// Same as convert_values_to_int32, but converting to float64.
 	static void convert_values_to_float64(
 		const std::shared_ptr<arrow::Array> &vals, double *data, int64_t n, const char *name, const char *context,
 		int64_t stride = 1, int64_t offset = 0)
@@ -2365,6 +2406,8 @@ static constexpr const char *ctype_name()
 	else if constexpr (std::is_same_v<CType, double>) return "float64";
 }
 
+// Shared body for every parquet_read_*_array_row extern "C" entry point: reads one row's
+// full element vector of a vector column `name` into `data`.
 template <typename CType>
 static void read_list_primitive_row(void *handle, const char *name, int64_t row_index, CType *data, int64_t col_size, int8_t *valid_out)
 {
@@ -2388,6 +2431,8 @@ static void read_list_primitive_row(void *handle, const char *name, int64_t row_
 	mark_read(reader_handle, name, ctype_name<CType>());
 }
 
+// Shared body for every parquet_read_*_array_element extern "C" entry point: reads one
+// element position (`col_index`) of a vector column `name` across every row into `data`.
 template <typename CType>
 static void read_list_primitive_element(void *handle, const char *name, int64_t col_index, CType *data, int64_t nrows, int8_t *valid_out)
 {
@@ -2451,6 +2496,7 @@ extern "C"
 		mark_read(reader_handle, name, "int32");
 	}
 
+	// Same as parquet_read_int32_column, but for int64.
 	void parquet_read_int64_column(void *handle, const char *name, int64_t *data, int64_t nrows, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -2465,6 +2511,7 @@ extern "C"
 		mark_read(reader_handle, name, "int64");
 	}
 
+	// Same as parquet_read_int32_column, but for float32.
 	void parquet_read_float32_column(void *handle, const char *name, float *data, int64_t nrows, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -2479,6 +2526,7 @@ extern "C"
 		mark_read(reader_handle, name, "float32");
 	}
 
+	// Same as parquet_read_int32_column, but for float64.
 	void parquet_read_float64_column(void *handle, const char *name, double *data, int64_t nrows, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -2493,6 +2541,7 @@ extern "C"
 		mark_read(reader_handle, name, "float64");
 	}
 
+	// Same as parquet_read_int32_column, but for boolean (bool8) columns.
 	void parquet_read_bool8_column(void *handle, const char *name, int8_t *data, int64_t nrows, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -2516,6 +2565,7 @@ extern "C"
 		mark_read(reader_handle, name, "bool8");
 	}
 
+	// Same as parquet_read_int32_column, but for string columns (fixed-width, space-padded output).
 	void parquet_read_string_column(void *handle, const char *name, char *data, int64_t item_len, int64_t nrows, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -2540,6 +2590,7 @@ extern "C"
 		mark_read_string(reader_handle, name, item_len);
 	}
 
+	// Reads the full vector int32 column `name` (every row) into `data`.
 	void parquet_read_int32_array_column(void *handle, const char *name, int32_t *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -2552,6 +2603,7 @@ extern "C"
 		mark_read(reader_handle, name, "int32");
 	}
 
+	// Same as parquet_read_int32_array_column, but for int64.
 	void parquet_read_int64_array_column(void *handle, const char *name, int64_t *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -2564,6 +2616,7 @@ extern "C"
 		mark_read(reader_handle, name, "int64");
 	}
 
+	// Same as parquet_read_int32_array_column, but for float32.
 	void parquet_read_float32_array_column(void *handle, const char *name, float *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -2576,6 +2629,7 @@ extern "C"
 		mark_read(reader_handle, name, "float32");
 	}
 
+	// Same as parquet_read_int32_array_column, but for float64.
 	void parquet_read_float64_array_column(void *handle, const char *name, double *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -2588,6 +2642,7 @@ extern "C"
 		mark_read(reader_handle, name, "float64");
 	}
 
+	// Same as parquet_read_int32_array_column, but for boolean (bool8) columns.
 	void parquet_read_bool8_array_column(void *handle, const char *name, int8_t *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -2608,6 +2663,7 @@ extern "C"
 		mark_read(reader_handle, name, "bool8");
 	}
 
+	// Same as parquet_read_int32_array_column, but for string columns (fixed-width, space-padded output).
 	void parquet_read_string_array_column(void *handle, const char *name, char *data, int64_t item_len, int64_t nrows, int64_t col_size, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -2628,26 +2684,32 @@ extern "C"
 		mark_read_string(reader_handle, name, item_len);
 	}
 
+	// Reads one row (row_index) of vector int32 column `name` into `data`.
 	void parquet_read_int32_array_row(void *handle, const char *name, int64_t row_index, int32_t *data, int64_t col_size, int8_t *valid_out)
 	{
 		read_list_primitive_row<int32_t>(handle, name, row_index, data, col_size, valid_out);
 	}
 
+	// Same as parquet_read_int32_array_row, but for int64.
 	void parquet_read_int64_array_row(void *handle, const char *name, int64_t row_index, int64_t *data, int64_t col_size, int8_t *valid_out)
 	{
 		read_list_primitive_row<int64_t>(handle, name, row_index, data, col_size, valid_out);
 	}
 
+	// Same as parquet_read_int32_array_row, but for float32.
 	void parquet_read_float32_array_row(void *handle, const char *name, int64_t row_index, float *data, int64_t col_size, int8_t *valid_out)
 	{
 		read_list_primitive_row<float>(handle, name, row_index, data, col_size, valid_out);
 	}
 
+	// Same as parquet_read_int32_array_row, but for float64.
 	void parquet_read_float64_array_row(void *handle, const char *name, int64_t row_index, double *data, int64_t col_size, int8_t *valid_out)
 	{
 		read_list_primitive_row<double>(handle, name, row_index, data, col_size, valid_out);
 	}
 
+	// Same as parquet_read_int32_array_row, but for boolean (bool8) columns (not templated,
+	// since bool8 has no primitive Arrow numeric type to widen/narrow via convert_values_to_*).
 	void parquet_read_bool8_array_row(void *handle, const char *name, int64_t row_index, int8_t *data, int64_t col_size, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -2667,6 +2729,7 @@ extern "C"
 		mark_read(reader_handle, name, "bool8");
 	}
 
+	// Same as parquet_read_bool8_array_row, but for string columns (fixed-width, space-padded output).
 	void parquet_read_string_array_row(void *handle, const char *name, int64_t row_index, char *data, int64_t item_len, int64_t col_size, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -2686,26 +2749,32 @@ extern "C"
 		mark_read_string(reader_handle, name, item_len);
 	}
 
+	// Reads one element position (col_index) of vector int32 column `name` across every row into `data`.
 	void parquet_read_int32_array_element(void *handle, const char *name, int64_t col_index, int32_t *data, int64_t nrows, int64_t unused_col_size, int8_t *valid_out)
 	{
 		read_list_primitive_element<int32_t>(handle, name, col_index, data, nrows, valid_out);
 	}
 
+	// Same as parquet_read_int32_array_element, but for int64.
 	void parquet_read_int64_array_element(void *handle, const char *name, int64_t col_index, int64_t *data, int64_t nrows, int64_t unused_col_size, int8_t *valid_out)
 	{
 		read_list_primitive_element<int64_t>(handle, name, col_index, data, nrows, valid_out);
 	}
 
+	// Same as parquet_read_int32_array_element, but for float32.
 	void parquet_read_float32_array_element(void *handle, const char *name, int64_t col_index, float *data, int64_t nrows, int64_t unused_col_size, int8_t *valid_out)
 	{
 		read_list_primitive_element<float>(handle, name, col_index, data, nrows, valid_out);
 	}
 
+	// Same as parquet_read_int32_array_element, but for float64.
 	void parquet_read_float64_array_element(void *handle, const char *name, int64_t col_index, double *data, int64_t nrows, int64_t unused_col_size, int8_t *valid_out)
 	{
 		read_list_primitive_element<double>(handle, name, col_index, data, nrows, valid_out);
 	}
 
+	// Same as parquet_read_int32_array_element, but for boolean (bool8) columns (not templated,
+	// since bool8 has no primitive Arrow numeric type to widen/narrow via convert_values_to_*).
 	void parquet_read_bool8_array_element(void *handle, const char *name, int64_t col_index, int8_t *data, int64_t nrows, int64_t, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -2729,6 +2798,7 @@ extern "C"
 		mark_read(reader_handle, name, "bool8");
 	}
 
+	// Same as parquet_read_bool8_array_element, but for string columns (fixed-width, space-padded output).
 	void parquet_read_string_array_element(void *handle, const char *name, int64_t col_index, char *data, int64_t item_len, int64_t nrows, int64_t, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -2752,6 +2822,7 @@ extern "C"
 		mark_read_string(reader_handle, name, item_len);
 	}
 
+	// Declares one column's schema metadata on a schema-less writer, growing fields/arrays to match.
 	void parquet_add_column_metadata(
 		void *handle,
 		const char *name,
@@ -2783,6 +2854,7 @@ extern "C"
 		}
 	}
 
+	// Adds one flat key-value table metadata entry to `handle`.
 	void parquet_add_table_metadata(void *handle, const char *key, const char *value, const char *description)
 	{
 		auto writer_handle = as_handle(handle);
@@ -2843,32 +2915,38 @@ static void append_typed_column(void *handle, const char *name, const ValueType 
 extern "C"
 {
 
+	// Appends one int32 column's values (scalar or, for col_size > 1, fixed-size-list) to `handle`.
 	void parquet_append_int32_column(void *handle, const char *name, const int32_t *data, int64_t nrows, int64_t col_size, const int8_t *valid_in)
 	{
 		append_typed_column<arrow::Int32Builder>(handle, name, data, nrows, col_size, valid_in, arrow::int32());
 	}
 
+	// Same as parquet_append_int32_column, but for int64.
 	void parquet_append_int64_column(void *handle, const char *name, const int64_t *data, int64_t nrows, int64_t col_size, const int8_t *valid_in)
 	{
 		append_typed_column<arrow::Int64Builder>(handle, name, data, nrows, col_size, valid_in, arrow::int64());
 	}
 
+	// Same as parquet_append_int32_column, but for float32.
 	void parquet_append_float32_column(void *handle, const char *name, const float *data, int64_t nrows, int64_t col_size, const int8_t *valid_in)
 	{
 		append_typed_column<arrow::FloatBuilder>(handle, name, data, nrows, col_size, valid_in, arrow::float32());
 	}
 
+	// Same as parquet_append_int32_column, but for float64.
 	void parquet_append_float64_column(void *handle, const char *name, const double *data, int64_t nrows, int64_t col_size, const int8_t *valid_in)
 	{
 		append_typed_column<arrow::DoubleBuilder>(handle, name, data, nrows, col_size, valid_in, arrow::float64());
 	}
 
+	// Same as parquet_append_int32_column, but for boolean (bool8) columns.
 	void parquet_append_bool8_column(void *handle, const char *name, const int8_t *data, int64_t nrows, int64_t col_size, const int8_t *valid_in)
 	{
 		append_typed_column<arrow::BooleanBuilder>(
 			handle, name, reinterpret_cast<const uint8_t *>(data), nrows, col_size, valid_in, arrow::boolean());
 	}
 
+	// Appends one scalar string column's values to `handle`.
 	void parquet_append_string_column(void *handle, const char *name, const char *data, int64_t item_len, int64_t nrows, const int8_t *valid_in)
 	{
 		auto writer_handle = as_handle(handle);
@@ -2900,6 +2978,7 @@ extern "C"
 		append_column(writer_handle, name, build_field(name, arrow::utf8(), 1, has_any_null(valid_in, nrows)), array);
 	}
 
+	// Appends one vector string column's values to `handle`.
 	void parquet_append_string_array_column(void *handle, const char *name, const char *data, int64_t item_len, int64_t nrows, int64_t col_size, const int8_t *valid_in)
 	{
 		auto writer_handle = as_handle(handle);
@@ -2936,6 +3015,8 @@ extern "C"
 	}
 
 
+	// Builds the final Arrow table from every appended column, writes it to the output file
+	// (error stops if any declared column was never written), and frees `handle`.
 	void close_parquet_writer(void *handle)
 	{
 		auto writer_handle = as_handle(handle);

@@ -31,6 +31,7 @@ Vector column entries use the shape convention `(col_size, nrows)` for arrays pa
 Anything not listed for a given `values` kind (e.g. requesting `integer` from a `float32`/`float64` column, or `logical`/`string` from anything else) fails immediately with `error stop`, naming the column and the type mismatch — there is no float-to-integer or integer/float-to-boolean/string conversion in either direction.
 
 Two conversions above lose information silently, with no warning:
+
 - `int64` → `integer(int32)` is the one integer narrowing checked for overflow: a stored value outside `int32`'s range fails with `error stop` (`"...int64->int32 overflow..."`) rather than wrapping.
 - `int32`/`int64` → `real32`/`real64`, and `float64` → `real32`, are **not** checked for precision loss — a large `int64` (beyond ~2^53) or `int32` (beyond ~2^24) read into `real32` silently loses exact-integer precision, the same way a plain Fortran `real(int_value, kind=real32)` conversion would.
 

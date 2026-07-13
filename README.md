@@ -1,5 +1,6 @@
 # parquet-fortran
 
+[![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg)](https://etempel.github.io/parquet-fortran/index.html)
 ![Language: Fortran](https://img.shields.io/badge/Language-Fortran-734f96.svg)
 [![fpm](https://img.shields.io/badge/fpm-package-729FCF.svg)](https://fpm.fortran-lang.org/)
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](LICENSE)

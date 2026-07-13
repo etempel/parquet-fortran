@@ -155,8 +155,10 @@ don't resolve outside that GitLab instance and would render broken on GitHub.
 git push github github main
 ```
 
-To resync after new commits land on `main`, merge `main` into `github-mirror`, reapply the
-badge removal if it gets reintroduced by the merge, and push again.
+To add API documentation badge in GitHub:
+```
+[![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg)](https://etempel.github.io/parquet-fortran/index.html)
+```
 
 ## Regenerating the built-in MAML module
 

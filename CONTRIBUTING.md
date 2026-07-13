@@ -11,6 +11,7 @@ This file covers developing, testing, and extending this repository itself. If y
   - [Regenerating the test fixtures](#regenerating-the-test-fixtures)
   - [Testing genuine OpenMP concurrency](#testing-genuine-openmp-concurrency)
   - [Continuous integration (GitLab CI)](#continuous-integration-gitlab-ci)
+  - [Mirroring to GitHub](#mirroring-to-github)
 - [Regenerating the built-in MAML module](#regenerating-the-built-in-maml-module)
 - [Extending the MAML schema](#extending-the-maml-schema)
 - [Error-handling conventions in `parquet_wrapper.cpp`](#error-handling-conventions-in-parquet_wrappercpp)
@@ -132,6 +133,33 @@ A few choices in that file are load-bearing — each one cost a debugging round 
 - **`FPM_FFLAGS="--coverage -fopenmp"`.** Source is kept within the standard 132-column free-form limit (see [Conventions](#conventions)), so no `-ffree-line-length-none` override is needed. Setting `FPM_FFLAGS` still *replaces* fpm's default profile flags, so the coverage/OpenMP flags this job needs must be passed explicitly here regardless. `FPM_CXXFLAGS="-std=c++20"` and `FPM_LDFLAGS="-lstdc++"` follow [README's Environment variables](README.md#environment-variables).
 
 Coverage is computed by `gcovr` over `src/` and surfaced through GitLab's `coverage:` regex. For the same line-coverage report locally, `tools/coverage.sh` does the equivalent — it builds with `--coverage`, runs the suite plus every error scenario, and prints per-file and total `src/` coverage (resolving the `gcov` that matches your `gfortran` automatically).
+
+### Mirroring to GitHub
+
+This repository is developed on GitLab (`gitlab.4most.eu`), with a manually-synced read-only
+mirror on GitHub (`github.com/etempel/parquet-fortran`) for publication purposes (e.g. the
+fortran-lang.org package index, which expects a GitHub repo). There is no automated sync —
+push to the mirror by hand whenever you want it updated:
+
+```bash
+git remote add github git@github.com:etempel/parquet-fortran.git   # one-time setup
+git push github main
+git push github --tags     # if there are tags to mirror
+```
+
+**Before the *first* push, remove README.md's three GitLab-specific badges** — the CI
+pipeline, coverage, and API-documentation badges all point at `gitlab.4most.eu` URLs that
+don't resolve outside that GitLab instance and would render broken on GitHub. Keep them on
+`main` for GitLab; maintain a separate branch (e.g. `github-mirror`) with just those three
+lines removed, and push that branch to the GitHub mirror's `main` instead:
+
+```bash
+git checkout -b github-mirror main   # one-time setup; then remove the 3 badge lines and commit
+git push github github-mirror:main
+```
+
+To resync after new commits land on `main`, merge `main` into `github-mirror`, reapply the
+badge removal if it gets reintroduced by the merge, and push again.
 
 ## Regenerating the built-in MAML module
 

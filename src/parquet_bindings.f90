@@ -618,4 +618,4 @@ module parquet_bindings
         end subroutine
     end interface
 
-end module
+end module parquet_bindings ! GCOVR_EXCL_LINE

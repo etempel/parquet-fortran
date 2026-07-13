@@ -147,15 +147,12 @@ git push github main
 git push github --tags     # if there are tags to mirror
 ```
 
-**Before the *first* push, remove README.md's three GitLab-specific badges** — the CI
+**Before the push, remove README.md's three GitLab-specific badges** — the CI
 pipeline, coverage, and API-documentation badges all point at `gitlab.4most.eu` URLs that
-don't resolve outside that GitLab instance and would render broken on GitHub. Keep them on
-`main` for GitLab; maintain a separate branch (e.g. `github-mirror`) with just those three
-lines removed, and push that branch to the GitHub mirror's `main` instead:
+don't resolve outside that GitLab instance and would render broken on GitHub.
 
 ```bash
-git checkout -b github-mirror main   # one-time setup; then remove the 3 badge lines and commit
-git push github github-mirror:main
+git push github github main
 ```
 
 To resync after new commits land on `main`, merge `main` into `github-mirror`, reapply the

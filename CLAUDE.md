@@ -198,39 +198,45 @@ it, and (b) GitHub Pages is switched to "GitHub Actions" as its source in the mi
 Settings — both are one-time manual steps the user does themselves once they actually migrate
 to GitHub, **not something to attempt to automate or prompt about before then.**
 
-### CI: GitLab Pages on gitlab.4most.eu — job DONE, not yet enabled/verified
+### CI: docs on gitlab.4most.eu via the instance's readthedocs webhook — DONE (2026-07-13)
 
-Decided 2026-07-13: **keep publishing docs on both hosts**, not GitHub-only — GitLab remains
-the system of record + existing `test` CI job, GitHub is a manually-synced mirror mainly for
-fpm-ecosystem visibility (see the "is it worth abandoning GitLab" discussion this session).
-Added a `pages` job to the existing `.gitlab-ci.yml` (new `docs` stage, after `test`):
-installs just `gcc` (for `cpp`, FORD's configured preprocessor) + `pipx install ford` — a much
-lighter `before_script` than the `test` job's, deliberately overridden rather than inherited,
-since generating docs from source comments needs no Arrow/Parquet/git-lfs setup at all; then
-runs `ford docs.md` and moves `ford-doc/` to `public/`. Gated to the default branch only
-(`rules: if $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH`) and `allow_failure: true` so a docs hiccup
-never fails the pipeline. `public/` added to `.gitignore` (build artifact, like `ford-doc/`).
+**Superseded the original `pages`-job plan the same day.** The gitlab.4most.eu admin confirmed
+(2026-07-13): GitLab Pages is **not enabled and there are no plans to enable it** on this
+instance. Instead, the instance runs its own docserver at `www.4most.eu/readthedocs/` (despite
+the name, it's tool-agnostic — accepts a tarball of any static HTML site, not just Sphinx
+output) — upload via one `curl` POST to `https://escience.aip.de/readthedocs/webhooks/upload`
+with `X-Docserver-Token`/`X-Project-Path`/`X-Git-Branch`/`X-Git-Tag` headers and the tarball as
+the body. Resulting site: `https://www.4most.eu/readthedocs/<group>/<project>/<branch>`.
+**`$DOCSERVER_TOKEN` is provided by the GitLab instance itself** — confirmed by the user, not
+something this project defines/sets as a CI/CD variable, just referenced directly.
 
-Job **must be named exactly `pages`** — that's the classic, broadly-version-compatible way
-GitLab recognizes a Pages-deploying job (works regardless of the specific GitLab server
-version, unlike the newer explicit `pages: true` keyword which needs GitLab 17.4+ and wasn't
-used here since gitlab.4most.eu's version is unknown).
+Verified this actually works for FORD output before implementing: the docserver serves each
+site from a **subpath** (not domain root), which only works if every internal link/asset is
+relative — checked every `href`/`src` across a full `ford-doc/` build (including the dynamic
+search feature's `./search/search_database.json` load) and found **zero root-absolute paths**,
+so no FORD config changes were needed for subpath-compatibility.
 
-**Verified locally (not via the actual pipeline, per this file's own "don't run GitLab CI
-yourself" rule):** the YAML parses correctly, and the job's `script:` steps
-(`ford docs.md; rm -rf public; mv ford-doc public`) were dry-run directly in this environment
-and produce a working `public/index.html`. The `apt-get`/`pipx install ford` setup steps were
-**not** exercised locally (would require root and pollute this dev machine) — first real
-pipeline run on gitlab.4most.eu is the actual test of that part.
+The old `pages` job (see previous conversation — GitLab Pages, `public/` artifact) was **deleted
+and replaced**, not kept alongside, since it could never actually deploy anything. New job named
+`readthedocs` (user's explicit naming choice), same `docs` stage, same lightweight
+`before_script` as before (`gcc`+`pipx install ford`, now also `curl`) rather than inheriting
+the `test` job's heavy Arrow/fpm/git-lfs setup. **Restricted to the default branch only**
+(`rules: if $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH`, user's explicit choice — not every
+branch/tag, even though the URL scheme supports per-branch/per-tag docs) — `$CI_COMMIT_TAG` is
+still passed through in the curl call exactly as the admin's example does (harmlessly empty
+here, since this job never runs off a tag). `allow_failure: true` retained, so a docs hiccup
+never fails the pipeline. Explicitly **not** matched to the `iwg7/4most-4gp` reference project's
+own `.gitlab-ci.yml` conventions — user said to skip that, revisit only if it becomes necessary.
 
-**Not yet done, deliberately deferred, same shape as the GitHub side:** (a) push this
-`.gitlab-ci.yml` change so the job actually runs once, and (b) **GitLab Pages must be enabled
-at the instance/admin level on gitlab.4most.eu** — unlike GitHub Pages (a per-repo toggle) or
-gitlab.com (Pages on by default), **self-managed GitLab instances often have Pages disabled
-entirely until a sysadmin enables the feature and configures a wildcard Pages domain** for the
-whole instance. If the first real pipeline run's `pages` job succeeds but no Pages URL appears
-in the project's Settings → Pages, that's the likely cause — something only the gitlab.4most.eu
-admin (may or may not be the user) can fix, not something fixable from this repo alone.
+`.gitignore`: `public/` entry removed (nothing produces it anymore), `docs.tar.gz` added (new
+build artifact from this job, alongside the existing `ford-doc/` entry).
+
+**Verified locally** (per this file's own "don't run GitLab CI yourself" rule — not via the
+actual pipeline): YAML parses correctly; `ford docs.md` → `tar -czf docs.tar.gz -C ford-doc .`
+was dry-run directly in this environment and produced a valid 119-entry tarball (matching the
+exact file count from the user's earlier successful pipeline run of the old `pages` job, a good
+cross-check). The `curl` upload itself was **not** exercised (no real token/network access from
+this environment) — first real pipeline run on gitlab.4most.eu is the actual end-to-end test.
 
 ### Local FORD build: DONE, verified working (2026-07-13)
 

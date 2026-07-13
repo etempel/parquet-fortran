@@ -77,29 +77,36 @@ test:
     - FPM_FFLAGS="--coverage -fopenmp" fpm test --verbose
     - gcovr -r . --filter 'src/*' --exclude 'src/test*'
 
-# GitLab Pages: the job must be named exactly "pages" (classic, broadly-compatible
-# activation mechanism -- works regardless of the GitLab server version) and must
-# produce its output under a "public/" artifact directory. Deliberately overrides
-# the top-level before_script: generating docs from source comments only needs a
-# C preprocessor (cpp, pulled in by the gcc package) and FORD itself -- none of the
-# test job's Arrow/Parquet/fpm/git-lfs setup is needed here, so skip it for a
-# faster, more isolated job. See docs.md/fpm.toml's [extra.ford] for FORD's own
-# configuration (preprocessor, page_dir, etc.).
-pages:
+# GitLab Pages is not enabled on this instance (confirmed by the gitlab.4most.eu
+# admin, no plans to enable it) -- docs are instead uploaded as a tarball to the
+# instance's readthedocs-style docserver, which then serves them at
+# https://www.4most.eu/readthedocs/<group>/<project>/<branch>. $DOCSERVER_TOKEN
+# is provided by the GitLab instance itself (not something this project defines).
+# Restricted to the default branch only. Deliberately overrides the top-level
+# before_script: generating docs from source comments only needs a C preprocessor
+# (cpp, pulled in by the gcc package) and FORD itself -- none of the test job's
+# Arrow/Parquet/fpm/git-lfs setup is needed here, so skip it for a faster, more
+# isolated job. See docs.md/fpm.toml's [extra.ford] for FORD's own configuration
+# (preprocessor, page_dir, etc.).
+readthedocs:
   stage: docs
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
   allow_failure: true
   before_script:
     - apt-get update -y
-    - apt-get install -y --no-install-recommends gcc python3-venv pipx
+    - apt-get install -y --no-install-recommends gcc python3-venv pipx curl
     - pipx ensurepath
     - pipx install ford
     - export PATH=~/.local/bin:$PATH
   script:
     - ford docs.md
-    - rm -rf public
-    - mv ford-doc public
-  artifacts:
-    paths:
-      - public
+    - tar -czf docs.tar.gz -C ford-doc .
+    - >
+      curl -f --request POST
+      --header "X-Docserver-Token: $DOCSERVER_TOKEN"
+      --header "X-Project-Path: $CI_PROJECT_PATH"
+      --header "X-Git-Branch: $CI_COMMIT_BRANCH"
+      --header "X-Git-Tag: $CI_COMMIT_TAG"
+      --data-binary @docs.tar.gz
+      https://escience.aip.de/readthedocs/webhooks/upload

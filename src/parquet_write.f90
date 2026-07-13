@@ -6,6 +6,7 @@
 !> parquet_close_writer, ...), plus private helpers for schema type-widening,
 !> qc: enforcement on write, and the write_maml=.true. sidecar .maml.
 submodule (parquet) parquet_write
+    implicit none
 contains
 
     !> Every parquet_write_column variant calls this first: writer%handle is

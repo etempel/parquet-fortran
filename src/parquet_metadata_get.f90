@@ -9,6 +9,7 @@
 !> the file. Messages follow the "<proc>: <message>" error stop convention
 !> used throughout this module.
 submodule (parquet) parquet_metadata_get
+    implicit none
 contains
 
     !> 1-based index of `key` in metadata%items, or 0 if not found.

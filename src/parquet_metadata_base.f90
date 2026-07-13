@@ -7,6 +7,7 @@
 !> (parquet_split_key_value/parquet_unquote/parquet_to_lower) reused across
 !> submodules.
 submodule (parquet) parquet_metadata_base
+    implicit none
 contains
 
     module procedure parquet_append_line

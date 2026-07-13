@@ -6,6 +6,7 @@
 !> parquet_get_metadata's specifics, ...), plus private helpers for row
 !> filtering, qc: enforcement on read, and validity-buffer plumbing.
 submodule (parquet) parquet_read
+    implicit none
 contains
 
     !> Allocates `valid_buf(n)` and points `valid_ptr` at it via c_loc only when

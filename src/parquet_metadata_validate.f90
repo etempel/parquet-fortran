@@ -7,6 +7,7 @@
 !> loading MAML/qc-maml files from disk, and qc-maml field parsing/validation
 !> for read-time quality control.
 submodule (parquet) parquet_metadata_validate
+    implicit none
 contains
 
     module procedure parquet_validate_user_maml

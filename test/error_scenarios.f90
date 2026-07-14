@@ -37,6 +37,8 @@ program error_scenarios
         call scenario_large_string_roundtrip()
     case ("col_size_overflow")
         call scenario_col_size_overflow()
+    case ("column_count_overflow")
+        call scenario_column_count_overflow()
     case ("write_undeclared_column")
         call scenario_write_undeclared_column()
     case ("write_undeclared_column_int64")
@@ -1494,6 +1496,42 @@ contains
         call parquet_close_writer(writer)
         print '(a)', "unexpectedly wrote a column with col_size exceeding the (shrunk) Arrow limit without error"
     end subroutine scenario_col_size_overflow
+
+    !> Arrow's arrow::Schema::num_fields()/GetFieldIndex() both return a plain int32_t internally
+    !> -- unlike row count there is no "large" variant for column count at all, so
+    !> check_column_count_fits_arrow_limit in parquet_wrapper.cpp (called from both the
+    !> schema-based parquet_add_column_metadata and the schema-less append_column registration
+    !> paths) aborts cleanly (via report_fatal_error) before the table's column count could ever
+    !> reach that limit, rather than risking Arrow's own field-count bookkeeping silently
+    !> wrapping/corrupting (see the README's Limitations section). A genuine >2^31-1-column table
+    !> needs far too much memory/time to build in the normal fpm test suite, so this scenario
+    !> instead calls parquet_debug_set_column_count_limit (a process-global, test-only hook
+    !> declared locally below, not part of the public Fortran API -- see its own comment in
+    !> parquet_wrapper.cpp) to shrink the threshold to a handful of columns, forcing a tiny
+    !> fixture through the same abort path. Safe as a process-global for the same
+    !> subprocess-isolation reason as scenario_large_string_roundtrip's own
+    !> parquet_debug_set_string_offset_limit use, further above.
+    subroutine scenario_column_count_overflow()
+        interface
+            subroutine parquet_debug_set_column_count_limit(n) &
+                bind(C, name="parquet_debug_set_column_count_limit")
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t), value :: n !! column-count threshold to use instead of the real 2^31-1 limit; <=0 restores it.
+            end subroutine parquet_debug_set_column_count_limit
+        end interface
+
+        type(parquet_writer) :: writer
+
+        call parquet_debug_set_column_count_limit(3_int64)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_column_count_overflow.parquet")
+        call parquet_write_column(writer, "c1", [1, 2, 3])
+        call parquet_write_column(writer, "c2", [1, 2, 3])
+        call parquet_write_column(writer, "c3", [1, 2, 3])
+        call parquet_write_column(writer, "c4", [1, 2, 3])
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote a table with column count exceeding the (shrunk) Arrow limit without error"
+    end subroutine scenario_column_count_overflow
 
     !> parquet_open_reader(..., filter=) validates every filter column name
     !> against the file's actual schema before applying it, the same as

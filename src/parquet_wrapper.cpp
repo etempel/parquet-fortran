@@ -549,6 +549,37 @@ extern "C"
 		}
 	}
 
+	// Arrow's real limit for a table's column count: arrow::Schema::num_fields()/GetFieldIndex()
+	// both return a plain int32_t internally (static_cast<int>(fields_.size())) -- unlike row
+	// count (int64_t throughout) there is no "large" variant for field count at all. Past this
+	// many columns, that cast would silently wrap rather than error, corrupting every subsequent
+	// field-count/field-index lookup (used pervasively by this file's own append_column,
+	// get_column_index, print_stat, ...) instead of failing cleanly. append_column and
+	// parquet_add_column_metadata check the column count against this (or, under test,
+	// g_debug_column_count_limit -- see parquet_debug_set_column_count_limit) before it can ever
+	// grow past it.
+	static constexpr int64_t kArrowInt32FieldCountLimit = 2147483647; // 2^31 - 1
+
+	// Test-only override of kArrowInt32FieldCountLimit -- see parquet_debug_set_column_count_limit,
+	// further below, for why this is a process-global (same reasoning as g_debug_string_offset_limit,
+	// above). <= 0 (the default) means "use the real production limit".
+	static int64_t g_debug_column_count_limit = -1;
+
+	// Aborts (via report_fatal_error) if adding one more column would make the table's column
+	// count exceed Arrow's Schema field-count limit -- see kArrowInt32FieldCountLimit, above.
+	// `current_count` is the column count *before* the one about to be added.
+	static void check_column_count_fits_arrow_limit(size_t current_count, const std::string &name, const char *context)
+	{
+		int64_t limit = g_debug_column_count_limit > 0 ? g_debug_column_count_limit : kArrowInt32FieldCountLimit;
+		int64_t new_count = static_cast<int64_t>(current_count) + 1;
+		if (new_count > limit)
+		{
+			report_fatal_error(context, "column '" + name + "': this table would have " + std::to_string(new_count) +
+				" columns, exceeding " + std::to_string(kArrowInt32FieldCountLimit) +
+				", the maximum column count Arrow's Schema supports");
+		}
+	}
+
 	// Formats `v` with 6 significant digits for a parquet_reader_print_stat line.
 	static std::string format_stat_double(double v)
 	{
@@ -1130,6 +1161,7 @@ extern "C"
 			return;
 		}
 
+		check_column_count_fits_arrow_limit(writer_handle->fields.size(), name, "parquet_append_column");
 		writer_handle->fields.push_back(field);
 		writer_handle->arrays.push_back(array);
 	}
@@ -2940,6 +2972,7 @@ extern "C"
 		int64_t col_size)
 	{
 		auto writer_handle = as_handle(handle);
+		check_column_count_fits_arrow_limit(writer_handle->column_metadata.size(), name, "parquet_add_column_metadata");
 		writer_handle->column_metadata.push_back(ColumnMetadata{
 			name,
 			unit,
@@ -3181,6 +3214,16 @@ extern "C"
 	void parquet_debug_set_col_size_limit(int64_t n)
 	{
 		g_debug_col_size_limit = n;
+	}
+
+	// Test-only: overrides g_debug_column_count_limit (see its own comment) so
+	// test/error_scenarios.f90's scenario_column_count_overflow can exercise the
+	// check_column_count_fits_arrow_limit abort path with a tiny fixture instead of a genuinely
+	// huge number of columns. Same process-global/subprocess-isolation reasoning as
+	// parquet_debug_set_string_offset_limit, above. Pass n<=0 to restore the real production limit.
+	void parquet_debug_set_column_count_limit(int64_t n)
+	{
+		g_debug_column_count_limit = n;
 	}
 
 

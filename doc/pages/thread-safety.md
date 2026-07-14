@@ -23,7 +23,7 @@ Practical cases:
 ```sh
 export FPM_FFLAGS="-fopenmp"
 ```
-Since this library compiles from source as a dependency, that flag also reaches `parquet-fortran`'s own compiled code, not just yours. Without it, the concurrency-related code paths described above silently run single-threaded rather than failing outright. (If you're developing `parquet-fortran` itself, see [CONTRIBUTING.md](https://github.com/etempel/parquet-fortran/blob/main/CONTRIBUTING.md#testing-genuine-openmp-concurrency) for how this project's own tests exercise real concurrency.)
+Since this library compiles from source as a dependency, that flag also reaches `parquet-fortran`'s own compiled code, not just yours. Without it, the concurrency-related code paths described above silently run single-threaded rather than failing outright. (If you're developing `parquet-fortran` itself, see [CONTRIBUTING.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CONTRIBUTING.md#testing-genuine-openmp-concurrency) for how this project's own tests exercise real concurrency.)
 
 Calling into a *shared* `parquet_writer`/`parquet_reader` from more than one thread at a time (the "not safe" case above) is actively detected and rejected: the second concurrent caller triggers an immediate process abort (`std::abort()`) with a diagnostic on stderr. This is a fail-fast race guard, not a locking mechanism. Sequential, non-overlapping hand-off between threads remains allowed.
 

@@ -20,6 +20,7 @@ jobs:
           python-version: '3.x'
       - run: pip install ford
       - run: ford docs.md
+      - run: tools/fix_ford_page_links.sh ford-doc
       - uses: actions/upload-pages-artifact@v3
         if: github.event_name != 'pull_request'
         with:

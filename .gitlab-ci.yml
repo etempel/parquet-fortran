@@ -101,6 +101,7 @@ readthedocs:
     - export PATH=~/.local/bin:$PATH
   script:
     - ford docs.md
+    - tools/fix_ford_page_links.sh ford-doc
     - tar -czf docs.tar.gz -C ford-doc .
     - >
       curl -f --request POST

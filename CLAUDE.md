@@ -52,9 +52,9 @@ User- and contributor-facing docs are split across three layers — keep new con
   the "FORD doc-comment conventions" section below); FORD turns these into the browsable
   modules/procedures/types reference automatically. This is the *only* place the per-procedure
   reference lives — there is no hand-written equivalent to keep in sync.
-- **CONTRIBUTING.md** — *contributor-facing*: building/testing this repo, the error-path test
-  harness, fixtures, OpenMP testing, MAML regeneration, C++ error conventions, the project
-  Conventions section, and "features considered but not implemented".
+- **CONTRIBUTING.md** — *contributor-facing*: building/testing this repo, project conventions,
+  and repo-maintenance tooling (see its own Contents ToC for the full topic list, kept current
+  there rather than duplicated here).
 
 Working rules:
 
@@ -71,9 +71,10 @@ Working rules:
 - **Diagrams: plain text, not Mermaid.** This project's GitLab does not reliably render Mermaid
   diagrams, so draw flows as plain-text/ASCII inside a normal code fence (renders identically
   everywhere) — see the MAML→header flow in `doc/pages/maml-format.md`'s "The MAML metadata format".
-- **Badges: static only for now** (license / language / fpm). A GitLab CI pipeline now exists
-  (`.gitlab-ci.yml`, running `fpm test` with coverage), but still defer dynamic build/coverage
-  badges until the project is public with a stable URL to point them at.
+- **Badges:** README.md carries three dynamic `gitlab.4most.eu` badges (CI pipeline, test
+  coverage, API documentation) alongside the static license/language/fpm ones. These are
+  GitLab-specific — `tools/prep_github_mirroring.sh` swaps them for a single GitHub Pages
+  documentation badge when mirroring (see CONTRIBUTING.md's "Mirroring to GitHub").
 
 ## FORD doc-comment conventions
 
@@ -109,10 +110,21 @@ validated end-to-end with `ford docs.md` — clean run besides the expected envi
 - `doc/pages/*.md` files deliberately have **no top-level heading in their body** (title comes
   from frontmatter only) — adding one back would reintroduce the duplicate-heading bug
   `doc/user.css` fixes on the front page.
-- Two working CI doc-publish paths: `.github/workflows/docs.yml` (GitHub Actions → GitHub Pages,
-  ready but waiting on the GitHub mirror — see "Publishing" below) and `.gitlab-ci.yml`'s
-  `readthedocs` job (GitLab CI → gitlab.4most.eu's readthedocs-style docserver, confirmed working
-  end-to-end). GitLab Pages isn't available on gitlab.4most.eu — the docserver replaces it.
+- Two working CI doc-publish paths, both confirmed working end-to-end: `.github/workflows/docs.yml`
+  (GitHub Actions → GitHub Pages) and `.gitlab-ci.yml`'s `readthedocs` job (GitLab CI →
+  gitlab.4most.eu's readthedocs-style docserver). GitLab Pages isn't available on
+  gitlab.4most.eu — the docserver replaces it.
+- **FORD does not resolve `doc/pages/*.md` links written in README.md's body text** (`docs.md` is
+  `{!README.md!}`, embedding README.md's raw markdown verbatim as the front page). FORD's own
+  navbar correctly links to `page/index.html`, proving it knows the real mapping
+  (`doc/pages/<name>.md` → `page/<name>.html`, `#anchor` preserved) — it just doesn't apply that
+  resolution inside embedded markdown body content. Both CI docs jobs run
+  `tools/fix_ford_page_links.sh ford-doc` right after `ford docs.md` to fix this in the generated
+  output; README.md's source keeps the `doc/pages/*.md` form since that's what's correct for
+  browsing the repo directly on GitLab/GitHub. This is host-independent (unlike
+  `tools/prep_github_mirroring.sh`), so both CI jobs need it, not just one. `doc/pages/*.md` files
+  linking to *each other* don't have this problem — they already use FORD's native
+  `page/*.html`-relative form directly in source.
 - `tools/generate_parquet_maml.sh`'s `end module` template line must keep emitting
   `! GCOVR_EXCL_LINE` (added deliberately, not FORD/gcovr's default) — a careless edit there
   will silently drop it from every regenerated file (`src/parquet_maml_base.f90` and any
@@ -121,20 +133,17 @@ validated end-to-end with `ford docs.md` — clean run besides the expected envi
 ## Publishing: remaining outside-this-repo steps
 
 FORD docs, doc-comment coverage, and MANUAL.md retirement (superseded by `doc/pages/*.md` + the
-FORD-generated reference) are complete. What's left, in order:
+FORD-generated reference) are complete. The GitHub mirror (`github.com/etempel/parquet-fortran`)
+is pushed and GitHub Pages is live — both doc-publish paths (GitLab's readthedocs docserver and
+GitHub Pages) are now confirmed working end-to-end. What's left, in order:
 
-1. User's own manual step: create/push to the GitHub mirror
-   (`github.com/etempel/parquet-fortran`, synced manually, no automation), then enable GitHub
-   Pages there (Settings → Pages → source "GitHub Actions") to activate the already-ready
-   `.github/workflows/docs.yml`.
-2. Only after (1): the fortran-lang.org **package index** PR (`fortran-lang/fortran-lang.org`'s
-   `PACKAGES.md`) — not the separate `fpm publish` registry, still playground/testing status,
-   skipped deliberately.
-3. Optional polish, no urgency, independent of 1–2: a `[[entity_name]]` auto-link pass over
-   `doc/pages/*.md`'s inline procedure-name mentions (plain backtick spans today); a favicon/logo
-   for `doc/media/` (exists, currently empty besides a `.gitkeep`); extending
-   `tools/check_doc_anchors.py` to also scan `doc/pages/*.md` (not covered today — see "Checking
-   documentation links" above).
+1. The fortran-lang.org **package index** PR (`fortran-lang/fortran-lang.org`'s `PACKAGES.md`) —
+   not the separate `fpm publish` registry, still playground/testing status, skipped
+   deliberately.
+2. Optional polish, no urgency: a `[[entity_name]]` auto-link pass over `doc/pages/*.md`'s
+   inline procedure-name mentions (plain backtick spans today); a favicon/logo for `doc/media/`
+   (exists, currently empty besides a `.gitkeep`); extending `tools/check_doc_anchors.py` to also
+   scan `doc/pages/*.md` (not covered today — see "Checking documentation links" above).
 
 ## MAML fixture directory: `schemas/` (renamed from `docs/`)
 

@@ -5,7 +5,7 @@
 [![API documentation](https://gitlab.4most.eu/ole/docserver/-/raw/master/API-documentation-blue.svg)](https://www.4most.eu/readthedocs/etempel/parquet-fortran/main)
 ![Language: Fortran](https://img.shields.io/badge/Language-Fortran-734f96.svg)
 [![fpm](https://img.shields.io/badge/fpm-package-729FCF.svg)](https://fpm.fortran-lang.org/)
-[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](LICENSE)
+[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/LICENSE)
 
 Library to read/write parquet files and handle MAML files. The parquet file metadata can be defined using the [MAML-format](https://github.com/asgr/MAML-Format). The metadata in the MAML file is converted to the VOTable style metadata in the parquet header.
 
@@ -30,8 +30,6 @@ Library to read/write parquet files and handle MAML files. The parquet file meta
 - [Limitations](#limitations)
 - [Contributing](#contributing)
 - [License](#license)
-
-Everything else — reading, writing, and the MAML format — lives in the **[user guide](doc/pages/index.md)**; the full per-procedure API reference is generated from source via FORD (see [Contributing](#contributing)).
 
 ## Quick example
 
@@ -149,7 +147,7 @@ Note: the exact variable set can vary by operating system and compiler toolchain
 
 For genuine multi-threaded (OpenMP) use, your compiler's OpenMP flag must also be supplied via `FPM_FFLAGS` — see [Thread safety](doc/pages/thread-safety.md) for the per-compiler flags and why.
 
-To build/test this repository itself (as opposed to depending on it from your own project), see [CONTRIBUTING.md](CONTRIBUTING.md).
+To build/test this repository itself (as opposed to depending on it from your own project), see [CONTRIBUTING.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CONTRIBUTING.md).
 
 Hitting a build or link error? See [Troubleshooting](doc/pages/troubleshooting.md) in the user guide for the common symptoms and their fixes.
 
@@ -177,14 +175,14 @@ Worth knowing up front before relying on this library:
 - **Reading a column whose physical Parquet type doesn't match what you asked for aborts the process, but not via a clean `error stop`** — it's a C++-level abort with a diagnostic printed to stderr (e.g. `parquet-fortran: parquet_read_column: type mismatch for column: d (expected int32/int64, got date32[day])`), not a Fortran `error stop`. This covers the physical type being outside the six [supported data types](doc/pages/supported-data-types.md) (e.g. the file has a `date32` column) as well as a declared vector column's shape not matching what was requested, across every read function (`parquet_read_column`, `parquet_read_array_row_mode`, `parquet_read_array_element_mode`, and vector-column reads).
 - A column can only be written once per `parquet_writer` — there's no incremental/streaming append to a column across multiple `parquet_write_column` calls, and no way to append rows to an already-closed `.parquet` file. Writing the same column name twice fails immediately with `error stop`, naming the column, whether or not the writer has a MAML-derived schema.
 - **`parquet_open_writer` silently overwrites/truncates an existing file at that path** — there is no existence check and no warning.
-- There is no random-access or predicate-pushdown read: `parquet_read_array_row_mode`/`parquet_read_array_element_mode` avoid loading a whole *column* at once, but there's no way to filter which *rows* are read across a table.
+- No genuine random-access or predicate-pushdown read: row filtering via `parquet_filter` (see [Row filtering](doc/pages/reading.md#row-filtering-with-parquet_filter)) narrows which rows your code sees, but it's post-decode — every referenced column is still fully read/decoded off disk; there's no I/O-level skip of non-matching row groups. Separately, `parquet_read_array_row_mode`/`parquet_read_array_element_mode` avoid loading a whole *column* at once.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for building/testing this repository itself, its error-path testing infrastructure, and a list of features that have been considered but aren't yet implemented.
+See [CONTRIBUTING.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CONTRIBUTING.md) for building/testing this repository itself, its error-path testing infrastructure, and a list of features that have been considered but aren't yet implemented.
 
 Generated API reference documentation ([FORD](https://forddocs.readthedocs.io/)) can be built locally with `ford docs.md`, producing HTML output in `ford-doc/`.
 
 ## License
 
-BSD 3-Clause License — see [LICENSE](LICENSE). See [CHANGELOG.md](CHANGELOG.md) for release history.
+BSD 3-Clause License — see [LICENSE](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/LICENSE). See [CHANGELOG.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CHANGELOG.md) for release history.

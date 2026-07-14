@@ -9,6 +9,7 @@ This file covers developing, testing, and extending this repository itself. If y
 - [Building and testing this repository](#building-and-testing-this-repository)
   - [Running the error-path tests](#running-the-error-path-tests)
   - [Regenerating the test fixtures](#regenerating-the-test-fixtures)
+  - [Other tools/ helpers](#other-tools-helpers)
   - [Testing genuine OpenMP concurrency](#testing-genuine-openmp-concurrency)
   - [Continuous integration (GitLab CI)](#continuous-integration-gitlab-ci)
   - [Mirroring to GitHub](#mirroring-to-github)
@@ -102,13 +103,17 @@ tools/run_generate_fixtures.sh
 
 This compiles `generate_fixtures.cpp` with `clang++` and runs it from the repository root, rewriting every fixture under `test/fixtures/`. It needs the same `FPM_CXXFLAGS`/`FPM_LDFLAGS` (Arrow/Parquet include/link flags) used to build the project itself — see [README.md's Environment variables section](README.md#environment-variables); the script errors out early if they are unset.
 
-(Two unrelated helpers live in the same folder: `tools/count_lines.py` reports code/comment/blank line counts for `src/` and `test/`, a convenience for repository metrics; `tools/check_doc_anchors.py` validates every `#anchor` link in this repository's `*.md` files — same-file and cross-file — against the anchors GitHub would actually generate for each file's headings (using GitHub's real slugging rules, including the `-1`/`-2` suffixing for repeated headings), and exits nonzero if any link doesn't resolve. Run it after editing headings or anchor links in README.md/CONTRIBUTING.md:
+### Other tools/ helpers
+
+Two more `tools/` scripts, unrelated to fixtures and not part of the build or test flow:
+
+`tools/count_lines.py` reports code/comment/blank line counts for `src/` and `test/`, a convenience for repository metrics.
+
+`tools/check_doc_anchors.py` validates every `#anchor` link in this repository's `*.md` files — same-file and cross-file — against the anchors GitHub would actually generate for each file's headings (using GitHub's real slugging rules, including the `-1`/`-2` suffixing for repeated headings), and exits nonzero if any link doesn't resolve. Run it after editing headings or anchor links in README.md/CONTRIBUTING.md:
 
 ```bash
 tools/check_doc_anchors.py
 ```
-
-Neither is part of the build or test flow.)
 
 ### Testing genuine OpenMP concurrency
 
@@ -134,6 +139,8 @@ A few choices in that file are load-bearing — each one cost a debugging round 
 
 Coverage is computed by `gcovr` over `src/` and surfaced through GitLab's `coverage:` regex. For the same line-coverage report locally, `tools/coverage.sh` does the equivalent — it builds with `--coverage`, runs the suite plus every error scenario, and prints per-file and total `src/` coverage (resolving the `gcov` that matches your `gfortran` automatically).
 
+Docs are published by two separate jobs, not the `test` job above: `.gitlab-ci.yml`'s `readthedocs` job (GitLab CI → gitlab.4most.eu's readthedocs-style docserver) and `.github/workflows/docs.yml` (GitHub Actions → GitHub Pages). Both just run `ford docs.md` plus `tools/fix_ford_page_links.sh` (fixes up `doc/pages/*.md` links that FORD doesn't resolve when embedding README.md's raw markdown as its front page — see that script's header) before publishing.
+
 ### Mirroring to GitHub
 
 This repository is developed on GitLab (`gitlab.4most.eu`), with a manually-synced read-only
@@ -143,22 +150,15 @@ push to the mirror by hand whenever you want it updated:
 
 ```bash
 git remote add github git@github.com:etempel/parquet-fortran.git   # one-time setup
-git push github main
+tools/mirror_to_github.sh --github
 git push github --tags     # if there are tags to mirror
 ```
 
-**Before the push, remove README.md's three GitLab-specific badges** — the CI
-pipeline, coverage, and API-documentation badges all point at `gitlab.4most.eu` URLs that
-don't resolve outside that GitLab instance and would render broken on GitHub.
-
-```bash
-git push github github main
-```
-
-To add API documentation badge in GitHub:
-```
-[![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg)](https://etempel.github.io/parquet-fortran/index.html)
-```
+README.md and `doc/pages/*.md` contain a handful of `gitlab.4most.eu`-specific links and badges
+that need to point at `github.com` instead once mirrored. `tools/mirror_to_github.sh` handles this
+automatically from a disposable local branch — so `main` never carries GitHub-targeted content,
+even transiently — via `tools/prep_github_mirroring.sh` (see that script's header for the exact
+mechanics, including its `--reverse` mode).
 
 ## Regenerating the built-in MAML module
 

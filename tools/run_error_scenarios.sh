@@ -100,6 +100,7 @@ scenarios=(
     "get_field_name_index_too_high:1"
     "read_column_with_nulls:1"
     "read_unsupported_physical_type:1"
+    "col_size_overflow:1"
     "prefetch_unknown_column:1"
     "filter_unknown_column:1"
     "filter_vector_column:1"

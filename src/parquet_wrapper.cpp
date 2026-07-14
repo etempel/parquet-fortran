@@ -520,6 +520,35 @@ extern "C"
 		return n_values * item_len > limit;
 	}
 
+	// Arrow's real limit for a vector column's per-row width: arrow::FixedSizeListBuilder and
+	// arrow::fixed_size_list() both take `list_size` as a plain int32_t. Unlike the string byte-offset
+	// limit above, there is no "large" fixed-size-list variant to auto-upgrade to -- this is a hard
+	// Arrow architectural ceiling, not something this library can work around. append_typed_column and
+	// parquet_append_string_array_column check col_size against this (or, under test,
+	// g_debug_col_size_limit -- see parquet_debug_set_col_size_limit) before ever casting it to
+	// int32_t, so an oversized col_size fails cleanly instead of silently wrapping into a garbage
+	// list_size and corrupting the written column.
+	static constexpr int64_t kArrowInt32ListSizeLimit = 2147483647; // 2^31 - 1
+
+	// Test-only override of kArrowInt32ListSizeLimit -- see parquet_debug_set_col_size_limit, further
+	// below, for why this is a process-global (same reasoning as g_debug_string_offset_limit, above).
+	// <= 0 (the default) means "use the real production limit".
+	static int64_t g_debug_col_size_limit = -1;
+
+	// Aborts (via report_fatal_error) if `col_size` exceeds Arrow's FixedSizeListType limit --
+	// see kArrowInt32ListSizeLimit, above. Called before any of the col_size > 1 vector-column
+	// write paths cast col_size to int32_t.
+	static void check_col_size_fits_arrow_limit(int64_t col_size, const std::string &name, const char *context)
+	{
+		int64_t limit = g_debug_col_size_limit > 0 ? g_debug_col_size_limit : kArrowInt32ListSizeLimit;
+		if (col_size > limit)
+		{
+			report_fatal_error(context, "column '" + name + "': col_size (" + std::to_string(col_size) +
+				") exceeds " + std::to_string(kArrowInt32ListSizeLimit) +
+				", the maximum vector-column width Arrow's FixedSizeListType supports");
+		}
+	}
+
 	// Formats `v` with 6 significant digits for a parquet_reader_print_stat line.
 	static std::string format_stat_double(double v)
 	{
@@ -2963,6 +2992,7 @@ static void append_typed_column(void *handle, const char *name, const ValueType 
 
 	if (col_size > 1)
 	{
+		check_col_size_fits_arrow_limit(col_size, name, "parquet_append_column");
 		auto value_builder = std::make_shared<BuilderType>();
 		arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(col_size));
 		auto status = list_builder.AppendValues(nrows);
@@ -3085,6 +3115,7 @@ extern "C"
 	void parquet_append_string_array_column(void *handle, const char *name, const char *data, int64_t item_len, int64_t nrows, int64_t col_size, const int8_t *valid_in)
 	{
 		auto writer_handle = as_handle(handle);
+		check_col_size_fits_arrow_limit(col_size, name, "parquet_append_string_array_column");
 
 		auto build = [&](auto value_builder) -> std::shared_ptr<arrow::Array>
 		{
@@ -3140,6 +3171,16 @@ extern "C"
 	void parquet_debug_set_string_offset_limit(int64_t n)
 	{
 		g_debug_string_offset_limit = n;
+	}
+
+	// Test-only: overrides g_debug_col_size_limit (see its own comment) so
+	// test/error_scenarios.f90's scenario_col_size_overflow can exercise the
+	// check_col_size_fits_arrow_limit abort path with a tiny fixture instead of a genuinely
+	// oversized vector column. Same process-global/subprocess-isolation reasoning as
+	// parquet_debug_set_string_offset_limit, above. Pass n<=0 to restore the real production limit.
+	void parquet_debug_set_col_size_limit(int64_t n)
+	{
+		g_debug_col_size_limit = n;
 	}
 
 

@@ -32,6 +32,8 @@ contains
             new_unittest("read array modes", test_read_array_modes), &
             new_unittest("read array modes for int32/float64/boolean vectors", &
                 test_read_array_modes_more_types), &
+            new_unittest("read array row_mode with an integer(int64) row_index", &
+                test_read_array_row_mode_int64_row_index), &
             new_unittest("read string vector with a short first element (row/element/matrix modes, get_string_length)", &
                 test_read_string_vector_short_first), &
             new_unittest("get library version", test_get_library_version), &
@@ -627,6 +629,80 @@ contains
 
         call parquet_close_reader(reader)
     end subroutine test_read_array_modes_more_types
+
+    !> Exercises the integer(int64) row_index specifics of parquet_read_array_row_mode
+    !> (parquet_read_<type>_array_row_mode_row_index_int64 in src/parquet_read.f90, added
+    !> alongside the existing integer(int32) row_index ones so a caller can address a row
+    !> beyond huge(1_int32) on a suitably large file) -- for all six types, checking an
+    !> explicit integer(int64) row_index literal returns exactly the same values as the
+    !> plain integer(int32) row_index call on the same row.
+    subroutine test_read_array_row_mode_int64_row_index(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: i32v(2, 2), i32_row32(2), i32_row64(2)
+        integer(int64) :: i64v(2, 2), i64_row32(2), i64_row64(2)
+        real(real32) :: f32v(2, 2), f32_row32(2), f32_row64(2)
+        real(real64) :: f64v(2, 2), f64_row32(2), f64_row64(2)
+        logical :: boolv(2, 2), bool_row32(2), bool_row64(2)
+        character(len=8) :: strv(2, 2), str_row32(2), str_row64(2)
+        logical :: ok
+        character(len=*), parameter :: out_file = "test_run/array_row_mode_int64_index.parquet"
+
+        i32v = reshape([1_int32, 2_int32, 3_int32, 4_int32], [2, 2])
+        i64v = reshape([10_int64, 20_int64, 30_int64, 40_int64], [2, 2])
+        f32v = reshape([1.5_real32, 2.5_real32, 3.5_real32, 4.5_real32], [2, 2])
+        f64v = reshape([1.25_real64, 2.25_real64, 3.25_real64, 4.25_real64], [2, 2])
+        boolv = reshape([.true., .false., .false., .true.], [2, 2])
+        strv = reshape([character(len=8) :: "aa", "bb", "cc", "dd"], [2, 2])
+
+        call schema%init(table="row_mode_int64_index_table")
+        call schema%add_field("i32v", "int32", col_size=2)
+        call schema%add_field("i64v", "int64", col_size=2)
+        call schema%add_field("f32v", "float32", col_size=2)
+        call schema%add_field("f64v", "float64", col_size=2)
+        call schema%add_field("boolv", "boolean", col_size=2)
+        call schema%add_field("strv", "string", array_size=8, col_size=2)
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "i32v", i32v)
+        call parquet_write_column(writer, "i64v", i64v)
+        call parquet_write_column(writer, "f32v", f32v)
+        call parquet_write_column(writer, "f64v", f64v)
+        call parquet_write_column(writer, "boolv", boolv)
+        call parquet_write_column(writer, "strv", strv)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+
+        call parquet_read_array_row_mode(reader, "i32v", i32_row32, 2)
+        call parquet_read_array_row_mode(reader, "i32v", i32_row64, 2_int64)
+        call parquet_read_array_row_mode(reader, "i64v", i64_row32, 2)
+        call parquet_read_array_row_mode(reader, "i64v", i64_row64, 2_int64)
+        call parquet_read_array_row_mode(reader, "f32v", f32_row32, 2)
+        call parquet_read_array_row_mode(reader, "f32v", f32_row64, 2_int64)
+        call parquet_read_array_row_mode(reader, "f64v", f64_row32, 2)
+        call parquet_read_array_row_mode(reader, "f64v", f64_row64, 2_int64)
+        call parquet_read_array_row_mode(reader, "boolv", bool_row32, 2)
+        call parquet_read_array_row_mode(reader, "boolv", bool_row64, 2_int64)
+        call parquet_read_array_row_mode(reader, "strv", str_row32, 2)
+        call parquet_read_array_row_mode(reader, "strv", str_row64, 2_int64)
+
+        call parquet_close_reader(reader)
+
+        ok = all(i32_row64 == i32_row32) .and. all(i32_row64 == [3_int32, 4_int32])
+        ok = ok .and. all(i64_row64 == i64_row32) .and. all(i64_row64 == [30_int64, 40_int64])
+        ok = ok .and. all(abs(f32_row64 - f32_row32) < 1.0e-6_real32) .and. &
+             all(abs(f32_row64 - [3.5_real32, 4.5_real32]) < 1.0e-6_real32)
+        ok = ok .and. all(abs(f64_row64 - f64_row32) < 1.0e-10_real64) .and. &
+             all(abs(f64_row64 - [3.25_real64, 4.25_real64]) < 1.0e-10_real64)
+        ok = ok .and. all(bool_row64 .eqv. bool_row32) .and. all(bool_row64 .eqv. [.false., .true.])
+        ok = ok .and. all(str_row64 == str_row32) .and. trim(str_row64(1)) == "cc" .and. trim(str_row64(2)) == "dd"
+
+        call check(error, ok, "integer(int64) row_index result did not match integer(int32) row_index for one or more types")
+    end subroutine test_read_array_row_mode_int64_row_index
 
     !> Regression guard for a past bug where a string vector column was sized
     !> from the length of the FIRST string it read, truncating every longer

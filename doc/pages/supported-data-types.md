@@ -19,6 +19,18 @@ Vector column entries use the shape convention `(col_size, nrows)` for arrays pa
 
 A `string` (scalar or vector-of-strings) column's underlying Arrow representation is chosen automatically based on size. Normally it's Arrow's default `utf8` type, which caps a single column's total string byte payload at 2^31-1 bytes (~2 GiB) — but if writing a column would exceed that, this library transparently switches that column to `large_utf8` (64-bit offsets, no such limit) instead. This is fully automatic and requires no action from either the writer or reader side: `parquet_write_column`/`parquet_read_column` and every other read function behave identically either way, including row filtering (`parquet_filter`) and `qc:` range checks. The only place the difference is visible is `parquet_close_reader(print_stat=.true.)`'s `parquet_type` column, which shows `large_string`/`list<large_string>` instead of `string`/`list<string>` for a column that was promoted.
 
+### Vector-column width (`col_size`) limit
+
+Unlike a column's row count or its total element count (`nrows * col_size`), which this library
+supports beyond Fortran's default-integer `huge(1)` (2,147,483,647) for every data type, a single
+row's own vector width (`col_size`) is capped at that same number. This is a hard limit of Arrow's
+`FixedSizeListType` itself — its `list_size` is a plain `int32_t`, and unlike Arrow's string type
+(see [Large string columns](#large-string-columns) above), there is no "large" fixed-size-list
+variant to fall back to. Writing a vector column whose `col_size` would exceed this aborts the
+process (a C++-level abort with a diagnostic on stderr, the same class of failure as the
+physical-type-mismatch case in [Limitations](../index.html#limitations)) rather than silently
+truncating `col_size` and corrupting the written column.
+
 ### Reading a column into a different numeric kind
 
 `parquet_read_column` (and `parquet_read_array_row_mode`/`parquet_read_array_element_mode`) dispatch on the *declared type/kind of the `values` array you pass in*, not the column's own stored type — so `values`' kind doesn't have to match the file's `data_type` exactly, as long as the conversion is one of the following:

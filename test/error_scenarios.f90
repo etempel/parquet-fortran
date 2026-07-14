@@ -35,6 +35,8 @@ program error_scenarios
         call scenario_print_stat_smoke()
     case ("large_string_roundtrip")
         call scenario_large_string_roundtrip()
+    case ("col_size_overflow")
+        call scenario_col_size_overflow()
     case ("write_undeclared_column")
         call scenario_write_undeclared_column()
     case ("write_undeclared_column_int64")
@@ -1459,6 +1461,39 @@ contains
             error stop "row filter on a large_utf8 scalar string column did not match exactly one row"
         end if
     end subroutine scenario_large_string_roundtrip
+
+    !> Arrow's arrow::FixedSizeListBuilder/fixed_size_list() take a vector column's per-row
+    !> width (col_size) as a plain int32_t -- unlike the string byte-offset limit above, there
+    !> is no "large" variant to auto-upgrade to, so check_col_size_fits_arrow_limit in
+    !> parquet_wrapper.cpp aborts cleanly (via report_fatal_error) rather than silently
+    !> truncating col_size and corrupting the written column (see the README's Limitations
+    !> section). A genuine col_size beyond 2^31-1 needs far too much memory per row to build in
+    !> the normal fpm test suite, so this scenario instead calls parquet_debug_set_col_size_limit
+    !> (a process-global, test-only hook declared locally below, not part of the public Fortran
+    !> API -- see its own comment in parquet_wrapper.cpp) to shrink the threshold to a handful of
+    !> elements, forcing a tiny fixture through the same abort path. Safe as a process-global for
+    !> the same subprocess-isolation reason as scenario_large_string_roundtrip's own
+    !> parquet_debug_set_string_offset_limit use, above.
+    subroutine scenario_col_size_overflow()
+        interface
+            subroutine parquet_debug_set_col_size_limit(n) &
+                bind(C, name="parquet_debug_set_col_size_limit")
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t), value :: n !! col_size threshold to use instead of the real 2^31-1 limit; <=0 restores it.
+            end subroutine parquet_debug_set_col_size_limit
+        end interface
+
+        type(parquet_writer) :: writer
+        integer(int32) :: data(6, 1)
+
+        data = reshape([1, 2, 3, 4, 5, 6], [6, 1])
+        call parquet_debug_set_col_size_limit(5_int64)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_col_size_overflow.parquet")
+        call parquet_write_column(writer, "v", data)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote a column with col_size exceeding the (shrunk) Arrow limit without error"
+    end subroutine scenario_col_size_overflow
 
     !> parquet_open_reader(..., filter=) validates every filter column name
     !> against the file's actual schema before applying it, the same as

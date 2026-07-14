@@ -370,17 +370,26 @@ module parquet
     !> Reads one row of a vector (array) column named `name` from an open
     !> parquet_reader (reader): `values` receives that row's full element
     !> vector, selected by the 1-based `row_index`. Dispatched by `values`'
-    !> actual/declared type/kind. null_value (optional) fills missing
-    !> entries; is_valid (optional) reports which elements were actually
-    !> present. See parquet_read_array_element_mode for the complementary
-    !> "one element across all rows" access pattern.
+    !> actual/declared type/kind, and separately by `row_index`'s own kind
+    !> (integer(int32) or integer(int64) -- the latter needed only to address
+    !> a row beyond huge(1_int32), 2,147,483,647, in a file that large).
+    !> null_value (optional) fills missing entries; is_valid (optional)
+    !> reports which elements were actually present. See
+    !> parquet_read_array_element_mode for the complementary "one element
+    !> across all rows" access pattern.
     interface parquet_read_array_row_mode
         module procedure parquet_read_int32_array_row_mode
+        module procedure parquet_read_int32_array_row_mode_row_index_int64
         module procedure parquet_read_int64_array_row_mode
+        module procedure parquet_read_int64_array_row_mode_row_index_int64
         module procedure parquet_read_float32_array_row_mode
+        module procedure parquet_read_float32_array_row_mode_row_index_int64
         module procedure parquet_read_float64_array_row_mode
+        module procedure parquet_read_float64_array_row_mode_row_index_int64
         module procedure parquet_read_logical_array_row_mode
+        module procedure parquet_read_logical_array_row_mode_row_index_int64
         module procedure parquet_read_string_array_row_mode
+        module procedure parquet_read_string_array_row_mode_row_index_int64
     end interface parquet_read_array_row_mode
 
     !> Reads one element position of a vector (array) column named `name`
@@ -1683,66 +1692,146 @@ module parquet
             logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
         end subroutine parquet_read_string_array_full
 
-        !> int32 specific of parquet_read_array_row_mode; see the generic
-        !> interface above for the shared "one row of a vector column" behavior.
+        !> int32 value / int32 row_index specific of parquet_read_array_row_mode; see the generic
+        !> interface above for the shared "one row of a vector column" behavior. A paired
+        !> _row_index_int64 specific (same value type, int64 row_index) also exists for files with
+        !> more than 2,147,483,647 rows -- see parquet_read_int32_array_row_mode_row_index_int64.
         module subroutine parquet_read_int32_array_row_mode(reader, name, values, row_index, null_value, is_valid)
             type(parquet_reader), intent(in) :: reader !! open reader.
             character(len=*), intent(in) :: name !! vector column name.
             integer(int32), intent(out) :: values(:) !! that row's element vector.
-            integer, intent(in) :: row_index !! 1-based row to read.
+            integer(int32), intent(in) :: row_index !! 1-based row to read.
             integer(int32), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-element validity mask.
         end subroutine parquet_read_int32_array_row_mode
 
-        !> int64 specific of parquet_read_array_row_mode; see parquet_read_int32_array_row_mode.
+        !> int32 value / int64 row_index specific of parquet_read_array_row_mode; see
+        !> parquet_read_int32_array_row_mode. Only needed to address a row beyond
+        !> huge(1_int32) (2,147,483,647) in a file that large.
+        module subroutine parquet_read_int32_array_row_mode_row_index_int64(reader, name, values, row_index, null_value, &
+                is_valid)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            integer(int32), intent(out) :: values(:) !! that row's element vector.
+            integer(int64), intent(in) :: row_index !! 1-based row to read.
+            integer(int32), intent(in), optional :: null_value !! fill value for missing entries.
+            logical, intent(out), optional :: is_valid(:) !! per-element validity mask.
+        end subroutine parquet_read_int32_array_row_mode_row_index_int64
+
+        !> int64 value / int32 row_index specific of parquet_read_array_row_mode; see
+        !> parquet_read_int32_array_row_mode.
         module subroutine parquet_read_int64_array_row_mode(reader, name, values, row_index, null_value, is_valid)
             type(parquet_reader), intent(in) :: reader !! open reader.
             character(len=*), intent(in) :: name !! vector column name.
             integer(int64), intent(out) :: values(:) !! that row's element vector.
-            integer, intent(in) :: row_index !! 1-based row to read.
+            integer(int32), intent(in) :: row_index !! 1-based row to read.
             integer(int64), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-element validity mask.
         end subroutine parquet_read_int64_array_row_mode
 
-        !> float32 specific of parquet_read_array_row_mode; see parquet_read_int32_array_row_mode.
+        !> int64 value / int64 row_index specific of parquet_read_array_row_mode; see
+        !> parquet_read_int32_array_row_mode_row_index_int64.
+        module subroutine parquet_read_int64_array_row_mode_row_index_int64(reader, name, values, row_index, null_value, &
+                is_valid)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            integer(int64), intent(out) :: values(:) !! that row's element vector.
+            integer(int64), intent(in) :: row_index !! 1-based row to read.
+            integer(int64), intent(in), optional :: null_value !! fill value for missing entries.
+            logical, intent(out), optional :: is_valid(:) !! per-element validity mask.
+        end subroutine parquet_read_int64_array_row_mode_row_index_int64
+
+        !> float32 value / int32 row_index specific of parquet_read_array_row_mode; see
+        !> parquet_read_int32_array_row_mode.
         module subroutine parquet_read_float32_array_row_mode(reader, name, values, row_index, null_value, is_valid)
             type(parquet_reader), intent(in) :: reader !! open reader.
             character(len=*), intent(in) :: name !! vector column name.
             real(real32), intent(out) :: values(:) !! that row's element vector.
-            integer, intent(in) :: row_index !! 1-based row to read.
+            integer(int32), intent(in) :: row_index !! 1-based row to read.
             real(real32), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-element validity mask.
         end subroutine parquet_read_float32_array_row_mode
 
-        !> float64 specific of parquet_read_array_row_mode; see parquet_read_int32_array_row_mode.
+        !> float32 value / int64 row_index specific of parquet_read_array_row_mode; see
+        !> parquet_read_int32_array_row_mode_row_index_int64.
+        module subroutine parquet_read_float32_array_row_mode_row_index_int64(reader, name, values, row_index, &
+                null_value, is_valid)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            real(real32), intent(out) :: values(:) !! that row's element vector.
+            integer(int64), intent(in) :: row_index !! 1-based row to read.
+            real(real32), intent(in), optional :: null_value !! fill value for missing entries.
+            logical, intent(out), optional :: is_valid(:) !! per-element validity mask.
+        end subroutine parquet_read_float32_array_row_mode_row_index_int64
+
+        !> float64 value / int32 row_index specific of parquet_read_array_row_mode; see
+        !> parquet_read_int32_array_row_mode.
         module subroutine parquet_read_float64_array_row_mode(reader, name, values, row_index, null_value, is_valid)
             type(parquet_reader), intent(in) :: reader !! open reader.
             character(len=*), intent(in) :: name !! vector column name.
             real(real64), intent(out) :: values(:) !! that row's element vector.
-            integer, intent(in) :: row_index !! 1-based row to read.
+            integer(int32), intent(in) :: row_index !! 1-based row to read.
             real(real64), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-element validity mask.
         end subroutine parquet_read_float64_array_row_mode
 
-        !> logical (boolean) specific of parquet_read_array_row_mode; see parquet_read_int32_array_row_mode.
+        !> float64 value / int64 row_index specific of parquet_read_array_row_mode; see
+        !> parquet_read_int32_array_row_mode_row_index_int64.
+        module subroutine parquet_read_float64_array_row_mode_row_index_int64(reader, name, values, row_index, &
+                null_value, is_valid)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            real(real64), intent(out) :: values(:) !! that row's element vector.
+            integer(int64), intent(in) :: row_index !! 1-based row to read.
+            real(real64), intent(in), optional :: null_value !! fill value for missing entries.
+            logical, intent(out), optional :: is_valid(:) !! per-element validity mask.
+        end subroutine parquet_read_float64_array_row_mode_row_index_int64
+
+        !> logical (boolean) value / int32 row_index specific of parquet_read_array_row_mode; see
+        !> parquet_read_int32_array_row_mode.
         module subroutine parquet_read_logical_array_row_mode(reader, name, values, row_index, null_value, is_valid)
             type(parquet_reader), intent(in) :: reader !! open reader.
             character(len=*), intent(in) :: name !! vector column name.
             logical, intent(out) :: values(:) !! that row's element vector.
-            integer, intent(in) :: row_index !! 1-based row to read.
+            integer(int32), intent(in) :: row_index !! 1-based row to read.
             logical, intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-element validity mask.
         end subroutine parquet_read_logical_array_row_mode
 
-        !> string specific of parquet_read_array_row_mode; see parquet_read_int32_array_row_mode.
+        !> logical (boolean) value / int64 row_index specific of parquet_read_array_row_mode; see
+        !> parquet_read_int32_array_row_mode_row_index_int64.
+        module subroutine parquet_read_logical_array_row_mode_row_index_int64(reader, name, values, row_index, &
+                null_value, is_valid)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            logical, intent(out) :: values(:) !! that row's element vector.
+            integer(int64), intent(in) :: row_index !! 1-based row to read.
+            logical, intent(in), optional :: null_value !! fill value for missing entries.
+            logical, intent(out), optional :: is_valid(:) !! per-element validity mask.
+        end subroutine parquet_read_logical_array_row_mode_row_index_int64
+
+        !> string value / int32 row_index specific of parquet_read_array_row_mode; see
+        !> parquet_read_int32_array_row_mode.
         module subroutine parquet_read_string_array_row_mode(reader, name, values, row_index, null_value, is_valid)
             type(parquet_reader), intent(in) :: reader !! open reader.
             character(len=*), intent(in) :: name !! vector column name.
             character(len=*), intent(out) :: values(:) !! that row's element vector.
-            integer, intent(in) :: row_index !! 1-based row to read.
+            integer(int32), intent(in) :: row_index !! 1-based row to read.
             character(len=*), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-element validity mask.
         end subroutine parquet_read_string_array_row_mode
+
+        !> string value / int64 row_index specific of parquet_read_array_row_mode; see
+        !> parquet_read_int32_array_row_mode_row_index_int64.
+        module subroutine parquet_read_string_array_row_mode_row_index_int64(reader, name, values, row_index, &
+                null_value, is_valid)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            character(len=*), intent(out) :: values(:) !! that row's element vector.
+            integer(int64), intent(in) :: row_index !! 1-based row to read.
+            character(len=*), intent(in), optional :: null_value !! fill value for missing entries.
+            logical, intent(out), optional :: is_valid(:) !! per-element validity mask.
+        end subroutine parquet_read_string_array_row_mode_row_index_int64
 
         !> int32 specific of parquet_read_array_element_mode; see the generic
         !> interface above for the shared "one element across all rows" behavior.

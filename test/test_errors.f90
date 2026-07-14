@@ -125,6 +125,8 @@ contains
                 test_read_column_with_nulls_aborts), &
             new_unittest("reading a column of an unsupported physical type aborts", &
                 test_read_unsupported_physical_type_aborts), &
+            new_unittest("writing a vector column with col_size exceeding Arrow's FixedSizeListType limit aborts", &
+                test_write_col_size_overflow_aborts), &
             new_unittest("prefetching an unknown column aborts", &
                 test_prefetch_unknown_column_aborts), &
             new_unittest("filter: unknown column aborts", &
@@ -660,6 +662,21 @@ contains
         call check_scenario_exit_status(error, "read_unsupported_physical_type", expect_abort=.true., &
             failure_message="reading a column of an unsupported physical Parquet type was expected to abort")
     end subroutine test_read_unsupported_physical_type_aborts
+
+    !> check_col_size_fits_arrow_limit in parquet_wrapper.cpp aborts via a C++-level
+    !> report_fatal_error (not a Fortran error stop) the moment a vector column's col_size
+    !> would exceed Arrow's FixedSizeListType int32_t limit -- see the README's Limitations
+    !> section and scenario_col_size_overflow's own comment for why this is tested with a
+    !> shrunk test-only threshold rather than a genuinely oversized column.
+    subroutine test_write_col_size_overflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "col_size_overflow", expect_abort=.true., &
+            failure_message="writing a vector column with col_size exceeding the (shrunk) Arrow limit " // &
+                "was expected to abort", &
+            required_stderr="parquet_append_column: column 'v': col_size (6) exceeds 2147483647, " // &
+                "the maximum vector-column width Arrow's FixedSizeListType supports")
+    end subroutine test_write_col_size_overflow_aborts
 
     !> parquet_prefetch_columns now validates names against the file's schema
     !> up front and error stops with a dedicated message, instead of letting

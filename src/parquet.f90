@@ -184,7 +184,11 @@ module parquet
     !> Overrides the default structure constructor so a schema can be built
     !> in one expression (my_maml = parquet_schema(table="my_table")) as an
     !> alternative to call my_maml%init(table="my_table"); both call
-    !> parquet_schema_new/schema_init under the hood.
+    !> parquet_schema_new/schema_init under the hood. table is the only
+    !> required argument (the MAML table: key); survey, dataset, version,
+    !> date, author, description, license, and maml_version are all optional
+    !> and set the correspondingly-named MAML header key when given. Returns
+    !> the newly initialized schema.
     interface parquet_schema
         module procedure parquet_schema_new
     end interface parquet_schema
@@ -299,10 +303,12 @@ module parquet
         logical :: null_values_allowed = .false. !! true only if this field's qc: miss: was Null/NA (case-insensitive).
     end type parquet_qc_rule
 
-    !> Writes one column's values to an open parquet_writer, dispatched by
-    !> the actual/declared type/kind of `values` (scalar or matrix/vector
-    !> column). is_valid (optional) marks per-element nulls; a .false. entry
-    !> for a protected column (see parquet_column_type%is_protected) error stops.
+    !> Writes one column's values to an open parquet_writer (writer), under
+    !> the given column name (name), dispatched by the actual/declared
+    !> type/kind of `values` (scalar values(:), one value per row; or
+    !> matrix/vector values(:,:), (element, row) values). is_valid (optional)
+    !> marks per-element nulls (matching values' rank); a .false. entry for a
+    !> protected column (see parquet_column_type%is_protected) error stops.
     interface parquet_write_column
         module procedure parquet_write_int32_column
         module procedure parquet_write_int32_matrix_column
@@ -319,26 +325,33 @@ module parquet
     end interface parquet_write_column
 
     !> Parses a MAML into a parquet_schema (its %maml, %cinfo and %metadata).
-    !> The file form loads the .maml from disk first; the object form parses
-    !> a schema whose %maml has already been populated (e.g. built in memory).
+    !> The file form takes a `filename` (.maml file path) and loads it from
+    !> disk first; the object form takes only `schema`, whose %maml has
+    !> already been populated (e.g. built in memory). Both forms fill in
+    !> `schema`'s %cinfo and %metadata in place.
     interface parquet_parse_maml
         module procedure parquet_parse_maml_from_file
         module procedure parquet_parse_maml_from_object
     end interface parquet_parse_maml
 
-    !> Validates either a parquet_maml_file (already loaded, e.g. via
-    !> parquet_load_maml_file or built in memory) or a MAML filename (loaded
-    !> from disk first). See parquet_validate_maml_internal/_file for behavior.
+    !> Runs the full set of MAML validity checks (a table: key, at least one
+    !> field, a valid data_type on every field, ...) against either an
+    !> already-loaded MAML passed as `maml` (a parquet_maml_file, e.g. via
+    !> parquet_load_maml_file or built in memory) or a MAML filename passed
+    !> as `maml` (a character(len=*) .maml file path, loaded from disk first,
+    !> then checked identically).
     interface parquet_validate_maml
         module procedure parquet_validate_maml_internal
         module procedure parquet_validate_maml_file
     end interface parquet_validate_maml
 
-    !> Reads one column's values from an open parquet_reader into `values`,
-    !> dispatched by its actual/declared type/kind and rank (scalar 1-D
-    !> column_1d specifics, or a full 2-D array_full specific for a vector
-    !> column). null_value (optional) fills missing entries; is_valid
-    !> (optional) reports which elements were actually present.
+    !> Reads one column, named `name`, from an open parquet_reader (reader)
+    !> into `values`, dispatched by its actual/declared type/kind and rank
+    !> (scalar 1-D values(:), one value per row -- the column_1d specifics;
+    !> or a full 2-D values(:,:), (element, row) values -- the array_full
+    !> specifics, for a vector column). null_value (optional) fills missing
+    !> entries; is_valid (optional) reports which elements were actually
+    !> present (same rank as values).
     interface parquet_read_column
         module procedure parquet_read_int32_column_1d
         module procedure parquet_read_int64_column_1d
@@ -354,10 +367,13 @@ module parquet
         module procedure parquet_read_string_array_full
     end interface parquet_read_column
 
-    !> Reads one row of a vector (array) column: `values` receives that row's
-    !> full element vector, selected by the 1-based `row_index`. Dispatched by
-    !> `values`' actual/declared type/kind. See parquet_read_array_element_mode
-    !> for the complementary "one element across all rows" access pattern.
+    !> Reads one row of a vector (array) column named `name` from an open
+    !> parquet_reader (reader): `values` receives that row's full element
+    !> vector, selected by the 1-based `row_index`. Dispatched by `values`'
+    !> actual/declared type/kind. null_value (optional) fills missing
+    !> entries; is_valid (optional) reports which elements were actually
+    !> present. See parquet_read_array_element_mode for the complementary
+    !> "one element across all rows" access pattern.
     interface parquet_read_array_row_mode
         module procedure parquet_read_int32_array_row_mode
         module procedure parquet_read_int64_array_row_mode
@@ -367,9 +383,12 @@ module parquet
         module procedure parquet_read_string_array_row_mode
     end interface parquet_read_array_row_mode
 
-    !> Reads one element position of a vector (array) column across all rows:
-    !> `values` receives that element (selected by the 1-based `elem_index`)
-    !> from every row. Dispatched by `values`' actual/declared type/kind. See
+    !> Reads one element position of a vector (array) column named `name`
+    !> from an open parquet_reader (reader) across all rows: `values`
+    !> receives that element (selected by the 1-based `elem_index`) from
+    !> every row. Dispatched by `values`' actual/declared type/kind.
+    !> null_value (optional) fills missing entries; is_valid (optional)
+    !> reports which rows were actually present. See
     !> parquet_read_array_row_mode for the complementary "one row" access pattern.
     interface parquet_read_array_element_mode
         module procedure parquet_read_int32_array_element_mode
@@ -380,26 +399,39 @@ module parquet
         module procedure parquet_read_string_array_element_mode
     end interface parquet_read_array_element_mode
 
-    !> Returns the open reader's post-filter row count in `nrows`, dispatched
-    !> by its integer(int32)/integer(int64) kind. check_positive (optional,
-    !> default .false.): if .true., error stops instead of returning 0 rows.
+    !> Returns `reader`'s post-filter row count in `nrows`, dispatched by
+    !> its integer(int32)/integer(int64) kind (the int32 specific also error
+    !> stops if the actual row count overflows int32). check_positive
+    !> (optional, default .false.): if .true., error stops instead of
+    !> returning 0 rows.
     interface parquet_get_nrows
         module procedure parquet_get_nrows_int64
         module procedure parquet_get_nrows_int32
     end interface parquet_get_nrows
 
-    !> Opens `filename` for reading into `reader`, optionally applying a
-    !> parquet_filter/qc schema and prefetching columns; see
-    !> parquet_open_reader_base's own doc comment below for the full argument
-    !> list. nrows= is generic over integer(int32)/integer(int64)
-    !> (parquet_open_reader_nrows_int32/_int64), plus the original nrows-less
-    !> form (parquet_open_reader_base) for when nrows isn't wanted at all.
-    !> This mirrors parquet_get_nrows's own int32/int64 overload above;
-    !> nrows is required (not optional) in the two typed specifics -- an
-    !> optional dummy that may be absent can't be the sole thing
-    !> distinguishing two specific procedures in a generic interface (a call
-    !> omitting it would be ambiguous), so parquet_open_reader_base carries
-    !> the nrows-absent case as a separate specific instead.
+    !> Opens `filename` for reading into `reader`. use_threads (optional):
+    !> use Arrow's multi-threaded reader. filter (optional): a parquet_filter
+    !> row filter to apply. schema (optional): a parquet_schema/qc-maml to
+    !> validate columns against. qc (optional): enable qc: min/max/miss
+    !> enforcement (needs schema). qc_soft (optional): qc violations warn
+    !> instead of error-stopping. prefetch (optional, default .false.): when
+    !> .true., every column in the file is read and cached right away, after
+    !> any filter has been applied, instead of each column being read lazily
+    !> on first request -- equivalent to calling parquet_prefetch_columns for
+    !> every column immediately after opening; materializes the whole file
+    !> in memory up front, see doc/pages/performance.md.
+    !>
+    !> nrows= is generic over integer(int32)/integer(int64)
+    !> (parquet_open_reader_nrows_int32/_int64: fills `nrows` with the
+    !> post-filter row count, error-stopping if it overflows the requested
+    !> kind), plus the original nrows-less form (parquet_open_reader_base)
+    !> for when nrows isn't wanted at all. This mirrors parquet_get_nrows's
+    !> own int32/int64 overload above; nrows is required (not optional) in
+    !> the two typed specifics -- an optional dummy that may be absent can't
+    !> be the sole thing distinguishing two specific procedures in a generic
+    !> interface (a call omitting it would be ambiguous), so
+    !> parquet_open_reader_base carries the nrows-absent case as a separate
+    !> specific instead.
     interface parquet_open_reader
         module procedure parquet_open_reader_base
         module procedure parquet_open_reader_nrows_int64
@@ -437,21 +469,23 @@ module parquet
         module procedure parquet_get_metadata_string_array
     end interface parquet_get_metadata
 
-    !> Returns the total element count of a vector (array) column across every
-    !> row (i.e. nrows * col_size) in `total_elements`, dispatched by its
+    !> Returns the total element count of a vector (array) column named
+    !> `name`, read from an open parquet_reader (reader), across every row
+    !> (i.e. nrows * col_size) in `total_elements`, dispatched by its
     !> integer(int32)/integer(int64) kind.
     interface parquet_get_column_total_elements
         module procedure parquet_get_column_total_elements_int64
         module procedure parquet_get_column_total_elements_int32
     end interface parquet_get_column_total_elements
 
-    !> Reads and caches the named column(s) right away rather than lazily on
-    !> first request. parquet_prefetch_columns accepts either an array of
-    !> column names (each element sharing one declared length -- pad shorter
-    !> names with blanks) or a single scalar string listing the names
-    !> separated by commas and/or semicolons ("ra;dec,mag"). The scalar form
-    !> avoids the fixed-length array pitfall where a too-short declared
-    !> length silently truncates a name.
+    !> Reads and caches the named column(s) of an open parquet_reader
+    !> (reader) right away rather than lazily on first request.
+    !> parquet_prefetch_columns accepts `names` as either an array of column
+    !> names (each element sharing one declared length -- pad shorter names
+    !> with blanks) or a single scalar string listing the names separated by
+    !> commas and/or semicolons ("ra;dec,mag"). The scalar form avoids the
+    !> fixed-length array pitfall where a too-short declared length silently
+    !> truncates a name.
     interface parquet_prefetch_columns
         module procedure parquet_prefetch_columns_array
         module procedure parquet_prefetch_columns_string

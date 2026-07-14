@@ -129,6 +129,25 @@ validated end-to-end with `ford docs.md` — clean run besides the expected envi
   `! GCOVR_EXCL_LINE` (added deliberately, not FORD/gcovr's default) — a careless edit there
   will silently drop it from every regenerated file (`src/parquet_maml_base.f90` and any
   downstream project's generated `parquet_maml` module).
+- **FORD 7.0.13 never renders per-argument docs for members of a named, multi-specific generic
+  interface** (e.g. `parquet_get_metadata`'s 12 `module procedure` entries) — every member's card
+  under "Module Procedures" on the generic's page shows "Arguments: None", permanently. Root
+  cause (confirmed by reading `ford/sourceform.py`): `FortranInterface.correlate()` resolves each
+  generic member through `self.all_procs[name]`, which lands on the submodule's
+  `FortranModuleProcedureImplementation` object — and that class hardcodes `self.args: List[str]
+  = []` in `_initialize()`, unconditionally, regardless of what the submodule source actually
+  declares. This is **not fixable from source**: rewriting the submodule's abbreviated `module
+  procedure NAME` into a fully restated `module subroutine NAME(args)` (mirroring the spec in
+  `parquet.f90`, the pattern used for `parquet_maml_base_add_col_qc.f90`) was tried and verified
+  to have zero effect on the rendered output — confirmed by rebuilding `ford-doc/` before and
+  after. Solo public procedures that aren't generic members (e.g. `parquet_get_string_length`)
+  are unaffected — they render correctly via a different code path
+  (`FortranModuleProcedureInterface`, wrapping the spec's own parsed `FortranSubroutine`).
+  Workaround in place: each of the 12 public generics' own leading `!>` doc-comment (the block
+  immediately above `interface <name>`) spells out every distinct argument name/role in prose,
+  since that comment (unlike the per-specific ones) does render on the generic's page. Do not
+  re-attempt the submodule-restatement approach without first re-verifying against a newer FORD
+  release that the upstream bug is actually fixed.
 
 ## Publishing: remaining outside-this-repo steps
 

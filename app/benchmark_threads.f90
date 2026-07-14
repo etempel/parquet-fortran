@@ -111,10 +111,9 @@ contains
         end if
     end subroutine parse_arguments
 
-    !> Uncompressed bytes/row of the fixed 12-column benchmark schema (see build_schema),
-    !> shared by estimate_nrows and warn_if_string_offset_limit_at_risk so the two stay
-    !> consistent. Booleans are approximated as 1 byte/row (Arrow actually bit-packs them) --
-    !> close enough for sizing.
+    !> Uncompressed bytes/row of the fixed 12-column benchmark schema (see build_schema), used by
+    !> estimate_nrows to size nrows for a target --size. Booleans are approximated as 1 byte/row
+    !> (Arrow actually bit-packs them) -- close enough for sizing.
     function benchmark_bytes_per_row(vector_len, string_len) result(bytes_per_row)
         integer, intent(in) :: vector_len !! element count of each vector column.
         integer, intent(in) :: string_len !! max length of each string column entry.
@@ -139,23 +138,21 @@ contains
         nrows = max(1_int64, nint(target_bytes / benchmark_bytes_per_row(vector_len, string_len), int64))
     end function estimate_nrows
 
-    !> Warns on stderr when the "str"/"strv" (string / vector-of-strings) columns' total byte
-    !> payload is at risk of overflowing Arrow's int32 string-offset limit (2^31-1 bytes per
-    !> column): src/parquet_wrapper.cpp builds every string column with arrow::utf8() (int32
-    !> offsets), not arrow::large_utf8() (int64 offsets), so a single string/string-vector
-    !> column's cumulative byte payload is capped project-wide, independent of --size or
-    !> row count. Exceeding it has been observed to SIGBUS inside WriteTable rather than fail
-    !> cleanly. Also estimates how many additional fixed-width filler columns (8 bytes/row,
-    !> matching an int64 column) would need to be added to this benchmark's schema
-    !> (build_schema) to bring nrows down enough to clear the limit at the current --size.
-    subroutine warn_if_string_offset_limit_at_risk(nrows, vector_len, string_len)
+    !> Reports on stderr whether the "str"/"strv" (string / vector-of-strings) columns' total byte
+    !> payload exceeds Arrow's int32 string-offset limit (2^31-1 bytes per column, the capacity of
+    !> the default arrow::utf8() representation). This used to be a genuine crash risk, but
+    !> src/parquet_wrapper.cpp now auto-detects exactly this case and transparently switches that
+    !> column to arrow::large_utf8() (int64 offsets, no such limit) instead -- see
+    !> doc/pages/supported-data-types.md's "Large string columns" section -- so exceeding it is
+    !> informational only: the write still completes correctly, just via the large_utf8 path
+    !> (visible in parquet_close_reader(print_stat=.true.)'s parquet_type column afterward).
+    subroutine report_string_offset_limit_status(nrows, vector_len, string_len)
         integer(int64), intent(in) :: nrows !! row count this run's write is about to attempt.
         integer, intent(in) :: vector_len !! element count of each vector column.
         integer, intent(in) :: string_len !! max length of each string column entry.
 
         integer(int64), parameter :: arrow_int32_offset_limit = 2147483647_int64 ! 2^31 - 1
-        integer(int64) :: str_bytes, strv_bytes, extra_cols_needed
-        real(real64) :: bytes_per_row, target_bytes_approx, bytes_per_row_needed
+        integer(int64) :: str_bytes, strv_bytes
 
         str_bytes = nrows * int(string_len, int64)
         strv_bytes = nrows * int(vector_len, int64) * int(string_len, int64)
@@ -166,22 +163,13 @@ contains
         flush(error_unit)
 
         if (str_bytes > arrow_int32_offset_limit .or. strv_bytes > arrow_int32_offset_limit) then
-            bytes_per_row = benchmark_bytes_per_row(vector_len, string_len)
-            target_bytes_approx = real(nrows, real64) * bytes_per_row
-            bytes_per_row_needed = target_bytes_approx * real(vector_len * string_len, real64) / &
-                real(arrow_int32_offset_limit, real64)
-            extra_cols_needed = max(0_int64, &
-                ceiling((bytes_per_row_needed - bytes_per_row) / 8.0_real64, kind=int64))
             write(error_unit, '(a)') &
-                "WARNING: 'str'/'strv' column byte payload exceeds Arrow's int32 string-offset " // &
-                "limit for a regular utf8 array -- this write is expected to crash or corrupt data."
-            write(error_unit, '(a, i0, a)') &
-                "         Adding roughly ", extra_cols_needed, " more fixed int64 columns to " // &
-                "build_schema would lower nrows enough to clear the limit at this --size target " // &
-                "(diminishing returns for much larger --size -- see CONTRIBUTING.md)."
+                "INFO: 'str'/'strv' column byte payload exceeds Arrow's int32 string-offset limit " // &
+                "for a regular utf8 array -- this library automatically writes that column as " // &
+                "arrow::large_utf8() (64-bit offsets) instead, so the write still completes correctly."
             flush(error_unit)
         end if
-    end subroutine warn_if_string_offset_limit_at_risk
+    end subroutine report_string_offset_limit_status
 
     !> One scalar + one vector field per supported type (int32/int64/float32/float64/
     !> boolean/string) -- the fixed column set every write/read benchmark run uses.
@@ -230,7 +218,7 @@ contains
         character(len=STRING_LEN), allocatable :: strc(:), strvc(:, :)
 
         call build_schema(schema, VECTOR_COL_LEN, STRING_LEN)
-        call warn_if_string_offset_limit_at_risk(nrows, VECTOR_COL_LEN, STRING_LEN)
+        call report_string_offset_limit_status(nrows, VECTOR_COL_LEN, STRING_LEN)
 
         elapsed_ticks = 0_int64
         call system_clock(t0, count_rate)

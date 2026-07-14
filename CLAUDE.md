@@ -301,6 +301,40 @@ own separate specific rather than an optional dummy — see `parquet_open_reader
 `parquet_open_reader_base` (no `nrows`) plus `parquet_open_reader_nrows_int32`/`_int64`
 (required `nrows`), all under one generic interface.
 
+## Keeping `tools/prep_fpm_publish.sh` in sync
+
+`tools/prep_fpm_publish.sh` builds the tarball content for `fpm publish` (see CONTRIBUTING.md's
+"Publishing to the fpm registry") by committing a disposable local branch that strips
+maintainer/CI-only files (`REMOVE_PATHS`) and edits `fpm.toml` (comments out `test-drive`, flips
+`module-naming` to `"parquet"`). This list/logic silently goes stale unless updated alongside the
+change that invalidates it — watch for these triggers:
+
+- **A new file lands under `tools/`.** Decide whether it's consumer-facing (like
+  `tools/generate_parquet_maml.sh`, documented in `doc/pages/embedding-maml-schemas.md`) or
+  maintainer/CI-only. If the latter, add it to `REMOVE_PATHS`. (A missing/renamed entry fails
+  loudly — the script pre-validates every path exists — so this is at least self-enforcing for
+  *existing* entries; it won't catch a *new* file that should have been added but wasn't.)
+- **A new maintainer/CI-only file lands at the repo root** (another CI config, another
+  AI-instructions-style file, etc.) — same call: add to `REMOVE_PATHS` if it's not
+  consumer-relevant.
+- **Any `REMOVE_PATHS` entry is renamed or moved.** Update the path string. The script's
+  pre-flight existence check turns a stale entry into an immediate, zero-side-effect failure
+  rather than a silently-wrong tarball — but only once you actually run it; nothing catches this
+  at edit time.
+- **A new dev-dependency is added to `fpm.toml`** — check whether its own modules comply with fpm's
+  [module-naming rules](https://fpm.fortran-lang.org/registry/naming.html) before adding it. If
+  not, it needs the same "comment out in the disposable branch" treatment as `test-drive`, or it
+  will reintroduce the build-breaking conflict documented in CONTRIBUTING.md.
+- **The exact literal text of the `test-drive.git = ...` or `module-naming = false` lines in
+  `fpm.toml` changes** for unrelated reasons — the script's own `SystemExit` checks already catch
+  this by failing loudly, but it's worth knowing why a future `fpm.toml` edit might break the
+  publish script.
+- **Upstream fpm or `test-drive` fixes the module-naming compliance gap** (fpm PR
+  [#828](https://github.com/fortran-lang/fpm/pull/828) / issue #883) — if fpm ever gains a
+  per-dependency naming exemption, or `test-drive` renames its modules to comply, revisit whether
+  the whole `test-drive`-comment-out workaround (and possibly `module-naming = false` on `main`)
+  is still needed at all.
+
 ## Error stop messages: include file/schema context
 
 New `error stop` messages in the read/write/schema-building paths should append the relevant

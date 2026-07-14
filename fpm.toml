@@ -14,10 +14,11 @@ name = "run_parquet_fortran"
 source-dir = "app"
 main = "program.f90"
 
+[dependencies]
+openmp = "*"
+
 [dev-dependencies]
 test-drive.git = "https://github.com/fortran-lang/test-drive"
-
-openmp = "*"
 
 [fortran]
 implicit-typing = false

@@ -13,6 +13,7 @@ This file covers developing, testing, and extending this repository itself. If y
   - [Testing genuine OpenMP concurrency](#testing-genuine-openmp-concurrency)
   - [Continuous integration (GitLab CI)](#continuous-integration-gitlab-ci)
   - [Mirroring to GitHub](#mirroring-to-github)
+  - [Publishing to the fpm registry](#publishing-to-the-fpm-registry)
 - [Regenerating the built-in MAML module](#regenerating-the-built-in-maml-module)
 - [Extending the MAML schema](#extending-the-maml-schema)
 - [Error-handling conventions in `parquet_wrapper.cpp`](#error-handling-conventions-in-parquet_wrappercpp)
@@ -159,6 +160,54 @@ that need to point at `github.com` instead once mirrored. `tools/mirror_to_githu
 automatically from a disposable local branch — so `main` never carries GitHub-targeted content,
 even transiently — via `tools/prep_github_mirroring.sh` (see that script's header for the exact
 mechanics, including its `--reverse` mode).
+
+### Publishing to the fpm registry
+
+Account/namespace/token setup and the general `fpm publish` workflow are documented upstream in
+[fpm's registry publishing guide](https://fpm.fortran-lang.org/registry/publish.html) — this
+section only covers what's specific to *this* repository, which needs a prep step first for two
+reasons undocumented upstream:
+
+- The registry [mandatorily enforces module
+  naming](https://fpm.fortran-lang.org/registry/naming.html), but `fpm.toml` keeps
+  `module-naming = false` on `main` since enabling it breaks local `fpm build`/`fpm test` — the
+  `test-drive` dev-dependency's own modules don't comply, and fpm has no per-dependency exemption
+  (fpm PR [#828](https://github.com/fortran-lang/fpm/pull/828) / issue #883; re-check whether
+  this is still true for whatever fpm version you're publishing with).
+- `fpm publish` packages git HEAD, not the working tree or even the staged index (confirmed by
+  testing — uncommitted and staged edits are both silently ignored). Prep edits must be committed
+  somewhere to take effect, without ever landing on `main`.
+
+**`tools/prep_fpm_publish.sh`** handles both: commits a disposable local branch
+(`fpm-publish-prep`, never pushed or merged) with `module-naming` enabled, `test-drive` commented
+out, GitHub-facing doc links applied, and maintainer/CI-only files stripped — see the script's own
+header comment for the exact file list and mechanics (keep it in sync per CLAUDE.md's "Keeping
+tools/prep_fpm_publish.sh in sync"). It then runs fpm's token-free preview commands and
+self-checks the resulting tarball's actual contents, exiting nonzero with the specific mismatch if
+anything's wrong.
+
+`categories`/`keywords` in `fpm.toml` are free text with no registry-enforced vocabulary
+(confirmed by reading the registry backend's source) — the current `categories = ["io"]` needs no
+change.
+
+**To publish, once you have a registry token:**
+
+```bash
+tools/prep_fpm_publish.sh                       # prep + self-check; stops here if anything's wrong
+fpm publish --token TOKEN --dry-run --verbose   # dry run
+fpm publish --token TOKEN                       # the real, permanent upload -- cannot be undone
+```
+
+**To clean up afterward** (always, whether or not you actually published):
+
+```bash
+git checkout main && git branch -D fpm-publish-prep
+rm -f fpm_model.json
+fpm clean --all
+```
+
+Publishing from a GitLab checkout or the GitHub mirror makes no difference — the disposable
+branch's committed content determines what's published, not which remote you started from.
 
 ## Regenerating the built-in MAML module
 

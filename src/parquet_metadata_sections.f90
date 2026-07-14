@@ -97,7 +97,7 @@ contains
     !> values are not inspected. Anything nested deeper than that, or
     !> anywhere inside "extra:", is left unvalidated.
     !> Appends one "; "-terminated message per unrecognized name to `errors`.
-    subroutine parquet_validate_maml_sections(lines, errors)
+    module subroutine parquet_validate_maml_sections(lines, errors)
         character(len=*), intent(in) :: lines(:) !! raw MAML source lines to check.
         character(len=:), allocatable, intent(inout) :: errors !! accumulated error messages; appended to, not reset.
         character(len=:), allocatable :: tline, item_tline, key, cvalue

@@ -162,13 +162,6 @@ contains
             " (Arrow int32 string-offset limit: 2147483647 bytes/column)"
         flush(error_unit)
 
-        if (str_bytes > arrow_int32_offset_limit .or. strv_bytes > arrow_int32_offset_limit) then
-            write(error_unit, '(a)') &
-                "INFO: 'str'/'strv' column byte payload exceeds Arrow's int32 string-offset limit " // &
-                "for a regular utf8 array -- this library automatically writes that column as " // &
-                "arrow::large_utf8() (64-bit offsets) instead, so the write still completes correctly."
-            flush(error_unit)
-        end if
     end subroutine report_string_offset_limit_status
 
     !> One scalar + one vector field per supported type (int32/int64/float32/float64/

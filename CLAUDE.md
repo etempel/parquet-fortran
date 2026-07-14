@@ -310,6 +310,56 @@ own separate specific rather than an optional dummy — see `parquet_open_reader
 `parquet_open_reader_base` (no `nrows`) plus `parquet_open_reader_nrows_int32`/`_int64`
 (required `nrows`), all under one generic interface.
 
+For a *required* (non-optional) argument, this ambiguity constraint doesn't apply — Fortran can
+disambiguate two specifics differing only by a required argument's kind without any special
+handling, so just add the second kind-specific directly (no base/kind-suffixed split needed),
+sharing one private `_impl` worker between the two (mirrors `add_col_qc_impl`'s existing
+shared-worker pattern) — see `parquet_read_array_row_mode`'s `row_index` (12 specifics: 6 data
+types x `integer(int32)`/`integer(int64)` row_index, each pair delegating to one
+`parquet_read_<type>_array_row_mode_impl`).
+
+## Guarding a hard Arrow int32-only ceiling
+
+Some Arrow/Parquet C++ APIs are hard-capped to a plain `int32_t`, with no int64/"large" fallback
+at all — found twice so far: `arrow::FixedSizeListBuilder`/`fixed_size_list()`'s `list_size` (a
+vector column's per-row width, `col_size`) and `arrow::Schema::num_fields()`/`GetFieldIndex()` (a
+table's column count). This differs from row count (`int64_t` throughout Arrow) or a string
+column's byte payload (which has an `arrow::large_utf8()` fallback) — for these two, there is no
+workaround, only a clean failure instead of letting Arrow silently truncate/wrap internally. When
+a new one is found, guard it with the pattern already used for the two above (see
+`check_col_size_fits_arrow_limit`/`check_column_count_fits_arrow_limit` in `parquet_wrapper.cpp`):
+
+1. A `static constexpr int64_t kArrowInt32...Limit = 2147483647;` named for what it bounds.
+2. A process-global `static int64_t g_debug_..._limit = -1;` test-only override plus a
+   `parquet_debug_set_..._limit(int64_t n)` extern "C" function (`<=0` restores the real limit) —
+   reachable only via a `bind(C)` interface declared locally inside the relevant
+   `test/error_scenarios.f90` scenario, never `src/parquet_bindings.f90`. This lets the error
+   scenario trigger the abort with a tiny fixture instead of actually building a multi-GB/
+   multi-billion-element table.
+3. A `check_..._fits_arrow_limit(...)` function comparing against `g_debug_..._limit > 0 ?
+   g_debug_..._limit : kArrowInt32...Limit`, calling `report_fatal_error` (never a silent
+   truncating cast) when exceeded — called at every place the value is about to flow into the
+   truncating Arrow API, before the cast happens.
+4. A matching `test/error_scenarios.f90` scenario (shrink the debug limit, trigger the abort with
+   a tiny fixture) + `test/test_errors.f90` wrapper (`check_scenario_exit_status_and_stderr`,
+   asserting the exact stderr message) + `tools/run_error_scenarios.sh` entry + a README
+   Limitations bullet describing the ceiling and that it aborts cleanly rather than corrupting.
+
+## Manual (never-`fpm test`) large-scale/benchmark tools
+
+A user/maintainer-runnable check that needs more memory/disk/time than `fpm test`/CI should ever
+attempt (e.g. genuinely exceeding `huge(1)` rows, or a multi-GB benchmark file) goes under `app/`
+(an `auto-executables` fpm target — never auto-picked-up by `fpm test`, unlike anything under
+`test/`) plus a thin `tools/*.sh` wrapper with env-var config (matching this repo's other
+`tools/*.sh` scripts), never under `test/`. See `app/benchmark_threads.f90`/
+`tools/benchmark_threads.sh` and `app/test_large_scale.f90`/`tools/test_large_scale.sh` for the
+established shape: CLI flags (`--key=value`) parsed via `get_command_argument` in the Fortran
+program; env vars read and forwarded as those flags by the shell wrapper
+(`NAME="${NAME:-default}"` then `fpm run <app> -- --key="$NAME"`); `set -euo pipefail`; `cd` to
+the repo root first. Document usage (parameters, defaults, example invocations) in
+CONTRIBUTING.md's "Other tools/ helpers" section, not README.md — this is a contributor/
+maintainer tool, not part of the public library API.
+
 ## Keeping `tools/prep_fpm_publish.sh` in sync
 
 `tools/prep_fpm_publish.sh` builds the tarball content for `fpm publish` (see CONTRIBUTING.md's

@@ -101,6 +101,8 @@ contains
                 test_open_reader_prefetch_true_with_filter), &
             new_unittest("parquet_close_reader(print_stat=.true.) does not disturb a normal close", &
                 test_close_reader_print_stat_smoke), &
+            new_unittest("a string/string-vector column too large for arrow::utf8() round-trips via large_utf8()", &
+                test_large_string_column_roundtrip), &
             new_unittest("qc: range violation prints a WARNING but does not abort", &
                 test_qc_range_violation_warns), &
             new_unittest("qc-maml: a stray no-colon line before qc: still warns correctly", &
@@ -1315,6 +1317,23 @@ contains
         call check_scenario_exit_status(error, "print_stat_smoke", expect_abort=.false., &
             failure_message="parquet_close_reader(print_stat=.true.) was expected to exit cleanly")
     end subroutine test_close_reader_print_stat_smoke
+
+    !> A string or string-vector column whose byte payload would overflow Arrow's real int32
+    !> STRING-offset limit (~2GiB) is written as arrow::large_utf8() instead of arrow::utf8()
+    !> (see would_overflow_string_offset_limit in parquet_wrapper.cpp) and must still round-trip
+    !> correctly. Exercising this for real would need a genuine multi-gigabyte column (tens of
+    !> seconds to build), far too slow for this suite -- so the actual round-trip (write, read
+    !> back, parquet_get_string_length, print_stat, and a row filter, all against a tiny fixture
+    !> forced onto the large_utf8 path via a test-only threshold override) runs out-of-process
+    !> as scenario_large_string_roundtrip in error_scenarios.f90; see that scenario's own
+    !> comment for why the override is safe only when isolated like this.
+    subroutine test_large_string_column_roundtrip(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "large_string_roundtrip", expect_abort=.false., &
+            failure_message="a string/string-vector column forced onto the arrow::large_utf8() path " // &
+            "did not round-trip correctly")
+    end subroutine test_large_string_column_roundtrip
 
     !> Read-time qc, like print_stat, always prints straight to stdout --
     !> run out-of-process (see scenario_qc_range_violation_warns in

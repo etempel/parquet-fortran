@@ -15,6 +15,10 @@ The following intrinsic Fortran kinds (from `iso_fortran_env`) are supported thr
 
 Vector column entries use the shape convention `(col_size, nrows)` for arrays passed to `parquet_write_column` or produced by `parquet_read_column`.
 
+### Large string columns
+
+A `string` (scalar or vector-of-strings) column's underlying Arrow representation is chosen automatically based on size. Normally it's Arrow's default `utf8` type, which caps a single column's total string byte payload at 2^31-1 bytes (~2 GiB) — but if writing a column would exceed that, this library transparently switches that column to `large_utf8` (64-bit offsets, no such limit) instead. This is fully automatic and requires no action from either the writer or reader side: `parquet_write_column`/`parquet_read_column` and every other read function behave identically either way, including row filtering (`parquet_filter`) and `qc:` range checks. The only place the difference is visible is `parquet_close_reader(print_stat=.true.)`'s `parquet_type` column, which shows `large_string`/`list<large_string>` instead of `string`/`list<string>` for a column that was promoted.
+
 ### Reading a column into a different numeric kind
 
 `parquet_read_column` (and `parquet_read_array_row_mode`/`parquet_read_array_element_mode`) dispatch on the *declared type/kind of the `values` array you pass in*, not the column's own stored type — so `values`' kind doesn't have to match the file's `data_type` exactly, as long as the conversion is one of the following:

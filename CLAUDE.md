@@ -192,6 +192,15 @@ The user runs `.gitlab-ci.yml` on their own GitLab server — don't attempt to e
 locally instead (`fpm build`/`fpm test` with the same `FPM_FFLAGS`/`FPM_CXXFLAGS`/
 `FPM_LDFLAGS` the CI job sets, minus anything CI-environment-specific like the apt installs).
 
+## Don't commit or push on the main/default branch yourself
+
+The user always commits and pushes their own changes on `main` — even after explicitly asking
+for a feature/fix to be implemented, do not run `git commit`/`git push` on `main` yourself
+unless they separately, explicitly ask for that specific commit. Leave finished work
+uncommitted in the working tree for them to review and commit. (This is specific to the
+main/default branch; it doesn't apply to work you've been asked to do inside your own
+throwaway branch/worktree, if any.)
+
 ## Build and compiler notes
 
 - **132-column line limit is enforced — do not reintroduce `-ffree-line-length-none`.** As of

@@ -33,6 +33,8 @@ program error_scenarios
         continue
     case ("print_stat_smoke")
         call scenario_print_stat_smoke()
+    case ("large_string_roundtrip")
+        call scenario_large_string_roundtrip()
     case ("write_undeclared_column")
         call scenario_write_undeclared_column()
     case ("write_undeclared_column_int64")
@@ -1372,6 +1374,91 @@ contains
             error stop "file was left in a bad state after parquet_close_reader(print_stat=.true.)"
         end if
     end subroutine scenario_print_stat_smoke
+
+    !> Proves the arrow::large_utf8() write/read path (added for a string/string-vector column
+    !> whose byte payload would overflow Arrow's real int32 STRING-offset limit, ~2GiB -- see
+    !> would_overflow_string_offset_limit in parquet_wrapper.cpp) actually round-trips
+    !> correctly, not just "doesn't crash". A genuine >2GiB column takes tens of seconds to
+    !> build (measured directly while diagnosing the original SIGBUS this feature fixes), far
+    !> too slow for the normal fpm test suite -- so this scenario instead calls
+    !> parquet_debug_set_string_offset_limit (a process-global, test-only hook declared locally
+    !> below, not part of the public Fortran API -- see its own comment in parquet_wrapper.cpp)
+    !> to shrink the threshold to a few dozen bytes, forcing a tiny fixture through the same
+    !> large_utf8 code path. Safe as a process-global specifically because this scenario always
+    !> runs as its own isolated subprocess: it can never race with a concurrently-running
+    !> test-drive test's own string columns the way a shared-process global would.
+    subroutine scenario_large_string_roundtrip()
+        interface
+            subroutine parquet_debug_set_string_offset_limit(n) &
+                bind(C, name="parquet_debug_set_string_offset_limit")
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t), value :: n !! byte threshold to use instead of the real 2^31-1 limit; <=0 restores it.
+            end subroutine parquet_debug_set_string_offset_limit
+        end interface
+
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_large_string.parquet"
+        character(len=10) :: s_values(6) = [character(len=10) :: &
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot"]
+        character(len=10) :: s_back(6)
+        character(len=6) :: v_values(2, 6), v_back(2, 6)
+        integer :: strlen_max
+        integer(int64) :: nrows
+
+        v_values = reshape([character(len=6) :: &
+            "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12"], [2, 6])
+
+        ! Both columns must share the same row count (6, matching "s") -- Arrow/Parquet
+        ! requires every column in a table to have equal length. 6 rows * 10 bytes = 60 > 40,
+        ! and 6 rows * 2 * 6 bytes = 72 > 40: both overflow this shrunk threshold, forcing both
+        ! parquet_append_string_column and parquet_append_string_array_column onto the
+        ! arrow::large_utf8() path.
+        call parquet_debug_set_string_offset_limit(40_int64)
+
+        call schema%init(table="large_string_table")
+        call schema%add_field("s", "string", array_size=10)
+        call schema%add_field("v", "string", col_size=2, array_size=6)
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "s", s_values)
+        call parquet_write_column(writer, "v", v_values)
+        call parquet_close_writer(writer)
+
+        ! Restore the real production limit right after writing -- defensive, since this
+        ! scenario is a one-shot subprocess that exits right after anyway, but keeps this
+        ! correct if a later edit ever adds more writes to this same scenario.
+        call parquet_debug_set_string_offset_limit(0_int64)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "s", s_back)
+        call parquet_read_column(reader, "v", v_back)
+        call parquet_get_string_length(reader, "s", strlen_max)
+        call parquet_close_reader(reader, print_stat=.true.)
+
+        if (.not. all(s_back == s_values)) then
+            error stop "scalar string column did not round-trip through the arrow::large_utf8() path"
+        end if
+        if (.not. all(v_back == v_values)) then
+            error stop "vector string column did not round-trip through the arrow::large_utf8() path"
+        end if
+        if (strlen_max /= 7) then
+            error stop "parquet_get_string_length was wrong for a large_utf8 scalar string column"
+        end if
+
+        ! Row-filtering (eval_filter_clause) on a large_utf8 scalar string column.
+        call filt%add('s == "charlie"')
+        call parquet_open_reader(reader, out_file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+
+        if (nrows /= 1_int64) then
+            error stop "row filter on a large_utf8 scalar string column did not match exactly one row"
+        end if
+    end subroutine scenario_large_string_roundtrip
 
     !> parquet_open_reader(..., filter=) validates every filter column name
     !> against the file's actual schema before applying it, the same as

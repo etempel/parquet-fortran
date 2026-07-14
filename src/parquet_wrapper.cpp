@@ -447,6 +447,79 @@ extern "C"
 		return array;
 	}
 
+	// True for either Arrow string representation this library may write to a column --
+	// STRING (int32 offsets, the default) or LARGE_STRING (int64 offsets, used only for a
+	// column whose own byte payload would overflow STRING's 2^31-1 limit -- see
+	// would_overflow_string_offset_limit and parquet_append_string_column/
+	// parquet_append_string_array_column). A file written with the large variant round-trips
+	// back as exactly that type on read (arrow_writer_builder.store_schema(), set in
+	// close_parquet_writer, preserves the precise original Arrow type rather than letting a
+	// reopen infer one from Parquet's own physical byte_array column, which doesn't distinguish
+	// the two) -- so every STRING-only check on the read side must also accept LARGE_STRING
+	// indefinitely, not just while writing a new large column.
+	static bool is_string_like_type(arrow::Type::type type_id)
+	{
+		return type_id == arrow::Type::STRING || type_id == arrow::Type::LARGE_STRING;
+	}
+
+	// Uniform (length/IsNull/GetView) accessor over a STRING or LARGE_STRING array, erasing the
+	// otherwise-unrelated-at-compile-time arrow::StringArray/arrow::LargeStringArray distinction
+	// so read-side call sites need one code path instead of two near-identical ones. `array`'s
+	// type_id() must satisfy is_string_like_type -- callers are expected to have already
+	// checked/branched on that themselves (so their own error message can name the actual type).
+	struct StringLikeAccessor
+	{
+		std::function<bool(int64_t)> is_null;
+		std::function<std::string_view(int64_t)> get_view;
+		int64_t length = 0;
+	};
+
+	static StringLikeAccessor make_string_like_accessor(const std::shared_ptr<arrow::Array> &array)
+	{
+		if (array->type_id() == arrow::Type::LARGE_STRING)
+		{
+			auto arr = std::static_pointer_cast<arrow::LargeStringArray>(array);
+			return StringLikeAccessor{
+				[arr](int64_t i) { return arr->IsNull(i); },
+				[arr](int64_t i) { return arr->GetView(i); },
+				arr->length()};
+		}
+		auto arr = std::static_pointer_cast<arrow::StringArray>(array);
+		return StringLikeAccessor{
+			[arr](int64_t i) { return arr->IsNull(i); },
+			[arr](int64_t i) { return arr->GetView(i); },
+			arr->length()};
+	}
+
+	// Arrow's real limit for a plain STRING array: its offsets buffer is int32, capping total
+	// value bytes at 2^31-1 for one array/column. parquet_append_string_column/
+	// parquet_append_string_array_column check a column's projected byte total against this
+	// (or, under test, g_debug_string_offset_limit -- see
+	// parquet_debug_set_string_offset_limit) before building it, switching to
+	// arrow::large_utf8() instead of arrow::utf8() when it would overflow.
+	static constexpr int64_t kArrowInt32OffsetLimit = 2147483647; // 2^31 - 1
+
+	// Test-only override of kArrowInt32OffsetLimit -- see parquet_debug_set_string_offset_limit,
+	// further below, for why this is a process-global rather than scoped to one writer (short
+	// version: parquet_writer%handle is a private component of the parquet Fortran module, so no
+	// test-only Fortran hook can reach a specific writer's handle from outside that module; a
+	// global is the only thing reachable, made safe by running the one test that touches it as
+	// an isolated subprocess -- see test/error_scenarios.f90's scenario_large_utf8_roundtrip).
+	// <= 0 (the default) means "use the real production limit".
+	static int64_t g_debug_string_offset_limit = -1;
+
+	// True if `n_values` string entries of up to `item_len` bytes each might overflow `limit`
+	// once built as a flat STRING/LARGE_STRING array. Uses item_len (the declared max length)
+	// as a safe upper bound on actual (trimmed) value bytes, so this can never *under*-estimate
+	// and miss a real overflow. Guards the multiplication itself against overflowing int64
+	// rather than computing n_values*item_len directly.
+	static bool would_overflow_string_offset_limit(int64_t n_values, int64_t item_len, int64_t limit)
+	{
+		if (item_len <= 0 || n_values <= 0) return false;
+		if (n_values > limit / item_len) return true;
+		return n_values * item_len > limit;
+	}
+
 	// Formats `v` with 6 significant digits for a parquet_reader_print_stat line.
 	static std::string format_stat_double(double v)
 	{
@@ -604,8 +677,9 @@ extern "C"
 			break;
 		}
 		case arrow::Type::STRING:
+		case arrow::Type::LARGE_STRING:
 		{
-			auto arr = std::static_pointer_cast<arrow::StringArray>(array);
+			auto acc = make_string_like_accessor(array);
 			std::string data_min, data_max;
 			auto scan = [&](const std::string &v)
 			{
@@ -617,7 +691,7 @@ extern "C"
 				if (rule.has_max) ok = ok && compare_op<std::string>(v, rule.max_raw, rule.max_op);
 				if (!ok) n_violate++;
 			};
-			for (int64_t i = 0; i < n; ++i) if (!arr->IsNull(i)) scan(std::string(arr->GetView(i)));
+			for (int64_t i = 0; i < n; ++i) if (!acc.is_null(i)) scan(std::string(acc.get_view(i)));
 			if (!any_valid || n_violate == 0) return false;
 			if (rule.has_min) bounds_desc = "min " + rule.min_op + " \"" + rule.min_raw + "\"";
 			if (rule.has_max)
@@ -1551,16 +1625,17 @@ extern "C"
 			return true;
 		}
 		case arrow::Type::STRING:
+		case arrow::Type::LARGE_STRING:
 		{
 			if (!is_string)
 			{
 				err = "value for string column '" + colname + "' must be double-quoted";
 				return false;
 			}
-			auto arr = std::static_pointer_cast<arrow::StringArray>(array);
+			auto acc = make_string_like_accessor(array);
 			for (int64_t i = 0; i < n; ++i)
 			{
-				bool ok = !arr->IsNull(i) && compare_op<std::string>(std::string(arr->GetView(i)), value_text, op);
+				bool ok = !acc.is_null(i) && compare_op<std::string>(std::string(acc.get_view(i)), value_text, op);
 				combined[static_cast<size_t>(i)] = combined[static_cast<size_t>(i)] && ok;
 			}
 			return true;
@@ -1741,13 +1816,13 @@ extern "C"
 		// just reports the longest non-null string, silently ignoring
 		// Nulls, regardless of whether the eventual parquet_read_column
 		// call will be given null_value/is_valid or not.
-		if (array->type_id() == arrow::Type::STRING)
+		if (is_string_like_type(array->type_id()))
 		{
-			auto sarr = std::static_pointer_cast<arrow::StringArray>(array);
-			for (int64_t i = 0; i < sarr->length(); ++i)
+			auto acc = make_string_like_accessor(array);
+			for (int64_t i = 0; i < acc.length; ++i)
 			{
-				if (sarr->IsNull(i)) continue;
-				max_len = std::max(max_len, static_cast<int64_t>(sarr->GetView(i).size()));
+				if (acc.is_null(i)) continue;
+				max_len = std::max(max_len, static_cast<int64_t>(acc.get_view(i).size()));
 			}
 			return max_len;
 		}
@@ -1770,11 +1845,11 @@ extern "C"
 			throw std::runtime_error(std::string("Column is not string-like: ") + name);
 		}
 
-		auto vals = std::static_pointer_cast<arrow::StringArray>(list_values);
-		for (int64_t i = 0; i < vals->length(); ++i)
+		auto vals = make_string_like_accessor(list_values);
+		for (int64_t i = 0; i < vals.length; ++i)
 		{
-			if (vals->IsNull(i)) continue;
-			max_len = std::max(max_len, static_cast<int64_t>(vals->GetView(i).size()));
+			if (vals.is_null(i)) continue;
+			max_len = std::max(max_len, static_cast<int64_t>(vals.get_view(i).size()));
 		}
 		return max_len;
 	}
@@ -1864,6 +1939,8 @@ extern "C"
 			return format_stat_double(std::static_pointer_cast<arrow::DoubleScalar>(s)->value);
 		case arrow::Type::STRING:
 			return "\"" + std::static_pointer_cast<arrow::StringScalar>(s)->value->ToString() + "\"";
+		case arrow::Type::LARGE_STRING:
+			return "\"" + std::static_pointer_cast<arrow::LargeStringScalar>(s)->value->ToString() + "\"";
 		default:
 			return s->ToString();
 		}
@@ -1927,14 +2004,14 @@ extern "C"
 			if (col_size > 1) col_size_str = std::to_string(col_size);
 
 			std::string len_str_str;
-			if (flat->type_id() == arrow::Type::STRING)
+			if (is_string_like_type(flat->type_id()))
 			{
-				auto sarr = std::static_pointer_cast<arrow::StringArray>(flat);
+				auto acc = make_string_like_accessor(flat);
 				int64_t max_len = 0;
-				for (int64_t i = 0; i < sarr->length(); ++i)
+				for (int64_t i = 0; i < acc.length; ++i)
 				{
-					if (sarr->IsNull(i)) continue;
-					max_len = std::max(max_len, static_cast<int64_t>(sarr->GetView(i).size()));
+					if (acc.is_null(i)) continue;
+					max_len = std::max(max_len, static_cast<int64_t>(acc.get_view(i).size()));
 				}
 				len_str_str = std::to_string(max_len);
 				auto out_len = reader_handle->output_str_len_used.find(idx);
@@ -2570,20 +2647,20 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		if (array->type_id() != arrow::Type::STRING)
+		if (!is_string_like_type(array->type_id()))
 		{
 			report_fatal_error("parquet_read_string_column", std::string("type mismatch for column: ") + name +
 				" (expected string, got " + array->type()->ToString() + ")");
 		}
-		auto arr = std::static_pointer_cast<arrow::StringArray>(array);
-		if (arr->length() != nrows)
+		auto arr = make_string_like_accessor(array);
+		if (arr.length != nrows)
 		{
 			report_fatal_error("parquet_read_string_column", std::string("nrows mismatch for column: ") + name);
 		}
-		check_or_report_nulls(arr, name, valid_out, "parquet_read_string_column");
+		check_or_report_nulls(array, name, valid_out, "parquet_read_string_column");
 		for (int64_t i = 0; i < nrows; ++i)
 		{
-			auto view = arr->GetView(i);
+			auto view = arr.get_view(i);
 			copy_string_with_padding(data + i * item_len, item_len, view);
 		}
 		fill_null_default_string(data, item_len, valid_out, nrows);
@@ -2669,16 +2746,16 @@ extern "C"
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
 		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_string_array_column");
-		if (vals_any->type_id() != arrow::Type::STRING)
+		if (!is_string_like_type(vals_any->type_id()))
 		{
 			report_fatal_error("parquet_read_string_array_column", std::string("type mismatch for list values in column: ") + name +
 				" (expected string, got " + vals_any->type()->ToString() + ")");
 		}
 		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out, "parquet_read_string_array_column");
-		auto vals = std::static_pointer_cast<arrow::StringArray>(vals_any);
+		auto vals = make_string_like_accessor(vals_any);
 		for (int64_t i = 0; i < nrows * col_size; ++i)
 		{
-			copy_string_with_padding(data + i * item_len, item_len, vals->GetView(i));
+			copy_string_with_padding(data + i * item_len, item_len, vals.get_view(i));
 		}
 		fill_null_default_string(data, item_len, valid_out, nrows * col_size);
 		mark_read_string(reader_handle, name, item_len);
@@ -2735,15 +2812,15 @@ extern "C"
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
 		auto vals_any = get_row_list_values(array, name, row_index, col_size, "parquet_read_string_array_row");
-		if (vals_any->type_id() != arrow::Type::STRING)
+		if (!is_string_like_type(vals_any->type_id()))
 			report_fatal_error("parquet_read_string_array_row", std::string("type mismatch for list values in column: ") + name +
 				" (expected string, got " + vals_any->type()->ToString() + ")");
 		report_nulls_list_full(array, vals_any, name, 1, col_size, row_index - 1, valid_out, "parquet_read_string_array_row");
 
-		auto vals = std::static_pointer_cast<arrow::StringArray>(vals_any);
+		auto vals = make_string_like_accessor(vals_any);
 		for (int64_t j = 0; j < col_size; ++j)
 		{
-			copy_string_with_padding(data + j * item_len, item_len, vals->GetView(j));
+			copy_string_with_padding(data + j * item_len, item_len, vals.get_view(j));
 		}
 		fill_null_default_string(data, item_len, valid_out, col_size);
 		mark_read_string(reader_handle, name, item_len);
@@ -2807,16 +2884,16 @@ extern "C"
 		if (col_index < 1 || col_index > col_size)
 			report_fatal_error("parquet_read_string_array_element", "col_index out of bounds");
 		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_string_array_element");
-		if (vals_any->type_id() != arrow::Type::STRING)
+		if (!is_string_like_type(vals_any->type_id()))
 			report_fatal_error("parquet_read_string_array_element", std::string("type mismatch for list values in column: ") + name +
 				" (expected string, got " + vals_any->type()->ToString() + ")");
 		auto offset = col_index - 1;
 		report_nulls_list_element(array, vals_any, name, nrows, col_size, offset, valid_out, "parquet_read_string_array_element");
 
-		auto vals = std::static_pointer_cast<arrow::StringArray>(vals_any);
+		auto vals = make_string_like_accessor(vals_any);
 		for (int64_t i = 0; i < nrows; ++i)
 		{
-			copy_string_with_padding(data + i * item_len, item_len, vals->GetView(i * col_size + offset));
+			copy_string_with_padding(data + i * item_len, item_len, vals.get_view(i * col_size + offset));
 		}
 		fill_null_default_string(data, item_len, valid_out, nrows);
 		mark_read_string(reader_handle, name, item_len);
@@ -2946,72 +3023,123 @@ extern "C"
 			handle, name, reinterpret_cast<const uint8_t *>(data), nrows, col_size, valid_in, arrow::boolean());
 	}
 
-	// Appends one scalar string column's values to `handle`.
+	// Appends one scalar string column's values to `handle`. Auto-selects arrow::utf8()
+	// (int32 offsets) or, if this column's own byte payload would overflow that (see
+	// would_overflow_string_offset_limit), arrow::large_utf8() (int64 offsets) instead -- every
+	// read-side site that decodes a string column accepts both (see is_string_like_type).
+	// The builder-type-dependent part is a local generic lambda rather than a free function
+	// template so it can stay inside this extern "C" block (function templates can't have C
+	// language linkage -- see compare_op's own comment, above the block, for the same reason).
 	void parquet_append_string_column(void *handle, const char *name, const char *data, int64_t item_len, int64_t nrows, const int8_t *valid_in)
 	{
 		auto writer_handle = as_handle(handle);
-		arrow::StringBuilder builder;
 
-		auto status = arrow::Status::OK();
-		for (int64_t i = 0; i < nrows; ++i)
+		auto build = [&](auto &builder) -> std::shared_ptr<arrow::Array>
 		{
-			if (valid_in != nullptr && valid_in[i] == 0)
+			auto status = arrow::Status::OK();
+			for (int64_t i = 0; i < nrows; ++i)
 			{
-				status = builder.AppendNull();
+				if (valid_in != nullptr && valid_in[i] == 0)
+				{
+					status = builder.AppendNull();
+				}
+				else
+				{
+					const char *raw = data + i * item_len;
+					std::string value(raw, static_cast<size_t>(item_len));
+					value = trim_right_spaces_and_nuls(value);
+					status = builder.Append(value);
+				}
+				if (!status.ok())
+					throw std::runtime_error(status.ToString());
 			}
-			else
-			{
-				const char *raw = data + i * item_len;
-				std::string value(raw, static_cast<size_t>(item_len));
-				value = trim_right_spaces_and_nuls(value);
-				status = builder.Append(value);
-			}
+
+			std::shared_ptr<arrow::Array> array;
+			status = builder.Finish(&array);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
-		}
+			return array;
+		};
+
+		int64_t limit = g_debug_string_offset_limit > 0 ? g_debug_string_offset_limit : kArrowInt32OffsetLimit;
+		bool use_large = would_overflow_string_offset_limit(nrows, item_len, limit);
 
 		std::shared_ptr<arrow::Array> array;
-		status = builder.Finish(&array);
-		if (!status.ok())
-			throw std::runtime_error(status.ToString());
+		if (use_large)
+		{
+			arrow::LargeStringBuilder builder;
+			array = build(builder);
+		}
+		else
+		{
+			arrow::StringBuilder builder;
+			array = build(builder);
+		}
 
-		append_column(writer_handle, name, build_field(name, arrow::utf8(), 1, has_any_null(valid_in, nrows)), array);
+		append_column(writer_handle, name,
+			build_field(name, use_large ? arrow::large_utf8() : arrow::utf8(), 1, has_any_null(valid_in, nrows)), array);
 	}
 
-	// Appends one vector string column's values to `handle`.
+	// Appends one vector string column's values to `handle`. Same arrow::utf8()/large_utf8()
+	// auto-selection as parquet_append_string_column, above -- see its own comment.
 	void parquet_append_string_array_column(void *handle, const char *name, const char *data, int64_t item_len, int64_t nrows, int64_t col_size, const int8_t *valid_in)
 	{
 		auto writer_handle = as_handle(handle);
-		auto value_builder = std::make_shared<arrow::StringBuilder>();
-		arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(col_size));
 
-		auto status = list_builder.AppendValues(nrows);
-		if (!status.ok())
-			throw std::runtime_error(status.ToString());
-
-		for (int64_t i = 0; i < nrows * col_size; ++i)
+		auto build = [&](auto value_builder) -> std::shared_ptr<arrow::Array>
 		{
-			if (valid_in != nullptr && valid_in[i] == 0)
-			{
-				status = value_builder->AppendNull();
-			}
-			else
-			{
-				const char *raw = data + i * item_len;
-				std::string value(raw, static_cast<size_t>(item_len));
-				value = trim_right_spaces_and_nuls(value);
-				status = value_builder->Append(value);
-			}
+			arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(col_size));
+
+			auto status = list_builder.AppendValues(nrows);
 			if (!status.ok())
 				throw std::runtime_error(status.ToString());
-		}
 
-		std::shared_ptr<arrow::Array> array;
-		status = list_builder.Finish(&array);
-		if (!status.ok())
-			throw std::runtime_error(status.ToString());
+			for (int64_t i = 0; i < nrows * col_size; ++i)
+			{
+				if (valid_in != nullptr && valid_in[i] == 0)
+				{
+					status = value_builder->AppendNull();
+				}
+				else
+				{
+					const char *raw = data + i * item_len;
+					std::string value(raw, static_cast<size_t>(item_len));
+					value = trim_right_spaces_and_nuls(value);
+					status = value_builder->Append(value);
+				}
+				if (!status.ok())
+					throw std::runtime_error(status.ToString());
+			}
 
-		append_column(writer_handle, name, build_field(name, arrow::utf8(), col_size), array);
+			std::shared_ptr<arrow::Array> array;
+			status = list_builder.Finish(&array);
+			if (!status.ok())
+				throw std::runtime_error(status.ToString());
+			return array;
+		};
+
+		int64_t limit = g_debug_string_offset_limit > 0 ? g_debug_string_offset_limit : kArrowInt32OffsetLimit;
+		bool use_large = would_overflow_string_offset_limit(nrows * col_size, item_len, limit);
+
+		std::shared_ptr<arrow::Array> array = use_large
+			? build(std::make_shared<arrow::LargeStringBuilder>())
+			: build(std::make_shared<arrow::StringBuilder>());
+
+		append_column(writer_handle, name, build_field(name, use_large ? arrow::large_utf8() : arrow::utf8(), col_size), array);
+	}
+
+	// Test-only: overrides g_debug_string_offset_limit (see its own comment for why this is a
+	// process-global) so test/error_scenarios.f90's scenario_large_utf8_roundtrip can exercise
+	// the arrow::large_utf8() write/read path with a tiny fixture instead of needing genuine
+	// multi-gigabyte string data. Safe as a process-global specifically because that scenario
+	// runs as its own isolated subprocess (see tools/run_error_scenarios.sh's pattern, already
+	// used this way elsewhere), so it can never race with a concurrently-running test-drive
+	// test's own string columns. Not part of the public Fortran API: reachable only via a
+	// bind(C) interface declared directly in test/error_scenarios.f90, never
+	// src/parquet_bindings.f90. Pass n<=0 to restore the real production limit.
+	void parquet_debug_set_string_offset_limit(int64_t n)
+	{
+		g_debug_string_offset_limit = n;
 	}
 
 

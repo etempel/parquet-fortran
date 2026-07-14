@@ -132,34 +132,34 @@ TEST_FILE=/tmp/benchmark.parquet TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads
 ```
 
 `tools/test_large_scale.sh` is a manual, user-runnable check (never run by `fpm test`/CI) that this
-library genuinely reads/writes columns correctly beyond `huge(1_int32)` (2,147,483,647) rows or
-row×`col_size` elements — the scale no automated test in this repository ever attempts, since doing
-so needs a machine with substantial memory and disk. It drives `app/test_large_scale.f90` (a
-maintainer/user-only fpm executable, not part of the public library) through 12 cases — every
-supported data type, each written once as a plain scalar column and once as a vector column of
-width `NELEM` — one case at a time: the write buffer for a case is deallocated before that case's
-file is opened for reading, and the file itself is deleted before the next case starts, so peak
-memory/disk usage is bounded by one column's own data, not by the whole run. Each case then checks
-`parquet_get_nrows`/`parquet_get_col_size`/`parquet_get_column_total_elements` against the true
-count, plus actual values: a scalar case reads the *entire* column back and compares every element;
-a vector case spot-checks a handful of rows (first, middle, last, and — once `NROWS` itself exceeds
-`huge(1_int32)` — one row past that boundary, deliberately exercising both the `integer(int32)` and
-`integer(int64)` specifics of `parquet_read_array_row_mode`) rather than reading the whole vector
-column back a second time, to avoid doubling peak memory. `NROWS`, `NELEM` and `MAX_SIZE_GB` are its
-env-overridable config — `NROWS`/`NELEM` set the row count and vector width for every case (default
-a small, cheap `1000`/`2`), and `MAX_SIZE_GB` (default `8`) skips any case whose estimated
-uncompressed size would exceed it instead of letting an oversized combination exhaust memory/disk,
-printing e.g. `Skipped test 3 of 12: ... -- expected size 7.451E+01 GB exceeds max_size_gb 8.000E+00
-GB`. Progress is printed per case (`Running test X of 12: ...` / `Finished test X of 12: ... --
-PASSED` / `Skipped test X of 12: ...`):
+library genuinely reads/writes columns correctly beyond `huge(1_int32)` (2,147,483,647) rows — the
+scale no automated test in this repository ever attempts, since doing so needs a machine with
+substantial memory and disk. It drives `app/test_large_scale.f90` (a maintainer/user-only fpm
+executable, not part of the public library) through 6 cases — every supported data type, each
+written once as a plain scalar column — one case at a time: the write buffer for a case is
+deallocated before that case's file is opened for reading, and the file itself is deleted before the
+next case starts, so peak memory/disk usage is bounded by one column's own data, not by the whole
+run. Each case then checks `parquet_get_nrows` against the true count, plus reads the *entire*
+column back and compares every element. `NROWS` and `MAX_SIZE_GB` are its env-overridable config —
+`NROWS` sets the row count for every case (default a small, cheap `1000`), and `MAX_SIZE_GB`
+(default `8`) skips any case whose estimated uncompressed size would exceed it instead of letting an
+oversized value exhaust memory/disk, printing e.g. `Skipped test 3 of 6: ... -- expected size
+7.451E+01 GB exceeds max_size_gb 8.000E+00 GB`. Progress is printed per case (`Running test X of 6:
+...` / `Finished test X of 6: ... -- PASSED` / `Skipped test X of 6: ...`):
 
 ```bash
 tools/test_large_scale.sh
 # Row count itself beyond huge(1_int32) (needs a large-memory machine):
 NROWS=3000000000 MAX_SIZE_GB=120 tools/test_large_scale.sh
-# Row count and col_size individually under huge(1_int32), product over it:
-NROWS=100000 NELEM=30000 MAX_SIZE_GB=64 tools/test_large_scale.sh
 ```
+
+Vector-column (`col_size=NELEM`) cases also exist in `app/test_large_scale.f90` (would bring the
+total to 12) but are hard-disabled there via its `RUN_VECTOR_CASES` parameter: Arrow/Parquet's own
+list-element-count ceiling (`nrows * col_size` capped at 2^31-1 — see
+`check_list_element_count_fits_arrow_limit` in `parquet_wrapper.cpp`, and the README's Limitations
+section) means an `NROWS` large enough to be an interesting scalar-only check aborts every vector
+case outright once `NELEM > 1`. Flip `RUN_VECTOR_CASES` back to `.true.` there once Arrow supports
+more than 2^31-1 elements in a list column.
 
 `tools/check_doc_anchors.py` validates every `#anchor` link in this repository's `*.md` files — same-file and cross-file — against the anchors GitHub would actually generate for each file's headings (using GitHub's real slugging rules, including the `-1`/`-2` suffixing for repeated headings), and exits nonzero if any link doesn't resolve. Run it after editing headings or anchor links in README.md/CONTRIBUTING.md:
 

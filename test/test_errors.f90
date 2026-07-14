@@ -127,6 +127,8 @@ contains
                 test_read_unsupported_physical_type_aborts), &
             new_unittest("writing a vector column with col_size exceeding Arrow's FixedSizeListType limit aborts", &
                 test_write_col_size_overflow_aborts), &
+            new_unittest("writing a vector column with nrows*col_size exceeding Arrow/Parquet's list-element-" // &
+                "count limit aborts", test_write_list_element_count_overflow_aborts), &
             new_unittest("writing a table with column count exceeding Arrow's Schema field-count limit aborts", &
                 test_write_column_count_overflow_aborts), &
             new_unittest("prefetching an unknown column aborts", &
@@ -679,6 +681,23 @@ contains
             required_stderr="parquet_append_column: column 'v': col_size (6) exceeds 2147483647, " // &
                 "the maximum vector-column width Arrow's FixedSizeListType supports")
     end subroutine test_write_col_size_overflow_aborts
+
+    !> check_list_element_count_fits_arrow_limit in parquet_wrapper.cpp aborts via a C++-level
+    !> report_fatal_error (not a Fortran error stop) the moment a vector column's nrows * col_size
+    !> would exceed Arrow/Parquet's int32_t list-element-count limit -- distinct from col_size
+    !> alone (test_write_col_size_overflow_aborts, above). See the README's Limitations section
+    !> and scenario_list_element_count_overflow's own comment for why this is tested with a
+    !> shrunk test-only threshold rather than a genuinely oversized (nrows * col_size > 2^31-1)
+    !> vector column.
+    subroutine test_write_list_element_count_overflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "list_element_count_overflow", expect_abort=.true., &
+            failure_message="writing a vector column with nrows*col_size exceeding the (shrunk) Arrow limit " // &
+                "was expected to abort", &
+            required_stderr="parquet_append_column: column 'v': nrows (3) * col_size (2) exceeds 2147483647, " // &
+                "the maximum total element count Arrow/Parquet's list-column level generation supports")
+    end subroutine test_write_list_element_count_overflow_aborts
 
     !> check_column_count_fits_arrow_limit in parquet_wrapper.cpp aborts via a C++-level
     !> report_fatal_error (not a Fortran error stop) the moment a table's column count would

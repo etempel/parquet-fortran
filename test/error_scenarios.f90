@@ -37,6 +37,8 @@ program error_scenarios
         call scenario_large_string_roundtrip()
     case ("col_size_overflow")
         call scenario_col_size_overflow()
+    case ("list_element_count_overflow")
+        call scenario_list_element_count_overflow()
     case ("column_count_overflow")
         call scenario_column_count_overflow()
     case ("write_undeclared_column")
@@ -1496,6 +1498,42 @@ contains
         call parquet_close_writer(writer)
         print '(a)', "unexpectedly wrote a column with col_size exceeding the (shrunk) Arrow limit without error"
     end subroutine scenario_col_size_overflow
+
+    !> Separate from col_size alone (scenario_col_size_overflow, above): Parquet's own
+    !> repetition/definition-level generation for list-typed columns walks every flattened
+    !> element (nrows * col_size) with a plain int32_t counter, so check_list_element_count_fits_
+    !> arrow_limit in parquet_wrapper.cpp aborts cleanly (via report_fatal_error) before that
+    !> product can overflow -- left unguarded, Arrow itself throws IOError("List index overflow")
+    !> from deep inside parquet::arrow::WriteTable, which can surface as an uncaught abort rather
+    !> than a clean error stop (see the README's Limitations section). A genuine nrows * col_size
+    !> beyond 2^31-1 needs far too much memory to build in the normal fpm test suite, so this
+    !> scenario instead calls parquet_debug_set_list_element_count_limit (a process-global,
+    !> test-only hook declared locally below, not part of the public Fortran API -- see its own
+    !> comment in parquet_wrapper.cpp) to shrink the threshold to a handful of elements, forcing a
+    !> tiny fixture through the same abort path. Safe as a process-global for the same
+    !> subprocess-isolation reason as scenario_large_string_roundtrip's own
+    !> parquet_debug_set_string_offset_limit use, above.
+    subroutine scenario_list_element_count_overflow()
+        interface
+            subroutine parquet_debug_set_list_element_count_limit(n) &
+                bind(C, name="parquet_debug_set_list_element_count_limit")
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t), value :: n !! nrows*col_size threshold instead of the real 2^31-1 limit; <=0 restores it.
+            end subroutine parquet_debug_set_list_element_count_limit
+        end interface
+
+        type(parquet_writer) :: writer
+        integer(int32) :: data(2, 3)
+
+        data = reshape([1, 2, 3, 4, 5, 6], [2, 3])
+        call parquet_debug_set_list_element_count_limit(5_int64)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_list_element_count_overflow.parquet")
+        call parquet_write_column(writer, "v", data)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote a vector column with nrows*col_size exceeding the (shrunk) Arrow limit " // &
+            "without error"
+    end subroutine scenario_list_element_count_overflow
 
     !> Arrow's arrow::Schema::num_fields()/GetFieldIndex() both return a plain int32_t internally
     !> -- unlike row count there is no "large" variant for column count at all, so

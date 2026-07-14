@@ -321,13 +321,19 @@ types x `integer(int32)`/`integer(int64)` row_index, each pair delegating to one
 ## Guarding a hard Arrow int32-only ceiling
 
 Some Arrow/Parquet C++ APIs are hard-capped to a plain `int32_t`, with no int64/"large" fallback
-at all — found twice so far: `arrow::FixedSizeListBuilder`/`fixed_size_list()`'s `list_size` (a
-vector column's per-row width, `col_size`) and `arrow::Schema::num_fields()`/`GetFieldIndex()` (a
-table's column count). This differs from row count (`int64_t` throughout Arrow) or a string
-column's byte payload (which has an `arrow::large_utf8()` fallback) — for these two, there is no
-workaround, only a clean failure instead of letting Arrow silently truncate/wrap internally. When
-a new one is found, guard it with the pattern already used for the two above (see
-`check_col_size_fits_arrow_limit`/`check_column_count_fits_arrow_limit` in `parquet_wrapper.cpp`):
+at all — found three times so far: `arrow::FixedSizeListBuilder`/`fixed_size_list()`'s `list_size`
+(a vector column's per-row width, `col_size`), `arrow::Schema::num_fields()`/`GetFieldIndex()` (a
+table's column count), and Parquet's own repetition/definition-level generation for list-typed
+columns (`level_conversion.cc`), which walks every flattened element of a vector column with a
+plain `int32_t` counter — capping a vector column's *total* element count (`nrows * col_size`)
+even when `col_size` itself is within its own separate limit above (see apache/arrow#33188 /
+ARROW-17983). This differs from row count (`int64_t` throughout Arrow) or a string column's byte
+payload (which has an `arrow::large_utf8()` fallback) — for these, there is no workaround, only a
+clean failure instead of letting Arrow silently truncate/wrap internally, or (in the
+level-generation case) throw an uncaught `IOError` mid-write. When a new one is found, guard it
+with the pattern already used for the three above (see `check_col_size_fits_arrow_limit`/
+`check_column_count_fits_arrow_limit`/`check_list_element_count_fits_arrow_limit` in
+`parquet_wrapper.cpp`):
 
 1. A `static constexpr int64_t kArrowInt32...Limit = 2147483647;` named for what it bounds.
 2. A process-global `static int64_t g_debug_..._limit = -1;` test-only override plus a

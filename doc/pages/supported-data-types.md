@@ -21,15 +21,26 @@ A `string` (scalar or vector-of-strings) column's underlying Arrow representatio
 
 ### Vector-column width (`col_size`) limit
 
-Unlike a column's row count or its total element count (`nrows * col_size`), which this library
-supports beyond Fortran's default-integer `huge(1)` (2,147,483,647) for every data type, a single
-row's own vector width (`col_size`) is capped at that same number. This is a hard limit of Arrow's
-`FixedSizeListType` itself — its `list_size` is a plain `int32_t`, and unlike Arrow's string type
-(see [Large string columns](#large-string-columns) above), there is no "large" fixed-size-list
-variant to fall back to. Writing a vector column whose `col_size` would exceed this aborts the
-process (a C++-level abort with a diagnostic on stderr, the same class of failure as the
-physical-type-mismatch case in [Limitations](../index.html#limitations)) rather than silently
-truncating `col_size` and corrupting the written column.
+Unlike a *scalar* column's row count, which this library supports beyond Fortran's default-integer
+`huge(1)` (2,147,483,647) for every data type, a single row's own vector width (`col_size`) is
+capped at that same number. This is a hard limit of Arrow's `FixedSizeListType` itself — its
+`list_size` is a plain `int32_t`, and unlike Arrow's string type (see
+[Large string columns](#large-string-columns) above), there is no "large" fixed-size-list variant
+to fall back to. Writing a vector column whose `col_size` would exceed this aborts the process (a
+C++-level abort with a diagnostic on stderr, the same class of failure as the physical-type-mismatch
+case in [Limitations](../index.html#limitations)) rather than silently truncating `col_size` and
+corrupting the written column.
+
+### Vector-column total element count (`nrows * col_size`) limit
+
+Separate from `col_size` alone, above, a vector column's *total* flattened element count
+(`nrows * col_size`) is also capped at 2,147,483,647 — even when `col_size` itself is well within
+its own limit. Parquet's own repetition/definition-level generation for list-typed columns walks
+every flattened element with a plain `int32_t` counter, so this product overflowing is a real,
+hittable case (e.g. 2.5 billion rows at `col_size=2`), not just a theoretical one. Writing a vector
+column whose `nrows * col_size` would exceed this aborts the process the same way as the `col_size`
+case above (a C++-level abort with a diagnostic on stderr) instead of letting Arrow itself throw an
+uncaught `IOError: List index overflow` mid-write.
 
 ### Reading a column into a different numeric kind
 

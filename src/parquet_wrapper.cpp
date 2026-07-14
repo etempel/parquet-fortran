@@ -549,6 +549,47 @@ extern "C"
 		}
 	}
 
+	// Arrow/Parquet's real limit on a vector column's *total* flattened element count
+	// (nrows * col_size), separate from the col_size-alone ceiling above. Parquet's own
+	// repetition/definition-level generation for list-typed columns (level_conversion.cc) walks
+	// every flattened element with a plain int32_t counter, so once nrows * col_size exceeds
+	// 2^31-1 that counter overflows and Arrow throws IOError("List index overflow") from deep
+	// inside parquet::arrow::WriteTable during close_parquet_writer -- past the point where a
+	// clean report_fatal_error can intervene, and on some toolchains (see
+	// parquet_read_int32_column's comment on gfortran/macOS unwinding) past the point where even
+	// a try/catch reliably catches it, surfacing as an uncaught std::terminate/abort instead of a
+	// clean error stop. Known upstream limitation, not fixed by choosing large_utf8/large_list on
+	// the write side (see apache/arrow#33188 / ARROW-17983). Unlike the string byte-offset limit,
+	// there is no "large" list variant to auto-upgrade to -- this is a hard ceiling.
+	// append_typed_column and parquet_append_string_array_column check nrows * col_size against
+	// this (or, under test, g_debug_list_element_count_limit -- see
+	// parquet_debug_set_list_element_count_limit) before ever building the FixedSizeListBuilder.
+	static constexpr int64_t kArrowInt32ListElementCountLimit = 2147483647; // 2^31 - 1
+
+	// Test-only override of kArrowInt32ListElementCountLimit -- see
+	// parquet_debug_set_list_element_count_limit, further below, for why this is a process-global
+	// (same reasoning as g_debug_string_offset_limit, above). <= 0 (the default) means "use the
+	// real production limit".
+	static int64_t g_debug_list_element_count_limit = -1;
+
+	// Aborts (via report_fatal_error) if nrows * col_size exceeds Arrow/Parquet's flattened
+	// list-element-count limit -- see kArrowInt32ListElementCountLimit, above. Called for every
+	// col_size > 1 vector column, before its FixedSizeListBuilder is ever built. Guards the
+	// nrows * col_size multiplication itself against overflowing int64 (the same way
+	// would_overflow_string_offset_limit does) rather than computing it directly.
+	static void check_list_element_count_fits_arrow_limit(int64_t nrows, int64_t col_size, const std::string &name, const char *context)
+	{
+		if (nrows <= 0 || col_size <= 0) return;
+		int64_t limit = g_debug_list_element_count_limit > 0 ? g_debug_list_element_count_limit : kArrowInt32ListElementCountLimit;
+		bool overflows = nrows > limit / col_size || nrows * col_size > limit;
+		if (overflows)
+		{
+			report_fatal_error(context, "column '" + name + "': nrows (" + std::to_string(nrows) + ") * col_size (" +
+				std::to_string(col_size) + ") exceeds " + std::to_string(kArrowInt32ListElementCountLimit) +
+				", the maximum total element count Arrow/Parquet's list-column level generation supports");
+		}
+	}
+
 	// Arrow's real limit for a table's column count: arrow::Schema::num_fields()/GetFieldIndex()
 	// both return a plain int32_t internally (static_cast<int>(fields_.size())) -- unlike row
 	// count (int64_t throughout) there is no "large" variant for field count at all. Past this
@@ -3026,6 +3067,7 @@ static void append_typed_column(void *handle, const char *name, const ValueType 
 	if (col_size > 1)
 	{
 		check_col_size_fits_arrow_limit(col_size, name, "parquet_append_column");
+		check_list_element_count_fits_arrow_limit(nrows, col_size, name, "parquet_append_column");
 		auto value_builder = std::make_shared<BuilderType>();
 		arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(col_size));
 		auto status = list_builder.AppendValues(nrows);
@@ -3149,6 +3191,7 @@ extern "C"
 	{
 		auto writer_handle = as_handle(handle);
 		check_col_size_fits_arrow_limit(col_size, name, "parquet_append_string_array_column");
+		check_list_element_count_fits_arrow_limit(nrows, col_size, name, "parquet_append_string_array_column");
 
 		auto build = [&](auto value_builder) -> std::shared_ptr<arrow::Array>
 		{
@@ -3214,6 +3257,17 @@ extern "C"
 	void parquet_debug_set_col_size_limit(int64_t n)
 	{
 		g_debug_col_size_limit = n;
+	}
+
+	// Test-only: overrides g_debug_list_element_count_limit (see its own comment) so
+	// test/error_scenarios.f90's scenario_list_element_count_overflow can exercise the
+	// check_list_element_count_fits_arrow_limit abort path with a tiny fixture instead of a
+	// genuinely huge (nrows * col_size > 2^31-1) vector column. Same process-global/
+	// subprocess-isolation reasoning as parquet_debug_set_string_offset_limit, above. Pass n<=0
+	// to restore the real production limit.
+	void parquet_debug_set_list_element_count_limit(int64_t n)
+	{
+		g_debug_list_element_count_limit = n;
 	}
 
 	// Test-only: overrides g_debug_column_count_limit (see its own comment) so

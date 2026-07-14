@@ -1,19 +1,24 @@
 !> Maintainer/user-runnable manual check (not part of the public library API, and never run by
 !> `fpm test`/CI -- see tools/test_large_scale.sh) that writes, reads back, and verifies one
-!> column at a time, for every supported data type, as both a scalar (col_size=1) and a vector
-!> (col_size=NELEM) column, at a row count (NROWS) and vector width (NELEM) supplied by the
-!> caller. Exists to let a large-memory machine actually exercise the >huge(1_int32)
-!> (2,147,483,647) row/column-width code paths this library supports, which the normal
-!> `fpm test` suite deliberately never does (see CLAUDE.md's "no new large-file-writing tests in
-!> fpm test" policy). Every case is independent: its write buffer is deallocated before any
-!> verification read happens, and its temp file is deleted before the next case starts, so peak
-!> memory/disk usage is bounded by one column's own data, not by the whole 12-case run.
+!> column at a time, for every supported data type, as a scalar (col_size=1) column, at a row
+!> count (NROWS) supplied by the caller. Exists to let a large-memory machine actually exercise
+!> the >huge(1_int32) (2,147,483,647) row-count code path this library supports, which the
+!> normal `fpm test` suite deliberately never does (see CLAUDE.md's "no new large-file-writing
+!> tests in fpm test" policy). Every case is independent: its write buffer is deallocated before
+!> any verification read happens, and its temp file is deleted before the next case starts, so
+!> peak memory/disk usage is bounded by one column's own data, not by the whole run.
 !>
-!> Combine NROWS/NELEM freely to reach whichever scenario you want to check, e.g.:
-!>   NROWS=3000000000               -- row count itself exceeds huge(1_int32) (vector+scalar).
-!>   NROWS=100000 NELEM=30000       -- both individually under huge(1_int32), product over it.
+!> Vector (col_size=NELEM) cases exist too but are hard-disabled via the RUN_VECTOR_CASES
+!> parameter below: Arrow/Parquet's own list-element-count ceiling (nrows * col_size capped at
+!> 2^31-1 -- see check_list_element_count_fits_arrow_limit in parquet_wrapper.cpp) means any
+!> NELEM > 1 run aborts on the vector cases well before an NROWS large enough to be an
+!> interesting scalar-only check. Flip RUN_VECTOR_CASES back to .true. once Arrow supports more
+!> than 2^31-1 elements in a list column.
+!>
+!> To reach the >huge(1_int32) scalar row-count scenario:
+!>   NROWS=3000000000
 !> MAX_SIZE_GB (default 8) skips any case whose estimated uncompressed size would exceed it,
-!> rather than let an accidental NROWS/NELEM combination exhaust memory/disk.
+!> rather than let an accidental NROWS combination exhaust memory/disk.
 program test_large_scale
     use iso_fortran_env, only : int32, int64, real32, real64, output_unit, error_unit
     use parquet
@@ -28,30 +33,42 @@ program test_large_scale
     integer, parameter :: STRING_LEN = 12
     character(len=*), parameter :: TMPFILE = "test_run/test_large_scale_tmp.parquet"
     character(len=*), parameter :: COLNAME = "v"
-    integer, parameter :: TOTAL_TESTS = 12
+
+    !> Hard-disabled until Arrow/Parquet's own list-element-count ceiling (nrows * col_size
+    !> capped at 2^31-1 -- see check_list_element_count_fits_arrow_limit in parquet_wrapper.cpp
+    !> and the README's Limitations section) gains a "large list" upstream variant: with it left
+    !> on, an NROWS large enough to be an interesting *scalar*-column check aborts every vector
+    !> case outright as soon as nrows*NELEM crosses that ceiling, well before reaching row counts
+    !> that actually stress anything new. Flip back to .true. once Arrow supports it.
+    logical, parameter :: RUN_VECTOR_CASES = .false.
 
     integer(int64) :: nrows, nelem
     real(real64) :: max_size_gb
-    integer :: test_num, cmdstat
+    integer :: test_num, total_tests, cmdstat
 
     call parse_arguments(nrows, nelem, max_size_gb)
     call execute_command_line("mkdir -p test_run", wait=.true., cmdstat=cmdstat)
 
     test_num = 0
+    total_tests = merge(12, 6, RUN_VECTOR_CASES)
 
-    call int32_vector_case(test_num, TOTAL_TESTS, nrows, nelem, max_size_gb)
-    call int32_scalar_case(test_num, TOTAL_TESTS, nrows, max_size_gb)
-    call int64_vector_case(test_num, TOTAL_TESTS, nrows, nelem, max_size_gb)
-    call int64_scalar_case(test_num, TOTAL_TESTS, nrows, max_size_gb)
-    call float32_vector_case(test_num, TOTAL_TESTS, nrows, nelem, max_size_gb)
-    call float32_scalar_case(test_num, TOTAL_TESTS, nrows, max_size_gb)
-    call float64_vector_case(test_num, TOTAL_TESTS, nrows, nelem, max_size_gb)
-    call float64_scalar_case(test_num, TOTAL_TESTS, nrows, max_size_gb)
-    call logical_vector_case(test_num, TOTAL_TESTS, nrows, nelem, max_size_gb)
-    call logical_scalar_case(test_num, TOTAL_TESTS, nrows, max_size_gb)
-    call string_vector_case(test_num, TOTAL_TESTS, nrows, nelem, max_size_gb)
-    call string_scalar_case(test_num, TOTAL_TESTS, nrows, max_size_gb)
+    if (RUN_VECTOR_CASES) call int32_vector_case(test_num, total_tests, nrows, nelem, max_size_gb)
+    call int32_scalar_case(test_num, total_tests, nrows, max_size_gb)
+    if (RUN_VECTOR_CASES) call int64_vector_case(test_num, total_tests, nrows, nelem, max_size_gb)
+    call int64_scalar_case(test_num, total_tests, nrows, max_size_gb)
+    if (RUN_VECTOR_CASES) call float32_vector_case(test_num, total_tests, nrows, nelem, max_size_gb)
+    call float32_scalar_case(test_num, total_tests, nrows, max_size_gb)
+    if (RUN_VECTOR_CASES) call float64_vector_case(test_num, total_tests, nrows, nelem, max_size_gb)
+    call float64_scalar_case(test_num, total_tests, nrows, max_size_gb)
+    if (RUN_VECTOR_CASES) call logical_vector_case(test_num, total_tests, nrows, nelem, max_size_gb)
+    call logical_scalar_case(test_num, total_tests, nrows, max_size_gb)
+    if (RUN_VECTOR_CASES) call string_vector_case(test_num, total_tests, nrows, nelem, max_size_gb)
+    call string_scalar_case(test_num, total_tests, nrows, max_size_gb)
 
+    if (.not. RUN_VECTOR_CASES) then
+        write(output_unit, '(a)') "test_large_scale: vector-column cases are hard-disabled " // &
+            "(RUN_VECTOR_CASES = .false. in app/test_large_scale.f90) -- see its own comment."
+    end if
     write(output_unit, '(a)') "test_large_scale: all cases completed (each PASSED or was SKIPPED as too large)."
 
 contains

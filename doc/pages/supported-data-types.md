@@ -115,3 +115,5 @@ The most common reason to pass `use_threads=.false.` is to avoid **oversubscript
 call parquet_set_max_threads(4)
 ```
 Unlike `use_threads`, this is **not** a per-reader/per-writer setting — Arrow's CPU thread pool is a single, process-global resource shared by every reader/writer (in every thread) that has `use_threads` enabled. Call it once, e.g. near the start of your program, before opening readers/writers on other threads; calling it repeatedly with different values from multiple concurrent threads is a race, since each call resizes a pool everyone else is using at that same moment. `n` must be `>= 1`; values below that fail immediately with `error stop`.
+
+(If you're developing `parquet-fortran` itself and want to measure how these two knobs actually affect write/read throughput on your own hardware, see [CONTRIBUTING.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CONTRIBUTING.md#other-tools-helpers)'s `tools/benchmark_threads.sh` entry.)

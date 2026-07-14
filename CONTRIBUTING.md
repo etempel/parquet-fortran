@@ -106,9 +106,30 @@ This compiles `generate_fixtures.cpp` with `clang++` and runs it from the reposi
 
 ### Other tools/ helpers
 
-Two more `tools/` scripts, unrelated to fixtures and not part of the build or test flow:
+A few more `tools/` scripts, unrelated to fixtures and not part of the build or test flow:
 
 `tools/count_lines.py` reports code/comment/blank line counts for `src/` and `test/`, a convenience for repository metrics.
+
+`tools/benchmark_threads.sh` measures how write and read throughput scale with Arrow's internal
+thread-pool size (`parquet_set_max_threads`), on one synthetic multi-type Parquet file (one
+scalar + one vector column per supported type; row count derived from a target uncompressed file
+size). It sweeps a log-spaced set of thread counts — e.g. `1 2 4 7 14 28 54 105 204 396` for a
+396-core machine and the default `MAX_STEPS=10` — driving `app/benchmark_threads.f90` (a
+maintainer-only fpm executable, not part of the public library) once per (mode, thread-count)
+data point, then prints a cores/total-time/time-per-core table for each of the write and read
+sweeps. The read sweep reuses a single static file (written by the write sweep's highest
+thread-count run) across every thread count, so it isolates single-file decode scaling rather
+than measuring concurrent multi-file throughput. `MAX_STEPS`, `TARGET_FILE_SIZE_GB` and `TEST_FILE`
+are its own env-overridable config; `VECTOR_COL_LEN`/`STRING_LEN` are hardcoded in
+`app/benchmark_threads.f90` itself. By default the synthetic test file is written under a fresh
+`mktemp -d` directory and deleted when the script exits; set `TEST_FILE` to give it a path of
+your own choosing instead, which also keeps the file around afterward for inspection or reuse:
+
+```bash
+tools/benchmark_threads.sh
+MAX_STEPS=6 TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads.sh
+TEST_FILE=/tmp/benchmark.parquet TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads.sh
+```
 
 `tools/check_doc_anchors.py` validates every `#anchor` link in this repository's `*.md` files — same-file and cross-file — against the anchors GitHub would actually generate for each file's headings (using GitHub's real slugging rules, including the `-1`/`-2` suffixing for repeated headings), and exits nonzero if any link doesn't resolve. Run it after editing headings or anchor links in README.md/CONTRIBUTING.md:
 

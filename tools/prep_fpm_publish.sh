@@ -71,6 +71,8 @@ REMOVE_PATHS=(
     .gitlab-ci.yml
     .github
     docs.md
+    app/benchmark_threads.f90
+    tools/benchmark_threads.sh
     tools/check_doc_anchors.py
     tools/count_lines.py
     tools/coverage.sh

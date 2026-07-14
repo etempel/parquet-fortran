@@ -166,6 +166,7 @@ contains
         integer :: j
         character(len=:), allocatable :: miss_low
         character(len=32) :: buf
+        logical :: have_qc_min, have_qc_max, have_qc_miss
 
         if (.not. this%is_initialized) then
             error stop "parquet_schema%add_field: call schema%init(...) before adding fields"
@@ -221,9 +222,14 @@ contains
             call maml_push_line(this%maml, "  col_size: " // trim(buf))
         end if
 
-        if ((present(qc_min) .and. len_trim(qc_min) > 0) .or. &
-            (present(qc_max) .and. len_trim(qc_max) > 0) .or. &
-            (present(qc_miss) .and. len_trim(qc_miss) > 0)) then
+        have_qc_min = .false.
+        if (present(qc_min)) have_qc_min = len_trim(qc_min) > 0
+        have_qc_max = .false.
+        if (present(qc_max)) have_qc_max = len_trim(qc_max) > 0
+        have_qc_miss = .false.
+        if (present(qc_miss)) have_qc_miss = len_trim(qc_miss) > 0
+
+        if (have_qc_min .or. have_qc_max .or. have_qc_miss) then
             call maml_push_line(this%maml, "  qc:")
             if (present(qc_min)) then
                 if (len_trim(qc_min) > 0) &

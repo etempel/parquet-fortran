@@ -1451,12 +1451,12 @@ extern "C"
 
 		if (indices.empty()) return;
 
-		std::shared_ptr<arrow::Table> table;
-		auto status = reader_handle->reader->ReadTable(indices, &table);
-		if (!status.ok())
+		auto table_result = reader_handle->reader->ReadTable(indices);
+		if (!table_result.ok())
 		{
-			throw std::runtime_error(status.ToString());
+			throw std::runtime_error(table_result.status().ToString());
 		}
+		auto table = table_result.ValueOrDie();
 
 		for (size_t i = 0; i < indices.size(); ++i)
 		{
@@ -1503,12 +1503,12 @@ extern "C"
 
 		if (indices.empty()) return;
 
-		std::shared_ptr<arrow::Table> table;
-		auto status = reader_handle->reader->ReadTable(indices, &table);
-		if (!status.ok())
+		auto table_result = reader_handle->reader->ReadTable(indices);
+		if (!table_result.ok())
 		{
-			throw std::runtime_error(status.ToString());
+			throw std::runtime_error(table_result.status().ToString());
 		}
+		auto table = table_result.ValueOrDie();
 
 		for (size_t i = 0; i < indices.size(); ++i)
 		{
@@ -2929,25 +2929,25 @@ extern "C"
 	}
 
 	// Reads one element position (col_index) of vector int32 column `name` across every row into `data`.
-	void parquet_read_int32_array_element(void *handle, const char *name, int64_t col_index, int32_t *data, int64_t nrows, int64_t unused_col_size, int8_t *valid_out)
+	void parquet_read_int32_array_element(void *handle, const char *name, int64_t col_index, int32_t *data, int64_t nrows, int64_t, int8_t *valid_out)
 	{
 		read_list_primitive_element<int32_t>(handle, name, col_index, data, nrows, valid_out);
 	}
 
 	// Same as parquet_read_int32_array_element, but for int64.
-	void parquet_read_int64_array_element(void *handle, const char *name, int64_t col_index, int64_t *data, int64_t nrows, int64_t unused_col_size, int8_t *valid_out)
+	void parquet_read_int64_array_element(void *handle, const char *name, int64_t col_index, int64_t *data, int64_t nrows, int64_t, int8_t *valid_out)
 	{
 		read_list_primitive_element<int64_t>(handle, name, col_index, data, nrows, valid_out);
 	}
 
 	// Same as parquet_read_int32_array_element, but for float32.
-	void parquet_read_float32_array_element(void *handle, const char *name, int64_t col_index, float *data, int64_t nrows, int64_t unused_col_size, int8_t *valid_out)
+	void parquet_read_float32_array_element(void *handle, const char *name, int64_t col_index, float *data, int64_t nrows, int64_t, int8_t *valid_out)
 	{
 		read_list_primitive_element<float>(handle, name, col_index, data, nrows, valid_out);
 	}
 
 	// Same as parquet_read_int32_array_element, but for float64.
-	void parquet_read_float64_array_element(void *handle, const char *name, int64_t col_index, double *data, int64_t nrows, int64_t unused_col_size, int8_t *valid_out)
+	void parquet_read_float64_array_element(void *handle, const char *name, int64_t col_index, double *data, int64_t nrows, int64_t, int8_t *valid_out)
 	{
 		read_list_primitive_element<double>(handle, name, col_index, data, nrows, valid_out);
 	}

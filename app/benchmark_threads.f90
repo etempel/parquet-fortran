@@ -157,9 +157,9 @@ contains
         str_bytes = nrows * int(string_len, int64)
         strv_bytes = nrows * int(vector_len, int64) * int(string_len, int64)
 
-        write(error_unit, '(a, i0, a, i0, a, i0, a)') &
+        write(error_unit, '(a, i0, a, i0, a, i0, a, i0, a)') &
             "INFO: nrows=", nrows, " str column bytes=", str_bytes, " strv column bytes=", strv_bytes, &
-            " (Arrow int32 string-offset limit: 2147483647 bytes/column)"
+            " (Arrow int32 string-offset limit: ", arrow_int32_offset_limit, " bytes/column)"
         flush(error_unit)
 
     end subroutine report_string_offset_limit_status

@@ -7,6 +7,7 @@
 !> loading MAML/qc-maml files from disk, and qc-maml field parsing/validation
 !> for read-time quality control.
 submodule (parquet) parquet_metadata_validate
+    use ieee_arithmetic, only: ieee_is_nan
     implicit none
 contains
 
@@ -612,7 +613,7 @@ contains
 
         read(raw, *, iostat=ios) value
         if (ios /= 0) return
-        if (value /= value) return ! NaN (only value that is never equal to itself)
+        if (ieee_is_nan(value)) return
         if (.not. (abs(value) <= huge(1.0_real64))) return ! Inf (or a magnitude beyond real64's finite range)
 
         select case (trim(data_type))

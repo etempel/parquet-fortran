@@ -224,6 +224,15 @@ throwaway branch/worktree, if any.)
   *within* a module/submodule do inherit their host's `implicit none` via ordinary host
   association, so it does not need repeating inside each individual function/subroutine — one
   `implicit none` per submodule file is sufficient.
+- **Test for NaN with `ieee_is_nan`, not `x /= x`.** Use `use ieee_arithmetic, only: ieee_is_nan`
+  and `ieee_is_nan(x)` rather than the classic self-comparison idiom — the latter is correct
+  (NaN is the only value never equal to itself) but triggers gfortran's `-Wcompare-reals`
+  warning. See `parquet_metadata_validate.f90`'s `parquet_qc_numeric_bound` for the pattern.
+  This does not apply to the *other* `-Wcompare-reals` sites in this codebase (e.g.
+  `value == anint(value)` in `parquet_write.f90`/`parquet_metadata_validate.f90`, testing
+  whether a float is exactly integral) — those are exact-equality checks with no arithmetic
+  drift and no equivalent NaN-style idiom, so their warning is left as an accepted false
+  positive rather than "fixed" into something worse (e.g. an epsilon comparison).
 
 ## Renames/refactors: only apply low-blast-radius changes
 

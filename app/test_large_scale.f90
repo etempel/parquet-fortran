@@ -171,24 +171,33 @@ contains
         end if
     end function case_label
 
-    subroutine print_start(test_num, total, label)
+    subroutine print_start(test_num, total, label, start_time)
         integer, intent(in) :: test_num, total
         character(len=*), intent(in) :: label
+        integer(int64), intent(out) :: start_time !! system_clock count captured here; pass through to print_done to
+            !! report this case's wall-clock duration.
         character(len=32) :: num_s, total_s
 
         write(num_s, '(i0)') test_num
         write(total_s, '(i0)') total
         write(output_unit, '(a)') "Running test "//trim(num_s)//" of "//trim(total_s)//": "//label
+        call system_clock(count=start_time)
     end subroutine print_start
 
-    subroutine print_done(test_num, total, label)
+    subroutine print_done(test_num, total, label, start_time)
         integer, intent(in) :: test_num, total
         character(len=*), intent(in) :: label
-        character(len=32) :: num_s, total_s
+        integer(int64), intent(in) :: start_time !! system_clock count from the matching print_start call.
+        character(len=32) :: num_s, total_s, elapsed_s
+        integer(int64) :: end_time, count_rate
 
         write(num_s, '(i0)') test_num
         write(total_s, '(i0)') total
-        write(output_unit, '(a)') "Finished test "//trim(num_s)//" of "//trim(total_s)//": "//label//" -- PASSED"
+        call system_clock(count=end_time, count_rate=count_rate)
+        write(elapsed_s, '(f0.3)') real(end_time - start_time, real64) / real(count_rate, real64)
+        if (elapsed_s(1:1) == ".") elapsed_s = "0"//trim(elapsed_s)
+        write(output_unit, '(a)') "Finished test "//trim(num_s)//" of "//trim(total_s)//": "//label// &
+            " -- PASSED ("//trim(adjustl(elapsed_s))//"s)"
     end subroutine print_done
 
     subroutine print_skipped(test_num, total, label, gb, max_gb)
@@ -277,6 +286,7 @@ contains
         integer(int64) :: i, j, flat, nrows_back, total_elems, check_rows(4)
         integer :: col_size_back, n_checks, k
         real(real64) :: gb
+        integer(int64) :: start_time
         character(len=:), allocatable :: label
 
         test_num = test_num + 1
@@ -286,7 +296,7 @@ contains
             call print_skipped(test_num, total, label, gb, max_gb)
             return
         end if
-        call print_start(test_num, total, label)
+        call print_start(test_num, total, label, start_time)
 
         allocate(values(col_size, nrows))
         do i = 1_int64, nrows
@@ -335,7 +345,7 @@ contains
 
         call parquet_close_reader(reader)
         call delete_file(TMPFILE)
-        call print_done(test_num, total, label)
+        call print_done(test_num, total, label, start_time)
     end subroutine int32_vector_case
 
     subroutine int32_scalar_case(test_num, total, nrows, max_gb)
@@ -348,6 +358,7 @@ contains
         integer(int32), allocatable :: values(:), back(:)
         integer(int64) :: i, nrows_back
         real(real64) :: gb
+        integer(int64) :: start_time
         character(len=:), allocatable :: label
 
         test_num = test_num + 1
@@ -357,7 +368,7 @@ contains
             call print_skipped(test_num, total, label, gb, max_gb)
             return
         end if
-        call print_start(test_num, total, label)
+        call print_start(test_num, total, label, start_time)
 
         allocate(values(nrows))
         do i = 1_int64, nrows
@@ -382,7 +393,7 @@ contains
 
         call parquet_close_reader(reader)
         call delete_file(TMPFILE)
-        call print_done(test_num, total, label)
+        call print_done(test_num, total, label, start_time)
     end subroutine int32_scalar_case
 
     !==============================================================
@@ -400,6 +411,7 @@ contains
         integer(int64) :: i, j, flat, nrows_back, total_elems, check_rows(4)
         integer :: col_size_back, n_checks, k
         real(real64) :: gb
+        integer(int64) :: start_time
         character(len=:), allocatable :: label
 
         test_num = test_num + 1
@@ -409,7 +421,7 @@ contains
             call print_skipped(test_num, total, label, gb, max_gb)
             return
         end if
-        call print_start(test_num, total, label)
+        call print_start(test_num, total, label, start_time)
 
         allocate(values(col_size, nrows))
         do i = 1_int64, nrows
@@ -458,7 +470,7 @@ contains
 
         call parquet_close_reader(reader)
         call delete_file(TMPFILE)
-        call print_done(test_num, total, label)
+        call print_done(test_num, total, label, start_time)
     end subroutine int64_vector_case
 
     subroutine int64_scalar_case(test_num, total, nrows, max_gb)
@@ -471,6 +483,7 @@ contains
         integer(int64), allocatable :: values(:), back(:)
         integer(int64) :: i, nrows_back
         real(real64) :: gb
+        integer(int64) :: start_time
         character(len=:), allocatable :: label
 
         test_num = test_num + 1
@@ -480,7 +493,7 @@ contains
             call print_skipped(test_num, total, label, gb, max_gb)
             return
         end if
-        call print_start(test_num, total, label)
+        call print_start(test_num, total, label, start_time)
 
         allocate(values(nrows))
         do i = 1_int64, nrows
@@ -505,7 +518,7 @@ contains
 
         call parquet_close_reader(reader)
         call delete_file(TMPFILE)
-        call print_done(test_num, total, label)
+        call print_done(test_num, total, label, start_time)
     end subroutine int64_scalar_case
 
     !==============================================================
@@ -523,6 +536,7 @@ contains
         integer(int64) :: i, j, flat, nrows_back, total_elems, check_rows(4)
         integer :: col_size_back, n_checks, k
         real(real64) :: gb
+        integer(int64) :: start_time
         character(len=:), allocatable :: label
 
         test_num = test_num + 1
@@ -532,7 +546,7 @@ contains
             call print_skipped(test_num, total, label, gb, max_gb)
             return
         end if
-        call print_start(test_num, total, label)
+        call print_start(test_num, total, label, start_time)
 
         allocate(values(col_size, nrows))
         do i = 1_int64, nrows
@@ -581,7 +595,7 @@ contains
 
         call parquet_close_reader(reader)
         call delete_file(TMPFILE)
-        call print_done(test_num, total, label)
+        call print_done(test_num, total, label, start_time)
     end subroutine float32_vector_case
 
     subroutine float32_scalar_case(test_num, total, nrows, max_gb)
@@ -594,6 +608,7 @@ contains
         real(real32), allocatable :: values(:), back(:)
         integer(int64) :: i, nrows_back
         real(real64) :: gb
+        integer(int64) :: start_time
         character(len=:), allocatable :: label
 
         test_num = test_num + 1
@@ -603,7 +618,7 @@ contains
             call print_skipped(test_num, total, label, gb, max_gb)
             return
         end if
-        call print_start(test_num, total, label)
+        call print_start(test_num, total, label, start_time)
 
         allocate(values(nrows))
         do i = 1_int64, nrows
@@ -628,7 +643,7 @@ contains
 
         call parquet_close_reader(reader)
         call delete_file(TMPFILE)
-        call print_done(test_num, total, label)
+        call print_done(test_num, total, label, start_time)
     end subroutine float32_scalar_case
 
     !==============================================================
@@ -646,6 +661,7 @@ contains
         integer(int64) :: i, j, flat, nrows_back, total_elems, check_rows(4)
         integer :: col_size_back, n_checks, k
         real(real64) :: gb
+        integer(int64) :: start_time
         character(len=:), allocatable :: label
 
         test_num = test_num + 1
@@ -655,7 +671,7 @@ contains
             call print_skipped(test_num, total, label, gb, max_gb)
             return
         end if
-        call print_start(test_num, total, label)
+        call print_start(test_num, total, label, start_time)
 
         allocate(values(col_size, nrows))
         do i = 1_int64, nrows
@@ -704,7 +720,7 @@ contains
 
         call parquet_close_reader(reader)
         call delete_file(TMPFILE)
-        call print_done(test_num, total, label)
+        call print_done(test_num, total, label, start_time)
     end subroutine float64_vector_case
 
     subroutine float64_scalar_case(test_num, total, nrows, max_gb)
@@ -717,6 +733,7 @@ contains
         real(real64), allocatable :: values(:), back(:)
         integer(int64) :: i, nrows_back
         real(real64) :: gb
+        integer(int64) :: start_time
         character(len=:), allocatable :: label
 
         test_num = test_num + 1
@@ -726,7 +743,7 @@ contains
             call print_skipped(test_num, total, label, gb, max_gb)
             return
         end if
-        call print_start(test_num, total, label)
+        call print_start(test_num, total, label, start_time)
 
         allocate(values(nrows))
         do i = 1_int64, nrows
@@ -751,7 +768,7 @@ contains
 
         call parquet_close_reader(reader)
         call delete_file(TMPFILE)
-        call print_done(test_num, total, label)
+        call print_done(test_num, total, label, start_time)
     end subroutine float64_scalar_case
 
     !==============================================================
@@ -769,6 +786,7 @@ contains
         integer(int64) :: i, j, flat, nrows_back, total_elems, check_rows(4)
         integer :: col_size_back, n_checks, k
         real(real64) :: gb
+        integer(int64) :: start_time
         character(len=:), allocatable :: label
 
         test_num = test_num + 1
@@ -778,7 +796,7 @@ contains
             call print_skipped(test_num, total, label, gb, max_gb)
             return
         end if
-        call print_start(test_num, total, label)
+        call print_start(test_num, total, label, start_time)
 
         allocate(values(col_size, nrows))
         do i = 1_int64, nrows
@@ -827,7 +845,7 @@ contains
 
         call parquet_close_reader(reader)
         call delete_file(TMPFILE)
-        call print_done(test_num, total, label)
+        call print_done(test_num, total, label, start_time)
     end subroutine logical_vector_case
 
     subroutine logical_scalar_case(test_num, total, nrows, max_gb)
@@ -840,6 +858,7 @@ contains
         logical, allocatable :: values(:), back(:)
         integer(int64) :: i, nrows_back
         real(real64) :: gb
+        integer(int64) :: start_time
         character(len=:), allocatable :: label
 
         test_num = test_num + 1
@@ -849,7 +868,7 @@ contains
             call print_skipped(test_num, total, label, gb, max_gb)
             return
         end if
-        call print_start(test_num, total, label)
+        call print_start(test_num, total, label, start_time)
 
         allocate(values(nrows))
         do i = 1_int64, nrows
@@ -876,7 +895,7 @@ contains
 
         call parquet_close_reader(reader)
         call delete_file(TMPFILE)
-        call print_done(test_num, total, label)
+        call print_done(test_num, total, label, start_time)
     end subroutine logical_scalar_case
 
     !==============================================================
@@ -894,6 +913,7 @@ contains
         integer(int64) :: i, j, flat, nrows_back, total_elems, check_rows(4)
         integer :: col_size_back, n_checks, k
         real(real64) :: gb
+        integer(int64) :: start_time
         character(len=:), allocatable :: label
 
         test_num = test_num + 1
@@ -903,7 +923,7 @@ contains
             call print_skipped(test_num, total, label, gb, max_gb)
             return
         end if
-        call print_start(test_num, total, label)
+        call print_start(test_num, total, label, start_time)
 
         allocate(values(col_size, nrows))
         do i = 1_int64, nrows
@@ -952,7 +972,7 @@ contains
 
         call parquet_close_reader(reader)
         call delete_file(TMPFILE)
-        call print_done(test_num, total, label)
+        call print_done(test_num, total, label, start_time)
     end subroutine string_vector_case
 
     subroutine string_scalar_case(test_num, total, nrows, max_gb)
@@ -965,6 +985,7 @@ contains
         character(len=STRING_LEN), allocatable :: values(:), back(:)
         integer(int64) :: i, nrows_back
         real(real64) :: gb
+        integer(int64) :: start_time
         character(len=:), allocatable :: label
 
         test_num = test_num + 1
@@ -974,7 +995,7 @@ contains
             call print_skipped(test_num, total, label, gb, max_gb)
             return
         end if
-        call print_start(test_num, total, label)
+        call print_start(test_num, total, label, start_time)
 
         allocate(values(nrows))
         do i = 1_int64, nrows
@@ -999,7 +1020,7 @@ contains
 
         call parquet_close_reader(reader)
         call delete_file(TMPFILE)
-        call print_done(test_num, total, label)
+        call print_done(test_num, total, label, start_time)
     end subroutine string_scalar_case
 
 end program test_large_scale

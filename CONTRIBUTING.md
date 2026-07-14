@@ -145,7 +145,8 @@ column back and compares every element. `NROWS` and `MAX_SIZE_GB` are its env-ov
 (default `8`) skips any case whose estimated uncompressed size would exceed it instead of letting an
 oversized value exhaust memory/disk, printing e.g. `Skipped test 3 of 6: ... -- expected size
 7.451E+01 GB exceeds max_size_gb 8.000E+00 GB`. Progress is printed per case (`Running test X of 6:
-...` / `Finished test X of 6: ... -- PASSED` / `Skipped test X of 6: ...`):
+...` / `Finished test X of 6: ... -- PASSED (12.345s)` — the parenthesized wall-clock duration is
+that case's own write+read+verify time, via `system_clock` — / `Skipped test X of 6: ...`):
 
 ```bash
 tools/test_large_scale.sh

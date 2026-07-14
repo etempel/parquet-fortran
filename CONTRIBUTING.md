@@ -152,7 +152,6 @@ push to the mirror by hand whenever you want it updated:
 ```bash
 git remote add github git@github.com:etempel/parquet-fortran.git   # one-time setup
 tools/mirror_to_github.sh --github
-git push github --tags     # if there are tags to mirror
 ```
 
 README.md and `doc/pages/*.md` contain a handful of `gitlab.4most.eu`-specific links and badges

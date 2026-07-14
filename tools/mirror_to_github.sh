@@ -15,6 +15,10 @@
 # Requires a "github" remote (see CONTRIBUTING.md's one-time
 # `git remote add github ...` setup) and a clean working tree.
 #
+# Also pushes all local tags to the mirror (`git push github --tags`) --
+# a plain no-op if there's nothing new, so this runs unconditionally rather
+# than trying to detect "are there new tags" itself.
+#
 # Force-pushes to a real remote, so it only runs when explicitly asked:
 # pass --github. Called with no arguments (or anything else), it does
 # nothing.
@@ -51,5 +55,6 @@ git commit -am "Rewrite doc links for GitHub mirror"
 git push --force github github-mirror:main
 git checkout "$original_branch"
 git branch -D github-mirror
+git push github --tags
 
-echo "tools/mirror_to_github.sh: pushed main to github (mirror branch discarded, back on $original_branch)"
+echo "tools/mirror_to_github.sh: pushed main and tags to github (mirror branch discarded, back on $original_branch)"

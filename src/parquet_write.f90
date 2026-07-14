@@ -791,6 +791,17 @@ contains
             write(buf, '(g0.7)') value
         end if
         text = trim(adjustl(buf))
+
+        ! g0 editing's leading zero for |value|<1 is implementation-defined: gfortran writes
+        ! "0.5000000", but ifort/ifx write ".5000000" -- normalize so callers/tests can rely on
+        ! a leading zero regardless of compiler.
+        if (len(text) > 0) then
+            if (text(1:1) == ".") then
+                text = "0" // text
+            else if (len(text) > 1) then
+                if (text(1:2) == "-.") text = "-0" // text(2:)
+            end if
+        end if
     end function parquet_qc_format_real
 
     !> Formats `value` as a trimmed plain integer for a qc-violation WARNING message.

@@ -473,8 +473,19 @@ contains
         integer :: level_value, chunk_size_value
         logical :: comp_ok
         logical :: use_threads_value
+        logical :: overwrite_value, file_exists
         character(len=12), parameter :: valid_compressions(6) = [character(len=12) :: &
             "uncompressed", "snappy", "gzip", "zstd", "brotli", "lz4"]
+
+        overwrite_value = .true.
+        if (present(overwrite)) overwrite_value = overwrite
+        if (.not. overwrite_value) then
+            inquire(file=trim(filename), exist=file_exists)
+            if (file_exists) then
+                error stop "parquet_open_writer: file already exists and overwrite=.false. (file: " // &
+                    trim(filename) // ")"
+            end if
+        end if
 
         writer%handle = create_parquet_writer(trim(filename)//char(0))
         writer%filename = trim(filename)

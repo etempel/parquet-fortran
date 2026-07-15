@@ -3006,37 +3006,139 @@ static void read_list_primitive_row(void *handle, const char *name, int64_t row_
 	mark_read(reader_handle, name, ctype_name<CType>(), array);
 }
 
+// Returns col_size for `name` without reading any column data when the column is a
+// FIXED_SIZE_LIST (the common case) -- same schema-only introspection as
+// parquet_reader_get_column_col_size (see its own comment). Every parquet_read_*_array_element
+// entry point needs col_size before it can validate col_index/compute the stride offset, so
+// element-mode's row-group streaming (see stream_element_mode_row_groups below) must not force a
+// whole-column read just to answer that. Falls back to a whole-column read (via
+// get_single_chunk_array) only for the rare LIST/LARGE_LIST case, matching that function's own
+// fallback (this library always writes FIXED_SIZE_LIST for vector columns).
+static int64_t resolve_element_mode_col_size(ParquetReaderHandle *reader_handle, const char *name)
+{
+	auto idx = get_column_index(reader_handle, name);
+	auto field = reader_handle->schema->field(static_cast<int>(idx));
+	if (field->type()->id() == arrow::Type::FIXED_SIZE_LIST)
+	{
+		return static_cast<int64_t>(std::static_pointer_cast<arrow::FixedSizeListType>(field->type())->list_size());
+	}
+	auto array = get_single_chunk_array(reader_handle, name);
+	return get_col_size(array);
+}
+
+// Streams row group by row group for a parquet_read_*_array_element entry point. Unlike
+// row_mode (read_list_primitive_row, which only ever needs ONE row group -- a single row's
+// data), element mode inherently needs every row's value at the same fixed column position, i.e.
+// data from EVERY row group -- it cannot skip any of them the way row_mode skips all but one.
+// What this avoids is ever materializing the whole flattened nrows*col_size array in a single
+// Arrow call (the original bug: identical in shape to row_mode's own pre-fix bug -- see
+// resolve_row_group_for_row's comment and CLAUDE.md's "Guarding a hard Arrow int32-only
+// ceiling"). Each row group's own element count (row_group_nrows*col_size) is already kept under
+// the int32 ceiling by the write side's row-group auto-sizing, so reading/flattening one row
+// group at a time (via get_row_group_chunk_array, the same helper row_mode's fix uses) never
+// asks Arrow to build an int32-overflowing array -- even though the final output spans the whole
+// file. `per_row_group` is invoked once per non-empty row group with (row_group_array,
+// row_group_vals, row_group_nrows, row_offset); the caller writes into its own data/valid_out at
+// row_offset (this helper doesn't know the CType/bool/string specifics of what to write).
+// Returns the last row group's own array (for mark_read's bookkeeping call), or nullptr if the
+// column has zero rows (no row groups at all, or every row group reported zero rows).
+template <typename Fn>
+static std::shared_ptr<arrow::Array> stream_element_mode_row_groups(
+	ParquetReaderHandle *reader_handle, const char *name, int64_t col_size, int64_t nrows, const char *context,
+	Fn &&per_row_group)
+{
+	auto *file_metadata = reader_handle->reader->parquet_reader()->metadata().get();
+	int64_t row_offset = 0;
+	std::shared_ptr<arrow::Array> last_array;
+	for (int64_t rg = 0; rg < reader_handle->num_row_groups; ++rg)
+	{
+		int64_t rg_rows = file_metadata->RowGroup(static_cast<int>(rg))->num_rows();
+		if (rg_rows == 0) continue;
+		auto array = get_row_group_chunk_array(reader_handle, name, rg + 1, context);
+		auto vals_any = get_uniform_list_values(array, name, rg_rows, col_size, context);
+		per_row_group(array, vals_any, rg_rows, row_offset);
+		row_offset += rg_rows;
+		last_array = array;
+	}
+	if (row_offset != nrows)
+	{
+		report_fatal_error(context, std::string("nrows mismatch for column: ") + name);
+	}
+	return last_array;
+}
+
 // Shared body for every parquet_read_*_array_element extern "C" entry point: reads one
 // element position (`col_index`) of a vector column `name` across every row into `data`.
 template <typename CType>
 static void read_list_primitive_element(void *handle, const char *name, int64_t col_index, CType *data, int64_t nrows, int8_t *valid_out)
 {
 	auto reader_handle = as_reader_handle(handle);
-	auto array = get_single_chunk_array(reader_handle, name);
-	auto col_size = get_col_size(array);
+	const char *context = "parquet_read_array_element_mode";
+
+	// See read_list_primitive_row's identical comment: a filter mask has no row-group structure
+	// of its own, so that case keeps the old whole-column path (already filtered via
+	// get_single_chunk_array/apply_filter_mask). Only the common, unfiltered case streams
+	// row-group by row-group below.
+	if (reader_handle->filter_mask)
+	{
+		auto array = get_single_chunk_array(reader_handle, name);
+		auto col_size = get_col_size(array);
+		if (col_index < 1 || col_index > col_size)
+		{
+			report_fatal_error(context, "col_index out of bounds");
+		}
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, context);
+		auto offset = col_index - 1;
+		report_nulls_list_element(array, vals_any, name, nrows, col_size, offset, valid_out, context);
+		if constexpr (std::is_same_v<CType, int32_t>)
+			convert_values_to_int32(vals_any, data, nrows, name, context, col_size, offset);
+		else if constexpr (std::is_same_v<CType, int64_t>)
+			convert_values_to_int64(vals_any, data, nrows, name, context, col_size, offset);
+		else if constexpr (std::is_same_v<CType, float>)
+			convert_values_to_float32(vals_any, data, nrows, name, context, col_size, offset);
+		else if constexpr (std::is_same_v<CType, double>)
+			convert_values_to_float64(vals_any, data, nrows, name, context, col_size, offset);
+		fill_null_default(data, valid_out, nrows);
+		mark_read(reader_handle, name, ctype_name<CType>(), array);
+		return;
+	}
+
+	auto col_size = resolve_element_mode_col_size(reader_handle, name);
 	if (col_index < 1 || col_index > col_size)
 	{
-		report_fatal_error("parquet_read_array_element_mode", "col_index out of bounds");
+		report_fatal_error(context, "col_index out of bounds");
 	}
-	auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_array_element_mode");
 	auto offset = col_index - 1;
-	report_nulls_list_element(array, vals_any, name, nrows, col_size, offset, valid_out, "parquet_read_array_element_mode");
 
-	// vals_any holds every row's full col_size-element vector back to back,
-	// so the value for row i at this fixed col_index sits at a stride of
-	// col_size apart, starting at offset -- not contiguous, hence passing
-	// stride/offset explicitly here (unlike the row-mode call above).
-	if constexpr (std::is_same_v<CType, int32_t>)
-		convert_values_to_int32(vals_any, data, nrows, name, "parquet_read_array_element_mode", col_size, offset);
-	else if constexpr (std::is_same_v<CType, int64_t>)
-		convert_values_to_int64(vals_any, data, nrows, name, "parquet_read_array_element_mode", col_size, offset);
-	else if constexpr (std::is_same_v<CType, float>)
-		convert_values_to_float32(vals_any, data, nrows, name, "parquet_read_array_element_mode", col_size, offset);
-	else if constexpr (std::is_same_v<CType, double>)
-		convert_values_to_float64(vals_any, data, nrows, name, "parquet_read_array_element_mode", col_size, offset);
+	// vals_any (per row group) holds that row group's rows' full col_size-element vectors back
+	// to back, so the value for local row i at this fixed col_index sits at a stride of col_size
+	// apart, starting at offset -- not contiguous, hence passing stride/offset explicitly here
+	// (unlike row_mode's contiguous single-row slice).
+	auto last_array = stream_element_mode_row_groups(reader_handle, name, col_size, nrows, context,
+		[&](const std::shared_ptr<arrow::Array> &array, const std::shared_ptr<arrow::Array> &vals_any,
+			int64_t rg_rows, int64_t row_offset)
+		{
+			int8_t *valid_slice = valid_out ? valid_out + row_offset : nullptr;
+			report_nulls_list_element(array, vals_any, name, rg_rows, col_size, offset, valid_slice, context);
+			if constexpr (std::is_same_v<CType, int32_t>)
+				convert_values_to_int32(vals_any, data + row_offset, rg_rows, name, context, col_size, offset);
+			else if constexpr (std::is_same_v<CType, int64_t>)
+				convert_values_to_int64(vals_any, data + row_offset, rg_rows, name, context, col_size, offset);
+			else if constexpr (std::is_same_v<CType, float>)
+				convert_values_to_float32(vals_any, data + row_offset, rg_rows, name, context, col_size, offset);
+			else if constexpr (std::is_same_v<CType, double>)
+				convert_values_to_float64(vals_any, data + row_offset, rg_rows, name, context, col_size, offset);
+		});
 
 	fill_null_default(data, valid_out, nrows);
-	mark_read(reader_handle, name, ctype_name<CType>(), array);
+	// A zero-row column has no row groups to have set `last_array` from -- fall back to the
+	// (cheap, since empty) whole-column read purely so mark_read has an array for its
+	// was_read/output_type_used/run_qc_checks bookkeeping.
+	if (!last_array)
+	{
+		last_array = get_single_chunk_array(reader_handle, name);
+	}
+	mark_read(reader_handle, name, ctype_name<CType>(), last_array);
 }
 
 extern "C"
@@ -3380,51 +3482,115 @@ extern "C"
 
 	// Same as parquet_read_int32_array_element, but for boolean (bool8) columns (not templated,
 	// since bool8 has no primitive Arrow numeric type to widen/narrow via convert_values_to_*).
+	// Streams row group by row group when unfiltered -- see stream_element_mode_row_groups's own
+	// comment for why element mode (unlike row_mode) needs every row group, not just one.
 	void parquet_read_bool8_array_element(void *handle, const char *name, int64_t col_index, int8_t *data, int64_t nrows, int64_t, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
-		auto array = get_single_chunk_array(reader_handle, name);
-		auto col_size = get_col_size(array);
-		if (col_index < 1 || col_index > col_size)
-			report_fatal_error("parquet_read_bool8_array_element", "col_index out of bounds");
-		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_bool8_array_element");
-		if (vals_any->type_id() != arrow::Type::BOOL)
-			report_fatal_error("parquet_read_bool8_array_element", std::string("type mismatch for list values in column: ") + name +
-				" (expected bool, got " + vals_any->type()->ToString() + ")");
-		auto offset = col_index - 1;
-		report_nulls_list_element(array, vals_any, name, nrows, col_size, offset, valid_out, "parquet_read_bool8_array_element");
+		const char *context = "parquet_read_bool8_array_element";
 
-		auto vals = std::static_pointer_cast<arrow::BooleanArray>(vals_any);
-		for (int64_t i = 0; i < nrows; ++i)
+		// See read_list_primitive_element's identical comment: a filter mask keeps the old
+		// whole-column path.
+		if (reader_handle->filter_mask)
 		{
-			data[i] = vals->Value(i * col_size + offset) ? 1 : 0;
+			auto array = get_single_chunk_array(reader_handle, name);
+			auto col_size = get_col_size(array);
+			if (col_index < 1 || col_index > col_size)
+				report_fatal_error(context, "col_index out of bounds");
+			auto vals_any = get_uniform_list_values(array, name, nrows, col_size, context);
+			if (vals_any->type_id() != arrow::Type::BOOL)
+				report_fatal_error(context, std::string("type mismatch for list values in column: ") + name +
+					" (expected bool, got " + vals_any->type()->ToString() + ")");
+			auto offset = col_index - 1;
+			report_nulls_list_element(array, vals_any, name, nrows, col_size, offset, valid_out, context);
+			auto vals = std::static_pointer_cast<arrow::BooleanArray>(vals_any);
+			for (int64_t i = 0; i < nrows; ++i)
+			{
+				data[i] = vals->Value(i * col_size + offset) ? 1 : 0;
+			}
+			fill_null_default(data, valid_out, nrows);
+			mark_read(reader_handle, name, "bool8", array);
+			return;
 		}
+
+		auto col_size = resolve_element_mode_col_size(reader_handle, name);
+		if (col_index < 1 || col_index > col_size)
+			report_fatal_error(context, "col_index out of bounds");
+		auto offset = col_index - 1;
+		auto last_array = stream_element_mode_row_groups(reader_handle, name, col_size, nrows, context,
+			[&](const std::shared_ptr<arrow::Array> &array, const std::shared_ptr<arrow::Array> &vals_any,
+				int64_t rg_rows, int64_t row_offset)
+			{
+				if (vals_any->type_id() != arrow::Type::BOOL)
+					report_fatal_error(context, std::string("type mismatch for list values in column: ") + name +
+						" (expected bool, got " + vals_any->type()->ToString() + ")");
+				int8_t *valid_slice = valid_out ? valid_out + row_offset : nullptr;
+				report_nulls_list_element(array, vals_any, name, rg_rows, col_size, offset, valid_slice, context);
+				auto vals = std::static_pointer_cast<arrow::BooleanArray>(vals_any);
+				for (int64_t i = 0; i < rg_rows; ++i)
+				{
+					data[row_offset + i] = vals->Value(i * col_size + offset) ? 1 : 0;
+				}
+			});
 		fill_null_default(data, valid_out, nrows);
-		mark_read(reader_handle, name, "bool8", array);
+		if (!last_array) last_array = get_single_chunk_array(reader_handle, name);
+		mark_read(reader_handle, name, "bool8", last_array);
 	}
 
-	// Same as parquet_read_bool8_array_element, but for string columns (fixed-width, space-padded output).
+	// Same as parquet_read_bool8_array_element, but for string columns (fixed-width, space-padded
+	// output). Streams row group by row group when unfiltered, same as
+	// parquet_read_bool8_array_element above.
 	void parquet_read_string_array_element(void *handle, const char *name, int64_t col_index, char *data, int64_t item_len, int64_t nrows, int64_t, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
-		auto array = get_single_chunk_array(reader_handle, name);
-		auto col_size = get_col_size(array);
-		if (col_index < 1 || col_index > col_size)
-			report_fatal_error("parquet_read_string_array_element", "col_index out of bounds");
-		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_string_array_element");
-		if (!is_string_like_type(vals_any->type_id()))
-			report_fatal_error("parquet_read_string_array_element", std::string("type mismatch for list values in column: ") + name +
-				" (expected string, got " + vals_any->type()->ToString() + ")");
-		auto offset = col_index - 1;
-		report_nulls_list_element(array, vals_any, name, nrows, col_size, offset, valid_out, "parquet_read_string_array_element");
+		const char *context = "parquet_read_string_array_element";
 
-		auto vals = make_string_like_accessor(vals_any);
-		for (int64_t i = 0; i < nrows; ++i)
+		// See read_list_primitive_element's identical comment: a filter mask keeps the old
+		// whole-column path.
+		if (reader_handle->filter_mask)
 		{
-			copy_string_with_padding(data + i * item_len, item_len, vals.get_view(i * col_size + offset));
+			auto array = get_single_chunk_array(reader_handle, name);
+			auto col_size = get_col_size(array);
+			if (col_index < 1 || col_index > col_size)
+				report_fatal_error(context, "col_index out of bounds");
+			auto vals_any = get_uniform_list_values(array, name, nrows, col_size, context);
+			if (!is_string_like_type(vals_any->type_id()))
+				report_fatal_error(context, std::string("type mismatch for list values in column: ") + name +
+					" (expected string, got " + vals_any->type()->ToString() + ")");
+			auto offset = col_index - 1;
+			report_nulls_list_element(array, vals_any, name, nrows, col_size, offset, valid_out, context);
+			auto vals = make_string_like_accessor(vals_any);
+			for (int64_t i = 0; i < nrows; ++i)
+			{
+				copy_string_with_padding(data + i * item_len, item_len, vals.get_view(i * col_size + offset));
+			}
+			fill_null_default_string(data, item_len, valid_out, nrows);
+			mark_read_string(reader_handle, name, item_len, array);
+			return;
 		}
+
+		auto col_size = resolve_element_mode_col_size(reader_handle, name);
+		if (col_index < 1 || col_index > col_size)
+			report_fatal_error(context, "col_index out of bounds");
+		auto offset = col_index - 1;
+		auto last_array = stream_element_mode_row_groups(reader_handle, name, col_size, nrows, context,
+			[&](const std::shared_ptr<arrow::Array> &array, const std::shared_ptr<arrow::Array> &vals_any,
+				int64_t rg_rows, int64_t row_offset)
+			{
+				if (!is_string_like_type(vals_any->type_id()))
+					report_fatal_error(context, std::string("type mismatch for list values in column: ") + name +
+						" (expected string, got " + vals_any->type()->ToString() + ")");
+				int8_t *valid_slice = valid_out ? valid_out + row_offset : nullptr;
+				report_nulls_list_element(array, vals_any, name, rg_rows, col_size, offset, valid_slice, context);
+				auto vals = make_string_like_accessor(vals_any);
+				for (int64_t i = 0; i < rg_rows; ++i)
+				{
+					copy_string_with_padding(data + (row_offset + i) * item_len, item_len, vals.get_view(i * col_size + offset));
+				}
+			});
 		fill_null_default_string(data, item_len, valid_out, nrows);
-		mark_read_string(reader_handle, name, item_len, array);
+		if (!last_array) last_array = get_single_chunk_array(reader_handle, name);
+		mark_read_string(reader_handle, name, item_len, last_array);
 	}
 
 } // extern "C"

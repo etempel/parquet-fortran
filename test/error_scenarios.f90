@@ -358,6 +358,8 @@ program error_scenarios
         call scenario_qc_silently_ignored_for_boolean()
     case ("write_unknown_compression")
         call scenario_write_unknown_compression()
+    case ("write_overwrite_false_existing_file")
+        call scenario_write_overwrite_false_existing_file()
     case ("write_values_not_divisible_by_col_size")
         call scenario_write_values_not_divisible_by_col_size()
     case ("write_int64_to_int32_overflow")
@@ -2108,20 +2110,24 @@ contains
     end subroutine scenario_col_size_overflow
 
     !> Regression coverage for the "List index overflow" crash parquet_get_col_size/
-    !> parquet_get_column_total_elements/parquet_read_array_row_mode used to hit once a vector
-    !> column's total element count (nrows * col_size) exceeded 2^31-1: all three used to
-    !> materialize the *whole* column (via get_single_chunk_array's ReadColumn) just to answer a
-    !> size query or fetch one row, which is exactly what Arrow's own int32 list-index ceiling
-    !> trips over on a genuinely huge column (see CLAUDE.md's "Guarding a hard Arrow int32-only
-    !> ceiling"). The fix makes col_size/total_elements read the FIXED_SIZE_LIST width straight
-    !> off the schema (no data read at all) and makes row-mode reads fetch only the one row group
-    !> the requested row lives in (get_row_group_chunk_array), instead of the whole column.
+    !> parquet_get_column_total_elements/parquet_read_array_row_mode/parquet_read_array_element_
+    !> mode used to hit once a vector column's total element count (nrows * col_size) exceeded
+    !> 2^31-1: all four used to materialize the *whole* column (via get_single_chunk_array's
+    !> ReadColumn) just to answer a size query, fetch one row, or fetch one element position
+    !> across all rows -- which is exactly what Arrow's own int32 list-index ceiling trips over on
+    !> a genuinely huge column (see CLAUDE.md's "Guarding a hard Arrow int32-only ceiling"). The
+    !> fix makes col_size/total_elements read the FIXED_SIZE_LIST width straight off the schema
+    !> (no data read at all), makes row-mode reads fetch only the one row group the requested row
+    !> lives in (get_row_group_chunk_array), and makes element-mode reads stream row group by row
+    !> group (every row group contributes one element per row, so none can be skipped the way
+    !> row-mode skips all but one -- see stream_element_mode_row_groups's own comment in
+    !> parquet_wrapper.cpp) -- instead of any of the four ever materializing the whole column.
     !> A genuine >2^31-element column is far too slow/large to build in a fast scenario, so this
     !> instead uses parquet_debug_set_force_whole_column_read_error (a process-global, test-only
     !> hook declared locally below, not part of the public Fortran API -- see its own comment in
     !> parquet_wrapper.cpp) to force get_single_chunk_array to abort the instant it would actually
     !> read a whole column -- on a tiny fixture, this scenario finishing without aborting proves
-    !> none of the three calls below ever took that path. scenario_whole_column_read_forced_error_
+    !> none of the four calls below ever took that path. scenario_whole_column_read_forced_error_
     !> control, just below, is the negative control proving the hook itself actually fires (so
     !> this scenario's "no abort" isn't simply because the hook is a no-op). Safe as a
     !> process-global for the same subprocess-isolation reason as
@@ -2139,7 +2145,7 @@ contains
         type(parquet_reader) :: reader
         character(len=*), parameter :: out_file = &
             "test_run/error_scenario_col_size_and_row_mode_avoid_whole_column_read.parquet"
-        integer(int32) :: vec_data(3, 4), row_buf(3)
+        integer(int32) :: vec_data(3, 4), row_buf(3), elem_buf(4)
         integer :: col_size_back
         integer(int64) :: total_elems
 
@@ -2151,7 +2157,7 @@ contains
 
         call parquet_open_reader(reader, out_file)
 
-        ! Forced on *before* any of the three calls below, so their success (rather than the
+        ! Forced on *before* any of the four calls below, so their success (rather than the
         ! forced abort) is the whole point of this scenario.
         call parquet_debug_set_force_whole_column_read_error(1)
 
@@ -2164,10 +2170,13 @@ contains
         call parquet_read_array_row_mode(reader, "vec", row_buf, 2)
         if (any(row_buf /= [4, 5, 6])) error stop "row_mode values mismatch for row 2"
 
+        call parquet_read_array_element_mode(reader, "vec", elem_buf, 2)
+        if (any(elem_buf /= [2, 5, 8, 11])) error stop "element_mode values mismatch for element 2"
+
         call parquet_debug_set_force_whole_column_read_error(0)
         call parquet_close_reader(reader)
         print '(a)', "parquet_get_col_size/parquet_get_column_total_elements/" // &
-            "parquet_read_array_row_mode all avoided a whole-column read, as expected"
+            "parquet_read_array_row_mode/parquet_read_array_element_mode all avoided a whole-column read, as expected"
     end subroutine scenario_col_size_and_row_mode_avoid_whole_column_read
 
     !> Negative control for scenario_col_size_and_row_mode_avoid_whole_column_read, above: proves
@@ -3344,6 +3353,24 @@ contains
         call parquet_close_writer(writer)
         print '(a)', "unexpectedly opened a writer with an unknown compression codec without error"
     end subroutine scenario_write_unknown_compression
+
+    !> parquet_open_writer(..., overwrite=.false.) must error stop rather than truncate an
+    !> existing file at that path -- write the file once normally, then reopen it with
+    !> overwrite=.false. and expect that second open to abort.
+    subroutine scenario_write_overwrite_false_existing_file()
+        type(parquet_writer) :: writer
+        integer(int32) :: values(1) = [1_int32]
+        character(len=*), parameter :: out_file = "test_run/error_scenario_overwrite_false.parquet"
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_writer(writer, out_file, overwrite=.false.)
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly opened a writer with overwrite=.false. over an existing file without error"
+    end subroutine scenario_write_overwrite_false_existing_file
 
     !> "v" is declared with col_size: 2 (a vector column), so a 1D values(:)
     !> array passed to parquet_write_column must have a length divisible by

@@ -3,7 +3,7 @@
 [![CI results](https://gitlab.4most.eu/etempel/parquet-fortran/badges/main/pipeline.svg)](https://gitlab.4most.eu/etempel/parquet-fortran)
 [![Test coverage](https://gitlab.4most.eu/etempel/parquet-fortran/badges/main/coverage.svg)](https://gitlab.4most.eu/etempel/parquet-fortran)
 [![API documentation](https://gitlab.4most.eu/ole/docserver/-/raw/master/API-documentation-blue.svg)](https://www.4most.eu/readthedocs/etempel/parquet-fortran/main)
-![Language: Fortran](https://img.shields.io/badge/Language-Fortran-734f96.svg)
+[![Language: Fortran](https://img.shields.io/badge/Language-Fortran-734f96.svg)](https://fortran-lang.org)
 [![fpm](https://img.shields.io/badge/fpm-package-729FCF.svg)](https://fpm.fortran-lang.org/)
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/LICENSE)
 
@@ -66,7 +66,18 @@ Quickstart outline — see [Prerequisites](#prerequisites) and [Environment vari
 
 1. Install the Arrow/Parquet C++ library (e.g. macOS Homebrew: `brew install apache-arrow`).
 2. Set `LIBRARY_PATH`, `FPM_FFLAGS`, `FPM_CXXFLAGS`, `FPM_LDFLAGS` to point at Arrow's `include`/`lib` — see [Environment variables](#environment-variables).
-3. Add `parquet-fortran` to your own `fpm.toml` with `link = ["arrow", "parquet", "c++"]` — see [Reading parquet files](doc/pages/reading.md).
+3. Add `parquet-fortran` to your own `fpm.toml`, with `link = ["arrow", "parquet", "c++"]`:
+
+```toml
+[dependencies]
+parquet-fortran = { path = "/path/to/parquet-fortran" }
+# or provide a relative path to the parquet-fortran git repository, e.g.
+parquet-fortran.git = "../parquet-fortran"
+
+[build]
+link = ["arrow", "parquet", "c++"]
+```
+
 4. Build/test your project with `fpm test`.
 
 > **On the link list:** your project lists `link = ["arrow", "parquet", "c++"]`, whereas `parquet-fortran`'s own `fpm.toml` lists `["arrow", "arrow_compute", "parquet"]`. The two differ intentionally — `arrow_compute` (used for read-side statistics and qc min/max) is propagated to you automatically by fpm, and the C++ runtime (`-lc++`/`-lstdc++`) comes in through `FPM_LDFLAGS` rather than the `link` list. See [Environment variables](#environment-variables) and the guide's [Troubleshooting](doc/pages/troubleshooting.md).
@@ -85,11 +96,10 @@ The code compiles successfully with the following compilers and libraries. It mi
 - Fortran compiler:
     - Intel Fortran (ifx) v2025.3.0
     - Gfortran v15.2.0 (development), v13 (CI)
-    - **Minimum gfortran: 13.** gfortran 11 and earlier (e.g. Ubuntu 22.04's
-      default compiler) miscompile the optional deferred-length allocatable
-      `character` argument returned by `schema%add_col_qc` / `schema%get_col_qc`,
-      yielding a corrupted column name at runtime (a spurious "column not found"
-      abort) rather than a build error. Use gfortran 13 or newer.
+    - **Minimum gfortran: 13.** Older versions (e.g. Ubuntu 22.04's default compiler)
+      miscompile part of the schema-building API — see
+      [Troubleshooting](doc/pages/troubleshooting.md) if you hit a spurious
+      "column not found" abort.
 - FPM ([Fortran Package Manager](https://fpm.fortran-lang.org/))
 - A C++20-capable C++ compiler (Arrow/Parquet headers use `std::span`
   unconditionally): e.g. GCC ≥ 11 / a recent Clang. `-std=c++20` must be set
@@ -179,9 +189,11 @@ Worth knowing up front before relying on this library:
 - **A vector column's per-row width (`col_size`) is capped at 2,147,483,647 elements** — a hard limit of Arrow's `FixedSizeListType` itself (its `list_size` is a plain `int32_t`, with no "large" variant to fall back to, unlike Arrow's string type). Writing a column that would exceed it aborts the same way as the physical-type-mismatch case above (a C++-level abort via a stderr diagnostic, not a clean `error stop`), rather than silently truncating/corrupting the written column.
 - **A vector column's flattened element count is capped at 2,147,483,647 elements *per row group*, not per file** — Parquet's own repetition/definition-level generation for list-typed columns walks every flattened element of a row group with a plain `int32_t` counter. This is handled automatically: `parquet_close_writer`'s row-group auto-sizing already accounts for each column's `col_size` and picks a smaller row-group size whenever a wide vector column needs it, so a column's *total* `nrows * col_size` — a real, hittable case (e.g. 2.5 billion rows at `col_size=2`) — can exceed 2,147,483,647 without any special handling, transparently split across multiple row groups. Only an *explicitly*-chosen `chunk_size` (`parquet_open_writer`/`parquet_set_writer_options`) that conflicts with a vector column's `col_size` aborts (a C++-level abort via a stderr diagnostic, not a clean `error stop`) rather than silently overriding the caller's request; see [Important behavior](#important-behavior).
 - **A table is capped at 2,147,483,647 columns** — another hard limit of Arrow's own C++ API (`Schema::num_fields()`/`GetFieldIndex()` return a plain `int32_t` internally, with no int64/"large" variant for column count at all, unlike row count). Writing a column that would push the table's column count past this aborts the same way as the two cases above (a C++-level abort via a stderr diagnostic, not a clean `error stop`), rather than risking Arrow's own field-count bookkeeping silently wrapping/corrupting. Reaching this in practice would first require an enormous amount of memory and time for per-column bookkeeping (each column needs its own name/type/metadata), so it is not a limit expected to be hit by accident.
-- A column can only be written once per `parquet_writer` — there's no incremental/streaming append to a column across multiple `parquet_write_column` calls, and no way to append rows to an already-closed `.parquet` file. Writing the same column name twice fails immediately with `error stop`, naming the column, whether or not the writer has a MAML-derived schema.
-- **`parquet_open_writer` silently overwrites/truncates an existing file at that path** — there is no existence check and no warning.
-- No genuine random-access or predicate-pushdown read: row filtering via `parquet_filter` (see [Row filtering](doc/pages/reading.md#row-filtering-with-parquet_filter)) narrows which rows your code sees, but it's post-decode — every referenced column is still fully read/decoded off disk; there's no I/O-level skip of non-matching row groups. Separately, `parquet_read_array_row_mode`/`parquet_read_array_element_mode` avoid loading a whole *column* at once.
+- A column can only be written once per `parquet_writer` via `parquet_write_column` — there's no way to append rows to an already-closed `.parquet` file. Writing the same column name twice this way fails immediately with `error stop`, naming the column, whether or not the writer has a MAML-derived schema. If a column is too large to hold as one complete array, see [Streaming/chunked writes](doc/pages/writing.md#streamingchunked-writes) for the incremental, row-group-at-a-time alternative (`parquet_new_row_group`/`parquet_write_column_chunk`/`parquet_finish_row_group`).
+- By default, `parquet_open_writer` silently overwrites/truncates an existing file at that path. Pass `overwrite=.false.` to instead fail immediately with `error stop`, naming the file, if it already exists.
+- **No predicate pushdown:** row filtering via `parquet_filter` (see [Row filtering](doc/pages/reading.md#row-filtering-with-parquet_filter)) narrows which rows your own code sees, but it's post-decode — every referenced column, and every column you subsequently read, is still fully read/decoded off disk exactly as without a filter; Parquet's own row-group statistics are never used to skip I/O.
+- **A filtered reader cannot use streaming/chunked reads:** `parquet_read_column_chunk` fails immediately with `error stop` on a reader opened with `filter=`, since the filter mask is a single flat mask over the whole unfiltered file with no row-group structure of its own; open a second, unfiltered reader if you need both. See [Streaming/chunked reads](doc/pages/reading.md#streamingchunked-reads).
+- `parquet_read_array_row_mode` reads only the one row group a given row falls in — genuine random access at row-group granularity, not a whole-column read — and `parquet_read_array_element_mode` streams the file row group by row group rather than materializing the whole column at once. Neither is single-row I/O in the strict sense (both still decode a full row group's worth of data), and both fall back to a genuine whole-column read once a row filter is active, since a filter mask has no row-group structure to resolve against.
 
 ## Contributing
 

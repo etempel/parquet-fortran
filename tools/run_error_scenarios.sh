@@ -133,6 +133,7 @@ scenarios=(
     "write_string_matrix_exceeds_array_size:1"
     "write_string_exceeds_array_size:1"
     "write_unknown_compression:1"
+    "write_overwrite_false_existing_file:1"
     "validate_bad_data_type:1"
     "validate_excluded_date_type:1"
     "validate_excluded_timestamp_type:1"

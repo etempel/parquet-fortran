@@ -479,7 +479,15 @@ module parquet
     !> every row. Dispatched by `values`' actual/declared type/kind.
     !> null_value (optional) fills missing entries; is_valid (optional)
     !> reports which rows were actually present. See
-    !> parquet_read_array_row_mode for the complementary "one row" access pattern.
+    !> parquet_read_array_row_mode for the complementary "one row" access pattern. Unlike
+    !> parquet_read_array_row_mode (which only needs one row group), this access pattern
+    !> inherently touches every row, so every row group contributes -- none can be skipped.
+    !> Instead, unless a row filter is active, this streams the file row group by row group
+    !> (never materializing the whole column's flattened element count in a single internal
+    !> call), so a vector column whose total element count (rows times per-row width) would
+    !> otherwise exceed 2,147,483,647 can still be read this way. If a row filter is active
+    !> (parquet_open_reader(..., filter=)/parquet_reader_set_filter), the whole (filtered) column
+    !> is read instead, since a filter mask has no row-group structure of its own.
     interface parquet_read_array_element_mode
         module procedure parquet_read_int32_array_element_mode
         module procedure parquet_read_int64_array_element_mode
@@ -814,9 +822,12 @@ module parquet
         !> the writer is schema-less: columns are inferred from the first
         !> parquet_write_column call for each name, with no field metadata/QC.
         !> With `schema`, every column/type/QC rule is fixed up front and
-        !> enforced on every write.
+        !> enforced on every write. By default (`overwrite=.true.`) an existing
+        !> file at `filename` is silently truncated; pass `overwrite=.false.`
+        !> to instead fail immediately with `error stop` if `filename` already
+        !> exists, rather than clobbering it.
         module subroutine parquet_open_writer(writer, filename, schema, write_maml, qc, &
-                compression, compression_level, chunk_size, use_threads)
+                compression, compression_level, chunk_size, use_threads, overwrite)
             type(parquet_writer), intent(out) :: writer !! writer to open.
             character(len=*), intent(in) :: filename !! output .parquet path.
             type(parquet_schema), intent(in), optional :: schema !! schema to enforce; schema-less writer if absent.
@@ -826,6 +837,7 @@ module parquet
             integer, intent(in), optional :: compression_level !! codec-specific compression level.
             integer, intent(in), optional :: chunk_size !! Parquet row-group size.
             logical, intent(in), optional :: use_threads !! use Arrow's multi-threaded writer.
+            logical, intent(in), optional :: overwrite !! allow truncating an existing file at filename; default .true.
         end subroutine parquet_open_writer
 
         !> Declares one column on a schema-less writer (%is_schema_enforced

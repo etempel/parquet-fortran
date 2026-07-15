@@ -414,27 +414,39 @@ rather than per-column-total:
 
 **Read side of the `nrows * col_size` ceiling: row-group-scoped, not a ceiling at all.** Unlike
 the write side above, `parquet_get_col_size`/`parquet_get_column_total_elements`/
-`parquet_read_array_row_mode` on the *read* path used to hit this ceiling for a different reason:
-they materialized the *whole* column via `get_single_chunk_array`'s `ReadColumn` (Arrow's
-whole-file, all-row-groups-at-once convenience API) just to answer a size query or fetch one row,
+`parquet_read_array_row_mode`/`parquet_read_array_element_mode` on the *read* path used to hit
+this ceiling for a different reason: they materialized the *whole* column via
+`get_single_chunk_array`'s `ReadColumn` (Arrow's whole-file, all-row-groups-at-once convenience
+API) just to answer a size query, fetch one row, or fetch one element position across all rows,
 which trips Arrow's own internal int32 list-index/offset limit once `nrows * col_size` crosses
 int32 — even though the column was written perfectly safely (every row group under the limit, per
-the write-side guard above). Fixed by making all three genuinely row-group-scoped instead of
+the write-side guard above). Fixed by making all four genuinely row-group-scoped instead of
 adding a new guard: `parquet_get_col_size`/`parquet_get_column_total_elements` read `col_size`
 straight off the schema's `FixedSizeListType::list_size()` (no data read at all) for a
 FIXED_SIZE_LIST column, and `parquet_read_array_row_mode` resolves which row group a given
 `row_index` falls in (`resolve_row_group_for_row`, walking each row group's `num_rows()` from the
 file footer) and reads only that one row group (`get_row_group_chunk_array`, the same helper the
-`_column_chunk` family already used) rather than the whole column. The one case that still falls
-back to the old whole-column path is an active row filter
-(`parquet_open_reader(..., filter=)`/`parquet_reader_set_filter`): a filter mask has no row-group
-structure of its own (see `get_row_group_chunk_array`'s own comment), so `row_index` there means
-"index into the filtered result", not a physical file row. Regression-tested via
-`test/error_scenarios.f90`'s `scenario_col_size_and_row_mode_avoid_whole_column_read` (a
-process-global `g_debug_force_whole_column_read_error` hook forces `get_single_chunk_array` to
-abort the instant it would actually read a whole column, on a tiny fixture — the scenario
-finishing without aborting proves none of the three calls took that path) plus its negative
-control `scenario_whole_column_read_forced_error_control` (proves the hook itself actually fires).
+`_column_chunk` family already used) rather than the whole column.
+`parquet_read_array_element_mode` is different in kind from the other three: it inherently needs
+every row's value at the same fixed column position, i.e. data from *every* row group — it can't
+skip all but one the way row_mode does. So its fix is "stream row group by row group" rather than
+"read only one row group": `stream_element_mode_row_groups` walks every row group, reads each
+one's own chunk via `get_row_group_chunk_array`, extracts just that row group's rows' values at
+the fixed offset, and writes them into the correct slice of the caller's already-allocated
+`nrows`-length output arrays — so no single Arrow call ever has to flatten more than one row
+group's worth of elements, even though the final output still spans the whole file.
+`resolve_element_mode_col_size` mirrors `parquet_get_col_size`'s own schema-only col_size lookup,
+so element mode doesn't need a whole-column read just to validate `col_index`/compute the stride
+offset either. The one case that still falls back to the old whole-column path (for all four) is
+an active row filter (`parquet_open_reader(..., filter=)`/`parquet_reader_set_filter`): a filter
+mask has no row-group structure of its own (see `get_row_group_chunk_array`'s own comment), so
+`row_index`/the per-row iteration there means "index into the filtered result", not a physical
+file row. Regression-tested via `test/error_scenarios.f90`'s
+`scenario_col_size_and_row_mode_avoid_whole_column_read` (a process-global
+`g_debug_force_whole_column_read_error` hook forces `get_single_chunk_array` to abort the instant
+it would actually read a whole column, on a tiny fixture — the scenario finishing without
+aborting proves none of the four calls took that path) plus its negative control
+`scenario_whole_column_read_forced_error_control` (proves the hook itself actually fires).
 
 ## Manual (never-`fpm test`) large-scale/benchmark tools
 

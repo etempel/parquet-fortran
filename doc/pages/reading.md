@@ -2,19 +2,9 @@
 title: Reading parquet files from your Fortran code
 ---
 
-To use this library in another Fortran project, add it as an FPM dependency in your project's `fpm.toml`:
-
-```toml
-[dependencies]
-parquet-fortran = { path = "/path/to/parquet-fortran" }
-# or provide a relative path to the parquet-fortran git repository, e.g.
-parquet-fortran.git = "../parquet-fortran"
-
-[build]
-link = ["arrow", "parquet", "c++"]
-```
-
-Then `use parquet` in your code.
+To use this library in another Fortran project, add it as an FPM dependency — see
+[Minimal setup to depend on this library](../index.html#minimal-setup-to-depend-on-this-library) in
+the README for the `fpm.toml` snippet. Then `use parquet` in your code.
 
 Minimal reader example:
 
@@ -49,7 +39,7 @@ Notes:
 
 ### Reading only touches the columns you ask for
 
-`parquet_open_reader` only parses the file's footer (schema, row count, row-group layout) — it does not read or decompress any column's data. Each column is read from disk only the first time you ask for it (`parquet_read_column`, `parquet_get_string_length`, etc.), then cached for the lifetime of that `reader`; asking for it again doesn't re-read it, and columns you never ask for are never read at all. This follows from Parquet's layout — each column is its own contiguous byte range, so the reader seeks straight to just the bytes it needs, regardless of [compression codec](supported-data-types.html#compression-and-row-group-size). So opening a large file with many columns and reading only a handful is cheap in both I/O and memory, no matter how large the unrequested columns are. `parquet_get_col_size`/`parquet_get_column_total_elements` are cheaper still for the common case (a vector column stored as `fixed_size_list`): they answer straight from the schema/footer, reading no column data at all — so they're safe to call even on a column whose total element count (`nrows * col_size`) is enormous. `parquet_read_array_row_mode` reads only the one row group the requested row lives in (not the whole column), unless a row filter is active, in which case it falls back to reading the whole (filtered) column, since a filter mask has no row-group structure of its own.
+`parquet_open_reader` only parses the file's footer (schema, row count, row-group layout) — it does not read or decompress any column's data. Each column is read from disk only the first time you ask for it (`parquet_read_column`, `parquet_get_string_length`, etc.), then cached for the lifetime of that `reader`; asking for it again doesn't re-read it, and columns you never ask for are never read at all. This follows from Parquet's layout — each column is its own contiguous byte range, so the reader seeks straight to just the bytes it needs, regardless of [compression codec](supported-data-types.html#compression-and-row-group-size). So opening a large file with many columns and reading only a handful is cheap in both I/O and memory, no matter how large the unrequested columns are. `parquet_get_col_size`/`parquet_get_column_total_elements` are cheaper still for the common case (a vector column stored as `fixed_size_list`): they answer straight from the schema/footer, reading no column data at all — so they're safe to call even on a column whose total element count (`nrows * col_size`) is enormous. `parquet_read_array_row_mode` reads only the one row group the requested row lives in (not the whole column), unless a row filter is active, in which case it falls back to reading the whole (filtered) column, since a filter mask has no row-group structure of its own. `parquet_read_array_element_mode` can't limit itself to one row group the way `parquet_read_array_row_mode` does — it inherently needs every row's value at the same element position, so every row group contributes — but, unless a row filter is active, it still avoids ever materializing the whole column's flattened element count in a single internal call by streaming the file row group by row group instead; a row filter falls back to reading the whole (filtered) column, same as `parquet_read_array_row_mode`.
 
 ### Prefetching multiple columns at once with `parquet_prefetch_columns`
 

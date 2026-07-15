@@ -13,8 +13,9 @@ It is an **independent module** — `use parquet_strings` depends only on `iso_f
 interop hooks that will connect it are described in
 [Interop hooks for the read/write path](#interop-hooks-for-the-readwrite-path) below.
 
-To use it, add parquet-fortran as an FPM dependency (see [Reading](reading.html) for the
-`fpm.toml` snippet) and `use parquet_strings` in your code.
+To use it, add parquet-fortran as an FPM dependency (see
+[Minimal setup to depend on this library](../index.html#minimal-setup-to-depend-on-this-library) in
+the README for the `fpm.toml` snippet) and `use parquet_strings` in your code.
 
 ## Why not an array of allocatable strings?
 

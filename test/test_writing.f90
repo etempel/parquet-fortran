@@ -83,6 +83,12 @@ contains
             new_unittest("compression=uncompressed writes a larger file than the snappy default", &
                 test_compression_uncompressed_larger_than_default), &
             new_unittest("an unknown compression codec aborts", test_compression_unknown_aborts), &
+            new_unittest("overwrite=.false. aborts when the file already exists", &
+                test_overwrite_false_existing_file_aborts), &
+            new_unittest("overwrite=.false. writes normally when the file does not yet exist", &
+                test_overwrite_false_new_file), &
+            new_unittest("overwrite defaults to .true. and truncates an existing file", &
+                test_overwrite_default_truncates), &
             new_unittest("chunk_size forces multiple row groups and still round-trips", &
                 test_chunk_size_round_trip), &
             new_unittest("chunk_size auto-sizes when not given and still round-trips", &
@@ -1034,6 +1040,71 @@ contains
         call check_scenario_exit_status(error, "write_unknown_compression", expect_abort=.true., &
             failure_message="an unknown compression codec name was expected to error stop")
     end subroutine test_compression_unknown_aborts
+
+    !> parquet_open_writer(..., overwrite=.false.) must error stop rather than truncate an
+    !> already-existing file (out-of-process: error stop kills the test process itself).
+    subroutine test_overwrite_false_existing_file_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_overwrite_false_existing_file", expect_abort=.true., &
+            failure_message="overwrite=.false. over an existing file was expected to error stop")
+    end subroutine test_overwrite_false_existing_file_aborts
+
+    !> overwrite=.false. is not a hazard when the file does not exist yet -- it must write
+    !> and round-trip exactly like the default.
+    subroutine test_overwrite_false_new_file(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: values(3) = [1, 2, 3]
+        integer(int32) :: read_back(3)
+        character(len=*), parameter :: out_file = "test_run/test_overwrite_false_new_file.parquet"
+        integer :: unit, ios
+
+        open(newunit=unit, file=out_file, status="old", iostat=ios)
+        if (ios == 0) close(unit, status="delete")
+
+        call parquet_open_writer(writer, out_file, overwrite=.false.)
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "v", read_back)
+        call parquet_close_reader(reader)
+
+        call check(error, all(read_back == values), &
+            "overwrite=.false. on a new file did not round-trip the written data correctly")
+    end subroutine test_overwrite_false_new_file
+
+    !> Not passing overwrite= (or passing overwrite=.true. explicitly) must keep the existing
+    !> silent-truncate behavior -- reopening the same path must succeed and reflect the newest
+    !> write, not the first one.
+    subroutine test_overwrite_default_truncates(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: first_values(3) = [1, 2, 3]
+        integer(int32) :: second_values(2) = [9, 8]
+        integer(int32) :: read_back(2)
+        integer(int64) :: nrows
+        character(len=*), parameter :: out_file = "test_run/test_overwrite_default_truncates.parquet"
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "v", first_values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "v", second_values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_read_column(reader, "v", read_back)
+        call parquet_close_reader(reader)
+
+        call check(error, nrows == 2_int64 .and. all(read_back == second_values), &
+            "default overwrite behavior did not truncate the file down to the second write")
+    end subroutine test_overwrite_default_truncates
 
     !> A small chunk_size (row group length) relative to the row count forces
     !> multiple row groups; the file must still read back correctly.

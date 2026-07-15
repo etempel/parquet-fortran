@@ -1332,20 +1332,18 @@ contains
         nrows = self%nrows
         nchars = self%nchars
         has_validity = self%has_nulls
-        if (allocated(self%offsets) .and. size(self%offsets, kind=int64) >= 1) then
-            offsets_ptr = c_loc(self%offsets)
-        else
-            offsets_ptr = c_null_ptr
+        offsets_ptr = c_null_ptr
+        if (allocated(self%offsets)) then
+            if (size(self%offsets, kind=int64) >= 1) offsets_ptr = c_loc(self%offsets)
         end if
         if (allocated(self%data) .and. self%nchars > 0) then
             data_ptr = c_loc(self%data)
         else
             data_ptr = c_null_ptr
         end if
-        if (self%has_nulls .and. allocated(self%validity) .and. size(self%validity, kind=int64) >= 1) then
-            validity_ptr = c_loc(self%validity)
-        else
-            validity_ptr = c_null_ptr
+        validity_ptr = c_null_ptr
+        if (self%has_nulls .and. allocated(self%validity)) then
+            if (size(self%validity, kind=int64) >= 1) validity_ptr = c_loc(self%validity)
         end if
     end subroutine raw_buffers
     !

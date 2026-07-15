@@ -11,6 +11,7 @@
 program error_scenarios
     use parquet
     use parquet_maml_base, only: parquet_maml_file, get_parquet_maml
+    use parquet_strings, only : parquet_string_column, parquet_string
     use iso_fortran_env, only : int32, int64, real32, real64
     !$ use omp_lib, only : omp_get_max_threads, omp_get_thread_num
     implicit none
@@ -437,6 +438,16 @@ program error_scenarios
         call scenario_schema_add_field_qc_max_operator_without_value()
     case ("schema_add_field_bad_qc_miss_value")
         call scenario_schema_add_field_bad_qc_miss_value()
+    case ("string_column_index_out_of_range")
+        call scenario_string_column_index_out_of_range()
+    case ("string_column_get_null")
+        call scenario_string_column_get_null()
+    case ("string_column_to_character_null")
+        call scenario_string_column_to_character_null()
+    case ("string_handle_unassociated")
+        call scenario_string_handle_unassociated()
+    case ("string_handle_stale_index")
+        call scenario_string_handle_stale_index()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -3848,5 +3859,58 @@ contains
         call schema%add_field("ra", "float64", qc_miss="garbage")
         print '(a)', "unexpectedly accepted an invalid qc_miss value in schema%add_field"
     end subroutine scenario_schema_add_field_bad_qc_miss_value
+
+    !> parquet_string_column: indexing out of range aborts (check_index).
+    subroutine scenario_string_column_index_out_of_range()
+        type(parquet_string_column) :: col
+        character(len=:), allocatable :: s
+        call col%append_string("a")
+        call col%append_string("b")
+        s = col%get(5)   ! index 5 > nrows 2 -> aborts
+        print '(a)', "unexpectedly read an out-of-range index: "//s
+    end subroutine scenario_string_column_index_out_of_range
+
+    !> parquet_string_column: get on a null element with no null option aborts (fail_null).
+    subroutine scenario_string_column_get_null()
+        type(parquet_string_column) :: col
+        character(len=:), allocatable :: s
+        call col%append_string("a")
+        call col%append_null()
+        s = col%get(2)   ! null, no null_value/allow_null -> aborts
+        print '(a)', "unexpectedly read a null element: "//s
+    end subroutine scenario_string_column_get_null
+
+    !> parquet_string_column: to_character on a null-containing column with no null_value aborts.
+    subroutine scenario_string_column_to_character_null()
+        type(parquet_string_column) :: col
+        character(len=:), allocatable :: arr(:)
+        call col%append_string("a")
+        call col%append_null()
+        call col%to_character(arr)   ! null present, no null_value -> aborts
+        print '(a)', "unexpectedly materialized a null-containing column without null_value"
+    end subroutine scenario_string_column_to_character_null
+
+    !> parquet_string handle: using an unassociated handle aborts (check_handle).
+    subroutine scenario_string_handle_unassociated()
+        type(parquet_string) :: h
+        integer(int64) :: n
+        n = h%length()   ! handle never associated with a column -> aborts
+        print '(a,i0)', "unexpectedly used an unassociated handle, length=", n
+    end subroutine scenario_string_handle_unassociated
+
+    !> parquet_string handle: a handle whose index no longer exists aborts (check_handle).
+    subroutine scenario_string_handle_stale_index()
+        type(parquet_string_column), target :: col
+        type(parquet_string) :: h
+        integer(int64) :: n
+        call col%append_string("a")
+        call col%append_string("b")
+        call col%append_string("c")
+        h = col%view(3)
+        call col%erase(1)
+        call col%erase(1)   ! nrows now 1; handle still refers to index 3
+        n = h%length()      ! idx 3 > nrows 1 -> aborts
+        print '(a,i0)', "unexpectedly used a stale handle, length=", n
+    end subroutine scenario_string_handle_stale_index
 
 end program error_scenarios

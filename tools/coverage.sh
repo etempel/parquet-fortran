@@ -49,6 +49,19 @@ GCOV="$(resolve_gcov)"
 echo "Using compiler: $(command -v "$FC")" >&2
 echo "Using gcov:      $GCOV" >&2
 
+# Safeguard against a stale fpm build cache (see CLAUDE.md, "Stale fpm build cache").
+# A leftover default build/ tree with several build/gfortran_* dirs (accumulated from
+# runs with different FPM_FFLAGS) can make fpm -- and test_errors.f90's
+# error_scenarios_bin binary lookup, which does `find build -name error_scenarios |
+# head -1` -- pick up an out-of-date binary, surfacing as spurious test failures.
+# Wipe fpm's default build tree up front so this run (and the next plain `fpm test`)
+# starts from a clean slate. This script's own instrumented build lives in build/gcov
+# and is cleaned separately below. Run before FPM_BUILD_DIR is exported so `fpm clean`
+# targets the default `build/`; </dev/null + `|| true` keep it non-interactive and
+# non-fatal if there is nothing to clean.
+echo "Cleaning fpm default build tree (fpm clean --all)..." >&2
+fpm clean --skip </dev/null >/dev/null 2>&1 || true
+
 export FPM_BUILD_DIR="${FPM_BUILD_DIR:-build/gcov}"
 export FPM_FFLAGS="${FPM_FFLAGS:-} -O0 -g --coverage"
 

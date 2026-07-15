@@ -340,9 +340,54 @@ contains
             new_unittest("concurrent calls into a shared parquet_reader abort", &
                 test_concurrent_calls_into_shared_reader_aborts), &
             new_unittest("concurrent calls into a shared parquet_writer abort", &
-                test_concurrent_calls_into_shared_writer_aborts) &
+                test_concurrent_calls_into_shared_writer_aborts), &
+            new_unittest("parquet_string_column indexing out of range aborts", &
+                test_string_column_index_out_of_range_aborts), &
+            new_unittest("parquet_string_column get on a null aborts", &
+                test_string_column_get_null_aborts), &
+            new_unittest("parquet_string_column to_character on a null aborts", &
+                test_string_column_to_character_null_aborts), &
+            new_unittest("parquet_string unassociated handle aborts", &
+                test_string_handle_unassociated_aborts), &
+            new_unittest("parquet_string stale handle index aborts", &
+                test_string_handle_stale_index_aborts) &
             ]
     end subroutine collect_tests_parquet_errors
+
+    subroutine test_string_column_index_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_column_index_out_of_range", expect_abort=.true., &
+            failure_message="indexing a parquet_string_column out of range was expected to abort", &
+            required_stderr="parquet_strings: index out of range in get")
+    end subroutine test_string_column_index_out_of_range_aborts
+
+    subroutine test_string_column_get_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_column_get_null", expect_abort=.true., &
+            failure_message="get on a null element with no null option was expected to abort", &
+            required_stderr="parquet_strings: null element accessed in get")
+    end subroutine test_string_column_get_null_aborts
+
+    subroutine test_string_column_to_character_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_column_to_character_null", expect_abort=.true., &
+            failure_message="to_character on a null-containing column with no null_value was expected to abort", &
+            required_stderr="parquet_strings: null element accessed in to_character")
+    end subroutine test_string_column_to_character_null_aborts
+
+    subroutine test_string_handle_unassociated_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_handle_unassociated", expect_abort=.true., &
+            failure_message="using an unassociated parquet_string handle was expected to abort", &
+            required_stderr="parquet_strings: unassociated string handle in length")
+    end subroutine test_string_handle_unassociated_aborts
+
+    subroutine test_string_handle_stale_index_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_handle_stale_index", expect_abort=.true., &
+            failure_message="using a parquet_string handle whose index no longer exists was expected to abort", &
+            required_stderr="parquet_strings: string handle index out of range (column changed?) in length")
+    end subroutine test_string_handle_stale_index_aborts
 
     subroutine test_ok_scenario_exits_cleanly(error)
         type(error_type), allocatable, intent(out) :: error

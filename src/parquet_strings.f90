@@ -1,0 +1,1527 @@
+!===========================================
+! Author: Elmo Tempel (elmo.tempel@ut.ee)
+!===========================================
+!
+!> Independent, self-contained module for Parquet BYTE_ARRAY/STRING column storage.
+!!
+!! Provides two public types:
+!!
+!! * `parquet_string_column` -- an owning, contiguous Arrow-`LargeUtf8`-compatible string
+!!   column (int64 offsets + a packed byte payload + a lazily allocated, bit-packed validity
+!!   bitmap). Designed for row-group-chunked appends, tens-to-hundreds of millions of rows and
+!!   multi-gigabyte payloads with a minimal allocation count and good cache locality.
+!! * `parquet_string` -- a lightweight, non-owning handle referring to one element of a column
+!!   (a column pointer + a 1-based index), resolved lazily on access so it survives appends to
+!!   the column. It owns nothing and frees nothing.
+!!
+!! This module depends only on `iso_fortran_env` and `iso_c_binding`; it has no dependency on
+!! any other module in this library (the read/write integration layer depends on it, never the
+!! reverse). See `raw_buffers`/`append_buffers` for the buffer-level interop hooks the future
+!! Parquet read/write path consumes.
+module parquet_strings
+    use, intrinsic :: iso_fortran_env, only : int8, int32, int64, output_unit
+    use, intrinsic :: iso_c_binding, only : c_ptr, c_loc, c_f_pointer, c_null_ptr, c_associated
+    !
+    implicit none
+    private
+    !
+    public :: parquet_string_column
+    public :: parquet_string
+    !
+    !> Error-message prefix for every `error stop` raised by this module.
+    character(len=*), parameter :: EP = "parquet_strings: "
+    !
+    !> Per-bit masks for the LSB-first, 1=valid validity bitmap (bit 7 = 10000000b = -128 as int8).
+    !! ibset(0_int8, 7) yields the bit-7 value without an out-of-range int8 literal.
+    integer(int8), parameter :: BIT_MASK(0:7) = [1_int8, 2_int8, 4_int8, 8_int8, &
+        16_int8, 32_int8, 64_int8, ibset(0_int8, 7)]
+    !
+    !> Minimum initial row / character capacity for the first allocation from empty.
+    integer(int64), parameter :: MIN_ROW_CAP = 16_int64
+    integer(int64), parameter :: MIN_CHAR_CAP = 64_int64
+    !
+    !> An owning, Arrow-LargeUtf8-compatible variable-length string column.
+    !!
+    !! Storage is Arrow-like and contiguous: `offsets` (int64, 1-based Fortran array with
+    !! `offsets(1)=0`, logical length `nrows+1`), a packed `data` byte payload, and a lazily
+    !! allocated bit-packed `validity` bitmap (1=valid). Element `i` (1-based) occupies
+    !! `data(offsets(i)+1 : offsets(i+1))`. All components are private; access is via the
+    !! type-bound procedures. Row/character indexing is `integer(int64)` throughout.
+    type :: parquet_string_column
+        private
+        integer(int64), allocatable :: offsets(:)     !! int64 offsets; offsets(1)=0, length nrows+1.
+        character(len=1), allocatable :: data(:)       !! packed byte payload; used bytes = nchars.
+        integer(int8), allocatable :: validity(:)      !! bit-packed bitmap (1=valid); lazy.
+        integer(int64) :: nrows = 0                    !! number of elements stored.
+        integer(int64) :: nchars = 0                   !! total characters stored (= offsets(nrows+1)).
+        integer(int64) :: n_null = 0                   !! cached number of null elements.
+        logical :: has_nulls = .false.                 !! .true. once the validity bitmap is materialized.
+    contains
+        ! --- construction / memory management ---
+        procedure :: clear                             !! Reset to empty and release all owned buffers.
+        procedure, private :: reserve_i32              !! int32 specific of reserve.
+        procedure, private :: reserve_i64              !! int64 specific of reserve.
+        generic :: reserve => reserve_i32, reserve_i64 !! Grow capacity for at least n_rows/n_characters.
+        procedure :: shrink_to_fit                     !! Reallocate buffers down to the current size.
+        procedure :: capacity                          !! Current row capacity.
+        procedure :: character_capacity                !! Current character-buffer capacity (bytes).
+        procedure :: size => col_size                  !! Number of elements stored.
+        procedure :: character_size                    !! Total characters stored.
+        procedure :: empty => col_empty                !! .true. when no rows are stored.
+        procedure :: null_count                        !! Number of null elements.
+        procedure :: memory_usage                      !! Total bytes of allocated buffers.
+        procedure :: validate                          !! Verify class invariants.
+        ! --- access ---
+        procedure, private :: length_i32               !! int32 specific of length.
+        procedure, private :: length_i64               !! int64 specific of length.
+        generic :: length => length_i32, length_i64    !! Length of element i (no allocation).
+        procedure, private :: get_i32                  !! int32 specific of get.
+        procedure, private :: get_i64                  !! int64 specific of get.
+        generic :: get => get_i32, get_i64             !! Element i as an allocatable string.
+        procedure, private :: view_i32                 !! int32 specific of view.
+        procedure, private :: view_i64                 !! int64 specific of view.
+        generic :: view => view_i32, view_i64          !! Zero-copy handle to element i.
+        procedure, private :: is_null_i32              !! int32 specific of is_null.
+        procedure, private :: is_null_i64              !! int64 specific of is_null.
+        generic :: is_null => is_null_i32, is_null_i64 !! Whether element i is null.
+        procedure, private :: is_empty_i32             !! int32 specific of is_empty.
+        procedure, private :: is_empty_i64             !! int64 specific of is_empty.
+        generic :: is_empty => is_empty_i32, is_empty_i64 !! Whether element i has zero length.
+        ! --- modification ---
+        procedure :: append_string                     !! Append a string to the end.
+        procedure :: append_null                       !! Append a null element to the end.
+        procedure :: append_column                     !! Append all elements from another column.
+        procedure, private :: set_i32                  !! int32 specific of set.
+        procedure, private :: set_i64                  !! int64 specific of set.
+        generic :: set => set_i32, set_i64             !! Replace the content of element i.
+        procedure, private :: erase_i32                !! int32 specific of erase.
+        procedure, private :: erase_i64                !! int64 specific of erase.
+        generic :: erase => erase_i32, erase_i64       !! Remove element i (shifts later elements down).
+        procedure :: strip_all                         !! Strip both ends of every non-null element.
+        procedure :: trim_all                          !! Trailing-trim every non-null element.
+        ! --- searching / comparison ---
+        procedure :: find                              !! Index of first/last element equal to str.
+        procedure, private :: contains_i32             !! int32 specific of contains.
+        procedure, private :: contains_i64             !! int64 specific of contains.
+        generic :: contains => contains_i32, contains_i64 !! Whether element i contains a substring.
+        procedure, private :: startswith_i32           !! int32 specific of startswith.
+        procedure, private :: startswith_i64           !! int64 specific of startswith.
+        generic :: startswith => startswith_i32, startswith_i64 !! Whether element i begins with prefix.
+        procedure, private :: endswith_i32             !! int32 specific of endswith.
+        procedure, private :: endswith_i64             !! int64 specific of endswith.
+        generic :: endswith => endswith_i32, endswith_i64 !! Whether element i ends with suffix.
+        procedure, private :: equals_i32               !! int32 specific of equals.
+        procedure, private :: equals_i64               !! int64 specific of equals.
+        generic :: equals => equals_i32, equals_i64    !! Whether element i equals str.
+        ! --- conversion / ownership ---
+        procedure :: to_character                      !! Materialize the whole column as a char array.
+        procedure :: clone                             !! Independent deep copy.
+        procedure :: move_from                         !! Transfer all buffers from another column.
+        procedure :: swap                              !! Exchange contents with another column.
+        ! --- diagnostics ---
+        procedure :: print => col_print                !! Human-readable representation.
+        procedure :: summary                           !! Compact one-line overview string.
+        procedure :: statistics                        !! Detailed metrics (optional out-args).
+        ! --- interop hooks (advanced; for the Parquet read/write integration layer) ---
+        procedure :: raw_buffers                       !! Export c_loc pointers to the internal buffers.
+        procedure :: append_buffers                    !! Bulk-append one row group from C buffers.
+        ! --- finalization ---
+        final :: finalize_column                       !! Deallocate all owned buffers.
+    end type parquet_string_column
+    !
+    !> A lightweight, non-owning handle to one element of a parquet_string_column.
+    !!
+    !! Holds a column pointer plus a 1-based index and resolves lazily on access, so it stays
+    !! valid across appends/reserve/shrink of the referenced column. It is invalidated by
+    !! `erase` (index shift), `clear`, `move_from`/`swap`, or the column going out of scope. The
+    !! referenced column must be declared with the `target` attribute and must outlive the handle.
+    type :: parquet_string
+        private
+        class(parquet_string_column), pointer :: col => null() !! referenced column (borrowed).
+        integer(int64) :: idx = 0                              !! 1-based element index.
+    contains
+        procedure :: length => psv_length          !! Length of the referenced string.
+        procedure :: is_empty => psv_is_empty       !! Whether the referenced string has zero length.
+        procedure :: is_null => psv_is_null         !! Whether the referenced element is null.
+        procedure :: to_string => psv_to_string     !! Materialize the referenced string.
+        procedure :: equals => psv_equals           !! Exact comparison against str.
+        procedure :: contains => psv_contains       !! Substring search for str.
+        procedure :: startswith => psv_startswith   !! Prefix test.
+        procedure :: endswith => psv_endswith       !! Suffix test.
+        procedure :: print => psv_print             !! Human-readable representation.
+        final :: finalize_handle                    !! Nullify the reference (never frees the column).
+    end type parquet_string
+    !
+contains
+    !
+    ! ==================================================================================
+    ! Internal helpers (private module procedures)
+    ! ==================================================================================
+    !
+    !> Aborts with a bounds-violation message; called by every index-checked accessor.
+    subroutine check_index(c, i, proc)
+        type(parquet_string_column), intent(in) :: c !! the column.
+        integer(int64), intent(in) :: i              !! the offending 1-based index.
+        character(len=*), intent(in) :: proc         !! calling procedure name (for the message).
+        if (i < 1 .or. i > c%nrows) then
+            error stop EP//"index out of range in "//proc
+        end if
+    end subroutine check_index
+    !
+    !> Aborts because a null element was accessed where a non-null was required.
+    subroutine fail_null(proc)
+        character(len=*), intent(in) :: proc !! calling procedure name (for the message).
+        error stop EP//"null element accessed in "//proc//" (guard with is_null, or pass a null option)"
+    end subroutine fail_null
+    !
+    !> Ensures `offsets` is allocated with room for at least `need_rows` rows (length need_rows+1),
+    !! initialising `offsets(1)=0` on first allocation and preserving existing entries on growth.
+    subroutine ensure_offsets_cap(c, need_rows)
+        type(parquet_string_column), intent(inout) :: c !! the column.
+        integer(int64), intent(in) :: need_rows         !! required row capacity.
+        integer(int64) :: need, newcap
+        integer(int64), allocatable :: tmp(:)
+        if (need_rows < 0) error stop EP//"row capacity overflow"
+        need = need_rows + 1
+        if (.not. allocated(c%offsets)) then
+            newcap = max(need, MIN_ROW_CAP)
+            allocate(c%offsets(newcap))
+            c%offsets(1) = 0_int64
+        else if (size(c%offsets, kind=int64) < need) then
+            newcap = size(c%offsets, kind=int64)
+            newcap = max(need, newcap + newcap/2_int64)
+            allocate(tmp(newcap))
+            tmp(1:c%nrows+1) = c%offsets(1:c%nrows+1)
+            call move_alloc(tmp, c%offsets)
+        end if
+    end subroutine ensure_offsets_cap
+    !
+    !> Ensures `data` is allocated with room for at least `need_chars` bytes, preserving the
+    !! already-used bytes on growth.
+    subroutine ensure_data_cap(c, need_chars)
+        type(parquet_string_column), intent(inout) :: c !! the column.
+        integer(int64), intent(in) :: need_chars        !! required character capacity (bytes).
+        integer(int64) :: newcap
+        character(len=1), allocatable :: tmp(:)
+        if (need_chars < 0) error stop EP//"character capacity overflow"
+        if (.not. allocated(c%data)) then
+            if (need_chars > 0) allocate(c%data(max(need_chars, MIN_CHAR_CAP)))
+        else if (size(c%data, kind=int64) < need_chars) then
+            newcap = size(c%data, kind=int64)
+            newcap = max(need_chars, newcap + newcap/2_int64)
+            allocate(tmp(newcap))
+            if (c%nchars > 0) tmp(1:c%nchars) = c%data(1:c%nchars)
+            call move_alloc(tmp, c%data)
+        end if
+    end subroutine ensure_data_cap
+    !
+    !> Ensures the validity bitmap is allocated to cover at least `need_rows` rows, initialising
+    !! new bytes to all-ones (every row valid) and preserving existing bits on growth.
+    subroutine ensure_validity_cap(c, need_rows)
+        type(parquet_string_column), intent(inout) :: c !! the column.
+        integer(int64), intent(in) :: need_rows         !! required row capacity.
+        integer(int64) :: need_bytes, newcap, oldsz
+        integer(int8), allocatable :: tmp(:)
+        need_bytes = (need_rows + 7_int64)/8_int64
+        if (.not. allocated(c%validity)) then
+            allocate(c%validity(max(need_bytes, 1_int64)))
+            c%validity = -1_int8
+        else if (size(c%validity, kind=int64) < need_bytes) then
+            oldsz = size(c%validity, kind=int64)
+            newcap = max(need_bytes, oldsz + oldsz/2_int64)
+            allocate(tmp(newcap))
+            tmp = -1_int8
+            tmp(1:oldsz) = c%validity(1:oldsz)
+            call move_alloc(tmp, c%validity)
+        end if
+    end subroutine ensure_validity_cap
+    !
+    !> Returns whether element `i` (1-based) is valid (non-null). All rows are valid until the
+    !! validity bitmap is materialized.
+    logical function bit_valid(c, i)
+        type(parquet_string_column), intent(in) :: c !! the column.
+        integer(int64), intent(in) :: i              !! 1-based element index.
+        integer(int64) :: k
+        if (.not. c%has_nulls) then
+            bit_valid = .true.
+            return
+        end if
+        k = i - 1_int64
+        bit_valid = iand(c%validity(k/8_int64 + 1_int64), BIT_MASK(int(mod(k, 8_int64)))) /= 0_int8
+    end function bit_valid
+    !
+    !> Marks element `i` (1-based) valid in the validity bitmap (bitmap assumed allocated).
+    subroutine set_bit_valid(c, i)
+        type(parquet_string_column), intent(inout) :: c !! the column.
+        integer(int64), intent(in) :: i                 !! 1-based element index.
+        integer(int64) :: k, b
+        k = i - 1_int64
+        b = k/8_int64 + 1_int64
+        c%validity(b) = ior(c%validity(b), BIT_MASK(int(mod(k, 8_int64))))
+    end subroutine set_bit_valid
+    !
+    !> Marks element `i` (1-based) null in the validity bitmap (bitmap assumed allocated).
+    subroutine set_bit_null(c, i)
+        type(parquet_string_column), intent(inout) :: c !! the column.
+        integer(int64), intent(in) :: i                 !! 1-based element index.
+        integer(int64) :: k, b
+        k = i - 1_int64
+        b = k/8_int64 + 1_int64
+        c%validity(b) = iand(c%validity(b), not(BIT_MASK(int(mod(k, 8_int64)))))
+    end subroutine set_bit_null
+    !
+    !> Returns the 1-based payload bounds `a:b` of element `i` (b < a for a zero-length element).
+    subroutine elem_bounds(c, i, a, b)
+        type(parquet_string_column), intent(in) :: c !! the column.
+        integer(int64), intent(in) :: i              !! 1-based element index.
+        integer(int64), intent(out) :: a             !! first payload byte (offsets(i)+1).
+        integer(int64), intent(out) :: b             !! last payload byte (offsets(i+1)).
+        a = c%offsets(i) + 1_int64
+        b = c%offsets(i+1)
+    end subroutine elem_bounds
+    !
+    !> Returns the trailing-blank-trimmed length of the payload bytes `data(a:b)`.
+    integer(int64) function elem_trim_len(c, a, b)
+        type(parquet_string_column), intent(in) :: c !! the column.
+        integer(int64), intent(in) :: a              !! first payload byte.
+        integer(int64), intent(in) :: b              !! last payload byte.
+        integer(int64) :: j
+        j = b
+        do while (j >= a)
+            if (c%data(j) /= ' ') exit
+            j = j - 1_int64
+        end do
+        elem_trim_len = j - a + 1_int64
+    end function elem_trim_len
+    !
+    !> Compares (non-null) element `i` against `str`; exact = byte-exact, else trailing-trim both.
+    logical function elem_equals(c, i, str, exact) result(res)
+        type(parquet_string_column), intent(in) :: c !! the column.
+        integer(int64), intent(in) :: i              !! 1-based element index.
+        character(len=*), intent(in) :: str          !! query string.
+        logical, intent(in) :: exact                 !! .true. => byte-exact comparison.
+        integer(int64) :: a, b, elen, el, k
+        integer :: sl
+        call elem_bounds(c, i, a, b)
+        elen = b - a + 1_int64
+        if (exact) then
+            if (elen /= int(len(str), int64)) then
+                res = .false.
+                return
+            end if
+            do k = 1_int64, elen
+                if (c%data(a+k-1_int64) /= str(k:k)) then
+                    res = .false.
+                    return
+                end if
+            end do
+            res = .true.
+        else
+            el = elem_trim_len(c, a, b)
+            sl = len_trim(str)
+            if (el /= int(sl, int64)) then
+                res = .false.
+                return
+            end if
+            do k = 1_int64, el
+                if (c%data(a+k-1_int64) /= str(k:k)) then
+                    res = .false.
+                    return
+                end if
+            end do
+            res = .true.
+        end if
+    end function elem_equals
+    !
+    !> Computes the stored substring bounds `str(lo:hi)` after applying strip/trim (hi < lo = empty).
+    subroutine process_bounds(str, do_strip, do_trim, lo, hi)
+        character(len=*), intent(in) :: str !! the raw string.
+        logical, intent(in) :: do_strip     !! strip leading and trailing blanks.
+        logical, intent(in) :: do_trim       !! trailing-trim (ignored when do_strip is .true.).
+        integer, intent(out) :: lo           !! first stored character index.
+        integer, intent(out) :: hi           !! last stored character index.
+        integer :: n
+        n = len(str)
+        lo = 1
+        hi = n
+        if (do_strip) then
+            do while (lo <= n)
+                if (str(lo:lo) /= ' ') exit
+                lo = lo + 1
+            end do
+            do while (hi >= lo)
+                if (str(hi:hi) /= ' ') exit
+                hi = hi - 1
+            end do
+        else if (do_trim) then
+            do while (hi >= 1)
+                if (str(hi:hi) /= ' ') exit
+                hi = hi - 1
+            end do
+        end if
+    end subroutine process_bounds
+    !
+    !> Swaps every component of two columns in O(1) (self-safe: a=b leaves the object unchanged).
+    subroutine swap_impl(a, b)
+        type(parquet_string_column), intent(inout) :: a !! first column.
+        type(parquet_string_column), intent(inout) :: b !! second column.
+        integer(int64), allocatable :: to(:)
+        character(len=1), allocatable :: td(:)
+        integer(int8), allocatable :: tv(:)
+        integer(int64) :: t_nrows, t_nchars, t_nnull
+        logical :: t_has
+        call move_alloc(a%offsets, to);   call move_alloc(b%offsets, a%offsets);   call move_alloc(to, b%offsets)
+        call move_alloc(a%data, td);      call move_alloc(b%data, a%data);         call move_alloc(td, b%data)
+        call move_alloc(a%validity, tv);  call move_alloc(b%validity, a%validity); call move_alloc(tv, b%validity)
+        t_nrows = a%nrows;  a%nrows = b%nrows;   b%nrows = t_nrows
+        t_nchars = a%nchars; a%nchars = b%nchars; b%nchars = t_nchars
+        t_nnull = a%n_null; a%n_null = b%n_null;  b%n_null = t_nnull
+        t_has = a%has_nulls; a%has_nulls = b%has_nulls; b%has_nulls = t_has
+    end subroutine swap_impl
+    !
+    ! ==================================================================================
+    ! Construction / memory management
+    ! ==================================================================================
+    !
+    !> Resets the column to an empty state and releases all owned memory (capacity becomes 0).
+    !! Invalidates every outstanding handle into this column.
+    subroutine clear(self)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        if (allocated(self%offsets)) deallocate(self%offsets)
+        if (allocated(self%data)) deallocate(self%data)
+        if (allocated(self%validity)) deallocate(self%validity)
+        self%nrows = 0
+        self%nchars = 0
+        self%n_null = 0
+        self%has_nulls = .false.
+    end subroutine clear
+    !
+    !> int32 specific of reserve; see the reserve generic.
+    subroutine reserve_i32(self, n_rows, n_characters)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int32), intent(in) :: n_rows                !! required row capacity.
+        integer(int32), intent(in) :: n_characters          !! required character capacity (bytes).
+        call self%reserve_i64(int(n_rows, int64), int(n_characters, int64))
+    end subroutine reserve_i32
+    !
+    !> int64 specific of reserve: grows capacity to hold at least `n_rows`/`n_characters`
+    !! (never shrinks; pass 0 for "no requirement on this dimension").
+    subroutine reserve_i64(self, n_rows, n_characters)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int64), intent(in) :: n_rows                !! required row capacity.
+        integer(int64), intent(in) :: n_characters          !! required character capacity (bytes).
+        if (n_rows > 0) call ensure_offsets_cap(self, max(n_rows, self%nrows))
+        if (n_characters > 0) call ensure_data_cap(self, max(n_characters, self%nchars))
+        if (self%has_nulls .and. n_rows > 0) call ensure_validity_cap(self, max(n_rows, self%nrows))
+    end subroutine reserve_i64
+    !
+    !> Reallocates the buffers down to exactly the current size (frees unused capacity).
+    !! Invalidates every outstanding handle into this column.
+    subroutine shrink_to_fit(self)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int64), allocatable :: to(:)
+        character(len=1), allocatable :: td(:)
+        integer(int8), allocatable :: tv(:)
+        integer(int64) :: need_bytes
+        if (allocated(self%offsets)) then
+            if (size(self%offsets, kind=int64) > self%nrows+1) then
+                allocate(to(self%nrows+1))
+                to(:) = self%offsets(1:self%nrows+1)
+                call move_alloc(to, self%offsets)
+            end if
+        end if
+        if (allocated(self%data)) then
+            if (self%nchars == 0) then
+                deallocate(self%data)
+            else if (size(self%data, kind=int64) > self%nchars) then
+                allocate(td(self%nchars))
+                td(:) = self%data(1:self%nchars)
+                call move_alloc(td, self%data)
+            end if
+        end if
+        if (self%has_nulls .and. allocated(self%validity)) then
+            need_bytes = (self%nrows + 7_int64)/8_int64
+            if (size(self%validity, kind=int64) > need_bytes .and. need_bytes >= 1) then
+                allocate(tv(need_bytes))
+                tv(:) = self%validity(1:need_bytes)
+                call move_alloc(tv, self%validity)
+            end if
+        end if
+    end subroutine shrink_to_fit
+    !
+    !> Returns the current row capacity.
+    integer(int64) function capacity(self)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        if (allocated(self%offsets)) then
+            capacity = size(self%offsets, kind=int64) - 1_int64
+        else
+            capacity = 0_int64
+        end if
+    end function capacity
+    !
+    !> Returns the current character-buffer capacity in bytes.
+    integer(int64) function character_capacity(self)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        if (allocated(self%data)) then
+            character_capacity = size(self%data, kind=int64)
+        else
+            character_capacity = 0_int64
+        end if
+    end function character_capacity
+    !
+    !> Returns the number of elements stored.
+    integer(int64) function col_size(self)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        col_size = self%nrows
+    end function col_size
+    !
+    !> Returns the total number of characters stored across all elements.
+    integer(int64) function character_size(self)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        character_size = self%nchars
+    end function character_size
+    !
+    !> Returns .true. when the column holds no rows.
+    logical function col_empty(self)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        col_empty = self%nrows == 0
+    end function col_empty
+    !
+    !> Returns the number of null elements.
+    integer(int64) function null_count(self)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        null_count = self%n_null
+    end function null_count
+    !
+    !> Returns the total bytes of allocated buffers (offsets + data + validity + object overhead).
+    integer(int64) function memory_usage(self)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        memory_usage = int(storage_size(self)/8, int64)
+        if (allocated(self%offsets)) memory_usage = memory_usage + size(self%offsets, kind=int64)*8_int64
+        if (allocated(self%data)) memory_usage = memory_usage + size(self%data, kind=int64)
+        if (allocated(self%validity)) memory_usage = memory_usage + size(self%validity, kind=int64)
+    end function memory_usage
+    !
+    !> Verifies all class invariants and internal consistency; returns .true. when they hold.
+    logical function validate(self, message)
+        class(parquet_string_column), intent(in) :: self       !! the column.
+        character(len=:), allocatable, intent(out), optional :: message !! diagnostic on failure.
+        integer(int64) :: i, cnt
+        validate = .false.
+        if (present(message)) message = ""
+        if (self%nrows < 0 .or. self%nchars < 0) then ! GCOVR_EXCL_START
+            if (present(message)) message = "negative nrows/nchars"
+            return
+        end if ! GCOVR_EXCL_STOP
+        if (self%n_null < 0 .or. self%n_null > self%nrows) then ! GCOVR_EXCL_START
+            if (present(message)) message = "n_null out of range"
+            return
+        end if ! GCOVR_EXCL_STOP
+        if (self%nrows > 0) then
+            if (.not. allocated(self%offsets)) then ! GCOVR_EXCL_START
+                if (present(message)) message = "offsets not allocated"
+                return
+            end if ! GCOVR_EXCL_STOP
+            if (size(self%offsets, kind=int64) < self%nrows+1) then ! GCOVR_EXCL_START
+                if (present(message)) message = "offsets too small"
+                return
+            end if ! GCOVR_EXCL_STOP
+            if (self%offsets(1) /= 0_int64) then ! GCOVR_EXCL_START
+                if (present(message)) message = "offsets(1) /= 0"
+                return
+            end if ! GCOVR_EXCL_STOP
+            do i = 1_int64, self%nrows
+                if (self%offsets(i+1) < self%offsets(i)) then ! GCOVR_EXCL_START
+                    if (present(message)) message = "offsets not monotonic"
+                    return
+                end if ! GCOVR_EXCL_STOP
+            end do
+            if (self%offsets(self%nrows+1) /= self%nchars) then ! GCOVR_EXCL_START
+                if (present(message)) message = "offsets(nrows+1) /= nchars"
+                return
+            end if ! GCOVR_EXCL_STOP
+        end if
+        if (self%nchars > 0) then
+            if (.not. allocated(self%data)) then ! GCOVR_EXCL_START
+                if (present(message)) message = "data not allocated"
+                return
+            end if ! GCOVR_EXCL_STOP
+            if (size(self%data, kind=int64) < self%nchars) then ! GCOVR_EXCL_START
+                if (present(message)) message = "data too small"
+                return
+            end if ! GCOVR_EXCL_STOP
+        end if
+        if (self%has_nulls) then
+            cnt = 0
+            do i = 1_int64, self%nrows
+                if (.not. bit_valid(self, i)) cnt = cnt + 1_int64
+            end do
+            if (cnt /= self%n_null) then ! GCOVR_EXCL_START
+                if (present(message)) message = "n_null disagrees with validity bitmap"
+                return
+            end if ! GCOVR_EXCL_STOP
+        else if (self%n_null /= 0) then
+            if (present(message)) message = "n_null /= 0 without a validity bitmap" ! GCOVR_EXCL_LINE
+            return ! GCOVR_EXCL_LINE
+        end if
+        validate = .true.
+    end function validate
+    !
+    ! ==================================================================================
+    ! Access
+    ! ==================================================================================
+    !
+    !> int32 specific of length; see the length generic.
+    integer(int64) function length_i32(self, i, check_null) result(n)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        integer(int32), intent(in) :: i                  !! 1-based element index.
+        logical, intent(in), optional :: check_null       !! .true. => error stop on a null element.
+        n = self%length_i64(int(i, int64), check_null)
+    end function length_i32
+    !
+    !> int64 specific of length: length of element i without allocating. A null element returns 0
+    !! by default, or error stops when `check_null` is .true.
+    integer(int64) function length_i64(self, i, check_null) result(n)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        integer(int64), intent(in) :: i                  !! 1-based element index.
+        logical, intent(in), optional :: check_null       !! .true. => error stop on a null element.
+        call check_index(self, i, "length")
+        if (.not. bit_valid(self, i)) then
+            if (present(check_null)) then
+                if (check_null) call fail_null("length")
+            end if
+            n = 0_int64
+            return
+        end if
+        n = self%offsets(i+1) - self%offsets(i)
+    end function length_i64
+    !
+    !> int32 specific of get; see the get generic.
+    function get_i32(self, i, null_value, allow_null) result(res)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        integer(int32), intent(in) :: i                  !! 1-based element index.
+        character(len=*), intent(in), optional :: null_value !! substitute returned for a null element.
+        logical, intent(in), optional :: allow_null           !! .true. => suppress abort, return empty string for a null.
+        character(len=:), allocatable :: res             !! element i (unallocated if null and allowed).
+        res = self%get_i64(int(i, int64), null_value, allow_null)
+    end function get_i32
+    !
+    !> int64 specific of get: element i as an allocatable string. A null element error stops by
+    !! default; pass `null_value` to substitute a string, or `allow_null=.true.` to suppress the
+    !! abort and return an empty string (detect null via is_null). When both are given,
+    !! `null_value` takes precedence.
+    function get_i64(self, i, null_value, allow_null) result(res)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        integer(int64), intent(in) :: i                  !! 1-based element index.
+        character(len=*), intent(in), optional :: null_value !! substitute returned for a null element.
+        logical, intent(in), optional :: allow_null           !! .true. => suppress abort, return empty string for a null.
+        character(len=:), allocatable :: res             !! element i (unallocated if null and allowed).
+        integer(int64) :: a, b, elen
+        logical :: allow
+        call check_index(self, i, "get")
+        if (.not. bit_valid(self, i)) then
+            if (present(null_value)) then
+                res = null_value
+                return
+            end if
+            allow = .false.
+            if (present(allow_null)) allow = allow_null
+            if (allow) then
+                res = ""
+                return
+            end if
+            call fail_null("get")
+        end if
+        call elem_bounds(self, i, a, b)
+        elen = b - a + 1_int64
+        allocate(character(len=elen) :: res)
+        if (elen > 0) res = transfer(self%data(a:b), res)
+    end function get_i64
+    !
+    !> int32 specific of view; see the view generic.
+    function view_i32(self, i) result(h)
+        class(parquet_string_column), intent(in), target :: self !! the column (must be a target).
+        integer(int32), intent(in) :: i                          !! 1-based element index.
+        type(parquet_string) :: h                                !! handle to element i.
+        h = self%view_i64(int(i, int64))
+    end function view_i32
+    !
+    !> int64 specific of view: a zero-copy handle to element i. The column must be declared with
+    !! the `target` attribute and must outlive the handle.
+    function view_i64(self, i) result(h)
+        class(parquet_string_column), intent(in), target :: self !! the column (must be a target).
+        integer(int64), intent(in) :: i                          !! 1-based element index.
+        type(parquet_string) :: h                                !! handle to element i.
+        call check_index(self, i, "view")
+        h%col => self
+        h%idx = i
+    end function view_i64
+    !
+    !> int32 specific of is_null; see the is_null generic.
+    logical function is_null_i32(self, i) result(res)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        integer(int32), intent(in) :: i                  !! 1-based element index.
+        res = self%is_null_i64(int(i, int64))
+    end function is_null_i32
+    !
+    !> int64 specific of is_null: whether element i is null (always safe -- the primary null guard).
+    logical function is_null_i64(self, i) result(res)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        integer(int64), intent(in) :: i                  !! 1-based element index.
+        call check_index(self, i, "is_null")
+        res = .not. bit_valid(self, i)
+    end function is_null_i64
+    !
+    !> int32 specific of is_empty; see the is_empty generic.
+    logical function is_empty_i32(self, i, check_null) result(res)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        integer(int32), intent(in) :: i                  !! 1-based element index.
+        logical, intent(in), optional :: check_null       !! .true. => error stop on a null element.
+        res = self%is_empty_i64(int(i, int64), check_null)
+    end function is_empty_i32
+    !
+    !> int64 specific of is_empty: whether element i has zero length. A null element returns
+    !! .true. by default, or error stops when `check_null` is .true.
+    logical function is_empty_i64(self, i, check_null) result(res)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        integer(int64), intent(in) :: i                  !! 1-based element index.
+        logical, intent(in), optional :: check_null       !! .true. => error stop on a null element.
+        call check_index(self, i, "is_empty")
+        if (.not. bit_valid(self, i)) then
+            if (present(check_null)) then
+                if (check_null) call fail_null("is_empty")
+            end if
+            res = .true.
+            return
+        end if
+        res = (self%offsets(i+1) - self%offsets(i)) == 0_int64
+    end function is_empty_i64
+    !
+    ! ==================================================================================
+    ! Modification
+    ! ==================================================================================
+    !
+    !> Appends a string to the end of the column. By default the string is stored verbatim; pass
+    !! `strip=.true.` to remove leading and trailing blanks, or `trim=.true.` to remove trailing
+    !! blanks only (`trim` is ignored when `strip` is .true.). Automatically grows capacity.
+    subroutine append_string(self, str, strip, trim)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        character(len=*), intent(in) :: str                 !! the string to append.
+        logical, intent(in), optional :: strip               !! remove leading and trailing blanks.
+        logical, intent(in), optional :: trim                !! remove trailing blanks only.
+        logical :: do_strip, do_trim
+        integer :: lo, hi
+        integer(int64) :: slen
+        do_strip = .false.
+        if (present(strip)) do_strip = strip
+        do_trim = .false.
+        if (present(trim)) do_trim = trim
+        call process_bounds(str, do_strip, do_trim, lo, hi)
+        slen = int(max(0, hi - lo + 1), int64)
+        call ensure_offsets_cap(self, self%nrows + 1_int64)
+        if (slen > 0) then
+            call ensure_data_cap(self, self%nchars + slen)
+            self%data(self%nchars+1 : self%nchars+slen) = transfer(str(lo:hi), self%data, int(slen))
+        end if
+        self%offsets(self%nrows+2) = self%nchars + slen
+        if (self%has_nulls) then
+            call ensure_validity_cap(self, self%nrows + 1_int64)
+            call set_bit_valid(self, self%nrows + 1_int64)
+        end if
+        self%nrows = self%nrows + 1_int64
+        self%nchars = self%nchars + slen
+    end subroutine append_string
+    !
+    !> Appends a null element to the end of the column (a zero-width, invalid slot).
+    subroutine append_null(self)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        call ensure_offsets_cap(self, self%nrows + 1_int64)
+        self%offsets(self%nrows+2) = self%nchars
+        self%has_nulls = .true.
+        call ensure_validity_cap(self, self%nrows + 1_int64)
+        call set_bit_null(self, self%nrows + 1_int64)
+        self%n_null = self%n_null + 1_int64
+        self%nrows = self%nrows + 1_int64
+    end subroutine append_null
+    !
+    !> Appends all elements (payload and nulls) from another column. Bulk-copies the payload and
+    !! offsets; never re-trims. `other` is left unchanged.
+    subroutine append_column(self, other)
+        class(parquet_string_column), intent(inout) :: self !! the destination column.
+        type(parquet_string_column), intent(in) :: other    !! the source column.
+        integer(int64) :: base, k
+        if (other%nrows == 0) return
+        call ensure_offsets_cap(self, self%nrows + other%nrows)
+        if (other%nchars > 0) then
+            call ensure_data_cap(self, self%nchars + other%nchars)
+            self%data(self%nchars+1 : self%nchars+other%nchars) = other%data(1:other%nchars)
+        end if
+        base = self%nchars
+        do k = 1_int64, other%nrows
+            self%offsets(self%nrows+1+k) = base + other%offsets(k+1)
+        end do
+        if (other%has_nulls) then
+            self%has_nulls = .true.
+            call ensure_validity_cap(self, self%nrows + other%nrows)
+            do k = 1_int64, other%nrows
+                if (bit_valid(other, k)) then
+                    call set_bit_valid(self, self%nrows + k)
+                else
+                    call set_bit_null(self, self%nrows + k)
+                    self%n_null = self%n_null + 1_int64
+                end if
+            end do
+        else if (self%has_nulls) then
+            call ensure_validity_cap(self, self%nrows + other%nrows)
+            do k = 1_int64, other%nrows
+                call set_bit_valid(self, self%nrows + k)
+            end do
+        end if
+        self%nrows = self%nrows + other%nrows
+        self%nchars = self%nchars + other%nchars
+    end subroutine append_column
+    !
+    !> int32 specific of set; see the set generic.
+    subroutine set_i32(self, i, str, strip, trim)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int32), intent(in) :: i                     !! 1-based element index.
+        character(len=*), intent(in) :: str                 !! the replacement string.
+        logical, intent(in), optional :: strip               !! remove leading and trailing blanks.
+        logical, intent(in), optional :: trim                !! remove trailing blanks only.
+        call self%set_i64(int(i, int64), str, strip, trim)
+    end subroutine set_i32
+    !
+    !> int64 specific of set: replaces the content of element i (clearing its null status).
+    !! Same-length replacement is O(length); a different length shifts the payload tail (O(N)).
+    !! Same strip/trim options as append_string.
+    subroutine set_i64(self, i, str, strip, trim)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int64), intent(in) :: i                     !! 1-based element index.
+        character(len=*), intent(in) :: str                 !! the replacement string.
+        logical, intent(in), optional :: strip               !! remove leading and trailing blanks.
+        logical, intent(in), optional :: trim                !! remove trailing blanks only.
+        logical :: do_strip, do_trim
+        integer :: lo, hi
+        integer(int64) :: a, b, old_len, new_len, delta, j
+        call check_index(self, i, "set")
+        do_strip = .false.
+        if (present(strip)) do_strip = strip
+        do_trim = .false.
+        if (present(trim)) do_trim = trim
+        call process_bounds(str, do_strip, do_trim, lo, hi)
+        new_len = int(max(0, hi - lo + 1), int64)
+        call elem_bounds(self, i, a, b)
+        old_len = b - a + 1_int64
+        delta = new_len - old_len
+        if (delta /= 0_int64) then
+            if (delta > 0_int64) call ensure_data_cap(self, self%nchars + delta)
+            call elem_bounds(self, i, a, b)   ! re-read: data may have moved on grow
+            ! shift the tail data(b+1 : nchars) by delta, directionally (no temp buffer)
+            if (delta > 0_int64) then
+                do j = self%nchars, b+1_int64, -1_int64
+                    self%data(j+delta) = self%data(j)
+                end do
+            else
+                do j = b+1_int64, self%nchars
+                    self%data(j+delta) = self%data(j)
+                end do
+            end if
+            do j = i+1_int64, self%nrows+1_int64
+                self%offsets(j) = self%offsets(j) + delta
+            end do
+            self%nchars = self%nchars + delta
+        end if
+        if (new_len > 0) self%data(a:a+new_len-1_int64) = transfer(str(lo:hi), self%data, int(new_len))
+        if (.not. bit_valid(self, i)) then
+            call set_bit_valid(self, i)
+            self%n_null = self%n_null - 1_int64
+        end if
+    end subroutine set_i64
+    !
+    !> int32 specific of erase; see the erase generic.
+    subroutine erase_i32(self, i)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int32), intent(in) :: i                     !! 1-based element index.
+        call self%erase_i64(int(i, int64))
+    end subroutine erase_i32
+    !
+    !> int64 specific of erase: removes element i, shifting all later elements down by one
+    !! (immediate compaction, order-preserving, O(N)). Invalidates handles at index >= i.
+    subroutine erase_i64(self, i)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int64), intent(in) :: i                     !! 1-based element index.
+        integer(int64) :: a, b, old_len, j
+        logical :: was_null
+        call check_index(self, i, "erase")
+        was_null = .not. bit_valid(self, i)
+        call elem_bounds(self, i, a, b)
+        old_len = b - a + 1_int64
+        ! compact payload: shift data(b+1 : nchars) left by old_len
+        if (old_len > 0_int64) then
+            do j = b+1_int64, self%nchars
+                self%data(j-old_len) = self%data(j)
+            end do
+        end if
+        ! rebuild offsets: drop offsets(i+1), shifting the rest down and subtracting old_len
+        do j = i+1_int64, self%nrows
+            self%offsets(j) = self%offsets(j+1) - old_len
+        end do
+        ! shift validity bits down by one (only meaningful when nulls exist)
+        if (self%has_nulls) then
+            do j = i, self%nrows-1_int64
+                if (bit_valid(self, j+1_int64)) then
+                    call set_bit_valid(self, j)
+                else
+                    call set_bit_null(self, j)
+                end if
+            end do
+        end if
+        if (was_null) self%n_null = self%n_null - 1_int64
+        self%nrows = self%nrows - 1_int64
+        self%nchars = self%nchars - old_len
+    end subroutine erase_i64
+    !
+    !> Strips leading and trailing blanks from every non-null element, in place (O(nchars)).
+    subroutine strip_all(self)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        call compact_all(self, .true.)
+    end subroutine strip_all
+    !
+    !> Trailing-trims every non-null element, in place (O(nchars)).
+    subroutine trim_all(self)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        call compact_all(self, .false.)
+    end subroutine trim_all
+    !
+    !> Shared worker for strip_all/trim_all: rewrites the payload compactly in a single left-to-right
+    !! pass (elements only shrink, so no reallocation is needed). When `do_strip` is .true. both ends
+    !! are trimmed; otherwise only trailing blanks are removed.
+    subroutine compact_all(c, do_strip) ! GCOVR_EXCL_LINE
+        type(parquet_string_column), intent(inout) :: c !! the column.
+        logical, intent(in) :: do_strip                 !! strip both ends when .true., else trailing only.
+        integer(int64) :: i, orig_a, orig_b, prev_end, lo, hi, wpos, k
+        wpos = 0_int64
+        prev_end = 0_int64   ! original offsets(1) is always 0
+        do i = 1_int64, c%nrows
+            orig_a = prev_end + 1_int64        ! original start (offsets(i) already overwritten below)
+            orig_b = c%offsets(i+1)            ! original end (not overwritten until end of this iteration)
+            prev_end = orig_b                  ! save before the overwrite
+            if (bit_valid(c, i) .and. orig_b >= orig_a) then
+                lo = orig_a
+                hi = orig_b
+                if (do_strip) then
+                    do while (lo <= orig_b)
+                        if (c%data(lo) /= ' ') exit
+                        lo = lo + 1_int64
+                    end do
+                end if
+                do while (hi >= lo)
+                    if (c%data(hi) /= ' ') exit
+                    hi = hi - 1_int64
+                end do
+                do k = lo, hi
+                    wpos = wpos + 1_int64
+                    c%data(wpos) = c%data(k)
+                end do
+            end if
+            c%offsets(i+1) = wpos
+        end do
+        c%nchars = wpos
+    end subroutine compact_all
+    !
+    ! ==================================================================================
+    ! Searching / comparison
+    ! ==================================================================================
+    !
+    !> Returns the 1-based index of the first element equal to `str`, or 0 if none. By default
+    !! the comparison is byte-exact; pass `exact=.false.` to trailing-trim both sides. Pass
+    !! `reverse=.true.` to scan from the last row backward (returning the last match). Null
+    !! elements never match.
+    integer(int64) function find(self, str, exact, reverse) result(idx)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        character(len=*), intent(in) :: str              !! the query string.
+        logical, intent(in), optional :: exact            !! .false. => trailing-trim both sides.
+        logical, intent(in), optional :: reverse          !! .true. => search from the back.
+        logical :: do_exact, do_rev
+        integer(int64) :: i
+        do_exact = .true.
+        if (present(exact)) do_exact = exact
+        do_rev = .false.
+        if (present(reverse)) do_rev = reverse
+        idx = 0_int64
+        if (do_rev) then
+            do i = self%nrows, 1_int64, -1_int64
+                if (bit_valid(self, i)) then
+                    if (elem_equals(self, i, str, do_exact)) then
+                        idx = i
+                        return
+                    end if
+                end if
+            end do
+        else
+            do i = 1_int64, self%nrows
+                if (bit_valid(self, i)) then
+                    if (elem_equals(self, i, str, do_exact)) then
+                        idx = i
+                        return
+                    end if
+                end if
+            end do
+        end if
+    end function find
+    !
+    !> int32 specific of contains; see the contains generic.
+    logical function contains_i32(self, i, str, check_null) result(res)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        integer(int32), intent(in) :: i                  !! 1-based element index.
+        character(len=*), intent(in) :: str              !! substring to search for.
+        logical, intent(in), optional :: check_null       !! .true. => error stop on a null element.
+        res = self%contains_i64(int(i, int64), str, check_null)
+    end function contains_i32
+    !
+    !> int64 specific of contains: whether element i contains `str` as a substring (exact bytes,
+    !! empty substring matches). A null element returns .false. by default, or error stops when
+    !! `check_null` is .true.
+    logical function contains_i64(self, i, str, check_null) result(res)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        integer(int64), intent(in) :: i                  !! 1-based element index.
+        character(len=*), intent(in) :: str              !! substring to search for.
+        logical, intent(in), optional :: check_null       !! .true. => error stop on a null element.
+        integer(int64) :: a, b, elen, start, k
+        integer :: m
+        logical :: match
+        call check_index(self, i, "contains")
+        if (guard_null_false(self, i, check_null, "contains")) then
+            res = .false.
+            return
+        end if
+        m = len(str)
+        if (m == 0) then
+            res = .true.
+            return
+        end if
+        call elem_bounds(self, i, a, b)
+        elen = b - a + 1_int64
+        if (elen < int(m, int64)) then
+            res = .false.
+            return
+        end if
+        do start = 0_int64, elen - int(m, int64)
+            match = .true.
+            do k = 1_int64, int(m, int64)
+                if (self%data(a+start+k-1_int64) /= str(k:k)) then
+                    match = .false.
+                    exit
+                end if
+            end do
+            if (match) then
+                res = .true.
+                return
+            end if
+        end do
+        res = .false.
+    end function contains_i64
+    !
+    !> int32 specific of startswith; see the startswith generic.
+    logical function startswith_i32(self, i, prefix, check_null) result(res)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        integer(int32), intent(in) :: i                  !! 1-based element index.
+        character(len=*), intent(in) :: prefix           !! prefix to test.
+        logical, intent(in), optional :: check_null       !! .true. => error stop on a null element.
+        res = self%startswith_i64(int(i, int64), prefix, check_null)
+    end function startswith_i32
+    !
+    !> int64 specific of startswith: whether element i begins with `prefix` (exact bytes, empty
+    !! prefix matches). A null element returns .false. by default, or error stops when
+    !! `check_null` is .true.
+    logical function startswith_i64(self, i, prefix, check_null) result(res)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        integer(int64), intent(in) :: i                  !! 1-based element index.
+        character(len=*), intent(in) :: prefix           !! prefix to test.
+        logical, intent(in), optional :: check_null       !! .true. => error stop on a null element.
+        integer(int64) :: a, b, elen, k
+        integer :: p
+        call check_index(self, i, "startswith")
+        if (guard_null_false(self, i, check_null, "startswith")) then
+            res = .false.
+            return
+        end if
+        p = len(prefix)
+        if (p == 0) then
+            res = .true.
+            return
+        end if
+        call elem_bounds(self, i, a, b)
+        elen = b - a + 1_int64
+        if (elen < int(p, int64)) then
+            res = .false.
+            return
+        end if
+        do k = 1_int64, int(p, int64)
+            if (self%data(a+k-1_int64) /= prefix(k:k)) then
+                res = .false.
+                return
+            end if
+        end do
+        res = .true.
+    end function startswith_i64
+    !
+    !> int32 specific of endswith; see the endswith generic.
+    logical function endswith_i32(self, i, suffix, check_null) result(res)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        integer(int32), intent(in) :: i                  !! 1-based element index.
+        character(len=*), intent(in) :: suffix           !! suffix to test.
+        logical, intent(in), optional :: check_null       !! .true. => error stop on a null element.
+        res = self%endswith_i64(int(i, int64), suffix, check_null)
+    end function endswith_i32
+    !
+    !> int64 specific of endswith: whether element i ends with `suffix` (exact bytes, empty suffix
+    !! matches). A null element returns .false. by default, or error stops when `check_null` is .true.
+    logical function endswith_i64(self, i, suffix, check_null) result(res)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        integer(int64), intent(in) :: i                  !! 1-based element index.
+        character(len=*), intent(in) :: suffix           !! suffix to test.
+        logical, intent(in), optional :: check_null       !! .true. => error stop on a null element.
+        integer(int64) :: a, b, elen, k
+        integer :: s
+        call check_index(self, i, "endswith")
+        if (guard_null_false(self, i, check_null, "endswith")) then
+            res = .false.
+            return
+        end if
+        s = len(suffix)
+        if (s == 0) then
+            res = .true.
+            return
+        end if
+        call elem_bounds(self, i, a, b)
+        elen = b - a + 1_int64
+        if (elen < int(s, int64)) then
+            res = .false.
+            return
+        end if
+        do k = 1_int64, int(s, int64)
+            if (self%data(b-int(s, int64)+k) /= suffix(k:k)) then
+                res = .false.
+                return
+            end if
+        end do
+        res = .true.
+    end function endswith_i64
+    !
+    !> int32 specific of equals; see the equals generic.
+    logical function equals_i32(self, i, str, exact, check_null) result(res)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        integer(int32), intent(in) :: i                  !! 1-based element index.
+        character(len=*), intent(in) :: str              !! query string.
+        logical, intent(in), optional :: exact            !! .false. => trailing-trim both sides.
+        logical, intent(in), optional :: check_null       !! .true. => error stop on a null element.
+        res = self%equals_i64(int(i, int64), str, exact, check_null)
+    end function equals_i32
+    !
+    !> int64 specific of equals: whether element i equals `str`. By default the comparison is
+    !! byte-exact; pass `exact=.false.` to trailing-trim both sides. A null element returns .false.
+    !! by default, or error stops when `check_null` is .true.
+    logical function equals_i64(self, i, str, exact, check_null) result(res)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        integer(int64), intent(in) :: i                  !! 1-based element index.
+        character(len=*), intent(in) :: str              !! query string.
+        logical, intent(in), optional :: exact            !! .false. => trailing-trim both sides.
+        logical, intent(in), optional :: check_null       !! .true. => error stop on a null element.
+        logical :: do_exact
+        call check_index(self, i, "equals")
+        if (guard_null_false(self, i, check_null, "equals")) then
+            res = .false.
+            return
+        end if
+        do_exact = .true.
+        if (present(exact)) do_exact = exact
+        res = elem_equals(self, i, str, do_exact)
+    end function equals_i64
+    !
+    !> Shared null guard for the logical comparison ops: returns .true. (meaning "the caller should
+    !! return .false.") for a null element, honouring `check_null` (error stop when present & true).
+    logical function guard_null_false(c, i, check_null, proc) result(is_null_row)
+        type(parquet_string_column), intent(in) :: c !! the column.
+        integer(int64), intent(in) :: i              !! 1-based element index.
+        logical, intent(in), optional :: check_null   !! .true. => error stop on a null element.
+        character(len=*), intent(in) :: proc          !! calling procedure name.
+        is_null_row = .not. bit_valid(c, i)
+        if (is_null_row .and. present(check_null)) then
+            if (check_null) call fail_null(proc)
+        end if
+    end function guard_null_false
+    !
+    ! ==================================================================================
+    ! Conversion / ownership
+    ! ==================================================================================
+    !
+    !> Materializes the whole column into a conventional Fortran character array `out`, each
+    !! element blank-padded to the longest element's length. A null element error stops by default;
+    !! pass `null_value` to substitute a string for nulls.
+    subroutine to_character(self, out, null_value)
+        class(parquet_string_column), intent(in) :: self          !! the column.
+        character(len=:), allocatable, intent(out) :: out(:)      !! materialized, padded strings.
+        character(len=*), intent(in), optional :: null_value      !! substitute for null elements.
+        integer(int64) :: i, elen, maxlen
+        maxlen = 0_int64
+        if (present(null_value)) maxlen = int(len(null_value), int64)
+        do i = 1_int64, self%nrows
+            if (bit_valid(self, i)) then
+                elen = self%offsets(i+1) - self%offsets(i)
+                if (elen > maxlen) maxlen = elen
+            else if (.not. present(null_value)) then
+                call fail_null("to_character")
+            end if
+        end do
+        allocate(character(len=maxlen) :: out(self%nrows))
+        do i = 1_int64, self%nrows
+            if (.not. bit_valid(self, i)) then
+                out(i) = null_value
+            else
+                ! normal character assignment left-justifies and blank-pads to maxlen
+                out(i) = self%get_i64(i)
+            end if
+        end do
+    end subroutine to_character
+    !
+    !> Returns an independent deep copy of the column (shrunk to the current size). Mutating either
+    !! object never affects the other.
+    function clone(self) result(res)
+        class(parquet_string_column), intent(in) :: self !! the source column.
+        type(parquet_string_column) :: res               !! the deep copy.
+        integer(int64) :: nb
+        res%nrows = self%nrows
+        res%nchars = self%nchars
+        res%n_null = self%n_null
+        res%has_nulls = self%has_nulls
+        if (self%nrows > 0 .and. allocated(self%offsets)) then
+            allocate(res%offsets(self%nrows+1))
+            res%offsets(:) = self%offsets(1:self%nrows+1)
+        end if
+        if (self%nchars > 0 .and. allocated(self%data)) then
+            allocate(res%data(self%nchars))
+            res%data(:) = self%data(1:self%nchars)
+        end if
+        if (self%has_nulls .and. allocated(self%validity)) then
+            nb = (self%nrows + 7_int64)/8_int64
+            if (nb >= 1) then
+                allocate(res%validity(nb))
+                res%validity(:) = self%validity(1:nb)
+            end if
+        end if
+    end function clone
+    !
+    !> Transfers all buffers from `other` into self, leaving `other` a valid empty column. Self's
+    !! previous contents are released. Self-move (move_from with the same object) is a no-op.
+    subroutine move_from(self, other)
+        class(parquet_string_column), intent(inout) :: self !! the destination column.
+        type(parquet_string_column), intent(inout) :: other !! the source column (left empty).
+        type(parquet_string_column) :: tmp
+        call swap_impl(other, tmp)   ! other -> tmp, other emptied
+        call swap_impl(self, tmp)    ! self <-> tmp: self gets other's data, tmp gets self's old
+        ! tmp (self's former data) is finalized on return
+    end subroutine move_from
+    !
+    !> Exchanges the contents of self and `other` in O(1). Symmetric: a%swap(b) == b%swap(a).
+    subroutine swap(self, other)
+        class(parquet_string_column), intent(inout) :: self !! the first column.
+        type(parquet_string_column), intent(inout) :: other !! the second column.
+        call swap_impl(self, other)
+    end subroutine swap
+    !
+    ! ==================================================================================
+    ! Diagnostics
+    ! ==================================================================================
+    !
+    !> Writes a human-readable representation of the column to `unit` (default: standard output),
+    !! showing each element (or <null>) up to `max_rows` (default 20).
+    subroutine col_print(self, unit, max_rows)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        integer, intent(in), optional :: unit            !! output unit (default output_unit).
+        integer(int64), intent(in), optional :: max_rows  !! max elements to print (default 20).
+        integer :: u
+        integer(int64) :: i, lim
+        character(len=:), allocatable :: s
+        u = output_unit
+        if (present(unit)) u = unit
+        lim = 20_int64
+        if (present(max_rows)) lim = max_rows
+        write(u, '(a,i0,a,i0,a,i0,a)') EP//"column with ", self%nrows, " rows, ", &
+            self%nchars, " chars, ", self%n_null, " nulls"
+        do i = 1_int64, min(self%nrows, lim)
+            if (.not. bit_valid(self, i)) then
+                write(u, '(2x,i0,a)') i, ": <null>"
+            else
+                s = self%get_i64(i)
+                write(u, '(2x,i0,a,a,a)') i, ': "', s, '"'
+            end if
+        end do
+        if (self%nrows > lim) write(u, '(2x,a,i0,a)') "... (", self%nrows - lim, " more)"
+    end subroutine col_print
+    !
+    !> Returns a compact one-line overview string (row/char/null counts and capacities).
+    function summary(self) result(res)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        character(len=:), allocatable :: res             !! the summary string.
+        character(len=256) :: buf
+        write(buf, '(a,i0,a,i0,a,i0,a,i0,a,i0,a)') "parquet_string_column(rows=", self%nrows, &
+            ", chars=", self%nchars, ", nulls=", self%n_null, ", row_cap=", self%capacity(), &
+            ", char_cap=", self%character_capacity(), ")"
+        res = trim(buf)
+    end function summary
+    !
+    !> Returns detailed metrics via optional intent(out) arguments (kept basic; extensible later).
+    subroutine statistics(self, nrows, nchars, n_null, min_len, max_len, row_capacity, &
+            char_capacity, bytes)
+        class(parquet_string_column), intent(in) :: self       !! the column.
+        integer(int64), intent(out), optional :: nrows          !! number of elements.
+        integer(int64), intent(out), optional :: nchars         !! total characters.
+        integer(int64), intent(out), optional :: n_null         !! number of nulls.
+        integer(int64), intent(out), optional :: min_len        !! shortest non-null element length.
+        integer(int64), intent(out), optional :: max_len        !! longest non-null element length.
+        integer(int64), intent(out), optional :: row_capacity   !! current row capacity.
+        integer(int64), intent(out), optional :: char_capacity  !! current character capacity.
+        integer(int64), intent(out), optional :: bytes          !! total allocated bytes.
+        integer(int64) :: i, elen, lo, hi
+        logical :: any_valid
+        if (present(nrows)) nrows = self%nrows
+        if (present(nchars)) nchars = self%nchars
+        if (present(n_null)) n_null = self%n_null
+        if (present(row_capacity)) row_capacity = self%capacity()
+        if (present(char_capacity)) char_capacity = self%character_capacity()
+        if (present(bytes)) bytes = self%memory_usage()
+        if (present(min_len) .or. present(max_len)) then
+            lo = 0_int64
+            hi = 0_int64
+            any_valid = .false.
+            do i = 1_int64, self%nrows
+                if (bit_valid(self, i)) then
+                    elen = self%offsets(i+1) - self%offsets(i)
+                    if (.not. any_valid) then
+                        lo = elen
+                        hi = elen
+                        any_valid = .true.
+                    else
+                        if (elen < lo) lo = elen
+                        if (elen > hi) hi = elen
+                    end if
+                end if
+            end do
+            if (present(min_len)) min_len = lo
+            if (present(max_len)) max_len = hi
+        end if
+    end subroutine statistics
+    !
+    ! ==================================================================================
+    ! Interop hooks (advanced; consumed by the Parquet read/write integration layer)
+    ! ==================================================================================
+    !
+    !> Exports c_loc pointers to the internal offsets/data/validity buffers plus counts, for the
+    !! Parquet writer to consume without materializing strings. The returned pointers are valid
+    !! only until the next mutation of the column. `validity_ptr` is C_NULL_PTR when the column has
+    !! no nulls; `data_ptr` is C_NULL_PTR when the payload is empty.
+    subroutine raw_buffers(self, offsets_ptr, data_ptr, validity_ptr, nrows, nchars, has_validity)
+        class(parquet_string_column), intent(in), target :: self !! the column (must be a target).
+        type(c_ptr), intent(out) :: offsets_ptr                  !! -> int64 offsets(0:nrows).
+        type(c_ptr), intent(out) :: data_ptr                     !! -> nchars payload bytes.
+        type(c_ptr), intent(out) :: validity_ptr                 !! -> validity bitmap, or C_NULL_PTR.
+        integer(int64), intent(out) :: nrows                     !! number of elements.
+        integer(int64), intent(out) :: nchars                    !! total characters.
+        logical, intent(out) :: has_validity                     !! whether a validity bitmap exists.
+        nrows = self%nrows
+        nchars = self%nchars
+        has_validity = self%has_nulls
+        if (allocated(self%offsets) .and. size(self%offsets, kind=int64) >= 1) then
+            offsets_ptr = c_loc(self%offsets)
+        else
+            offsets_ptr = c_null_ptr
+        end if
+        if (allocated(self%data) .and. self%nchars > 0) then
+            data_ptr = c_loc(self%data)
+        else
+            data_ptr = c_null_ptr
+        end if
+        if (self%has_nulls .and. allocated(self%validity) .and. size(self%validity, kind=int64) >= 1) then
+            validity_ptr = c_loc(self%validity)
+        else
+            validity_ptr = c_null_ptr
+        end if
+    end subroutine raw_buffers
+    !
+    !> Bulk-appends one row group straight from C buffers: `nrows_in` elements with a packed
+    !! `nchars_in`-byte payload, an offsets buffer (int32 when `offsets_int32` is .true., else
+    !! int64; length nrows_in+1, 0-based), and an optional Arrow validity bitmap (`validity` =
+    !! C_NULL_PTR means all valid). Offsets are rebased onto the existing payload (int32 widened to
+    !! int64 in the same pass); the validity bit region is merged (handling a non-byte-aligned join).
+    subroutine append_buffers(self, nrows_in, nchars_in, offsets, data, validity, offsets_int32)
+        class(parquet_string_column), intent(inout) :: self !! the destination column.
+        integer(int64), intent(in) :: nrows_in              !! number of incoming elements.
+        integer(int64), intent(in) :: nchars_in             !! incoming payload byte count.
+        type(c_ptr), intent(in) :: offsets                  !! -> int32/int64 offsets(0:nrows_in).
+        type(c_ptr), intent(in) :: data                     !! -> nchars_in payload bytes.
+        type(c_ptr), intent(in) :: validity                 !! -> Arrow bitmap, or C_NULL_PTR.
+        logical, intent(in) :: offsets_int32                !! .true. => source offsets are int32.
+        integer(int64), pointer :: off64(:)
+        integer(int32), pointer :: off32(:)
+        character(len=1), pointer :: din(:)
+        integer(int8), pointer :: vin(:)
+        integer(int64) :: base, k
+        if (nrows_in <= 0) return
+        call ensure_offsets_cap(self, self%nrows + nrows_in)
+        if (nchars_in > 0) then
+            call ensure_data_cap(self, self%nchars + nchars_in)
+            call c_f_pointer(data, din, [nchars_in])
+            self%data(self%nchars+1 : self%nchars+nchars_in) = din(1:nchars_in)
+        end if
+        base = self%nchars
+        if (offsets_int32) then
+            call c_f_pointer(offsets, off32, [nrows_in+1])
+            do k = 1_int64, nrows_in
+                self%offsets(self%nrows+1+k) = base + int(off32(k+1), int64)
+            end do
+        else
+            call c_f_pointer(offsets, off64, [nrows_in+1])
+            do k = 1_int64, nrows_in
+                self%offsets(self%nrows+1+k) = base + off64(k+1)
+            end do
+        end if
+        if (c_associated(validity)) then
+            self%has_nulls = .true.
+            call ensure_validity_cap(self, self%nrows + nrows_in)
+            call c_f_pointer(validity, vin, [(nrows_in + 7_int64)/8_int64])
+            do k = 1_int64, nrows_in
+                if (iand(vin((k-1_int64)/8_int64 + 1_int64), BIT_MASK(int(mod(k-1_int64, 8_int64)))) /= 0_int8) then
+                    call set_bit_valid(self, self%nrows + k)
+                else
+                    call set_bit_null(self, self%nrows + k)
+                    self%n_null = self%n_null + 1_int64
+                end if
+            end do
+        else if (self%has_nulls) then
+            call ensure_validity_cap(self, self%nrows + nrows_in)
+            do k = 1_int64, nrows_in
+                call set_bit_valid(self, self%nrows + k)
+            end do
+        end if
+        self%nrows = self%nrows + nrows_in
+        self%nchars = self%nchars + nchars_in
+    end subroutine append_buffers
+    !
+    !> Finalizer: deallocates all owned buffers.
+    subroutine finalize_column(self)
+        type(parquet_string_column), intent(inout) :: self !! the column being finalized.
+        if (allocated(self%offsets)) deallocate(self%offsets)
+        if (allocated(self%data)) deallocate(self%data)
+        if (allocated(self%validity)) deallocate(self%validity)
+    end subroutine finalize_column
+    !
+    ! ==================================================================================
+    ! parquet_string (handle) type-bound procedures
+    ! ==================================================================================
+    !
+    !> Aborts when the handle is unassociated or its index no longer refers to a valid element.
+    subroutine check_handle(self, proc)
+        class(parquet_string), intent(in) :: self !! the handle.
+        character(len=*), intent(in) :: proc       !! calling procedure name.
+        if (.not. associated(self%col)) error stop EP//"unassociated string handle in "//proc
+        if (self%idx < 1 .or. self%idx > self%col%nrows) then
+            error stop EP//"string handle index out of range (column changed?) in "//proc
+        end if
+    end subroutine check_handle
+    !
+    !> Returns the length of the referenced string (0 for a null element).
+    integer(int64) function psv_length(self) result(n)
+        class(parquet_string), intent(in) :: self !! the handle.
+        call check_handle(self, "length")
+        n = self%col%length_i64(self%idx)
+    end function psv_length
+    !
+    !> Returns whether the referenced string has zero length (.true. for a null element).
+    logical function psv_is_empty(self, check_null) result(res)
+        class(parquet_string), intent(in) :: self !! the handle.
+        logical, intent(in), optional :: check_null !! .true. => error stop on a null element.
+        call check_handle(self, "is_empty")
+        res = self%col%is_empty_i64(self%idx, check_null)
+    end function psv_is_empty
+    !
+    !> Returns whether the referenced element is null.
+    logical function psv_is_null(self) result(res)
+        class(parquet_string), intent(in) :: self !! the handle.
+        call check_handle(self, "is_null")
+        res = self%col%is_null_i64(self%idx)
+    end function psv_is_null
+    !
+    !> Materializes the referenced string. A null element error stops by default; pass `null_value`
+    !! to substitute a string, or `allow_null=.true.` to suppress the abort and return an empty
+    !! string (detect null via is_null).
+    function psv_to_string(self, null_value, allow_null) result(res)
+        class(parquet_string), intent(in) :: self             !! the handle.
+        character(len=*), intent(in), optional :: null_value  !! substitute for a null element.
+        logical, intent(in), optional :: allow_null            !! .true. => suppress abort, return empty string for null.
+        character(len=:), allocatable :: res                  !! the referenced string.
+        call check_handle(self, "to_string")
+        res = self%col%get_i64(self%idx, null_value, allow_null)
+    end function psv_to_string
+    !
+    !> Exact comparison of the referenced string against `str` (see the column's equals).
+    logical function psv_equals(self, str, exact, check_null) result(res)
+        class(parquet_string), intent(in) :: self !! the handle.
+        character(len=*), intent(in) :: str        !! query string.
+        logical, intent(in), optional :: exact      !! .false. => trailing-trim both sides.
+        logical, intent(in), optional :: check_null !! .true. => error stop on a null element.
+        call check_handle(self, "equals")
+        res = self%col%equals_i64(self%idx, str, exact, check_null)
+    end function psv_equals
+    !
+    !> Substring search within the referenced string (see the column's contains).
+    logical function psv_contains(self, str, check_null) result(res)
+        class(parquet_string), intent(in) :: self !! the handle.
+        character(len=*), intent(in) :: str        !! substring to search for.
+        logical, intent(in), optional :: check_null !! .true. => error stop on a null element.
+        call check_handle(self, "contains")
+        res = self%col%contains_i64(self%idx, str, check_null)
+    end function psv_contains
+    !
+    !> Prefix test on the referenced string (see the column's startswith).
+    logical function psv_startswith(self, prefix, check_null) result(res)
+        class(parquet_string), intent(in) :: self !! the handle.
+        character(len=*), intent(in) :: prefix     !! prefix to test.
+        logical, intent(in), optional :: check_null !! .true. => error stop on a null element.
+        call check_handle(self, "startswith")
+        res = self%col%startswith_i64(self%idx, prefix, check_null)
+    end function psv_startswith
+    !
+    !> Suffix test on the referenced string (see the column's endswith).
+    logical function psv_endswith(self, suffix, check_null) result(res)
+        class(parquet_string), intent(in) :: self !! the handle.
+        character(len=*), intent(in) :: suffix     !! suffix to test.
+        logical, intent(in), optional :: check_null !! .true. => error stop on a null element.
+        call check_handle(self, "endswith")
+        res = self%col%endswith_i64(self%idx, suffix, check_null)
+    end function psv_endswith
+    !
+    !> Writes a human-readable representation of the referenced string to `unit` (default stdout).
+    subroutine psv_print(self, unit)
+        class(parquet_string), intent(in) :: self !! the handle.
+        integer, intent(in), optional :: unit      !! output unit (default output_unit).
+        integer :: u
+        character(len=:), allocatable :: s
+        u = output_unit
+        if (present(unit)) u = unit
+        call check_handle(self, "print")
+        if (self%col%is_null_i64(self%idx)) then
+            write(u, '(a)') "<null>"
+        else
+            s = self%col%get_i64(self%idx)
+            write(u, '(a,a,a)') '"', s, '"'
+        end if
+    end subroutine psv_print
+    !
+    !> Finalizer: nullifies the reference. Never deallocates the referenced column (non-owning).
+    subroutine finalize_handle(self)
+        type(parquet_string), intent(inout) :: self !! the handle being finalized.
+        self%col => null()
+    end subroutine finalize_handle
+    !
+end module parquet_strings

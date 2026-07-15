@@ -18,12 +18,22 @@ which is all this repository's headings currently use. Non-ASCII headings
 fall back to stripping punctuation via unicodedata, which is a reasonable
 approximation but not a byte-for-byte match to GitHub's Unicode ranges.
 
+Also scans `doc/pages/*.md`. Those files link to each other (and to the
+README-derived FORD front page) using FORD's own rendered `page/*.html`
+form rather than raw `.md` paths -- e.g. `reading.html#some-heading` for a
+sibling page, `../index.html#some-heading` for README.md -- since that is
+the correct form for FORD's generated output (see CLAUDE.md's "FORD does
+not resolve doc/pages/*.md links written in README.md's body text" note
+for why README.md itself keeps the raw `doc/pages/<name>.md` form
+instead). Both forms are resolved back to the real source file below so
+their anchors can be checked the same way as ordinary `.md` links.
+
 Usage:
     tools/check_doc_anchors.py
 
-Scans every *.md file in the repository root. Exits nonzero and prints one
-line per unresolved link if any anchor doesn't match a heading in its
-target file.
+Scans every *.md file in the repository root plus every *.md file in
+doc/pages/. Exits nonzero and prints one line per unresolved link if any
+anchor doesn't match a heading in its target file.
 """
 import re
 import sys
@@ -81,12 +91,33 @@ def heading_slugs(text):
     return slugs
 
 
+def resolve_link_target(path, target_file):
+    """Resolves a link's target file to the real Markdown source on disk.
+
+    Handles three forms: a same-file `#anchor` (empty target_file), an
+    ordinary relative `.md` path, and the FORD-rendered `.html` form used
+    between doc/pages/*.md files -- a bare `name.html` is a sibling page
+    (doc/pages/name.md) and `../index.html` is the FORD front page, which
+    is README.md embedded verbatim (see docs.md).
+    """
+    if not target_file:
+        return path
+    if target_file.endswith(".html"):
+        name = Path(target_file).name
+        if name == "index.html":
+            return (REPO_ROOT / "README.md").resolve()
+        return (REPO_ROOT / "doc" / "pages" / f"{name[:-len('.html')]}.md").resolve()
+    return (path.parent / target_file).resolve()
+
+
 def check_file(path, cache):
     text = path.read_text()
     problems = []
     for match in LINK_RE.finditer(text):
         target_file, anchor = match.group(1), match.group(2)
-        target_path = (path.parent / target_file).resolve() if target_file else path
+        if re.match(r"^[a-z][a-z0-9+.-]*://", target_file):
+            continue  # external URL (e.g. a full gitlab.4most.eu link) -- not ours to validate
+        target_path = resolve_link_target(path, target_file)
         if target_path not in cache:
             if not target_path.is_file():
                 problems.append((match.group(0), f"target file not found: {target_file}"))
@@ -99,7 +130,7 @@ def check_file(path, cache):
 
 
 def main():
-    md_files = sorted(REPO_ROOT.glob("*.md"))
+    md_files = sorted(REPO_ROOT.glob("*.md")) + sorted((REPO_ROOT / "doc" / "pages").glob("*.md"))
     cache = {}
     total_problems = 0
 

@@ -113,18 +113,12 @@ A few more `tools/` scripts, unrelated to fixtures and not part of the build or 
 `tools/count_lines.py` reports code/comment/blank line counts for `src/` and `test/`, a convenience for repository metrics.
 
 `tools/benchmark_threads.sh` measures how write and read throughput scale with Arrow's internal
-thread-pool size (`parquet_set_max_threads`), on one synthetic multi-type Parquet file (one
-scalar + one vector column per supported type; row count derived from a target uncompressed file
-size). It sweeps a log-spaced set of thread counts — e.g. `1 2 4 7 14 28 54 105 204 396` for a
-396-core machine and the default `MAX_STEPS=10` — driving `app/benchmark_threads.f90` (a
-maintainer-only fpm executable, not part of the public library) once per (mode, thread-count)
-data point, then prints a cores/total-time/time-per-core table for each of the write and read
-sweeps. The read sweep reuses a single static file (written by the write sweep's highest
-thread-count run) across every thread count, so it isolates single-file decode scaling rather
-than measuring concurrent multi-file throughput. `MAX_STEPS`, `TARGET_FILE_SIZE_GB` and `TEST_FILE`
-are its own env-overridable config; `VECTOR_COL_LEN`/`STRING_LEN` are hardcoded in
-`app/benchmark_threads.f90` itself. By default the synthetic test file is written under a fresh
-`mktemp -d` directory and deleted when the script exits; set `TEST_FILE` to give it a path of
+thread-pool size (`parquet_set_max_threads`), sweeping a log-spaced set of thread counts and
+driving `app/benchmark_threads.f90` (a maintainer-only fpm executable, not part of the public
+library) once per (mode, thread-count) data point. `MAX_STEPS`, `TARGET_FILE_SIZE_GB` and
+`TEST_FILE` are its own env-overridable config (`VECTOR_COL_LEN`/`STRING_LEN` are hardcoded in
+`app/benchmark_threads.f90` itself); by default the synthetic test file is written under a fresh
+`mktemp -d` directory and deleted when the script exits — set `TEST_FILE` to give it a path of
 your own choosing instead, which also keeps the file around afterward for inspection or reuse:
 
 ```bash
@@ -137,25 +131,13 @@ TEST_FILE=/tmp/benchmark.parquet TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads
 library genuinely reads/writes columns correctly beyond `huge(1_int32)` (2,147,483,647) rows — the
 scale no automated test in this repository ever attempts, since doing so needs a machine with
 substantial memory and disk. It drives `app/test_large_scale.f90` (a maintainer/user-only fpm
-executable, not part of the public library) through 12 cases — every supported data type, each
-written once as a plain scalar column and once as a vector (`col_size=NELEM`) column — one case at
-a time: the write buffer for a case is deallocated before that case's file is opened for reading,
-and the file itself is deleted before the next case starts, so peak memory/disk usage is bounded by
-one column's own data, not by the whole run. Each case then checks `parquet_get_nrows` against the
-true count, plus reads the *entire* column back and compares every element. `NROWS`, `NELEM`, and
-`MAX_SIZE_GB` are its env-overridable config — `NROWS` sets the row count for every case (default a
-small, cheap `1000`), `NELEM` sets the vector cases' `col_size` (default `2`), and `MAX_SIZE_GB`
-(default `8`) skips any case whose estimated uncompressed size would exceed it instead of letting an
-oversized value exhaust memory/disk, printing e.g. `Skipped test 3 of 12: ... -- expected size
-7.451E+01 GB exceeds max_size_gb 8.000E+00 GB`. A large `NROWS * NELEM` for a vector case is not a
-problem: Arrow/Parquet's real list-element-count ceiling (2^31-1, a plain `int32_t` counter in
-Parquet's own repetition/definition-level generation — see `check_chunk_size_fits_limit_for_col_size`
-in `parquet_wrapper.cpp`) is scoped to one row group, not the whole file, and
-`parquet_close_writer`'s row-group auto-sizing already keeps every row group under it regardless of
-how large the total gets — see the README's Limitations section. Progress is printed per case
-(`Running test X of 12: ...` / `Finished test X of 12: ... -- PASSED (12.345s)` — the parenthesized
-wall-clock duration is that case's own write+read+verify time, via `system_clock` — / `Skipped test X
-of 12: ...`):
+executable, not part of the public library) through 12 cases, one at a time, each checking
+`parquet_get_nrows` and a full read-back against the true data. `NROWS`, `NELEM`, and `MAX_SIZE_GB`
+are its env-overridable config — `NROWS` sets the row count for every case (default a small, cheap
+`1000`), `NELEM` sets the vector cases' `col_size` (default `2`), and `MAX_SIZE_GB` (default `8`)
+skips any case whose estimated uncompressed size would exceed it instead of letting an oversized
+value exhaust memory/disk. Progress is printed per case (`Running test X of 12: ...` / `Finished
+test X of 12: ... -- PASSED (12.345s)` / `Skipped test X of 12: ...`):
 
 ```bash
 tools/test_large_scale.sh
@@ -294,12 +276,10 @@ These were looked at (during an audit comparing this library against Arrow C++'s
 
 **Plausible future candidates, if needed:**
 - `date`/`timestamp` scalar types — Arrow supports these natively; would likely slot into the existing six-type scheme as new entries.
-- Streaming/incremental writes — `parquet_write_column` currently buffers a full column in memory before `parquet_close_writer` writes anything (see the [Performance and memory guide](doc/pages/performance.md)); Arrow's `parquet::arrow::FileWriter` supports writing row batches incrementally, which would resolve this but requires reworking the writer's internal buffering model.
-- Row-group-level partial reads — `parquet::arrow::FileReader::ReadRowGroup` exists and is unused; would be a bounded step toward "read only some rows," short of full predicate pushdown.
 - Per-column writer properties (e.g. `disable_statistics()` for write-heavy/throwaway files, explicit dictionary-encoding toggles) — small, additive, doesn't touch the type system.
 
 **Bigger lifts, worth being cautious about:**
-- Predicate pushdown (statistics-based I/O skipping) — *not to be confused with row filtering, which is already implemented* (`parquet_filter` / `parquet_open_reader(..., filter=)`, see the [Row filtering section](doc/pages/reading.md#row-filtering-with-parquet_filter)). That existing filter is post-decode: it narrows the rows your code sees but still reads and decodes every referenced column in full. Genuine predicate pushdown — using per-row-group statistics (or Arrow's expression/compute-filter machinery) to skip reading matching row groups off disk entirely — is the unimplemented part, and the current "no random-access read" limitation treats it as an intentional non-goal for now.
+- Predicate pushdown (statistics-based I/O skipping) — *not to be confused with row filtering, which is already implemented* (`parquet_filter` / `parquet_open_reader(..., filter=)`, see the [Row filtering section](doc/pages/reading.md#row-filtering-with-parquet_filter)). That existing filter is post-decode: it narrows the rows your code sees but still reads and decodes every referenced column in full. Genuine predicate pushdown — using per-row-group statistics (or Arrow's expression/compute-filter machinery) to skip reading matching row groups off disk entirely — is the unimplemented part, and the README's "No predicate pushdown" limitation treats it as an intentional non-goal for now.
 - Nested/struct/map/variable-length-list types — Arrow supports these natively, but they'd break the library's core "flat columns + fixed `col_size` vectors" data model that the whole Fortran-side API is built around; this would be a redesign, not an addition.
 - Additional scalar types (`int8`/`int16`/unsigned integers/`decimal`) — straightforward from Arrow's side, but each new type multiplies the `parquet_write_*`/`parquet_read_*` interface surface (a dedicated subroutine pair per type already exists for each of the six supported types).
 

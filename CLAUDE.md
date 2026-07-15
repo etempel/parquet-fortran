@@ -24,12 +24,13 @@ maintained from the first public release (1.0) onward — do **not** add `CHANGE
 
 ## Checking documentation links
 
-After editing headings or `#anchor` links in README.md/CONTRIBUTING.md/CHANGELOG.md/CLAUDE.md/docs.md,
-run `tools/check_doc_anchors.py` to verify every in-page and cross-file anchor link still
-resolves against GitHub's actual heading-slug rules. It exits nonzero and lists any broken
-link. Note: it does not currently scan `doc/pages/*.md` — check links into/within those pages
-by hand (or by cross-referencing an existing internal link to the same heading, e.g.
-`doc/pages/reading.md`'s own `#row-filtering-with-parquet_filter` anchor) until that's added.
+After editing headings or `#anchor` links in README.md/CONTRIBUTING.md/CHANGELOG.md/CLAUDE.md/docs.md/
+`doc/pages/*.md`, run `tools/check_doc_anchors.py` to verify every in-page and cross-file anchor
+link still resolves against GitHub's actual heading-slug rules. It exits nonzero and lists any
+broken link. It scans `doc/pages/*.md` too, resolving both the raw `other.md#anchor` form (used by
+README.md/CONTRIBUTING.md linking *into* `doc/pages/`) and the FORD-rendered `name.html#anchor` /
+`../index.html#anchor` form those pages use to link to each other / back to README.md (see
+`resolve_link_target` in the script).
 
 ## Documentation structure
 
@@ -66,8 +67,7 @@ Working rules:
 - Moving content between README.md and a `doc/pages/*.md` page turns in-page `#anchor` links
   into cross-file `doc/pages/<page>.md#…` / `README.md#…` links — repoint them, and fix
   now-stale relative wording ("above", "below", "this README"). Re-run `tools/check_doc_anchors.py`
-  afterward for the files it covers (see "Checking documentation links" above; it doesn't scan
-  `doc/pages/*.md` itself yet).
+  afterward (see "Checking documentation links" above).
 - **Diagrams: plain text, not Mermaid.** This project's GitLab does not reliably render Mermaid
   diagrams, so draw flows as plain-text/ASCII inside a normal code fence (renders identically
   everywhere) — see the MAML→header flow in `doc/pages/maml-format.md`'s "The MAML metadata format".
@@ -79,7 +79,7 @@ Working rules:
 ## FORD doc-comment conventions
 
 Every public/private procedure, type, dummy argument/function result, and type-bound procedure
-binding in `src/*.f90` carries a `!>`(leading)/`!!`(trailing) doc-comment doc-comment (already true throughout `src/*.f90`,
+binding in `src/*.f90` carries a `!>`(leading)/`!!`(trailing) doc-comment (already true throughout `src/*.f90`,
 validated end-to-end with `ford docs.md` — clean run besides the expected environment-only
 "Graphviz not installed" warning). Keep new code to the same standard:
 
@@ -161,8 +161,7 @@ GitHub Pages) are now confirmed working end-to-end. What's left, in order:
    deliberately.
 2. Optional polish, no urgency: a `[[entity_name]]` auto-link pass over `doc/pages/*.md`'s
    inline procedure-name mentions (plain backtick spans today); a favicon/logo for `doc/media/`
-   (exists, currently empty besides a `.gitkeep`); extending `tools/check_doc_anchors.py` to also
-   scan `doc/pages/*.md` (not covered today — see "Checking documentation links" above).
+   (exists, currently empty besides a `.gitkeep`).
 
 ## MAML fixture directory: `schemas/` (renamed from `docs/`)
 

@@ -5,12 +5,12 @@
 # tool.
 #
 # Runs 12 cases (6 scalar + 6 vector, one per supported data type) via RUN_VECTOR_CASES = .true.
-# in app/test_large_scale.f90. Each vector case skips cleanly, instead of running, whenever
-# nrows*NELEM would cross Arrow/Parquet's own list-element-count ceiling (capped at 2^31-1; see
-# check_list_element_count_fits_arrow_limit in parquet_wrapper.cpp and ARROW_LIST_ELEMENT_LIMIT in
-# app/test_large_scale.f90) -- a hard upstream Arrow limitation, not something this library can
-# lift, so a NROWS chosen to stress the *scalar* >huge(1_int32) row-count case (see below) just
-# skips the vector cases instead of aborting the whole run.
+# in app/test_large_scale.f90. A large NROWS*NELEM for a vector case is not a problem: Arrow/
+# Parquet's real list-element-count ceiling (2^31-1, a plain int32_t counter in Parquet's own
+# repetition/definition-level generation; see check_chunk_size_fits_limit_for_col_size in
+# parquet_wrapper.cpp) is scoped to one row group, not the whole file, and
+# parquet_close_writer's row-group auto-sizing already keeps every row group under it regardless
+# of how large the total gets -- see the README's Limitations section.
 #
 # Usage:
 #   tools/test_large_scale.sh

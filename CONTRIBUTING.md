@@ -147,19 +147,20 @@ true count, plus reads the *entire* column back and compares every element. `NRO
 small, cheap `1000`), `NELEM` sets the vector cases' `col_size` (default `2`), and `MAX_SIZE_GB`
 (default `8`) skips any case whose estimated uncompressed size would exceed it instead of letting an
 oversized value exhaust memory/disk, printing e.g. `Skipped test 3 of 12: ... -- expected size
-7.451E+01 GB exceeds max_size_gb 8.000E+00 GB`. Every vector case also skips cleanly, instead of
-running, whenever `nrows * NELEM` would cross Arrow/Parquet's own list-element-count ceiling (capped
-at 2^31-1 — see `check_list_element_count_fits_arrow_limit` in `parquet_wrapper.cpp` and
-`ARROW_LIST_ELEMENT_LIMIT` in `app/test_large_scale.f90`) — a hard upstream Arrow limitation, not
-something this library can lift, printing e.g. `Skipped test 1 of 12: ... -- nrows*col_size=...
-exceeds Arrow's list-element limit 2147483647`. Progress is printed per case (`Running test X of 12:
-...` / `Finished test X of 12: ... -- PASSED (12.345s)` — the parenthesized wall-clock duration is
-that case's own write+read+verify time, via `system_clock` — / `Skipped test X of 12: ...`):
+7.451E+01 GB exceeds max_size_gb 8.000E+00 GB`. A large `NROWS * NELEM` for a vector case is not a
+problem: Arrow/Parquet's real list-element-count ceiling (2^31-1, a plain `int32_t` counter in
+Parquet's own repetition/definition-level generation — see `check_chunk_size_fits_limit_for_col_size`
+in `parquet_wrapper.cpp`) is scoped to one row group, not the whole file, and
+`parquet_close_writer`'s row-group auto-sizing already keeps every row group under it regardless of
+how large the total gets — see the README's Limitations section. Progress is printed per case
+(`Running test X of 12: ...` / `Finished test X of 12: ... -- PASSED (12.345s)` — the parenthesized
+wall-clock duration is that case's own write+read+verify time, via `system_clock` — / `Skipped test X
+of 12: ...`):
 
 ```bash
 tools/test_large_scale.sh
-# Row count itself beyond huge(1_int32) (needs a large-memory machine); vector cases skip
-# themselves cleanly here since nrows*NELEM would cross Arrow's list-element ceiling:
+# Row count itself beyond huge(1_int32) (needs a large-memory machine); the vector cases here
+# (NROWS * NELEM = 6 billion) still round-trip fine via row-group auto-sizing:
 NROWS=3000000000 MAX_SIZE_GB=120 tools/test_large_scale.sh
 ```
 

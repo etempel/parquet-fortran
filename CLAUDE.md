@@ -333,16 +333,25 @@ Some Arrow/Parquet C++ APIs are hard-capped to a plain `int32_t`, with no int64/
 at all — found three times so far: `arrow::FixedSizeListBuilder`/`fixed_size_list()`'s `list_size`
 (a vector column's per-row width, `col_size`), `arrow::Schema::num_fields()`/`GetFieldIndex()` (a
 table's column count), and Parquet's own repetition/definition-level generation for list-typed
-columns (`level_conversion.cc`), which walks every flattened element of a vector column with a
-plain `int32_t` counter — capping a vector column's *total* element count (`nrows * col_size`)
-even when `col_size` itself is within its own separate limit above (see apache/arrow#33188 /
-ARROW-17983). This differs from row count (`int64_t` throughout Arrow) or a string column's byte
-payload (which has an `arrow::large_utf8()` fallback) — for these, there is no workaround, only a
-clean failure instead of letting Arrow silently truncate/wrap internally, or (in the
-level-generation case) throw an uncaught `IOError` mid-write. When a new one is found, guard it
-with the pattern already used for the three above (see `check_col_size_fits_arrow_limit`/
-`check_column_count_fits_arrow_limit`/`check_list_element_count_fits_arrow_limit` in
-`parquet_wrapper.cpp`):
+columns (`level_conversion.cc`), which walks every flattened element of a row group with a plain
+`int32_t` counter (see apache/arrow#33188 / ARROW-17983, confirmed still open/unfixed upstream).
+Unlike the other two, this last one is scoped to one **row group**, not a column's total element
+count (`nrows * col_size`) — and `close_parquet_writer`'s row-group auto-sizing already keeps
+every row group under it by shrinking the row-group size, however large `nrows` gets, so a large
+total is never actually a problem (confirmed empirically: a multi-billion-element vector column
+writes successfully split across small-enough row groups). Only an *explicit* `chunk_size=`
+(`parquet_open_writer`/`parquet_set_writer_options`) that itself conflicts with a column's
+`col_size` still aborts, since that's a caller-forced value auto-sizing can't silently override —
+see `check_chunk_size_fits_limit_for_col_size`/`check_explicit_chunk_size_fits_arrow_limit`/
+`check_chunk_size_fits_metadata_limit` in `parquet_wrapper.cpp`, and the README's Limitations
+section. This differs from row count (`int64_t` throughout Arrow) or a string column's byte
+payload (which has an `arrow::large_utf8()` fallback) — for those two (`col_size` and column
+count), there is no workaround, only a clean failure instead of letting Arrow silently
+truncate/wrap internally. When a new int32-only ceiling is found, guard it with the pattern
+already used for `col_size`/column-count above (see `check_col_size_fits_arrow_limit`/
+`check_column_count_fits_arrow_limit` in `parquet_wrapper.cpp`) — only reach for the
+row-group-scoped auto-sizing approach instead if the new ceiling is similarly scoped per-row-group
+rather than per-column-total:
 
 1. A `static constexpr int64_t kArrowInt32...Limit = 2147483647;` named for what it bounds.
 2. A process-global `static int64_t g_debug_..._limit = -1;` test-only override plus a

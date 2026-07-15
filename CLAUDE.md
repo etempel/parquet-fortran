@@ -185,6 +185,13 @@ If `fpm test` behaves unexpectedly after source changes (e.g. a test target seem
 old code), try `fpm clean --all` to force a clean rebuild before spending time debugging —
 fpm's build cache can serve a stale binary.
 
+This bit us concretely: building with several different `FPM_FFLAGS` creates multiple
+`build/gfortran_<hash>/` dirs, and `test/test_errors.f90`'s `error_scenarios_bin` does
+`find build -name error_scenarios | head -1` — which can then pick a *stale* binary and report
+"scenario name not recognized" (or run old code) even though the source is current. Symptom:
+tests that pass when run scoped but fail under a full `fpm test`. `tools/coverage.sh` now runs
+`fpm clean` up front to avoid this; for a plain `fpm test`, `fpm clean --all` fixes it.
+
 ## Don't run the GitLab CI pipeline yourself
 
 The user runs `.gitlab-ci.yml` on their own GitLab server — don't attempt to execute it
@@ -200,6 +207,30 @@ unless they separately, explicitly ask for that specific commit. Leave finished 
 uncommitted in the working tree for them to review and commit. (This is specific to the
 main/default branch; it doesn't apply to work you've been asked to do inside your own
 throwaway branch/worktree, if any.)
+
+## The `parquet_strings` module (standalone, not yet integrated)
+
+`src/parquet_strings.f90` is an independent module (`use parquet_strings`; depends only on
+`iso_fortran_env`/`iso_c_binding`) providing `parquet_string_column` (Arrow-LargeUtf8-style
+offsets+data+bit-packed-validity string storage) and `parquet_string` (a non-owning handle to
+one element). User guide: `doc/pages/string-columns.md`.
+
+- **The module is `parquet_strings` (plural) on purpose.** A module and a type cannot share a
+  name in gfortran (`public :: parquet_string` binds to the module, and the type declaration
+  then conflicts). The user-facing *type* is `parquet_string`, so the *module* had to differ —
+  do not "fix" the plural back to `parquet_string`.
+- **It is deliberately NOT wired into the library yet.** The two interop hooks
+  `raw_buffers` (export c_loc pointers for a writer) and `append_buffers` (bulk-append one row
+  group from C buffers, int32/int64 offsets + validity merge) are the extension points for a
+  future `parquet_read_column`/`parquet_write_column` integration. When integrating: the current
+  Fortran↔C++ string boundary is a fixed-width, space-padded block (`parquet_read_string_column`/
+  `parquet_append_string_column`), so efficient support needs NEW C++ entry points that pass
+  offsets+data+validity directly — and the write path **must not trim** (the column stores bytes
+  verbatim by default; the padded path trims because padding is indistinguishable from real
+  trailing spaces). Scope is scalar 1-D string columns only; vector/matrix string columns stay on
+  the legacy padded path.
+- **`allow_null=.true.` on `get`/`to_string` returns an empty string, not unallocated** — see the
+  gfortran note in "Build and compiler notes" below.
 
 ## Build and compiler notes
 
@@ -233,6 +264,18 @@ throwaway branch/worktree, if any.)
   whether a float is exactly integral) — those are exact-equality checks with no arithmetic
   drift and no equivalent NaN-style idiom, so their warning is left as an accepted false
   positive rather than "fixed" into something worse (e.g. an epsilon comparison).
+- **A function returning an unallocated `allocatable` cannot yield an unallocated LHS via
+  `x = func()`.** Verified on gfortran 15.2: intrinsic assignment from an unallocated allocatable
+  function result leaves the LHS *allocated* (an empty string/array), even for a fresh target.
+  So an API cannot signal "absent" purely by returning an unallocated result — provide an explicit
+  flag/sentinel instead (this is why `parquet_strings`' `allow_null` returns `""`, guarded by
+  `is_null()`).
+- **`-128_int8` trips gfortran's range check** (it parses `128` then negates). Build the high bit
+  with `ibset(0_int8, 7)` in constant expressions. Also: an array-constructor implied-do index
+  (`[(f(b), b=0,7)]`) has no implicit type under `implicit none` — list the elements explicitly.
+- **`transfer(source, mold, size)` into a longer target leaves the trailing bytes undefined**, not
+  blank-padded. To place a short string into a longer fixed-length slot, assign normally (which
+  blank-pads); reserve `transfer` for exact-size byte moves.
 
 ## Renames/refactors: only apply low-blast-radius changes
 
@@ -368,6 +411,30 @@ rather than per-column-total:
    a tiny fixture) + `test/test_errors.f90` wrapper (`check_scenario_exit_status_and_stderr`,
    asserting the exact stderr message) + `tools/run_error_scenarios.sh` entry + a README
    Limitations bullet describing the ceiling and that it aborts cleanly rather than corrupting.
+
+**Read side of the `nrows * col_size` ceiling: row-group-scoped, not a ceiling at all.** Unlike
+the write side above, `parquet_get_col_size`/`parquet_get_column_total_elements`/
+`parquet_read_array_row_mode` on the *read* path used to hit this ceiling for a different reason:
+they materialized the *whole* column via `get_single_chunk_array`'s `ReadColumn` (Arrow's
+whole-file, all-row-groups-at-once convenience API) just to answer a size query or fetch one row,
+which trips Arrow's own internal int32 list-index/offset limit once `nrows * col_size` crosses
+int32 — even though the column was written perfectly safely (every row group under the limit, per
+the write-side guard above). Fixed by making all three genuinely row-group-scoped instead of
+adding a new guard: `parquet_get_col_size`/`parquet_get_column_total_elements` read `col_size`
+straight off the schema's `FixedSizeListType::list_size()` (no data read at all) for a
+FIXED_SIZE_LIST column, and `parquet_read_array_row_mode` resolves which row group a given
+`row_index` falls in (`resolve_row_group_for_row`, walking each row group's `num_rows()` from the
+file footer) and reads only that one row group (`get_row_group_chunk_array`, the same helper the
+`_column_chunk` family already used) rather than the whole column. The one case that still falls
+back to the old whole-column path is an active row filter
+(`parquet_open_reader(..., filter=)`/`parquet_reader_set_filter`): a filter mask has no row-group
+structure of its own (see `get_row_group_chunk_array`'s own comment), so `row_index` there means
+"index into the filtered result", not a physical file row. Regression-tested via
+`test/error_scenarios.f90`'s `scenario_col_size_and_row_mode_avoid_whole_column_read` (a
+process-global `g_debug_force_whole_column_read_error` hook forces `get_single_chunk_array` to
+abort the instant it would actually read a whole column, on a tiny fixture — the scenario
+finishing without aborting proves none of the three calls took that path) plus its negative
+control `scenario_whole_column_read_forced_error_control` (proves the hook itself actually fires).
 
 ## Manual (never-`fpm test`) large-scale/benchmark tools
 

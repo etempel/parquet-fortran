@@ -15,6 +15,7 @@ module test_reading
     use parquet_maml_base
     use iso_fortran_env, only : int32, int64, real32, real64
     use testdrive, only : new_unittest, unittest_type, error_type, check, test_failed
+    use test_errors, only : check_scenario_exit_status
     !
     implicit none
     private
@@ -53,7 +54,9 @@ contains
             new_unittest("chunked read: int64 row_group kind, parquet_get_num_row_groups, " // &
                 "parquet_get_chunk_size(reader,...)", test_read_column_chunk_int64_row_group), &
             new_unittest("chunked read: parquet_close_reader(check_complete=.true.) passes when every row " // &
-                "group was read", test_read_column_chunk_check_complete_pass) &
+                "group was read", test_read_column_chunk_check_complete_pass), &
+            new_unittest("parquet_get_col_size/parquet_get_column_total_elements/parquet_read_array_row_mode " // &
+                "avoid a whole-column read", test_col_size_and_row_mode_avoid_whole_column_read) &
             ]
     end subroutine collect_tests_parquet_reading
 
@@ -1575,5 +1578,25 @@ contains
         call check(error, all(back1 == [1, 2]) .and. all(back2 == [3, 4]), &
             "check_complete=.true. unexpectedly disrupted a complete chunked read")
     end subroutine test_read_column_chunk_check_complete_pass
+
+    !> Regression coverage for the "List index overflow" crash parquet_get_col_size/
+    !> parquet_get_column_total_elements/parquet_read_array_row_mode used to hit once a vector
+    !> column's total element count (nrows * col_size) exceeded 2^31-1 -- all three used to read
+    !> the *whole* column just to answer a size query or fetch one row. Exercising this for real
+    !> would need a genuine multi-billion-element column, far too slow/large for this suite -- so
+    !> the actual proof runs out-of-process as
+    !> scenario_col_size_and_row_mode_avoid_whole_column_read in error_scenarios.f90 (same pattern
+    !> as test_list_element_count_auto_multi_row_group_roundtrip in test_writing.f90), against a
+    !> tiny fixture with a test-only hook that forces a whole-column read to abort; see that
+    !> scenario's own comment (and its negative control,
+    !> scenario_whole_column_read_forced_error_control) for why this proves the fix rather than
+    !> just "nothing happened to call the old path anyway".
+    subroutine test_col_size_and_row_mode_avoid_whole_column_read(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "col_size_and_row_mode_avoid_whole_column_read", expect_abort=.false., &
+            failure_message="parquet_get_col_size/parquet_get_column_total_elements/parquet_read_array_row_mode " // &
+                "did not all avoid a whole-column read")
+    end subroutine test_col_size_and_row_mode_avoid_whole_column_read
     !
 end module test_reading

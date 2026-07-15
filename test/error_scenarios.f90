@@ -38,6 +38,10 @@ program error_scenarios
         call scenario_large_string_roundtrip()
     case ("col_size_overflow")
         call scenario_col_size_overflow()
+    case ("col_size_and_row_mode_avoid_whole_column_read")
+        call scenario_col_size_and_row_mode_avoid_whole_column_read()
+    case ("whole_column_read_forced_error_control")
+        call scenario_whole_column_read_forced_error_control()
     case ("list_element_count_auto_multi_row_group")
         call scenario_list_element_count_auto_multi_row_group()
     case ("list_element_count_explicit_chunk_size_overflow")
@@ -2102,6 +2106,101 @@ contains
         call parquet_close_writer(writer)
         print '(a)', "unexpectedly wrote a column with col_size exceeding the (shrunk) Arrow limit without error"
     end subroutine scenario_col_size_overflow
+
+    !> Regression coverage for the "List index overflow" crash parquet_get_col_size/
+    !> parquet_get_column_total_elements/parquet_read_array_row_mode used to hit once a vector
+    !> column's total element count (nrows * col_size) exceeded 2^31-1: all three used to
+    !> materialize the *whole* column (via get_single_chunk_array's ReadColumn) just to answer a
+    !> size query or fetch one row, which is exactly what Arrow's own int32 list-index ceiling
+    !> trips over on a genuinely huge column (see CLAUDE.md's "Guarding a hard Arrow int32-only
+    !> ceiling"). The fix makes col_size/total_elements read the FIXED_SIZE_LIST width straight
+    !> off the schema (no data read at all) and makes row-mode reads fetch only the one row group
+    !> the requested row lives in (get_row_group_chunk_array), instead of the whole column.
+    !> A genuine >2^31-element column is far too slow/large to build in a fast scenario, so this
+    !> instead uses parquet_debug_set_force_whole_column_read_error (a process-global, test-only
+    !> hook declared locally below, not part of the public Fortran API -- see its own comment in
+    !> parquet_wrapper.cpp) to force get_single_chunk_array to abort the instant it would actually
+    !> read a whole column -- on a tiny fixture, this scenario finishing without aborting proves
+    !> none of the three calls below ever took that path. scenario_whole_column_read_forced_error_
+    !> control, just below, is the negative control proving the hook itself actually fires (so
+    !> this scenario's "no abort" isn't simply because the hook is a no-op). Safe as a
+    !> process-global for the same subprocess-isolation reason as
+    !> scenario_large_string_roundtrip's own parquet_debug_set_string_offset_limit use, above.
+    subroutine scenario_col_size_and_row_mode_avoid_whole_column_read()
+        interface
+            subroutine parquet_debug_set_force_whole_column_read_error(enable) &
+                bind(C, name="parquet_debug_set_force_whole_column_read_error")
+                use iso_c_binding, only : c_int
+                integer(c_int), value :: enable !! nonzero forces the next whole-column read to abort; 0 restores normal behavior.
+            end subroutine parquet_debug_set_force_whole_column_read_error
+        end interface
+
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = &
+            "test_run/error_scenario_col_size_and_row_mode_avoid_whole_column_read.parquet"
+        integer(int32) :: vec_data(3, 4), row_buf(3)
+        integer :: col_size_back
+        integer(int64) :: total_elems
+
+        vec_data = reshape([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], [3, 4])
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "vec", vec_data)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+
+        ! Forced on *before* any of the three calls below, so their success (rather than the
+        ! forced abort) is the whole point of this scenario.
+        call parquet_debug_set_force_whole_column_read_error(1)
+
+        call parquet_get_col_size(reader, "vec", col_size_back)
+        if (col_size_back /= 3) error stop "col_size mismatch for vector column"
+
+        call parquet_get_column_total_elements(reader, "vec", total_elems)
+        if (total_elems /= 12_int64) error stop "total element count mismatch for vector column"
+
+        call parquet_read_array_row_mode(reader, "vec", row_buf, 2)
+        if (any(row_buf /= [4, 5, 6])) error stop "row_mode values mismatch for row 2"
+
+        call parquet_debug_set_force_whole_column_read_error(0)
+        call parquet_close_reader(reader)
+        print '(a)', "parquet_get_col_size/parquet_get_column_total_elements/" // &
+            "parquet_read_array_row_mode all avoided a whole-column read, as expected"
+    end subroutine scenario_col_size_and_row_mode_avoid_whole_column_read
+
+    !> Negative control for scenario_col_size_and_row_mode_avoid_whole_column_read, above: proves
+    !> parquet_debug_set_force_whole_column_read_error actually does something, by calling a
+    !> function that legitimately still takes get_single_chunk_array's whole-column path
+    !> (parquet_read_column on a plain scalar column) while the forced error is active, and
+    !> expecting it to abort.
+    subroutine scenario_whole_column_read_forced_error_control()
+        interface
+            subroutine parquet_debug_set_force_whole_column_read_error(enable) &
+                bind(C, name="parquet_debug_set_force_whole_column_read_error")
+                use iso_c_binding, only : c_int
+                integer(c_int), value :: enable !! nonzero forces the next whole-column read to abort; 0 restores normal behavior.
+            end subroutine parquet_debug_set_force_whole_column_read_error
+        end interface
+
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = &
+            "test_run/error_scenario_whole_column_read_forced_error_control.parquet"
+        integer(int32) :: scalar_data(4), scalar_back(4)
+
+        scalar_data = [1, 2, 3, 4]
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "s", scalar_data)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_debug_set_force_whole_column_read_error(1)
+        call parquet_read_column(reader, "s", scalar_back)
+        print '(a)', "unexpectedly read a plain scalar column without triggering the forced whole-column-read error"
+    end subroutine scenario_whole_column_read_forced_error_control
 
     !> Separate from col_size alone (scenario_col_size_overflow, above): Parquet's own
     !> repetition/definition-level generation for list-typed columns walks every flattened

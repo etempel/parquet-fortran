@@ -179,6 +179,8 @@ scenarios=(
     "read_column_with_nulls:1"
     "read_unsupported_physical_type:1"
     "col_size_overflow:1"
+    "col_size_and_row_mode_avoid_whole_column_read:0"
+    "whole_column_read_forced_error_control:1"
     "list_element_count_explicit_chunk_size_overflow:1"
     "row_group_explicit_nrows_overflow:1"
     "row_group_dangling_at_close:1"

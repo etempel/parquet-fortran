@@ -454,7 +454,10 @@ module parquet
     !> null_value (optional) fills missing entries; is_valid (optional)
     !> reports which elements were actually present. See
     !> parquet_read_array_element_mode for the complementary "one element
-    !> across all rows" access pattern.
+    !> across all rows" access pattern. Reads only the one row group `row_index` falls in (not the
+    !> whole column), unless a row filter is active (parquet_open_reader(..., filter=)/
+    !> parquet_reader_set_filter), in which case `row_index` addresses the filtered result and the
+    !> whole (filtered) column is read, since a filter mask has no row-group structure of its own.
     interface parquet_read_array_row_mode
         module procedure parquet_read_int32_array_row_mode
         module procedure parquet_read_int32_array_row_mode_row_index_int64
@@ -609,7 +612,12 @@ module parquet
     !> Returns the total element count of a vector (array) column named
     !> `name`, read from an open parquet_reader (reader), across every row
     !> (i.e. nrows * col_size) in `total_elements`, dispatched by its
-    !> integer(int32)/integer(int64) kind.
+    !> integer(int32)/integer(int64) kind. Reads no column data (nrows and col_size are both
+    !> already known from the file footer/schema), so this is safe to call even on a column whose
+    !> total element count itself exceeds int32 -- unlike an earlier implementation, which
+    !> materialized the whole column just to answer this query and could hit Arrow's own int32
+    !> list-index ceiling on a large enough column (see CLAUDE.md's "Guarding a hard Arrow
+    !> int32-only ceiling").
     interface parquet_get_column_total_elements
         module procedure parquet_get_column_total_elements_int64
         module procedure parquet_get_column_total_elements_int32
@@ -1729,7 +1737,10 @@ module parquet
         end subroutine parquet_get_num_row_groups_int32
 
         !> Returns `name`'s declared col_size (vector-column element count;
-        !> 1 for a scalar column) in `col_size`.
+        !> 1 for a scalar column) in `col_size`. Reads no column data (a FIXED_SIZE_LIST column's
+        !> width is a schema-level constant), so this is safe even on a column whose total
+        !> element count (nrows * col_size) itself exceeds int32 -- see
+        !> parquet_get_column_total_elements's identical note.
         module subroutine parquet_get_col_size(reader, name, col_size)
             type(parquet_reader), intent(in) :: reader !! open reader.
             character(len=*), intent(in) :: name !! column name.

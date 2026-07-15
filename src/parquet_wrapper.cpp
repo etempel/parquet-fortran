@@ -434,6 +434,20 @@ extern "C"
 		return filtered.ValueOrDie().make_array();
 	}
 
+	// Test-only: forces get_single_chunk_array (below) to abort via report_fatal_error the next
+	// time it would actually issue a whole-column ReadColumn call (a cache hit is unaffected --
+	// see get_single_chunk_array's own comment). Lets
+	// test/error_scenarios.f90's scenario_col_size_and_row_mode_avoid_whole_column_read prove,
+	// on a tiny fixture, that parquet_reader_get_column_col_size/
+	// parquet_reader_get_column_total_elements/read_list_primitive_row (backing
+	// parquet_get_col_size/parquet_get_column_total_elements/parquet_read_array_row_mode) never
+	// take the whole-column path for a FIXED_SIZE_LIST column -- the actual fix for the "List
+	// index overflow" crash these functions used to hit once nrows * col_size exceeded int32 (see
+	// CLAUDE.md's "Guarding a hard Arrow int32-only ceiling"). Same process-global/subprocess-
+	// isolation reasoning as g_debug_string_offset_limit, above: safe only because the scenario
+	// that flips it runs as its own isolated subprocess.
+	static bool g_debug_force_whole_column_read_error = false;
+
 	// Reads (and caches) exactly one column's data from disk -- every other
 	// column in the file is never touched, regardless of how many columns
 	// the file has or how large they are. This is what makes reading a
@@ -446,6 +460,12 @@ extern "C"
 		if (cached != reader_handle->column_cache.end())
 		{
 			return cached->second;
+		}
+
+		if (g_debug_force_whole_column_read_error)
+		{
+			report_fatal_error("get_single_chunk_array",
+				std::string("forced debug error: whole-column read attempted for column: ") + name);
 		}
 
 		std::shared_ptr<arrow::ChunkedArray> chunked;
@@ -1098,22 +1118,29 @@ extern "C"
 	// (as opposed to it merely being cached via get_single_chunk_array's own
 	// cache-fill or via parquet_reader_prefetch_columns) and what Fortran-side
 	// output type it was read into -- used only for parquet_reader_print_stat.
-	static void mark_read(ParquetReaderHandle *reader_handle, const char *name, const char *type_name)
+	// Takes `array` directly (the same array the caller just decoded/sliced values from) rather
+	// than looking it up in reader_handle->column_cache: a row-group-scoped read (see
+	// resolve_row_group_for_row/get_row_group_chunk_array, used by the row-mode read functions)
+	// never populates column_cache at all, so an at(idx) lookup there would throw
+	// std::out_of_range for those callers.
+	static void mark_read(ParquetReaderHandle *reader_handle, const char *name, const char *type_name,
+		const std::shared_ptr<arrow::Array> &array)
 	{
 		auto idx = static_cast<int>(get_column_index(reader_handle, name));
 		reader_handle->was_read.insert(idx);
 		reader_handle->output_type_used[idx] = type_name;
-		run_qc_checks(reader_handle, idx, name, reader_handle->column_cache.at(idx));
+		run_qc_checks(reader_handle, idx, name, array);
 	}
 
 	// Same as mark_read, but also records the declared string item_len (for parquet_reader_print_stat).
-	static void mark_read_string(ParquetReaderHandle *reader_handle, const char *name, int64_t item_len)
+	static void mark_read_string(ParquetReaderHandle *reader_handle, const char *name, int64_t item_len,
+		const std::shared_ptr<arrow::Array> &array)
 	{
 		auto idx = static_cast<int>(get_column_index(reader_handle, name));
 		reader_handle->was_read.insert(idx);
 		reader_handle->output_type_used[idx] = "string";
 		reader_handle->output_str_len_used[idx] = item_len;
-		run_qc_checks(reader_handle, idx, name, reader_handle->column_cache.at(idx));
+		run_qc_checks(reader_handle, idx, name, array);
 	}
 
 	// Returns the vector-column element count of a fixed-size-list or list array (0 for a scalar column).
@@ -2153,18 +2180,51 @@ extern "C"
 		return reader_handle->schema->GetFieldIndex(name) >= 0 ? 1 : 0;
 	}
 
-	// Returns the declared vector-column element count of `name` (0 for a scalar column).
+	// Returns the declared vector-column element count of `name` (0 for a scalar column),
+	// without reading any column data for the common FIXED_SIZE_LIST case. A FIXED_SIZE_LIST
+	// column's width is a schema-level constant (arrow::FixedSizeListType::list_size()), so it's
+	// read straight off the already in-memory schema -- the same schema-only introspection
+	// pattern max_fixed_size_list_col_size/check_explicit_chunk_size_fits_arrow_limit use on the
+	// write side. This is what lets col_size be queried on a multi-billion-element column
+	// without ever materializing it (see get_single_chunk_array's whole-column read, and the
+	// int32 element-count ceiling documented on parquet_reader_get_column_total_elements below
+	// and in CLAUDE.md's "Guarding a hard Arrow int32-only ceiling"). A plain LIST/LARGE_LIST
+	// column (only ever produced by a non-this-library writer -- this library always writes
+	// FIXED_SIZE_LIST for vector columns) has no such schema-level constant, since its per-row
+	// width can vary; that case still falls back to get_col_size's own data-scanning heuristic
+	// via get_single_chunk_array.
 	int64_t parquet_reader_get_column_col_size(void *handle, const char *name)
 	{
 		auto reader_handle = as_reader_handle(handle);
+		auto idx = get_column_index(reader_handle, name);
+		auto field = reader_handle->schema->field(static_cast<int>(idx));
+		if (field->type()->id() == arrow::Type::FIXED_SIZE_LIST)
+		{
+			return static_cast<int64_t>(std::static_pointer_cast<arrow::FixedSizeListType>(field->type())->list_size());
+		}
 		auto array = get_single_chunk_array(reader_handle, name);
 		return get_col_size(array);
 	}
 
-	// Returns the total element count (nrows * col_size) of vector column `name`.
+	// Returns the total element count (nrows * col_size) of vector column `name`, without
+	// reading any column data for the common FIXED_SIZE_LIST case (see
+	// parquet_reader_get_column_col_size, above) -- reader_handle->nrows already comes from the
+	// file footer (create_parquet_reader), so this needs no column data read at all in that
+	// case. This is the fix for a whole-column read (the old get_single_chunk_array-based
+	// implementation, still used below for the non-FIXED_SIZE_LIST fallback) throwing Arrow's
+	// "List index overflow" once nrows * col_size exceeds int32, purely to answer a size query --
+	// see CLAUDE.md's "Guarding a hard Arrow int32-only ceiling" for the underlying limit (write
+	// side only there; this is the read-side counterpart).
 	int64_t parquet_reader_get_column_total_elements(void *handle, const char *name)
 	{
 		auto reader_handle = as_reader_handle(handle);
+		auto idx = get_column_index(reader_handle, name);
+		auto field = reader_handle->schema->field(static_cast<int>(idx));
+		if (field->type()->id() == arrow::Type::FIXED_SIZE_LIST)
+		{
+			auto col_size = static_cast<int64_t>(std::static_pointer_cast<arrow::FixedSizeListType>(field->type())->list_size());
+			return reader_handle->nrows * col_size;
+		}
 		auto nrows = reader_handle->nrows;
 		// Calls the same static helpers parquet_reader_get_column_col_size
 		// itself uses, rather than that exported function directly -- going
@@ -2693,6 +2753,43 @@ extern "C"
 			" (expected fixed_size_list/list/large_list, got " + array->type()->ToString() + ")");
 	}
 
+	// Forward declaration -- get_row_group_chunk_array is defined further below (it needs
+	// ParquetReaderHandle's row-group bookkeeping, laid out near the _column_chunk family), but
+	// resolve_row_group_for_row/read_list_primitive_row (just below) need to call it.
+	static std::shared_ptr<arrow::Array> get_row_group_chunk_array(ParquetReaderHandle *reader_handle,
+		const char *name, int64_t row_group, const char *context);
+
+	// Maps a 1-based global row index to the (1-based row_group, 1-based local row-within-group)
+	// pair that get_row_group_chunk_array/get_row_list_values need, by walking each row group's
+	// own physical row count from the file footer (metadata()->RowGroup(i)->num_rows()) -- never
+	// reads any column data. Used by read_list_primitive_row (parquet_read_array_row_mode) so a
+	// single row of a vector column can be fetched by reading only the one row group it lives in,
+	// instead of materializing the whole column (see get_single_chunk_array's int32 element-count
+	// ceiling, documented in CLAUDE.md's "Guarding a hard Arrow int32-only ceiling"). Aborts via
+	// report_fatal_error if row_index is out of range.
+	static void resolve_row_group_for_row(ParquetReaderHandle *reader_handle, int64_t row_index,
+		const char *context, int64_t &row_group_out, int64_t &local_row_out)
+	{
+		if (row_index < 1)
+		{
+			report_fatal_error(context, "row_index out of bounds");
+		}
+		auto *file_metadata = reader_handle->reader->parquet_reader()->metadata().get();
+		int64_t remaining = row_index;
+		for (int64_t rg = 0; rg < reader_handle->num_row_groups; ++rg)
+		{
+			int64_t rg_rows = file_metadata->RowGroup(static_cast<int>(rg))->num_rows();
+			if (remaining <= rg_rows)
+			{
+				row_group_out = rg + 1;
+				local_row_out = remaining;
+				return;
+			}
+			remaining -= rg_rows;
+		}
+		report_fatal_error(context, "row_index out of bounds");
+	}
+
 extern "C"
 {
 
@@ -2873,9 +2970,26 @@ template <typename CType>
 static void read_list_primitive_row(void *handle, const char *name, int64_t row_index, CType *data, int64_t col_size, int8_t *valid_out)
 {
 	auto reader_handle = as_reader_handle(handle);
-	auto array = get_single_chunk_array(reader_handle, name);
-	auto vals_any = get_row_list_values(array, name, row_index, col_size, "parquet_read_array_row_mode");
-	report_nulls_list_full(array, vals_any, name, 1, col_size, row_index - 1, valid_out, "parquet_read_array_row_mode");
+	// A filter mask has no row-group structure of its own (see get_row_group_chunk_array's own
+	// comment on why filtering doesn't compose with a row-group-scoped read), so row_index there
+	// means "index into the filtered array" -- that case keeps the old whole-column path, which
+	// already applies the filter via get_single_chunk_array/apply_filter_mask. Only the common,
+	// unfiltered case is switched to a row-group-scoped read, so a single row can be fetched
+	// without materializing the whole column (see resolve_row_group_for_row's own comment).
+	std::shared_ptr<arrow::Array> array;
+	int64_t local_row_index = row_index;
+	if (reader_handle->filter_mask)
+	{
+		array = get_single_chunk_array(reader_handle, name);
+	}
+	else
+	{
+		int64_t row_group = 0;
+		resolve_row_group_for_row(reader_handle, row_index, "parquet_read_array_row_mode", row_group, local_row_index);
+		array = get_row_group_chunk_array(reader_handle, name, row_group, "parquet_read_array_row_mode");
+	}
+	auto vals_any = get_row_list_values(array, name, local_row_index, col_size, "parquet_read_array_row_mode");
+	report_nulls_list_full(array, vals_any, name, 1, col_size, local_row_index - 1, valid_out, "parquet_read_array_row_mode");
 
 	// get_row_list_values already returns a contiguous col_size-element slice
 	// for this one row, so the default stride=1/offset=0 applies.
@@ -2889,7 +3003,7 @@ static void read_list_primitive_row(void *handle, const char *name, int64_t row_
 		convert_values_to_float64(vals_any, data, col_size, name, "parquet_read_array_row_mode");
 
 	fill_null_default(data, valid_out, col_size);
-	mark_read(reader_handle, name, ctype_name<CType>());
+	mark_read(reader_handle, name, ctype_name<CType>(), array);
 }
 
 // Shared body for every parquet_read_*_array_element extern "C" entry point: reads one
@@ -2922,7 +3036,7 @@ static void read_list_primitive_element(void *handle, const char *name, int64_t 
 		convert_values_to_float64(vals_any, data, nrows, name, "parquet_read_array_element_mode", col_size, offset);
 
 	fill_null_default(data, valid_out, nrows);
-	mark_read(reader_handle, name, ctype_name<CType>());
+	mark_read(reader_handle, name, ctype_name<CType>(), array);
 }
 
 extern "C"
@@ -2954,7 +3068,7 @@ extern "C"
 		check_or_report_nulls(array, name, valid_out, "parquet_read_int32_column");
 		convert_values_to_int32(array, data, nrows, name, "parquet_read_int32_column");
 		fill_null_default(data, valid_out, nrows);
-		mark_read(reader_handle, name, "int32");
+		mark_read(reader_handle, name, "int32", array);
 	}
 
 	// Same as parquet_read_int32_column, but for int64.
@@ -2969,7 +3083,7 @@ extern "C"
 		check_or_report_nulls(array, name, valid_out, "parquet_read_int64_column");
 		convert_values_to_int64(array, data, nrows, name, "parquet_read_int64_column");
 		fill_null_default(data, valid_out, nrows);
-		mark_read(reader_handle, name, "int64");
+		mark_read(reader_handle, name, "int64", array);
 	}
 
 	// Same as parquet_read_int32_column, but for float32.
@@ -2984,7 +3098,7 @@ extern "C"
 		check_or_report_nulls(array, name, valid_out, "parquet_read_float32_column");
 		convert_values_to_float32(array, data, nrows, name, "parquet_read_float32_column");
 		fill_null_default(data, valid_out, nrows);
-		mark_read(reader_handle, name, "float32");
+		mark_read(reader_handle, name, "float32", array);
 	}
 
 	// Same as parquet_read_int32_column, but for float64.
@@ -2999,7 +3113,7 @@ extern "C"
 		check_or_report_nulls(array, name, valid_out, "parquet_read_float64_column");
 		convert_values_to_float64(array, data, nrows, name, "parquet_read_float64_column");
 		fill_null_default(data, valid_out, nrows);
-		mark_read(reader_handle, name, "float64");
+		mark_read(reader_handle, name, "float64", array);
 	}
 
 	// Same as parquet_read_int32_column, but for boolean (bool8) columns.
@@ -3023,7 +3137,7 @@ extern "C"
 			data[i] = arr->Value(i) ? 1 : 0;
 		}
 		fill_null_default(data, valid_out, nrows);
-		mark_read(reader_handle, name, "bool8");
+		mark_read(reader_handle, name, "bool8", array);
 	}
 
 	// Same as parquet_read_int32_column, but for string columns (fixed-width, space-padded output).
@@ -3048,7 +3162,7 @@ extern "C"
 			copy_string_with_padding(data + i * item_len, item_len, view);
 		}
 		fill_null_default_string(data, item_len, valid_out, nrows);
-		mark_read_string(reader_handle, name, item_len);
+		mark_read_string(reader_handle, name, item_len, array);
 	}
 
 	// Reads the full vector int32 column `name` (every row) into `data`.
@@ -3061,7 +3175,7 @@ extern "C"
 		int64_t total = nrows * col_size;
 		convert_values_to_int32(vals_any, data, total, name, "parquet_read_int32_array_column");
 		fill_null_default(data, valid_out, total);
-		mark_read(reader_handle, name, "int32");
+		mark_read(reader_handle, name, "int32", array);
 	}
 
 	// Same as parquet_read_int32_array_column, but for int64.
@@ -3074,7 +3188,7 @@ extern "C"
 		int64_t total = nrows * col_size;
 		convert_values_to_int64(vals_any, data, total, name, "parquet_read_int64_array_column");
 		fill_null_default(data, valid_out, total);
-		mark_read(reader_handle, name, "int64");
+		mark_read(reader_handle, name, "int64", array);
 	}
 
 	// Same as parquet_read_int32_array_column, but for float32.
@@ -3087,7 +3201,7 @@ extern "C"
 		int64_t total = nrows * col_size;
 		convert_values_to_float32(vals_any, data, total, name, "parquet_read_float32_array_column");
 		fill_null_default(data, valid_out, total);
-		mark_read(reader_handle, name, "float32");
+		mark_read(reader_handle, name, "float32", array);
 	}
 
 	// Same as parquet_read_int32_array_column, but for float64.
@@ -3100,7 +3214,7 @@ extern "C"
 		int64_t total = nrows * col_size;
 		convert_values_to_float64(vals_any, data, total, name, "parquet_read_float64_array_column");
 		fill_null_default(data, valid_out, total);
-		mark_read(reader_handle, name, "float64");
+		mark_read(reader_handle, name, "float64", array);
 	}
 
 	// Same as parquet_read_int32_array_column, but for boolean (bool8) columns.
@@ -3121,7 +3235,7 @@ extern "C"
 			data[i] = vals->Value(i) ? 1 : 0;
 		}
 		fill_null_default(data, valid_out, nrows * col_size);
-		mark_read(reader_handle, name, "bool8");
+		mark_read(reader_handle, name, "bool8", array);
 	}
 
 	// Same as parquet_read_int32_array_column, but for string columns (fixed-width, space-padded output).
@@ -3142,7 +3256,7 @@ extern "C"
 			copy_string_with_padding(data + i * item_len, item_len, vals.get_view(i));
 		}
 		fill_null_default_string(data, item_len, valid_out, nrows * col_size);
-		mark_read_string(reader_handle, name, item_len);
+		mark_read_string(reader_handle, name, item_len, array);
 	}
 
 	// Reads one row (row_index) of vector int32 column `name` into `data`.
@@ -3174,12 +3288,27 @@ extern "C"
 	void parquet_read_bool8_array_row(void *handle, const char *name, int64_t row_index, int8_t *data, int64_t col_size, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
-		auto array = get_single_chunk_array(reader_handle, name);
-		auto vals_any = get_row_list_values(array, name, row_index, col_size, "parquet_read_bool8_array_row");
+		// See read_list_primitive_row's identical comment: a filter mask keeps the old
+		// whole-column path (row_index means "index into the filtered array" there); the
+		// unfiltered common case is row-group-scoped so one row can be fetched without
+		// materializing the whole column.
+		std::shared_ptr<arrow::Array> array;
+		int64_t local_row_index = row_index;
+		if (reader_handle->filter_mask)
+		{
+			array = get_single_chunk_array(reader_handle, name);
+		}
+		else
+		{
+			int64_t row_group = 0;
+			resolve_row_group_for_row(reader_handle, row_index, "parquet_read_bool8_array_row", row_group, local_row_index);
+			array = get_row_group_chunk_array(reader_handle, name, row_group, "parquet_read_bool8_array_row");
+		}
+		auto vals_any = get_row_list_values(array, name, local_row_index, col_size, "parquet_read_bool8_array_row");
 		if (vals_any->type_id() != arrow::Type::BOOL)
 			report_fatal_error("parquet_read_bool8_array_row", std::string("type mismatch for list values in column: ") + name +
 				" (expected bool, got " + vals_any->type()->ToString() + ")");
-		report_nulls_list_full(array, vals_any, name, 1, col_size, row_index - 1, valid_out, "parquet_read_bool8_array_row");
+		report_nulls_list_full(array, vals_any, name, 1, col_size, local_row_index - 1, valid_out, "parquet_read_bool8_array_row");
 
 		auto vals = std::static_pointer_cast<arrow::BooleanArray>(vals_any);
 		for (int64_t j = 0; j < col_size; ++j)
@@ -3187,19 +3316,34 @@ extern "C"
 			data[j] = vals->Value(j) ? 1 : 0;
 		}
 		fill_null_default(data, valid_out, col_size);
-		mark_read(reader_handle, name, "bool8");
+		mark_read(reader_handle, name, "bool8", array);
 	}
 
 	// Same as parquet_read_bool8_array_row, but for string columns (fixed-width, space-padded output).
 	void parquet_read_string_array_row(void *handle, const char *name, int64_t row_index, char *data, int64_t item_len, int64_t col_size, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
-		auto array = get_single_chunk_array(reader_handle, name);
-		auto vals_any = get_row_list_values(array, name, row_index, col_size, "parquet_read_string_array_row");
+		// See read_list_primitive_row's identical comment: a filter mask keeps the old
+		// whole-column path (row_index means "index into the filtered array" there); the
+		// unfiltered common case is row-group-scoped so one row can be fetched without
+		// materializing the whole column.
+		std::shared_ptr<arrow::Array> array;
+		int64_t local_row_index = row_index;
+		if (reader_handle->filter_mask)
+		{
+			array = get_single_chunk_array(reader_handle, name);
+		}
+		else
+		{
+			int64_t row_group = 0;
+			resolve_row_group_for_row(reader_handle, row_index, "parquet_read_string_array_row", row_group, local_row_index);
+			array = get_row_group_chunk_array(reader_handle, name, row_group, "parquet_read_string_array_row");
+		}
+		auto vals_any = get_row_list_values(array, name, local_row_index, col_size, "parquet_read_string_array_row");
 		if (!is_string_like_type(vals_any->type_id()))
 			report_fatal_error("parquet_read_string_array_row", std::string("type mismatch for list values in column: ") + name +
 				" (expected string, got " + vals_any->type()->ToString() + ")");
-		report_nulls_list_full(array, vals_any, name, 1, col_size, row_index - 1, valid_out, "parquet_read_string_array_row");
+		report_nulls_list_full(array, vals_any, name, 1, col_size, local_row_index - 1, valid_out, "parquet_read_string_array_row");
 
 		auto vals = make_string_like_accessor(vals_any);
 		for (int64_t j = 0; j < col_size; ++j)
@@ -3207,7 +3351,7 @@ extern "C"
 			copy_string_with_padding(data + j * item_len, item_len, vals.get_view(j));
 		}
 		fill_null_default_string(data, item_len, valid_out, col_size);
-		mark_read_string(reader_handle, name, item_len);
+		mark_read_string(reader_handle, name, item_len, array);
 	}
 
 	// Reads one element position (col_index) of vector int32 column `name` across every row into `data`.
@@ -3256,7 +3400,7 @@ extern "C"
 			data[i] = vals->Value(i * col_size + offset) ? 1 : 0;
 		}
 		fill_null_default(data, valid_out, nrows);
-		mark_read(reader_handle, name, "bool8");
+		mark_read(reader_handle, name, "bool8", array);
 	}
 
 	// Same as parquet_read_bool8_array_element, but for string columns (fixed-width, space-padded output).
@@ -3280,7 +3424,7 @@ extern "C"
 			copy_string_with_padding(data + i * item_len, item_len, vals.get_view(i * col_size + offset));
 		}
 		fill_null_default_string(data, item_len, valid_out, nrows);
-		mark_read_string(reader_handle, name, item_len);
+		mark_read_string(reader_handle, name, item_len, array);
 	}
 
 } // extern "C"
@@ -4236,6 +4380,18 @@ extern "C"
 	void parquet_debug_set_column_count_limit(int64_t n)
 	{
 		g_debug_column_count_limit = n;
+	}
+
+	// Test-only: overrides g_debug_force_whole_column_read_error (see its own comment) so
+	// test/error_scenarios.f90's scenario_col_size_and_row_mode_avoid_whole_column_read can prove
+	// parquet_get_col_size/parquet_get_column_total_elements/parquet_read_array_row_mode never
+	// take get_single_chunk_array's whole-column-read path for a FIXED_SIZE_LIST column, on a
+	// tiny fixture -- without needing a genuinely oversized (nrows * col_size > 2^31-1) column.
+	// Same process-global/subprocess-isolation reasoning as parquet_debug_set_string_offset_limit,
+	// above. Pass 0 to restore normal (non-forced-error) behavior.
+	void parquet_debug_set_force_whole_column_read_error(int enable)
+	{
+		g_debug_force_whole_column_read_error = (enable != 0);
 	}
 
 

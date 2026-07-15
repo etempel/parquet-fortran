@@ -8,7 +8,7 @@ Whenever asked to implement a new feature in this repository, always:
    coverage via `test/error_scenarios.f90` + `test/test_errors.f90` +
    `tools/run_error_scenarios.sh` if the feature has failure modes that `error stop`).
 2. Update documentation — see [Documentation structure](#documentation-structure) for what
-   goes where. In brief: every new public procedure/type gets its own `!>`/`!!` doc-comment
+   goes where. In brief: every new public procedure/type gets its own `!>`(leading)/`!!`(trailing) doc-comment
    (picked up automatically by the FORD-generated API reference — no hand-maintained table to
    update); user-facing behavior/how-to goes in the relevant `doc/pages/*.md` guide page; touch
    README.md only if the landing-page story changes (a new entry in its compact "API overview"
@@ -58,7 +58,7 @@ User- and contributor-facing docs are split across three layers — keep new con
 
 Working rules:
 
-- A new public procedure gets a `!>`/`!!` doc-comment (see "FORD doc-comment conventions"
+- A new public procedure gets a `!>`(leading)/`!!`(trailing) doc-comment (see "FORD doc-comment conventions"
   below) **and**
   its name in **README.md**'s "API overview" index; keep the two in sync on any rename/removal.
 - Every section heading must appear in that file's own **Contents** ToC (README.md/CONTRIBUTING.md);
@@ -79,7 +79,7 @@ Working rules:
 ## FORD doc-comment conventions
 
 Every public/private procedure, type, dummy argument/function result, and type-bound procedure
-binding in `src/*.f90` carries a `!>`/`!!` doc-comment (already true throughout `src/*.f90`,
+binding in `src/*.f90` carries a `!>`(leading)/`!!`(trailing) doc-comment doc-comment (already true throughout `src/*.f90`,
 validated end-to-end with `ford docs.md` — clean run besides the expected environment-only
 "Graphviz not installed" warning). Keep new code to the same standard:
 
@@ -147,7 +147,7 @@ validated end-to-end with `ford docs.md` — clean run besides the expected envi
   immediately above `interface <name>`) spells out every distinct argument name/role in prose,
   since that comment (unlike the per-specific ones) does render on the generic's page. Do not
   re-attempt the submodule-restatement approach without first re-verifying against a newer FORD
-  release that the upstream bug is actually fixed.
+  release that the upstream bug is actually fixed. See FORD Issue (https://github.com/Fortran-FOSS-Programmers/ford/issues/738).
 
 ## Publishing: remaining outside-this-repo steps
 

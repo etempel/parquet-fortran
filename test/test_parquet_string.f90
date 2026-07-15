@@ -558,6 +558,7 @@ contains
         call col%append_buffers(2_int64, 2_int64, c_loc(off64b), c_loc(datb), c_null_ptr, .false.)
         call check(error, col%size() == 11, "batch3 appended")
         if (allocated(error)) return
+        print*, "batch3: ", col%get(10), " : ", col%get(11)
         call check(error, col%get(10) == "m" .and. col%get(11) == "n", "batch3 content")
         if (allocated(error)) return
         call check(error, .not. col%is_null(10) .and. .not. col%is_null(11), "batch3 rows valid")

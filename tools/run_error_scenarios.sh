@@ -14,6 +14,49 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Worker mode: this script re-invokes itself (via xargs -P below) as
+#   run_error_scenarios.sh __worker__ <bin> <results_dir> <idx> <scenario> <expect_abort>
+# to run exactly one scenario and record its PASS/FAIL line + status to
+# "$results_dir/$idx.{status,line}". This lets the scenario list further down
+# be dispatched across several worker processes in parallel via xargs -P
+# instead of one `fpm test error_scenarios -- ...` invocation at a time --
+# each scenario is an independent process writing to its own uniquely-named
+# file under test_run/, so there is no cross-scenario interference. Kept as a
+# re-invocation of this same file (rather than a separate helper script or an
+# exported shell function) so it works unchanged under the old bash (3.2, no
+# `export -f`/`wait -n`) macOS ships as /bin/bash.
+if [ "${1:-}" = "__worker__" ]; then
+    bin="$2"
+    results_dir="$3"
+    idx="$4"
+    scenario="$5"
+    expect_abort="$6"
+
+    "$bin" "$scenario" > /dev/null 2>&1
+    exitstat=$?
+
+    # exit code 97 means error_scenarios.f90's `case default` was hit --
+    # i.e. this scenario name isn't recognized there (typo, or renamed on
+    # one side but not the other) -- distinct from a genuine abort so this
+    # doesn't silently "pass" by coincidence.
+    if [ "$exitstat" -eq 97 ]; then
+        status=FAIL
+        line=$(printf "[FAIL] %-50s scenario name not recognized by error_scenarios.f90 (typo?)" "$scenario")
+    else
+        if [ "$exitstat" -ne 0 ]; then aborted=1; else aborted=0; fi
+        if [ "$aborted" -eq "$expect_abort" ]; then
+            status=PASS
+            line=$(printf "[PASS] %-50s (exit=%d, expected abort=%s)" "$scenario" "$exitstat" "$expect_abort")
+        else
+            status=FAIL
+            line=$(printf "[FAIL] %-50s (exit=%d, expected abort=%s)" "$scenario" "$exitstat" "$expect_abort")
+        fi
+    fi
+    echo "$status" > "$results_dir/$idx.status"
+    echo "$line" > "$results_dir/$idx.line"
+    exit 0
+fi
+
 # scenario:expect_abort ("0" or "1")
 scenarios=(
     "ok:0"
@@ -41,6 +84,41 @@ scenarios=(
     "write_array_mismatch_float64_matrix:1"
     "write_array_mismatch_logical_matrix:1"
     "write_array_mismatch_string_matrix:1"
+    "write_chunk_undeclared_column_int32:1"
+    "write_chunk_undeclared_column_int64:1"
+    "write_chunk_undeclared_column_float32:1"
+    "write_chunk_undeclared_column_float64:1"
+    "write_chunk_undeclared_column_logical:1"
+    "write_chunk_undeclared_column_string:1"
+    "write_chunk_undeclared_column_int32_matrix:1"
+    "write_chunk_undeclared_column_int64_matrix:1"
+    "write_chunk_undeclared_column_float32_matrix:1"
+    "write_chunk_undeclared_column_float64_matrix:1"
+    "write_chunk_undeclared_column_logical_matrix:1"
+    "write_chunk_undeclared_column_string_matrix:1"
+    "write_chunk_not_divisible_int32:1"
+    "write_chunk_not_divisible_int64:1"
+    "write_chunk_not_divisible_float32:1"
+    "write_chunk_not_divisible_float64:1"
+    "write_chunk_not_divisible_logical:1"
+    "write_chunk_not_divisible_string:1"
+    "write_chunk_array_mismatch_int32_matrix:1"
+    "write_chunk_array_mismatch_int64_matrix:1"
+    "write_chunk_array_mismatch_float32_matrix:1"
+    "write_chunk_array_mismatch_float64_matrix:1"
+    "write_chunk_array_mismatch_logical_matrix:1"
+    "write_chunk_array_mismatch_string_matrix:1"
+    "write_chunk_string_matrix_exceeds_array_size:1"
+    "write_chunk_string_exceeds_array_size:1"
+    "write_chunk_no_row_group_open:1"
+    "write_chunk_row_count_mismatch:1"
+    "write_chunk_type_mismatch:1"
+    "read_chunk_with_filter:1"
+    "read_chunk_qc_hard_aborts:1"
+    "read_chunk_qc_soft_warns:0"
+    "read_chunk_check_complete_hard_aborts:1"
+    "read_chunk_row_group_out_of_range:1"
+    "get_chunk_size_row_group_out_of_range:1"
     "write_type_mismatch:1"
     "write_column_twice:1"
     "write_column_twice_no_schema:1"
@@ -101,7 +179,12 @@ scenarios=(
     "read_column_with_nulls:1"
     "read_unsupported_physical_type:1"
     "col_size_overflow:1"
-    "list_element_count_overflow:1"
+    "list_element_count_explicit_chunk_size_overflow:1"
+    "row_group_explicit_nrows_overflow:1"
+    "row_group_dangling_at_close:1"
+    "row_group_whole_column_undercovered:1"
+    "row_group_whole_column_overrun:1"
+    "row_group_new_column_after_first:1"
     "column_count_overflow:1"
     "prefetch_unknown_column:1"
     "filter_unknown_column:1"
@@ -183,56 +266,62 @@ scenarios=(
 # real OpenMP flag supplied via FPM_FFLAGS -- see README's "Thread safety"
 # section), which this script does not assume. When OpenMP is not active the
 # scenarios detect that (omp_get_max_threads() <= 1) and skip cleanly. They are
-# run separately below, best-effort, and do not count towards failures whether
-# they abort (guard fired) or skip (no real concurrency available).
+# run separately below, sequentially (not part of the parallel batch -- they
+# specifically probe OpenMP thread contention, and running them alongside a
+# pool of other concurrent processes would only add timing noise), and do not
+# count towards failures whether they abort (guard fired) or skip (no real
+# concurrency available).
 concurrency_scenarios=(
     "concurrent_calls_into_shared_reader"
     "concurrent_calls_into_shared_writer"
 )
 
 echo "Building error_scenarios..."
-if ! fpm build 2>&1 | tail -5; then
+if ! fpm build --tests 2>&1 | tail -5; then
     echo "fpm build failed" >&2
     exit 1
 fi
 
-failures=0
+bin="$(find "${FPM_BUILD_DIR:-build}" -type f -name error_scenarios | head -n 1)"
+if [ -z "$bin" ]; then
+    echo "could not locate the built error_scenarios binary under build/" >&2
+    exit 1
+fi
 
+mkdir -p test_run
+results_dir="$(mktemp -d test_run/run_error_scenarios_results.XXXXXX)"
+trap 'rm -rf "$results_dir"' EXIT
+
+# Number of scenarios to run concurrently -- override with
+# RUN_ERROR_SCENARIOS_JOBS=N if the default (one per logical CPU) is too
+# aggressive for a given machine.
+jobs_n="${RUN_ERROR_SCENARIOS_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
+
+idx=0
+tokens=()
 for entry in "${scenarios[@]}"; do
     scenario="${entry%%:*}"
     expect_abort="${entry##*:}"
+    idx=$((idx + 1))
+    tokens+=("$idx" "$scenario" "$expect_abort")
+done
 
-    fpm test error_scenarios -- "$scenario" > /dev/null 2>&1
-    exitstat=$?
+printf '%s\n' "${tokens[@]}" | xargs -P "$jobs_n" -n 3 "$0" __worker__ "$bin" "$results_dir"
 
-    # exit code 97 means error_scenarios.f90's `case default` was hit --
-    # i.e. this scenario name isn't recognized there (typo, or renamed on
-    # one side but not the other) -- distinct from a genuine abort so this
-    # doesn't silently "pass" by coincidence.
-    if [ "$exitstat" -eq 97 ]; then
-        printf "[FAIL] %-50s scenario name not recognized by error_scenarios.f90 (typo?)\n" "$scenario"
-        failures=$((failures + 1))
-        continue
-    fi
-
-    if [ "$exitstat" -ne 0 ]; then
-        aborted=1
-    else
-        aborted=0
-    fi
-
-    if [ "$aborted" -eq "$expect_abort" ]; then
-        printf "[PASS] %-50s (exit=%d, expected abort=%s)\n" "$scenario" "$exitstat" "$expect_abort"
-    else
-        printf "[FAIL] %-50s (exit=%d, expected abort=%s)\n" "$scenario" "$exitstat" "$expect_abort"
+failures=0
+i=1
+while [ "$i" -le "$idx" ]; do
+    echo "$(cat "$results_dir/$i.line")"
+    if [ "$(cat "$results_dir/$i.status")" = "FAIL" ]; then
         failures=$((failures + 1))
     fi
+    i=$((i + 1))
 done
 
 echo
 echo "Concurrency scenarios (best-effort, need FPM_FFLAGS with a real OpenMP flag to reliably trigger):"
 for scenario in "${concurrency_scenarios[@]}"; do
-    if fpm test error_scenarios -- "$scenario" > /dev/null 2>&1; then
+    if "$bin" "$scenario" > /dev/null 2>&1; then
         printf "[INFO] %-50s did not abort (skipped or single-threaded: needs genuine OpenMP concurrency)\n" "$scenario"
     else
         printf "[PASS] %-50s aborted as expected\n" "$scenario"

@@ -88,6 +88,8 @@ tools/run_error_scenarios.sh
 
 This prints a `[PASS]`/`[FAIL]` line per scenario and exits nonzero if any scenario's exit code didn't match what was expected — useful for a quick manual check or a CI step that doesn't need the full `fpm test` output. Keep this script's scenario list in sync with `test/error_scenarios.f90`'s `select case` — it's meant to be a complete mirror, not a curated subset.
 
+After one `fpm build --tests`, the script runs scenarios directly against the built `error_scenarios` binary (not through a separate `fpm test error_scenarios -- ...` per scenario) and dispatches them across several scenarios at once via `xargs -P` — each scenario is an independent process writing to its own uniquely-named file under `test_run/`, so this is safe. Defaults to one worker per logical CPU; override with `RUN_ERROR_SCENARIOS_JOBS=N tools/run_error_scenarios.sh` if that's too aggressive for a given machine. The two `concurrent_calls_into_shared_*` scenarios are the exception — they specifically probe OpenMP thread contention, so they still run sequentially, after the parallel batch.
+
 ### Regenerating the test fixtures
 
 A handful of tests read pre-built Parquet files committed under `test/fixtures/` rather than files this library writes itself. These deliberately contain shapes this library's own writer *cannot* produce — genuine Arrow validity-bitmap Nulls, an unsupported physical column type, and a list-encoded (per-row array) vector column — so that the reader's handling of them can be exercised. They are built directly against the Arrow/Parquet C++ API by `tools/generate_fixtures.cpp` (one function per fixture):
@@ -135,32 +137,31 @@ TEST_FILE=/tmp/benchmark.parquet TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads
 library genuinely reads/writes columns correctly beyond `huge(1_int32)` (2,147,483,647) rows — the
 scale no automated test in this repository ever attempts, since doing so needs a machine with
 substantial memory and disk. It drives `app/test_large_scale.f90` (a maintainer/user-only fpm
-executable, not part of the public library) through 6 cases — every supported data type, each
-written once as a plain scalar column — one case at a time: the write buffer for a case is
-deallocated before that case's file is opened for reading, and the file itself is deleted before the
-next case starts, so peak memory/disk usage is bounded by one column's own data, not by the whole
-run. Each case then checks `parquet_get_nrows` against the true count, plus reads the *entire*
-column back and compares every element. `NROWS` and `MAX_SIZE_GB` are its env-overridable config —
-`NROWS` sets the row count for every case (default a small, cheap `1000`), and `MAX_SIZE_GB`
+executable, not part of the public library) through 12 cases — every supported data type, each
+written once as a plain scalar column and once as a vector (`col_size=NELEM`) column — one case at
+a time: the write buffer for a case is deallocated before that case's file is opened for reading,
+and the file itself is deleted before the next case starts, so peak memory/disk usage is bounded by
+one column's own data, not by the whole run. Each case then checks `parquet_get_nrows` against the
+true count, plus reads the *entire* column back and compares every element. `NROWS`, `NELEM`, and
+`MAX_SIZE_GB` are its env-overridable config — `NROWS` sets the row count for every case (default a
+small, cheap `1000`), `NELEM` sets the vector cases' `col_size` (default `2`), and `MAX_SIZE_GB`
 (default `8`) skips any case whose estimated uncompressed size would exceed it instead of letting an
-oversized value exhaust memory/disk, printing e.g. `Skipped test 3 of 6: ... -- expected size
-7.451E+01 GB exceeds max_size_gb 8.000E+00 GB`. Progress is printed per case (`Running test X of 6:
-...` / `Finished test X of 6: ... -- PASSED (12.345s)` — the parenthesized wall-clock duration is
-that case's own write+read+verify time, via `system_clock` — / `Skipped test X of 6: ...`):
+oversized value exhaust memory/disk, printing e.g. `Skipped test 3 of 12: ... -- expected size
+7.451E+01 GB exceeds max_size_gb 8.000E+00 GB`. Every vector case also skips cleanly, instead of
+running, whenever `nrows * NELEM` would cross Arrow/Parquet's own list-element-count ceiling (capped
+at 2^31-1 — see `check_list_element_count_fits_arrow_limit` in `parquet_wrapper.cpp` and
+`ARROW_LIST_ELEMENT_LIMIT` in `app/test_large_scale.f90`) — a hard upstream Arrow limitation, not
+something this library can lift, printing e.g. `Skipped test 1 of 12: ... -- nrows*col_size=...
+exceeds Arrow's list-element limit 2147483647`. Progress is printed per case (`Running test X of 12:
+...` / `Finished test X of 12: ... -- PASSED (12.345s)` — the parenthesized wall-clock duration is
+that case's own write+read+verify time, via `system_clock` — / `Skipped test X of 12: ...`):
 
 ```bash
 tools/test_large_scale.sh
-# Row count itself beyond huge(1_int32) (needs a large-memory machine):
+# Row count itself beyond huge(1_int32) (needs a large-memory machine); vector cases skip
+# themselves cleanly here since nrows*NELEM would cross Arrow's list-element ceiling:
 NROWS=3000000000 MAX_SIZE_GB=120 tools/test_large_scale.sh
 ```
-
-Vector-column (`col_size=NELEM`) cases also exist in `app/test_large_scale.f90` (would bring the
-total to 12) but are hard-disabled there via its `RUN_VECTOR_CASES` parameter: Arrow/Parquet's own
-list-element-count ceiling (`nrows * col_size` capped at 2^31-1 — see
-`check_list_element_count_fits_arrow_limit` in `parquet_wrapper.cpp`, and the README's Limitations
-section) means an `NROWS` large enough to be an interesting scalar-only check aborts every vector
-case outright once `NELEM > 1`. Flip `RUN_VECTOR_CASES` back to `.true.` there once Arrow supports
-more than 2^31-1 elements in a list column.
 
 `tools/check_doc_anchors.py` validates every `#anchor` link in this repository's `*.md` files — same-file and cross-file — against the anchors GitHub would actually generate for each file's headings (using GitHub's real slugging rules, including the `-1`/`-2` suffixing for repeated headings), and exits nonzero if any link doesn't resolve. Run it after editing headings or anchor links in README.md/CONTRIBUTING.md:
 

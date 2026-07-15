@@ -8,12 +8,11 @@
 !> any verification read happens, and its temp file is deleted before the next case starts, so
 !> peak memory/disk usage is bounded by one column's own data, not by the whole run.
 !>
-!> Vector (col_size=NELEM) cases exist too but are hard-disabled via the RUN_VECTOR_CASES
-!> parameter below: Arrow/Parquet's own list-element-count ceiling (nrows * col_size capped at
-!> 2^31-1 -- see check_list_element_count_fits_arrow_limit in parquet_wrapper.cpp) means any
-!> NELEM > 1 run aborts on the vector cases well before an NROWS large enough to be an
-!> interesting scalar-only check. Flip RUN_VECTOR_CASES back to .true. once Arrow supports more
-!> than 2^31-1 elements in a list column.
+!> Vector (col_size=NELEM) cases run too (see RUN_VECTOR_CASES below), one per type, each
+!> skipping cleanly instead of running when nrows*NELEM would cross Arrow/Parquet's own
+!> list-element-count ceiling (nrows * col_size capped at 2^31-1 -- see
+!> check_list_element_count_fits_arrow_limit in parquet_wrapper.cpp and ARROW_LIST_ELEMENT_LIMIT
+!> below) -- that ceiling is a hard upstream Arrow limitation, not something this library can lift.
 !>
 !> To reach the >huge(1_int32) scalar row-count scenario:
 !>   NROWS=3000000000
@@ -34,13 +33,20 @@ program test_large_scale
     character(len=*), parameter :: TMPFILE = "test_run/test_large_scale_tmp.parquet"
     character(len=*), parameter :: COLNAME = "v"
 
-    !> Hard-disabled until Arrow/Parquet's own list-element-count ceiling (nrows * col_size
-    !> capped at 2^31-1 -- see check_list_element_count_fits_arrow_limit in parquet_wrapper.cpp
-    !> and the README's Limitations section) gains a "large list" upstream variant: with it left
-    !> on, an NROWS large enough to be an interesting *scalar*-column check aborts every vector
-    !> case outright as soon as nrows*NELEM crosses that ceiling, well before reaching row counts
-    !> that actually stress anything new. Flip back to .true. once Arrow supports it.
-    logical, parameter :: RUN_VECTOR_CASES = .false.
+    !> Arrow/Parquet's own list-element-count ceiling (nrows * col_size, hard-capped at a plain
+    !> int32_t upstream) -- see check_list_element_count_fits_arrow_limit in parquet_wrapper.cpp
+    !> and the README's Limitations section. Every vector case below skips cleanly (like the
+    !> existing max_size_gb skip) rather than error-stopping into it, so an NROWS chosen to stress
+    !> the scalar cases (e.g. the >huge(1_int32) row-count scenario) doesn't kill the whole program
+    !> before it ever reaches them -- vector cases run first in the case sequence below.
+    integer(int64), parameter :: ARROW_LIST_ELEMENT_LIMIT = 2147483647_int64
+
+    !> Set to .false. to skip the 6 vector cases outright (e.g. for a quick scalar-only run);
+    !> normally left .true. -- each vector case already skips itself cleanly (via
+    !> ARROW_LIST_ELEMENT_LIMIT above) rather than error-stopping when nrows*NELEM would exceed
+    !> Arrow's own list-element ceiling, so leaving this on is safe even for an NROWS chosen to
+    !> stress the *scalar* >huge(1_int32) row-count case.
+    logical, parameter :: RUN_VECTOR_CASES = .true.
 
     integer(int64) :: nrows, nelem
     real(real64) :: max_size_gb
@@ -66,10 +72,11 @@ program test_large_scale
     call string_scalar_case(test_num, total_tests, nrows, max_size_gb)
 
     if (.not. RUN_VECTOR_CASES) then
-        write(output_unit, '(a)') "test_large_scale: vector-column cases are hard-disabled " // &
-            "(RUN_VECTOR_CASES = .false. in app/test_large_scale.f90) -- see its own comment."
+        write(output_unit, '(a)') "test_large_scale: vector-column cases were skipped " // &
+            "(RUN_VECTOR_CASES = .false. in app/test_large_scale.f90)."
     end if
-    write(output_unit, '(a)') "test_large_scale: all cases completed (each PASSED or was SKIPPED as too large)."
+    write(output_unit, '(a)') "test_large_scale: all cases completed (each PASSED or was SKIPPED as too large " // &
+        "or beyond Arrow's list-element limit)."
 
 contains
 
@@ -214,6 +221,22 @@ contains
             " -- expected size "//trim(adjustl(gb_s))//" GB exceeds max_size_gb "//trim(adjustl(max_gb_s))//" GB"
     end subroutine print_skipped
 
+    !> Like print_skipped, but for a vector case whose nrows*col_size would exceed
+    !> ARROW_LIST_ELEMENT_LIMIT -- Arrow's own list-element-count ceiling, not this library's.
+    subroutine print_skipped_arrow_limit(test_num, total, label, nrows, col_size)
+        integer, intent(in) :: test_num, total
+        character(len=*), intent(in) :: label
+        integer(int64), intent(in) :: nrows, col_size
+        character(len=32) :: num_s, total_s, elems_s, limit_s
+
+        write(num_s, '(i0)') test_num
+        write(total_s, '(i0)') total
+        write(elems_s, '(i0)') nrows * col_size
+        write(limit_s, '(i0)') ARROW_LIST_ELEMENT_LIMIT
+        write(output_unit, '(a)') "Skipped test "//trim(num_s)//" of "//trim(total_s)//": "//label// &
+            " -- nrows*col_size="//trim(elems_s)//" exceeds Arrow's list-element limit "//trim(limit_s)
+    end subroutine print_skipped_arrow_limit
+
     subroutine delete_file(filename)
         character(len=*), intent(in) :: filename
         integer :: unit, ios
@@ -294,6 +317,10 @@ contains
         gb = estimated_gb(nrows, col_size, BYTES_INT32)
         if (gb > max_gb) then
             call print_skipped(test_num, total, label, gb, max_gb)
+            return
+        end if
+        if (nrows * col_size > ARROW_LIST_ELEMENT_LIMIT) then
+            call print_skipped_arrow_limit(test_num, total, label, nrows, col_size)
             return
         end if
         call print_start(test_num, total, label, start_time)
@@ -421,6 +448,10 @@ contains
             call print_skipped(test_num, total, label, gb, max_gb)
             return
         end if
+        if (nrows * col_size > ARROW_LIST_ELEMENT_LIMIT) then
+            call print_skipped_arrow_limit(test_num, total, label, nrows, col_size)
+            return
+        end if
         call print_start(test_num, total, label, start_time)
 
         allocate(values(col_size, nrows))
@@ -544,6 +575,10 @@ contains
         gb = estimated_gb(nrows, col_size, BYTES_FLOAT32)
         if (gb > max_gb) then
             call print_skipped(test_num, total, label, gb, max_gb)
+            return
+        end if
+        if (nrows * col_size > ARROW_LIST_ELEMENT_LIMIT) then
+            call print_skipped_arrow_limit(test_num, total, label, nrows, col_size)
             return
         end if
         call print_start(test_num, total, label, start_time)
@@ -671,6 +706,10 @@ contains
             call print_skipped(test_num, total, label, gb, max_gb)
             return
         end if
+        if (nrows * col_size > ARROW_LIST_ELEMENT_LIMIT) then
+            call print_skipped_arrow_limit(test_num, total, label, nrows, col_size)
+            return
+        end if
         call print_start(test_num, total, label, start_time)
 
         allocate(values(col_size, nrows))
@@ -794,6 +833,10 @@ contains
         gb = estimated_gb(nrows, col_size, BYTES_LOGICAL)
         if (gb > max_gb) then
             call print_skipped(test_num, total, label, gb, max_gb)
+            return
+        end if
+        if (nrows * col_size > ARROW_LIST_ELEMENT_LIMIT) then
+            call print_skipped_arrow_limit(test_num, total, label, nrows, col_size)
             return
         end if
         call print_start(test_num, total, label, start_time)
@@ -921,6 +964,10 @@ contains
         gb = estimated_gb(nrows, col_size, BYTES_STRING)
         if (gb > max_gb) then
             call print_skipped(test_num, total, label, gb, max_gb)
+            return
+        end if
+        if (nrows * col_size > ARROW_LIST_ELEMENT_LIMIT) then
+            call print_skipped_arrow_limit(test_num, total, label, nrows, col_size)
             return
         end if
         call print_start(test_num, total, label, start_time)

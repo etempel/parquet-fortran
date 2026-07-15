@@ -31,16 +31,23 @@ C++-level abort with a diagnostic on stderr, the same class of failure as the ph
 case in [Limitations](../index.html#limitations)) rather than silently truncating `col_size` and
 corrupting the written column.
 
-### Vector-column total element count (`nrows * col_size`) limit
+### Vector-column per-row-group element count limit
 
-Separate from `col_size` alone, above, a vector column's *total* flattened element count
-(`nrows * col_size`) is also capped at 2,147,483,647 — even when `col_size` itself is well within
-its own limit. Parquet's own repetition/definition-level generation for list-typed columns walks
-every flattened element with a plain `int32_t` counter, so this product overflowing is a real,
-hittable case (e.g. 2.5 billion rows at `col_size=2`), not just a theoretical one. Writing a vector
-column whose `nrows * col_size` would exceed this aborts the process the same way as the `col_size`
-case above (a C++-level abort with a diagnostic on stderr) instead of letting Arrow itself throw an
-uncaught `IOError: List index overflow` mid-write.
+Parquet's own repetition/definition-level generation for list-typed columns walks every flattened
+element *of a single row group* with a plain `int32_t` counter, so a row group's own
+`row_group_rows * col_size` is capped at 2,147,483,647 — but this is scoped to one row group, not
+the whole file. `parquet_close_writer`'s row-group auto-sizing (see `chunk_size` in
+[Writing parquet files](writing.html)) already knows each column's `col_size` and silently picks a
+smaller row-group size whenever a wide vector column needs it, so a column's *total*
+`nrows * col_size` can exceed 2,147,483,647 — a real, hittable case (e.g. 2.5 billion rows at
+`col_size=2`) — without any special handling: it is transparently split across multiple row groups
+and round-trips normally. The only case that still aborts is an *explicitly* chosen `chunk_size`
+(`parquet_open_writer`/`parquet_set_writer_options`) that conflicts with a vector column's
+`col_size` — silently shrinking a caller's explicit request would be a surprising, hard-to-notice
+performance change, so this aborts the process instead (a C++-level abort with a diagnostic on
+stderr, the same class of failure as the `col_size` case above) rather than either silently
+overriding the request or letting Arrow itself throw an uncaught `IOError: List index overflow`
+mid-write.
 
 ### Reading a column into a different numeric kind
 
@@ -124,7 +131,7 @@ call parquet_open_writer(writer, "data.parquet", compression="zstd", compression
 ```
 - `compression` — one of `"uncompressed"`, `"snappy"` (the default), `"gzip"`, `"zstd"`, `"brotli"`, `"lz4"` (case-insensitive); an unrecognized name fails immediately with `error stop`. The default is `"snappy"`, following the ecosystem convention (pyarrow, Spark, ...) rather than Parquet's own unset-by-default `"uncompressed"`. Rough guidance: `snappy`/`lz4` for fastest read/write at a modest size reduction; `gzip`/`brotli` for the smallest files at slower speed; `zstd` for the best balance (and the only one here with a meaningfully tunable `compression_level`, roughly 1–22).
 - `compression_level` — optional integer tuning the chosen codec's compression level (mainly meaningful for `zstd`/`gzip`/`brotli`); omitted means "use that codec's own default level".
-- `chunk_size` — **advanced/optional: most callers never need to set this.** It's the maximum number of rows per Parquet row group. If omitted (the default, recommended for normal use), it is auto-sized once `parquet_close_writer` runs, targeting ~256 MiB per row group based on the table's actual in-memory byte size — not a flat row count — so both narrow `int32` columns and wide vector columns (large `col_size`) end up sensibly sized without tuning, up to very large files (hundreds of millions of rows). The auto-sized value is clamped between 1,000 and 10,000,000 rows. Pass an explicit value only to override this — e.g. to force multiple row groups in a small file (as some of this library's own tests do), or to hand-tune the memory-vs-overhead trade-off for a workload you've measured: larger values reduce per-row-group overhead and can improve compression, at the cost of more per-row-group encoder state (dictionaries, statistics) held in memory while writing (see [Performance and memory](performance.html)).
+- `chunk_size` — **advanced/optional: most callers never need to set this.** It's the maximum number of rows per Parquet row group. If omitted (the default, recommended for normal use), it is auto-sized — from the table's actual in-memory byte size once `parquet_close_writer` runs, for a writer that only ever uses `parquet_write_column`, or from the schema's declared types/`col_size` right away for a writer that uses the [streaming row-group API](writing.html#streamingchunked-writes) instead — targeting ~256 MiB per row group, not a flat row count, so both narrow `int32` columns and wide vector columns (large `col_size`) end up sensibly sized without tuning, up to very large files (hundreds of millions of rows). The auto-sized value is clamped between 1,000 and 10,000,000 rows, and further clamped down if needed so no vector column's per-row-group element count can exceed Arrow's own limit (see [Vector-column per-row-group element count limit](#vector-column-per-row-group-element-count-limit)). Pass an explicit value only to override this — e.g. to force multiple row groups in a small file (as some of this library's own tests do), or to hand-tune the memory-vs-overhead trade-off for a workload you've measured: larger values reduce per-row-group overhead and can improve compression, at the cost of more per-row-group encoder state (dictionaries, statistics) held in memory while writing (see [Performance and memory](performance.html)). `parquet_get_chunk_size` returns the writer's resolved value (or, for a `parquet_reader`, an existing row group's actual size) at any point after opening.
 
 ### Multi-threaded decoding/encoding (`use_threads`) and thread pool size
 

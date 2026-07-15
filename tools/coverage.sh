@@ -52,6 +52,12 @@ echo "Using gcov:      $GCOV" >&2
 export FPM_BUILD_DIR="${FPM_BUILD_DIR:-build/gcov}"
 export FPM_FFLAGS="${FPM_FFLAGS:-} -O0 -g --coverage"
 
+# Unconditional on every invocation -- this build dir is separate from fpm's default `build/`
+# (so `fpm clean --all` never touches it) and is NOT reused/merged across runs: a manual
+# `fpm test ...` pointed at this same FPM_BUILD_DIR outside this script (e.g. for quick
+# iteration while debugging) leaves its own coverage data behind, which would otherwise get
+# silently merged into the next report here and inflate/skew its numbers. Always start clean.
+echo "Cleaning previous coverage build directory: $FPM_BUILD_DIR" >&2
 rm -rf "$FPM_BUILD_DIR"
 
 echo "Building + running run_tester with coverage instrumentation..." >&2

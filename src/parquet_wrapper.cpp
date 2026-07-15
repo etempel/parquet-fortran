@@ -214,6 +214,29 @@ extern "C"
 		int64_t chunk_size = -1; // <= 0 means "not set by the caller": auto-sized at close time from the final row count.
 		bool use_threads = true; // per-writer opt-out of Arrow's internal thread pool; see parquet_open_writer(..., use_threads=).
 		std::atomic<bool> busy{false}; // guards against two threads calling into the same writer at once; see ConcurrencyGuard.
+
+		// --- Streaming row-group API state (parquet_new_row_group/parquet_write_column_chunk/
+		// parquet_finish_row_group) -- unused (left at these defaults) by a writer that only
+		// ever uses parquet_write_column; see resolve_chunk_size/close_parquet_writer for how
+		// the two paths coexist. ---
+		int64_t resolved_chunk_size = -1; // Cached by resolve_chunk_size on first need; -1 = not yet resolved.
+		// The lower-level, row-group-oriented FileWriter (distinct from the WriteTable-based
+		// batch path) -- lazily opened at the *first* parquet_finish_row_group call, once every
+		// column appearing in that (first) row group is known, since Parquet's file-level schema
+		// must be fixed before any row group can be written. Null until then; once non-null, the
+		// batch (WriteTable) close path is no longer used -- see close_parquet_writer.
+		std::unique_ptr<parquet::arrow::FileWriter> row_group_writer;
+		bool in_row_group = false; // true between parquet_new_row_group and its matching parquet_finish_row_group.
+		int64_t current_row_group_nrows = 0; // The `nrows` given to the currently-open parquet_new_row_group call.
+		// Running total of rows covered by every *finished* row group so far -- also the slice
+		// offset into any whole (parquet_write_column-populated) column for the next row group.
+		int64_t streamed_rows_total = 0;
+		// One entry per column already touched by parquet_write_column_chunk for the
+		// currently-open row group (built fresh, as a small array covering just this row
+		// group's rows, by append_typed_column_chunk_impl -- never a slice of a larger array).
+		// Cleared by parquet_new_row_group, consumed and cleared again by
+		// parquet_finish_row_group.
+		std::unordered_map<int, std::shared_ptr<arrow::Array>> pending_chunk_arrays;
 	};
 
 	// One column's read-time QC declaration, parsed on the Fortran side
@@ -301,6 +324,16 @@ extern "C"
 		std::unordered_map<int, QcRule> qc_rules;
 		std::unordered_set<int> qc_null_warned;
 		std::unordered_set<int> qc_range_warned;
+		// Row-group-chunked read support (parquet_read_column_chunk / parquet_get_num_row_groups /
+		// parquet_get_chunk_size(reader,...) -- see get_row_group_chunk_array). num_row_groups is
+		// the file's row-group count, read once from the footer at open time
+		// (create_parquet_reader) -- unlike nrows/total_nrows this is never affected by filtering,
+		// since a filtered reader disallows chunk reads entirely (get_row_group_chunk_array).
+		// chunk_read_row_groups tracks, per column schema-field-index, which 1-based row groups
+		// have been read via the chunk API -- used only by parquet_reader_check_complete, called
+		// from parquet_close_reader(check_complete=.true.).
+		int64_t num_row_groups = 0;
+		std::unordered_map<int, std::unordered_set<int64_t>> chunk_read_row_groups;
 		std::atomic<bool> busy{false}; // guards against two threads calling into the same reader at once; see ConcurrencyGuard.
 	};
 
@@ -549,21 +582,22 @@ extern "C"
 		}
 	}
 
-	// Arrow/Parquet's real limit on a vector column's *total* flattened element count
-	// (nrows * col_size), separate from the col_size-alone ceiling above. Parquet's own
+	// Arrow/Parquet's real limit on a vector column's flattened element count *per row group*
+	// (row_group_rows * col_size), separate from the col_size-alone ceiling above. Parquet's own
 	// repetition/definition-level generation for list-typed columns (level_conversion.cc) walks
-	// every flattened element with a plain int32_t counter, so once nrows * col_size exceeds
-	// 2^31-1 that counter overflows and Arrow throws IOError("List index overflow") from deep
-	// inside parquet::arrow::WriteTable during close_parquet_writer -- past the point where a
-	// clean report_fatal_error can intervene, and on some toolchains (see
-	// parquet_read_int32_column's comment on gfortran/macOS unwinding) past the point where even
-	// a try/catch reliably catches it, surfacing as an uncaught std::terminate/abort instead of a
-	// clean error stop. Known upstream limitation, not fixed by choosing large_utf8/large_list on
-	// the write side (see apache/arrow#33188 / ARROW-17983). Unlike the string byte-offset limit,
-	// there is no "large" list variant to auto-upgrade to -- this is a hard ceiling.
-	// append_typed_column and parquet_append_string_array_column check nrows * col_size against
-	// this (or, under test, g_debug_list_element_count_limit -- see
-	// parquet_debug_set_list_element_count_limit) before ever building the FixedSizeListBuilder.
+	// every flattened element of a row group with a plain int32_t counter, so once
+	// row_group_rows * col_size exceeds 2^31-1 that counter overflows and Arrow throws
+	// IOError("List index overflow") from deep inside parquet::arrow::WriteTable during
+	// close_parquet_writer. Known upstream limitation, not fixed by choosing large_utf8/large_list
+	// on the write side (see apache/arrow#33188 / ARROW-17983). Unlike the string byte-offset
+	// limit, there is no "large" list variant to auto-upgrade to -- this is a hard ceiling, but
+	// crucially it is scoped to one row group's element count, not the whole file's: WriteTable's
+	// own row-group splitting already keeps an arbitrarily large *total* column within this limit
+	// as long as each individual row group stays under it (confirmed empirically -- a
+	// multi-billion-element FixedSizeListArray writes successfully split across small-enough row
+	// groups). So this is enforced in close_parquet_writer, once the actual row-group size
+	// (effective_chunk_size) is known -- see there for how the auto-sized and explicit-chunk_size
+	// cases differ.
 	static constexpr int64_t kArrowInt32ListElementCountLimit = 2147483647; // 2^31 - 1
 
 	// Test-only override of kArrowInt32ListElementCountLimit -- see
@@ -572,22 +606,213 @@ extern "C"
 	// real production limit".
 	static int64_t g_debug_list_element_count_limit = -1;
 
-	// Aborts (via report_fatal_error) if nrows * col_size exceeds Arrow/Parquet's flattened
-	// list-element-count limit -- see kArrowInt32ListElementCountLimit, above. Called for every
-	// col_size > 1 vector column, before its FixedSizeListBuilder is ever built. Guards the
-	// nrows * col_size multiplication itself against overflowing int64 (the same way
-	// would_overflow_string_offset_limit does) rather than computing it directly.
-	static void check_list_element_count_fits_arrow_limit(int64_t nrows, int64_t col_size, const std::string &name, const char *context)
+	// Returns the widest col_size among `fields`' FIXED_SIZE_LIST columns (0 if none) -- used by
+	// close_parquet_writer to size/validate effective_chunk_size against
+	// kArrowInt32ListElementCountLimit.
+	static int64_t max_fixed_size_list_col_size(const std::vector<std::shared_ptr<arrow::Field>> &fields)
 	{
-		if (nrows <= 0 || col_size <= 0) return;
+		int64_t max_col_size = 0;
+		for (const auto &field : fields)
+		{
+			if (field->type()->id() != arrow::Type::FIXED_SIZE_LIST) continue;
+			auto col_size = static_cast<int64_t>(std::static_pointer_cast<arrow::FixedSizeListType>(field->type())->list_size());
+			if (col_size > max_col_size) max_col_size = col_size;
+		}
+		return max_col_size;
+	}
+
+	// Core of check_explicit_chunk_size_fits_arrow_limit / check_chunk_size_fits_metadata_limit,
+	// below -- both need only a (name, col_size) view of one column, whether it comes from an
+	// already-built arrow::Field (the WriteTable/batch path and the streaming path once its
+	// schema is locked -- see ParquetWriterHandle::fields) or a still-schema-only ColumnMetadata
+	// entry (resolving a row-group size before any data exists at all -- see resolve_chunk_size).
+	// Aborts (via report_fatal_error) if `chunk_size` -- an *explicit*, caller-chosen row-group
+	// size, from parquet_open_writer(..., chunk_size=)/parquet_set_writer_options -- combined
+	// with `col_size` would exceed kArrowInt32ListElementCountLimit. Only ever called for an
+	// explicit chunk_size: the auto-sized path (chunk_size <= 0) instead silently clamps its own
+	// computed value down to whatever is safe, since nothing was explicitly requested to
+	// silently deviate from -- see close_parquet_writer/estimate_chunk_size_from_schema. Guards
+	// the chunk_size * col_size multiplication itself against overflowing int64 (the same way
+	// would_overflow_string_offset_limit does) rather than computing it directly.
+	static void check_chunk_size_fits_limit_for_col_size(int64_t chunk_size, const std::string &name,
+		int64_t col_size, const char *context, const char *value_label = "chunk_size",
+		const char *advice = "pass a smaller chunk_size to parquet_open_writer/parquet_set_writer_options, or "
+			"omit it to auto-size safely")
+	{
+		if (col_size <= 1) return;
 		int64_t limit = g_debug_list_element_count_limit > 0 ? g_debug_list_element_count_limit : kArrowInt32ListElementCountLimit;
-		bool overflows = nrows > limit / col_size || nrows * col_size > limit;
+		bool overflows = chunk_size > limit / col_size || chunk_size * col_size > limit;
 		if (overflows)
 		{
-			report_fatal_error(context, "column '" + name + "': nrows (" + std::to_string(nrows) + ") * col_size (" +
-				std::to_string(col_size) + ") exceeds " + std::to_string(kArrowInt32ListElementCountLimit) +
-				", the maximum total element count Arrow/Parquet's list-column level generation supports");
+			report_fatal_error(context, "column '" + name + "': " + value_label + " (" + std::to_string(chunk_size) +
+				") * col_size (" + std::to_string(col_size) + ") exceeds " + std::to_string(kArrowInt32ListElementCountLimit) +
+				", the maximum per-row-group element count Arrow/Parquet's list-column level generation supports "
+				"-- " + advice);
 		}
+	}
+
+	// Field-based (WriteTable/batch path, and the streaming path once every column's
+	// arrow::Field is known) form of check_chunk_size_fits_limit_for_col_size, above -- checks
+	// every FIXED_SIZE_LIST column in `fields`.
+	static void check_explicit_chunk_size_fits_arrow_limit(int64_t chunk_size,
+		const std::vector<std::shared_ptr<arrow::Field>> &fields, const char *context)
+	{
+		for (const auto &field : fields)
+		{
+			if (field->type()->id() != arrow::Type::FIXED_SIZE_LIST) continue;
+			auto col_size = static_cast<int64_t>(std::static_pointer_cast<arrow::FixedSizeListType>(field->type())->list_size());
+			check_chunk_size_fits_limit_for_col_size(chunk_size, field->name(), col_size, context);
+		}
+	}
+
+	// ColumnMetadata-based (schema-declared, before any data exists) form of
+	// check_chunk_size_fits_limit_for_col_size, above -- used by resolve_chunk_size to validate
+	// an explicit chunk_size against every column a schema already declares, without needing any
+	// column's arrow::Field to exist yet.
+	static void check_chunk_size_fits_metadata_limit(int64_t chunk_size,
+		const std::vector<ColumnMetadata> &column_metadata, const char *context, const char *value_label = "chunk_size",
+		const char *advice = "pass a smaller chunk_size to parquet_open_writer/parquet_set_writer_options, or "
+			"omit it to auto-size safely")
+	{
+		for (const auto &col : column_metadata)
+		{
+			check_chunk_size_fits_limit_for_col_size(chunk_size, col.name, col.col_size, context, value_label, advice);
+		}
+	}
+
+	// Row-group-size byte-target policy, shared by close_parquet_writer's actual-table-bytes
+	// computation (writers that never use the streaming row-group API) and
+	// estimate_chunk_size_from_schema's schema-only estimate, below (writers that do). Targets a
+	// row group size in BYTES rather than a flat row count -- a flat row-count cap doesn't know
+	// how wide a row is: for a handful of int32 columns, a few hundred thousand rows might be a
+	// few MB, while for a table with several vector columns (large col_size) the same row count
+	// could be gigabytes -- sized this way, both end up with row groups in the same ballpark of
+	// actual bytes, which is what Parquet's own row-group size guidance (roughly 128MB-1GB) is
+	// actually about, and what drives per-row-group compression efficiency and decode cost.
+	// kMinAutoChunkSizeRows/kMaxAutoChunkSizeRows bound the result so pathological row widths
+	// still produce something reasonable: an extremely wide row (e.g. a huge vector column) is
+	// floored so a table isn't fragmented into an absurd number of tiny row groups, and an
+	// extremely narrow row is capped so a huge table doesn't collapse into one single, enormous
+	// row group either. Callers separately apply any further caps afterward (a known num_rows,
+	// the int32 vector-column ceiling via max_fixed_size_list_col_size/estimate_chunk_size_from_
+	// schema) -- this function only implements the core byte-target arithmetic.
+	static constexpr int64_t kTargetRowGroupBytes = 256LL * 1024 * 1024; // ~256 MiB
+	static constexpr int64_t kMinAutoChunkSizeRows = 1000;
+	// 10,000,000: high enough that the byte target above governs for any realistically-shaped
+	// table (the row-count cap only starts to bind below ~27 bytes/row -- e.g. a single narrow
+	// column), while still backstopping genuinely pathological cases (a handful of bytes per row
+	// at billions of rows) from collapsing into one giant row group spanning the whole file.
+	static constexpr int64_t kMaxAutoChunkSizeRows = 10000000;
+	// The kMinAutoChunkSizeRows floor exists to avoid fragmenting a table into an excessive
+	// number of tiny row groups when rows are moderately wide -- but blindly applying it
+	// regardless of row width defeats the whole point of sizing by bytes: if a single row is
+	// already close to (or bigger than) kTargetRowGroupBytes (e.g. a vector column with a very
+	// large col_size), forcing kMinAutoChunkSizeRows rows into one row group would produce a row
+	// group many times the intended size. kMaxFloorOvershootFactor bounds how far the floor is
+	// allowed to push things past the target before it's abandoned in favor of a
+	// smaller-than-floor (down to 1 row) row group instead -- an under-sized row group is a much
+	// smaller problem than one that is unboundedly oversized.
+	static constexpr double kMaxFloorOvershootFactor = 4.0;
+
+	static int64_t chunk_size_from_bytes_per_row(double bytes_per_row)
+	{
+		auto rows_for_target = static_cast<int64_t>(
+			static_cast<double>(kTargetRowGroupBytes) / std::max(bytes_per_row, 1.0));
+
+		if (rows_for_target >= kMinAutoChunkSizeRows)
+		{
+			return std::min<int64_t>(rows_for_target, kMaxAutoChunkSizeRows);
+		}
+		if (static_cast<double>(kMinAutoChunkSizeRows) * bytes_per_row
+			<= static_cast<double>(kTargetRowGroupBytes) * kMaxFloorOvershootFactor)
+		{
+			// Floor overshoots the target, but only by a bounded, acceptable amount -- apply it
+			// as usual.
+			return kMinAutoChunkSizeRows;
+		}
+		// Even the floor would blow far past the target (rows this wide): accept a
+		// smaller-than-floor row group (down to 1 row) instead of a wildly oversized one.
+		return std::max<int64_t>(rows_for_target, 1);
+	}
+
+	// Per-element byte-width estimate for a MAML-declared data_type, used only to estimate a
+	// row-group size from schema alone (no actual data yet) -- see
+	// estimate_chunk_size_from_schema. A conservative (never-under) estimate is what matters
+	// here, not exactness: overestimating bytes-per-row only makes the resulting row groups
+	// smaller/more numerous than strictly necessary, never larger than the byte target intends.
+	// "string" uses array_size (the MAML-declared max length) as its upper bound, the same
+	// convention would_overflow_string_offset_limit already uses for the string byte-offset
+	// ceiling.
+	static int64_t estimated_bytes_per_element(const std::string &data_type, int64_t array_size)
+	{
+		if (data_type == "int32" || data_type == "float32") return 4;
+		if (data_type == "int64" || data_type == "float64") return 8;
+		if (data_type == "boolean") return 1; // Arrow bit-packs booleans; 1 byte/element over-estimates safely.
+		if (data_type == "string") return array_size > 0 ? array_size : 1;
+		return 8; // Unrecognized data_type shouldn't happen (schema parsing validates this
+		          // elsewhere) -- a conservative fallback rather than a hard failure here, since
+		          // this is only an estimate, never the source of correctness.
+	}
+
+	// Estimates a row-group size (see chunk_size_from_bytes_per_row) purely from
+	// `column_metadata`'s declared types/col_size/array_size -- no actual data needed. Used to
+	// give parquet_get_chunk_size(writer) a usable answer before any column has been written,
+	// and to lock in a starting row-group size the moment the streaming row-group API
+	// (parquet_new_row_group) is first used, since by then data may only exist one row group at
+	// a time rather than as one fully-built table the way close_parquet_writer's own,
+	// more-accurate actual-bytes computation needs -- see resolve_chunk_size. Also applies the
+	// int32 vector-column clamp directly (via max_col_size, computed inline below since
+	// ColumnMetadata's col_size doesn't need max_fixed_size_list_col_size's arrow::Field
+	// unwrapping), since a schema-based estimate must already be safe the moment it's handed
+	// out -- unlike close_parquet_writer's own computation, there is no later opportunity to
+	// re-clamp before the first row group is built.
+	static int64_t estimate_chunk_size_from_schema(const std::vector<ColumnMetadata> &column_metadata)
+	{
+		double bytes_per_row = 0;
+		int64_t max_col_size = 0;
+		for (const auto &col : column_metadata)
+		{
+			auto col_size = col.col_size > 0 ? col.col_size : 1;
+			bytes_per_row += static_cast<double>(estimated_bytes_per_element(col.data_type, col.array_size)) *
+				static_cast<double>(col_size);
+			if (col_size > max_col_size) max_col_size = col_size;
+		}
+
+		int64_t effective_chunk_size = bytes_per_row > 0 ? chunk_size_from_bytes_per_row(bytes_per_row) : kMaxAutoChunkSizeRows;
+		if (effective_chunk_size < 1) effective_chunk_size = 1;
+
+		if (max_col_size > 1)
+		{
+			int64_t limit = g_debug_list_element_count_limit > 0 ? g_debug_list_element_count_limit : kArrowInt32ListElementCountLimit;
+			effective_chunk_size = std::min(effective_chunk_size, std::max<int64_t>(limit / max_col_size, 1));
+		}
+		return effective_chunk_size;
+	}
+
+	// Resolves and CACHES writer_handle->resolved_chunk_size on first call -- the authoritative
+	// row-group size for parquet_get_chunk_size(writer), queried before any data has been
+	// written, and the advisory starting point for the streaming row-group API
+	// (parquet_new_row_group's own `nrows` argument is what actually determines each row
+	// group's size; this is only ever a suggestion the caller's loop can choose to follow).
+	// Once cached, always returns the same value -- recomputing later would be pointless, since
+	// nothing about this schema-only estimate improves with time the way close_parquet_writer's
+	// own actual-table-bytes computation does for a writer that never streams at all (see there
+	// -- that path is entirely separate and unaffected by this one).
+	static int64_t resolve_chunk_size(ParquetWriterHandle *writer_handle)
+	{
+		if (writer_handle->resolved_chunk_size > 0) return writer_handle->resolved_chunk_size;
+
+		if (writer_handle->chunk_size > 0)
+		{
+			check_chunk_size_fits_metadata_limit(writer_handle->chunk_size, writer_handle->column_metadata,
+				"parquet_get_chunk_size");
+			writer_handle->resolved_chunk_size = writer_handle->chunk_size;
+		}
+		else
+		{
+			writer_handle->resolved_chunk_size = estimate_chunk_size_from_schema(writer_handle->column_metadata);
+		}
+		return writer_handle->resolved_chunk_size;
 	}
 
 	// Arrow's real limit for a table's column count: arrow::Schema::num_fields()/GetFieldIndex()
@@ -1169,6 +1394,20 @@ extern "C"
 		const std::shared_ptr<arrow::Field> &field,
 		const std::shared_ptr<arrow::Array> &array)
 	{
+		// A whole-column (parquet_write_column) write is never valid once the streaming
+		// row-group API has already locked the file's schema (see parquet_finish_row_group) --
+		// every column, new or previously-declared-but-untouched, must go through
+		// parquet_write_column_chunk from that point on. A column that was already
+		// chunk-started (but the file's schema not yet locked) is instead caught below, by the
+		// ordinary "written more than once" check -- its field is already set at that point,
+		// same as a column written the ordinary way twice.
+		if (writer_handle->row_group_writer)
+		{
+			throw std::runtime_error("Column written via parquet_write_column after the streaming row-group API "
+				"already started writing row groups: " + name + " -- every column must be written via "
+				"parquet_write_column before the first parquet_new_row_group call");
+		}
+
 		auto metadata_index = static_cast<int64_t>(-1);
 		for (int64_t i = 0; i < static_cast<int64_t>(writer_handle->column_metadata.size()); ++i)
 		{
@@ -1379,6 +1618,7 @@ extern "C"
 
 		handle->nrows = handle->reader->parquet_reader()->metadata()->num_rows();
 		handle->total_nrows = handle->nrows;
+		handle->num_row_groups = handle->reader->parquet_reader()->metadata()->num_row_groups();
 
 		auto kv_metadata = handle->schema->metadata();
 		if (kv_metadata)
@@ -1534,6 +1774,36 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		return reader_handle->total_nrows;
+	}
+
+	// Returns `handle`'s row-group count (the file's physical row-group layout, unaffected by
+	// any filter). See parquet_get_num_row_groups (parquet.f90).
+	int64_t parquet_reader_get_num_row_groups(void *handle)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		return reader_handle->num_row_groups;
+	}
+
+	// True (1) if `handle` was opened with an active row filter -- parquet_read_column_chunk and
+	// parquet_get_chunk_size(reader,...) are both disallowed on such a reader (see
+	// get_row_group_chunk_array's own comment for why filtering doesn't compose with a
+	// row-group-scoped read). Checked on the Fortran side (parquet_read.f90) so the resulting
+	// error stop is clean and names the file, rather than a C++-level report_fatal_error.
+	int parquet_reader_has_filter(void *handle)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		return reader_handle->filter_mask ? 1 : 0;
+	}
+
+	// Returns the physical row count of row group `row_group` (1-based; already resolved/
+	// validated by the Fortran caller -- see parquet_get_chunk_size's reader specifics in
+	// parquet_read.f90, which check row_group against parquet_reader_get_num_row_groups first).
+	// Row groups are not guaranteed uniform, so this is a genuine per-row-group query, not a
+	// single file-wide constant the way the writer side's resolved chunk_size is.
+	int64_t parquet_reader_get_chunk_size_at(void *handle, int64_t row_group)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		return reader_handle->reader->parquet_reader()->metadata()->RowGroup(static_cast<int>(row_group - 1))->num_rows();
 	}
 
 	// Read-time QC support for parquet_open_reader(..., maml=, qc=). Every
@@ -2292,13 +2562,20 @@ extern "C"
 				if (list_array->IsNull(row_offset + i)) { any_null = true; break; }
 			}
 		}
-		if (!any_null) return;
 
 		if (valid_out == nullptr)
 		{
-			report_fatal_error(context, std::string("column contains Null value(s), which is not supported: ") + name);
+			if (any_null)
+			{
+				report_fatal_error(context, std::string("column contains Null value(s), which is not supported: ") + name);
+			}
+			return;
 		}
 
+		// valid_out must be fully populated even when any_null is false here (e.g. this specific
+		// chunked-read row group has no nulls, even though other row groups of the same column
+		// do) -- an early return in that case would leave valid_out uninitialized instead of
+		// correctly all-valid.
 		for (int64_t i = 0; i < nrows; ++i)
 		{
 			bool row_valid = list_array->IsValid(row_offset + i);
@@ -2327,13 +2604,18 @@ extern "C"
 		{
 			if (!list_array->IsValid(i) || !vals_any->IsValid(i * col_size + offset)) { any_null = true; break; }
 		}
-		if (!any_null) return;
 
 		if (valid_out == nullptr)
 		{
-			report_fatal_error(context, std::string("column contains Null value(s), which is not supported: ") + name);
+			if (any_null)
+			{
+				report_fatal_error(context, std::string("column contains Null value(s), which is not supported: ") + name);
+			}
+			return;
 		}
 
+		// See report_nulls_list_full's identical comment: valid_out must be fully populated even
+		// when any_null is false here, not left uninitialized via an early return.
 		for (int64_t i = 0; i < nrows; ++i)
 		{
 			valid_out[i] = (list_array->IsValid(i) && vals_any->IsValid(i * col_size + offset)) ? 1 : 0;
@@ -3001,6 +3283,274 @@ extern "C"
 		mark_read_string(reader_handle, name, item_len);
 	}
 
+} // extern "C"
+
+	// Reads (uncached, always freshly from disk) row group `row_group`'s data for column `name`,
+	// bypassing get_single_chunk_array's whole-column cache entirely -- this is the whole point of
+	// a row-group-chunked read: bounded memory, one row group at a time, never materializing the
+	// whole column. Disallowed together with an active filter (checked Fortran-side via
+	// parquet_reader_has_filter, before this is ever reached): the filter mask is a single flat
+	// mask sized to the *whole unfiltered file*, with no row-group structure of its own, so there
+	// is no coherent way to say "this filtered subset of row group N" without an entirely separate
+	// filter-to-row-group mapping -- out of scope for this version (see doc/pages/reading.md's
+	// "Streaming/chunked reads" section). Also records `row_group` as read (for
+	// parquet_reader_check_complete) and runs per-row-group qc (run_qc_checks -- reusing the exact
+	// same whole-column check functions, just scoped to this one row group's own array: a
+	// hard-mode violation aborts naming this row group, a soft-mode one warns at most once per
+	// column, same throttling as every other read path).
+	static std::shared_ptr<arrow::Array> get_row_group_chunk_array(ParquetReaderHandle *reader_handle,
+		const char *name, int64_t row_group, const char *context)
+	{
+		auto idx = get_column_index(reader_handle, name);
+		std::shared_ptr<arrow::Table> table;
+		auto status = reader_handle->reader->ReadRowGroup(static_cast<int>(row_group - 1), {static_cast<int>(idx)}, &table);
+		if (!status.ok())
+		{
+			throw std::runtime_error(status.ToString());
+		}
+		auto array = combine_column_chunks(table->column(0), name);
+		reader_handle->chunk_read_row_groups[static_cast<int>(idx)].insert(row_group);
+		run_qc_checks(reader_handle, static_cast<int>(idx), std::string(name) + " [row group " + std::to_string(row_group) + "]", array);
+		return array;
+	}
+
+extern "C"
+{
+
+	// parquet_read_{int32,int64,float32,float64,bool8,string}_column_chunk are the direct targets
+	// of parquet_read_column_chunk -- the row-group-scoped counterpart of parquet_read_*_column
+	// (see get_row_group_chunk_array, above), for reading a large column one row group at a time
+	// instead of materializing it whole. Same null/type/nrows-mismatch reporting contract as the
+	// whole-column reads; no mark_read call, since was_read/output_type_used (parquet_reader_print_stat)
+	// are scoped to whole-column reads only.
+	void parquet_read_int32_column_chunk(void *handle, const char *name, int64_t row_group, int32_t *data, int64_t nrows, int8_t *valid_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_row_group_chunk_array(reader_handle, name, row_group, "parquet_read_int32_column_chunk");
+		if (array->length() != nrows)
+		{
+			report_fatal_error("parquet_read_int32_column_chunk", std::string("nrows mismatch for column: ") + name);
+		}
+		check_or_report_nulls(array, name, valid_out, "parquet_read_int32_column_chunk");
+		convert_values_to_int32(array, data, nrows, name, "parquet_read_int32_column_chunk");
+		fill_null_default(data, valid_out, nrows);
+	}
+
+	// Same as parquet_read_int32_column_chunk, but for int64.
+	void parquet_read_int64_column_chunk(void *handle, const char *name, int64_t row_group, int64_t *data, int64_t nrows, int8_t *valid_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_row_group_chunk_array(reader_handle, name, row_group, "parquet_read_int64_column_chunk");
+		if (array->length() != nrows)
+		{
+			report_fatal_error("parquet_read_int64_column_chunk", std::string("nrows mismatch for column: ") + name);
+		}
+		check_or_report_nulls(array, name, valid_out, "parquet_read_int64_column_chunk");
+		convert_values_to_int64(array, data, nrows, name, "parquet_read_int64_column_chunk");
+		fill_null_default(data, valid_out, nrows);
+	}
+
+	// Same as parquet_read_int32_column_chunk, but for float32.
+	void parquet_read_float32_column_chunk(void *handle, const char *name, int64_t row_group, float *data, int64_t nrows, int8_t *valid_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_row_group_chunk_array(reader_handle, name, row_group, "parquet_read_float32_column_chunk");
+		if (array->length() != nrows)
+		{
+			report_fatal_error("parquet_read_float32_column_chunk", std::string("nrows mismatch for column: ") + name);
+		}
+		check_or_report_nulls(array, name, valid_out, "parquet_read_float32_column_chunk");
+		convert_values_to_float32(array, data, nrows, name, "parquet_read_float32_column_chunk");
+		fill_null_default(data, valid_out, nrows);
+	}
+
+	// Same as parquet_read_int32_column_chunk, but for float64.
+	void parquet_read_float64_column_chunk(void *handle, const char *name, int64_t row_group, double *data, int64_t nrows, int8_t *valid_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_row_group_chunk_array(reader_handle, name, row_group, "parquet_read_float64_column_chunk");
+		if (array->length() != nrows)
+		{
+			report_fatal_error("parquet_read_float64_column_chunk", std::string("nrows mismatch for column: ") + name);
+		}
+		check_or_report_nulls(array, name, valid_out, "parquet_read_float64_column_chunk");
+		convert_values_to_float64(array, data, nrows, name, "parquet_read_float64_column_chunk");
+		fill_null_default(data, valid_out, nrows);
+	}
+
+	// Same as parquet_read_int32_column_chunk, but for boolean (bool8) columns.
+	void parquet_read_bool8_column_chunk(void *handle, const char *name, int64_t row_group, int8_t *data, int64_t nrows, int8_t *valid_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_row_group_chunk_array(reader_handle, name, row_group, "parquet_read_bool8_column_chunk");
+		if (array->type_id() != arrow::Type::BOOL)
+		{
+			report_fatal_error("parquet_read_bool8_column_chunk", std::string("type mismatch for column: ") + name +
+				" (expected bool, got " + array->type()->ToString() + ")");
+		}
+		auto arr = std::static_pointer_cast<arrow::BooleanArray>(array);
+		if (arr->length() != nrows)
+		{
+			report_fatal_error("parquet_read_bool8_column_chunk", std::string("nrows mismatch for column: ") + name);
+		}
+		check_or_report_nulls(arr, name, valid_out, "parquet_read_bool8_column_chunk");
+		for (int64_t i = 0; i < nrows; ++i)
+		{
+			data[i] = arr->Value(i) ? 1 : 0;
+		}
+		fill_null_default(data, valid_out, nrows);
+	}
+
+	// Same as parquet_read_int32_column_chunk, but for string columns (fixed-width, space-padded output).
+	void parquet_read_string_column_chunk(void *handle, const char *name, int64_t row_group, char *data, int64_t item_len, int64_t nrows, int8_t *valid_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_row_group_chunk_array(reader_handle, name, row_group, "parquet_read_string_column_chunk");
+		if (!is_string_like_type(array->type_id()))
+		{
+			report_fatal_error("parquet_read_string_column_chunk", std::string("type mismatch for column: ") + name +
+				" (expected string, got " + array->type()->ToString() + ")");
+		}
+		auto arr = make_string_like_accessor(array);
+		if (arr.length != nrows)
+		{
+			report_fatal_error("parquet_read_string_column_chunk", std::string("nrows mismatch for column: ") + name);
+		}
+		check_or_report_nulls(array, name, valid_out, "parquet_read_string_column_chunk");
+		for (int64_t i = 0; i < nrows; ++i)
+		{
+			auto view = arr.get_view(i);
+			copy_string_with_padding(data + i * item_len, item_len, view);
+		}
+		fill_null_default_string(data, item_len, valid_out, nrows);
+	}
+
+	// Reads row group `row_group`'s full vector int32 column `name` into `data`.
+	void parquet_read_int32_array_column_chunk(void *handle, const char *name, int64_t row_group, int32_t *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_row_group_chunk_array(reader_handle, name, row_group, "parquet_read_int32_array_column_chunk");
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_int32_array_column_chunk");
+		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out, "parquet_read_int32_array_column_chunk");
+		int64_t total = nrows * col_size;
+		convert_values_to_int32(vals_any, data, total, name, "parquet_read_int32_array_column_chunk");
+		fill_null_default(data, valid_out, total);
+	}
+
+	// Same as parquet_read_int32_array_column_chunk, but for int64.
+	void parquet_read_int64_array_column_chunk(void *handle, const char *name, int64_t row_group, int64_t *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_row_group_chunk_array(reader_handle, name, row_group, "parquet_read_int64_array_column_chunk");
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_int64_array_column_chunk");
+		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out, "parquet_read_int64_array_column_chunk");
+		int64_t total = nrows * col_size;
+		convert_values_to_int64(vals_any, data, total, name, "parquet_read_int64_array_column_chunk");
+		fill_null_default(data, valid_out, total);
+	}
+
+	// Same as parquet_read_int32_array_column_chunk, but for float32.
+	void parquet_read_float32_array_column_chunk(void *handle, const char *name, int64_t row_group, float *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_row_group_chunk_array(reader_handle, name, row_group, "parquet_read_float32_array_column_chunk");
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_float32_array_column_chunk");
+		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out, "parquet_read_float32_array_column_chunk");
+		int64_t total = nrows * col_size;
+		convert_values_to_float32(vals_any, data, total, name, "parquet_read_float32_array_column_chunk");
+		fill_null_default(data, valid_out, total);
+	}
+
+	// Same as parquet_read_int32_array_column_chunk, but for float64.
+	void parquet_read_float64_array_column_chunk(void *handle, const char *name, int64_t row_group, double *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_row_group_chunk_array(reader_handle, name, row_group, "parquet_read_float64_array_column_chunk");
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_float64_array_column_chunk");
+		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out, "parquet_read_float64_array_column_chunk");
+		int64_t total = nrows * col_size;
+		convert_values_to_float64(vals_any, data, total, name, "parquet_read_float64_array_column_chunk");
+		fill_null_default(data, valid_out, total);
+	}
+
+	// Same as parquet_read_int32_array_column_chunk, but for boolean (bool8) columns.
+	void parquet_read_bool8_array_column_chunk(void *handle, const char *name, int64_t row_group, int8_t *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_row_group_chunk_array(reader_handle, name, row_group, "parquet_read_bool8_array_column_chunk");
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_bool8_array_column_chunk");
+		if (vals_any->type_id() != arrow::Type::BOOL)
+		{
+			report_fatal_error("parquet_read_bool8_array_column_chunk", std::string("type mismatch for list values in column: ") + name +
+				" (expected bool, got " + vals_any->type()->ToString() + ")");
+		}
+		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out, "parquet_read_bool8_array_column_chunk");
+		auto vals = std::static_pointer_cast<arrow::BooleanArray>(vals_any);
+		for (int64_t i = 0; i < nrows * col_size; ++i)
+		{
+			data[i] = vals->Value(i) ? 1 : 0;
+		}
+		fill_null_default(data, valid_out, nrows * col_size);
+	}
+
+	// Same as parquet_read_int32_array_column_chunk, but for string columns (fixed-width, space-padded output).
+	void parquet_read_string_array_column_chunk(void *handle, const char *name, int64_t row_group, char *data, int64_t item_len, int64_t nrows, int64_t col_size, int8_t *valid_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_row_group_chunk_array(reader_handle, name, row_group, "parquet_read_string_array_column_chunk");
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_string_array_column_chunk");
+		if (!is_string_like_type(vals_any->type_id()))
+		{
+			report_fatal_error("parquet_read_string_array_column_chunk", std::string("type mismatch for list values in column: ") + name +
+				" (expected string, got " + vals_any->type()->ToString() + ")");
+		}
+		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out, "parquet_read_string_array_column_chunk");
+		auto vals = make_string_like_accessor(vals_any);
+		for (int64_t i = 0; i < nrows * col_size; ++i)
+		{
+			copy_string_with_padding(data + i * item_len, item_len, vals.get_view(i));
+		}
+		fill_null_default_string(data, item_len, valid_out, nrows * col_size);
+	}
+
+	// Called from parquet_close_reader(check_complete=.true.), before close_parquet_reader: for
+	// every column that received at least one parquet_read_column_chunk call this reader's
+	// lifetime, verifies every one of the file's num_row_groups row groups was actually read for
+	// that column -- catches a caller that forgot to loop through every row group (or exited a
+	// chunked-read loop early by mistake). Row-mode/whole-column reads never touch
+	// chunk_read_row_groups, so they're excluded, matching parquet_close_reader's own doc-comment.
+	// `hard` (1/0) mirrors qc_soft: hard aborts via report_fatal_error naming the column and its
+	// missing row group(s); soft prints a WARNING (to stdout, same as a soft qc violation) and
+	// continues, once per incomplete column.
+	void parquet_reader_check_complete(void *handle, int hard)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		for (const auto &entry : reader_handle->chunk_read_row_groups)
+		{
+			int idx = entry.first;
+			const auto &touched = entry.second;
+			if (static_cast<int64_t>(touched.size()) >= reader_handle->num_row_groups) continue;
+
+			std::string missing;
+			for (int64_t rg = 1; rg <= reader_handle->num_row_groups; ++rg)
+			{
+				if (touched.find(rg) == touched.end())
+				{
+					if (!missing.empty()) missing += ", ";
+					missing += std::to_string(rg);
+				}
+			}
+			std::string colname = reader_handle->schema->field(idx)->name();
+			std::string msg = "column '" + colname + "' was read via parquet_read_column_chunk but not every row " +
+				"group was read -- missing row group(s): " + missing;
+			if (hard)
+			{
+				report_fatal_error("parquet_close_reader", msg);
+			}
+			std::fprintf(stdout, "WARNING: %s\n", msg.c_str());
+		}
+	}
+
 	// Declares one column's schema metadata on a schema-less writer, growing fields/arrays to match.
 	void parquet_add_column_metadata(
 		void *handle,
@@ -3067,7 +3617,6 @@ static void append_typed_column(void *handle, const char *name, const ValueType 
 	if (col_size > 1)
 	{
 		check_col_size_fits_arrow_limit(col_size, name, "parquet_append_column");
-		check_list_element_count_fits_arrow_limit(nrows, col_size, name, "parquet_append_column");
 		auto value_builder = std::make_shared<BuilderType>();
 		arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(col_size));
 		auto status = list_builder.AppendValues(nrows);
@@ -3092,6 +3641,140 @@ static void append_typed_column(void *handle, const char *name, const ValueType 
 	}
 
 	append_column(writer_handle, name, build_field(name, value_type, col_size, has_any_null(valid_in, nrows * col_size)), array);
+}
+
+// Shared precondition checks for every parquet_write_*_column_chunk entry point below.
+// column_metadata only ever holds entries for a *schema-enforced* writer's declared columns
+// (populated once, upfront, by parquet_open_writer -- see parquet_add_column_info's only
+// caller, in parquet_write.f90); a schema-less writer never populates it at all, exactly
+// mirroring append_column's own "not found -> push new" fallback for the batch
+// (parquet_write_column) path -- so a schema-less column here is instead found (or, on its
+// first-ever chunk, newly registered) by name directly in `fields`. Enforces every
+// row-group-streaming invariant: a row group must be open (parquet_new_row_group), a column can
+// never be written both as a whole array (parquet_write_column) and via chunks, a new column
+// can never appear after the first row group's schema has already locked in (see
+// close_parquet_writer/parquet_finish_row_group), and a column can only be chunk-written once
+// per row group. Returns the column's index into fields/arrays; `first_chunk_ever` reports
+// whether this is the column's very first chunk ever (its field still needs to be built) so
+// callers don't need to re-derive that separately.
+static size_t check_column_chunk_write_preconditions(ParquetWriterHandle *writer_handle, const char *name,
+	bool &first_chunk_ever)
+{
+	if (!writer_handle->in_row_group)
+	{
+		report_fatal_error("parquet_write_column_chunk",
+			"column '" + std::string(name) + "': no row group is open -- call parquet_new_row_group first");
+	}
+
+	int64_t metadata_index = -1;
+	for (size_t i = 0; i < writer_handle->column_metadata.size(); ++i)
+	{
+		if (writer_handle->column_metadata[i].name == name) { metadata_index = static_cast<int64_t>(i); break; }
+	}
+
+	size_t idx;
+	if (metadata_index >= 0)
+	{
+		idx = static_cast<size_t>(metadata_index);
+		first_chunk_ever = idx >= writer_handle->fields.size() || !writer_handle->fields[idx];
+	}
+	else
+	{
+		// Schema-less: find an already-established (whole or chunk-started) column of this
+		// name, if any; otherwise this is a brand-new column, appended past the end of fields
+		// (mirroring append_column's own push-new fallback) rather than into column_metadata's
+		// index space, which schema-less writers never use.
+		idx = writer_handle->fields.size();
+		for (size_t i = 0; i < writer_handle->fields.size(); ++i)
+		{
+			if (writer_handle->fields[i] && writer_handle->fields[i]->name() == name) { idx = i; break; }
+		}
+		first_chunk_ever = idx == writer_handle->fields.size();
+		if (first_chunk_ever) check_column_count_fits_arrow_limit(writer_handle->fields.size(), name, "parquet_write_column_chunk");
+	}
+
+	if (idx < writer_handle->arrays.size() && writer_handle->arrays[idx])
+	{
+		report_fatal_error("parquet_write_column_chunk", "column '" + std::string(name) +
+			"': already fully written via parquet_write_column -- cannot also write it via parquet_write_column_chunk");
+	}
+	if (first_chunk_ever && writer_handle->row_group_writer)
+	{
+		report_fatal_error("parquet_write_column_chunk", "column '" + std::string(name) +
+			"': introduced after the first row group was already written -- every column must appear in the "
+			"first row group, since a Parquet file's schema is fixed once the first row group is written");
+	}
+	if (!first_chunk_ever && writer_handle->pending_chunk_arrays.count(static_cast<int>(idx)))
+	{
+		report_fatal_error("parquet_write_column_chunk", "column '" + std::string(name) +
+			"': already written for this row group -- call parquet_finish_row_group before writing it again");
+	}
+	return idx;
+}
+
+// Streaming counterpart to append_typed_column, above: builds a small array covering just
+// writer_handle->current_row_group_nrows rows (this row group's slice), rather than the whole
+// file's nrows. Never touches writer_handle->arrays -- doing so would mark the column "whole"
+// (see close_parquet_writer's own reconciliation check) -- the built array is instead stashed in
+// pending_chunk_arrays, consumed and cleared by parquet_finish_row_group.
+template <typename BuilderType, typename ValueType>
+static void append_typed_column_chunk(void *handle, const char *name, const ValueType *data, int64_t col_size,
+	const int8_t *valid_in, const std::shared_ptr<arrow::DataType> &value_type)
+{
+	auto writer_handle = as_handle(handle);
+	bool first_chunk_ever;
+	auto idx = check_column_chunk_write_preconditions(writer_handle, name, first_chunk_ever);
+	auto nrows = writer_handle->current_row_group_nrows;
+
+	if (col_size > 1)
+	{
+		check_col_size_fits_arrow_limit(col_size, name, "parquet_write_column_chunk");
+		check_chunk_size_fits_limit_for_col_size(nrows, name, col_size, "parquet_write_column_chunk", "nrows",
+		"reduce this row group's nrows (parquet_new_row_group) or this column's col_size");
+	}
+
+	std::shared_ptr<arrow::Array> array;
+	auto valid_bytes = reinterpret_cast<const uint8_t *>(valid_in);
+
+	if (col_size > 1)
+	{
+		auto value_builder = std::make_shared<BuilderType>();
+		arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(col_size));
+		auto status = list_builder.AppendValues(nrows);
+		if (!status.ok())
+			throw std::runtime_error(status.ToString());
+		status = value_builder->AppendValues(data, nrows * col_size, valid_bytes);
+		if (!status.ok())
+			throw std::runtime_error(status.ToString());
+		status = list_builder.Finish(&array);
+		if (!status.ok())
+			throw std::runtime_error(status.ToString());
+	}
+	else
+	{
+		BuilderType builder;
+		auto status = builder.AppendValues(data, nrows, valid_bytes);
+		if (!status.ok())
+			throw std::runtime_error(status.ToString());
+		status = builder.Finish(&array);
+		if (!status.ok())
+			throw std::runtime_error(status.ToString());
+	}
+
+	if (first_chunk_ever)
+	{
+		if (writer_handle->fields.size() <= idx) writer_handle->fields.resize(idx + 1);
+		// Always nullable, unlike append_typed_column's has_any_null-based decision: this
+		// field is fixed the moment the first row group locks the schema (see
+		// check_column_chunk_write_preconditions), long before every row group's data -- and
+		// thus every possible null -- has been seen. Fixing nullable=false from a null-free
+		// first chunk would make a *later* row group's genuine null rejected by Arrow, so this
+		// always allows it instead (col_size > 1's build_field ignores this argument anyway --
+		// see its own comment).
+		writer_handle->fields[idx] = build_field(name, value_type, col_size, /*nullable=*/true);
+	}
+	if (writer_handle->arrays.size() <= idx) writer_handle->arrays.resize(idx + 1);
+	writer_handle->pending_chunk_arrays[static_cast<int>(idx)] = array;
 }
 
 extern "C"
@@ -3191,7 +3874,6 @@ extern "C"
 	{
 		auto writer_handle = as_handle(handle);
 		check_col_size_fits_arrow_limit(col_size, name, "parquet_append_string_array_column");
-		check_list_element_count_fits_arrow_limit(nrows, col_size, name, "parquet_append_string_array_column");
 
 		auto build = [&](auto value_builder) -> std::shared_ptr<arrow::Array>
 		{
@@ -3233,6 +3915,282 @@ extern "C"
 			: build(std::make_shared<arrow::StringBuilder>());
 
 		append_column(writer_handle, name, build_field(name, use_large ? arrow::large_utf8() : arrow::utf8(), col_size), array);
+	}
+
+	// --- Streaming row-group API: parquet_new_row_group / parquet_write_*_column_chunk /
+	// parquet_finish_row_group. See close_parquet_writer for how a streaming writer's close
+	// differs from the WriteTable-based batch path above, and check_column_chunk_write_
+	// preconditions/append_typed_column_chunk (further above, outside this extern "C" block)
+	// for the shared validation/array-building logic every parquet_write_*_column_chunk
+	// function below is built on. ---
+
+	void parquet_new_row_group(void *handle, int64_t nrows)
+	{
+		auto writer_handle = as_handle(handle);
+		if (writer_handle->in_row_group)
+		{
+			report_fatal_error("parquet_new_row_group",
+				"a row group is already open -- call parquet_finish_row_group before starting another");
+		}
+		if (nrows <= 0)
+		{
+			report_fatal_error("parquet_new_row_group", "nrows (" + std::to_string(nrows) + ") must be positive");
+		}
+		// Validates against every vector column already known (schema-enforced, or established
+		// by an earlier row group for a schema-less writer). A brand-new schema-less column's
+		// own col_size isn't known yet here -- that's validated later instead, at its first
+		// parquet_write_column_chunk call.
+		check_chunk_size_fits_metadata_limit(nrows, writer_handle->column_metadata, "parquet_new_row_group", "nrows",
+			"pass a smaller nrows to parquet_new_row_group");
+
+		writer_handle->in_row_group = true;
+		writer_handle->current_row_group_nrows = nrows;
+		writer_handle->pending_chunk_arrays.clear();
+	}
+
+	void parquet_write_int32_column_chunk(void *handle, const char *name, const int32_t *data, int64_t col_size, const int8_t *valid_in)
+	{
+		append_typed_column_chunk<arrow::Int32Builder>(handle, name, data, col_size, valid_in, arrow::int32());
+	}
+
+	void parquet_write_int64_column_chunk(void *handle, const char *name, const int64_t *data, int64_t col_size, const int8_t *valid_in)
+	{
+		append_typed_column_chunk<arrow::Int64Builder>(handle, name, data, col_size, valid_in, arrow::int64());
+	}
+
+	void parquet_write_float32_column_chunk(void *handle, const char *name, const float *data, int64_t col_size, const int8_t *valid_in)
+	{
+		append_typed_column_chunk<arrow::FloatBuilder>(handle, name, data, col_size, valid_in, arrow::float32());
+	}
+
+	void parquet_write_float64_column_chunk(void *handle, const char *name, const double *data, int64_t col_size, const int8_t *valid_in)
+	{
+		append_typed_column_chunk<arrow::DoubleBuilder>(handle, name, data, col_size, valid_in, arrow::float64());
+	}
+
+	void parquet_write_bool8_column_chunk(void *handle, const char *name, const int8_t *data, int64_t col_size, const int8_t *valid_in)
+	{
+		append_typed_column_chunk<arrow::BooleanBuilder>(
+			handle, name, reinterpret_cast<const uint8_t *>(data), col_size, valid_in, arrow::boolean());
+	}
+
+	// Streaming counterpart to parquet_append_string_column: unlike that whole-column write,
+	// which auto-selects arrow::utf8()/arrow::large_utf8() from the *whole* column's byte
+	// payload, a streamed column's field is fixed the moment the first row group locks the
+	// schema -- long before every row group's string bytes have been seen. Always uses
+	// arrow::large_utf8() instead, unconditionally, so no later row group's cumulative bytes can
+	// ever exceed what the already-fixed type supports (the cost is a slightly larger offset
+	// buffer even for a small file, imperceptible in practice and irrelevant for the large files
+	// this API exists for).
+	void parquet_write_string_column_chunk(void *handle, const char *name, const char *data, int64_t item_len,
+		const int8_t *valid_in)
+	{
+		auto writer_handle = as_handle(handle);
+		bool first_chunk_ever;
+		auto idx = check_column_chunk_write_preconditions(writer_handle, name, first_chunk_ever);
+		auto nrows = writer_handle->current_row_group_nrows;
+
+		arrow::LargeStringBuilder builder;
+		arrow::Status status;
+		for (int64_t i = 0; i < nrows; ++i)
+		{
+			if (valid_in != nullptr && valid_in[i] == 0)
+			{
+				status = builder.AppendNull();
+			}
+			else
+			{
+				const char *raw = data + i * item_len;
+				std::string value(raw, static_cast<size_t>(item_len));
+				value = trim_right_spaces_and_nuls(value);
+				status = builder.Append(value);
+			}
+			if (!status.ok())
+				throw std::runtime_error(status.ToString());
+		}
+		std::shared_ptr<arrow::Array> array;
+		status = builder.Finish(&array);
+		if (!status.ok())
+			throw std::runtime_error(status.ToString());
+
+		if (first_chunk_ever)
+		{
+			if (writer_handle->fields.size() <= idx) writer_handle->fields.resize(idx + 1);
+			writer_handle->fields[idx] = build_field(name, arrow::large_utf8(), 1, /*nullable=*/true);
+		}
+		if (writer_handle->arrays.size() <= idx) writer_handle->arrays.resize(idx + 1);
+		writer_handle->pending_chunk_arrays[static_cast<int>(idx)] = array;
+	}
+
+	// Vector-string counterpart to parquet_write_string_column_chunk, above -- same
+	// always-arrow::large_utf8() reasoning.
+	void parquet_write_string_array_column_chunk(void *handle, const char *name, const char *data, int64_t item_len,
+		int64_t col_size, const int8_t *valid_in)
+	{
+		auto writer_handle = as_handle(handle);
+		bool first_chunk_ever;
+		auto idx = check_column_chunk_write_preconditions(writer_handle, name, first_chunk_ever);
+		auto nrows = writer_handle->current_row_group_nrows;
+
+		check_col_size_fits_arrow_limit(col_size, name, "parquet_write_column_chunk");
+		check_chunk_size_fits_limit_for_col_size(nrows, name, col_size, "parquet_write_column_chunk", "nrows",
+		"reduce this row group's nrows (parquet_new_row_group) or this column's col_size");
+
+		auto value_builder = std::make_shared<arrow::LargeStringBuilder>();
+		arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(col_size));
+		auto status = list_builder.AppendValues(nrows);
+		if (!status.ok())
+			throw std::runtime_error(status.ToString());
+
+		for (int64_t i = 0; i < nrows * col_size; ++i)
+		{
+			if (valid_in != nullptr && valid_in[i] == 0)
+			{
+				status = value_builder->AppendNull();
+			}
+			else
+			{
+				const char *raw = data + i * item_len;
+				std::string value(raw, static_cast<size_t>(item_len));
+				value = trim_right_spaces_and_nuls(value);
+				status = value_builder->Append(value);
+			}
+			if (!status.ok())
+				throw std::runtime_error(status.ToString());
+		}
+
+		std::shared_ptr<arrow::Array> array;
+		status = list_builder.Finish(&array);
+		if (!status.ok())
+			throw std::runtime_error(status.ToString());
+
+		if (first_chunk_ever)
+		{
+			if (writer_handle->fields.size() <= idx) writer_handle->fields.resize(idx + 1);
+			writer_handle->fields[idx] = build_field(name, arrow::large_utf8(), col_size);
+		}
+		if (writer_handle->arrays.size() <= idx) writer_handle->arrays.resize(idx + 1);
+		writer_handle->pending_chunk_arrays[static_cast<int>(idx)] = array;
+	}
+
+	// Ends the currently-open row group: verifies every column known so far has data for it
+	// (either a slice of a whole parquet_write_column array, or a pending chunk -- see
+	// check_column_chunk_write_preconditions), lazily opens the underlying row-group-oriented
+	// FileWriter on the very first call (locking the file's schema from every column
+	// established by then -- see the comment on ParquetWriterHandle::row_group_writer), then
+	// writes one column chunk per column, in schema order, as parquet::arrow::FileWriter::
+	// WriteColumnChunk requires.
+	void parquet_finish_row_group(void *handle)
+	{
+		auto writer_handle = as_handle(handle);
+		if (!writer_handle->in_row_group)
+		{
+			report_fatal_error("parquet_finish_row_group", "no row group is open -- call parquet_new_row_group first");
+		}
+
+		auto nrows = writer_handle->current_row_group_nrows;
+		bool opening_first_row_group = !writer_handle->row_group_writer;
+
+		if (opening_first_row_group && !writer_handle->column_metadata.empty())
+		{
+			// Schema-enforced writer: every declared column must actually appear in the first
+			// row group -- mirrors close_parquet_writer's "Missing column data before close"
+			// check for the batch (WriteTable) path, just fired here instead so a forgotten
+			// column is caught immediately rather than only once the whole file has already
+			// been streamed. A no-op for a schema-less writer: there, column_metadata only ever
+			// gains an entry together with its field, in the same call (see
+			// parquet_add_column_info), so this condition can never actually trigger for one.
+			for (size_t i = 0; i < writer_handle->column_metadata.size(); ++i)
+			{
+				if (i >= writer_handle->fields.size() || !writer_handle->fields[i])
+				{
+					report_fatal_error("parquet_finish_row_group", "column '" +
+						writer_handle->column_metadata[i].name + "' has no data in the first row group");
+				}
+			}
+		}
+
+		for (size_t i = 0; i < writer_handle->fields.size(); ++i)
+		{
+			if (!writer_handle->fields[i]) continue; // Not yet established by anything -- only possible
+			                                          // before the first row group's schema locks in
+			                                          // (checked above, for schema-enforced writers).
+			bool is_whole = i < writer_handle->arrays.size() && writer_handle->arrays[i] != nullptr;
+			bool has_pending = writer_handle->pending_chunk_arrays.count(static_cast<int>(i)) > 0;
+			if (!is_whole && !has_pending)
+			{
+				report_fatal_error("parquet_finish_row_group",
+					"column '" + writer_handle->fields[i]->name() + "' has no data for this row group");
+			}
+			if (is_whole && writer_handle->streamed_rows_total + nrows > writer_handle->arrays[i]->length())
+			{
+				report_fatal_error("parquet_finish_row_group", "column '" + writer_handle->fields[i]->name() +
+					"' has " + std::to_string(writer_handle->arrays[i]->length()) +
+					" rows (written via parquet_write_column), but row groups have already covered " +
+					std::to_string(writer_handle->streamed_rows_total) + " of them and this row group would add " +
+					std::to_string(nrows) + " more, exceeding the column's own row count");
+			}
+		}
+
+		if (opening_first_row_group)
+		{
+			if (writer_handle->fields.empty())
+			{
+				report_fatal_error("parquet_finish_row_group", "no columns have been written -- nothing to write");
+			}
+			auto metadata = build_file_metadata(writer_handle->column_metadata, writer_handle->table_metadata);
+			auto schema = arrow::schema(writer_handle->fields, metadata);
+
+			parquet::ArrowWriterProperties::Builder arrow_writer_builder;
+			arrow_writer_builder.store_schema();
+			arrow_writer_builder.set_use_threads(writer_handle->use_threads);
+			auto arrow_writer_properties = arrow_writer_builder.build();
+			auto writer_properties = parquet::WriterProperties::Builder()
+				.compression(writer_handle->compression_codec)
+				->compression_level(writer_handle->compression_level)
+				->build();
+
+			auto result = parquet::arrow::FileWriter::Open(*schema, arrow::default_memory_pool(),
+				writer_handle->outfile, writer_properties, arrow_writer_properties);
+			if (!result.ok())
+				throw std::runtime_error(result.status().ToString());
+			writer_handle->row_group_writer = std::move(result).ValueOrDie();
+		}
+
+		auto status = writer_handle->row_group_writer->NewRowGroup();
+		if (!status.ok())
+			throw std::runtime_error(status.ToString());
+
+		for (size_t i = 0; i < writer_handle->fields.size(); ++i)
+		{
+			std::shared_ptr<arrow::Array> array;
+			auto pending_it = writer_handle->pending_chunk_arrays.find(static_cast<int>(i));
+			if (pending_it != writer_handle->pending_chunk_arrays.end())
+			{
+				array = pending_it->second;
+			}
+			else
+			{
+				array = writer_handle->arrays[i]->Slice(writer_handle->streamed_rows_total, nrows);
+			}
+			status = writer_handle->row_group_writer->WriteColumnChunk(*array);
+			if (!status.ok())
+				throw std::runtime_error(status.ToString());
+		}
+
+		writer_handle->streamed_rows_total += nrows;
+		writer_handle->pending_chunk_arrays.clear();
+		writer_handle->in_row_group = false;
+		writer_handle->current_row_group_nrows = 0;
+	}
+
+	// Returns the writer's resolved/authoritative row-group size -- see resolve_chunk_size.
+	// Usable at any point after parquet_open_writer, including before any column has been
+	// written.
+	int64_t parquet_writer_get_chunk_size(void *handle)
+	{
+		auto writer_handle = as_handle(handle);
+		return resolve_chunk_size(writer_handle);
 	}
 
 	// Test-only: overrides g_debug_string_offset_limit (see its own comment for why this is a
@@ -3282,10 +4240,67 @@ extern "C"
 
 
 	// Builds the final Arrow table from every appended column, writes it to the output file
-	// (error stops if any declared column was never written), and frees `handle`.
+	// (error stops if any declared column was never written), and frees `handle`. A writer that
+	// used the streaming row-group API (row_group_writer set -- see parquet_finish_row_group)
+	// takes a completely different path: the file was already opened and written to
+	// incrementally, one row group at a time, so there is no table to build here at all --
+	// close_streaming_writer (below) only needs to verify completeness and finalize the footer.
+	static void close_streaming_writer(ConcurrencyGuard<ParquetWriterHandle> &writer_handle)
+	{
+		if (writer_handle->in_row_group)
+		{
+			delete writer_handle.release();
+			throw std::runtime_error("A row group was started via parquet_new_row_group but never finished via "
+				"parquet_finish_row_group before close");
+		}
+
+		for (size_t i = 0; i < writer_handle->fields.size(); ++i)
+		{
+			if (i >= writer_handle->arrays.size() || !writer_handle->arrays[i]) continue; // streamed column, not
+			                                                                              // whole -- nothing to
+			                                                                              // reconcile against.
+			if (writer_handle->arrays[i]->length() != writer_handle->streamed_rows_total)
+			{
+				auto name = writer_handle->fields[i]->name();
+				auto declared = writer_handle->arrays[i]->length();
+				auto covered = writer_handle->streamed_rows_total;
+				delete writer_handle.release();
+				throw std::runtime_error("column '" + name + "' has " + std::to_string(declared) +
+					" rows (written via parquet_write_column), but only " + std::to_string(covered) +
+					" were covered by row groups written via parquet_new_row_group/parquet_write_column_chunk/"
+					"parquet_finish_row_group -- every row of a column written as a whole array must also be "
+					"covered by a row group");
+			}
+		}
+
+		auto status = writer_handle->row_group_writer->Close();
+		if (!status.ok())
+		{
+			delete writer_handle.release();
+			throw std::runtime_error(status.ToString());
+		}
+		status = writer_handle->outfile->Close();
+		delete writer_handle.release();
+		if (!status.ok())
+			throw std::runtime_error(status.ToString());
+	}
+
 	void close_parquet_writer(void *handle)
 	{
 		auto writer_handle = as_handle(handle);
+
+		// in_row_group is included here (not just row_group_writer) so a row group that was
+		// opened via parquet_new_row_group but never finished even once -- row_group_writer
+		// itself is only ever set inside parquet_finish_row_group's first successful call --
+		// still reaches close_streaming_writer's own dangling-row-group check below, instead of
+		// silently falling through to the batch (WriteTable) path with a column that only has a
+		// pending_chunk_arrays entry and no arrays[] entry at all (which previously crashed
+		// arrow::Table::Make with a null Array).
+		if (writer_handle->row_group_writer || writer_handle->in_row_group)
+		{
+			close_streaming_writer(writer_handle);
+			return;
+		}
 
 		if (!writer_handle->column_metadata.empty())
 		{
@@ -3388,6 +4403,23 @@ extern "C"
 				effective_chunk_size = num_rows;
 			}
 			if (effective_chunk_size < 1) effective_chunk_size = 1;
+
+			// Vector-column int32 per-row-group element-count ceiling (see
+			// kArrowInt32ListElementCountLimit) -- always resolvable by clamping down, since
+			// col_size alone is already separately bounded by check_col_size_fits_arrow_limit
+			// (so even a 1-row row group can never itself overflow), meaning this auto-sized
+			// path never needs to abort. An explicit caller-chosen chunk_size, below, is
+			// validated instead of silently overridden.
+			auto max_col_size = max_fixed_size_list_col_size(writer_handle->fields);
+			if (max_col_size > 1)
+			{
+				int64_t limit = g_debug_list_element_count_limit > 0 ? g_debug_list_element_count_limit : kArrowInt32ListElementCountLimit;
+				effective_chunk_size = std::min(effective_chunk_size, std::max<int64_t>(limit / max_col_size, 1));
+			}
+		}
+		else
+		{
+			check_explicit_chunk_size_fits_arrow_limit(effective_chunk_size, writer_handle->fields, "close_parquet_writer");
 		}
 
 		parquet::ArrowWriterProperties::Builder arrow_writer_builder;

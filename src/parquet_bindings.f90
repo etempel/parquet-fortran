@@ -27,6 +27,16 @@ module parquet_bindings
     public :: parquet_append_float32_column, parquet_append_float64_column
     public :: parquet_append_bool8_column
     public :: parquet_append_string_column, parquet_append_string_array_column
+    ! Local (Fortran-side) names deliberately differ from their bind(C, name="...") C++ symbol,
+    ! same reason parquet_append_int32_column (this binding) differs from parquet_write_column
+    ! (the public generic parquet.f90 exposes for it): parquet_write.f90 is a submodule of
+    ! parquet, which use-associates this whole module -- a public Fortran wrapper reusing the
+    ! exact same name as the C symbol it wraps would collide with that use association.
+    public :: parquet_writer_new_row_group, parquet_writer_finish_row_group, parquet_writer_get_chunk_size
+    public :: parquet_append_int32_column_chunk, parquet_append_int64_column_chunk
+    public :: parquet_append_float32_column_chunk, parquet_append_float64_column_chunk
+    public :: parquet_append_bool8_column_chunk
+    public :: parquet_append_string_column_chunk, parquet_append_string_array_column_chunk
     public :: parquet_reader_get_nrows, parquet_reader_get_total_nrows, parquet_reader_get_column_col_size
     public :: parquet_reader_get_column_total_elements, parquet_reader_get_string_length
     public :: parquet_reader_get_table_metadata_count
@@ -47,6 +57,14 @@ module parquet_bindings
     public :: parquet_read_int32_array_element, parquet_read_int64_array_element
     public :: parquet_read_float32_array_element, parquet_read_float64_array_element
     public :: parquet_read_bool8_array_element, parquet_read_string_array_element
+    public :: parquet_reader_get_num_row_groups, parquet_reader_has_filter, parquet_reader_get_chunk_size_at
+    public :: parquet_reader_check_complete
+    public :: parquet_read_int32_column_chunk, parquet_read_int64_column_chunk
+    public :: parquet_read_float32_column_chunk, parquet_read_float64_column_chunk
+    public :: parquet_read_bool8_column_chunk, parquet_read_string_column_chunk
+    public :: parquet_read_int32_array_column_chunk, parquet_read_int64_array_column_chunk
+    public :: parquet_read_float32_array_column_chunk, parquet_read_float64_array_column_chunk
+    public :: parquet_read_bool8_array_column_chunk, parquet_read_string_array_column_chunk
 
     interface
         !> Creates a new parquet writer for `filename` and returns its opaque handle.
@@ -209,6 +227,115 @@ module parquet_bindings
             integer(c_long_long), value :: col_size
             type(c_ptr), value :: valid_in
         end subroutine
+
+        !> Starts a new row group of `nrows` rows on `writer` -- every column already known must
+        !> then receive exactly one parquet_append_*_column_chunk call (or already be a whole
+        !> column written via parquet_append_*_column) before parquet_writer_finish_row_group.
+        subroutine parquet_writer_new_row_group(writer, nrows) &
+                bind(C, name="parquet_new_row_group")
+            import
+            type(c_ptr), value :: writer
+            integer(c_long_long), value :: nrows
+        end subroutine
+
+        !> Writes one int32 column's chunk (scalar or, for col_size > 1, fixed-size-list) for the
+        !> currently-open row group -- nrows is implicit (the row group's own size).
+        subroutine parquet_append_int32_column_chunk(writer, name, data, col_size, valid_in) &
+                bind(C, name="parquet_write_int32_column_chunk")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_int32_t) :: data(*)
+            integer(c_long_long), value :: col_size
+            type(c_ptr), value :: valid_in
+        end subroutine
+
+        !> Same as parquet_append_int32_column_chunk, but for int64.
+        subroutine parquet_append_int64_column_chunk(writer, name, data, col_size, valid_in) &
+                bind(C, name="parquet_write_int64_column_chunk")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_int64_t) :: data(*)
+            integer(c_long_long), value :: col_size
+            type(c_ptr), value :: valid_in
+        end subroutine
+
+        !> Same as parquet_append_int32_column_chunk, but for float32.
+        subroutine parquet_append_float32_column_chunk(writer, name, data, col_size, valid_in) &
+                bind(C, name="parquet_write_float32_column_chunk")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            real(c_float) :: data(*)
+            integer(c_long_long), value :: col_size
+            type(c_ptr), value :: valid_in
+        end subroutine
+
+        !> Same as parquet_append_int32_column_chunk, but for float64.
+        subroutine parquet_append_float64_column_chunk(writer, name, data, col_size, valid_in) &
+                bind(C, name="parquet_write_float64_column_chunk")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            real(c_double) :: data(*)
+            integer(c_long_long), value :: col_size
+            type(c_ptr), value :: valid_in
+        end subroutine
+
+        !> Same as parquet_append_int32_column_chunk, but for boolean (bool8).
+        subroutine parquet_append_bool8_column_chunk(writer, name, data, col_size, valid_in) &
+                bind(C, name="parquet_write_bool8_column_chunk")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_int8_t) :: data(*)
+            integer(c_long_long), value :: col_size
+            type(c_ptr), value :: valid_in
+        end subroutine
+
+        !> Writes one scalar string column's chunk for the currently-open row group -- always
+        !> uses arrow::large_utf8() (see parquet_wrapper.cpp's own comment on this function).
+        subroutine parquet_append_string_column_chunk(writer, name, data, item_len, valid_in) &
+                bind(C, name="parquet_write_string_column_chunk")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            character(kind=c_char) :: data(*)
+            integer(c_long_long), value :: item_len
+            type(c_ptr), value :: valid_in
+        end subroutine
+
+        !> Writes one vector string column's chunk for the currently-open row group -- always
+        !> uses arrow::large_utf8(), same as parquet_append_string_column_chunk above.
+        subroutine parquet_append_string_array_column_chunk(writer, name, data, item_len, col_size, valid_in) &
+                bind(C, name="parquet_write_string_array_column_chunk")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            character(kind=c_char) :: data(*)
+            integer(c_long_long), value :: item_len
+            integer(c_long_long), value :: col_size
+            type(c_ptr), value :: valid_in
+        end subroutine
+
+        !> Ends the currently-open row group, verifying every known column received data for it
+        !> and, on the very first call, locking the file's schema and opening it for writing.
+        subroutine parquet_writer_finish_row_group(writer) &
+                bind(C, name="parquet_finish_row_group")
+            import
+            type(c_ptr), value :: writer
+        end subroutine
+
+        !> Returns `writer`'s resolved/authoritative row-group size (see resolve_chunk_size in
+        !> parquet_wrapper.cpp) -- usable at any point after parquet_open_writer, including
+        !> before any column has been written.
+        function parquet_writer_get_chunk_size(writer) &
+                bind(C, name="parquet_writer_get_chunk_size") result(chunk_size)
+            import
+            type(c_ptr), value :: writer
+            integer(c_long_long) :: chunk_size
+        end function
 
         !> Flushes and closes `writer`, freeing the underlying C++ object.
         subroutine close_parquet_writer(writer) &
@@ -682,6 +809,194 @@ module parquet_bindings
             type(c_ptr), value :: reader
             character(kind=c_char) :: name(*)
             integer(c_long_long), value :: col_index
+            character(kind=c_char) :: data(*)
+            integer(c_long_long), value :: item_len
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: col_size
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Returns `reader`'s row-group count (file-physical, unaffected by any filter).
+        function parquet_reader_get_num_row_groups(reader) &
+                bind(C, name="parquet_reader_get_num_row_groups") result(num_row_groups)
+            import
+            type(c_ptr), value :: reader
+            integer(c_long_long) :: num_row_groups
+        end function
+
+        !> Returns non-zero if `reader` was opened with an active row filter.
+        function parquet_reader_has_filter(reader) &
+                bind(C, name="parquet_reader_has_filter") result(has_filter)
+            import
+            type(c_ptr), value :: reader
+            integer(c_int) :: has_filter
+        end function
+
+        !> Returns the physical row count of `reader`'s row group `row_group` (1-based, already
+        !> validated/resolved by the caller).
+        function parquet_reader_get_chunk_size_at(reader, row_group) &
+                bind(C, name="parquet_reader_get_chunk_size_at") result(chunk_size)
+            import
+            type(c_ptr), value :: reader
+            integer(c_long_long), value :: row_group
+            integer(c_long_long) :: chunk_size
+        end function
+
+        !> Checks that every column read via parquet_read_*_column_chunk had every row group
+        !> read by now; hard/=0 aborts on an incomplete column, else warns once per column.
+        subroutine parquet_reader_check_complete(reader, hard) &
+                bind(C, name="parquet_reader_check_complete")
+            import
+            type(c_ptr), value :: reader
+            integer(c_int), value :: hard
+        end subroutine
+
+        !> Reads row group `row_group` of scalar int32 column `name` from `reader` into `data`.
+        subroutine parquet_read_int32_column_chunk(reader, name, row_group, data, nrows, valid_out) &
+                bind(C, name="parquet_read_int32_column_chunk")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_int32_t) :: data(*)
+            integer(c_long_long), value :: nrows
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Same as parquet_read_int32_column_chunk, but for int64.
+        subroutine parquet_read_int64_column_chunk(reader, name, row_group, data, nrows, valid_out) &
+                bind(C, name="parquet_read_int64_column_chunk")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_int64_t) :: data(*)
+            integer(c_long_long), value :: nrows
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Same as parquet_read_int32_column_chunk, but for float32.
+        subroutine parquet_read_float32_column_chunk(reader, name, row_group, data, nrows, valid_out) &
+                bind(C, name="parquet_read_float32_column_chunk")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            real(c_float) :: data(*)
+            integer(c_long_long), value :: nrows
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Same as parquet_read_int32_column_chunk, but for float64.
+        subroutine parquet_read_float64_column_chunk(reader, name, row_group, data, nrows, valid_out) &
+                bind(C, name="parquet_read_float64_column_chunk")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            real(c_double) :: data(*)
+            integer(c_long_long), value :: nrows
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Same as parquet_read_int32_column_chunk, but for boolean (bool8).
+        subroutine parquet_read_bool8_column_chunk(reader, name, row_group, data, nrows, valid_out) &
+                bind(C, name="parquet_read_bool8_column_chunk")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_int8_t) :: data(*)
+            integer(c_long_long), value :: nrows
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Same as parquet_read_int32_column_chunk, but for string (fixed-width, space-padded).
+        subroutine parquet_read_string_column_chunk(reader, name, row_group, data, item_len, nrows, valid_out) &
+                bind(C, name="parquet_read_string_column_chunk")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            character(kind=c_char) :: data(*)
+            integer(c_long_long), value :: item_len
+            integer(c_long_long), value :: nrows
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Reads row group `row_group` of vector int32 column `name` from `reader` into `data`.
+        subroutine parquet_read_int32_array_column_chunk(reader, name, row_group, data, nrows, col_size, valid_out) &
+                bind(C, name="parquet_read_int32_array_column_chunk")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_int32_t) :: data(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: col_size
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Same as parquet_read_int32_array_column_chunk, but for int64.
+        subroutine parquet_read_int64_array_column_chunk(reader, name, row_group, data, nrows, col_size, valid_out) &
+                bind(C, name="parquet_read_int64_array_column_chunk")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_int64_t) :: data(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: col_size
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Same as parquet_read_int32_array_column_chunk, but for float32.
+        subroutine parquet_read_float32_array_column_chunk(reader, name, row_group, data, nrows, col_size, valid_out) &
+                bind(C, name="parquet_read_float32_array_column_chunk")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            real(c_float) :: data(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: col_size
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Same as parquet_read_int32_array_column_chunk, but for float64.
+        subroutine parquet_read_float64_array_column_chunk(reader, name, row_group, data, nrows, col_size, valid_out) &
+                bind(C, name="parquet_read_float64_array_column_chunk")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            real(c_double) :: data(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: col_size
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Same as parquet_read_int32_array_column_chunk, but for boolean (bool8).
+        subroutine parquet_read_bool8_array_column_chunk(reader, name, row_group, data, nrows, col_size, valid_out) &
+                bind(C, name="parquet_read_bool8_array_column_chunk")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_int8_t) :: data(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: col_size
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Same as parquet_read_int32_array_column_chunk, but for string (fixed-width, space-padded).
+        subroutine parquet_read_string_array_column_chunk(reader, name, row_group, data, item_len, nrows, col_size, &
+                valid_out) &
+                bind(C, name="parquet_read_string_array_column_chunk")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
             character(kind=c_char) :: data(*)
             integer(c_long_long), value :: item_len
             integer(c_long_long), value :: nrows

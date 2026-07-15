@@ -45,7 +45,15 @@ contains
             new_unittest("read array column with null_value and is_valid", test_read_array_null), &
             new_unittest("read list-encoded vector column", test_read_list_vector_column), &
             new_unittest("null_value on a Null-containing vector column (full/row/element modes, every type)", &
-                test_read_vector_null_value_all_types) &
+                test_read_vector_null_value_all_types), &
+            new_unittest("is_valid on a vector column with zero Nulls anywhere (full/row/element modes)", &
+                test_read_vector_is_valid_no_nulls_present), &
+            new_unittest("chunked read (parquet_read_column_chunk): every type/shape round-trips row group by " // &
+                "row group", test_read_column_chunk_all_types_roundtrip), &
+            new_unittest("chunked read: int64 row_group kind, parquet_get_num_row_groups, " // &
+                "parquet_get_chunk_size(reader,...)", test_read_column_chunk_int64_row_group), &
+            new_unittest("chunked read: parquet_close_reader(check_complete=.true.) passes when every row " // &
+                "group was read", test_read_column_chunk_check_complete_pass) &
             ]
     end subroutine collect_tests_parquet_reading
 
@@ -1275,5 +1283,297 @@ contains
         call check(error, ok, &
             "null_value substitution failed for one or more scalar/vector-column read variants/types")
     end subroutine test_read_vector_null_value_all_types
+
+    !> Regression test: parquet_read_column/parquet_read_array_row_mode/parquet_read_array_element_mode's
+    !> shared null-reporting helpers (report_nulls_list_full/report_nulls_list_element in
+    !> parquet_wrapper.cpp) used to skip populating is_valid entirely whenever the array being
+    !> read happened to contain zero Nulls, leaving it as uninitialized memory instead of all
+    !> .true. -- every other test in this suite reads a column/row-group that has at least one
+    !> Null somewhere, so this never-nulls-at-all case was untested and the bug went unnoticed.
+    !> Writes a 3-row, col_size=2 int32 vector column with no Nulls at all and asserts is_valid
+    !> comes back entirely .true. via every read mode that shares those helpers.
+    subroutine test_read_vector_is_valid_no_nulls_present(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = "test_run/vector_is_valid_no_nulls.parquet"
+        integer(int32) :: i32v(2, 3), full(2, 3), row_mode(2), elem_mode(3)
+        logical :: valid_full(2, 3), valid_row(2), valid_elem(3)
+        logical :: ok
+
+        i32v = reshape([10_int32, 20_int32, 30_int32, 40_int32, 50_int32, 60_int32], [2, 3])
+
+        call schema%init(table="vector_no_nulls_table")
+        call schema%add_field("i32v", "int32", col_size=2)
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "i32v", i32v)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "i32v", full, is_valid=valid_full)
+        call parquet_read_array_row_mode(reader, "i32v", row_mode, 2, is_valid=valid_row)
+        call parquet_read_array_element_mode(reader, "i32v", elem_mode, 1, is_valid=valid_elem)
+        call parquet_close_reader(reader)
+
+        ok = all(valid_full) .and. all(full == i32v) .and. &
+             all(valid_row) .and. all(row_mode == i32v(:, 2)) .and. &
+             all(valid_elem) .and. all(elem_mode == i32v(1, :))
+
+        call check(error, ok, &
+            "is_valid was not all .true. (or data was corrupted) for a vector column with zero Nulls present")
+    end subroutine test_read_vector_is_valid_no_nulls_present
+    !
+    !> Writes a 5-row, 12-column (every type x scalar/matrix) file with chunk_size=2 (forcing 3
+    !> row groups: 2, 2, 1 rows), then reads it back row group by row group -- once via each
+    !> row_group kind-specific of parquet_read_column_chunk/parquet_get_chunk_size (int64, then
+    !> int32), plus parquet_get_num_row_groups's own int32 specific -- comparing each row group's
+    !> slice against the known full data. This is the primary functional/round-trip check for the
+    !> whole chunked-read feature. The last row (col 2 for vector columns) is written Null and
+    !> every read passes null_value=, also covering the null-substitution branch shared by both
+    !> row_group kind-specifics.
+    subroutine test_read_column_chunk_all_types_roundtrip(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = "test_run/test_read_chunk_all_types.parquet"
+        integer, parameter :: nrows = 5
+        integer(int32), parameter :: i32_null = -111_int32
+        integer(int64), parameter :: i64_null = -222_int64
+        real(real32), parameter :: f32_null = -3.5_real32
+        real(real64), parameter :: f64_null = -4.5_real64
+        logical, parameter :: log_null = .true.
+        character(len=8), parameter :: str_null = "NULLSTR"
+        integer(int32) :: i32s(nrows), i32v(2, nrows), exp_i32s(nrows), exp_i32v(2, nrows)
+        integer(int64) :: i64s(nrows), i64v(2, nrows), exp_i64s(nrows), exp_i64v(2, nrows)
+        real(real32) :: f32s(nrows), f32v(2, nrows), exp_f32s(nrows), exp_f32v(2, nrows)
+        real(real64) :: f64s(nrows), f64v(2, nrows), exp_f64s(nrows), exp_f64v(2, nrows)
+        logical :: logs(nrows), logv(2, nrows), exp_logs(nrows), exp_logv(2, nrows)
+        character(len=8) :: strs(nrows), strv(2, nrows), exp_strs(nrows), exp_strv(2, nrows)
+        logical :: vmask(2, nrows), smask(nrows)
+        integer(int64) :: num_row_groups, rg, rg_size, row0, i
+        integer(int32) :: num_row_groups32, rg32, rg_size32
+        logical :: ok
+        integer :: k
+
+        i32s = [(k, k=1,nrows)]
+        i32v = reshape([(k, k=1,2*nrows)], [2, nrows])
+        i64s = [(int(k, kind=int64), k=101,100+nrows)]
+        i64v = reshape([(int(k, kind=int64), k=1,2*nrows)], [2, nrows])
+        f32s = [(real(k, kind=real32), k=1,nrows)]
+        f32v = reshape([(real(k, kind=real32), k=1,2*nrows)], [2, nrows])
+        f64s = [(real(k, kind=real64), k=1,nrows)]
+        f64v = reshape([(real(k, kind=real64), k=1,2*nrows)], [2, nrows])
+        logs = [.true., .false., .true., .false., .true.]
+        logv = reshape([.true., .false., .false., .true., .true., .true., .false., .false., .true., .false.], [2, nrows])
+        strs = [character(len=8) :: "alpha", "bravo", "charlie", "delta", "echo"]
+        strv = reshape([character(len=8) :: "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9", "t10"], [2, nrows])
+
+        ! Last scalar row, and (col 2, last row) of each vector column, are Null.
+        smask = .true.
+        smask(nrows) = .false.
+        vmask = .true.
+        vmask(2, nrows) = .false.
+
+        exp_i32s = i32s; exp_i32s(nrows) = i32_null
+        exp_i32v = i32v; exp_i32v(2, nrows) = i32_null
+        exp_i64s = i64s; exp_i64s(nrows) = i64_null
+        exp_i64v = i64v; exp_i64v(2, nrows) = i64_null
+        exp_f32s = f32s; exp_f32s(nrows) = f32_null
+        exp_f32v = f32v; exp_f32v(2, nrows) = f32_null
+        exp_f64s = f64s; exp_f64s(nrows) = f64_null
+        exp_f64v = f64v; exp_f64v(2, nrows) = f64_null
+        exp_logs = logs; exp_logs(nrows) = log_null
+        exp_logv = logv; exp_logv(2, nrows) = log_null
+        exp_strs = strs; exp_strs(nrows) = str_null
+        exp_strv = strv; exp_strv(2, nrows) = str_null
+
+        call schema%init(table="read_chunk_all_types_table")
+        call schema%add_field("i32s", "int32")
+        call schema%add_field("i32v", "int32", col_size=2)
+        call schema%add_field("i64s", "int64")
+        call schema%add_field("i64v", "int64", col_size=2)
+        call schema%add_field("f32s", "float32")
+        call schema%add_field("f32v", "float32", col_size=2)
+        call schema%add_field("f64s", "float64")
+        call schema%add_field("f64v", "float64", col_size=2)
+        call schema%add_field("logs", "boolean")
+        call schema%add_field("logv", "boolean", col_size=2)
+        call schema%add_field("strs", "string", array_size=8)
+        call schema%add_field("strv", "string", col_size=2, array_size=8)
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema, chunk_size=2)
+        call parquet_write_column(writer, "i32s", i32s, is_valid=smask)
+        call parquet_write_column(writer, "i32v", i32v, is_valid=vmask)
+        call parquet_write_column(writer, "i64s", i64s, is_valid=smask)
+        call parquet_write_column(writer, "i64v", i64v, is_valid=vmask)
+        call parquet_write_column(writer, "f32s", f32s, is_valid=smask)
+        call parquet_write_column(writer, "f32v", f32v, is_valid=vmask)
+        call parquet_write_column(writer, "f64s", f64s, is_valid=smask)
+        call parquet_write_column(writer, "f64v", f64v, is_valid=vmask)
+        call parquet_write_column(writer, "logs", logs, is_valid=smask)
+        call parquet_write_column(writer, "logv", logv, is_valid=vmask)
+        call parquet_write_column(writer, "strs", strs, is_valid=smask)
+        call parquet_write_column(writer, "strv", strv, is_valid=vmask)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_num_row_groups(reader, num_row_groups)
+        call parquet_get_num_row_groups(reader, num_row_groups32)
+        ok = (num_row_groups == 3_int64) .and. (num_row_groups32 == 3_int32)
+
+        ! Pass 1: row_group as integer(int64) throughout (parquet_get_chunk_size/
+        ! parquet_read_column_chunk's int64 row_group kind-specifics).
+        row0 = 0_int64
+        do rg = 1_int64, num_row_groups
+            block
+                integer(int32), allocatable :: b_i32s(:), b_i32v(:, :)
+                integer(int64), allocatable :: b_i64s(:), b_i64v(:, :)
+                real(real32), allocatable :: b_f32s(:), b_f32v(:, :)
+                real(real64), allocatable :: b_f64s(:), b_f64v(:, :)
+                logical, allocatable :: b_logs(:), b_logv(:, :)
+                character(len=8), allocatable :: b_strs(:), b_strv(:, :)
+
+                call parquet_get_chunk_size(reader, rg_size, row_group=rg)
+                allocate(b_i32s(rg_size), b_i64s(rg_size), b_f32s(rg_size), b_f64s(rg_size), b_logs(rg_size), &
+                    b_strs(rg_size))
+                allocate(b_i32v(2, rg_size), b_i64v(2, rg_size), b_f32v(2, rg_size), b_f64v(2, rg_size), &
+                    b_logv(2, rg_size), b_strv(2, rg_size))
+
+                call parquet_read_column_chunk(reader, "i32s", rg, b_i32s, null_value=i32_null)
+                call parquet_read_column_chunk(reader, "i32v", rg, b_i32v, null_value=i32_null)
+                call parquet_read_column_chunk(reader, "i64s", rg, b_i64s, null_value=i64_null)
+                call parquet_read_column_chunk(reader, "i64v", rg, b_i64v, null_value=i64_null)
+                call parquet_read_column_chunk(reader, "f32s", rg, b_f32s, null_value=f32_null)
+                call parquet_read_column_chunk(reader, "f32v", rg, b_f32v, null_value=f32_null)
+                call parquet_read_column_chunk(reader, "f64s", rg, b_f64s, null_value=f64_null)
+                call parquet_read_column_chunk(reader, "f64v", rg, b_f64v, null_value=f64_null)
+                call parquet_read_column_chunk(reader, "logs", rg, b_logs, null_value=log_null)
+                call parquet_read_column_chunk(reader, "logv", rg, b_logv, null_value=log_null)
+                call parquet_read_column_chunk(reader, "strs", rg, b_strs, null_value=str_null)
+                call parquet_read_column_chunk(reader, "strv", rg, b_strv, null_value=str_null)
+
+                do i = 1_int64, rg_size
+                    ok = ok .and. b_i32s(i) == exp_i32s(row0+i) .and. all(b_i32v(:, i) == exp_i32v(:, row0+i))
+                    ok = ok .and. b_i64s(i) == exp_i64s(row0+i) .and. all(b_i64v(:, i) == exp_i64v(:, row0+i))
+                    ok = ok .and. b_f32s(i) == exp_f32s(row0+i) .and. all(b_f32v(:, i) == exp_f32v(:, row0+i))
+                    ok = ok .and. b_f64s(i) == exp_f64s(row0+i) .and. all(b_f64v(:, i) == exp_f64v(:, row0+i))
+                    ok = ok .and. (b_logs(i) .eqv. exp_logs(row0+i)) .and. all(b_logv(:, i) .eqv. exp_logv(:, row0+i))
+                    ok = ok .and. b_strs(i) == exp_strs(row0+i) .and. all(b_strv(:, i) == exp_strv(:, row0+i))
+                end do
+                row0 = row0 + rg_size
+            end block
+        end do
+        ok = ok .and. (row0 == int(nrows, kind=int64))
+
+        ! Pass 2: same file/data, but row_group as integer(int32) throughout (parquet_get_chunk_size/
+        ! parquet_read_column_chunk's int32 row_group kind-specifics) -- every type/shape here except
+        ! the plain int32 scalar column is otherwise only ever exercised with an int64 row_group.
+        row0 = 0_int64
+        do rg = 1_int64, num_row_groups
+            rg32 = int(rg, kind=int32)
+            block
+                integer(int32), allocatable :: b_i32s(:), b_i32v(:, :)
+                integer(int64), allocatable :: b_i64s(:), b_i64v(:, :)
+                real(real32), allocatable :: b_f32s(:), b_f32v(:, :)
+                real(real64), allocatable :: b_f64s(:), b_f64v(:, :)
+                logical, allocatable :: b_logs(:), b_logv(:, :)
+                character(len=8), allocatable :: b_strs(:), b_strv(:, :)
+
+                call parquet_get_chunk_size(reader, rg_size32, row_group=rg32)
+                allocate(b_i32s(rg_size32), b_i64s(rg_size32), b_f32s(rg_size32), b_f64s(rg_size32), &
+                    b_logs(rg_size32), b_strs(rg_size32))
+                allocate(b_i32v(2, rg_size32), b_i64v(2, rg_size32), b_f32v(2, rg_size32), b_f64v(2, rg_size32), &
+                    b_logv(2, rg_size32), b_strv(2, rg_size32))
+
+                call parquet_read_column_chunk(reader, "i32s", rg32, b_i32s, null_value=i32_null)
+                call parquet_read_column_chunk(reader, "i32v", rg32, b_i32v, null_value=i32_null)
+                call parquet_read_column_chunk(reader, "i64s", rg32, b_i64s, null_value=i64_null)
+                call parquet_read_column_chunk(reader, "i64v", rg32, b_i64v, null_value=i64_null)
+                call parquet_read_column_chunk(reader, "f32s", rg32, b_f32s, null_value=f32_null)
+                call parquet_read_column_chunk(reader, "f32v", rg32, b_f32v, null_value=f32_null)
+                call parquet_read_column_chunk(reader, "f64s", rg32, b_f64s, null_value=f64_null)
+                call parquet_read_column_chunk(reader, "f64v", rg32, b_f64v, null_value=f64_null)
+                call parquet_read_column_chunk(reader, "logs", rg32, b_logs, null_value=log_null)
+                call parquet_read_column_chunk(reader, "logv", rg32, b_logv, null_value=log_null)
+                call parquet_read_column_chunk(reader, "strs", rg32, b_strs, null_value=str_null)
+                call parquet_read_column_chunk(reader, "strv", rg32, b_strv, null_value=str_null)
+
+                do i = 1_int64, int(rg_size32, kind=int64)
+                    ok = ok .and. b_i32s(i) == exp_i32s(row0+i) .and. all(b_i32v(:, i) == exp_i32v(:, row0+i))
+                    ok = ok .and. b_i64s(i) == exp_i64s(row0+i) .and. all(b_i64v(:, i) == exp_i64v(:, row0+i))
+                    ok = ok .and. b_f32s(i) == exp_f32s(row0+i) .and. all(b_f32v(:, i) == exp_f32v(:, row0+i))
+                    ok = ok .and. b_f64s(i) == exp_f64s(row0+i) .and. all(b_f64v(:, i) == exp_f64v(:, row0+i))
+                    ok = ok .and. (b_logs(i) .eqv. exp_logs(row0+i)) .and. all(b_logv(:, i) .eqv. exp_logv(:, row0+i))
+                    ok = ok .and. b_strs(i) == exp_strs(row0+i) .and. all(b_strv(:, i) == exp_strv(:, row0+i))
+                end do
+                row0 = row0 + int(rg_size32, kind=int64)
+            end block
+        end do
+        ok = ok .and. (row0 == int(nrows, kind=int64))
+        call parquet_close_reader(reader)
+
+        call check(error, ok, "chunked read did not round-trip one or more types/shapes/row groups correctly")
+    end subroutine test_read_column_chunk_all_types_roundtrip
+
+    !> Exercises the row_group=integer(int64) specific of parquet_read_column_chunk/
+    !> parquet_get_chunk_size, plus parquet_get_num_row_groups's own int64 specific, on a small
+    !> 2-row-group file.
+    subroutine test_read_column_chunk_int64_row_group(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = "test_run/test_read_chunk_int64_rg.parquet"
+        integer(int32) :: values(4), back1(2), back2(2)
+        integer(int64) :: num_row_groups, chunk_size1, chunk_size2
+        logical :: ok
+
+        values = [10, 20, 30, 40]
+        call parquet_open_writer(writer, out_file, chunk_size=2)
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_num_row_groups(reader, num_row_groups)
+        ok = (num_row_groups == 2_int64)
+
+        call parquet_get_chunk_size(reader, chunk_size1, row_group=1_int64)
+        call parquet_get_chunk_size(reader, chunk_size2, row_group=2_int64)
+        ok = ok .and. chunk_size1 == 2_int64 .and. chunk_size2 == 2_int64
+
+        call parquet_read_column_chunk(reader, "v", 1_int64, back1)
+        call parquet_read_column_chunk(reader, "v", 2_int64, back2)
+        call parquet_close_reader(reader)
+
+        ok = ok .and. all(back1 == [10, 20]) .and. all(back2 == [30, 40])
+        call check(error, ok, "int64 row_group-kind chunked read did not round-trip correctly")
+    end subroutine test_read_column_chunk_int64_row_group
+
+    !> parquet_close_reader(check_complete=.true.) must not warn/abort when every row group of
+    !> every chunk-read column was actually read.
+    subroutine test_read_column_chunk_check_complete_pass(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = "test_run/test_read_chunk_complete_pass.parquet"
+        integer(int32) :: values(4), back1(2), back2(2)
+
+        values = [1, 2, 3, 4]
+        call parquet_open_writer(writer, out_file, chunk_size=2)
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column_chunk(reader, "v", 1, back1)
+        call parquet_read_column_chunk(reader, "v", 2, back2)
+        call parquet_close_reader(reader, check_complete=.true.)
+
+        call check(error, all(back1 == [1, 2]) .and. all(back2 == [3, 4]), &
+            "check_complete=.true. unexpectedly disrupted a complete chunked read")
+    end subroutine test_read_column_chunk_check_complete_pass
     !
 end module test_reading

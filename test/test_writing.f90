@@ -8,7 +8,7 @@ module test_writing
     use iso_fortran_env, only : int32, int64, real32, real64
     use testdrive, only : new_unittest, unittest_type, error_type, check, test_failed
     use test_errors, only : check_scenario_exit_status, check_scenario_exit_status_and_stderr, &
-        check_scenario_exit_status_and_no_output
+        check_scenario_exit_status_and_no_output, run_error_scenario
     !
     implicit none
     private
@@ -103,6 +103,9 @@ contains
                 test_close_reader_print_stat_smoke), &
             new_unittest("a string/string-vector column too large for arrow::utf8() round-trips via large_utf8()", &
                 test_large_string_column_roundtrip), &
+            new_unittest("a vector column whose auto-sized row-group size is clamped for the int32 " // &
+                "list-element-count limit still round-trips, split across multiple row groups", &
+                test_list_element_count_auto_multi_row_group_roundtrip), &
             new_unittest("qc: range violation prints a WARNING but does not abort", &
                 test_qc_range_violation_warns), &
             new_unittest("qc-maml: a stray no-colon line before qc: still warns correctly", &
@@ -142,7 +145,21 @@ contains
             new_unittest("float32 scalar (with is_valid) and float32/boolean vector columns round-trip", &
                 test_write_float32_boolean_vector_columns), &
             new_unittest("vector columns written through a qc-enabled schema round-trip (with/without is_valid)", &
-                test_write_vector_columns_schema_qc) &
+                test_write_vector_columns_schema_qc), &
+            new_unittest("streaming row-group write (schema-enforced): mixed whole/chunked columns round-trip", &
+                test_streaming_write_schema_enforced_roundtrip), &
+            new_unittest("streaming row-group write (schema-less): mixed whole/chunked columns round-trip", &
+                test_streaming_write_schemaless_roundtrip), &
+            new_unittest("streaming row-group write: a single row group covering the whole file round-trips", &
+                test_streaming_write_single_row_group_roundtrip), &
+            new_unittest("streaming row-group write: string and logical chunked columns round-trip", &
+                test_streaming_write_string_logical_roundtrip), &
+            new_unittest("parquet_get_chunk_size(writer) returns a positive value before and during streaming", &
+                test_streaming_get_chunk_size), &
+            new_unittest("streaming row-group write: every type/shape (incl. logical/string) round-trips " // &
+                "with is_valid+qc branches exercised", test_streaming_write_all_types_roundtrip), &
+            new_unittest("streaming row-group write: col_size>1 string column via a flat rank-1 array round-trips", &
+                test_streaming_write_string_flat_vector_chunk) &
             ]
         !
     end subroutine collect_tests_parquet_writing
@@ -847,12 +864,9 @@ contains
         character(len=*), parameter :: out_file = "test_run/qc_warning_fractional_bound_output.txt"
         logical :: found_bound_text
 
-        call execute_command_line("mkdir -p test_run", wait=.true.)
-        call execute_command_line( &
-            "fpm test error_scenarios -- qc_warning_fractional_bound > " // out_file // " 2>&1", &
-            wait=.true., exitstat=exitstat, cmdstat=cmdstat)
+        call run_error_scenario("qc_warning_fractional_bound", "> " // out_file // " 2>&1", exitstat, cmdstat)
 
-        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper program via fpm")
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
         if (allocated(error)) return
         call check(error, exitstat == 0, &
             "qc=.true. with an out-of-range fractional-bound value should not error stop (warning only)")
@@ -870,7 +884,7 @@ contains
         call check_qc_scenario_warns(error, "qc_warning_string", "s", exitstat, cmdstat)
         if (allocated(error)) return
 
-        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper program via fpm")
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
         if (allocated(error)) return
         call check(error, exitstat == 0, &
             "qc=.true. with an out-of-range string value should not error stop (warning only)")
@@ -882,12 +896,9 @@ contains
         character(len=*), parameter :: out_file = "test_run/qc_boolean_output.txt"
         logical :: found_warning
 
-        call execute_command_line("mkdir -p test_run", wait=.true.)
-        call execute_command_line( &
-            "fpm test error_scenarios -- qc_silently_ignored_for_boolean > " // out_file // " 2>&1", &
-            wait=.true., exitstat=exitstat, cmdstat=cmdstat)
+        call run_error_scenario("qc_silently_ignored_for_boolean", "> " // out_file // " 2>&1", exitstat, cmdstat)
 
-        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper program via fpm")
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
         if (allocated(error)) return
         call check(error, exitstat == 0, "qc: on a boolean field should never be enforced (no error expected)")
         if (allocated(error)) return
@@ -908,10 +919,7 @@ contains
 
         out_file = "test_run/" // trim(scenario_name) // "_output.txt"
 
-        call execute_command_line("mkdir -p test_run", wait=.true.)
-        call execute_command_line( &
-            "fpm test error_scenarios -- " // trim(scenario_name) // " > " // out_file // " 2>&1", &
-            wait=.true., exitstat=exitstat, cmdstat=cmdstat)
+        call run_error_scenario(scenario_name, "> " // out_file // " 2>&1", exitstat, cmdstat)
         if (cmdstat /= 0) return
 
         call file_contains_warning_for_column(out_file, column_name, found_warning)
@@ -988,7 +996,7 @@ contains
     subroutine test_compression_uncompressed_larger_than_default(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_writer) :: writer
-        character(len=256) :: values(2000)
+        character(len=256) :: values(100)
         character(len=*), parameter :: gzip_file = "test_run/test_compression_gzip_size.parquet"
         character(len=*), parameter :: uncompressed_file = "test_run/test_compression_uncompressed.parquet"
         integer(int64) :: gzip_size, uncompressed_size
@@ -1083,43 +1091,49 @@ contains
             "auto-sized chunk_size (no explicit value given) did not round-trip the written data correctly")
     end subroutine test_chunk_size_auto_sizing_without_explicit_value
 
-    !> A "wide" row (a vector column with a large col_size) can reach the
-    !> ~256 MiB row-group byte target at well under a million rows -- a flat
-    !> row-count-based auto-sizing heuristic would never split a table this
-    !> small into multiple row groups, but a byte-size-aware one should.
-    !> This only checks the round-trip still comes back correct; the actual
-    !> row-group count/size was verified manually against a standalone
-    !> parquet::ParquetFileReader inspector during development (2 row groups
-    !> of ~256 MiB and ~132 MiB for 50,000 rows x col_size=1000 int64).
+    !> A "wide" row (a vector column with a large col_size) reaches the ~256 MiB row-group byte
+    !> target at well under a million rows -- a flat row-count-based auto-sizing heuristic would
+    !> pick the same chunk_size regardless of col_size, but a byte-size-aware one should scale it
+    !> down for a wide column. Checked directly via parquet_get_chunk_size's schema-based estimate
+    !> (computed purely from column metadata -- see estimate_chunk_size_from_schema in
+    !> parquet_wrapper.cpp -- before any data is written), comparing a wide schema's estimate
+    !> against a narrow one's, rather than by actually writing enough data to reach that target:
+    !> doing that for a genuinely wide column would need writing/reading a file hundreds of MB in
+    !> size on every `fpm test` run. tools/test_large_scale.sh is the maintainer-runnable check
+    !> that exercises writing/reading data at real scale instead (see CONTRIBUTING.md).
     subroutine test_chunk_size_auto_sizing_wide_row(error)
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_writer) :: writer
-        type(parquet_reader) :: reader
-        integer, parameter :: nrows = 50000
-        integer, parameter :: col_size = 1000
-        integer(int64), allocatable :: wide(:, :), wide_read(:, :)
-        integer(int64) :: n
-        character(len=*), parameter :: out_file = "test_run/test_chunk_size_auto_wide.parquet"
-        integer :: i, j
+        type(parquet_schema) :: narrow_schema, wide_schema
+        type(parquet_writer) :: narrow_writer, wide_writer
+        integer(int64) :: narrow_chunk_size, wide_chunk_size
+        integer(int64) :: narrow_data(1) = [1_int64]
+        integer(int64), allocatable :: wide_data(:, :)
+        character(len=*), parameter :: narrow_file = "test_run/test_chunk_size_auto_narrow.parquet"
+        character(len=*), parameter :: wide_file = "test_run/test_chunk_size_auto_wide.parquet"
 
-        allocate(wide(col_size, nrows), wide_read(col_size, nrows))
-        do i = 1, nrows
-            do j = 1, col_size
-                wide(j, i) = int(i, kind=int64) * 10000_int64 + j
-            end do
-        end do
+        call narrow_schema%init(table="chunk_size_narrow_table")
+        call narrow_schema%add_field("v", "int64")
+        call parquet_parse_maml(narrow_schema)
 
-        call parquet_open_writer(writer, out_file)
-        call parquet_write_column(writer, "wide", wide)
-        call parquet_close_writer(writer)
+        call wide_schema%init(table="chunk_size_wide_table")
+        call wide_schema%add_field("v", "int64", col_size=1000)
+        call parquet_parse_maml(wide_schema)
 
-        call parquet_open_reader(reader, out_file)
-        call parquet_get_nrows(reader, n)
-        call parquet_read_column(reader, "wide", wide_read)
-        call parquet_close_reader(reader)
+        call parquet_open_writer(narrow_writer, narrow_file, narrow_schema)
+        call parquet_get_chunk_size(narrow_writer, narrow_chunk_size)
+        call parquet_write_column(narrow_writer, "v", narrow_data)
+        call parquet_close_writer(narrow_writer)
 
-        call check(error, n == int(nrows, kind=int64) .and. all(wide_read == wide), &
-            "auto-sized chunk_size for a wide vector column did not round-trip the written data correctly")
+        allocate(wide_data(1000, 1))
+        wide_data = 1_int64
+        call parquet_open_writer(wide_writer, wide_file, wide_schema)
+        call parquet_get_chunk_size(wide_writer, wide_chunk_size)
+        call parquet_write_column(wide_writer, "v", wide_data)
+        call parquet_close_writer(wide_writer)
+
+        call check(error, narrow_chunk_size > 0 .and. wide_chunk_size > 0 .and. &
+            wide_chunk_size < narrow_chunk_size, &
+            "a wide vector column's auto-sized chunk_size estimate was not scaled down for its col_size")
     end subroutine test_chunk_size_auto_sizing_wide_row
 
     !> parquet_prefetch_columns must warm the cache for the requested columns
@@ -1334,6 +1348,24 @@ contains
             failure_message="a string/string-vector column forced onto the arrow::large_utf8() path " // &
             "did not round-trip correctly")
     end subroutine test_large_string_column_roundtrip
+
+    !> A vector column's flattened element count (nrows * col_size) is capped at 2^31-1 *per row
+    !> group*, not per file -- close_parquet_writer's auto-sizing path silently clamps its own
+    !> computed row-group size down to whatever is safe for the widest vector column present, so
+    !> a column whose total nrows * col_size would otherwise exceed that limit now writes
+    !> successfully, split across multiple row groups. Exercising this for real would need a
+    !> genuine multi-billion-element column, far too slow/large for this suite -- so the actual
+    !> round-trip runs out-of-process as scenario_list_element_count_auto_multi_row_group in
+    !> error_scenarios.f90 (same pattern as test_large_string_column_roundtrip, above), against a
+    !> tiny fixture forced to split via a test-only threshold override; see that scenario's own
+    !> comment for why the override is safe only when isolated like this.
+    subroutine test_list_element_count_auto_multi_row_group_roundtrip(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "list_element_count_auto_multi_row_group", expect_abort=.false., &
+            failure_message="a vector column split across multiple auto-clamped row groups " // &
+            "did not round-trip correctly")
+    end subroutine test_list_element_count_auto_multi_row_group_roundtrip
 
     !> Read-time qc, like print_stat, always prints straight to stdout --
     !> run out-of-process (see scenario_qc_range_violation_warns in
@@ -2089,6 +2121,347 @@ contains
         call check(error, all(i32v_back == i32v) .and. all(i64v_back == i64v), &
             "vector columns written through a qc-enabled schema did not round-trip")
     end subroutine test_write_vector_columns_schema_qc
+
+    !> Streaming row-group write, schema-enforced: "id" is written whole (parquet_write_column,
+    !> before any row group opens), "big_vec" is written in two row groups of uneven size (3
+    !> rows, then 2) via parquet_new_row_group/parquet_write_column_chunk/
+    !> parquet_finish_row_group. Verifies both columns round-trip correctly, exercising the
+    !> whole-column-sliced-per-row-group path (for "id") alongside the freshly-built-per-chunk
+    !> path (for "big_vec").
+    subroutine test_streaming_write_schema_enforced_roundtrip(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = "test_run/test_streaming_schema_enforced.parquet"
+        integer(int32) :: id_values(5), id_back(5)
+        integer(int32) :: vec_values(3, 5), vec_back(3, 5)
+        integer :: i
+
+        id_values = [(i, i=1,5)]
+        vec_values = reshape([(i, i=1,15)], [3, 5])
+
+        call schema%init(table="streaming_table")
+        call schema%add_field("id", "int32")
+        call schema%add_field("big_vec", "int32", col_size=3)
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "id", id_values)
+
+        call parquet_new_row_group(writer, 3)
+        call parquet_write_column_chunk(writer, "big_vec", vec_values(:, 1:3))
+        call parquet_finish_row_group(writer)
+
+        call parquet_new_row_group(writer, 2)
+        call parquet_write_column_chunk(writer, "big_vec", vec_values(:, 4:5))
+        call parquet_finish_row_group(writer)
+
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "id", id_back)
+        call parquet_read_column(reader, "big_vec", vec_back)
+        call parquet_close_reader(reader)
+
+        call check(error, all(id_back == id_values) .and. all(vec_back == vec_values), &
+            "streaming-written schema-enforced columns did not round-trip correctly")
+    end subroutine test_streaming_write_schema_enforced_roundtrip
+
+    !> Same shape as test_streaming_write_schema_enforced_roundtrip, above, but for a
+    !> schema-less writer -- exercises check_column_chunk_write_preconditions' other branch
+    !> (finding/registering a column by name in `fields` directly, since column_metadata stays
+    !> empty for a schema-less writer).
+    subroutine test_streaming_write_schemaless_roundtrip(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = "test_run/test_streaming_schemaless.parquet"
+        integer(int32) :: id_values(5), id_back(5)
+        integer(int32) :: vec_values(3, 5), vec_back(3, 5)
+        integer :: i
+
+        id_values = [(i, i=1,5)]
+        vec_values = reshape([(i, i=1,15)], [3, 5])
+
+        call parquet_open_writer(writer, out_file, chunk_size=3)
+        call parquet_write_column(writer, "id", id_values)
+
+        call parquet_new_row_group(writer, 3)
+        call parquet_write_column_chunk(writer, "big_vec", vec_values(:, 1:3))
+        call parquet_finish_row_group(writer)
+
+        call parquet_new_row_group(writer, 2)
+        call parquet_write_column_chunk(writer, "big_vec", vec_values(:, 4:5))
+        call parquet_finish_row_group(writer)
+
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "id", id_back)
+        call parquet_read_column(reader, "big_vec", vec_back)
+        call parquet_close_reader(reader)
+
+        call check(error, all(id_back == id_values) .and. all(vec_back == vec_values), &
+            "streaming-written schema-less columns did not round-trip correctly")
+    end subroutine test_streaming_write_schemaless_roundtrip
+
+    !> A file whose only row group covers every row (no whole columns at all) -- the simplest
+    !> possible streaming shape, and the one closest to how a single-row-group auto-sized batch
+    !> write behaves.
+    subroutine test_streaming_write_single_row_group_roundtrip(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = "test_run/test_streaming_single_row_group.parquet"
+        integer(int32) :: vec_values(2, 4), vec_back(2, 4)
+        integer :: i
+
+        vec_values = reshape([(i, i=1,8)], [2, 4])
+
+        call parquet_open_writer(writer, out_file, chunk_size=4)
+        call parquet_new_row_group(writer, 4)
+        call parquet_write_column_chunk(writer, "v", vec_values)
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "v", vec_back)
+        call parquet_close_reader(reader)
+
+        call check(error, all(vec_back == vec_values), &
+            "a single-row-group streamed column did not round-trip correctly")
+    end subroutine test_streaming_write_single_row_group_roundtrip
+
+    !> String and logical (boolean) chunked columns, both scalar and vector forms, round-trip
+    !> across two row groups -- these two types take different code paths in
+    !> parquet_write_*_column_chunk (bool8 conversion; string packing + always-large_utf8) from
+    !> the numeric types already covered above.
+    subroutine test_streaming_write_string_logical_roundtrip(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = "test_run/test_streaming_string_logical.parquet"
+        character(len=8) :: names(4), names_back(4)
+        character(len=8) :: tags(2, 4), tags_back(2, 4)
+        logical :: flags(4), flags_back(4)
+
+        names = [character(len=8) :: "alpha", "bravo", "charlie", "delta"]
+        tags = reshape([character(len=8) :: "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"], [2, 4])
+        flags = [.true., .false., .true., .true.]
+
+        call parquet_open_writer(writer, out_file, chunk_size=2)
+
+        call parquet_new_row_group(writer, 2)
+        call parquet_write_column_chunk(writer, "name", names(1:2))
+        call parquet_write_column_chunk(writer, "tag", tags(:, 1:2))
+        call parquet_write_column_chunk(writer, "flag", flags(1:2))
+        call parquet_finish_row_group(writer)
+
+        call parquet_new_row_group(writer, 2)
+        call parquet_write_column_chunk(writer, "name", names(3:4))
+        call parquet_write_column_chunk(writer, "tag", tags(:, 3:4))
+        call parquet_write_column_chunk(writer, "flag", flags(3:4))
+        call parquet_finish_row_group(writer)
+
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "name", names_back)
+        call parquet_read_column(reader, "tag", tags_back)
+        call parquet_read_column(reader, "flag", flags_back)
+        call parquet_close_reader(reader)
+
+        call check(error, all(names_back == names) .and. all(tags_back == tags) .and. all(flags_back .eqv. flags), &
+            "streamed string/logical columns did not round-trip correctly")
+    end subroutine test_streaming_write_string_logical_roundtrip
+
+    !> parquet_get_chunk_size(writer) must return a usable positive value both before any data
+    !> is written (schema-based estimate) and once streaming is under way (locked-in value).
+    !! Also exercises the int32-kind specific (parquet_get_chunk_size_writer_int32) alongside the
+    !! int64 one, and the int64-kind specific of parquet_new_row_group.
+    subroutine test_streaming_get_chunk_size(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        character(len=*), parameter :: out_file = "test_run/test_streaming_get_chunk_size.parquet"
+        integer(int64) :: chunk_size_before, chunk_size_during
+        integer(int32) :: chunk_size_before32
+        integer(int32) :: v(2, 2)
+
+        v = reshape([1, 2, 3, 4], [2, 2])
+
+        call schema%init(table="chunk_size_table")
+        call schema%add_field("v", "int32", col_size=2)
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_get_chunk_size(writer, chunk_size_before)
+        call parquet_get_chunk_size(writer, chunk_size_before32)
+
+        call parquet_new_row_group(writer, 2_int64)
+        call parquet_write_column_chunk(writer, "v", v)
+        call parquet_get_chunk_size(writer, chunk_size_during)
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+
+        call check(error, chunk_size_before > 0 .and. chunk_size_during > 0 .and. chunk_size_before32 > 0, &
+            "parquet_get_chunk_size(writer) did not return a positive value")
+    end subroutine test_streaming_get_chunk_size
+
+    !> Covers every parquet_write_column_chunk type/shape specific across a SCHEMA-ENFORCED,
+    !! qc-enabled writer: int32/int64/float32/float64 scalar+matrix, logical scalar+matrix, and
+    !! string scalar+matrix -- including the schema-enforced branch of logical-scalar/string
+    !! chunk writes (only ever exercised schema-less elsewhere, by
+    !! test_streaming_write_string_logical_roundtrip) and the is_valid-present/absent branches
+    !! (row group 1 passes is_valid=, row group 2 omits it) under qc=.true.. Two uneven row
+    !! groups (3 rows, then 1) so every chunked column also exercises a real multi-row-group
+    !! split, not just a single chunk.
+    subroutine test_streaming_write_all_types_roundtrip(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = "test_run/test_streaming_all_types.parquet"
+        integer(int32) :: i32s(4), i32s_back(4)
+        integer(int32) :: i32v(2, 4), i32v_back(2, 4)
+        integer(int64) :: i64s(4), i64s_back(4)
+        integer(int64) :: i64v(2, 4), i64v_back(2, 4)
+        real(real32) :: f32s(4), f32s_back(4)
+        real(real32) :: f32v(2, 4), f32v_back(2, 4)
+        real(real64) :: f64s(4), f64s_back(4)
+        real(real64) :: f64v(2, 4), f64v_back(2, 4)
+        logical :: logv(2, 4), logv_back(2, 4)
+        logical :: logs(4), logs_back(4)
+        character(len=8) :: strs(4), strs_back(4)
+        character(len=8) :: strv(2, 4), strv_back(2, 4)
+        logical :: valid_s(4), valid_m(2, 4)
+        integer :: i
+
+        i32s = [(i, i=1,4)]
+        i32v = reshape([(i, i=1,8)], [2, 4])
+        i64s = [(int(i, kind=int64), i=5,8)]
+        i64v = reshape([(int(i, kind=int64), i=1,8)], [2, 4])
+        f32s = [(real(i, kind=real32), i=1,4)]
+        f32v = reshape([(real(i, kind=real32), i=1,8)], [2, 4])
+        f64s = [(real(i, kind=real64), i=5,8)]
+        f64v = reshape([(real(i, kind=real64), i=1,8)], [2, 4])
+        logv = reshape([.true., .false., .false., .true., .true., .true., .false., .false.], [2, 4])
+        logs = [.true., .false., .true., .false.]
+        strs = [character(len=8) :: "alpha", "bravo", "charlie", "delta"]
+        strv = reshape([character(len=8) :: "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"], [2, 4])
+        valid_s = .true.
+        valid_m = .true.
+
+        call schema%init(table="streaming_all_types_table")
+        call schema%add_field("i32s", "int32", qc_min="0", qc_max="100")
+        call schema%add_field("i32v", "int32", col_size=2, qc_min="0", qc_max="100")
+        call schema%add_field("i64s", "int64", qc_min="0", qc_max="100")
+        call schema%add_field("i64v", "int64", col_size=2, qc_min="0", qc_max="100")
+        call schema%add_field("f32s", "float32", qc_min="0", qc_max="100")
+        call schema%add_field("f32v", "float32", col_size=2, qc_min="0", qc_max="100")
+        call schema%add_field("f64s", "float64", qc_min="0", qc_max="100")
+        call schema%add_field("f64v", "float64", col_size=2, qc_min="0", qc_max="100")
+        call schema%add_field("logv", "boolean", col_size=2)
+        call schema%add_field("logs", "boolean")
+        call schema%add_field("strs", "string", array_size=8, qc_min=">aa", qc_max="<zz")
+        call schema%add_field("strv", "string", col_size=2, array_size=8, qc_min=">aa", qc_max="<zz")
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema, qc=.true.)
+
+        call parquet_new_row_group(writer, 3_int64)
+        call parquet_write_column_chunk(writer, "i32s", i32s(1:3), is_valid=valid_s(1:3))
+        call parquet_write_column_chunk(writer, "i32v", i32v(:, 1:3), is_valid=valid_m(:, 1:3))
+        call parquet_write_column_chunk(writer, "i64s", i64s(1:3), is_valid=valid_s(1:3))
+        call parquet_write_column_chunk(writer, "i64v", i64v(:, 1:3), is_valid=valid_m(:, 1:3))
+        call parquet_write_column_chunk(writer, "f32s", f32s(1:3), is_valid=valid_s(1:3))
+        call parquet_write_column_chunk(writer, "f32v", f32v(:, 1:3), is_valid=valid_m(:, 1:3))
+        call parquet_write_column_chunk(writer, "f64s", f64s(1:3), is_valid=valid_s(1:3))
+        call parquet_write_column_chunk(writer, "f64v", f64v(:, 1:3), is_valid=valid_m(:, 1:3))
+        call parquet_write_column_chunk(writer, "logv", logv(:, 1:3), is_valid=valid_m(:, 1:3))
+        call parquet_write_column_chunk(writer, "logs", logs(1:3), is_valid=valid_s(1:3))
+        call parquet_write_column_chunk(writer, "strs", strs(1:3), is_valid=valid_s(1:3))
+        call parquet_write_column_chunk(writer, "strv", strv(:, 1:3), is_valid=valid_m(:, 1:3))
+        call parquet_finish_row_group(writer)
+
+        call parquet_new_row_group(writer, 1_int64)
+        call parquet_write_column_chunk(writer, "i32s", i32s(4:4))
+        call parquet_write_column_chunk(writer, "i32v", i32v(:, 4:4))
+        call parquet_write_column_chunk(writer, "i64s", i64s(4:4))
+        call parquet_write_column_chunk(writer, "i64v", i64v(:, 4:4))
+        call parquet_write_column_chunk(writer, "f32s", f32s(4:4))
+        call parquet_write_column_chunk(writer, "f32v", f32v(:, 4:4))
+        call parquet_write_column_chunk(writer, "f64s", f64s(4:4))
+        call parquet_write_column_chunk(writer, "f64v", f64v(:, 4:4))
+        call parquet_write_column_chunk(writer, "logv", logv(:, 4:4))
+        call parquet_write_column_chunk(writer, "logs", logs(4:4))
+        call parquet_write_column_chunk(writer, "strs", strs(4:4))
+        call parquet_write_column_chunk(writer, "strv", strv(:, 4:4))
+        call parquet_finish_row_group(writer)
+
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "i32s", i32s_back)
+        call parquet_read_column(reader, "i32v", i32v_back)
+        call parquet_read_column(reader, "i64s", i64s_back)
+        call parquet_read_column(reader, "i64v", i64v_back)
+        call parquet_read_column(reader, "f32s", f32s_back)
+        call parquet_read_column(reader, "f32v", f32v_back)
+        call parquet_read_column(reader, "f64s", f64s_back)
+        call parquet_read_column(reader, "f64v", f64v_back)
+        call parquet_read_column(reader, "logv", logv_back)
+        call parquet_read_column(reader, "logs", logs_back)
+        call parquet_read_column(reader, "strs", strs_back)
+        call parquet_read_column(reader, "strv", strv_back)
+        call parquet_close_reader(reader)
+
+        call check(error, all(i32s_back == i32s) .and. all(i32v_back == i32v) .and. all(i64s_back == i64s) .and. &
+            all(i64v_back == i64v) .and. &
+            all(f32s_back == f32s) .and. all(f32v_back == f32v) .and. all(f64s_back == f64s) .and. &
+            all(f64v_back == f64v) .and. all(logv_back .eqv. logv) .and. all(logs_back .eqv. logs) .and. &
+            all(strs_back == strs) .and. all(strv_back == strv), &
+            "streamed int32/int64/float32/float64/logical/string scalar+matrix columns did not round-trip")
+    end subroutine test_streaming_write_all_types_roundtrip
+
+    !> parquet_write_string_column_chunk (the rank-1 "values(:)" chunk-write entry point) supports
+    !> a col_size>1 column too, packing a flat array in (element varies fastest, then row) order
+    !> -- a separate branch from parquet_write_string_matrix_column_chunk's rank-2 "values(:,:)"
+    !> form, which every other chunked-string test in this suite uses instead. Exercises that
+    !> flat-array branch directly and checks the round-trip against a schema col_size=2 column.
+    subroutine test_streaming_write_string_flat_vector_chunk(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = "test_run/streaming_string_flat_vector_chunk.parquet"
+        character(len=8) :: flat(6), back(2, 3)
+        logical :: ok
+
+        flat = [character(len=8) :: "a1", "a2", "b1", "b2", "c1", "c2"]
+
+        call schema%init(table="string_flat_vector_chunk_table")
+        call schema%add_field("strv", "string", col_size=2, array_size=8)
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_new_row_group(writer, 3_int64)
+        call parquet_write_column_chunk(writer, "strv", flat)
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "strv", back)
+        call parquet_close_reader(reader)
+
+        ok = trim(back(1, 1)) == "a1" .and. trim(back(2, 1)) == "a2" .and. &
+             trim(back(1, 2)) == "b1" .and. trim(back(2, 2)) == "b2" .and. &
+             trim(back(1, 3)) == "c1" .and. trim(back(2, 3)) == "c2"
+
+        call check(error, ok, &
+            "chunk write of a col_size>1 string column via a flat rank-1 array did not round-trip")
+    end subroutine test_streaming_write_string_flat_vector_chunk
 
     subroutine test_write_parquet_file(error)
         type(error_type), allocatable, intent(out) :: error

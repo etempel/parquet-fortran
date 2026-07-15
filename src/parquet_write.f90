@@ -794,10 +794,12 @@ contains
 
         ! g0 editing's leading zero for |value|<1 is implementation-defined: gfortran writes
         ! "0.5000000", but ifort/ifx write ".5000000" -- normalize so callers/tests can rely on
-        ! a leading zero regardless of compiler.
+        ! a leading zero regardless of compiler. Not coverable under gfortran, this project's
+        ! only tested compiler (confirmed: gfortran always emits the leading zero, checked
+        ! across 0.5, -0.5, 0.00001, -0.00001, 1e20 and -1e-20) -- kept for ifort/ifx builds.
         if (len(text) > 0) then
             if (text(1:1) == ".") then
-                text = "0" // text
+                text = "0" // text ! GCOVR_EXCL_LINE
             else if (len(text) > 1) then
                 if (text(1:2) == "-.") text = "-0" // text(2:)
             end if
@@ -1602,6 +1604,751 @@ contains
             asize, &
             valid_ptr )
     end procedure parquet_write_string_matrix_column
+
+    !> Validates that a parquet_write_column_chunk call's own row count (`nrows`, from the shape
+    !> of its `values`) matches the currently-open row group's own size
+    !> (writer%current_row_group_nrows, set by parquet_new_row_group) -- the streaming
+    !> counterpart to parquet_check_row_count, which instead fixes/checks a row count against
+    !> the whole file.
+    subroutine parquet_check_row_group_row_count(writer, name, nrows)
+        type(parquet_writer), intent(in) :: writer !! open writer, expected to have a row group open.
+        character(len=*), intent(in) :: name !! column being written; named only in the error-stop message.
+        integer(c_long_long), intent(in) :: nrows !! row count of this chunk's own values.
+        character(len=32) :: expected_str, got_str
+
+        if (.not. writer%in_row_group) error stop &
+            "parquet_write_column_chunk: no row group is open (call parquet_new_row_group first) for column " // &
+            trim(name) // writer_context_suffix(writer)
+        if (nrows /= writer%current_row_group_nrows) then
+            write(expected_str, '(i0)') writer%current_row_group_nrows
+            write(got_str, '(i0)') nrows
+            error stop "parquet_write_column_chunk: row count mismatch for column " // trim(name) // &
+                ": the open row group has " // trim(expected_str) // " rows but this chunk has " // trim(got_str) // &
+                writer_context_suffix(writer)
+        end if
+    end subroutine parquet_check_row_group_row_count
+
+    !> Like parquet_assert_column_type, but requires an EXACT data_type match rather than
+    !> parquet_is_type_compatible's lenient cross-numeric-type compatibility: unlike
+    !> parquet_write_column, parquet_write_column_chunk never converts `values`' own kind to the
+    !> schema's declared type before writing (there is no parquet_append_as_schema_chunk_*
+    !> dispatcher the way there is for the batch path) -- see parquet_write_column_chunk's own
+    !> doc-comment in parquet.f90.
+    subroutine parquet_assert_column_type_exact(writer, name, expected_type)
+        type(parquet_writer), intent(in) :: writer !! open writer.
+        character(len=*), intent(in) :: name !! column name.
+        character(len=*), intent(in) :: expected_type !! this chunk-write call's own value kind, e.g. "int32".
+        integer :: idx
+
+        if (.not. writer%is_schema_enforced) return
+        idx = parquet_get_defined_column_index(writer, name)
+        ! Unreachable in practice: every one of this function's 12 callers (one per type/shape)
+        ! already performs this identical is_schema_enforced-guarded idx==0 check and aborts
+        ! itself first, before ever calling in here -- kept as a defensive belt-and-suspenders
+        ! check in case a future caller is added without repeating it.
+        if (idx == 0) error stop &
+            "parquet_write_column_chunk: column not defined in parquet_open_writer: " // &
+            trim(name) // writer_context_suffix(writer) ! GCOVR_EXCL_LINE
+        if (trim(writer%all_columns(idx)%data_type) /= trim(expected_type)) then
+            error stop "parquet_write_column_chunk: type mismatch for column " // trim(name) // &
+                " (expected " // trim(expected_type) // ", got " // trim(writer%all_columns(idx)%data_type) // &
+                ") -- parquet_write_column_chunk requires an exact type match, unlike parquet_write_column" // &
+                writer_context_suffix(writer)
+        end if
+    end subroutine parquet_assert_column_type_exact
+
+    !> Marks `name` as written for parquet_mark_column_written's own bookkeeping (write_counts/
+    !> written_names), but only on its very first chunk ever -- unlike parquet_write_column, a
+    !> chunk column legitimately receives many write calls (one per row group), and
+    !> parquet_mark_column_written itself would error stop ("written more than once") on any
+    !> call after the first.
+    subroutine parquet_chunk_mark_written_if_first(writer, name)
+        type(parquet_writer), intent(inout) :: writer !! open writer.
+        character(len=*), intent(in) :: name !! column name.
+        integer :: idx, i
+        logical :: is_first
+
+        is_first = .true.
+        if (writer%is_schema_enforced) then
+            if (allocated(writer%enabled_columns)) then
+                idx = parquet_get_enabled_column_index(writer, name)
+                if (idx > 0) is_first = (writer%write_counts(idx) == 0)
+            end if
+        else
+            if (allocated(writer%written_names)) then
+                do i = 1, size(writer%written_names)
+                    if (trim(writer%written_names(i)) == trim(name)) then
+                        is_first = .false.
+                        exit
+                    end if
+                end do
+            end if
+        end if
+        if (is_first) call parquet_mark_column_written(writer, name)
+    end subroutine parquet_chunk_mark_written_if_first
+
+    !> Shared worker for parquet_new_row_group_int32/_int64 -- see the parquet_new_row_group
+    !> generic interface in parquet.f90.
+    subroutine parquet_new_row_group_impl(writer, nrows)
+        type(parquet_writer), intent(inout) :: writer !! open writer.
+        integer(c_long_long), intent(in) :: nrows !! row count for the new row group; must be positive.
+
+        call check_writer_open(writer)
+        if (nrows <= 0) error stop "parquet_new_row_group: nrows must be positive" // writer_context_suffix(writer)
+        call parquet_writer_new_row_group(writer%handle, nrows)
+        writer%in_row_group = .true.
+        writer%current_row_group_nrows = nrows
+    end subroutine parquet_new_row_group_impl
+
+    module procedure parquet_new_row_group_int32
+        call parquet_new_row_group_impl(writer, int(nrows, kind=c_long_long))
+    end procedure parquet_new_row_group_int32
+
+    module procedure parquet_new_row_group_int64
+        call parquet_new_row_group_impl(writer, nrows)
+    end procedure parquet_new_row_group_int64
+
+    module procedure parquet_write_int32_column_chunk
+        integer :: idx
+        integer(int64) :: asize, nrows
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
+        call check_writer_open(writer)
+
+        if (writer%is_schema_enforced) then
+            idx = parquet_get_defined_column_index(writer, name)
+            if (idx == 0) error stop &
+                "parquet_write_column_chunk: column not defined in parquet_open_writer: " // &
+                trim(name) // writer_context_suffix(writer)
+            if (.not. writer%all_columns(idx)%is_set) return
+        end if
+
+        call parquet_assert_column_type_exact(writer, name, "int32")
+
+        if (.not. parquet_is_column_enabled(writer, name)) return
+
+        asize = int(parquet_get_column_col_size(writer, name), kind=int64)
+        if (mod(size(values, kind=int64), asize) /= 0) error stop &
+            "parquet_write_int32_column_chunk: values size is not divisible by col_size for column " // &
+            trim(name) // writer_context_suffix(writer)
+        nrows = size(values, kind=int64) / asize
+        call parquet_check_row_group_row_count(writer, name, nrows)
+
+        if (present(is_valid)) then
+            call parquet_check_protected(writer, name, is_valid)
+            if (writer%qc .and. writer%is_schema_enforced) then
+                call parquet_check_qc_numeric(writer, name, real(values, kind=real64), is_valid)
+            end if
+        else
+            if (writer%qc .and. writer%is_schema_enforced) then
+                call parquet_check_qc_numeric(writer, name, real(values, kind=real64), &
+                    spread(.true., 1, size(values, kind=int64)))
+            end if
+        end if
+        call parquet_make_valid_buf_write(is_valid, valid_buf, valid_ptr)
+        call parquet_chunk_mark_written_if_first(writer, name)
+
+        call parquet_append_int32_column_chunk(writer%handle, &
+            trim(parquet_resolve_output_name(writer, name))//char(0), values, asize, valid_ptr)
+    end procedure parquet_write_int32_column_chunk
+
+    module procedure parquet_write_int32_matrix_column_chunk
+        integer :: idx
+        integer(int64) :: asize, nrows
+        integer(int32), allocatable :: packed(:)
+        logical, allocatable :: valid_flat(:)
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
+        call check_writer_open(writer)
+
+        asize = size(values, 1, kind=int64)
+        nrows = size(values, 2, kind=int64)
+
+        if (writer%is_schema_enforced) then
+            idx = parquet_get_defined_column_index(writer, name)
+            if (idx == 0) error stop &
+                "parquet_write_column_chunk: column not defined in parquet_open_writer: " // &
+                trim(name) // writer_context_suffix(writer)
+            if (.not. writer%all_columns(idx)%is_set) return
+            if (writer%all_columns(idx)%col_size /= asize) then
+                error stop "parquet_write_column_chunk: array size mismatch for column " // trim(name)
+            end if
+        end if
+
+        call parquet_assert_column_type_exact(writer, name, "int32")
+
+        if (.not. parquet_is_column_enabled(writer, name)) return
+        call parquet_check_row_group_row_count(writer, name, nrows)
+
+        allocate(packed(size(values, kind=int64)))
+        packed = reshape(values, [size(values, kind=int64)])
+
+        if (present(is_valid)) then
+            valid_flat = reshape(is_valid, [size(is_valid, kind=int64)])
+            call parquet_check_protected(writer, name, valid_flat)
+            if (writer%qc .and. writer%is_schema_enforced) then
+                call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), valid_flat)
+            end if
+            call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
+        else
+            if (writer%qc .and. writer%is_schema_enforced) then
+                call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), &
+                    spread(.true., 1, size(packed, kind=int64)))
+            end if
+            call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
+        end if
+        call parquet_chunk_mark_written_if_first(writer, name)
+
+        call parquet_append_int32_column_chunk(writer%handle, &
+            trim(parquet_resolve_output_name(writer, name))//char(0), packed, asize, valid_ptr)
+    end procedure parquet_write_int32_matrix_column_chunk
+
+    module procedure parquet_write_int64_column_chunk
+        integer :: idx
+        integer(int64) :: asize, nrows
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
+        call check_writer_open(writer)
+
+        if (writer%is_schema_enforced) then
+            idx = parquet_get_defined_column_index(writer, name)
+            if (idx == 0) error stop &
+                "parquet_write_column_chunk: column not defined in parquet_open_writer: " // &
+                trim(name) // writer_context_suffix(writer)
+            if (.not. writer%all_columns(idx)%is_set) return
+        end if
+
+        call parquet_assert_column_type_exact(writer, name, "int64")
+
+        if (.not. parquet_is_column_enabled(writer, name)) return
+
+        asize = int(parquet_get_column_col_size(writer, name), kind=int64)
+        if (mod(size(values, kind=int64), asize) /= 0) error stop &
+            "parquet_write_int64_column_chunk: values size is not divisible by col_size for column " // &
+            trim(name) // writer_context_suffix(writer)
+        nrows = size(values, kind=int64) / asize
+        call parquet_check_row_group_row_count(writer, name, nrows)
+
+        if (present(is_valid)) then
+            call parquet_check_protected(writer, name, is_valid)
+            if (writer%qc .and. writer%is_schema_enforced) then
+                call parquet_check_qc_numeric(writer, name, real(values, kind=real64), is_valid)
+            end if
+        else
+            if (writer%qc .and. writer%is_schema_enforced) then
+                call parquet_check_qc_numeric(writer, name, real(values, kind=real64), &
+                    spread(.true., 1, size(values, kind=int64)))
+            end if
+        end if
+        call parquet_make_valid_buf_write(is_valid, valid_buf, valid_ptr)
+        call parquet_chunk_mark_written_if_first(writer, name)
+
+        call parquet_append_int64_column_chunk(writer%handle, &
+            trim(parquet_resolve_output_name(writer, name))//char(0), values, asize, valid_ptr)
+    end procedure parquet_write_int64_column_chunk
+
+    module procedure parquet_write_int64_matrix_column_chunk
+        integer :: idx
+        integer(int64) :: asize, nrows
+        integer(int64), allocatable :: packed(:)
+        logical, allocatable :: valid_flat(:)
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
+        call check_writer_open(writer)
+
+        asize = size(values, 1, kind=int64)
+        nrows = size(values, 2, kind=int64)
+
+        if (writer%is_schema_enforced) then
+            idx = parquet_get_defined_column_index(writer, name)
+            if (idx == 0) error stop &
+                "parquet_write_column_chunk: column not defined in parquet_open_writer: " // &
+                trim(name) // writer_context_suffix(writer)
+            if (.not. writer%all_columns(idx)%is_set) return
+            if (writer%all_columns(idx)%col_size /= asize) then
+                error stop "parquet_write_column_chunk: array size mismatch for column " // trim(name)
+            end if
+        end if
+
+        call parquet_assert_column_type_exact(writer, name, "int64")
+
+        if (.not. parquet_is_column_enabled(writer, name)) return
+        call parquet_check_row_group_row_count(writer, name, nrows)
+
+        allocate(packed(size(values, kind=int64)))
+        packed = reshape(values, [size(values, kind=int64)])
+
+        if (present(is_valid)) then
+            valid_flat = reshape(is_valid, [size(is_valid, kind=int64)])
+            call parquet_check_protected(writer, name, valid_flat)
+            if (writer%qc .and. writer%is_schema_enforced) then
+                call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), valid_flat)
+            end if
+            call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
+        else
+            if (writer%qc .and. writer%is_schema_enforced) then
+                call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), &
+                    spread(.true., 1, size(packed, kind=int64)))
+            end if
+            call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
+        end if
+        call parquet_chunk_mark_written_if_first(writer, name)
+
+        call parquet_append_int64_column_chunk(writer%handle, &
+            trim(parquet_resolve_output_name(writer, name))//char(0), packed, asize, valid_ptr)
+    end procedure parquet_write_int64_matrix_column_chunk
+
+    module procedure parquet_write_float32_column_chunk
+        integer :: idx
+        integer(int64) :: asize, nrows
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
+        call check_writer_open(writer)
+
+        if (writer%is_schema_enforced) then
+            idx = parquet_get_defined_column_index(writer, name)
+            if (idx == 0) error stop &
+                "parquet_write_column_chunk: column not defined in parquet_open_writer: " // &
+                trim(name) // writer_context_suffix(writer)
+            if (.not. writer%all_columns(idx)%is_set) return
+        end if
+
+        call parquet_assert_column_type_exact(writer, name, "float32")
+
+        if (.not. parquet_is_column_enabled(writer, name)) return
+
+        asize = int(parquet_get_column_col_size(writer, name), kind=int64)
+        if (mod(size(values, kind=int64), asize) /= 0) error stop &
+            "parquet_write_float32_column_chunk: values size is not divisible by col_size for column " // &
+            trim(name) // writer_context_suffix(writer)
+        nrows = size(values, kind=int64) / asize
+        call parquet_check_row_group_row_count(writer, name, nrows)
+
+        if (present(is_valid)) then
+            call parquet_check_protected(writer, name, is_valid)
+            if (writer%qc .and. writer%is_schema_enforced) then
+                call parquet_check_qc_numeric(writer, name, real(values, kind=real64), is_valid)
+            end if
+        else
+            if (writer%qc .and. writer%is_schema_enforced) then
+                call parquet_check_qc_numeric(writer, name, real(values, kind=real64), &
+                    spread(.true., 1, size(values, kind=int64)))
+            end if
+        end if
+        call parquet_make_valid_buf_write(is_valid, valid_buf, valid_ptr)
+        call parquet_chunk_mark_written_if_first(writer, name)
+
+        call parquet_append_float32_column_chunk(writer%handle, &
+            trim(parquet_resolve_output_name(writer, name))//char(0), values, asize, valid_ptr)
+    end procedure parquet_write_float32_column_chunk
+
+    module procedure parquet_write_float32_matrix_column_chunk
+        integer :: idx
+        integer(int64) :: asize, nrows
+        real(real32), allocatable :: packed(:)
+        logical, allocatable :: valid_flat(:)
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
+        call check_writer_open(writer)
+
+        asize = size(values, 1, kind=int64)
+        nrows = size(values, 2, kind=int64)
+
+        if (writer%is_schema_enforced) then
+            idx = parquet_get_defined_column_index(writer, name)
+            if (idx == 0) error stop &
+                "parquet_write_column_chunk: column not defined in parquet_open_writer: " // &
+                trim(name) // writer_context_suffix(writer)
+            if (.not. writer%all_columns(idx)%is_set) return
+            if (writer%all_columns(idx)%col_size /= asize) then
+                error stop "parquet_write_column_chunk: array size mismatch for column " // trim(name)
+            end if
+        end if
+
+        call parquet_assert_column_type_exact(writer, name, "float32")
+
+        if (.not. parquet_is_column_enabled(writer, name)) return
+        call parquet_check_row_group_row_count(writer, name, nrows)
+
+        allocate(packed(size(values, kind=int64)))
+        packed = reshape(values, [size(values, kind=int64)])
+
+        if (present(is_valid)) then
+            valid_flat = reshape(is_valid, [size(is_valid, kind=int64)])
+            call parquet_check_protected(writer, name, valid_flat)
+            if (writer%qc .and. writer%is_schema_enforced) then
+                call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), valid_flat)
+            end if
+            call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
+        else
+            if (writer%qc .and. writer%is_schema_enforced) then
+                call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), &
+                    spread(.true., 1, size(packed, kind=int64)))
+            end if
+            call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
+        end if
+        call parquet_chunk_mark_written_if_first(writer, name)
+
+        call parquet_append_float32_column_chunk(writer%handle, &
+            trim(parquet_resolve_output_name(writer, name))//char(0), packed, asize, valid_ptr)
+    end procedure parquet_write_float32_matrix_column_chunk
+
+    module procedure parquet_write_float64_column_chunk
+        integer :: idx
+        integer(int64) :: asize, nrows
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
+        call check_writer_open(writer)
+
+        if (writer%is_schema_enforced) then
+            idx = parquet_get_defined_column_index(writer, name)
+            if (idx == 0) error stop &
+                "parquet_write_column_chunk: column not defined in parquet_open_writer: " // &
+                trim(name) // writer_context_suffix(writer)
+            if (.not. writer%all_columns(idx)%is_set) return
+        end if
+
+        call parquet_assert_column_type_exact(writer, name, "float64")
+
+        if (.not. parquet_is_column_enabled(writer, name)) return
+
+        asize = int(parquet_get_column_col_size(writer, name), kind=int64)
+        if (mod(size(values, kind=int64), asize) /= 0) error stop &
+            "parquet_write_float64_column_chunk: values size is not divisible by col_size for column " // &
+            trim(name) // writer_context_suffix(writer)
+        nrows = size(values, kind=int64) / asize
+        call parquet_check_row_group_row_count(writer, name, nrows)
+
+        if (present(is_valid)) then
+            call parquet_check_protected(writer, name, is_valid)
+            if (writer%qc .and. writer%is_schema_enforced) then
+                call parquet_check_qc_numeric(writer, name, real(values, kind=real64), is_valid)
+            end if
+        else
+            if (writer%qc .and. writer%is_schema_enforced) then
+                call parquet_check_qc_numeric(writer, name, real(values, kind=real64), &
+                    spread(.true., 1, size(values, kind=int64)))
+            end if
+        end if
+        call parquet_make_valid_buf_write(is_valid, valid_buf, valid_ptr)
+        call parquet_chunk_mark_written_if_first(writer, name)
+
+        call parquet_append_float64_column_chunk(writer%handle, &
+            trim(parquet_resolve_output_name(writer, name))//char(0), values, asize, valid_ptr)
+    end procedure parquet_write_float64_column_chunk
+
+    module procedure parquet_write_float64_matrix_column_chunk
+        integer :: idx
+        integer(int64) :: asize, nrows
+        real(real64), allocatable :: packed(:)
+        logical, allocatable :: valid_flat(:)
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
+        call check_writer_open(writer)
+
+        asize = size(values, 1, kind=int64)
+        nrows = size(values, 2, kind=int64)
+
+        if (writer%is_schema_enforced) then
+            idx = parquet_get_defined_column_index(writer, name)
+            if (idx == 0) error stop &
+                "parquet_write_column_chunk: column not defined in parquet_open_writer: " // &
+                trim(name) // writer_context_suffix(writer)
+            if (.not. writer%all_columns(idx)%is_set) return
+            if (writer%all_columns(idx)%col_size /= asize) then
+                error stop "parquet_write_column_chunk: array size mismatch for column " // trim(name)
+            end if
+        end if
+
+        call parquet_assert_column_type_exact(writer, name, "float64")
+
+        if (.not. parquet_is_column_enabled(writer, name)) return
+        call parquet_check_row_group_row_count(writer, name, nrows)
+
+        allocate(packed(size(values, kind=int64)))
+        packed = reshape(values, [size(values, kind=int64)])
+
+        if (present(is_valid)) then
+            valid_flat = reshape(is_valid, [size(is_valid, kind=int64)])
+            call parquet_check_protected(writer, name, valid_flat)
+            if (writer%qc .and. writer%is_schema_enforced) then
+                call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), valid_flat)
+            end if
+            call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
+        else
+            if (writer%qc .and. writer%is_schema_enforced) then
+                call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), &
+                    spread(.true., 1, size(packed, kind=int64)))
+            end if
+            call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
+        end if
+        call parquet_chunk_mark_written_if_first(writer, name)
+
+        call parquet_append_float64_column_chunk(writer%handle, &
+            trim(parquet_resolve_output_name(writer, name))//char(0), packed, asize, valid_ptr)
+    end procedure parquet_write_float64_matrix_column_chunk
+
+    module procedure parquet_write_logical_column_chunk
+        integer :: idx
+        integer(int64) :: asize, nrows, i
+        integer(c_int8_t), allocatable :: bool_data(:)
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
+        call check_writer_open(writer)
+
+        if (writer%is_schema_enforced) then
+            idx = parquet_get_defined_column_index(writer, name)
+            if (idx == 0) error stop &
+                "parquet_write_column_chunk: column not defined in parquet_open_writer: " // &
+                trim(name) // writer_context_suffix(writer)
+            if (.not. writer%all_columns(idx)%is_set) return
+        end if
+
+        call parquet_assert_column_type_exact(writer, name, "boolean")
+
+        if (.not. parquet_is_column_enabled(writer, name)) return
+
+        asize = int(parquet_get_column_col_size(writer, name), kind=int64)
+        if (mod(size(values, kind=int64), asize) /= 0) error stop &
+            "parquet_write_logical_column_chunk: values size is not divisible by col_size for column " // &
+            trim(name) // writer_context_suffix(writer)
+        nrows = size(values, kind=int64) / asize
+        call parquet_check_row_group_row_count(writer, name, nrows)
+
+        allocate(bool_data(size(values, kind=int64)))
+        do i = 1_int64, size(values, kind=int64)
+            if (values(i)) then
+                bool_data(i) = 1_c_int8_t
+            else
+                bool_data(i) = 0_c_int8_t
+            end if
+        end do
+
+        if (present(is_valid)) call parquet_check_protected(writer, name, is_valid)
+        call parquet_make_valid_buf_write(is_valid, valid_buf, valid_ptr)
+        call parquet_chunk_mark_written_if_first(writer, name)
+
+        call parquet_append_bool8_column_chunk(&
+            writer%handle, &
+            trim(parquet_resolve_output_name(writer, name))//char(0), &
+            bool_data, &
+            asize, &
+            valid_ptr )
+    end procedure parquet_write_logical_column_chunk
+
+    module procedure parquet_write_logical_matrix_column_chunk
+        integer :: idx
+        integer(int64) :: asize, nrows
+        integer(c_int8_t), allocatable :: bool_data(:)
+        logical, allocatable :: valid_flat(:)
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
+        call check_writer_open(writer)
+
+        asize = size(values, 1, kind=int64)
+        nrows = size(values, 2, kind=int64)
+
+        if (writer%is_schema_enforced) then
+            idx = parquet_get_defined_column_index(writer, name)
+            if (idx == 0) error stop &
+                "parquet_write_column_chunk: column not defined in parquet_open_writer: " // &
+                trim(name) // writer_context_suffix(writer)
+            if (.not. writer%all_columns(idx)%is_set) return
+            if (writer%all_columns(idx)%col_size /= asize) then
+                error stop "parquet_write_column_chunk: array size mismatch for column " // trim(name)
+            end if
+        end if
+
+        call parquet_assert_column_type_exact(writer, name, "boolean")
+
+        if (.not. parquet_is_column_enabled(writer, name)) return
+        call parquet_check_row_group_row_count(writer, name, nrows)
+
+        allocate(bool_data(size(values, kind=int64)))
+        bool_data = merge(1_c_int8_t, 0_c_int8_t, reshape(values, [size(values, kind=int64)]))
+
+        if (present(is_valid)) then
+            valid_flat = reshape(is_valid, [size(is_valid, kind=int64)])
+            call parquet_check_protected(writer, name, valid_flat)
+            call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
+        else
+            call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
+        end if
+        call parquet_chunk_mark_written_if_first(writer, name)
+
+        call parquet_append_bool8_column_chunk(&
+            writer%handle, &
+            trim(parquet_resolve_output_name(writer, name))//char(0), &
+            bool_data, &
+            asize, &
+            valid_ptr )
+    end procedure parquet_write_logical_matrix_column_chunk
+
+    module procedure parquet_write_string_column_chunk
+        character(kind=c_char), allocatable :: packed(:)
+        integer(int64) :: i, k, nrows, asize, nitems
+        integer :: j, item_len, idx, max_item_len, max_string_len
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
+        call check_writer_open(writer)
+
+        if (writer%is_schema_enforced) then
+            idx = parquet_get_defined_column_index(writer, name)
+            if (idx == 0) error stop &
+                "parquet_write_column_chunk: column not defined in parquet_open_writer: " // &
+                trim(name) // writer_context_suffix(writer)
+            if (.not. writer%all_columns(idx)%is_set) return
+        end if
+
+        call parquet_assert_column_type_exact(writer, name, "string")
+
+        if (.not. parquet_is_column_enabled(writer, name)) return
+
+        asize = int(parquet_get_column_col_size(writer, name), kind=int64)
+        nitems = size(values, kind=int64)
+        if (nitems <= 0) return
+        if (mod(nitems, asize) /= 0) error stop &
+            "parquet_write_string_column_chunk: values size is not divisible by col_size for column " // &
+            trim(name) // writer_context_suffix(writer)
+
+        if (writer%is_schema_enforced) then
+            max_string_len = max(1, writer%all_columns(idx)%array_size)
+            max_item_len = maxval([(len_trim(values(i)), i=1_int64,nitems)])
+            if (max_item_len > max_string_len) then
+                error stop "parquet_write_string_column_chunk: string length exceeds declared array_size " // &
+                    "for column: " // trim(name)
+            end if
+        end if
+
+        nrows = nitems / asize
+        call parquet_check_row_group_row_count(writer, name, nrows)
+
+        item_len = len(values(1))
+        allocate(packed(item_len*nitems))
+
+        k = 0_int64
+        do i = 1_int64, nitems
+            do j = 1, item_len
+                k = k + 1_int64
+                packed(k) = achar(iachar(values(i)(j:j)), kind=c_char)
+            end do
+        end do
+
+        if (present(is_valid)) then
+            call parquet_check_protected(writer, name, is_valid)
+            call parquet_check_qc_string(writer, name, values, is_valid)
+        else
+            call parquet_check_qc_string(writer, name, values, spread(.true., 1, size(values, kind=int64)))
+        end if
+        call parquet_make_valid_buf_write(is_valid, valid_buf, valid_ptr)
+        call parquet_chunk_mark_written_if_first(writer, name)
+
+        if (asize == 1) then
+            call parquet_append_string_column_chunk(&
+                writer%handle, &
+                trim(parquet_resolve_output_name(writer, name))//char(0), &
+                packed, &
+                int(item_len, kind=c_long_long), &
+                valid_ptr )
+        else
+            call parquet_append_string_array_column_chunk(&
+                writer%handle, &
+                trim(parquet_resolve_output_name(writer, name))//char(0), &
+                packed, &
+                int(item_len, kind=c_long_long), &
+                asize, &
+                valid_ptr )
+        end if
+    end procedure parquet_write_string_column_chunk
+
+    module procedure parquet_write_string_matrix_column_chunk
+        character(kind=c_char), allocatable :: packed(:)
+        integer(int64) :: i, j, k, nrows, asize, nitems
+        integer :: l, item_len, idx, max_item_len, max_string_len
+        logical, allocatable :: valid_flat(:)
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
+        call check_writer_open(writer)
+
+        asize = size(values, 1, kind=int64)
+        nrows = size(values, 2, kind=int64)
+
+        if (writer%is_schema_enforced) then
+            idx = parquet_get_defined_column_index(writer, name)
+            if (idx == 0) error stop &
+                "parquet_write_column_chunk: column not defined in parquet_open_writer: " // &
+                trim(name) // writer_context_suffix(writer)
+            if (.not. writer%all_columns(idx)%is_set) return
+            if (writer%all_columns(idx)%col_size /= asize) then
+                error stop "parquet_write_column_chunk: array size mismatch for column " // trim(name)
+            end if
+
+            max_string_len = max(1, writer%all_columns(idx)%array_size)
+            max_item_len = maxval(len_trim(values))
+            if (max_item_len > max_string_len) then
+                error stop "parquet_write_string_matrix_column_chunk: string length exceeds declared " // &
+                    "array_size for column: " // trim(name)
+            end if
+        end if
+
+        call parquet_assert_column_type_exact(writer, name, "string")
+
+        if (.not. parquet_is_column_enabled(writer, name)) return
+
+        nitems = size(values, kind=int64)
+        if (nitems <= 0) return
+        call parquet_check_row_group_row_count(writer, name, nrows)
+
+        item_len = len(values(1, 1))
+        allocate(packed(item_len * nitems))
+
+        k = 0_int64
+        do i = 1_int64, nrows
+            do j = 1_int64, asize
+                do l = 1, item_len
+                    k = k + 1_int64
+                    packed(k) = achar(iachar(values(j, i)(l:l)), kind=c_char)
+                end do
+            end do
+        end do
+
+        if (present(is_valid)) then
+            valid_flat = reshape(is_valid, [size(is_valid, kind=int64)])
+            call parquet_check_protected(writer, name, valid_flat)
+            call parquet_check_qc_string(writer, name, reshape(values, [size(values, kind=int64)]), valid_flat)
+            call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
+        else
+            call parquet_check_qc_string(writer, name, reshape(values, [size(values, kind=int64)]), &
+                spread(.true., 1, size(values, kind=int64)))
+            call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
+        end if
+        call parquet_chunk_mark_written_if_first(writer, name)
+
+        call parquet_append_string_array_column_chunk(&
+            writer%handle, &
+            trim(parquet_resolve_output_name(writer, name))//char(0), &
+            packed, &
+            int(item_len, kind=c_long_long), &
+            asize, &
+            valid_ptr )
+    end procedure parquet_write_string_matrix_column_chunk
+
+    module procedure parquet_finish_row_group
+        call check_writer_open(writer)
+        call parquet_writer_finish_row_group(writer%handle)
+        writer%in_row_group = .false.
+        writer%current_row_group_nrows = 0
+    end procedure parquet_finish_row_group
+
+    module procedure parquet_get_chunk_size_writer_int32
+        call check_writer_open(writer)
+        chunk_size = int(parquet_writer_get_chunk_size(writer%handle), kind=int32)
+    end procedure parquet_get_chunk_size_writer_int32
+
+    module procedure parquet_get_chunk_size_writer_int64
+        call check_writer_open(writer)
+        chunk_size = parquet_writer_get_chunk_size(writer%handle)
+    end procedure parquet_get_chunk_size_writer_int64
 
     module procedure parquet_close_writer
         integer :: i

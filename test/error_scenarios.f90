@@ -37,8 +37,20 @@ program error_scenarios
         call scenario_large_string_roundtrip()
     case ("col_size_overflow")
         call scenario_col_size_overflow()
-    case ("list_element_count_overflow")
-        call scenario_list_element_count_overflow()
+    case ("list_element_count_auto_multi_row_group")
+        call scenario_list_element_count_auto_multi_row_group()
+    case ("list_element_count_explicit_chunk_size_overflow")
+        call scenario_list_element_count_explicit_chunk_size_overflow()
+    case ("row_group_explicit_nrows_overflow")
+        call scenario_row_group_explicit_nrows_overflow()
+    case ("row_group_dangling_at_close")
+        call scenario_row_group_dangling_at_close()
+    case ("row_group_whole_column_undercovered")
+        call scenario_row_group_whole_column_undercovered()
+    case ("row_group_whole_column_overrun")
+        call scenario_row_group_whole_column_overrun()
+    case ("row_group_new_column_after_first")
+        call scenario_row_group_new_column_after_first()
     case ("column_count_overflow")
         call scenario_column_count_overflow()
     case ("write_undeclared_column")
@@ -87,6 +99,76 @@ program error_scenarios
         call scenario_write_array_mismatch_logical_matrix()
     case ("write_array_mismatch_string_matrix")
         call scenario_write_array_mismatch_string_matrix()
+    case ("write_chunk_undeclared_column_int32")
+        call scenario_write_chunk_undeclared_column_int32()
+    case ("write_chunk_undeclared_column_int64")
+        call scenario_write_chunk_undeclared_column_int64()
+    case ("write_chunk_undeclared_column_float32")
+        call scenario_write_chunk_undeclared_column_float32()
+    case ("write_chunk_undeclared_column_float64")
+        call scenario_write_chunk_undeclared_column_float64()
+    case ("write_chunk_undeclared_column_logical")
+        call scenario_write_chunk_undeclared_column_logical()
+    case ("write_chunk_undeclared_column_string")
+        call scenario_write_chunk_undeclared_column_string()
+    case ("write_chunk_undeclared_column_int32_matrix")
+        call scenario_write_chunk_undeclared_column_int32_matrix()
+    case ("write_chunk_undeclared_column_int64_matrix")
+        call scenario_write_chunk_undeclared_column_int64_matrix()
+    case ("write_chunk_undeclared_column_float32_matrix")
+        call scenario_write_chunk_undeclared_column_float32_matrix()
+    case ("write_chunk_undeclared_column_float64_matrix")
+        call scenario_write_chunk_undeclared_column_float64_matrix()
+    case ("write_chunk_undeclared_column_logical_matrix")
+        call scenario_write_chunk_undeclared_column_logical_matrix()
+    case ("write_chunk_undeclared_column_string_matrix")
+        call scenario_write_chunk_undeclared_column_string_matrix()
+    case ("write_chunk_not_divisible_int32")
+        call scenario_write_chunk_not_divisible_int32()
+    case ("write_chunk_not_divisible_int64")
+        call scenario_write_chunk_not_divisible_int64()
+    case ("write_chunk_not_divisible_float32")
+        call scenario_write_chunk_not_divisible_float32()
+    case ("write_chunk_not_divisible_float64")
+        call scenario_write_chunk_not_divisible_float64()
+    case ("write_chunk_not_divisible_logical")
+        call scenario_write_chunk_not_divisible_logical()
+    case ("write_chunk_not_divisible_string")
+        call scenario_write_chunk_not_divisible_string()
+    case ("write_chunk_array_mismatch_int32_matrix")
+        call scenario_write_chunk_array_mismatch_int32_matrix()
+    case ("write_chunk_array_mismatch_int64_matrix")
+        call scenario_write_chunk_array_mismatch_int64_matrix()
+    case ("write_chunk_array_mismatch_float32_matrix")
+        call scenario_write_chunk_array_mismatch_float32_matrix()
+    case ("write_chunk_array_mismatch_float64_matrix")
+        call scenario_write_chunk_array_mismatch_float64_matrix()
+    case ("write_chunk_array_mismatch_logical_matrix")
+        call scenario_write_chunk_array_mismatch_logical_matrix()
+    case ("write_chunk_array_mismatch_string_matrix")
+        call scenario_write_chunk_array_mismatch_string_matrix()
+    case ("write_chunk_string_matrix_exceeds_array_size")
+        call scenario_write_chunk_string_matrix_exceeds_array_size()
+    case ("write_chunk_string_exceeds_array_size")
+        call scenario_write_chunk_string_exceeds_array_size()
+    case ("write_chunk_no_row_group_open")
+        call scenario_write_chunk_no_row_group_open()
+    case ("write_chunk_row_count_mismatch")
+        call scenario_write_chunk_row_count_mismatch()
+    case ("write_chunk_type_mismatch")
+        call scenario_write_chunk_type_mismatch()
+    case ("read_chunk_with_filter")
+        call scenario_read_chunk_with_filter()
+    case ("read_chunk_qc_hard_aborts")
+        call scenario_read_chunk_qc_hard_aborts()
+    case ("read_chunk_qc_soft_warns")
+        call scenario_read_chunk_qc_soft_warns()
+    case ("read_chunk_check_complete_hard_aborts")
+        call scenario_read_chunk_check_complete_hard_aborts()
+    case ("read_chunk_row_group_out_of_range")
+        call scenario_read_chunk_row_group_out_of_range()
+    case ("get_chunk_size_row_group_out_of_range")
+        call scenario_get_chunk_size_row_group_out_of_range()
     case ("write_type_mismatch")
         call scenario_write_type_mismatch()
     case ("write_column_twice")
@@ -652,6 +734,517 @@ contains
         call parquet_write_column(writer, "str", data)
         call parquet_close_writer(writer)
     end subroutine scenario_write_array_mismatch_string_matrix
+
+    !> The parquet_write_column_chunk counterparts of the scenario_write_undeclared_column_*/
+    !> scenario_write_not_divisible_*/scenario_write_array_mismatch_* scenarios above: the same
+    !> three guard checks (column not defined / values size not divisible by col_size / matrix
+    !> array size mismatch), but reached through parquet_write_*_column_chunk's own copy of each
+    !> check instead of the batch parquet_write_*_column's. All three guards fire before a row
+    !> group needs to be open (see parquet_check_row_group_row_count's own doc-comment in
+    !> parquet_write.f90), so none of these need parquet_new_row_group first.
+    subroutine scenario_write_chunk_undeclared_column_int32()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int32) :: data(3) = [1_int32, 2_int32, 3_int32]
+
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_undeclared_int32.parquet", schema)
+        call parquet_write_column_chunk(writer, "not_a_real_column", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_undeclared_column_int32
+
+    subroutine scenario_write_chunk_undeclared_column_int64()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int64) :: data(3) = [1_int64, 2_int64, 3_int64]
+
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_undeclared_int64.parquet", schema)
+        call parquet_write_column_chunk(writer, "not_a_real_column", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_undeclared_column_int64
+
+    subroutine scenario_write_chunk_undeclared_column_float32()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real32) :: data(3) = [1.0_real32, 2.0_real32, 3.0_real32]
+
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_undeclared_float32.parquet", schema)
+        call parquet_write_column_chunk(writer, "not_a_real_column", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_undeclared_column_float32
+
+    subroutine scenario_write_chunk_undeclared_column_float64()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real64) :: data(3) = [1.0_real64, 2.0_real64, 3.0_real64]
+
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_undeclared_float64.parquet", schema)
+        call parquet_write_column_chunk(writer, "not_a_real_column", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_undeclared_column_float64
+
+    subroutine scenario_write_chunk_undeclared_column_logical()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        logical :: data(3) = [.true., .false., .true.]
+
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_undeclared_logical.parquet", schema)
+        call parquet_write_column_chunk(writer, "not_a_real_column", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_undeclared_column_logical
+
+    subroutine scenario_write_chunk_undeclared_column_string()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        character(len=8) :: data(3) = ["aa     ", "bb     ", "cc     "]
+
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_undeclared_string.parquet", schema)
+        call parquet_write_column_chunk(writer, "not_a_real_column", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_undeclared_column_string
+
+    subroutine scenario_write_chunk_undeclared_column_int32_matrix()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int32) :: data(3,2)
+
+        data = reshape([1_int32, 2_int32, 3_int32, 4_int32, 5_int32, 6_int32], [3, 2])
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_undeclared_int32_matrix.parquet", schema)
+        call parquet_write_column_chunk(writer, "not_a_real_column", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_undeclared_column_int32_matrix
+
+    subroutine scenario_write_chunk_undeclared_column_int64_matrix()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int64) :: data(3,2)
+
+        data = reshape([1_int64, 2_int64, 3_int64, 4_int64, 5_int64, 6_int64], [3, 2])
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_undeclared_int64_matrix.parquet", schema)
+        call parquet_write_column_chunk(writer, "not_a_real_column", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_undeclared_column_int64_matrix
+
+    subroutine scenario_write_chunk_undeclared_column_float32_matrix()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real32) :: data(3,2)
+
+        data = reshape([1.0_real32, 2.0_real32, 3.0_real32, 4.0_real32, 5.0_real32, 6.0_real32], [3, 2])
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_undeclared_float32_matrix.parquet", schema)
+        call parquet_write_column_chunk(writer, "not_a_real_column", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_undeclared_column_float32_matrix
+
+    subroutine scenario_write_chunk_undeclared_column_float64_matrix()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real64) :: data(3,2)
+
+        data = reshape([1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64, 6.0_real64], [3, 2])
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_undeclared_float64_matrix.parquet", schema)
+        call parquet_write_column_chunk(writer, "not_a_real_column", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_undeclared_column_float64_matrix
+
+    subroutine scenario_write_chunk_undeclared_column_logical_matrix()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        logical :: data(3,2)
+
+        data = reshape([.true., .false., .true., .false., .true., .false.], [3, 2])
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_undeclared_logical_matrix.parquet", schema)
+        call parquet_write_column_chunk(writer, "not_a_real_column", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_undeclared_column_logical_matrix
+
+    subroutine scenario_write_chunk_undeclared_column_string_matrix()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        character(len=8) :: data(3,2)
+
+        data = reshape(["aa     ", "bb     ", "cc     ", "dd     ", "ee     ", "ff     "], [3, 2])
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_undeclared_string_matrix.parquet", schema)
+        call parquet_write_column_chunk(writer, "not_a_real_column", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_undeclared_column_string_matrix
+
+    subroutine scenario_write_chunk_not_divisible_int32()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int32) :: data(4) = [1_int32, 2_int32, 3_int32, 4_int32]
+
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_not_divisible_int32.parquet", schema)
+        call parquet_write_column_chunk(writer, "i32", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_not_divisible_int32
+
+    subroutine scenario_write_chunk_not_divisible_int64()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int64) :: data(4) = [1_int64, 2_int64, 3_int64, 4_int64]
+
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_not_divisible_int64.parquet", schema)
+        call parquet_write_column_chunk(writer, "i64", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_not_divisible_int64
+
+    subroutine scenario_write_chunk_not_divisible_float32()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real32) :: data(4) = [1.0_real32, 2.0_real32, 3.0_real32, 4.0_real32]
+
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_not_divisible_float32.parquet", schema)
+        call parquet_write_column_chunk(writer, "f32", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_not_divisible_float32
+
+    subroutine scenario_write_chunk_not_divisible_float64()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real64) :: data(4) = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_not_divisible_float64.parquet", schema)
+        call parquet_write_column_chunk(writer, "f64", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_not_divisible_float64
+
+    subroutine scenario_write_chunk_not_divisible_logical()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        logical :: data(4) = [.true., .false., .true., .false.]
+
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_not_divisible_logical.parquet", schema)
+        call parquet_write_column_chunk(writer, "lg", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_not_divisible_logical
+
+    subroutine scenario_write_chunk_not_divisible_string()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        character(len=8) :: data(4) = ["aa     ", "bb     ", "cc     ", "dd     "]
+
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_not_divisible_string.parquet", schema)
+        call parquet_write_column_chunk(writer, "str", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_not_divisible_string
+
+    subroutine scenario_write_chunk_array_mismatch_int32_matrix()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int32) :: data(2,3)
+
+        data = reshape([1_int32, 2_int32, 3_int32, 4_int32, 5_int32, 6_int32], [2, 3])
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_array_mismatch_int32_matrix.parquet", schema)
+        call parquet_write_column_chunk(writer, "i32", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_array_mismatch_int32_matrix
+
+    subroutine scenario_write_chunk_array_mismatch_int64_matrix()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int64) :: data(2,3)
+
+        data = reshape([1_int64, 2_int64, 3_int64, 4_int64, 5_int64, 6_int64], [2, 3])
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_array_mismatch_int64_matrix.parquet", schema)
+        call parquet_write_column_chunk(writer, "i64", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_array_mismatch_int64_matrix
+
+    subroutine scenario_write_chunk_array_mismatch_float32_matrix()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real32) :: data(2,3)
+
+        data = reshape([1.0_real32, 2.0_real32, 3.0_real32, 4.0_real32, 5.0_real32, 6.0_real32], [2, 3])
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_array_mismatch_float32_matrix.parquet", schema)
+        call parquet_write_column_chunk(writer, "f32", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_array_mismatch_float32_matrix
+
+    subroutine scenario_write_chunk_array_mismatch_float64_matrix()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real64) :: data(2,3)
+
+        data = reshape([1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64, 6.0_real64], [2, 3])
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_array_mismatch_float64_matrix.parquet", schema)
+        call parquet_write_column_chunk(writer, "f64", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_array_mismatch_float64_matrix
+
+    subroutine scenario_write_chunk_array_mismatch_logical_matrix()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        logical :: data(2,3)
+
+        data = reshape([.true., .false., .true., .false., .true., .false.], [2, 3])
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_array_mismatch_logical_matrix.parquet", schema)
+        call parquet_write_column_chunk(writer, "lg", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_array_mismatch_logical_matrix
+
+    subroutine scenario_write_chunk_array_mismatch_string_matrix()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        character(len=8) :: data(2,3)
+
+        data = reshape(["aa     ", "bb     ", "cc     ", "dd     ", "ee     ", "ff     "], [2, 3])
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_array_mismatch_string_matrix.parquet", schema)
+        call parquet_write_column_chunk(writer, "str", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_array_mismatch_string_matrix
+
+    !> parquet_write_column_chunk counterpart of scenario_write_string_matrix_exceeds_array_size.
+    subroutine scenario_write_chunk_string_matrix_exceeds_array_size()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        character(len=20) :: values(2, 1)
+
+        schema%maml%name = "string_matrix_array_size_chunk.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: string_matrix_chunk_table", &
+            "fields:", &
+            "- name: s", &
+            "  data_type: string", &
+            "  array_size: 5", &
+            "  col_size: 2" ]
+
+        call parquet_parse_maml(schema)
+
+        values(1, 1) = "short"
+        values(2, 1) = "this_is_way_too_long"
+
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_string_matrix_array_size.parquet", schema)
+        call parquet_write_column_chunk(writer, "s", values)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote an over-length string into a fixed-size string matrix chunk column " // &
+            "without error"
+    end subroutine scenario_write_chunk_string_matrix_exceeds_array_size
+
+    !> parquet_read_column_chunk is disallowed outright on a reader opened with an active
+    !> filter=, since the filter mask is a single flat mask sized to the whole unfiltered file
+    !> with no row-group structure of its own -- see check_reader_no_filter's own comment in
+    !> parquet_read.f90.
+    subroutine scenario_read_chunk_with_filter()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32) :: v(4), back(2)
+
+        v = [1, 2, 3, 4]
+        call parquet_open_writer(writer, "test_run/read_chunk_filter.parquet", chunk_size=2)
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+
+        call filt%add("v >= 0")
+        call parquet_open_reader(reader, "test_run/read_chunk_filter.parquet", filter=filt)
+        call parquet_read_column_chunk(reader, "v", 1, back)
+        print '(a)', "unexpectedly read a chunk on a filtered reader without aborting"
+    end subroutine scenario_read_chunk_with_filter
+
+    !> Default (qc_soft=.false., hard): a chunk read whose own row group contains an
+    !> out-of-range value with qc active aborts the process, naming that row group -- reusing
+    !> the exact same run_qc_range_check the whole-column path uses, just scoped to one row
+    !> group's own array (see get_row_group_chunk_array's own comment in parquet_wrapper.cpp).
+    subroutine scenario_read_chunk_qc_hard_aborts()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: ra(4), ra_back(2)
+
+        ra = [10, 400, 20, 30] ! 400 (in row group 1) is outside [0, 360]
+
+        call parquet_open_writer(writer, "test_run/read_chunk_qc_hard.parquet", chunk_size=2)
+        call parquet_write_column(writer, "ra", ra)
+        call parquet_close_writer(writer)
+
+        call write_text_file("test_run/read_chunk_qc_hard.maml", [character(len=32) :: &
+            "fields:", "- name: ra", "  qc:", "    min: 0", "    max: 360"])
+
+        call parquet_open_reader(reader, "test_run/read_chunk_qc_hard.parquet", &
+            schema=parquet_load_qc_maml_file("test_run/read_chunk_qc_hard.maml"), qc=.true.)
+        call parquet_read_column_chunk(reader, "ra", 1, ra_back)
+        print '(a)', "unexpectedly read an out-of-range chunk without aborting in hard qc mode"
+    end subroutine scenario_read_chunk_qc_hard_aborts
+
+    !> Soft (qc_soft=.true.): a violation found in one row group's chunk WARNs (not aborts),
+    !> exactly like the whole-column path -- and the WARNING fires at most once per column even
+    !> across multiple violating row groups (reusing qc_range_warned, the same per-column
+    !> throttling set the whole-column path already uses), avoiding "one warning per chunk"
+    !> spam. Both row groups here violate the bound; only one WARNING must be printed.
+    subroutine scenario_read_chunk_qc_soft_warns()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: ra(4), ra_back(2)
+
+        ra = [400, 500, -5, -10] ! every row violates [0, 360], across both row groups
+
+        call parquet_open_writer(writer, "test_run/read_chunk_qc_soft.parquet", chunk_size=2)
+        call parquet_write_column(writer, "ra", ra)
+        call parquet_close_writer(writer)
+
+        call write_text_file("test_run/read_chunk_qc_soft.maml", [character(len=32) :: &
+            "fields:", "- name: ra", "  qc:", "    min: 0", "    max: 360"])
+
+        call parquet_open_reader(reader, "test_run/read_chunk_qc_soft.parquet", &
+            schema=parquet_load_qc_maml_file("test_run/read_chunk_qc_soft.maml"), qc=.true., qc_soft=.true.)
+        call parquet_read_column_chunk(reader, "ra", 1, ra_back)
+        call parquet_read_column_chunk(reader, "ra", 2, ra_back)
+        call parquet_close_reader(reader)
+    end subroutine scenario_read_chunk_qc_soft_warns
+
+    !> Default (check_hard=.true.): parquet_close_reader(check_complete=.true.) aborts if a
+    !> column was read via parquet_read_column_chunk but not every row group was read for it --
+    !> here row group 2 (of 2) is never read.
+    subroutine scenario_read_chunk_check_complete_hard_aborts()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: v(4), back(2)
+
+        v = [1, 2, 3, 4]
+        call parquet_open_writer(writer, "test_run/read_chunk_incomplete.parquet", chunk_size=2)
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, "test_run/read_chunk_incomplete.parquet")
+        call parquet_read_column_chunk(reader, "v", 1, back)
+        call parquet_close_reader(reader, check_complete=.true.)
+        print '(a)', "unexpectedly closed an incomplete chunked read without aborting"
+    end subroutine scenario_read_chunk_check_complete_hard_aborts
+
+    !> parquet_read_column_chunk/parquet_get_chunk_size(reader,...) both abort on a row_group
+    !> outside [1, num_row_groups] rather than reading garbage or silently clamping.
+    subroutine scenario_read_chunk_row_group_out_of_range()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: v(4), back(2)
+
+        v = [1, 2, 3, 4]
+        call parquet_open_writer(writer, "test_run/read_chunk_out_of_range.parquet", chunk_size=2)
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, "test_run/read_chunk_out_of_range.parquet")
+        call parquet_read_column_chunk(reader, "v", 3, back)
+        print '(a)', "unexpectedly read row_group=3 of a 2-row-group file without aborting"
+    end subroutine scenario_read_chunk_row_group_out_of_range
+
+    !> parquet_get_chunk_size(reader, ...) has its own row_group bounds check (separate from
+    !> parquet_read_column_chunk's -- see check_row_group_valid vs parquet_get_chunk_size_reader_impl
+    !> in parquet_read.f90), so it must be exercised on its own: calling it directly with an
+    !> out-of-range row_group, without ever calling parquet_read_column_chunk, must still abort.
+    subroutine scenario_get_chunk_size_row_group_out_of_range()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: v(4)
+        integer(int64) :: chunk_size
+
+        v = [1, 2, 3, 4]
+        call parquet_open_writer(writer, "test_run/get_chunk_size_out_of_range.parquet", chunk_size=2)
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, "test_run/get_chunk_size_out_of_range.parquet")
+        call parquet_get_chunk_size(reader, chunk_size, row_group=3_int64)
+        print '(a)', "unexpectedly queried chunk_size for row_group=3 of a 2-row-group file without aborting"
+    end subroutine scenario_get_chunk_size_row_group_out_of_range
+
+    !> parquet_write_column_chunk counterpart of scenario_write_string_exceeds_array_size (the
+    !> rank-1/flat form, dispatched for both a plain scalar string column and a flattened
+    !> string-vector column).
+    subroutine scenario_write_chunk_string_exceeds_array_size()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        character(len=20) :: values(2)
+
+        schema%maml%name = "string_flat_array_size_chunk.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: string_flat_chunk_table", &
+            "fields:", &
+            "- name: s", &
+            "  data_type: string", &
+            "  array_size: 5", &
+            "  col_size: 2" ]
+
+        call parquet_parse_maml(schema)
+
+        values(1) = "short"
+        values(2) = "this_is_way_too_long"
+
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_string_flat_array_size.parquet", schema)
+        call parquet_write_column_chunk(writer, "s", values)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote an over-length string into a fixed-size string vector chunk column " // &
+            "(flat form) without error"
+    end subroutine scenario_write_chunk_string_exceeds_array_size
+
+
+    !> parquet_check_row_group_row_count's own two guard checks (used by every
+    !> parquet_write_*_column_chunk specific), reached directly rather than via any of the
+    !> scenarios above: calling parquet_write_column_chunk before any parquet_new_row_group, and
+    !> calling it with a row count that doesn't match the currently open row group's own nrows.
+    !> Both checks fire before either needs a row group open except the second (by construction).
+    subroutine scenario_write_chunk_no_row_group_open()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int32) :: data(3) = [1_int32, 2_int32, 3_int32]
+
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_no_row_group.parquet", schema)
+        call parquet_write_column_chunk(writer, "i32", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_no_row_group_open
+
+    subroutine scenario_write_chunk_row_count_mismatch()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int32) :: data(6) = [1_int32, 2_int32, 3_int32, 4_int32, 5_int32, 6_int32]
+
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_row_count_mismatch.parquet", schema)
+        call parquet_new_row_group(writer, 3)
+        ! "i32" has col_size=3, so 6 values = 2 rows -- mismatches the row group's declared 3 rows.
+        call parquet_write_column_chunk(writer, "i32", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_row_count_mismatch
+
+    !> parquet_assert_column_type_exact's own type-mismatch check, reached via
+    !> parquet_write_column_chunk -- unlike parquet_write_column, there is no cross-numeric-kind
+    !> conversion on this path, so a logical chunk written to an int32-declared column is a
+    !> mismatch (fires before any row group needs to be open, so no parquet_new_row_group here).
+    subroutine scenario_write_chunk_type_mismatch()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        logical :: data(3) = [.true., .false., .true.]
+
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_type_mismatch.parquet", schema)
+        call parquet_write_column_chunk(writer, "i32", data)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_type_mismatch
 
 
     !> An in-memory schema (parquet_schema(...), not loaded from a .maml file)
@@ -1501,24 +2094,74 @@ contains
 
     !> Separate from col_size alone (scenario_col_size_overflow, above): Parquet's own
     !> repetition/definition-level generation for list-typed columns walks every flattened
-    !> element (nrows * col_size) with a plain int32_t counter, so check_list_element_count_fits_
-    !> arrow_limit in parquet_wrapper.cpp aborts cleanly (via report_fatal_error) before that
-    !> product can overflow -- left unguarded, Arrow itself throws IOError("List index overflow")
-    !> from deep inside parquet::arrow::WriteTable, which can surface as an uncaught abort rather
-    !> than a clean error stop (see the README's Limitations section). A genuine nrows * col_size
-    !> beyond 2^31-1 needs far too much memory to build in the normal fpm test suite, so this
-    !> scenario instead calls parquet_debug_set_list_element_count_limit (a process-global,
-    !> test-only hook declared locally below, not part of the public Fortran API -- see its own
-    !> comment in parquet_wrapper.cpp) to shrink the threshold to a handful of elements, forcing a
-    !> tiny fixture through the same abort path. Safe as a process-global for the same
-    !> subprocess-isolation reason as scenario_large_string_roundtrip's own
-    !> parquet_debug_set_string_offset_limit use, above.
-    subroutine scenario_list_element_count_overflow()
+    !> element *of a single row group* (row_group_rows * col_size) with a plain int32_t counter.
+    !> This is scoped to one row group, not the whole file -- close_parquet_writer's auto-sizing
+    !> path (chunk_size never passed by the caller) silently clamps its own computed row-group
+    !> size down to whatever is safe for the widest vector column present (see
+    !> max_fixed_size_list_col_size/kArrowInt32ListElementCountLimit in parquet_wrapper.cpp), so a
+    !> vector column whose *total* nrows * col_size exceeds 2^31-1 now writes successfully, split
+    !> across multiple row groups, rather than aborting (see the README's Limitations section --
+    !> only col_size alone, or an *explicit* chunk_size that conflicts with col_size, i.e.
+    !> scenario_list_element_count_explicit_chunk_size_overflow below, still abort). A genuine
+    !> nrows * col_size beyond 2^31-1 needs far too much memory to build in the normal fpm test
+    !> suite, so this scenario instead calls parquet_debug_set_list_element_count_limit (a
+    !> process-global, test-only hook declared locally below, not part of the public Fortran API
+    !> -- see its own comment in parquet_wrapper.cpp) to shrink the threshold to a handful of
+    !> elements, forcing a tiny fixture through the same clamp with more than one row group.
+    !> Safe as a process-global for the same subprocess-isolation reason as
+    !> scenario_large_string_roundtrip's own parquet_debug_set_string_offset_limit use, above.
+    subroutine scenario_list_element_count_auto_multi_row_group()
         interface
             subroutine parquet_debug_set_list_element_count_limit(n) &
                 bind(C, name="parquet_debug_set_list_element_count_limit")
                 use iso_c_binding, only : c_int64_t
-                integer(c_int64_t), value :: n !! nrows*col_size threshold instead of the real 2^31-1 limit; <=0 restores it.
+                integer(c_int64_t), value :: n !! per-row-group nrows*col_size threshold; <=0 restores the real 2^31-1 limit.
+            end subroutine parquet_debug_set_list_element_count_limit
+        end interface
+
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = "test_run/error_scenario_list_element_count_multi_row_group.parquet"
+        integer(int32) :: data(2, 3), data_back(2, 3)
+
+        data = reshape([1, 2, 3, 4, 5, 6], [2, 3])
+        ! col_size=2, limit=5 -> max_safe_chunk_size = max(5/2, 1) = 2 rows/group, forcing this
+        ! 3-row column to split into (at least) two row groups (e.g. 2 rows then 1) instead of
+        ! the single row group it would otherwise get for a table this tiny.
+        call parquet_debug_set_list_element_count_limit(5_int64)
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "v", data)
+        call parquet_close_writer(writer)
+
+        ! Restore the real production limit right after writing -- defensive, since this
+        ! scenario is a one-shot subprocess that exits right after anyway, but keeps this
+        ! correct if a later edit ever adds more writes to this same scenario.
+        call parquet_debug_set_list_element_count_limit(0_int64)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "v", data_back)
+        call parquet_close_reader(reader)
+
+        if (.not. all(data_back == data)) then
+            error stop "vector column split across multiple row groups did not round-trip correctly"
+        end if
+    end subroutine scenario_list_element_count_auto_multi_row_group
+
+    !> Counterpart to scenario_list_element_count_auto_multi_row_group, above: an *explicit*
+    !> chunk_size (parquet_open_writer(..., chunk_size=)/parquet_set_writer_options) that
+    !> conflicts with a vector column's col_size is validated rather than silently overridden --
+    !> silently shrinking a caller's explicit request would be a surprising, hard-to-notice
+    !> performance change, unlike the auto-sized path above where nothing was explicitly
+    !> requested to deviate from. check_explicit_chunk_size_fits_arrow_limit in
+    !> parquet_wrapper.cpp aborts cleanly (via report_fatal_error) instead. Uses the same
+    !> process-global debug hook as the scenario above, for the same reason.
+    subroutine scenario_list_element_count_explicit_chunk_size_overflow()
+        interface
+            subroutine parquet_debug_set_list_element_count_limit(n) &
+                bind(C, name="parquet_debug_set_list_element_count_limit")
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t), value :: n !! per-row-group nrows*col_size threshold; <=0 restores the real 2^31-1 limit.
             end subroutine parquet_debug_set_list_element_count_limit
         end interface
 
@@ -1526,14 +2169,128 @@ contains
         integer(int32) :: data(2, 3)
 
         data = reshape([1, 2, 3, 4, 5, 6], [2, 3])
+        ! col_size=2, explicit chunk_size=3 -> 3*2=6 > 5 (the shrunk limit): conflicts.
         call parquet_debug_set_list_element_count_limit(5_int64)
 
-        call parquet_open_writer(writer, "test_run/error_scenario_list_element_count_overflow.parquet")
+        call parquet_open_writer(writer, &
+            "test_run/error_scenario_list_element_count_explicit_chunk_size_overflow.parquet", chunk_size=3)
         call parquet_write_column(writer, "v", data)
         call parquet_close_writer(writer)
-        print '(a)', "unexpectedly wrote a vector column with nrows*col_size exceeding the (shrunk) Arrow limit " // &
-            "without error"
-    end subroutine scenario_list_element_count_overflow
+        print '(a)', "unexpectedly wrote a vector column with an explicit chunk_size*col_size exceeding the " // &
+            "(shrunk) Arrow limit without error"
+    end subroutine scenario_list_element_count_explicit_chunk_size_overflow
+
+    !> An explicit parquet_new_row_group(writer, nrows) whose nrows, combined with a
+    !> schema-declared vector column's col_size, would exceed Arrow/Parquet's int32
+    !> per-row-group element-count limit aborts cleanly (via report_fatal_error), the same way
+    !> an explicit chunk_size does for the batch (WriteTable) path -- see
+    !> scenario_list_element_count_explicit_chunk_size_overflow, above, for why this uses a
+    !> shrunk test-only threshold.
+    subroutine scenario_row_group_explicit_nrows_overflow()
+        interface
+            subroutine parquet_debug_set_list_element_count_limit(n) &
+                bind(C, name="parquet_debug_set_list_element_count_limit")
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t), value :: n !! per-row-group nrows*col_size threshold; <=0 restores the real 2^31-1 limit.
+            end subroutine parquet_debug_set_list_element_count_limit
+        end interface
+
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int32) :: data(2, 3)
+
+        data = reshape([1, 2, 3, 4, 5, 6], [2, 3])
+        ! col_size=2, nrows=3 -> 3*2=6 > 5 (the shrunk limit): conflicts.
+        call parquet_debug_set_list_element_count_limit(5_int64)
+
+        call schema%init(table="row_group_overflow_table")
+        call schema%add_field("v", "int32", col_size=2)
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_row_group_explicit_nrows_overflow.parquet", schema)
+        call parquet_new_row_group(writer, 3)
+        call parquet_write_column_chunk(writer, "v", data)
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly started a row group with an explicit nrows*col_size exceeding the (shrunk) " // &
+            "Arrow limit without error"
+    end subroutine scenario_row_group_explicit_nrows_overflow
+
+    !> Calling parquet_close_writer while a row group is still open (parquet_new_row_group
+    !> called but parquet_finish_row_group never was) aborts -- see close_streaming_writer in
+    !> parquet_wrapper.cpp.
+    subroutine scenario_row_group_dangling_at_close()
+        type(parquet_writer) :: writer
+        integer(int32) :: data(3)
+
+        data = [1, 2, 3]
+        call parquet_open_writer(writer, "test_run/error_scenario_row_group_dangling_at_close.parquet", chunk_size=3)
+        call parquet_new_row_group(writer, 3)
+        call parquet_write_column_chunk(writer, "v", data)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly closed a writer with a dangling open row group without error"
+    end subroutine scenario_row_group_dangling_at_close
+
+    !> Closing a writer where a whole (parquet_write_column) column's row count exceeds what the
+    !> streaming row-group API actually covered aborts -- see close_streaming_writer in
+    !> parquet_wrapper.cpp.
+    subroutine scenario_row_group_whole_column_undercovered()
+        type(parquet_writer) :: writer
+        integer(int32) :: whole_data(5), chunk_data(3)
+
+        whole_data = [1, 2, 3, 4, 5]
+        chunk_data = [10, 20, 30]
+        call parquet_open_writer(writer, &
+            "test_run/error_scenario_row_group_whole_column_undercovered.parquet", chunk_size=3)
+        call parquet_write_column(writer, "whole", whole_data)
+        call parquet_new_row_group(writer, 3)
+        call parquet_write_column_chunk(writer, "chunked", chunk_data)
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly closed a writer with an under-covered whole column without error"
+    end subroutine scenario_row_group_whole_column_undercovered
+
+    !> A row group whose rows would read past the end of an already-whole (parquet_write_column)
+    !> column aborts immediately at parquet_finish_row_group, rather than waiting until close --
+    !> see parquet_finish_row_group in parquet_wrapper.cpp.
+    subroutine scenario_row_group_whole_column_overrun()
+        type(parquet_writer) :: writer
+        integer(int32) :: whole_data(3), chunk_data(5)
+
+        whole_data = [1, 2, 3]
+        chunk_data = [10, 20, 30, 40, 50]
+        call parquet_open_writer(writer, "test_run/error_scenario_row_group_whole_column_overrun.parquet", &
+            chunk_size=5)
+        call parquet_write_column(writer, "whole", whole_data)
+        call parquet_new_row_group(writer, 5)
+        call parquet_write_column_chunk(writer, "chunked", chunk_data)
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly finished a row group that reads past a whole column's own row count without error"
+    end subroutine scenario_row_group_whole_column_overrun
+
+    !> A column introduced (via its first parquet_write_column_chunk call) after the first row
+    !> group has already been written aborts -- a Parquet file's schema is fixed from that point
+    !> on. See check_column_chunk_write_preconditions in parquet_wrapper.cpp.
+    subroutine scenario_row_group_new_column_after_first()
+        type(parquet_writer) :: writer
+        integer(int32) :: a_data(2), b_data(2)
+
+        a_data = [1, 2]
+        b_data = [10, 20]
+        call parquet_open_writer(writer, "test_run/error_scenario_row_group_new_column_after_first.parquet", &
+            chunk_size=2)
+        call parquet_new_row_group(writer, 2)
+        call parquet_write_column_chunk(writer, "a", a_data)
+        call parquet_finish_row_group(writer)
+
+        call parquet_new_row_group(writer, 2)
+        call parquet_write_column_chunk(writer, "a", a_data)
+        call parquet_write_column_chunk(writer, "b", b_data)
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly introduced a new column after the first row group without error"
+    end subroutine scenario_row_group_new_column_after_first
 
     !> Arrow's arrow::Schema::num_fields()/GetFieldIndex() both return a plain int32_t internally
     !> -- unlike row count there is no "large" variant for column count at all, so

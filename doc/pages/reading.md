@@ -228,4 +228,49 @@ Both forms share the same input format and validation:
 
 - A **missing** `key` triggers `error stop`, unless the optional `default` (same type/kind as `value`) is given, in which case `value` is set to it.
 - A **present but unconvertible** stored value (e.g. non-numeric text, or an integer too large for the requested kind) always prints a `WARNING`, then falls back to `default` if given, else `error stop`.
+
+### Streaming/chunked reads
+
+`parquet_read_column` reads a whole column into one complete array — fine for most data, but not for a column too large to hold in memory that way. `parquet_read_column_chunk` reads such a column one Parquet row group at a time instead, so peak memory is bounded by a row group's worth of data rather than the whole column — the read-side mirror of [streaming/chunked writes](writing.html#streamingchunked-writes):
+
+```fortran
+type(parquet_reader) :: reader
+integer(int64) :: num_row_groups, rg, rg_nrows
+integer(int32), allocatable :: buf(:)
+
+call parquet_open_reader(reader, "data.parquet")
+call parquet_get_num_row_groups(reader, num_row_groups)
+
+do rg = 1, num_row_groups
+    call parquet_get_chunk_size(reader, rg_nrows, row_group=rg)
+    allocate(buf(rg_nrows))
+
+    call parquet_read_column_chunk(reader, "big_vec", rg, buf)
+    call process_chunk(buf, rg_nrows)  ! your own code
+
+    deallocate(buf)
+end do
+
+call parquet_close_reader(reader)
+```
+
+`parquet_get_num_row_groups(reader, num_row_groups)` returns the file's row-group count. `parquet_get_chunk_size(reader, chunk_size, row_group=)` returns row group `row_group`'s (1-based) own physical row count — row groups are not guaranteed uniform, so query each one rather than assuming they all match the first; `row_group` is optional and defaults to the first row group. `parquet_read_column_chunk(reader, name, row_group, values)` then reads that row group's rows into `values`, dispatched by its actual/declared type/kind and rank (scalar `values(:)` or matrix `values(:,:)`) exactly like `parquet_read_column`, and separately by `row_group`'s own kind (`integer(int32)`/`integer(int64)`, the latter only needed for a file with more row groups than `huge(1_int32)`).
+
+**Stateless, random access:** unlike the write side's `parquet_new_row_group`/`parquet_finish_row_group` pairing, there is no "currently open" row group to track — call `parquet_read_column_chunk` with any `row_group`, in any order, as many times as you like, for any column, independent of any other chunked read on the same reader.
+
+**Type matching:** like `parquet_write_column_chunk` (and unlike `parquet_write_column`/`parquet_read_column`), there is no cross-numeric-type conversion on this path — `values`' own kind must match the column's actual stored type exactly.
+
+**Not compatible with `filter`:** a reader opened with [`filter=`](#row-filtering-with-parquet_filter) fails immediately with `error stop` if you call `parquet_read_column_chunk` on it. The filter mask is a single flat mask covering the whole unfiltered file, with no row-group structure of its own — there's no coherent way to say "this filtered subset of row group N". Open a second, unfiltered reader for the chunked pass if you need both.
+
+**Read-time qc still runs, scoped to one row group at a time:** if the reader was opened with [`qc=.true.`](#read-time-quality-control-with-a-qc-maml), each `parquet_read_column_chunk` call runs the usual `qc: min:`/`max:`/`miss:` checks against just that row group's own data, not the whole column. In hard mode (`qc_soft=.false.`, the default), a violation aborts immediately, naming the offending row group (`qc violation for column 'name [row group N]'...`). In soft mode (`qc_soft=.true.`), a violation prints a `WARNING` — still at most once per column for the reader's whole lifetime (the same throttling `parquet_read_column` already uses), so reading many violating row groups in soft mode doesn't spam one warning per chunk.
+
+**Completeness checks:** pass `check_complete=.true.` to `parquet_close_reader` to verify that every column you read via `parquet_read_column_chunk` had *every* one of the file's row groups read by the time you close — catches a loop that forgot a row group, or exited early by mistake:
+
+```fortran
+call parquet_close_reader(reader, check_complete=.true.)
+```
+
+`check_complete` defaults to `.false.` (no check, so existing code is unaffected). When it's `.true.`, `check_hard` (default `.true.`) picks the failure mode: `error stop` naming the column and its missing row group(s), or (`check_hard=.false.`) a `WARNING` instead. Only columns actually touched via `parquet_read_column_chunk` are tracked — a column read via `parquet_read_column`/`parquet_read_array_row_mode`/`parquet_read_array_element_mode` is never included in this check, even if the reader also chunk-read other columns.
+
+**Threading:** `parquet_read_column_chunk` calls on the *same* `parquet_reader` are bound by the same "one thread at a time" rule as every other call into a shared reader (see [Thread safety](thread-safety.html)) — but since chunked reads are stateless/random-access, splitting the row-group loop itself across threads works cleanly as long as each thread uses its *own* `parquet_reader` instance opened on the same file (independent readers on the same file are always safe to use concurrently), rather than sharing one reader across threads.
 - `warn` (optional `logical`, default `.true.`) only governs the missing-key-with-`default` case; pass `warn=.false.` to suppress that warning. It has no effect when the key is present.

@@ -25,6 +25,14 @@ module test_errors
     public :: check_scenario_exit_status
     public :: check_scenario_exit_status_and_stderr
     public :: check_scenario_exit_status_and_no_output
+    ! Exposed for test_writing.f90's own qc-warning scenario helpers -- see
+    ! run_error_scenario below.
+    public :: run_error_scenario
+    !
+    ! Cached path to the built error_scenarios helper binary -- see
+    ! error_scenarios_bin below.
+    character(len=:), allocatable, save :: g_error_scenarios_bin
+    logical, save :: g_error_scenarios_bin_ready = .false.
     !
 contains
     !
@@ -78,6 +86,76 @@ contains
                 test_write_array_mismatch_logical_matrix_aborts), &
             new_unittest("writing a string matrix with a col_size mismatch aborts", &
                 test_write_array_mismatch_string_matrix_aborts), &
+            new_unittest("streaming: writing an undeclared int32 chunk column aborts", &
+                test_write_chunk_undeclared_column_int32_aborts), &
+            new_unittest("streaming: writing an undeclared int64 chunk column aborts", &
+                test_write_chunk_undeclared_column_int64_aborts), &
+            new_unittest("streaming: writing an undeclared float32 chunk column aborts", &
+                test_write_chunk_undeclared_column_float32_aborts), &
+            new_unittest("streaming: writing an undeclared float64 chunk column aborts", &
+                test_write_chunk_undeclared_column_float64_aborts), &
+            new_unittest("streaming: writing an undeclared logical chunk column aborts", &
+                test_write_chunk_undeclared_column_logical_aborts), &
+            new_unittest("streaming: writing an undeclared string chunk column aborts", &
+                test_write_chunk_undeclared_column_string_aborts), &
+            new_unittest("streaming: writing an undeclared int32 matrix chunk column aborts", &
+                test_write_chunk_undeclared_column_int32_matrix_aborts), &
+            new_unittest("streaming: writing an undeclared int64 matrix chunk column aborts", &
+                test_write_chunk_undeclared_column_int64_matrix_aborts), &
+            new_unittest("streaming: writing an undeclared float32 matrix chunk column aborts", &
+                test_write_chunk_undeclared_column_float32_matrix_aborts), &
+            new_unittest("streaming: writing an undeclared float64 matrix chunk column aborts", &
+                test_write_chunk_undeclared_column_float64_matrix_aborts), &
+            new_unittest("streaming: writing an undeclared logical matrix chunk column aborts", &
+                test_write_chunk_undeclared_column_logical_matrix_aborts), &
+            new_unittest("streaming: writing an undeclared string matrix chunk column aborts", &
+                test_write_chunk_undeclared_column_string_matrix_aborts), &
+            new_unittest("streaming: writing a int32 chunk values(:) array not divisible by col_size aborts", &
+                test_write_chunk_not_divisible_int32_aborts), &
+            new_unittest("streaming: writing a int64 chunk values(:) array not divisible by col_size aborts", &
+                test_write_chunk_not_divisible_int64_aborts), &
+            new_unittest("streaming: writing a float32 chunk values(:) array not divisible by col_size aborts", &
+                test_write_chunk_not_divisible_float32_aborts), &
+            new_unittest("streaming: writing a float64 chunk values(:) array not divisible by col_size aborts", &
+                test_write_chunk_not_divisible_float64_aborts), &
+            new_unittest("streaming: writing a logical chunk values(:) array not divisible by col_size aborts", &
+                test_write_chunk_not_divisible_logical_aborts), &
+            new_unittest("streaming: writing a string chunk values(:) array not divisible by col_size aborts", &
+                test_write_chunk_not_divisible_string_aborts), &
+            new_unittest("streaming: writing a int32 chunk matrix with a col_size mismatch aborts", &
+                test_write_chunk_array_mismatch_int32_matrix_aborts), &
+            new_unittest("streaming: writing a int64 chunk matrix with a col_size mismatch aborts", &
+                test_write_chunk_array_mismatch_int64_matrix_aborts), &
+            new_unittest("streaming: writing a float32 chunk matrix with a col_size mismatch aborts", &
+                test_write_chunk_array_mismatch_float32_matrix_aborts), &
+            new_unittest("streaming: writing a float64 chunk matrix with a col_size mismatch aborts", &
+                test_write_chunk_array_mismatch_float64_matrix_aborts), &
+            new_unittest("streaming: writing a logical chunk matrix with a col_size mismatch aborts", &
+                test_write_chunk_array_mismatch_logical_matrix_aborts), &
+            new_unittest("streaming: writing a string chunk matrix with a col_size mismatch aborts", &
+                test_write_chunk_array_mismatch_string_matrix_aborts), &
+            new_unittest("streaming: writing an over-length string into a fixed-size string matrix chunk " // &
+                "column aborts", test_write_chunk_string_matrix_exceeds_array_size_aborts), &
+            new_unittest("streaming: writing an over-length string into a fixed-size string vector chunk " // &
+                "column (flat form) aborts", test_write_chunk_string_exceeds_array_size_aborts), &
+            new_unittest("streaming: writing a chunk column before parquet_new_row_group aborts", &
+                test_write_chunk_no_row_group_open_aborts), &
+            new_unittest("streaming: writing a chunk whose row count doesn't match the open row group aborts", &
+                test_write_chunk_row_count_mismatch_aborts), &
+            new_unittest("streaming: writing a chunk with type mismatch aborts", &
+                test_write_chunk_type_mismatch_aborts), &
+            new_unittest("chunked read: parquet_read_column_chunk on a filtered reader aborts", &
+                test_read_chunk_with_filter_aborts), &
+            new_unittest("chunked read: hard qc violation in one row group aborts, naming that row group", &
+                test_read_chunk_qc_hard_aborts), &
+            new_unittest("chunked read: soft qc violation warns once per column across multiple row groups", &
+                test_read_chunk_qc_soft_warns), &
+            new_unittest("chunked read: check_complete=.true. aborts on a column missing a row group", &
+                test_read_chunk_check_complete_hard_aborts), &
+            new_unittest("chunked read: an out-of-range row_group aborts", &
+                test_read_chunk_row_group_out_of_range_aborts), &
+            new_unittest("parquet_get_chunk_size with an out-of-range row_group aborts", &
+                test_get_chunk_size_row_group_out_of_range_aborts), &
             new_unittest("write with type mismatch aborts", test_write_type_mismatch_aborts), &
             new_unittest("writing the same column twice aborts", test_write_column_twice_aborts), &
             new_unittest("writing the same column twice on a schema-less writer aborts", &
@@ -127,8 +205,18 @@ contains
                 test_read_unsupported_physical_type_aborts), &
             new_unittest("writing a vector column with col_size exceeding Arrow's FixedSizeListType limit aborts", &
                 test_write_col_size_overflow_aborts), &
-            new_unittest("writing a vector column with nrows*col_size exceeding Arrow/Parquet's list-element-" // &
-                "count limit aborts", test_write_list_element_count_overflow_aborts), &
+            new_unittest("writing a vector column with an explicit chunk_size*col_size exceeding Arrow/Parquet's " // &
+                "list-element-count limit aborts", test_write_list_element_count_chunk_size_overflow_aborts), &
+            new_unittest("parquet_new_row_group with an explicit nrows*col_size exceeding Arrow/Parquet's " // &
+                "list-element-count limit aborts", test_row_group_explicit_nrows_overflow_aborts), &
+            new_unittest("closing a writer with a dangling open row group aborts", &
+                test_row_group_dangling_at_close_aborts), &
+            new_unittest("closing a writer with an under-covered whole column aborts", &
+                test_row_group_whole_column_undercovered_aborts), &
+            new_unittest("a row group reading past a whole column's own row count aborts", &
+                test_row_group_whole_column_overrun_aborts), &
+            new_unittest("introducing a new column after the first row group aborts", &
+                test_row_group_new_column_after_first_aborts), &
             new_unittest("writing a table with column count exceeding Arrow's Schema field-count limit aborts", &
                 test_write_column_count_overflow_aborts), &
             new_unittest("prefetching an unknown column aborts", &
@@ -428,6 +516,290 @@ contains
             failure_message="writing a string matrix with a col_size mismatch was expected to error stop")
     end subroutine test_write_array_mismatch_string_matrix_aborts
 
+    !> streaming (parquet_write_column_chunk) counterparts of the undeclared-column/
+    !! not-divisible/array-mismatch tests above -- one deep check_scenario_exit_status_and_stderr
+    !! (int32 scalar) plus exit-status-only checks for the rest, matching the batch API's own
+    !! mix above.
+    subroutine test_write_chunk_undeclared_column_int32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "write_chunk_undeclared_column_int32", expect_abort=.true., &
+            failure_message="writing an undeclared int32 chunk column was expected to error stop", &
+            required_stderr="parquet_write_column_chunk: column not defined in parquet_open_writer: " // &
+                "not_a_real_column (file: test_run/error_scenario_chunk_undeclared_int32.parquet, " // &
+                "maml: internal:multitype_table)")
+    end subroutine test_write_chunk_undeclared_column_int32_aborts
+
+    subroutine test_write_chunk_undeclared_column_int64_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_chunk_undeclared_column_int64", expect_abort=.true., &
+            failure_message="writing an undeclared int64 chunk column was expected to error stop")
+    end subroutine test_write_chunk_undeclared_column_int64_aborts
+
+    subroutine test_write_chunk_undeclared_column_float32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_chunk_undeclared_column_float32", expect_abort=.true., &
+            failure_message="writing an undeclared float32 chunk column was expected to error stop")
+    end subroutine test_write_chunk_undeclared_column_float32_aborts
+
+    subroutine test_write_chunk_undeclared_column_float64_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_chunk_undeclared_column_float64", expect_abort=.true., &
+            failure_message="writing an undeclared float64 chunk column was expected to error stop")
+    end subroutine test_write_chunk_undeclared_column_float64_aborts
+
+    subroutine test_write_chunk_undeclared_column_logical_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_chunk_undeclared_column_logical", expect_abort=.true., &
+            failure_message="writing an undeclared logical chunk column was expected to error stop")
+    end subroutine test_write_chunk_undeclared_column_logical_aborts
+
+    subroutine test_write_chunk_undeclared_column_string_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_chunk_undeclared_column_string", expect_abort=.true., &
+            failure_message="writing an undeclared string chunk column was expected to error stop")
+    end subroutine test_write_chunk_undeclared_column_string_aborts
+
+    subroutine test_write_chunk_undeclared_column_int32_matrix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_chunk_undeclared_column_int32_matrix", expect_abort=.true., &
+            failure_message="writing an undeclared int32 matrix chunk column was expected to error stop")
+    end subroutine test_write_chunk_undeclared_column_int32_matrix_aborts
+
+    subroutine test_write_chunk_undeclared_column_int64_matrix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_chunk_undeclared_column_int64_matrix", expect_abort=.true., &
+            failure_message="writing an undeclared int64 matrix chunk column was expected to error stop")
+    end subroutine test_write_chunk_undeclared_column_int64_matrix_aborts
+
+    subroutine test_write_chunk_undeclared_column_float32_matrix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_chunk_undeclared_column_float32_matrix", expect_abort=.true., &
+            failure_message="writing an undeclared float32 matrix chunk column was expected to error stop")
+    end subroutine test_write_chunk_undeclared_column_float32_matrix_aborts
+
+    subroutine test_write_chunk_undeclared_column_float64_matrix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_chunk_undeclared_column_float64_matrix", expect_abort=.true., &
+            failure_message="writing an undeclared float64 matrix chunk column was expected to error stop")
+    end subroutine test_write_chunk_undeclared_column_float64_matrix_aborts
+
+    subroutine test_write_chunk_undeclared_column_logical_matrix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_chunk_undeclared_column_logical_matrix", expect_abort=.true., &
+            failure_message="writing an undeclared logical matrix chunk column was expected to error stop")
+    end subroutine test_write_chunk_undeclared_column_logical_matrix_aborts
+
+    subroutine test_write_chunk_undeclared_column_string_matrix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_chunk_undeclared_column_string_matrix", expect_abort=.true., &
+            failure_message="writing an undeclared string matrix chunk column was expected to error stop")
+    end subroutine test_write_chunk_undeclared_column_string_matrix_aborts
+
+    subroutine test_write_chunk_not_divisible_int32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_chunk_not_divisible_int32", expect_abort=.true., &
+            failure_message="writing a int32 chunk values(:) array not divisible by col_size was expected " // &
+                "to error stop")
+    end subroutine test_write_chunk_not_divisible_int32_aborts
+
+    subroutine test_write_chunk_not_divisible_int64_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_chunk_not_divisible_int64", expect_abort=.true., &
+            failure_message="writing a int64 chunk values(:) array not divisible by col_size was expected " // &
+                "to error stop")
+    end subroutine test_write_chunk_not_divisible_int64_aborts
+
+    subroutine test_write_chunk_not_divisible_float32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_chunk_not_divisible_float32", expect_abort=.true., &
+            failure_message="writing a float32 chunk values(:) array not divisible by col_size was expected " // &
+                "to error stop")
+    end subroutine test_write_chunk_not_divisible_float32_aborts
+
+    subroutine test_write_chunk_not_divisible_float64_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_chunk_not_divisible_float64", expect_abort=.true., &
+            failure_message="writing a float64 chunk values(:) array not divisible by col_size was expected " // &
+                "to error stop")
+    end subroutine test_write_chunk_not_divisible_float64_aborts
+
+    subroutine test_write_chunk_not_divisible_logical_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_chunk_not_divisible_logical", expect_abort=.true., &
+            failure_message="writing a logical chunk values(:) array not divisible by col_size was expected " // &
+                "to error stop")
+    end subroutine test_write_chunk_not_divisible_logical_aborts
+
+    subroutine test_write_chunk_not_divisible_string_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_chunk_not_divisible_string", expect_abort=.true., &
+            failure_message="writing a string chunk values(:) array not divisible by col_size was expected " // &
+                "to error stop")
+    end subroutine test_write_chunk_not_divisible_string_aborts
+
+    subroutine test_write_chunk_array_mismatch_int32_matrix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_chunk_array_mismatch_int32_matrix", expect_abort=.true., &
+            failure_message="writing a int32 chunk matrix with a col_size mismatch was expected to error stop")
+    end subroutine test_write_chunk_array_mismatch_int32_matrix_aborts
+
+    subroutine test_write_chunk_array_mismatch_int64_matrix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_chunk_array_mismatch_int64_matrix", expect_abort=.true., &
+            failure_message="writing a int64 chunk matrix with a col_size mismatch was expected to error stop")
+    end subroutine test_write_chunk_array_mismatch_int64_matrix_aborts
+
+    subroutine test_write_chunk_array_mismatch_float32_matrix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_chunk_array_mismatch_float32_matrix", expect_abort=.true., &
+            failure_message="writing a float32 chunk matrix with a col_size mismatch was expected to error stop")
+    end subroutine test_write_chunk_array_mismatch_float32_matrix_aborts
+
+    subroutine test_write_chunk_array_mismatch_float64_matrix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_chunk_array_mismatch_float64_matrix", expect_abort=.true., &
+            failure_message="writing a float64 chunk matrix with a col_size mismatch was expected to error stop")
+    end subroutine test_write_chunk_array_mismatch_float64_matrix_aborts
+
+    subroutine test_write_chunk_array_mismatch_logical_matrix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_chunk_array_mismatch_logical_matrix", expect_abort=.true., &
+            failure_message="writing a logical chunk matrix with a col_size mismatch was expected to error stop")
+    end subroutine test_write_chunk_array_mismatch_logical_matrix_aborts
+
+    subroutine test_write_chunk_array_mismatch_string_matrix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_chunk_array_mismatch_string_matrix", expect_abort=.true., &
+            failure_message="writing a string chunk matrix with a col_size mismatch was expected to error stop")
+    end subroutine test_write_chunk_array_mismatch_string_matrix_aborts
+
+    subroutine test_write_chunk_string_matrix_exceeds_array_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_chunk_string_matrix_exceeds_array_size", expect_abort=.true., &
+            failure_message="writing an over-length string into a fixed-size string matrix chunk column " // &
+                "was expected to error stop")
+    end subroutine test_write_chunk_string_matrix_exceeds_array_size_aborts
+
+    !> Same check as test_write_chunk_string_matrix_exceeds_array_size_aborts, but for
+    !! parquet_write_string_column_chunk's 1D/flat form (values(:), dispatched for a rank-1
+    !! actual argument).
+    subroutine test_write_chunk_string_exceeds_array_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_chunk_string_exceeds_array_size", expect_abort=.true., &
+            failure_message="writing an over-length string into a fixed-size string vector chunk column " // &
+                "(flat form) was expected to error stop")
+    end subroutine test_write_chunk_string_exceeds_array_size_aborts
+
+    subroutine test_write_chunk_no_row_group_open_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "write_chunk_no_row_group_open", expect_abort=.true., &
+            failure_message="writing a chunk column before parquet_new_row_group was expected to error stop", &
+            required_stderr="parquet_write_column_chunk: no row group is open (call parquet_new_row_group " // &
+                "first) for column i32 (file: test_run/error_scenario_chunk_no_row_group.parquet, " // &
+                "maml: internal:multitype_table)")
+    end subroutine test_write_chunk_no_row_group_open_aborts
+
+    subroutine test_write_chunk_row_count_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "write_chunk_row_count_mismatch", expect_abort=.true., &
+            failure_message="writing a chunk with a row count mismatch was expected to error stop", &
+            required_stderr="parquet_write_column_chunk: row count mismatch for column i32: the open row " // &
+                "group has 3 rows but this chunk has 2 " // &
+                "(file: test_run/error_scenario_chunk_row_count_mismatch.parquet, maml: internal:multitype_table)")
+    end subroutine test_write_chunk_row_count_mismatch_aborts
+
+    subroutine test_write_chunk_type_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "write_chunk_type_mismatch", expect_abort=.true., &
+            failure_message="writing a chunk with a type mismatch was expected to error stop", &
+            required_stderr="parquet_write_column_chunk: type mismatch for column i32 (expected boolean, " // &
+                "got int32) -- parquet_write_column_chunk requires an exact type match, unlike " // &
+                "parquet_write_column (file: test_run/error_scenario_chunk_type_mismatch.parquet, " // &
+                "maml: internal:multitype_table)")
+    end subroutine test_write_chunk_type_mismatch_aborts
+
+    subroutine test_read_chunk_with_filter_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "read_chunk_with_filter", expect_abort=.true., &
+            failure_message="a chunked read on a filtered reader was expected to error stop", &
+            required_stderr="chunked reads are not supported on a reader opened with an active filter=")
+    end subroutine test_read_chunk_with_filter_aborts
+
+    subroutine test_read_chunk_qc_hard_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "read_chunk_qc_hard_aborts", expect_abort=.true., &
+            failure_message="a hard qc violation in a chunk read was expected to abort", &
+            required_stderr="qc violation for column 'ra [row group 1]'")
+    end subroutine test_read_chunk_qc_hard_aborts
+
+    subroutine test_read_chunk_qc_soft_warns(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "read_chunk_qc_soft_warns", expect_abort=.false., &
+            failure_message="a soft qc violation in a chunk read was expected to warn, not abort", &
+            required_stderr="WARNING: qc violation for column 'ra [row group 1]'")
+    end subroutine test_read_chunk_qc_soft_warns
+
+    subroutine test_read_chunk_check_complete_hard_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "read_chunk_check_complete_hard_aborts", expect_abort=.true., &
+            failure_message="closing an incomplete chunked read with check_complete=.true. was expected to abort", &
+            required_stderr="column 'v' was read via parquet_read_column_chunk but not every row group was read")
+    end subroutine test_read_chunk_check_complete_hard_aborts
+
+    subroutine test_read_chunk_row_group_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "read_chunk_row_group_out_of_range", expect_abort=.true., &
+            failure_message="reading an out-of-range row_group was expected to error stop", &
+            required_stderr="row_group 3 out of range (file has 2 row group(s))")
+    end subroutine test_read_chunk_row_group_out_of_range_aborts
+
+    !> parquet_get_chunk_size has its own row_group bounds check, independent of
+    !> parquet_read_column_chunk's (see check_row_group_valid vs
+    !> parquet_get_chunk_size_reader_impl in parquet_read.f90) -- must abort even when
+    !> parquet_read_column_chunk itself is never called.
+    subroutine test_get_chunk_size_row_group_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "get_chunk_size_row_group_out_of_range", &
+            expect_abort=.true., &
+            failure_message="parquet_get_chunk_size with an out-of-range row_group was expected to error stop", &
+            required_stderr="parquet_get_chunk_size: row_group 3 out of range (file has 2 row group(s))")
+    end subroutine test_get_chunk_size_row_group_out_of_range_aborts
+
     subroutine test_write_type_mismatch_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
@@ -682,22 +1054,100 @@ contains
                 "the maximum vector-column width Arrow's FixedSizeListType supports")
     end subroutine test_write_col_size_overflow_aborts
 
-    !> check_list_element_count_fits_arrow_limit in parquet_wrapper.cpp aborts via a C++-level
-    !> report_fatal_error (not a Fortran error stop) the moment a vector column's nrows * col_size
-    !> would exceed Arrow/Parquet's int32_t list-element-count limit -- distinct from col_size
-    !> alone (test_write_col_size_overflow_aborts, above). See the README's Limitations section
-    !> and scenario_list_element_count_overflow's own comment for why this is tested with a
-    !> shrunk test-only threshold rather than a genuinely oversized (nrows * col_size > 2^31-1)
-    !> vector column.
-    subroutine test_write_list_element_count_overflow_aborts(error)
+    !> check_explicit_chunk_size_fits_arrow_limit in parquet_wrapper.cpp aborts via a C++-level
+    !> report_fatal_error (not a Fortran error stop) the moment an *explicit* chunk_size
+    !> (parquet_open_writer(..., chunk_size=)/parquet_set_writer_options) combined with a vector
+    !> column's col_size would exceed Arrow/Parquet's int32_t per-row-group list-element-count
+    !> limit -- distinct from col_size alone (test_write_col_size_overflow_aborts, above). An
+    !> *auto*-sized chunk_size no longer aborts for this (see
+    !> scenario_list_element_count_auto_multi_row_group in test_writing.f90's
+    !> test_list_element_count_auto_multi_row_group_roundtrip): only a caller-chosen chunk_size
+    !> that conflicts with col_size is validated rather than silently overridden. See the
+    !> README's Limitations section and
+    !> scenario_list_element_count_explicit_chunk_size_overflow's own comment for why this is
+    !> tested with a shrunk test-only threshold rather than a genuinely oversized
+    !> (chunk_size * col_size > 2^31-1) vector column.
+    subroutine test_write_list_element_count_chunk_size_overflow_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
-        call check_scenario_exit_status_and_stderr(error, "list_element_count_overflow", expect_abort=.true., &
-            failure_message="writing a vector column with nrows*col_size exceeding the (shrunk) Arrow limit " // &
-                "was expected to abort", &
-            required_stderr="parquet_append_column: column 'v': nrows (3) * col_size (2) exceeds 2147483647, " // &
-                "the maximum total element count Arrow/Parquet's list-column level generation supports")
-    end subroutine test_write_list_element_count_overflow_aborts
+        call check_scenario_exit_status_and_stderr(error, "list_element_count_explicit_chunk_size_overflow", &
+            expect_abort=.true., &
+            failure_message="writing a vector column with an explicit chunk_size*col_size exceeding the " // &
+                "(shrunk) Arrow limit was expected to abort", &
+            required_stderr="close_parquet_writer: column 'v': chunk_size (3) * col_size (2) exceeds 2147483647, " // &
+                "the maximum per-row-group element count Arrow/Parquet's list-column level generation supports")
+    end subroutine test_write_list_element_count_chunk_size_overflow_aborts
+
+    !> Counterpart to test_write_list_element_count_chunk_size_overflow_aborts, above, for the
+    !> streaming row-group API: an explicit parquet_new_row_group(writer, nrows) whose nrows
+    !> conflicts with a schema-declared vector column's col_size aborts via a C++-level
+    !> report_fatal_error, the same way an explicit chunk_size does for the batch path. See
+    !> scenario_row_group_explicit_nrows_overflow's own comment for why this is tested with a
+    !> shrunk test-only threshold.
+    subroutine test_row_group_explicit_nrows_overflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_group_explicit_nrows_overflow", expect_abort=.true., &
+            failure_message="starting a row group with an explicit nrows*col_size exceeding the (shrunk) Arrow " // &
+                "limit was expected to abort", &
+            required_stderr="parquet_new_row_group: column 'v': nrows (3) * col_size (2) exceeds 2147483647, " // &
+                "the maximum per-row-group element count Arrow/Parquet's list-column level generation supports")
+    end subroutine test_row_group_explicit_nrows_overflow_aborts
+
+    !> close_streaming_writer in parquet_wrapper.cpp aborts (a C++-level uncaught
+    !> std::runtime_error, not a clean Fortran error stop) if a row group was started via
+    !> parquet_new_row_group but parquet_finish_row_group was never called before
+    !> parquet_close_writer -- see scenario_row_group_dangling_at_close's own comment.
+    subroutine test_row_group_dangling_at_close_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_group_dangling_at_close", expect_abort=.true., &
+            failure_message="closing a writer with a dangling open row group was expected to abort", &
+            required_stderr="A row group was started via parquet_new_row_group but never finished via " // &
+                "parquet_finish_row_group before close")
+    end subroutine test_row_group_dangling_at_close_aborts
+
+    !> close_streaming_writer aborts if a whole (parquet_write_column) column's row count
+    !> exceeds what the streaming row-group API actually covered by the time the writer closes
+    !> -- see scenario_row_group_whole_column_undercovered's own comment.
+    subroutine test_row_group_whole_column_undercovered_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_group_whole_column_undercovered", &
+            expect_abort=.true., &
+            failure_message="closing a writer with an under-covered whole column was expected to abort", &
+            required_stderr="column 'whole' has 5 rows (written via parquet_write_column), but only 3 were " // &
+                "covered by row groups written via parquet_new_row_group/parquet_write_column_chunk/" // &
+                "parquet_finish_row_group")
+    end subroutine test_row_group_whole_column_undercovered_aborts
+
+    !> parquet_finish_row_group in parquet_wrapper.cpp aborts (via report_fatal_error)
+    !> immediately -- rather than waiting until close -- if a row group's own rows would read
+    !> past the end of an already-whole (parquet_write_column) column. See
+    !> scenario_row_group_whole_column_overrun's own comment.
+    subroutine test_row_group_whole_column_overrun_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_group_whole_column_overrun", expect_abort=.true., &
+            failure_message="a row group reading past a whole column's own row count was expected to abort", &
+            required_stderr="parquet_finish_row_group: column 'whole' has 3 rows (written via " // &
+                "parquet_write_column), but row groups have already covered 0 of them and this row group " // &
+                "would add 5 more, exceeding the column's own row count")
+    end subroutine test_row_group_whole_column_overrun_aborts
+
+    !> check_column_chunk_write_preconditions in parquet_wrapper.cpp aborts (via
+    !> report_fatal_error) if a column is introduced (its first parquet_write_column_chunk call)
+    !> after the first row group has already been written -- a Parquet file's schema is fixed
+    !> from that point on. See scenario_row_group_new_column_after_first's own comment.
+    subroutine test_row_group_new_column_after_first_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_group_new_column_after_first", expect_abort=.true., &
+            failure_message="introducing a new column after the first row group was expected to abort", &
+            required_stderr="parquet_write_column_chunk: column 'b': introduced after the first row group " // &
+                "was already written -- every column must appear in the first row group, since a Parquet " // &
+                "file's schema is fixed once the first row group is written")
+    end subroutine test_row_group_new_column_after_first_aborts
 
     !> check_column_count_fits_arrow_limit in parquet_wrapper.cpp aborts via a C++-level
     !> report_fatal_error (not a Fortran error stop) the moment a table's column count would
@@ -1308,6 +1758,68 @@ contains
             required_stderr="concurrent access to a single parquet_writer detected")
     end subroutine test_concurrent_calls_into_shared_writer_aborts
 
+    !> Resolves the path to the built error_scenarios helper binary, building
+    !> it (via `fpm build --tests`, which builds every test executable
+    !> including run_tester itself, so this is a fast up-to-date check on the
+    !> common path) on first use and caching the result for the rest of this
+    !> process. This suite and test_writing.f90's qc-warning scenario tests
+    !> together spawn well over a hundred scenario subprocesses; going
+    !> through a full `fpm test error_scenarios -- ...` invocation for each
+    !> one (as this used to do) re-parses the manifest and re-checks
+    !> dependencies every single time -- about 2s of pure fpm overhead per
+    !> call, dwarfing the ~0.05s the scenario itself takes to run. Resolving
+    !> the binary path once and invoking it directly cuts that to a single
+    !> ~1.5s build check for the whole suite. `find` is scoped to
+    !> $FPM_BUILD_DIR (defaulting to "build", fpm's own default) rather than
+    !> a bare "build" -- tools/coverage.sh builds under build/gcov via its
+    !> own FPM_BUILD_DIR, and searching the whole build/ tree regardless of
+    !> that would risk picking up whichever of the two happens to sort
+    !> first, not the one actually requested for this run.
+    function error_scenarios_bin() result(bin)
+        character(len=:), allocatable :: bin
+        character(len=*), parameter :: path_file = "test_run/.error_scenarios_bin_path"
+        integer :: unit, ios
+        character(len=1024) :: line
+
+        if (.not. g_error_scenarios_bin_ready) then
+            call execute_command_line("mkdir -p test_run", wait=.true.)
+            call execute_command_line("fpm build --tests > /dev/null 2>&1", wait=.true.)
+            call execute_command_line( &
+                "find ""${FPM_BUILD_DIR:-build}"" -type f -name error_scenarios 2>/dev/null | head -n 1 > "// &
+                path_file, &
+                wait=.true.)
+            line = ""
+            open(newunit=unit, file=path_file, status="old", action="read", iostat=ios)
+            if (ios == 0) then
+                read(unit, '(a)', iostat=ios) line
+                close(unit)
+            end if
+            g_error_scenarios_bin = trim(adjustl(line))
+            g_error_scenarios_bin_ready = .true.
+        end if
+        bin = g_error_scenarios_bin
+    end function error_scenarios_bin
+
+    !> Runs the error_scenarios helper binary as `<binary> <scenario>
+    !> <redirect>`, resolving/building it via error_scenarios_bin on first
+    !> use. Centralizes what used to be six near-identical
+    !> `execute_command_line("fpm test error_scenarios -- ...")` call sites
+    !> (three here, three in test_writing.f90's qc-warning scenario tests).
+    subroutine run_error_scenario(scenario, redirect, exitstat, cmdstat)
+        character(len=*), intent(in) :: scenario, redirect
+        integer, intent(out) :: exitstat, cmdstat
+        character(len=:), allocatable :: bin
+
+        bin = error_scenarios_bin()
+        if (len_trim(bin) == 0) then
+            cmdstat = 1
+            exitstat = -1
+            return
+        end if
+        call execute_command_line(trim(bin)//" "//trim(scenario)//" "//redirect, &
+            wait=.true., exitstat=exitstat, cmdstat=cmdstat)
+    end subroutine run_error_scenario
+
     subroutine check_scenario_exit_status(error, scenario, expect_abort, failure_message)
         type(error_type), allocatable, intent(out) :: error
         character(len=*), intent(in) :: scenario, failure_message
@@ -1315,16 +1827,9 @@ contains
         integer :: exitstat, cmdstat
         logical :: aborted
 
-        ! execute_command_line spawns a brand new fpm process that inherits
-        ! the environment (including FPM_FFLAGS), so an OpenMP flag set there
-        ! carries into the subprocess and the concurrency scenarios genuinely
-        ! run multi-threaded. The OpenMP flag itself is compiler-dependent, so
-        ! it must come from the environment rather than being hardcoded here.
-        call execute_command_line( &
-            "fpm test error_scenarios -- "//trim(scenario)//" > /dev/null 2>&1", &
-            wait=.true., exitstat=exitstat, cmdstat=cmdstat)
+        call run_error_scenario(scenario, "> /dev/null 2>&1", exitstat, cmdstat)
 
-        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper program via fpm")
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
         if (allocated(error)) return
 
         ! exitstat == 97 means error_scenarios.f90's `case default` was hit --
@@ -1359,11 +1864,8 @@ contains
 
         out_file = "test_run/" // trim(scenario) // "_stderr.txt"
 
-        call execute_command_line( &
-            "fpm test error_scenarios -- " // trim(scenario) // &
-            " > " // out_file // " 2>&1", &
-            wait=.true., exitstat=exitstat, cmdstat=cmdstat)
-        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper program via fpm")
+        call run_error_scenario(scenario, "> " // out_file // " 2>&1", exitstat, cmdstat)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
         if (allocated(error)) return
 
         ! See check_scenario_exit_status's identical check for why: exit
@@ -1407,11 +1909,8 @@ contains
 
         out_file = "test_run/" // trim(scenario) // "_stdout.txt"
 
-        call execute_command_line( &
-            "fpm test error_scenarios -- " // trim(scenario) // &
-            " > " // out_file // " 2>&1", &
-            wait=.true., exitstat=exitstat, cmdstat=cmdstat)
-        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper program via fpm")
+        call run_error_scenario(scenario, "> " // out_file // " 2>&1", exitstat, cmdstat)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
         if (allocated(error)) return
 
         call check(error, exitstat /= 97, &

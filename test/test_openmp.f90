@@ -7,7 +7,7 @@
 module test_openmp
     use parquet
     use parquet_maml_base, only : parquet_maml_file, get_parquet_maml
-    use iso_fortran_env, only : real64
+    use iso_fortran_env, only : real64, int32
     use testdrive, only : new_unittest, unittest_type, error_type, check, test_failed
     !$ use omp_lib, only : omp_get_max_threads
     !
@@ -33,7 +33,9 @@ contains
         type(unittest_type), allocatable, intent(out) :: testsuite(:)
 
         testsuite = [ &
-            new_unittest("write different parquet files in parallel", test_write_parallel) &
+            new_unittest("write different parquet files in parallel", test_write_parallel), &
+            new_unittest("streaming write: parallel-computed row groups, written serially, round-trip", &
+                test_streaming_write_parallel_compute_serial_write) &
             ]
     end subroutine collect_tests_parquet_openmp_write
 
@@ -108,6 +110,54 @@ contains
 
         inquire(file=filename, exist=ok)
     end subroutine write_one_file
+
+    !> Validates the specific "parallel compute, serial write" pattern this project recommends
+    !> for the streaming row-group API (see doc/pages/thread-safety.md): OpenMP threads only
+    !> ever compute chunk data into private slots of a shared buffer, never touch the shared
+    !> parquet_writer itself -- the actual parquet_new_row_group/parquet_write_column_chunk/
+    !> parquet_finish_row_group calls stay on a single thread, in row-group order, exactly as
+    !> the concurrency guard requires (see scenario_concurrent_calls_into_shared_writer in
+    !> error_scenarios.f90 for what happens if that rule is broken instead).
+    subroutine test_streaming_write_parallel_compute_serial_write(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = "test_run/test_openmp_streaming_write.parquet"
+        integer, parameter :: rows_per_group = 5
+        integer, parameter :: num_groups = 6
+        integer, parameter :: col_size = 3
+        integer(int32) :: vec_buf(col_size, rows_per_group, num_groups)
+        integer(int32) :: vec_expected(col_size, rows_per_group * num_groups)
+        integer(int32) :: vec_back(col_size, rows_per_group * num_groups)
+        integer :: g, r, e
+
+        !$omp parallel do default(shared) private(g, r, e)
+        do g = 1, num_groups
+            do r = 1, rows_per_group
+                do e = 1, col_size
+                    vec_buf(e, r, g) = (g - 1) * rows_per_group * col_size + (r - 1) * col_size + e
+                end do
+            end do
+        end do
+        !$omp end parallel do
+
+        vec_expected = reshape(vec_buf, [col_size, rows_per_group * num_groups])
+
+        call parquet_open_writer(writer, out_file, chunk_size=rows_per_group)
+        do g = 1, num_groups
+            call parquet_new_row_group(writer, rows_per_group)
+            call parquet_write_column_chunk(writer, "v", vec_buf(:, :, g))
+            call parquet_finish_row_group(writer)
+        end do
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "v", vec_back)
+        call parquet_close_reader(reader)
+
+        call check(error, all(vec_back == vec_expected), &
+            "a streaming write fed by parallel-computed row-group data did not round-trip correctly")
+    end subroutine test_streaming_write_parallel_compute_serial_write
 
     !> Reads back the files produced by test_write_parallel, again with each
     !> thread owning an independent parquet_reader instance.

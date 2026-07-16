@@ -66,8 +66,17 @@ test:
     # including this CI job, are expected to supply it via FPM_LDFLAGS). No
     # -I/-L path is needed for either: the apt packages above install Arrow
     # to the standard system prefix, already on gcc/ld's default search path.
-    FPM_CXXFLAGS: "-std=c++20"
-    FPM_LDFLAGS: "-lstdc++"
+    # --coverage on both instruments src/parquet_wrapper.cpp alongside the
+    # Fortran sources below -- safe here specifically because this image's
+    # gfortran/gcc/g++ all come from the same apt GCC install (one matched
+    # GNU toolchain), so the .cpp's gcov data reads back with the same gcovr
+    # invocation below with no format mismatch. This does NOT generalize to
+    # every dev machine -- e.g. a Mac with gfortran from one toolchain (say
+    # MacPorts GCC) and a default `clang++` FPM_CXX would produce gcov data
+    # in Clang's format, which plain GNU `gcov`/`gcovr` cannot reliably read
+    # -- see CONTRIBUTING.md's coverage section.
+    FPM_CXXFLAGS: "-std=c++20 --coverage"
+    FPM_LDFLAGS: "-lstdc++ --coverage"
   coverage: /^TOTAL.*\s+(\d+\%)$/
   script:
     # Source is kept within the standard 132-column free-form limit, so no

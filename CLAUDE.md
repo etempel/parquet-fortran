@@ -380,8 +380,12 @@ line can *only* be covered by an out-of-process scenario (`test/error_scenarios.
 in-process test-drive test (the abort kills the process); a normal branch is usually
 reachable by extending an existing test with different data/arguments. Genuinely not
 coverable and not worth chasing: `end module`/`end submodule` lines, implicit finalizers,
-and interface-only / `extern "C"` files (`parquet_bindings.f90`, and `parquet_wrapper.cpp`,
-which the local gcov toolchain doesn't instrument at all).
+and interface-only files (`parquet_bindings.f90`). `src/parquet_wrapper.cpp` is measured
+by `.gitlab-ci.yml`'s `test` job (its `gfortran`/`gcc`/`g++` are one matched apt GCC install,
+so `gcovr` reads its gcov data cleanly alongside the Fortran sources) but deliberately
+**not** by `tools/coverage.sh`'s local run, since an arbitrary dev machine's `FPM_CXX`
+(e.g. a default `clang++`) may not produce gcov data in a format the locally-resolved GNU
+`gcov` can read — see CONTRIBUTING.md's CI section.
 
 If you ever find a line marked `GCOVR_EXCL_LINE`/inside a `GCOVR_EXCL_START`/`GCOVR_EXCL_STOP`
 block that is actually reachable in normal (non-abort) operation — i.e. the exclusion looks

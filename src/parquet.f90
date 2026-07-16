@@ -781,8 +781,10 @@ module parquet
             type(parquet_maml_col_map_entry), allocatable :: col_map(:) !! parsed (internal_name, output_name) entries.
         end function parquet_parse_col_map
 
-        !> Error stops if `name` is not a defined column, or is defined with a
-        !> data_type incompatible with `expected_type` (see parquet_is_type_compatible).
+        !> Error stops if `name` is defined with a data_type incompatible with
+        !> `expected_type` (see parquet_is_type_compatible). Assumes `name` is
+        !> already known to be a defined column -- every caller checks that
+        !> itself (and error stops on a not-defined column) before calling this.
         module subroutine parquet_assert_column_type(writer, name, expected_type)
             type(parquet_writer), intent(in) :: writer !! open writer to check against.
             character(len=*), intent(in) :: name !! column name being written.

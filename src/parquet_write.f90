@@ -390,11 +390,6 @@ contains
         if (.not. writer%is_schema_enforced) return
 
         idx = parquet_get_defined_column_index(writer, name)
-        if (idx == 0) then
-            call writer_context_suffix(writer, ctx)
-            error stop "parquet_write_column: column not defined in parquet_open_writer: " // &
-                                  trim(name) // ctx
-        end if
 
         if (.not. parquet_is_type_compatible(writer%all_columns(idx)%data_type, expected_type)) then
             call writer_context_suffix(writer, ctx)

@@ -132,7 +132,8 @@ contains
     !> "key:"/"doi:" on their own indented line, and depends: entries whose
     !> first (dash-line) key is "dataset:"/"table:" instead of "survey:",
     !> with "survey:" itself then appearing as a later indented continuation
-    !> line. This test is the only one exercising those variations. It also
+    !> line, and a depends: entry whose first (dash-line) key is "version:".
+    !> This test is the only one exercising those variations. It also
     !> spells the fields: header "Fields:" -- the fast-path literal check
     !> for "fields:" is case-sensitive, but the fallback generic key/value
     !> path (reached because none of keyarray:/DOIs:/depends:/extra: match
@@ -142,7 +143,7 @@ contains
         type(error_type), allocatable, intent(out) :: error
         type(parquet_schema) :: schema
         integer :: i
-        logical :: found_keyarray, found_doi, found_depends1, found_depends2
+        logical :: found_keyarray, found_doi, found_depends1, found_depends2, found_depends3
 
         schema%maml%name = "key_variations.maml"
         schema%maml%lines = [character(len=40) :: &
@@ -161,6 +162,7 @@ contains
             "  survey: The Medium Survey", &
             "- table: Phot_South", &
             "  version: 2", &
+            "- version: 3", &
             "Fields:", &
             "- name: id0", &
             "  data_type: int32" ]
@@ -171,6 +173,7 @@ contains
         found_doi = .false.
         found_depends1 = .false.
         found_depends2 = .false.
+        found_depends3 = .false.
 
         do i = 1, size(schema%metadata%items)
             if (trim(schema%metadata%items(i)%key) == "test_bare") then
@@ -195,6 +198,11 @@ contains
                 call check(error, trim(schema%metadata%items(i)%value) == ";;Phot_South;2", &
                     "depends: entry starting with 'table:' (dash-line) did not parse as expected")
                 if (allocated(error)) return
+            else if (trim(schema%metadata%items(i)%key) == "depends_3") then
+                found_depends3 = .true.
+                call check(error, trim(schema%metadata%items(i)%value) == ";;;3", &
+                    "depends: entry starting with 'version:' (dash-line) did not parse as expected")
+                if (allocated(error)) return
             end if
         end do
 
@@ -205,6 +213,8 @@ contains
         call check(error, found_depends1, "expected depends: entry 'depends_1' not found")
         if (allocated(error)) return
         call check(error, found_depends2, "expected depends: entry 'depends_2' not found")
+        if (allocated(error)) return
+        call check(error, found_depends3, "expected depends: entry 'depends_3' not found")
     end subroutine test_keyarray_dois_depends_key_variations
 
     !> Any top-level plain-string list section other than comments:/coauthors:/

@@ -451,6 +451,8 @@ contains
         integer :: i, j, n
         character(len=32) :: idx_buf
         type(parquet_qc_rule), allocatable :: tmp(:)
+        character(len=:), allocatable :: tlo1, tlo3, tlo4 !! scratch (to_lower).
+        character(len=:), allocatable :: tuq2, tuq5 !! scratch (unquote).
 
         ! "" if maml%name was never set (e.g. a qc-maml built in memory via
         ! add_col_qc); otherwise " (maml: X)", appended to every error stop
@@ -506,7 +508,8 @@ contains
 
             if (in_qc) then
                 call parquet_split_key_value(tline, key, cvalue)
-                select case (parquet_to_lower(key))
+                call parquet_to_lower(key, tlo1)
+                select case (tlo1)
                 case ("min")
                     call parquet_set_qc_bound(tmp(n)%has_min, tmp(n)%min_op, raw, cvalue, ">=")
                     tmp(n)%min_text = raw
@@ -516,7 +519,9 @@ contains
                     tmp(n)%max_text = raw
                     cycle
                 case ("miss")
-                    miss_lower = trim(parquet_to_lower(parquet_unquote(cvalue)))
+                    call parquet_unquote(cvalue, tuq2)
+                    call parquet_to_lower(tuq2, tlo3)
+                    miss_lower = trim(tlo3)
                     if (len_trim(miss_lower) == 0) then
                         tmp(n)%null_values_allowed = .false.
                     else if (trim(miss_lower) == "null" .or. trim(miss_lower) == "na") then
@@ -535,9 +540,11 @@ contains
             call parquet_split_key_value(tline, key, cvalue)
             if (len_trim(key) == 0) cycle
 
-            select case (parquet_to_lower(key))
+            call parquet_to_lower(key, tlo4)
+            select case (tlo4)
             case ("name")
-                tmp(n)%name = parquet_unquote(cvalue)
+                call parquet_unquote(cvalue, tuq5)
+                tmp(n)%name = tuq5
             case ("qc")
                 in_qc = .true.
                 tmp(n)%has_qc_block = .true.
@@ -583,8 +590,10 @@ contains
 
     module procedure parquet_set_qc_bound
         character(len=:), allocatable :: text
+        character(len=:), allocatable :: tuq1 !! scratch (unquote).
 
-        text = trim(adjustl(parquet_unquote(cvalue)))
+        call parquet_unquote(cvalue, tuq1)
+        text = trim(adjustl(tuq1))
         if (index(text, ">=") == 1) then
             op = ">="
             text = trim(adjustl(text(3:)))

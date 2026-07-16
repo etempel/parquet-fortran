@@ -115,20 +115,20 @@ contains
     !> __kmp_invoke_microtask). Run those suites' tests sequentially instead
     !> so the fork always happens with no other team threads active.
     !>
-    !> "parquet_string" is excluded for a different reason: a gfortran/OpenMP
-    !> runtime bug (not a bug in parquet_strings.f90's own logic -- reproduced
-    !> with a from-scratch, unrelated derived type using no code from this
-    !> library) silently corrupts memory when multiple threads concurrently
-    !> construct/destroy independent instances of a `class()`-dispatched
-    !> derived type that has two or more allocatable array components, even
-    !> when only one of those components is ever touched. Every
-    !> `parquet_string_column` local in this suite's tests hits exactly that
-    !> shape. Full root-cause investigation, minimal reproducer, and the
-    !> confirmation that serializing eliminates it: see `debug.md`.
+    !> "parquet_string" no longer needs an entry here: it used to, because of a
+    !> gfortran/OpenMP runtime bug (not a bug in parquet_strings.f90's own
+    !> logic) that silently corrupted memory when multiple threads
+    !> concurrently called a function returning `character(len=:), allocatable`
+    !> on a type with two or more allocatable components -- `parquet_string_column`
+    !> hit this via its (formerly function-form) `get`/`summary`. Fixed at the
+    !> source by converting every such accessor in this library to a
+    !> subroutine with an `intent(out)`/`intent(inout)` allocatable `character`
+    !> argument instead (see "Build and compiler notes" in CLAUDE.md), which
+    !> this suite's re-enabled parallel execution exercises as its own ongoing
+    !> regression check.
     logical function suite_is_safe_to_parallelize(name) result(safe)
         character(len=*), intent(in) :: name
-        safe = .not. (name == "writing" .or. name == "errors" .or. name == "metadata" .or. name == "maml" &
-            .or. name == "parquet_string")
+        safe = .not. (name == "writing" .or. name == "errors" .or. name == "metadata" .or. name == "maml")
     end function suite_is_safe_to_parallelize
 
 end program tester

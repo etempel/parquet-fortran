@@ -62,15 +62,16 @@ module parquet_maml_base
             character(len=*), intent(in) :: qc_input !! compact "col, min, max, miss" string.
             character(len=:), allocatable, intent(out), optional :: col_name !! parsed column name.
         end subroutine parquet_maml_add_col_qc
-        !> Function form of add_col_qc: appends the same qc: field entry and
-        !> returns the parsed column name as the result, so it may be assigned
-        !> back into the argument variable (col = maml%get_col_qc(col)). NB it
+        !> In-place form of add_col_qc: appends the same qc: field entry. `col_name` is
+        !> `intent(inout)`: it holds the compact "col, min, max, miss" string on entry and
+        !> the parsed column name on exit, so a caller reuses one variable
+        !> (call maml%get_col_qc(col)) instead of naming a separate input and output. NB it
         !> mutates self (adds the entry) despite the get_ name.
-        module function parquet_maml_get_col_qc(self, qc_input) result(col_name)
+        module subroutine parquet_maml_get_col_qc(self, col_name)
             class(parquet_maml_file), intent(inout) :: self !! qc-maml being built; gains a fields: entry.
-            character(len=*), intent(in) :: qc_input !! compact "col, min, max, miss" string.
-            character(len=:), allocatable :: col_name !! parsed column name.
-        end function parquet_maml_get_col_qc
+            character(len=:), allocatable, intent(inout) :: col_name !! compact "col, min, max, miss" string on
+            !! entry; parsed column name on exit.
+        end subroutine parquet_maml_get_col_qc
     end interface
 
     public :: get_parquet_maml

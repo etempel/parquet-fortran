@@ -206,10 +206,13 @@ contains
         character(len=*), intent(in) :: key !! top-level section name to look up.
         integer :: idx !! index into allowed_maml_sections, or 0.
         integer :: k
+        character(len=:), allocatable :: tlo1, tlo2 !! scratch (to_lower).
 
         idx = 0
         do k = 1, size(allowed_maml_sections)
-            if (trim(parquet_to_lower(allowed_maml_sections(k)%name)) == trim(parquet_to_lower(key))) then
+            call parquet_to_lower(allowed_maml_sections(k)%name, tlo1)
+            call parquet_to_lower(key, tlo2)
+            if (trim(tlo1) == trim(tlo2)) then
                 idx = k
                 return
             end if
@@ -234,14 +237,19 @@ contains
         character(len=*), intent(in) :: parent_subkey !! item sub-key whose nested schema is being looked up.
         integer :: idx !! index into allowed_maml_nested_sections, or 0.
         integer :: k
+        character(len=:), allocatable :: tlo1, tlo2, tlo3, tlo4 !! scratch (to_lower).
 
         idx = 0
         if (len_trim(parent_subkey) == 0) return ! GCOVR_EXCL_LINE
         do k = 1, size(allowed_maml_nested_sections)
-            if (trim(parquet_to_lower(allowed_maml_nested_sections(k)%parent_section)) == &
-                trim(parquet_to_lower(parent_section)) .and. &
-                trim(parquet_to_lower(allowed_maml_nested_sections(k)%parent_subkey)) == &
-                trim(parquet_to_lower(parent_subkey))) then ! GCOVR_EXCL_LINE
+            call parquet_to_lower(allowed_maml_nested_sections(k)%parent_section, tlo1)
+            call parquet_to_lower(parent_section, tlo2)
+            call parquet_to_lower(allowed_maml_nested_sections(k)%parent_subkey, tlo3)
+            call parquet_to_lower(parent_subkey, tlo4)
+            if (trim(tlo1) == &
+                trim(tlo2) .and. &
+                trim(tlo3) == &
+                trim(tlo4)) then ! GCOVR_EXCL_LINE
                 idx = k
                 return
             end if
@@ -251,6 +259,7 @@ contains
     !> Appends an "unknown sub-key" message to `errors` if `key` is not among
     !> allowed_maml_nested_sections(nested_idx)'s declared subkeys(:).
     subroutine parquet_check_maml_nested_subkey(nested_idx, key, errors)
+        character(len=:), allocatable :: tlo1, tlo2 !! scratch (to_lower).
         integer, intent(in) :: nested_idx !! index into allowed_maml_nested_sections.
         character(len=*), intent(in) :: key !! nested sub-key name found in the MAML.
         character(len=:), allocatable, intent(inout) :: errors !! accumulated error messages; appended to, not reset.
@@ -260,8 +269,10 @@ contains
         ok = .false.
         do k = 1, maml_max_nested_subkeys
             if (len_trim(allowed_maml_nested_sections(nested_idx)%subkeys(k)) == 0) cycle
-            if (trim(parquet_to_lower(allowed_maml_nested_sections(nested_idx)%subkeys(k))) == &
-                trim(parquet_to_lower(key))) then
+            call parquet_to_lower(allowed_maml_nested_sections(nested_idx)%subkeys(k), tlo1)
+            call parquet_to_lower(key, tlo2)
+            if (trim(tlo1) == &
+                trim(tlo2)) then
                 ok = .true.
                 exit
             end if
@@ -276,6 +287,7 @@ contains
     !> Appends an "unknown sub-key" message to `errors` if `key` is not among
     !> allowed_maml_sections(section_idx)'s declared subkeys(:).
     subroutine parquet_check_maml_subkey(section_idx, key, errors)
+        character(len=:), allocatable :: tlo1, tlo2 !! scratch (to_lower).
         integer, intent(in) :: section_idx !! index into allowed_maml_sections.
         character(len=*), intent(in) :: key !! sub-key name found in the MAML.
         character(len=:), allocatable, intent(inout) :: errors !! accumulated error messages; appended to, not reset.
@@ -285,8 +297,10 @@ contains
         ok = .false.
         do k = 1, maml_max_subkeys
             if (len_trim(allowed_maml_sections(section_idx)%subkeys(k)) == 0) cycle
-            if (trim(parquet_to_lower(allowed_maml_sections(section_idx)%subkeys(k))) == &
-                trim(parquet_to_lower(key))) then
+            call parquet_to_lower(allowed_maml_sections(section_idx)%subkeys(k), tlo1)
+            call parquet_to_lower(key, tlo2)
+            if (trim(tlo1) == &
+                trim(tlo2)) then
                 ok = .true.
                 exit
             end if

@@ -275,42 +275,45 @@ one element). User guide: `doc/pages/string-columns.md`.
 - **`transfer(source, mold, size)` into a longer target leaves the trailing bytes undefined**, not
   blank-padded. To place a short string into a longer fixed-length slot, assign normally (which
   blank-pads); reserve `transfer` for exact-size byte moves.
-- **Calling a function that returns `character(len=:), allocatable` on a type with two or more
-  allocatable components can be silently corrupted by gfortran/OpenMP under concurrent
-  execution — prefer a subroutine with an `intent(out), allocatable character` argument for any
-  such accessor.** Root-caused across a full investigation (see the session that produced this
-  bullet); the finding narrowed twice from an initial broader guess, each narrowing confirmed
-  with a minimal, library-independent reproducer:
-    - **Not about construction/destruction, and not about object lifetime.** The first
-      hypothesis — that concurrently constructing/destroying a multi-allocatable-component local
-      was the trigger — turned out to be too broad. A type built *once* per thread and never
-      rebuilt, with its accessor called repeatedly across thousands of later iterations, corrupts
-      just as reliably as one rebuilt every iteration. The actual trigger is simply *calling* the
-      function, repeatedly, concurrently.
-    - **Not about `class()` polymorphism.** A plain `type(x)` dummy in an ordinary (non-type-
-      bound) module function corrupts at the same rate as a `class(x)`-dispatched type-bound
-      procedure. Free functions taking a derived-type argument are just as exposed as type-bound
-      accessors.
-    - **Specific to `character(len=:), allocatable` function results.** The same type/harness
-      with an `integer(int32), allocatable` result instead (scalar or array) reproduced **zero**
-      failures across 80,000 iterations, vs. hundreds of failures per 8000 for the character-
-      function-result version. Rewriting the accessor as a subroutine with an
-      `intent(out), allocatable character` argument (instead of returning `character(len=:),
-      allocatable` as a function result) also reproduced **zero** failures — this is the
-      confirmed, working fix, not just a workaround.
-    - The one still-necessary condition: the type must have ≥2 allocatable components (a type
-      with only one, otherwise identical, does not reproduce it).
+- **Never write a function that returns `character(len=:), allocatable` — use a subroutine with
+  an `intent(out)`/`intent(inout)` allocatable `character` argument instead.** This is a fixed
+  project-wide convention now, not just advice: gfortran has a confirmed, still-open compiler bug
+  (GCC [PR113797](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=113797); related:
+  [PR97977](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=97977)) where the codegen for *receiving*
+  such a function's result uses a hidden length-tracking variable that isn't always properly
+  thread-local, silently corrupting memory when the function is called concurrently (confirmed
+  via a from-scratch, library-independent reproducer; needs a type with ≥2 allocatable
+  components — a type with only one, otherwise identical, does not reproduce it; not affected by
+  `class()` vs. plain `type()`, object lifetime, or construction/destruction; and not shared by
+  non-`character` allocatable results, e.g. `integer(int32), allocatable` reproduced zero
+  failures across 80,000 iterations under the identical harness).
 
-  `parquet_string_column` (`offsets`/`data`/`validity`, 3 allocatable components) hit this via
-  its function-result `get` — see its test suite's exclusion from parallel execution in
-  `test/run_tester.f90`'s `suite_is_safe_to_parallelize` and the caveat in
-  `doc/pages/string-columns.md`'s "Thread safety" section (that caveat still describes the
-  original, broader — and now superseded — construction/destruction hypothesis; needs updating
-  to match this corrected understanding). Any new or existing public accessor that returns
-  `character(len=:), allocatable` from a type with ≥2 allocatable components should be written
-  (or converted) as a subroutine, not a function, unless proven single-threaded-only; other
-  allocatable result kinds (numeric scalars/arrays, allocatable arrays of a derived type) are
-  confirmed *not* affected and don't need this treatment.
+  Every such function in this codebase has been converted: `parquet_string_column`'s `get`/
+  `summary` and `parquet_string`'s `to_string` (in `parquet_strings.f90`); `parquet_unquote`/
+  `parquet_to_lower`/`schema_get_field_name`/`parquet_column_info%get_field_name` (`parquet.f90`
+  + submodules); `schema_get_col_qc`/`parquet_maml_file%get_col_qc` (converted to a single
+  `intent(inout)` argument — see below); and the private helpers
+  `parquet_column_output_name`/`parquet_resolve_output_name`/`parquet_get_schema_type`/
+  `writer_context_suffix`/`parquet_qc_format_real`/`parquet_qc_format_int` (`parquet_write.f90`),
+  `maml_name_suffix` (`parquet_metadata.f90`), `reader_filename_suffix` (`parquet_read.f90`),
+  `nth_field` (`parquet_maml_base_add_col_qc.f90`). `test/run_tester.f90`'s `parquet_string`
+  suite runs fully parallel again (the exclusion that used to be here is gone) as this fix's own
+  ongoing regression check — verified clean across 20 repeated runs under
+  `-fcheck=bounds,do,mem,pointer` before being re-enabled.
+
+  **`get_col_qc` design note**: converting a function whose whole point was `col =
+  schema%get_col_qc(col)` (assign the result back into the same variable used as input) needed a
+  real design change, not a mechanical swap — a subroutine can't alias the same actual argument to
+  separate `intent(in)`/`intent(out)` dummies. Fixed by making the single argument
+  `intent(inout)`: it holds the compact input string on entry and the parsed name on exit, so
+  `call schema%get_col_qc(col)` preserves the original single-variable ergonomics. Same treatment
+  for `parquet_maml_file%get_col_qc` underneath it. `add_col_qc` (a genuinely separate two-argument
+  subroutine, `qc_input` `intent(in)` + optional `col_name` `intent(out)`) was already a
+  subroutine and needed no change.
+
+  **Not affected, no action needed**: functions with no multi-allocatable-component "self" type
+  at all (e.g. plain string/numeric helpers), and any function returning an allocatable
+  non-`character` result (numeric scalars/arrays, allocatable arrays of a derived type).
 
 ## Renames/refactors: only apply low-blast-radius changes
 

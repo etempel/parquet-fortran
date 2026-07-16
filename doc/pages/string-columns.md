@@ -64,6 +64,7 @@ program strings_quickstart
     implicit none
 
     type(parquet_string_column) :: names
+    character(len=:), allocatable :: s
     integer(int64) :: i
 
     call names%append_string("Alice")
@@ -79,14 +80,15 @@ program strings_quickstart
         if (names%is_null(i)) then
             print *, i, "<null>"
         else
-            print *, i, '"' // names%get(i) // '"'
+            call names%get(i, s)
+            print *, i, '"' // s // '"'
         end if
     end do
 end program strings_quickstart
 ```
 
-`get(i)` returns the string as a fresh `character(len=:), allocatable`. For read-only access
-without allocating a copy per row, use a handle (next section).
+`get(i, s)` writes the string into `s`, a fresh `character(len=:), allocatable`. For read-only
+access without allocating a copy per row, use a handle (next section).
 
 ## Mapping a row type: the array-of-structs pattern
 
@@ -145,11 +147,14 @@ end do
 **Column → row usage / materialization:**
 
 ```fortran
+character(len=:), allocatable :: nm
+
 do i = 1, size(table)
     if (table(i)%name%is_null()) then
         call use_missing(table(i)%id)
     else
-        call use_name(table(i)%id, table(i)%name%to_string())   ! one allocation, the string
+        call table(i)%name%to_string(nm)      ! one allocation, the string
+        call use_name(table(i)%id, nm)
     end if
 end do
 
@@ -174,7 +179,7 @@ A **null** (missing value) and an **empty string** `""` are kept strictly distin
 | `is_null(i)` | `.true.` | `.false.` |
 | `is_empty(i)` | `.true.` (by default) | `.true.` |
 | `length(i)` | `0` (by default) | `0` |
-| `get(i)` | **error stops** by default | allocated, length 0 |
+| `get(i, s)` | **error stops** by default | `s` allocated, length 0 |
 | `equals(i, "")` | `.false.` | `.true.` |
 
 Reading the content of a null is treated as a programmer error and **error stops by default**,
@@ -182,11 +187,11 @@ so a missing value is never silently confused with data. You choose how to handl
 explicitly:
 
 ```fortran
-s = col%get(i)                        ! error stops if element i is null
-s = col%get(i, null_value="<NA>")     ! returns "<NA>" for a null
-s = col%get(i, allow_null=.true.)     ! suppresses the abort, returns "" for a null
+call col%get(i, s)                        ! error stops if element i is null
+call col%get(i, s, null_value="<NA>")     ! returns "<NA>" for a null
+call col%get(i, s, allow_null=.true.)     ! suppresses the abort, returns "" for a null
 
-if (col%is_null(i)) ...               ! the always-safe guard
+if (col%is_null(i)) ...                   ! the always-safe guard
 ```
 
 The lenient predicates (`length`, `is_empty`, and the comparison functions) return a sensible
@@ -198,9 +203,10 @@ n = col%length(i)                     ! 0 for a null
 n = col%length(i, check_null=.true.)  ! error stops on a null
 ```
 
-> Note (gfortran): `s = col%get(i, allow_null=.true.)` returns an empty string, not an
-> unallocated one — the intrinsic assignment `s = <function result>` cannot leave `s`
-> unallocated. Detect nulls with `is_null()`.
+> Note: `call col%get(i, s, allow_null=.true.)` returns `s` as an empty string, not an
+> unallocated one, purely by choice (to keep this behavior unchanged from before `get` became
+> a subroutine) — `s`'s `intent(out)` status would technically allow leaving it unallocated to
+> signal a null. Detect nulls with `is_null()` either way.
 
 ## Trimming on append
 
@@ -284,10 +290,13 @@ call col%shrink_to_fit()            ! release unused capacity (e.g. before a lon
 Introspection:
 
 ```fortran
+character(len=:), allocatable :: smry
+
 print *, col%size(), col%character_size()             ! logical sizes
 print *, col%capacity(), col%character_capacity()     ! allocated capacity
 print *, col%null_count(), col%memory_usage()
-print *, col%summary()                                 ! one-line overview string
+call col%summary(smry)
+print *, smry                                          ! one-line overview string
 ```
 
 ## Converting to a plain Fortran array
@@ -328,50 +337,35 @@ read-only operations (`get`, `view`, `length`, the comparisons, `find`, the size
 long as no thread mutates the column concurrently. Any mutation must be externally
 synchronized, and a handle must not be used across a mutation on any thread.
 
-**Known gfortran/OpenMP runtime caveat — `get()` and anything built on it, not construction or
-sharing.** The rule above is about *sharing one column* across threads; it says nothing about
-each thread having its own, fully independent `parquet_string_column`. That turned out to
-matter, but not for the reason first suspected. On the gfortran/OpenMP combination this
-project's tests are built with, **calling a function that returns `character(len=:), allocatable`
-on a type with two or more allocatable components can silently corrupt memory under concurrent
-execution** — `parquet_string_column` (`offsets`/`data`/`validity`, 3 allocatable components) has
-exactly this shape, and `get` is exactly such a function. Confirmed with a minimal reproducer
-built from scratch, using no code from this library, and narrowed down precisely:
+**Past gfortran/OpenMP runtime caveat — now worked around in this module's source.** The rule
+above is about *sharing one column* across threads; for a while this project also had to warn
+about something else: each thread having its own, fully independent `parquet_string_column`
+could still silently corrupt memory under concurrent execution on some gfortran/OpenMP builds.
+Root-caused to a specific, still-open gfortran bug
+([PR113797](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=113797); related:
+[PR97977](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=97977)): the compiler's codegen for
+*receiving* a `character(len=:), allocatable` function result uses a hidden length-tracking
+variable that isn't always properly thread-local. Confirmed with a minimal reproducer using no
+code from this library — the hazard needed nothing more than a `character(len=:), allocatable`
+function called concurrently on a type with two or more allocatable components (this type has
+three: `offsets`, `data`, `validity`); it did not depend on construction/destruction, `class()`
+dispatch, or sharing, and did not affect non-`character` allocatable results.
 
-- **Not about construction/destruction.** A column built *once* per thread and never rebuilt,
-  with `get` called on it repeatedly across thousands of later calls, corrupts just as reliably
-  as one freshly constructed on every call. Merely *calling* the function repeatedly, concurrently,
-  is enough — no construction or scope-exit needs to be involved at all.
-- **Not about `class()` dispatch, and not about sharing.** A plain, non-polymorphic argument in
-  an ordinary function corrupts at the same rate as a type-bound, `class()`-dispatched call. Every
-  reproduction used fully independent, per-thread objects — this is not the "many-readers xor
-  single-writer" shared-mutation hazard above; it reproduces even when nothing is ever shared
-  between threads.
-- **Specific to `character(len=:), allocatable` function results.** The identical type and test
-  harness with an `integer(int32), allocatable` result instead (scalar or array) reproduced
-  **zero** failures across 80,000 iterations, vs. hundreds of failures per 8000 for the
-  character-function-result version. Rewriting the accessor as a subroutine with an
-  `intent(out), allocatable character` argument instead of returning `character(len=:),
-  allocatable` as a function result also reproduced **zero** failures — a confirmed, working
-  fix, not just a workaround, but not yet applied to this module's source.
+The fix: **every accessor that used to return `character(len=:), allocatable` as a function
+result is now a subroutine** that writes into an `intent(out)`/`intent(inout)` allocatable
+`character` argument instead — `get`, `summary`, and the `parquet_string` handle's `to_string`
+(the three that were directly exposed), which sidesteps the defective codegen path entirely
+rather than working around a symptom. This was independently verified: the identical reproducer
+converted from a function to a subroutine reproduced **zero** failures across tens of thousands
+of iterations, vs. hundreds of failures per 8000 for the function form. `to_character`, `print`,
+and the handle's `print` were already subroutines and needed no signature change, only an
+internal update to call the now-subroutine `get`. `find`, `contains`, `startswith`, `endswith`,
+`equals` were never exposed in the first place — they compare bytes directly against the stored
+buffer and never returned an allocatable `character` result.
 
-**What's actually exposed in this module today:** `get` (both the column's and the
-`parquet_string` handle's `to_string`, which forwards to it) and `summary` are themselves
-`character(len=:), allocatable` functions on `parquet_string_column` and are directly exposed.
-`to_character`, `print`, and the handle's `print` are subroutines, but each calls `get`
-internally per element/row, so they carry the same exposure indirectly. **Not exposed**: `find`,
-`contains`, `startswith`, `endswith`, `equals` compare bytes directly against the stored buffer
-and never call `get` or return an allocatable `character` result, so they're unaffected by this
-specific issue — likewise every non-string-returning query (`size`, `length`, `is_null`,
-`is_empty`, `capacity`, `null_count`, `memory_usage`, `validate`, `view`).
-
-**Practical guidance until this is fixed upstream (in gfortran) or worked around (in this
-module):** treat any concurrent call to `get`, `to_character`, `print`, `summary`, or the
-`parquet_string` handle's `to_string`/`print` — on *any* `parquet_string_column`, independent or
-shared, freshly built or long-lived — as unsafe unless externally serialized (e.g. a single
-`!$omp critical` region around the call). This is broader than "don't share a column across
-threads": it applies even to two threads each calling `get()` on their own, entirely separate
-columns at the same time.
+No special precaution is needed for concurrent, independent `parquet_string_column` use as a
+result — the "many-readers xor single-writer" rule at the top of this section remains the only
+thread-safety rule that applies.
 
 ## Complexity at a glance
 

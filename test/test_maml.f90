@@ -52,7 +52,7 @@ contains
             new_unittest("add_col_qc builds a qc-maml from compact strings", test_add_col_qc_builds_maml), &
             new_unittest("add_col_qc result reads back through parquet_open_reader", test_add_col_qc_roundtrip), &
             new_unittest("add_col_qc with an empty input is a no-op", test_add_col_qc_empty_input_is_noop), &
-            new_unittest("get_col_qc (function form) returns the name in place", test_get_col_qc), &
+            new_unittest("get_col_qc (in-place form) returns the name in place", test_get_col_qc), &
             new_unittest("schema%init emits the requested top-level keys", test_schema_init_builds_top_level_lines), &
             new_unittest("parquet_schema(...) constructor matches schema%init", &
                 test_schema_constructor_matches_init), &
@@ -375,6 +375,7 @@ contains
     subroutine test_get_num_fields_and_field_name(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_schema) :: schema
+        character(len=:), allocatable :: fname
 
         schema%maml = get_parquet_maml("maml_example.maml")
         call parquet_parse_maml(schema)
@@ -383,11 +384,13 @@ contains
             "get_num_fields did not return the expected total field count")
         if (allocated(error)) return
 
-        call check(error, trim(schema%get_field_name(1)) == "id0", &
+        call schema%get_field_name(1, fname)
+        call check(error, trim(fname) == "id0", &
             "get_field_name(1) did not return the first declared field")
         if (allocated(error)) return
 
-        call check(error, trim(schema%get_field_name(13)) == "flag_array", &
+        call schema%get_field_name(13, fname)
+        call check(error, trim(fname) == "flag_array", &
             "get_field_name(13) did not return the last declared field")
         if (allocated(error)) return
 
@@ -399,7 +402,8 @@ contains
             "get_num_fields changed after set_column_unavailable")
         if (allocated(error)) return
 
-        call check(error, trim(schema%get_field_name(1)) == "id0", &
+        call schema%get_field_name(1, fname)
+        call check(error, trim(fname) == "id0", &
             "get_field_name(1) changed after set_column_unavailable")
     end subroutine test_get_num_fields_and_field_name
 
@@ -493,7 +497,8 @@ contains
 
         call schema%add_col_qc("ra, >=0, <=10", cn)
 
-        cn2 = schema%get_col_qc("extra_dummy, >=0")
+        cn2 = "extra_dummy, >=0"
+        call schema%get_col_qc(cn2)
         call check(error, cn2 == "extra_dummy", "schema%get_col_qc did not return the parsed column name")
         if (allocated(error)) return
 
@@ -536,11 +541,12 @@ contains
             "a real add_col_qc after a no-op did not build correctly")
     end subroutine test_add_col_qc_empty_input_is_noop
 
-    !> get_col_qc is the function form of add_col_qc: it appends the same entry
-    !> and returns the column name as its result, so it can be assigned back
-    !> into the source variable in place (col = maml%get_col_qc(col)) -- which
-    !> the subroutine form cannot do (that would alias an intent(out) argument).
-    !> Also confirms the subroutine's col_name argument is now optional.
+    !> get_col_qc is the in-place form of add_col_qc: it appends the same entry
+    !> and writes the column name back into its own (intent(inout)) argument,
+    !> so a caller reuses one variable (call maml%get_col_qc(col)) -- which
+    !> add_col_qc's two-argument form cannot do (that would alias an
+    !> intent(out) argument with qc_input). Also confirms the subroutine's
+    !> col_name argument is now optional.
     subroutine test_get_col_qc(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_maml_file) :: maml, m2
@@ -549,9 +555,9 @@ contains
         ! subroutine form with col_name omitted (now optional) still adds.
         call maml%add_col_qc("ra, >0, <=360")
 
-        ! function form: in-place, same-variable assignment, exact length.
+        ! in-place form: same-variable assignment, exact length.
         s = 'id_galaxy , 0,'
-        s = maml%get_col_qc(s)
+        call maml%get_col_qc(s)
         call check(error, s == "id_galaxy" .and. len(s) == 9, &
             "get_col_qc did not return the exact in-place column name")
         if (allocated(error)) return
@@ -566,8 +572,9 @@ contains
             "get_col_qc / optional-col_name add_col_qc produced unexpected lines")
         if (allocated(error)) return
 
-        ! an empty input is a no-op for the function form too (returns "").
-        r = m2%get_col_qc("")
+        ! an empty input is a no-op for the in-place form too (returns "").
+        r = ""
+        call m2%get_col_qc(r)
         call check(error, len(r) == 0 .and. .not. allocated(m2%lines), &
             "get_col_qc('') should be a no-op returning an empty string")
     end subroutine test_get_col_qc

@@ -1770,7 +1770,7 @@ contains
         schema%maml = get_parquet_maml("maml_example.maml")
         call parquet_parse_maml(schema)
 
-        name = schema%get_field_name(0)
+        call schema%get_field_name(0, name)
         print '(a,a)', "unexpectedly found name: ", name
     end subroutine scenario_get_field_name_index_too_low
 
@@ -1781,7 +1781,7 @@ contains
         schema%maml = get_parquet_maml("maml_example.maml")
         call parquet_parse_maml(schema)
 
-        name = schema%get_field_name(schema%get_num_fields() + 1)
+        call schema%get_field_name(schema%get_num_fields() + 1, name)
         print '(a,a)', "unexpectedly found name: ", name
     end subroutine scenario_get_field_name_index_too_high
 
@@ -2979,13 +2979,14 @@ contains
         print '(a)', "unexpectedly accepted a duplicate column name (double-quoted) in add_col_qc"
     end subroutine scenario_add_col_qc_duplicate_column_double_quoted
 
-    !> The get_col_qc function form shares add_col_qc's worker, so it enforces
+    !> The get_col_qc in-place form shares add_col_qc's worker, so it enforces
     !> the same validation -- e.g. a reversed min: operator aborts here too.
     subroutine scenario_get_col_qc_reversed_operator()
         type(parquet_maml_file) :: maml
         character(len=:), allocatable :: col_name
 
-        col_name = maml%get_col_qc("ra, <5")
+        col_name = "ra, <5"
+        call maml%get_col_qc(col_name)
         print '(a)', "unexpectedly accepted a reversed qc min operator in get_col_qc"
     end subroutine scenario_get_col_qc_reversed_operator
 
@@ -3992,7 +3993,7 @@ contains
         character(len=:), allocatable :: s
         call col%append_string("a")
         call col%append_string("b")
-        s = col%get(5)   ! index 5 > nrows 2 -> aborts
+        call col%get(5, s)   ! index 5 > nrows 2 -> aborts
         print '(a)', "unexpectedly read an out-of-range index: "//s
     end subroutine scenario_string_column_index_out_of_range
 
@@ -4002,7 +4003,7 @@ contains
         character(len=:), allocatable :: s
         call col%append_string("a")
         call col%append_null()
-        s = col%get(2)   ! null, no null_value/allow_null -> aborts
+        call col%get(2, s)   ! null, no null_value/allow_null -> aborts
         print '(a)', "unexpectedly read a null element: "//s
     end subroutine scenario_string_column_get_null
 

@@ -57,6 +57,7 @@ contains
     subroutine test_append_and_get(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_string_column) :: col
+        character(len=:), allocatable :: s
         call col%append_string("abc")
         call col%append_string("de")
         call col%append_string("fghij")
@@ -64,11 +65,14 @@ contains
         if (allocated(error)) return
         call check(error, col%character_size() == 10, "character_size should be 10")
         if (allocated(error)) return
-        call check(error, col%get(1) == "abc", "get(1)")
+        call col%get(1, s)
+        call check(error, s == "abc", "get(1)")
         if (allocated(error)) return
-        call check(error, col%get(2) == "de", "get(2)")
+        call col%get(2, s)
+        call check(error, s == "de", "get(2)")
         if (allocated(error)) return
-        call check(error, col%get(3) == "fghij", "get(3)")
+        call col%get(3, s)
+        call check(error, s == "fghij", "get(3)")
         if (allocated(error)) return
         call check(error, col%length(3) == 5, "length(3)")
         if (allocated(error)) return
@@ -91,7 +95,7 @@ contains
         if (allocated(error)) return
         call check(error, col%length(1) == 0, "empty length 0")
         if (allocated(error)) return
-        s = col%get(1)
+        call col%get(1, s)
         call check(error, allocated(s), "empty get is allocated")
         if (allocated(error)) return
         call check(error, len(s) == 0, "empty get has length 0")
@@ -117,60 +121,73 @@ contains
         character(len=:), allocatable :: s
         call col%append_string("x")
         call col%append_null()
-        s = col%get(2, null_value="<NA>")
+        call col%get(2, s, null_value="<NA>")
         call check(error, s == "<NA>", "null_value substitute")
         if (allocated(error)) return
-        ! NOTE: on gfortran, s = func() cannot yield an unallocated result (the assignment
-        ! materializes an empty string); allow_null suppresses the error stop -- null detection
-        ! is via is_null(). See the design note raised with the maintainer.
-        s = col%get(2, allow_null=.true.)
-        call check(error, len(s) == 0, "allow_null suppresses error, yields empty on gfortran")
+        ! allow_null suppresses the error stop and yields an empty string; null detection is
+        ! via is_null(), not via checking whether s is allocated (see get_i64's own doc-comment).
+        call col%get(2, s, allow_null=.true.)
+        call check(error, len(s) == 0, "allow_null suppresses error, yields empty string")
         if (allocated(error)) return
         ! both given: null_value takes precedence, no error
-        s = col%get(2, null_value="P", allow_null=.true.)
+        call col%get(2, s, null_value="P", allow_null=.true.)
         call check(error, s == "P", "null_value precedence over allow_null")
     end subroutine test_null_options
     !
     subroutine test_strip_trim(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_string_column) :: col
+        character(len=:), allocatable :: s
         call col%append_string("  ab  ")                 ! verbatim (default)
         call col%append_string("  ab  ", strip=.true.)   ! both ends
         call col%append_string("  ab  ", trim=.true.)    ! trailing only
         call col%append_string("  ab  ", strip=.true., trim=.true.) ! strip wins
-        call check(error, col%get(1) == "  ab  ", "verbatim default")
+        call col%get(1, s)
+        call check(error, s == "  ab  ", "verbatim default")
         if (allocated(error)) return
-        call check(error, col%get(2) == "ab", "strip both ends")
+        call col%get(2, s)
+        call check(error, s == "ab", "strip both ends")
         if (allocated(error)) return
-        call check(error, col%get(3) == "  ab", "trim trailing only")
+        call col%get(3, s)
+        call check(error, s == "  ab", "trim trailing only")
         if (allocated(error)) return
-        call check(error, col%get(4) == "ab", "strip dominates trim")
+        call col%get(4, s)
+        call check(error, s == "ab", "strip dominates trim")
     end subroutine test_strip_trim
     !
     subroutine test_set(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_string_column) :: col
+        character(len=:), allocatable :: s1, s2
         call col%append_string("aa")
         call col%append_string("bb")
         call col%append_string("cc")
         call col%append_null()
         ! same length
         call col%set(2, "BB")
-        call check(error, col%get(2) == "BB", "same-length set")
+        call col%get(2, s1)
+        call check(error, s1 == "BB", "same-length set")
         if (allocated(error)) return
-        call check(error, col%get(1) == "aa" .and. col%get(3) == "cc", "neighbours intact")
+        call col%get(1, s1)
+        call col%get(3, s2)
+        call check(error, s1 == "aa" .and. s2 == "cc", "neighbours intact")
         if (allocated(error)) return
         ! longer
         call col%set(2, "BBBBB")
-        call check(error, col%get(2) == "BBBBB", "longer set")
+        call col%get(2, s1)
+        call check(error, s1 == "BBBBB", "longer set")
         if (allocated(error)) return
-        call check(error, col%get(1) == "aa" .and. col%get(3) == "cc", "neighbours intact after grow")
+        call col%get(1, s1)
+        call col%get(3, s2)
+        call check(error, s1 == "aa" .and. s2 == "cc", "neighbours intact after grow")
         if (allocated(error)) return
         ! shorter
         call col%set(2, "b")
-        call check(error, col%get(2) == "b", "shorter set")
+        call col%get(2, s1)
+        call check(error, s1 == "b", "shorter set")
         if (allocated(error)) return
-        call check(error, col%get(3) == "cc", "neighbour intact after shrink")
+        call col%get(3, s1)
+        call check(error, s1 == "cc", "neighbour intact after shrink")
         if (allocated(error)) return
         ! set clears null
         call col%set(4, "now")
@@ -184,6 +201,7 @@ contains
     subroutine test_erase(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_string_column) :: col
+        character(len=:), allocatable :: s
         call col%append_string("aa")
         call col%append_string("bbb")
         call col%append_null()
@@ -191,18 +209,21 @@ contains
         call col%erase(2)                 ! remove "bbb"
         call check(error, col%size() == 3, "size after erase")
         if (allocated(error)) return
-        call check(error, col%get(1) == "aa", "elem 1 intact")
+        call col%get(1, s)
+        call check(error, s == "aa", "elem 1 intact")
         if (allocated(error)) return
         call check(error, col%is_null(2), "null shifted into slot 2")
         if (allocated(error)) return
-        call check(error, col%get(3) == "dddd", "elem 3 shifted")
+        call col%get(3, s)
+        call check(error, s == "dddd", "elem 3 shifted")
         if (allocated(error)) return
         call check(error, col%character_size() == 6, "nchars after erase (aa+dddd)")
         if (allocated(error)) return
         call col%erase(2)                 ! remove the null
         call check(error, col%null_count() == 0, "null erased")
         if (allocated(error)) return
-        call check(error, col%get(2) == "dddd", "elem shifted after null erase")
+        call col%get(2, s)
+        call check(error, s == "dddd", "elem shifted after null erase")
         if (allocated(error)) return
         call check(error, col%validate(), "invariants hold")
     end subroutine test_erase
@@ -210,6 +231,7 @@ contains
     subroutine test_append_column(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_string_column) :: a, b
+        character(len=:), allocatable :: s1, s2
         call a%append_string("one")
         call a%append_null()
         call b%append_string("two")
@@ -218,13 +240,16 @@ contains
         call a%append_column(b)
         call check(error, a%size() == 5, "combined size")
         if (allocated(error)) return
-        call check(error, a%get(1) == "one", "a[1]")
+        call a%get(1, s1)
+        call check(error, s1 == "one", "a[1]")
         if (allocated(error)) return
         call check(error, a%is_null(2), "a[2] null")
         if (allocated(error)) return
-        call check(error, a%get(3) == "two", "b[1] appended")
+        call a%get(3, s1)
+        call check(error, s1 == "two", "b[1] appended")
         if (allocated(error)) return
-        call check(error, a%get(4) == "three", "b[2] appended")
+        call a%get(4, s1)
+        call check(error, s1 == "three", "b[2] appended")
         if (allocated(error)) return
         call check(error, a%is_null(5), "b[3] null appended")
         if (allocated(error)) return
@@ -240,7 +265,9 @@ contains
             call c%append_string("z1")
             call c%append_string("z2")
             call a%append_column(c)
-            call check(error, a%get(6) == "z1" .and. a%get(7) == "z2", "null-free column appended")
+            call a%get(6, s1)
+            call a%get(7, s2)
+            call check(error, s1 == "z1" .and. s2 == "z2", "null-free column appended")
             if (allocated(error)) return
             call check(error, .not. a%is_null(6), "appended rows valid")
             if (allocated(error)) return
@@ -332,13 +359,15 @@ contains
         type(error_type), allocatable, intent(out) :: error
         type(parquet_string_column), target :: col
         type(parquet_string) :: h, h2
+        character(len=:), allocatable :: s
         integer :: u
         call col%append_string("alpha")
         call col%append_null()
         h = col%view(1)
         call check(error, h%length() == 5, "handle length")
         if (allocated(error)) return
-        call check(error, h%to_string() == "alpha", "handle to_string")
+        call h%to_string(s)
+        call check(error, s == "alpha", "handle to_string")
         if (allocated(error)) return
         call check(error, h%equals("alpha"), "handle equals")
         if (allocated(error)) return
@@ -366,6 +395,7 @@ contains
         type(error_type), allocatable, intent(out) :: error
         type(parquet_string_column), target :: col
         type(t_row) :: rows(3)
+        character(len=:), allocatable :: s
         integer :: i
         character(len=8) :: names(3)
         names = [character(len=8) :: "aaa", "bb", "cccccccc"]
@@ -380,9 +410,11 @@ contains
         do i = 1, 1000
             call col%append_string("filler")
         end do
-        call check(error, rows(1)%name%to_string() == "aaa", "handle 1 still valid after realloc")
+        call rows(1)%name%to_string(s)
+        call check(error, s == "aaa", "handle 1 still valid after realloc")
         if (allocated(error)) return
-        call check(error, rows(3)%name%to_string() == "cccccccc", "handle 3 still valid after realloc")
+        call rows(3)%name%to_string(s)
+        call check(error, s == "cccccccc", "handle 3 still valid after realloc")
         if (allocated(error)) return
         call check(error, rows(2)%name%length() == 2, "handle 2 length after realloc")
     end subroutine test_handle_survives_append
@@ -409,11 +441,13 @@ contains
     subroutine test_clone_independence(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_string_column) :: a, b
+        character(len=:), allocatable :: s
         call a%append_string("orig")
         call a%append_null()
         b = a%clone()
         call a%set(1, "changed")
-        call check(error, b%get(1) == "orig", "clone unaffected by source mutation")
+        call b%get(1, s)
+        call check(error, s == "orig", "clone unaffected by source mutation")
         if (allocated(error)) return
         call check(error, b%is_null(2), "clone keeps null")
         if (allocated(error)) return
@@ -425,12 +459,14 @@ contains
     subroutine test_move_and_swap(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_string_column) :: a, b
+        character(len=:), allocatable :: s
         call a%append_string("aaa")
         call a%append_string("bbb")
         call b%move_from(a)
         call check(error, b%size() == 2, "dest got data")
         if (allocated(error)) return
-        call check(error, b%get(2) == "bbb", "dest content")
+        call b%get(2, s)
+        call check(error, s == "bbb", "dest content")
         if (allocated(error)) return
         call check(error, a%size() == 0 .and. a%empty(), "source emptied")
         if (allocated(error)) return
@@ -441,7 +477,8 @@ contains
         call b%swap(a)
         call check(error, a%size() == 2 .and. b%size() == 1, "swap exchanged sizes")
         if (allocated(error)) return
-        call check(error, b%get(1) == "x", "swap content")
+        call b%get(1, s)
+        call check(error, s == "x", "swap content")
     end subroutine test_move_and_swap
     !
     subroutine test_reserve_capacity(error)
@@ -471,13 +508,16 @@ contains
     subroutine test_strip_all_trim_all(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_string_column) :: a, b
+        character(len=:), allocatable :: s
         call a%append_string("  x  ")
         call a%append_string(" yy ")
         call a%append_null()
         call a%strip_all()
-        call check(error, a%get(1) == "x", "strip_all elem 1")
+        call a%get(1, s)
+        call check(error, s == "x", "strip_all elem 1")
         if (allocated(error)) return
-        call check(error, a%get(2) == "yy", "strip_all elem 2")
+        call a%get(2, s)
+        call check(error, s == "yy", "strip_all elem 2")
         if (allocated(error)) return
         call check(error, a%is_null(3), "strip_all leaves null")
         if (allocated(error)) return
@@ -485,12 +525,14 @@ contains
         if (allocated(error)) return
         call b%append_string("  x  ")
         call b%trim_all()
-        call check(error, b%get(1) == "  x", "trim_all trailing only")
+        call b%get(1, s)
+        call check(error, s == "  x", "trim_all trailing only")
     end subroutine test_strip_all_trim_all
     !
     subroutine test_validate_stats(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_string_column) :: col
+        character(len=:), allocatable :: smry
         integer(int64) :: nr, nn, mn, mx
         call col%append_string("ab")
         call col%append_string("cdef")
@@ -506,7 +548,8 @@ contains
         if (allocated(error)) return
         call check(error, col%validate(), "invariants hold")
         if (allocated(error)) return
-        call check(error, len(col%summary()) > 0, "summary non-empty")
+        call col%summary(smry)
+        call check(error, len(smry) > 0, "summary non-empty")
     end subroutine test_validate_stats
     !
     subroutine test_interop_buffers(error)
@@ -516,6 +559,7 @@ contains
         integer(int32), target :: off32(5)
         character(len=1), target :: dat1(10), dat2(3), datb(2)
         integer(int8), target :: val2(1)
+        character(len=:), allocatable :: s1, s2
         integer :: i
         ! batch 1 (int64 offsets, all valid): "abc","de","","fghi","j"
         off64 = [0_int64, 3_int64, 5_int64, 5_int64, 9_int64, 10_int64]
@@ -525,9 +569,11 @@ contains
         call col%append_buffers(5_int64, 10_int64, c_loc(off64), c_loc(dat1), c_null_ptr, .false.)
         call check(error, col%size() == 5, "batch1 size")
         if (allocated(error)) return
-        call check(error, col%get(1) == "abc", "batch1 get(1)")
+        call col%get(1, s1)
+        call check(error, s1 == "abc", "batch1 get(1)")
         if (allocated(error)) return
-        call check(error, col%get(4) == "fghi", "batch1 get(4)")
+        call col%get(4, s1)
+        call check(error, s1 == "fghi", "batch1 get(4)")
         if (allocated(error)) return
         ! batch 2 (int32 offsets, nulls at local rows 2,3): "xy","","","q" (4 rows -> 5 offsets)
         off32 = [0_int32, 2_int32, 2_int32, 2_int32, 3_int32]
@@ -536,11 +582,13 @@ contains
         call col%append_buffers(4_int64, 3_int64, c_loc(off32), c_loc(dat2), c_loc(val2), .true.)
         call check(error, col%size() == 9, "merged size")
         if (allocated(error)) return
-        call check(error, col%get(6) == "xy", "batch2 get(6)")
+        call col%get(6, s1)
+        call check(error, s1 == "xy", "batch2 get(6)")
         if (allocated(error)) return
         call check(error, col%is_null(7) .and. col%is_null(8), "batch2 nulls at non-byte boundary")
         if (allocated(error)) return
-        call check(error, col%get(9) == "q", "batch2 get(9)")
+        call col%get(9, s1)
+        call check(error, s1 == "q", "batch2 get(9)")
         if (allocated(error)) return
         call check(error, col%null_count() == 2, "merged null count")
         if (allocated(error)) return
@@ -558,8 +606,10 @@ contains
         call col%append_buffers(2_int64, 2_int64, c_loc(off64b), c_loc(datb), c_null_ptr, .false.)
         call check(error, col%size() == 11, "batch3 appended")
         if (allocated(error)) return
-        print*, "batch3: ", col%get(10), " : ", col%get(11), " : test debug!" !keep it for now
-        call check(error, col%get(10) == "m" .and. col%get(11) == "n", "batch3 content")
+        call col%get(10, s1)
+        call col%get(11, s2)
+        print*, "batch3: ", s1, " : ", s2, " : test debug!" !keep it for now
+        call check(error, s1 == "m" .and. s2 == "n", "batch3 content")
         if (allocated(error)) return
         call check(error, .not. col%is_null(10) .and. .not. col%is_null(11), "batch3 rows valid")
         if (allocated(error)) return
@@ -618,6 +668,7 @@ contains
     subroutine test_large_growth(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_string_column) :: col
+        character(len=:), allocatable :: s
         integer :: i
         character(len=16) :: buf
         do i = 1, 20000
@@ -626,9 +677,11 @@ contains
         end do
         call check(error, col%size() == 20000, "20k rows")
         if (allocated(error)) return
-        call check(error, col%get(1) == "row1", "first row")
+        call col%get(1, s)
+        call check(error, s == "row1", "first row")
         if (allocated(error)) return
-        call check(error, col%get(20000) == "row20000", "last row")
+        call col%get(20000, s)
+        call check(error, s == "row20000", "last row")
         if (allocated(error)) return
         call check(error, col%validate(), "invariants hold")
     end subroutine test_large_growth
@@ -636,6 +689,7 @@ contains
     subroutine test_first_shortest(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_string_column) :: col
+        character(len=:), allocatable :: s
         ! first element deliberately shortest; a later one longer (sizing-from-first-element bug guard)
         call col%append_string("a")
         call col%append_string("bb")
@@ -644,7 +698,8 @@ contains
         if (allocated(error)) return
         call check(error, col%length(3) == 10, "len last (longest)")
         if (allocated(error)) return
-        call check(error, col%get(3) == "cccccccccc", "get longest")
+        call col%get(3, s)
+        call check(error, s == "cccccccccc", "get longest")
         if (allocated(error)) return
         call check(error, col%find("cccccccccc") == 3, "find longest")
     end subroutine test_first_shortest
@@ -652,6 +707,7 @@ contains
     subroutine test_dual_kind(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_string_column) :: col
+        character(len=:), allocatable :: s
         integer(int32) :: i32
         integer(int64) :: i64
         call col%append_string("p")
@@ -662,9 +718,11 @@ contains
         if (allocated(error)) return
         call check(error, col%length(i64) == 2, "length with int64 index")
         if (allocated(error)) return
-        call check(error, col%get(1_int32) == "p", "get with int32 literal")
+        call col%get(1_int32, s)
+        call check(error, s == "p", "get with int32 literal")
         if (allocated(error)) return
-        call check(error, col%get(1_int64) == "p", "get with int64 literal")
+        call col%get(1_int64, s)
+        call check(error, s == "p", "get with int64 literal")
     end subroutine test_dual_kind
     !
     subroutine test_diagnostics_extra(error)

@@ -1,10 +1,11 @@
 !> Hand-written submodule of parquet_maml_base (NOT generated). Implements the
-!> parquet_maml_file%add_col_qc (subroutine) and %get_col_qc (function) type-bound
+!> parquet_maml_file%add_col_qc and %get_col_qc (both subroutines) type-bound
 !> procedures, whose deferred module-procedure interfaces are declared in the
 !> (generated) src/parquet_maml_base.f90. Both share one worker (add_col_qc_impl)
 !> and differ only in how the parsed column name is returned: add_col_qc via an
-!> optional out-argument, get_col_qc as the function result (so it can be assigned
-!> back into the source variable, which the subroutine cannot do due to aliasing).
+!> optional out-argument, get_col_qc via its own intent(inout) argument (so a
+!> caller can reuse one variable in place, which add_col_qc's two-argument form
+!> cannot do due to intent(out)/intent(in) aliasing).
 !>
 !> add_col_qc/get_col_qc build a read-time qc-maml incrementally from a compact
 !> one-line "col, min, max, miss" string, appending a fields: entry with a qc: block.
@@ -22,7 +23,7 @@ contains
     !> and `qc_input` MUST be different variables -- passing the same variable
     !> as both aliases an intent(out) argument, which is undefined behaviour
     !> (the intent(out) deallocation destroys the input first). Use the
-    !> get_col_qc function form for an in-place `col = maml%get_col_qc(col)`.
+    !> get_col_qc in-place form for `call maml%get_col_qc(col)` instead.
     module subroutine parquet_maml_add_col_qc(self, qc_input, col_name)
         class(parquet_maml_file), intent(inout) :: self !! qc-maml being built; gains one fields: entry.
         character(len=*), intent(in) :: qc_input !! compact "col, min, max, miss" string.
@@ -33,19 +34,23 @@ contains
         if (present(col_name)) col_name = nm
     end subroutine parquet_maml_add_col_qc
 
-    !> Function form. Appends the same qc entry and returns the parsed column
-    !> name as the result, so it can be assigned straight back into the source
-    !> variable -- `col = maml%get_col_qc(col)` -- which the subroutine form
-    !> cannot do (aliasing qc_input with an intent(out) col_name is illegal).
-    !> NB: like add_col_qc it mutates `self` (adds the entry), despite the
-    !> get_ name; it is a builder that also returns the name, not a pure query.
-    module function parquet_maml_get_col_qc(self, qc_input) result(col_name)
+    !> In-place form. Appends the same qc entry; `col_name` is `intent(inout)` --
+    !> it holds the compact "col, min, max, miss" string on entry and the parsed
+    !> column name on exit, so a caller reuses one variable
+    !> (`call maml%get_col_qc(col)`) instead of separately naming an input and
+    !> an output (add_col_qc's own optional col_name argument cannot alias
+    !> qc_input, since that would alias an intent(out) argument). NB: like
+    !> add_col_qc it mutates `self` (adds the entry), despite the get_ name; it
+    !> is a builder that also returns the name, not a pure query.
+    module subroutine parquet_maml_get_col_qc(self, col_name)
         class(parquet_maml_file), intent(inout) :: self !! qc-maml being built; gains one fields: entry.
-        character(len=*), intent(in) :: qc_input !! compact "col, min, max, miss" string.
-        character(len=:), allocatable :: col_name !! parsed column name.
+        character(len=:), allocatable, intent(inout) :: col_name !! compact "col, min, max, miss" string on
+        !! entry; parsed column name on exit.
+        character(len=:), allocatable :: qc_input
 
+        qc_input = col_name
         call add_col_qc_impl(self, qc_input, col_name)
-    end function parquet_maml_get_col_qc
+    end subroutine parquet_maml_get_col_qc
 
     !> Shared worker for both forms above: parses and validates qc_input,
     !> appends the field entry to self%lines, and always returns the parsed
@@ -83,10 +88,10 @@ contains
         end if
 
         ! Positional split (empty token => that field omitted).
-        name_str = nth_field(qc_input, 1)
-        min_str  = nth_field(qc_input, 2)
-        max_str  = nth_field(qc_input, 3)
-        miss_str = nth_field(qc_input, 4)
+        call nth_field(qc_input, 1, name_str)
+        call nth_field(qc_input, 2, min_str)
+        call nth_field(qc_input, 3, max_str)
+        call nth_field(qc_input, 4, miss_str)
 
         ! --- validate everything BEFORE mutating self%lines ---
 
@@ -135,12 +140,12 @@ contains
 
     contains
 
-        !> Returns field n (1-based) of a comma-separated string, trimmed of
+        !> Writes field n (1-based) of a comma-separated string into `field`, trimmed of
         !> surrounding blanks; an empty string if n is beyond the last field.
-        pure function nth_field(s, n) result(field)
+        pure subroutine nth_field(s, n, field)
             character(len=*), intent(in) :: s !! comma-separated source string.
             integer, intent(in) :: n !! 1-based field index to extract.
-            character(len=:), allocatable :: field !! trimmed field n, or "" if n is out of range.
+            character(len=:), allocatable, intent(out) :: field !! trimmed field n, or "" if n is out of range.
             integer :: k, start, cur
 
             start = 1
@@ -159,7 +164,7 @@ contains
                     start = k + 1
                 end if
             end do
-        end function nth_field
+        end subroutine nth_field
 
         !> Validates one qc min:/max: bound. `raw` may be empty (omitted --
         !> nothing to check), a bare bound (no operator -- accepted as-is;

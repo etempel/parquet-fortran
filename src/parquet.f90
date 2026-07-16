@@ -154,12 +154,16 @@ module parquet
         ! for "column quality-control" (the qc: block of a fields: entry) --
         ! kept short because it appears in every qc-building call. (2) get_col_qc
         ! is deliberately named get_ even though it MUTATES the schema (it
-        ! appends the entry, like add_col_qc): the get_ form exists only so the
-        ! parsed column name can be assigned back in place (col = schema%get_col_qc(col)),
-        ! which the subroutine form cannot do without aliasing an intent(out)
-        ! argument. It is a builder that also returns the name, not a pure query.
+        ! appends the entry, like add_col_qc): the get_ form exists so a caller
+        ! can reuse one variable in place (call schema%get_col_qc(col) -- col holds
+        ! the qc_input string on entry, the parsed column name on exit) instead of
+        ! separately naming an input and an output variable the way add_col_qc's
+        ! optional col_name argument requires. It is a builder that also returns
+        ! the name, not a pure query -- and, being a subroutine, never returns
+        ! character(len=:), allocatable as a function result (see "Build and
+        ! compiler notes" in CLAUDE.md for why that matters).
         procedure :: add_col_qc => schema_add_col_qc !! Appends one qc: field entry from a compact string.
-        procedure :: get_col_qc => schema_get_col_qc !! Function form of %add_col_qc; returns the parsed name.
+        procedure :: get_col_qc => schema_get_col_qc !! In-place form of %add_col_qc; parses the name into its argument.
         procedure :: schema_add_metadata_int32 !! int32 specific.
         procedure :: schema_add_metadata_int64 !! int64 specific.
         procedure :: schema_add_metadata_float32 !! float32 specific.
@@ -1286,11 +1290,11 @@ module parquet
         end function schema_get_num_fields
 
         !> Forwards to %cinfo%get_field_name.
-        module function schema_get_field_name(this, index) result(name)
+        module subroutine schema_get_field_name(this, index, name)
             class(parquet_schema), intent(in) :: this !! schema to query.
             integer, intent(in) :: index !! 1-based field position in MAML source order.
-            character(len=:), allocatable :: name !! field name at that position.
-        end function schema_get_field_name
+            character(len=:), allocatable, intent(out) :: name !! field name at that position.
+        end subroutine schema_get_field_name
 
         !> Subroutine form of %add_col_qc: forwards to %maml%add_col_qc. See
         !> parquet_maml_add_col_qc (parquet_maml_base_add_col_qc.f90) for the
@@ -1301,13 +1305,17 @@ module parquet
             character(len=:), allocatable, intent(out), optional :: col_name !! parsed column name.
         end subroutine schema_add_col_qc
 
-        !> Function form of %add_col_qc: forwards to %maml%get_col_qc, so the
-        !> parsed name can be assigned back in place (col = schema%get_col_qc(col)).
-        module function schema_get_col_qc(this, qc_input) result(col_name)
+        !> In-place form of %add_col_qc: forwards to %maml%get_col_qc. `col_name` is
+        !> `intent(inout)`, not separate in/out arguments: on entry it holds the compact
+        !> "col, min, max, miss" string, and on exit it holds just the parsed column name --
+        !> so a caller reuses one variable (call schema%get_col_qc(col)) rather than
+        !> assigning a function result back into it (a subroutine can't alias the same
+        !> actual argument to separate intent(in)/intent(out) dummies).
+        module subroutine schema_get_col_qc(this, col_name)
             class(parquet_schema), intent(inout) :: this !! schema whose %maml gains one fields: entry.
-            character(len=*), intent(in) :: qc_input !! compact "col, min, max, miss" string.
-            character(len=:), allocatable :: col_name !! parsed column name.
-        end function schema_get_col_qc
+            character(len=:), allocatable, intent(inout) :: col_name !! compact "col, min, max, miss" string on
+            !! entry; parsed column name on exit.
+        end subroutine schema_get_col_qc
 
         !> int32 specific of %add_metadata; forwards to %metadata%add_metadata
         !> (see the parquet_get_metadata generic interface above for the
@@ -1437,11 +1445,11 @@ module parquet
         !> order (same order get_num_fields counts). index must be between 1
         !> and get_num_fields(this); anything outside that range fails with
         !> error stop.
-        module function get_field_name(this, index) result(name)
+        module subroutine get_field_name(this, index, name)
             class(parquet_column_info), intent(in) :: this !! column_info to query.
             integer, intent(in) :: index !! 1-based field position in MAML source order.
-            character(len=:), allocatable :: name !! field name at that position.
-        end function get_field_name
+            character(len=:), allocatable, intent(out) :: name !! field name at that position.
+        end subroutine get_field_name
 
         !> Backs parquet_schema%set_column_unavailable (see set_column_unavailable
         !> in the parquet_schema block above); disables `name`, or every
@@ -1611,16 +1619,16 @@ module parquet
 
         !> Strips one matching pair of surrounding single or double quotes
         !> from `s`, if present; returns `s` unchanged otherwise.
-        module function parquet_unquote(s) result(out)
+        module subroutine parquet_unquote(s, out)
             character(len=*), intent(in) :: s !! text to unquote.
-            character(len=:), allocatable :: out !! s with surrounding quotes removed, if any.
-        end function parquet_unquote
+            character(len=:), allocatable, intent(out) :: out !! s with surrounding quotes removed, if any.
+        end subroutine parquet_unquote
 
         !> Case-insensitive lowercase of ASCII letters.
-        module function parquet_to_lower(s) result(out)
+        module subroutine parquet_to_lower(s, out)
             character(len=*), intent(in) :: s !! input string.
-            character(len=:), allocatable :: out !! s with every ASCII A-Z lowercased; other characters unchanged.
-        end function parquet_to_lower
+            character(len=:), allocatable, intent(out) :: out !! s with every ASCII A-Z lowercased; other characters unchanged.
+        end subroutine parquet_to_lower
 
         !> The nrows-less form of parquet_open_reader (see the generic
         !> interface above): opens as usual, filling in none of the

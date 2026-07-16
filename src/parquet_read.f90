@@ -48,15 +48,15 @@ contains
     !> just defensive. Appended to post-open read errors so they name which
     !> parquet file failed, without needing that file to be threaded through
     !> every intermediate call.
-    function reader_filename_suffix(reader) result(suffix)
+    subroutine reader_filename_suffix(reader, suffix)
         type(parquet_reader), intent(in) :: reader !! reader whose filename is reported.
-        character(len=:), allocatable :: suffix !! " (file: X)"-style suffix, or "".
+        character(len=:), allocatable, intent(out) :: suffix !! " (file: X)"-style suffix, or "".
 
         suffix = ""
         if (allocated(reader%filename)) then
             if (len_trim(reader%filename) > 0) suffix = " (file: " // trim(reader%filename) // ")"
         end if
-    end function reader_filename_suffix
+    end subroutine reader_filename_suffix
 
     !> Every reader-taking procedure that also names a specific column calls
     !> this right after check_reader_open: an unrecognized column name used
@@ -71,8 +71,10 @@ contains
         type(parquet_reader), intent(in) :: reader !! open reader to check against.
         character(len=*), intent(in) :: name !! column name to look up.
         character(len=*), intent(in) :: context !! calling procedure's name, used in the error-stop message.
+        character(len=:), allocatable :: name_suffix !! scratch (reader_filename_suffix).
         if (parquet_reader_has_column(reader%handle, trim(name)//char(0)) == 0) then
-            error stop trim(context) // ": column not found in parquet file: " // trim(name) // reader_filename_suffix(reader)
+            call reader_filename_suffix(reader, name_suffix)
+            error stop trim(context) // ": column not found in parquet file: " // trim(name) // name_suffix
         end if
     end subroutine check_column_exists
 
@@ -84,9 +86,11 @@ contains
     subroutine check_reader_no_filter(reader, context)
         type(parquet_reader), intent(in) :: reader !! open reader to check.
         character(len=*), intent(in) :: context !! calling procedure's name, used in the error-stop message.
+        character(len=:), allocatable :: name_suffix !! scratch (reader_filename_suffix).
         if (parquet_reader_has_filter(reader%handle) /= 0) then
+            call reader_filename_suffix(reader, name_suffix)
             error stop trim(context) // ": chunked reads are not supported on a reader opened with an " // &
-                "active filter= -- open a second, unfiltered reader for chunked access" // reader_filename_suffix(reader)
+                "active filter= -- open a second, unfiltered reader for chunked access" // name_suffix
         end if
     end subroutine check_reader_no_filter
 
@@ -101,13 +105,15 @@ contains
         character(len=*), intent(in) :: context !! calling procedure's name, used in the error-stop message.
         integer(int64) :: num_row_groups
         character(len=32) :: rg_str, total_str
+        character(len=:), allocatable :: name_suffix !! scratch (reader_filename_suffix).
 
         num_row_groups = int(parquet_reader_get_num_row_groups(reader%handle), kind=int64)
         if (row_group < 1 .or. row_group > num_row_groups) then
             write(rg_str, '(i0)') row_group
             write(total_str, '(i0)') num_row_groups
+            call reader_filename_suffix(reader, name_suffix)
             error stop trim(context) // ": row_group " // trim(rg_str) // " out of range (file has " // &
-                trim(total_str) // " row group(s))" // reader_filename_suffix(reader)
+                trim(total_str) // " row group(s))" // name_suffix
         end if
     end subroutine check_row_group_valid
 
@@ -332,6 +338,7 @@ contains
         character(len=1024) :: c_err
         integer(c_long_long) :: status
         integer :: i, n
+        character(len=:), allocatable :: name_suffix !! scratch (reader_filename_suffix).
 
         n = filter%n
         allocate(names(n), ops(n), values(n), is_string_flags(n))
@@ -339,11 +346,13 @@ contains
         do i = 1, n
             call parquet_tokenize_filter_rule(filter%rules(i), parsed_name, parsed_op, parsed_value, &
                 parsed_is_string, ok, errmsg)
-            if (.not. ok) error stop "parquet_open_reader: invalid filter rule: " // errmsg // reader_filename_suffix(reader)
+            call reader_filename_suffix(reader, name_suffix)
+            if (.not. ok) error stop "parquet_open_reader: invalid filter rule: " // errmsg // name_suffix
             ! GCOVR_EXCL_START
             if (len(parsed_name) > len(names) .or. len(parsed_op) > len(ops) .or. len(parsed_value) > len(values)) then
+                call reader_filename_suffix(reader, name_suffix)
                 error stop "parquet_open_reader: filter rule exceeds an internal length limit: " // trim(filter%rules(i)) // &
-                    reader_filename_suffix(reader)
+                    name_suffix
             end if
             ! GCOVR_EXCL_STOP
             names(i) = parsed_name
@@ -361,7 +370,8 @@ contains
             ops_packed, int(len(ops), kind=c_long_long), values_packed, int(len(values), kind=c_long_long), &
             is_string_flags, int(n, kind=c_long_long), c_err, int(len(c_err), kind=c_long_long))
 
-        if (status /= 0) error stop "parquet_open_reader: " // trim(c_err) // reader_filename_suffix(reader)
+        call reader_filename_suffix(reader, name_suffix)
+        if (status /= 0) error stop "parquet_open_reader: " // trim(c_err) // name_suffix
     end subroutine parquet_apply_filter
 
     !> Called once by parquet_open_reader, right after the handle is created:
@@ -480,6 +490,7 @@ contains
     module procedure parquet_prefetch_columns_array
         character(kind=c_char), allocatable :: packed(:)
         integer :: i, j, k, item_len, n
+        character(len=:), allocatable :: name_suffix !! scratch (reader_filename_suffix).
 
         call check_reader_open(reader, "parquet_prefetch_columns")
         n = size(names)
@@ -487,8 +498,9 @@ contains
 
         do i = 1, n
             if (parquet_reader_has_column(reader%handle, trim(names(i))//char(0)) == 0) then
+                call reader_filename_suffix(reader, name_suffix)
                 error stop "parquet_prefetch_columns: column not found in parquet file: " // trim(names(i)) // &
-                    reader_filename_suffix(reader)
+                    name_suffix
             end if
         end do
 
@@ -604,13 +616,15 @@ contains
 
     module procedure parquet_get_nrows_int32
         integer(int64) :: nrows64
+        character(len=:), allocatable :: name_suffix !! scratch (reader_filename_suffix).
         call check_reader_open(reader, "parquet_get_nrows")
         nrows64 = int(parquet_reader_get_nrows(reader%handle), kind=int64)
         if (present(check_positive)) then
             if (check_positive) call check_nrows_positive(reader, nrows64)
         end if
         if (nrows64 > huge(0_int32)) then ! GCOVR_EXCL_START
-            error stop "parquet_get_nrows: number of rows exceeds int32 range" // reader_filename_suffix(reader)
+            call reader_filename_suffix(reader, name_suffix)
+            error stop "parquet_get_nrows: number of rows exceeds int32 range" // name_suffix
         end if ! GCOVR_EXCL_STOP
         nrows = int(nrows64, kind=int32)
     end procedure parquet_get_nrows_int32
@@ -622,11 +636,13 @@ contains
 
     module procedure parquet_get_num_row_groups_int32
         integer(int64) :: num_row_groups64
+        character(len=:), allocatable :: name_suffix !! scratch (reader_filename_suffix).
         call check_reader_open(reader, "parquet_get_num_row_groups")
         num_row_groups64 = int(parquet_reader_get_num_row_groups(reader%handle), kind=int64)
         if (num_row_groups64 > huge(0_int32)) then ! GCOVR_EXCL_START
+            call reader_filename_suffix(reader, name_suffix)
             error stop "parquet_get_num_row_groups: number of row groups exceeds int32 range" // &
-                reader_filename_suffix(reader)
+                name_suffix
         end if ! GCOVR_EXCL_STOP
         num_row_groups = int(num_row_groups64, kind=int32)
     end procedure parquet_get_num_row_groups_int32
@@ -642,6 +658,7 @@ contains
         integer(int64), intent(in) :: row_group !! 1-based row group, or 0 for "use the first row group".
         integer(int64) :: rg, num_row_groups
         character(len=32) :: rg_str, total_str
+        character(len=:), allocatable :: name_suffix !! scratch (reader_filename_suffix).
 
         call check_reader_open(reader, "parquet_get_chunk_size")
         rg = merge(row_group, 1_int64, row_group > 0)
@@ -649,8 +666,9 @@ contains
         if (rg < 1 .or. rg > num_row_groups) then
             write(rg_str, '(i0)') rg
             write(total_str, '(i0)') num_row_groups
+            call reader_filename_suffix(reader, name_suffix)
             error stop "parquet_get_chunk_size: row_group " // trim(rg_str) // " out of range (file has " // &
-                trim(total_str) // " row group(s))" // reader_filename_suffix(reader)
+                trim(total_str) // " row group(s))" // name_suffix
         end if
         chunk_size = int(parquet_reader_get_chunk_size_at(reader%handle, rg), kind=int64)
     end subroutine parquet_get_chunk_size_reader_impl
@@ -684,12 +702,14 @@ contains
 
     module procedure parquet_get_column_total_elements_int32
         integer(int64) :: nelem64
+        character(len=:), allocatable :: name_suffix !! scratch (reader_filename_suffix).
         call check_reader_open(reader, "parquet_get_column_total_elements")
         call check_column_exists(reader, name, "parquet_get_column_total_elements")
         nelem64 = int(parquet_reader_get_column_total_elements(reader%handle, trim(name)//char(0)), kind=int64)
         if (nelem64 > huge(0_int32)) then ! GCOVR_EXCL_START
+            call reader_filename_suffix(reader, name_suffix)
             error stop "parquet_get_column_total_elements: number of elements exceeds int32 range for column: " // &
-                trim(name) // reader_filename_suffix(reader)
+                trim(name) // name_suffix
         end if ! GCOVR_EXCL_STOP
         total_elements = int(nelem64, kind=int32)
     end procedure parquet_get_column_total_elements_int32
@@ -703,14 +723,16 @@ contains
     module procedure parquet_check_read_row_count
         integer(c_long_long) :: file_nrows
         character(len=32) :: expected_str, got_str
+        character(len=:), allocatable :: name_suffix !! scratch (reader_filename_suffix).
 
         file_nrows = parquet_reader_get_nrows(reader%handle)
         if (given_nrows /= file_nrows) then
             write(expected_str, '(i0)') file_nrows
             write(got_str, '(i0)') given_nrows
+            call reader_filename_suffix(reader, name_suffix)
             error stop "parquet_read_column: row count mismatch for column " // trim(name) // &
                 ": file has " // trim(expected_str) // " rows but the values array implies " // trim(got_str) // &
-                reader_filename_suffix(reader)
+                name_suffix
         end if
     end procedure parquet_check_read_row_count
 

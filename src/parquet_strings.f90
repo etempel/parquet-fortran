@@ -77,7 +77,7 @@ module parquet_strings
         generic :: length => length_i32, length_i64    !! Length of element i (no allocation).
         procedure, private :: get_i32                  !! int32 specific of get.
         procedure, private :: get_i64                  !! int64 specific of get.
-        generic :: get => get_i32, get_i64             !! Element i as an allocatable string.
+        generic :: get => get_i32, get_i64             !! Writes element i into an allocatable string.
         procedure, private :: view_i32                 !! int32 specific of view.
         procedure, private :: view_i64                 !! int64 specific of view.
         generic :: view => view_i32, view_i64          !! Zero-copy handle to element i.
@@ -120,7 +120,7 @@ module parquet_strings
         procedure :: swap                              !! Exchange contents with another column.
         ! --- diagnostics ---
         procedure :: print => col_print                !! Human-readable representation.
-        procedure :: summary                           !! Compact one-line overview string.
+        procedure :: summary                           !! Writes a compact one-line overview string.
         procedure :: statistics                        !! Detailed metrics (optional out-args).
         ! --- interop hooks (advanced; for the Parquet read/write integration layer) ---
         procedure :: raw_buffers                       !! Export c_loc pointers to the internal buffers.
@@ -143,7 +143,7 @@ module parquet_strings
         procedure :: length => psv_length          !! Length of the referenced string.
         procedure :: is_empty => psv_is_empty       !! Whether the referenced string has zero length.
         procedure :: is_null => psv_is_null         !! Whether the referenced element is null.
-        procedure :: to_string => psv_to_string     !! Materialize the referenced string.
+        procedure :: to_string => psv_to_string     !! Writes the referenced string into an argument.
         procedure :: equals => psv_equals           !! Exact comparison against str.
         procedure :: contains => psv_contains       !! Substring search for str.
         procedure :: startswith => psv_startswith   !! Prefix test.
@@ -597,25 +597,27 @@ contains
     end function length_i64
     !
     !> int32 specific of get; see the get generic.
-    function get_i32(self, i, null_value, allow_null) result(res)
+    subroutine get_i32(self, i, res, null_value, allow_null)
         class(parquet_string_column), intent(in) :: self !! the column.
         integer(int32), intent(in) :: i                  !! 1-based element index.
+        character(len=:), allocatable, intent(out) :: res !! element i (unallocated if null and allowed).
         character(len=*), intent(in), optional :: null_value !! substitute returned for a null element.
         logical, intent(in), optional :: allow_null           !! .true. => suppress abort, return empty string for a null.
-        character(len=:), allocatable :: res             !! element i (unallocated if null and allowed).
-        res = self%get_i64(int(i, int64), null_value, allow_null)
-    end function get_i32
+        call self%get_i64(int(i, int64), res, null_value, allow_null)
+    end subroutine get_i32
     !
-    !> int64 specific of get: element i as an allocatable string. A null element error stops by
+    !> int64 specific of get: writes element i into `res`. A null element error stops by
     !! default; pass `null_value` to substitute a string, or `allow_null=.true.` to suppress the
     !! abort and return an empty string (detect null via is_null). When both are given,
-    !! `null_value` takes precedence.
-    function get_i64(self, i, null_value, allow_null) result(res)
+    !! `null_value` takes precedence. A subroutine (not a function) so this never returns
+    !! `character(len=:), allocatable` as a function result -- see "Build and compiler notes" in
+    !! CLAUDE.md for why.
+    subroutine get_i64(self, i, res, null_value, allow_null)
         class(parquet_string_column), intent(in) :: self !! the column.
         integer(int64), intent(in) :: i                  !! 1-based element index.
+        character(len=:), allocatable, intent(out) :: res !! element i (unallocated if null and allowed).
         character(len=*), intent(in), optional :: null_value !! substitute returned for a null element.
         logical, intent(in), optional :: allow_null           !! .true. => suppress abort, return empty string for a null.
-        character(len=:), allocatable :: res             !! element i (unallocated if null and allowed).
         integer(int64) :: a, b, elen
         logical :: allow
         call check_index(self, i, "get")
@@ -636,7 +638,7 @@ contains
         elen = b - a + 1_int64
         allocate(character(len=elen) :: res)
         if (elen > 0) res = transfer(self%data(a:b), res)
-    end function get_i64
+    end subroutine get_i64
     !
     !> int32 specific of view; see the view generic.
     function view_i32(self, i) result(h)
@@ -1164,6 +1166,7 @@ contains
         character(len=:), allocatable, intent(out) :: out(:)      !! materialized, padded strings.
         character(len=*), intent(in), optional :: null_value      !! substitute for null elements.
         integer(int64) :: i, elen, maxlen
+        character(len=:), allocatable :: elem
         maxlen = 0_int64
         if (present(null_value)) maxlen = int(len(null_value), int64)
         do i = 1_int64, self%nrows
@@ -1180,7 +1183,8 @@ contains
                 out(i) = null_value
             else
                 ! normal character assignment left-justifies and blank-pads to maxlen
-                out(i) = self%get_i64(i)
+                call self%get_i64(i, elem)
+                out(i) = elem
             end if
         end do
     end subroutine to_character
@@ -1253,23 +1257,23 @@ contains
             if (.not. bit_valid(self, i)) then
                 write(u, '(2x,i0,a)') i, ": <null>"
             else
-                s = self%get_i64(i)
+                call self%get_i64(i, s)
                 write(u, '(2x,i0,a,a,a)') i, ': "', s, '"'
             end if
         end do
         if (self%nrows > lim) write(u, '(2x,a,i0,a)') "... (", self%nrows - lim, " more)"
     end subroutine col_print
     !
-    !> Returns a compact one-line overview string (row/char/null counts and capacities).
-    function summary(self) result(res)
+    !> Writes a compact one-line overview string (row/char/null counts and capacities) into `res`.
+    subroutine summary(self, res)
         class(parquet_string_column), intent(in) :: self !! the column.
-        character(len=:), allocatable :: res             !! the summary string.
+        character(len=:), allocatable, intent(out) :: res !! the summary string.
         character(len=256) :: buf
         write(buf, '(a,i0,a,i0,a,i0,a,i0,a,i0,a)') "parquet_string_column(rows=", self%nrows, &
             ", chars=", self%nchars, ", nulls=", self%n_null, ", row_cap=", self%capacity(), &
             ", char_cap=", self%character_capacity(), ")"
         res = trim(buf)
-    end function summary
+    end subroutine summary
     !
     !> Returns detailed metrics via optional intent(out) arguments (kept basic; extensible later).
     subroutine statistics(self, nrows, nchars, n_null, min_len, max_len, row_capacity, &
@@ -1450,17 +1454,17 @@ contains
         res = self%col%is_null_i64(self%idx)
     end function psv_is_null
     !
-    !> Materializes the referenced string. A null element error stops by default; pass `null_value`
-    !! to substitute a string, or `allow_null=.true.` to suppress the abort and return an empty
-    !! string (detect null via is_null).
-    function psv_to_string(self, null_value, allow_null) result(res)
+    !> Writes the referenced string into `res`. A null element error stops by default; pass
+    !! `null_value` to substitute a string, or `allow_null=.true.` to suppress the abort and
+    !! return an empty string (detect null via is_null).
+    subroutine psv_to_string(self, res, null_value, allow_null)
         class(parquet_string), intent(in) :: self             !! the handle.
+        character(len=:), allocatable, intent(out) :: res     !! the referenced string.
         character(len=*), intent(in), optional :: null_value  !! substitute for a null element.
         logical, intent(in), optional :: allow_null            !! .true. => suppress abort, return empty string for null.
-        character(len=:), allocatable :: res                  !! the referenced string.
         call check_handle(self, "to_string")
-        res = self%col%get_i64(self%idx, null_value, allow_null)
-    end function psv_to_string
+        call self%col%get_i64(self%idx, res, null_value, allow_null)
+    end subroutine psv_to_string
     !
     !> Exact comparison of the referenced string against `str` (see the column's equals).
     logical function psv_equals(self, str, exact, check_null) result(res)
@@ -1511,7 +1515,7 @@ contains
         if (self%col%is_null_i64(self%idx)) then
             write(u, '(a)') "<null>"
         else
-            s = self%col%get_i64(self%idx)
+            call self%col%get_i64(self%idx, s)
             write(u, '(a,a,a)') '"', s, '"'
         end if
     end subroutine psv_print

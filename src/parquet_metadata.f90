@@ -88,7 +88,7 @@ contains
         type(parquet_maml_file), intent(in) :: maml !! schema being built.
         character(len=*), intent(in) :: name !! field name to look for (case-sensitive).
         integer :: i, colon
-        character(len=:), allocatable :: t, key, val
+        character(len=:), allocatable :: t, key, val, key_lower
 
         found = .false.
         if (.not. allocated(maml%lines)) return ! GCOVR_EXCL_LINE
@@ -100,7 +100,8 @@ contains
             colon = index(t, ":")
             if (colon <= 1) cycle
             key = trim(adjustl(t(1:colon-1)))
-            if (parquet_to_lower(key) /= "name") cycle
+            call parquet_to_lower(key, key_lower)
+            if (key_lower /= "name") cycle
             val = trim(adjustl(t(colon+1:)))
             if (len(val) >= 2) then
                 if ((val(1:1) == '"' .and. val(len(val):len(val)) == '"') .or. &
@@ -151,15 +152,15 @@ contains
     !> parquet_schema(...) always give an in-memory schema a name
     !> ("internal:<table>"), so this is effectively always populated for
     !> every add_field error below it.
-    function maml_name_suffix(maml) result(suffix)
+    subroutine maml_name_suffix(maml, suffix)
         type(parquet_maml_file), intent(in) :: maml !! schema being built.
-        character(len=:), allocatable :: suffix !! " (maml: X)"-style suffix, or "".
+        character(len=:), allocatable, intent(out) :: suffix !! " (maml: X)"-style suffix, or "".
 
         suffix = ""
         if (allocated(maml%name)) then
             if (len_trim(maml%name) > 0) suffix = " (maml: " // trim(maml%name) // ")"
         end if
-    end function maml_name_suffix
+    end subroutine maml_name_suffix
 
     module procedure schema_add_field
         logical :: type_ok
@@ -167,17 +168,21 @@ contains
         character(len=:), allocatable :: miss_low
         character(len=32) :: buf
         logical :: have_qc_min, have_qc_max, have_qc_miss
+        character(len=:), allocatable :: tlo1 !! scratch (unquote/to_lower).
+        character(len=:), allocatable :: name_suffix !! scratch (maml_name_suffix).
 
         if (.not. this%is_initialized) then
             error stop "parquet_schema%add_field: call schema%init(...) before adding fields"
         end if
 
         if (len_trim(name) == 0) then
-            error stop "parquet_schema%add_field: field name must not be empty" // maml_name_suffix(this%maml)
+            call maml_name_suffix(this%maml, name_suffix)
+            error stop "parquet_schema%add_field: field name must not be empty" // name_suffix
         end if
 
         if (maml_field_name_exists(this%maml, trim(name))) then
-            error stop "parquet_schema%add_field: duplicate field name '" // trim(name) // "'" // maml_name_suffix(this%maml)
+            call maml_name_suffix(this%maml, name_suffix)
+            error stop "parquet_schema%add_field: duplicate field name '" // trim(name) // "'" // name_suffix
         end if
 
         type_ok = .false.
@@ -188,8 +193,9 @@ contains
             end if
         end do
         if (.not. type_ok) then
+            call maml_name_suffix(this%maml, name_suffix)
             error stop "parquet_schema%add_field: field '" // trim(name) // "' has invalid data_type '" // &
-                trim(data_type) // "'" // maml_name_suffix(this%maml)
+                trim(data_type) // "'" // name_suffix
         end if
 
         call validate_qc_bound(qc_min, .true.)
@@ -197,10 +203,12 @@ contains
 
         if (present(qc_miss)) then
             if (len_trim(qc_miss) > 0) then
-                miss_low = parquet_to_lower(trim(adjustl(qc_miss)))
+                call parquet_to_lower(trim(adjustl(qc_miss)), tlo1)
+                miss_low = tlo1
                 if (.not. (miss_low == "null" .or. miss_low == "na")) then
+                    call maml_name_suffix(this%maml, name_suffix)
                     error stop "parquet_schema%add_field: invalid qc_miss value '" // trim(adjustl(qc_miss)) // &
-                        "' for field '" // trim(name) // "' (expected Null/NA or empty)" // maml_name_suffix(this%maml)
+                        "' for field '" // trim(name) // "' (expected Null/NA or empty)" // name_suffix
                 end if
             end if
         end if
@@ -280,22 +288,26 @@ contains
 
             if (has_op) then
                 if (is_min .and. op(1:1) == "<") then
+                    call maml_name_suffix(this%maml, name_suffix)
                     error stop "parquet_schema%add_field: qc_min for field '" // trim(name) // "' uses a '" // &
                         trim(op) // "' operator; qc_min accepts only >= or > (use qc_max for an upper bound)" // &
-                        maml_name_suffix(this%maml)
+                        name_suffix
                 end if
                 if (.not. is_min .and. op(1:1) == ">") then
+                    call maml_name_suffix(this%maml, name_suffix)
                     error stop "parquet_schema%add_field: qc_max for field '" // trim(name) // "' uses a '" // &
                         trim(op) // "' operator; qc_max accepts only <= or < (use qc_min for a lower bound)" // &
-                        maml_name_suffix(this%maml)
+                        name_suffix
                 end if
                 if (len_trim(rem) == 0) then
                     if (is_min) then
+                        call maml_name_suffix(this%maml, name_suffix)
                         error stop "parquet_schema%add_field: bad qc_min value provided for field '" // trim(name) // &
-                            "'" // maml_name_suffix(this%maml)
+                            "'" // name_suffix
                     else
+                        call maml_name_suffix(this%maml, name_suffix)
                         error stop "parquet_schema%add_field: bad qc_max value provided for field '" // trim(name) // &
-                            "'" // maml_name_suffix(this%maml)
+                            "'" // name_suffix
                     end if
                 end if
             end if
@@ -324,7 +336,7 @@ contains
     end procedure schema_get_num_fields
 
     module procedure schema_get_field_name
-        name = this%cinfo%get_field_name(index)
+        call this%cinfo%get_field_name(index, name)
     end procedure schema_get_field_name
 
     module procedure schema_add_col_qc
@@ -332,7 +344,7 @@ contains
     end procedure schema_add_col_qc
 
     module procedure schema_get_col_qc
-        col_name = this%maml%get_col_qc(qc_input)
+        call this%maml%get_col_qc(col_name)
     end procedure schema_get_col_qc
 
     module procedure schema_add_metadata_int32
@@ -439,6 +451,11 @@ contains
         type(parquet_maml_col_map_entry), allocatable :: col_map(:)
         integer :: ios, n, i, j, list_item_idx, doi_idx, depends_idx
         character(len=32) :: idx_buf
+        character(len=:), allocatable :: tlo2, tlo3, tlo8, tlo9, tlo12, tlo17, tlo27, tlo28, tlo29, tlo30, &
+            tlo33, tlo34, tlo37, tlo41 !! scratch (to_lower).
+        character(len=:), allocatable :: tuq1, tuq4, tuq5, tuq6, tuq7, tuq10, tuq11, tuq13, tuq14, tuq15, &
+            tuq16, tuq18, tuq19, tuq20, tuq21, tuq22, tuq23, tuq24, tuq25, tuq26, tuq31, tuq32, tuq35, tuq36, &
+            tuq38, tuq39, tuq40 !! scratch (unquote).
 
         ! See g_maml_mutex in parquet_wrapper.cpp: this function's repeated
         ! "grow tmp(:), whole-array-assign the old contents in, move_alloc"
@@ -489,18 +506,24 @@ contains
                         tline = trim(adjustl(tline(2:)))
                         if (len_trim(tline) > 0) then
                             call parquet_split_key_value(tline, key, cvalue)
-                            if (parquet_to_lower(key) == "key") ka_key = parquet_unquote(cvalue)
+                            call parquet_unquote(cvalue, tuq1)
+                            call parquet_to_lower(key, tlo2)
+                            if (tlo2 == "key") ka_key = tuq1
                         end if
                         cycle
                     else if (line(1:1) == " " .and. index(tline, ":") > 0) then
                         call parquet_split_key_value(tline, key, cvalue)
-                        select case (parquet_to_lower(key))
+                        call parquet_to_lower(key, tlo3)
+                        select case (tlo3)
                         case ("key")
-                            ka_key = parquet_unquote(cvalue)
+                            call parquet_unquote(cvalue, tuq4)
+                            ka_key = tuq4
                         case ("value")
-                            ka_value = parquet_unquote(cvalue)
+                            call parquet_unquote(cvalue, tuq5)
+                            ka_value = tuq5
                         case ("comment")
-                            ka_comment = parquet_unquote(cvalue)
+                            call parquet_unquote(cvalue, tuq6)
+                            ka_comment = tuq6
                         end select
                         cycle
                     else
@@ -517,16 +540,21 @@ contains
                         tline = trim(adjustl(tline(2:)))
                         if (len_trim(tline) > 0) then
                             call parquet_split_key_value(tline, key, cvalue)
-                            if (parquet_to_lower(key) == "doi") doi_value = parquet_unquote(cvalue)
+                            call parquet_unquote(cvalue, tuq7)
+                            call parquet_to_lower(key, tlo8)
+                            if (tlo8 == "doi") doi_value = tuq7
                         end if
                         cycle
                     else if (line(1:1) == " " .and. index(tline, ":") > 0) then
                         call parquet_split_key_value(tline, key, cvalue)
-                        select case (parquet_to_lower(key))
+                        call parquet_to_lower(key, tlo9)
+                        select case (tlo9)
                         case ("doi")
-                            doi_value = parquet_unquote(cvalue)
+                            call parquet_unquote(cvalue, tuq10)
+                            doi_value = tuq10
                         case ("type")
-                            doi_type = parquet_unquote(cvalue)
+                            call parquet_unquote(cvalue, tuq11)
+                            doi_type = tuq11
                         end select
                         cycle
                     else
@@ -546,29 +574,39 @@ contains
                         tline = trim(adjustl(tline(2:)))
                         if (len_trim(tline) > 0) then
                             call parquet_split_key_value(tline, key, cvalue)
-                            select case (parquet_to_lower(key))
+                            call parquet_to_lower(key, tlo12)
+                            select case (tlo12)
                             case ("survey")
-                                depends_survey = parquet_unquote(cvalue)
+                                call parquet_unquote(cvalue, tuq13)
+                                depends_survey = tuq13
                             case ("dataset")
-                                depends_dataset = parquet_unquote(cvalue)
+                                call parquet_unquote(cvalue, tuq14)
+                                depends_dataset = tuq14
                             case ("table")
-                                depends_table = parquet_unquote(cvalue)
+                                call parquet_unquote(cvalue, tuq15)
+                                depends_table = tuq15
                             case ("version")
-                                depends_version = parquet_unquote(cvalue)
+                                call parquet_unquote(cvalue, tuq16)
+                                depends_version = tuq16
                             end select
                         end if
                         cycle
                     else if (line(1:1) == " " .and. index(tline, ":") > 0) then
                         call parquet_split_key_value(tline, key, cvalue)
-                        select case (parquet_to_lower(key))
+                        call parquet_to_lower(key, tlo17)
+                        select case (tlo17)
                         case ("survey")
-                            depends_survey = parquet_unquote(cvalue)
+                            call parquet_unquote(cvalue, tuq18)
+                            depends_survey = tuq18
                         case ("dataset")
-                            depends_dataset = parquet_unquote(cvalue)
+                            call parquet_unquote(cvalue, tuq19)
+                            depends_dataset = tuq19
                         case ("table")
-                            depends_table = parquet_unquote(cvalue)
+                            call parquet_unquote(cvalue, tuq20)
+                            depends_table = tuq20
                         case ("version")
-                            depends_version = parquet_unquote(cvalue)
+                            call parquet_unquote(cvalue, tuq21)
+                            depends_version = tuq21
                         end select
                         cycle
                     else
@@ -597,18 +635,23 @@ contains
                         list_item_idx = list_item_idx + 1
                         if (list_key == "comments" .or. list_key == "comment") then
                             write(idx_buf, '(I0)') list_item_idx
-                            call metadata%add_metadata("comment_" // trim(idx_buf), parquet_unquote(tline(3:)))
+                            call parquet_unquote(tline(3:), tuq22)
+                            call metadata%add_metadata("comment_" // trim(idx_buf), tuq22)
                         else if (list_key == "coauthors" .or. list_key == "coauthor") then
                             write(idx_buf, '(I0)') list_item_idx
-                            call metadata%add_metadata("coauthor_" // trim(idx_buf), parquet_unquote(tline(3:)))
+                            call parquet_unquote(tline(3:), tuq23)
+                            call metadata%add_metadata("coauthor_" // trim(idx_buf), tuq23)
                         else if (list_key == "keywords" .or. list_key == "keyword") then
                             if (len_trim(keywords_value) > 0) then
-                                keywords_value = trim(keywords_value) // ";" // trim(parquet_unquote(tline(3:)))
+                                call parquet_unquote(tline(3:), tuq24)
+                                keywords_value = trim(keywords_value) // ";" // trim(tuq24)
                             else
-                                keywords_value = trim(parquet_unquote(tline(3:)))
+                                call parquet_unquote(tline(3:), tuq25)
+                                keywords_value = trim(tuq25)
                             end if
                         else
-                            call metadata%add_metadata(list_key, parquet_unquote(tline(3:)))
+                            call parquet_unquote(tline(3:), tuq26)
+                            call metadata%add_metadata(list_key, tuq26)
                         end if
                         cycle
                     else if (index(tline, ":") > 0 .and. line(1:1) /= " ") then
@@ -633,7 +676,8 @@ contains
                     cycle
                 end if
 
-                if (parquet_to_lower(tline) == "dois:") then
+                call parquet_to_lower(tline, tlo27)
+                if (tlo27 == "dois:") then
                     in_doiarray = .true.
                     doi_idx = 0
                     doi_value = ""
@@ -641,7 +685,8 @@ contains
                     cycle
                 end if
 
-                if (parquet_to_lower(tline) == "depends:") then
+                call parquet_to_lower(tline, tlo28)
+                if (tlo28 == "depends:") then
                     in_dependsarray = .true.
                     depends_idx = 0
                     depends_survey = ""
@@ -651,7 +696,8 @@ contains
                     cycle
                 end if
 
-                if (parquet_to_lower(tline) == "extra:") then
+                call parquet_to_lower(tline, tlo29)
+                if (tlo29 == "extra:") then
                     in_extra = .true.
                     cycle
                 end if
@@ -659,12 +705,14 @@ contains
                 call parquet_split_key_value(tline, key, cvalue)
                 if (len_trim(key) == 0) cycle
 
-                key = parquet_to_lower(key)
+                call parquet_to_lower(key, tlo30)
+                key = tlo30
 
                 if (key == "fields") then
                     in_fields = .true.
                 else if (len_trim(cvalue) > 0) then
-                    call metadata%add_metadata(key, parquet_unquote(cvalue))
+                    call parquet_unquote(cvalue, tuq31)
+                    call metadata%add_metadata(key, tuq31)
                 else
                     in_list = .true.
                     list_key = key
@@ -686,7 +734,8 @@ contains
 
             if (in_field_list) then
                 if (index(tline, "- ") == 1 .and. line(1:1) == " ") then
-                    list_item = parquet_unquote(tline(3:))
+                    call parquet_unquote(tline(3:), tuq32)
+                    list_item = tuq32
                     select case (field_list_key)
                     case ("ucd")
                         if (.not. allocated(tmp(n)%ucd) .or. len_trim(tmp(n)%ucd) == 0) then
@@ -704,7 +753,8 @@ contains
 
             if (in_qc) then
                 call parquet_split_key_value(tline, key, cvalue)
-                select case (parquet_to_lower(key))
+                call parquet_to_lower(key, tlo33)
+                select case (tlo33)
                 case ("min")
                     call parquet_set_qc_bound(tmp(n)%has_qc_min, tmp(n)%qc_min_op, tmp(n)%qc_min_raw, cvalue, ">=")
                     cycle
@@ -721,24 +771,32 @@ contains
             call parquet_split_key_value(tline, key, cvalue)
             if (len_trim(key) == 0) cycle
 
-            select case (parquet_to_lower(key))
+            call parquet_to_lower(key, tlo34)
+            select case (tlo34)
             case ("name")
-                tmp(n)%name = parquet_unquote(cvalue)
+                call parquet_unquote(cvalue, tuq35)
+                tmp(n)%name = tuq35
             case ("unit")
-                tmp(n)%unit = parquet_unquote(cvalue)
-                if (parquet_to_lower(tmp(n)%unit) == "unitless") tmp(n)%unit = ""
+                call parquet_unquote(cvalue, tuq36)
+                tmp(n)%unit = tuq36
+                call parquet_to_lower(tmp(n)%unit, tlo37)
+                if (tlo37 == "unitless") tmp(n)%unit = ""
             case ("info")
-                tmp(n)%info = parquet_unquote(cvalue)
+                call parquet_unquote(cvalue, tuq38)
+                tmp(n)%info = tuq38
             case ("ucd")
                 if (len_trim(cvalue) > 0) then
-                    tmp(n)%ucd = parquet_unquote(cvalue)
+                    call parquet_unquote(cvalue, tuq39)
+                    tmp(n)%ucd = tuq39
                 else
                     tmp(n)%ucd = ""
                     in_field_list = .true.
                     field_list_key = "ucd"
                 end if
             case ("data_type")
-                cvalue = parquet_to_lower(parquet_unquote(cvalue))
+                call parquet_unquote(cvalue, tuq40)
+                call parquet_to_lower(tuq40, tlo41)
+                cvalue = tlo41
                 if (index(cvalue, "string") == 1) then
                     cvalue = "string"
                 end if
@@ -965,6 +1023,7 @@ contains
         type(parquet_maml_col_map_entry), allocatable :: tmp(:)
         character(len=:), allocatable :: tline, key, cvalue
         integer :: i, n, idx_extra, extra_end, idx_col_map, n_entries
+        character(len=:), allocatable :: tuq1, tuq2 !! scratch (unquote).
 
         allocate(col_map(0))
 
@@ -1018,8 +1077,10 @@ contains
             n_entries = size(col_map)
             allocate(tmp(n_entries + 1))
             if (n_entries > 0) tmp(1:n_entries) = col_map
-            tmp(n_entries + 1)%internal_name = parquet_unquote(key)
-            tmp(n_entries + 1)%output_name = parquet_unquote(cvalue)
+            call parquet_unquote(key, tuq1)
+            tmp(n_entries + 1)%internal_name = tuq1
+            call parquet_unquote(cvalue, tuq2)
+            tmp(n_entries + 1)%output_name = tuq2
             call move_alloc(tmp, col_map)
         end do
         call parquet_maml_unlock()
@@ -1030,6 +1091,7 @@ contains
         character(len=:), allocatable, intent(out) :: names(:) !! trimmed, unquoted protected column names.
         character(len=:), allocatable :: tmp(:)
         character(len=:), allocatable :: tline, key, cvalue, token
+        character(len=:), allocatable :: key_lower, unquoted
         integer :: i, n, idx_extra, extra_end, idx_key, n_names, p, sep
         integer :: maxlen
 
@@ -1063,7 +1125,8 @@ contains
             if (len_trim(lines(i)) == 0) cycle
             tline = trim(adjustl(lines(i)))
             call parquet_split_key_value(tline, key, cvalue)
-            if (parquet_to_lower(trim(key)) == "protected_cols") then
+            call parquet_to_lower(trim(key), key_lower)
+            if (key_lower == "protected_cols") then
                 idx_key = i
                 exit
             end if
@@ -1085,7 +1148,8 @@ contains
                     token = cvalue(p:p+sep-2)
                     p = p + sep
                 end if
-                token = trim(adjustl(parquet_unquote(token)))
+                call parquet_unquote(token, unquoted)
+                token = trim(adjustl(unquoted))
                 if (len_trim(token) > 0) then
                     n_names = size(names)
                     allocate(character(len=len(names)) :: tmp(n_names + 1))
@@ -1104,7 +1168,8 @@ contains
             tline = trim(adjustl(lines(i)))
             if (tline(1:1) /= "-") exit
             tline = trim(adjustl(tline(2:)))
-            token = trim(adjustl(parquet_unquote(tline)))
+            call parquet_unquote(tline, unquoted)
+            token = trim(adjustl(unquoted))
             if (len_trim(token) == 0) cycle
 
             n_names = size(names)

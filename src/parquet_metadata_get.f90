@@ -58,7 +58,7 @@ contains
         logical, intent(out) :: val !! parsed value; only meaningful when ok is .true.
         character(len=:), allocatable :: t
 
-        t = parquet_to_lower(trim(adjustl(str)))
+        call parquet_to_lower(trim(adjustl(str)), t)
         if (t == "true") then
             val = .true.
             ok = .true.

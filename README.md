@@ -164,7 +164,7 @@ Hitting a build or link error? See [Troubleshooting](doc/pages/troubleshooting.m
 
 A quick index of the public `use parquet` API. For the full per-procedure reference, generate the API docs locally with FORD (see [Contributing](#contributing)); for usage, see the linked how-to sections in the [user guide](doc/pages/index.md).
 
-**Types:** `parquet_writer`, `parquet_reader`, `parquet_schema`, `parquet_filter`, `parquet_column_info`, `parquet_column_type`, `parquet_table_metadata`, `parquet_maml_file`
+**Types:** `parquet_writer`, `parquet_reader`, `parquet_schema`, `parquet_filter`, `parquet_column_info`, `parquet_column_type`, `parquet_table_metadata`, `parquet_maml_file`, `parquet_string_column`
 
 **Utility:** `parquet_get_version`, `parquet_set_max_threads`
 
@@ -179,6 +179,8 @@ A quick index of the public `use parquet` API. For the full per-procedure refere
 **Reader — column data:** `parquet_read_column`, `parquet_read_array_row_mode`, `parquet_read_array_element_mode`
 
 **Reader — streaming row groups:** `parquet_read_column_chunk`, `parquet_get_chunk_size` — an alternative to `parquet_read_column` for a column too large to hold as one complete array; see [Streaming/chunked reads](doc/pages/reading.md#streamingchunked-reads)
+
+**Compact string columns:** `parquet_string_column` — a scalar `string` column can be written/read via `parquet_write_column`/`parquet_read_column` (and their chunked counterparts) as a `parquet_string_column` instead of a padded `character(len=...)` array, with no pre-sizing needed; see [Reading and writing compact string columns](doc/pages/string-columns.md#reading-and-writing-compact-string-columns)
 
 ## Limitations
 

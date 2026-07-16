@@ -33,7 +33,9 @@ Notes:
 - `parquet_get_nrows` returns the number of table rows.
 - Allocate output arrays before calling `parquet_read_column`. Its row count (`size(values)` for a plain column, `size(values, 2)` for a vector column) must match `parquet_get_nrows` exactly, or it fails immediately with `error stop`, naming the column and both row counts.
 - `name` must be a column that actually exists in the file — this is checked for every procedure that takes a column name (`parquet_read_column`, `parquet_get_col_size`, `parquet_get_column_total_elements`, `parquet_get_string_length`, `parquet_read_array_row_mode`, `parquet_read_array_element_mode`), each failing immediately with `error stop` naming the missing column.
-- For string columns, choose a fixed string length that is large enough for your data.
+- For string columns, choose a fixed string length that is large enough for your data — or read
+  into a `type(parquet_string_column)` instead, which needs no pre-sizing; see
+  [Reading and writing compact string columns](string-columns.html#reading-and-writing-compact-string-columns).
 - For vector columns, allocate 2D arrays with shape `(col_size, nrows)`.
 - A vector column may be stored on disk either as a `fixed_size_list` (what this library's own writer emits) or as a variable-length `list<element>` (the Parquet `LIST` layout many other producers use — including its legacy 2-level and non-standard inner-element-name variants, which Arrow's reader normalizes to the same `list` type); both are read back identically. The only requirement is that every row's vector has the same length (so it fits the `(col_size, nrows)` shape); a genuinely ragged `list` column (rows of differing length) is rejected with `error stop`. `col_size` is inferred from the data in either case.
 
@@ -248,6 +250,8 @@ call parquet_close_reader(reader)
 **Stateless, random access:** unlike the write side's `parquet_new_row_group`/`parquet_finish_row_group` pairing, there is no "currently open" row group to track — call `parquet_read_column_chunk` with any `row_group`, in any order, as many times as you like, for any column, independent of any other chunked read on the same reader.
 
 **Type matching:** like `parquet_write_column_chunk` (and unlike `parquet_write_column`/`parquet_read_column`), there is no cross-numeric-type conversion on this path — `values`' own kind must match the column's actual stored type exactly.
+
+**Compact string columns:** a scalar `string` column can also be chunk-read into a `type(parquet_string_column)` (`values` is cleared, then filled with just that row group's rows) — see [Reading and writing compact string columns](string-columns.html#reading-and-writing-compact-string-columns).
 
 **Not compatible with `filter`:** a reader opened with [`filter=`](#row-filtering-with-parquet_filter) fails immediately with `error stop` if you call `parquet_read_column_chunk` on it. The filter mask is a single flat mask covering the whole unfiltered file, with no row-group structure of its own — there's no coherent way to say "this filtered subset of row group N". Open a second, unfiltered reader for the chunked pass if you need both.
 

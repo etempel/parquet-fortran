@@ -1029,6 +1029,25 @@ contains
         end do
     end procedure parquet_read_string_array_full
 
+    !> Compact (parquet_string_column) specific of parquet_read_column: clears `values` then
+    !> bulk-appends the whole column straight from its own decoded offsets/data/validity buffers
+    !> (parquet_read_string_column_buffers), instead of copying one string at a time into a
+    !> fixed-width padded array. Every Null lands as values%append_null() -- there is no
+    !> null_value/is_valid to plumb through here, unlike every other parquet_read_column specific.
+    module procedure parquet_read_string_column_compact
+        integer(int64) :: nrows, nchars
+        type(c_ptr) :: offsets_ptr, data_ptr, validity_ptr
+        integer(c_int8_t) :: offsets_int32_flag
+
+        call check_reader_open(reader, "parquet_read_column")
+        call check_column_exists(reader, name, "parquet_read_column")
+        call values%clear()
+        call parquet_read_string_column_buffers(reader%handle, trim(name)//char(0), nrows, nchars, &
+            offsets_ptr, data_ptr, validity_ptr, offsets_int32_flag)
+        call values%append_buffers(nrows, nchars, offsets_ptr, data_ptr, validity_ptr, &
+            offsets_int32_flag /= 0_c_int8_t)
+    end procedure parquet_read_string_column_compact
+
     !> Shared body of parquet_read_int32_array_row_mode/_row_index_int64 -- see the generic
     !> interface's own doc comment in parquet.f90 for why row_index has two kind-specifics.
     subroutine parquet_read_int32_array_row_mode_impl(reader, name, values, row_index, null_value, is_valid)
@@ -1780,6 +1799,38 @@ contains
             end do
         end do
     end subroutine parquet_read_string_array_column_chunk_impl
+
+    !> Shared body of parquet_read_string_column_chunk_compact_rg32/_rg64 -- see the generic
+    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics, and
+    !> parquet_read_string_column_compact's own doc comment for the parquet_string_column notes
+    !> shared with this chunked counterpart.
+    subroutine parquet_read_string_column_chunk_compact_impl(reader, name, row_group, values)
+        type(parquet_reader), intent(in) :: reader
+        character(len=*), intent(in) :: name
+        integer(int64), intent(in) :: row_group
+        type(parquet_string_column), intent(inout) :: values
+        integer(int64) :: nrows, nchars
+        type(c_ptr) :: offsets_ptr, data_ptr, validity_ptr
+        integer(c_int8_t) :: offsets_int32_flag
+
+        call check_reader_open(reader, "parquet_read_column_chunk")
+        call check_column_exists(reader, name, "parquet_read_column_chunk")
+        call check_reader_no_filter(reader, "parquet_read_column_chunk")
+        call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
+        call values%clear()
+        call parquet_read_string_column_chunk_buffers(reader%handle, trim(name)//char(0), row_group, nrows, nchars, &
+            offsets_ptr, data_ptr, validity_ptr, offsets_int32_flag)
+        call values%append_buffers(nrows, nchars, offsets_ptr, data_ptr, validity_ptr, &
+            offsets_int32_flag /= 0_c_int8_t)
+    end subroutine parquet_read_string_column_chunk_compact_impl
+
+    module procedure parquet_read_string_column_chunk_compact_rg32
+        call parquet_read_string_column_chunk_compact_impl(reader, name, int(row_group, kind=int64), values)
+    end procedure parquet_read_string_column_chunk_compact_rg32
+
+    module procedure parquet_read_string_column_chunk_compact_rg64
+        call parquet_read_string_column_chunk_compact_impl(reader, name, row_group, values)
+    end procedure parquet_read_string_column_chunk_compact_rg64
 
     module procedure parquet_read_int32_column_chunk_rg32
         call parquet_read_int32_column_chunk_impl(reader, name, int(row_group, kind=int64), values, null_value, &

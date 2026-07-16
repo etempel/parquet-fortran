@@ -70,6 +70,8 @@ program error_scenarios
         call scenario_write_undeclared_column_logical()
     case ("write_undeclared_column_string")
         call scenario_write_undeclared_column_string()
+    case ("write_undeclared_column_string_compact")
+        call scenario_write_undeclared_column_string_compact()
     case ("write_undeclared_column_int32_matrix")
         call scenario_write_undeclared_column_int32_matrix()
     case ("write_undeclared_column_int64_matrix")
@@ -116,6 +118,8 @@ program error_scenarios
         call scenario_write_chunk_undeclared_column_logical()
     case ("write_chunk_undeclared_column_string")
         call scenario_write_chunk_undeclared_column_string()
+    case ("write_chunk_undeclared_column_string_compact")
+        call scenario_write_chunk_undeclared_column_string_compact()
     case ("write_chunk_undeclared_column_int32_matrix")
         call scenario_write_chunk_undeclared_column_int32_matrix()
     case ("write_chunk_undeclared_column_int64_matrix")
@@ -460,6 +464,12 @@ program error_scenarios
         call scenario_string_handle_stale_index()
     case ("string_column_append_buffers_offset_not_zero")
         call scenario_string_column_append_buffers_offset_not_zero()
+    case ("string_column_append_buffers_offset_not_zero_int32")
+        call scenario_string_column_append_buffers_offset_not_zero_int32()
+    case ("compact_string_write_requires_scalar_column")
+        call scenario_compact_string_write_requires_scalar_column()
+    case ("compact_string_write_chunk_requires_scalar_column")
+        call scenario_compact_string_write_chunk_requires_scalar_column()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -558,6 +568,21 @@ contains
         call parquet_write_column(writer, "not_a_real_column", data)
         call parquet_close_writer(writer)
     end subroutine scenario_write_undeclared_column_string
+
+    !> Same as scenario_write_undeclared_column_string, but via a compact (parquet_string_column)
+    !! write -- a distinct source line/subroutine (parquet_write_string_column_compact), so needs
+    !! its own scenario for coverage.
+    subroutine scenario_write_undeclared_column_string_compact()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_string_column) :: col
+
+        call col%append_string("aa")
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_undeclared_string_compact.parquet", schema)
+        call parquet_write_column(writer, "not_a_real_column", col)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_undeclared_column_string_compact
 
     subroutine scenario_write_undeclared_column_int32_matrix()
         type(parquet_schema) :: schema
@@ -830,6 +855,22 @@ contains
         call parquet_write_column_chunk(writer, "not_a_real_column", data)
         call parquet_close_writer(writer)
     end subroutine scenario_write_chunk_undeclared_column_string
+
+    !> Same as scenario_write_chunk_undeclared_column_string, but via a compact
+    !! (parquet_string_column) chunk write -- a distinct source line/subroutine
+    !! (parquet_write_string_column_chunk_compact), so needs its own scenario for coverage.
+    subroutine scenario_write_chunk_undeclared_column_string_compact()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_string_column) :: col
+
+        call col%append_string("aa")
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, &
+            "test_run/error_scenario_chunk_undeclared_string_compact.parquet", schema)
+        call parquet_write_column_chunk(writer, "not_a_real_column", col)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_chunk_undeclared_column_string_compact
 
     subroutine scenario_write_chunk_undeclared_column_int32_matrix()
         type(parquet_schema) :: schema
@@ -4095,5 +4136,52 @@ contains
         call col%append_buffers(2_int64, 3_int64, c_loc(off64), c_loc(dat), c_null_ptr, .false.)
         print '(a,i0)', "unexpectedly accepted un-rebased offsets, size=", col%size()
     end subroutine scenario_string_column_append_buffers_offset_not_zero
+
+    !> Same as scenario_string_column_append_buffers_offset_not_zero, but with int32 source
+    !! offsets (offsets_int32=.true.) instead of int64 -- a distinct source line (append_buffers
+    !! has one guard per branch), so needs its own scenario for coverage.
+    subroutine scenario_string_column_append_buffers_offset_not_zero_int32()
+        use, intrinsic :: iso_c_binding, only : c_loc, c_null_ptr
+        type(parquet_string_column) :: col
+        integer(int32), target :: off32(3)
+        character(len=1), target :: dat(4)
+        off32 = [1_int32, 3_int32, 4_int32]   ! first entry is 1, not 0 -> not rebased
+        dat = [character(len=1) :: "a", "b", "c", "d"]
+        call col%append_buffers(2_int64, 3_int64, c_loc(off32), c_loc(dat), c_null_ptr, .true.)
+        print '(a,i0)', "unexpectedly accepted un-rebased int32 offsets, size=", col%size()
+    end subroutine scenario_string_column_append_buffers_offset_not_zero_int32
+
+    !> Compact (parquet_string_column) write into a schema-declared vector (col_size>1) string
+    !> column aborts -- the compact path is scalar-only (see parquet_write_column's own doc
+    !> comment in parquet.f90).
+    subroutine scenario_compact_string_write_requires_scalar_column()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_string_column) :: col
+
+        call col%append_string("a")
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_compact_string_vector_column.parquet", schema)
+        call parquet_write_column(writer, "str", col)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote a compact string column into a vector (col_size>1) schema field"
+    end subroutine scenario_compact_string_write_requires_scalar_column
+
+    !> Same as scenario_compact_string_write_requires_scalar_column, but via the chunked
+    !> (parquet_write_column_chunk) path.
+    subroutine scenario_compact_string_write_chunk_requires_scalar_column()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_string_column) :: col
+
+        call col%append_string("a")
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, &
+            "test_run/error_scenario_compact_string_chunk_vector_column.parquet", schema)
+        call parquet_new_row_group(writer, 1_int64)
+        call parquet_write_column_chunk(writer, "str", col)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote a compact string column chunk into a vector (col_size>1) schema field"
+    end subroutine scenario_compact_string_write_chunk_requires_scalar_column
 
 end program error_scenarios

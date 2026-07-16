@@ -167,7 +167,17 @@ contains
             new_unittest("streaming row-group write: every type/shape (incl. logical/string) round-trips " // &
                 "with is_valid+qc branches exercised", test_streaming_write_all_types_roundtrip), &
             new_unittest("streaming row-group write: col_size>1 string column via a flat rank-1 array round-trips", &
-                test_streaming_write_string_flat_vector_chunk) &
+                test_streaming_write_string_flat_vector_chunk), &
+            new_unittest("compact (parquet_string_column) string round-trip, incl. nulls/empty strings", &
+                test_compact_string_roundtrip), &
+            new_unittest("compact string write is readable via the padded path, and vice versa", &
+                test_compact_string_cross_path_compat), &
+            new_unittest("compact string chunked write/read round-trips across multiple row groups", &
+                test_compact_string_chunked_roundtrip), &
+            new_unittest("compact string write under qc=.true. warns (does not abort) on a violation", &
+                test_compact_string_qc_warning), &
+            new_unittest("compact string read reflects an active row filter", &
+                test_compact_string_filter_read) &
             ]
         !
     end subroutine collect_tests_parquet_writing
@@ -2703,5 +2713,229 @@ contains
             test_data(i)%flag_arr = [(mod(i+j,2) == 0, j=1,6)]
         end do
     end subroutine init_test_data
+    !
+    !> Compact (parquet_string_column) write/read round-trip, including a Null and an empty
+    !> string. Deliberately shortest element first, then longer ones (see CLAUDE.md's
+    !> "Regression tests for 'sized/typed from the first element' bugs" guidance) -- not that the
+    !> compact path has any fixed-width sizing to get wrong, but this keeps the fixture honest.
+    subroutine test_compact_string_roundtrip(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_string_column) :: col, back
+        character(len=:), allocatable :: s
+        character(len=*), parameter :: out_file = "test_run/test_compact_string_roundtrip.parquet"
+
+        call col%append_string("")
+        call col%append_string("a much longer second value")
+        call col%append_null()
+        call col%append_string("third")
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "name", col)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "name", back)
+        call parquet_close_reader(reader)
+
+        call check(error, back%size() == 4_int64, "compact string round-trip: wrong row count")
+        if (allocated(error)) return
+        call check(error, back%null_count() == 1_int64, "compact string round-trip: wrong null count")
+        if (allocated(error)) return
+        call check(error, (.not. back%is_null(1)) .and. back%is_empty(1), "compact string round-trip: row 1 (empty)")
+        if (allocated(error)) return
+        call back%get(2, s)
+        call check(error, s == "a much longer second value", "compact string round-trip: row 2 content")
+        if (allocated(error)) return
+        call check(error, back%is_null(3), "compact string round-trip: row 3 should be Null")
+        if (allocated(error)) return
+        call back%get(4, s)
+        call check(error, s == "third", "compact string round-trip: row 4 content")
+    end subroutine test_compact_string_roundtrip
+
+    !> A file is fully interchangeable between the two Fortran-side string representations --
+    !> both are just Parquet BYTE_ARRAY on disk (see doc/pages/string-columns.md's "Reading and
+    !> writing compact string columns"): a compact write must read back correctly via the padded
+    !> character(len=...) path, and a padded write must read back correctly via the compact path.
+    subroutine test_compact_string_cross_path_compat(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_string_column) :: col, back
+        character(len=5) :: padded_values(3)
+        character(len=16) :: padded_back(3)
+        character(len=:), allocatable :: s
+        character(len=*), parameter :: file1 = "test_run/test_compact_write_padded_read.parquet"
+        character(len=*), parameter :: file2 = "test_run/test_padded_write_compact_read.parquet"
+
+        ! compact write -> padded read
+        call col%append_string("alpha")
+        call col%append_string("beta")
+        call col%append_null()
+
+        call parquet_open_writer(writer, file1)
+        call parquet_write_column(writer, "name", col)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, file1)
+        call parquet_read_column(reader, "name", padded_back, null_value="NA")
+        call parquet_close_reader(reader)
+
+        call check(error, trim(padded_back(1)) == "alpha" .and. trim(padded_back(2)) == "beta" .and. &
+            trim(padded_back(3)) == "NA", "compact write not readable via the padded path")
+        if (allocated(error)) return
+
+        ! padded write -> compact read
+        padded_values = ["gamma", "delta", "     "]
+
+        call parquet_open_writer(writer, file2)
+        call parquet_write_column(writer, "name", padded_values, is_valid=[.true., .true., .false.])
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, file2)
+        call parquet_read_column(reader, "name", back)
+        call parquet_close_reader(reader)
+
+        call check(error, back%size() == 3_int64, "padded write not readable via the compact path (size)")
+        if (allocated(error)) return
+        call back%get(1, s)
+        call check(error, s == "gamma", "padded write not readable via the compact path (row 1)")
+        if (allocated(error)) return
+        call check(error, back%is_null(3), "padded write not readable via the compact path (row 3 Null)")
+    end subroutine test_compact_string_cross_path_compat
+
+    !> Chunked write (parquet_new_row_group/parquet_write_column_chunk/parquet_finish_row_group)
+    !> of two parquet_string_column row groups, read back both chunk-by-chunk (parquet_read_
+    !> column_chunk) and as a whole column (parquet_read_column, which forces combine_column_
+    !> chunks' multi-chunk arrow::Concatenate path in parquet_wrapper.cpp, since the file now has
+    !> more than one row group).
+    subroutine test_compact_string_chunked_roundtrip(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_string_column) :: chunk1, chunk2, back, whole
+        character(len=:), allocatable :: s
+        character(len=*), parameter :: out_file = "test_run/test_compact_string_chunked.parquet"
+        integer(int64) :: row_group2
+
+        call chunk1%append_string("row1")
+        call chunk1%append_null()
+        call chunk2%append_string("row3")
+        call chunk2%append_string("row4 longer value")
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_new_row_group(writer, 2_int64)
+        call parquet_write_column_chunk(writer, "name", chunk1)
+        call parquet_finish_row_group(writer)
+        call parquet_new_row_group(writer, 2_int64)
+        call parquet_write_column_chunk(writer, "name", chunk2)
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        ! row_group=1 as a plain (int32) literal exercises the _rg32 specific.
+        call parquet_read_column_chunk(reader, "name", 1, back)
+        call check(error, back%size() == 2_int64 .and. (.not. back%is_null(1)) .and. back%is_null(2), &
+            "compact chunked read: row group 1 mismatch")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+
+        ! row_group=2 as an explicit integer(int64) exercises the _rg64 specific.
+        row_group2 = 2_int64
+        call parquet_read_column_chunk(reader, "name", row_group2, back)
+        call back%get(2, s)
+        call check(error, back%size() == 2_int64 .and. s == "row4 longer value", &
+            "compact chunked read: row group 2 mismatch")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+
+        call parquet_read_column(reader, "name", whole)
+        call parquet_close_reader(reader)
+
+        call check(error, whole%size() == 4_int64, "compact whole-column read after chunked write: wrong size")
+        if (allocated(error)) return
+        call whole%get(1, s)
+        call check(error, s == "row1", "compact whole-column read after chunked write: row 1")
+        if (allocated(error)) return
+        call check(error, whole%null_count() == 1_int64, "compact whole-column read after chunked write: null count")
+    end subroutine test_compact_string_chunked_roundtrip
+
+    !> A qc: min:/max: violation on a compact string write warns (prints to stdout) but must not
+    !> abort the write or corrupt the file -- exercises parquet_check_qc_string_compact's
+    !> has_qc_min and has_qc_max branches (both the per-row check and the bounds_desc message
+    !> building) together, since both are declared here. Doesn't assert on the printed WARNING
+    !> text itself (that formatting is already covered by the padded path's own qc string tests);
+    !> this only proves the compact write's qc call site is wired up and non-fatal.
+    subroutine test_compact_string_qc_warning(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_string_column) :: col, back
+        character(len=*), parameter :: out_file = "test_run/test_compact_string_qc_warning.parquet"
+
+        call schema%init(table="compact_qc_table")
+        call schema%add_field("name", "string", qc_min="a", qc_max="m")
+        call parquet_parse_maml(schema)
+
+        call col%append_string("apple")
+        call col%append_string("zebra") ! lexicographically > "m" -> qc violation (WARNING only)
+
+        call parquet_open_writer(writer, out_file, schema, qc=.true.)
+        call parquet_write_column(writer, "name", col)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "name", back)
+        call parquet_close_reader(reader)
+
+        call check(error, back%size() == 2_int64, &
+            "compact string qc violation (WARNING only) should not abort the write or corrupt the data")
+    end subroutine test_compact_string_qc_warning
+
+    !> A reader opened with an active row filter transparently narrows a compact string read to
+    !> just the matching rows, exercising apply_filter_mask's arrow::compute::Filter branch
+    !> through the new buffer-extraction read path (see extract_string_buffers's own comment on
+    !> why this matters: Filter always produces a fresh, offset()==0 array).
+    subroutine test_compact_string_filter_read(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        type(parquet_string_column) :: col, back
+        integer(int32) :: id(4)
+        character(len=:), allocatable :: s
+        character(len=*), parameter :: out_file = "test_run/test_compact_string_filter.parquet"
+        integer :: i
+
+        id = [(i, i=1,4)]
+        call col%append_string("one")
+        call col%append_string("two")
+        call col%append_string("three")
+        call col%append_string("four")
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_write_column(writer, "name", col)
+        call parquet_close_writer(writer)
+
+        call filt%add("id > 2")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        call parquet_read_column(reader, "name", back)
+        call parquet_close_reader(reader)
+
+        call check(error, back%size() == 2_int64, "compact string read under a row filter: wrong row count")
+        if (allocated(error)) return
+        call back%get(1, s)
+        call check(error, s == "three", "compact string read under a row filter: row 1 content")
+        if (allocated(error)) return
+        call back%get(2, s)
+        call check(error, s == "four", "compact string read under a row filter: row 2 content")
+    end subroutine test_compact_string_filter_read
     !
 end module test_writing

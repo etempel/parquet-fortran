@@ -1001,6 +1001,77 @@ contains
             fmt_int // " of " // fmt_int2 // " valid element(s) out of range"
     end subroutine parquet_check_qc_string
 
+    !> Same as parquet_check_qc_string but reading from a parquet_string_column source directly
+    !> (the compact write path, parquet_write_string_column_compact/_chunk_compact) instead of
+    !> requiring a pre-materialized character(len=*) array -- so a compact write never needs a
+    !> padded intermediate just to run this check. Unlike parquet_check_qc_string (which compares
+    !> trimmed values, since a padded array's trailing blanks may just be padding), values here
+    !> are compared verbatim: parquet_string_column stores content exactly as given, so a
+    !> trailing space is always real data, never padding -- see "Trimming on append" in
+    !> doc/pages/string-columns.md.
+    subroutine parquet_check_qc_string_compact(writer, name, values)
+        type(parquet_writer), intent(in) :: writer !! open (schema-enforced) writer.
+        character(len=*), intent(in) :: name !! string column name.
+        type(parquet_string_column), intent(in) :: values !! the compact column being written.
+        integer :: idx
+        integer(int64) :: i, n_valid, n_violate, nrows
+        logical :: any_valid, ok
+        character(len=:), allocatable :: data_min, data_max, bounds_desc, fmt_int, fmt_int2, s
+
+        if (.not. writer%qc) return
+        if (.not. writer%is_schema_enforced) return
+        idx = parquet_get_defined_column_index(writer, name)
+        if (idx == 0) return
+        if (.not. (writer%all_columns(idx)%has_qc_min .or. writer%all_columns(idx)%has_qc_max)) return
+
+        any_valid = .false.
+        n_valid = 0_int64
+        n_violate = 0_int64
+        nrows = values%size()
+        do i = 1_int64, nrows
+            if (values%is_null(i)) cycle
+            call values%get(i, s)
+            n_valid = n_valid + 1
+            if (.not. any_valid) then
+                data_min = s
+                data_max = s
+                any_valid = .true.
+            else
+                if (s < data_min) data_min = s
+                if (s > data_max) data_max = s
+            end if
+
+            ok = .true.
+            if (writer%all_columns(idx)%has_qc_min) then
+                ok = ok .and. parquet_qc_string_satisfies( &
+                    s, trim(writer%all_columns(idx)%qc_min_raw), writer%all_columns(idx)%qc_min_op)
+            end if
+            if (writer%all_columns(idx)%has_qc_max) then
+                ok = ok .and. parquet_qc_string_satisfies( &
+                    s, trim(writer%all_columns(idx)%qc_max_raw), writer%all_columns(idx)%qc_max_op)
+            end if
+            if (.not. ok) n_violate = n_violate + 1
+        end do
+        if (.not. any_valid .or. n_violate == 0) return
+
+        bounds_desc = ""
+        if (writer%all_columns(idx)%has_qc_min) then
+            bounds_desc = "min " // trim(writer%all_columns(idx)%qc_min_op) // " '" // &
+                trim(writer%all_columns(idx)%qc_min_raw) // "'"
+        end if
+        if (writer%all_columns(idx)%has_qc_max) then
+            if (len_trim(bounds_desc) > 0) bounds_desc = bounds_desc // ", "
+            bounds_desc = bounds_desc // "max " // trim(writer%all_columns(idx)%qc_max_op) // " '" // &
+                trim(writer%all_columns(idx)%qc_max_raw) // "'"
+        end if
+
+        call parquet_qc_format_int(n_violate, fmt_int)
+        call parquet_qc_format_int(n_valid, fmt_int2)
+        print '(a)', "WARNING: qc violation for column '" // trim(name) // "': declared " // bounds_desc // &
+            ", data range ['" // data_min // "', '" // data_max // "'], " // &
+            fmt_int // " of " // fmt_int2 // " valid element(s) out of range"
+    end subroutine parquet_check_qc_string_compact
+
     !> Errors out if `name`'s column is listed under extra: protected_cols:
     !> (see parquet_parse_protected_cols) and `is_valid_flat` contains any
     !> .false. entry. A no-op for a schema-less writer or an unlisted column.
@@ -1689,6 +1760,62 @@ contains
             asize, &
             valid_ptr )
     end procedure parquet_write_string_matrix_column
+
+    module procedure parquet_write_string_column_compact
+        integer(int64) :: nrows, nchars, i
+        integer :: idx
+        type(c_ptr) :: offsets_ptr, data_ptr, validity_ptr
+        logical :: has_validity
+        logical, allocatable :: is_valid_flat(:)
+        character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
+        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
+        call check_writer_open(writer)
+
+        if (writer%is_schema_enforced) then
+            idx = parquet_get_defined_column_index(writer, name)
+            call writer_context_suffix(writer, ctx)
+            if (idx == 0) error stop &
+                "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // ctx
+            if (.not. writer%all_columns(idx)%is_set) return
+        end if
+
+        call parquet_assert_column_type(writer, name, "string")
+
+        if (writer%is_schema_enforced) then
+            if (parquet_get_column_col_size(writer, name) /= 1) then
+                call writer_context_suffix(writer, ctx)
+                error stop "parquet_write_column: a parquet_string_column write requires a scalar " // &
+                    "(col_size=1) column: " // trim(name) // ctx
+            end if
+        end if
+
+        if (.not. parquet_is_column_enabled(writer, name)) return
+        call parquet_mark_column_written(writer, name)
+
+        nrows = values%size()
+        if (nrows <= 0_int64) return
+        call parquet_check_row_count(writer, name, nrows)
+
+        if (values%null_count() > 0_int64) then
+            allocate(is_valid_flat(nrows))
+            do i = 1_int64, nrows
+                is_valid_flat(i) = .not. values%is_null(i)
+            end do
+            call parquet_check_protected(writer, name, is_valid_flat)
+        end if
+        call parquet_check_qc_string_compact(writer, name, values)
+
+        call values%raw_buffers(offsets_ptr, data_ptr, validity_ptr, nrows, nchars, has_validity)
+        call parquet_resolve_output_name(writer, name, outname)
+        call parquet_append_string_column_buffers(&
+            writer%handle, &
+            trim(outname)//char(0), &
+            nrows, &
+            nchars, &
+            offsets_ptr, &
+            data_ptr, &
+            validity_ptr )
+    end procedure parquet_write_string_column_compact
 
     !> Validates that a parquet_write_column_chunk call's own row count (`nrows`, from the shape
     !> of its `values`) matches the currently-open row group's own size
@@ -2480,6 +2607,63 @@ contains
             asize, &
             valid_ptr )
     end procedure parquet_write_string_matrix_column_chunk
+
+    module procedure parquet_write_string_column_chunk_compact
+        integer(int64) :: nrows, nchars, i
+        integer :: idx
+        type(c_ptr) :: offsets_ptr, data_ptr, validity_ptr
+        logical :: has_validity
+        logical, allocatable :: is_valid_flat(:)
+        character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
+        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
+        call check_writer_open(writer)
+
+        if (writer%is_schema_enforced) then
+            idx = parquet_get_defined_column_index(writer, name)
+            call writer_context_suffix(writer, ctx)
+            if (idx == 0) error stop &
+                "parquet_write_column_chunk: column not defined in parquet_open_writer: " // &
+                trim(name) // ctx
+            if (.not. writer%all_columns(idx)%is_set) return
+        end if
+
+        call parquet_assert_column_type_exact(writer, name, "string")
+
+        if (writer%is_schema_enforced) then
+            if (parquet_get_column_col_size(writer, name) /= 1) then
+                call writer_context_suffix(writer, ctx)
+                error stop "parquet_write_column_chunk: a parquet_string_column write requires a " // &
+                    "scalar (col_size=1) column: " // trim(name) // ctx
+            end if
+        end if
+
+        if (.not. parquet_is_column_enabled(writer, name)) return
+
+        nrows = values%size()
+        if (nrows <= 0_int64) return
+        call parquet_check_row_group_row_count(writer, name, nrows)
+
+        if (values%null_count() > 0_int64) then
+            allocate(is_valid_flat(nrows))
+            do i = 1_int64, nrows
+                is_valid_flat(i) = .not. values%is_null(i)
+            end do
+            call parquet_check_protected(writer, name, is_valid_flat)
+        end if
+        call parquet_check_qc_string_compact(writer, name, values)
+        call parquet_chunk_mark_written_if_first(writer, name)
+
+        call values%raw_buffers(offsets_ptr, data_ptr, validity_ptr, nrows, nchars, has_validity)
+        call parquet_resolve_output_name(writer, name, outname)
+        call parquet_write_string_column_chunk_buffers(&
+            writer%handle, &
+            trim(outname)//char(0), &
+            nrows, &
+            nchars, &
+            offsets_ptr, &
+            data_ptr, &
+            validity_ptr )
+    end procedure parquet_write_string_column_chunk_compact
 
     module procedure parquet_finish_row_group
         call check_writer_open(writer)

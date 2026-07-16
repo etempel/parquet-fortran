@@ -67,6 +67,7 @@ scenarios=(
     "write_undeclared_column_float64:1"
     "write_undeclared_column_logical:1"
     "write_undeclared_column_string:1"
+    "write_undeclared_column_string_compact:1"
     "write_undeclared_column_int32_matrix:1"
     "write_undeclared_column_int64_matrix:1"
     "write_undeclared_column_float32_matrix:1"
@@ -90,6 +91,7 @@ scenarios=(
     "write_chunk_undeclared_column_float64:1"
     "write_chunk_undeclared_column_logical:1"
     "write_chunk_undeclared_column_string:1"
+    "write_chunk_undeclared_column_string_compact:1"
     "write_chunk_undeclared_column_int32_matrix:1"
     "write_chunk_undeclared_column_int64_matrix:1"
     "write_chunk_undeclared_column_float32_matrix:1"
@@ -270,6 +272,9 @@ scenarios=(
     "string_handle_unassociated:1"
     "string_handle_stale_index:1"
     "string_column_append_buffers_offset_not_zero:1"
+    "string_column_append_buffers_offset_not_zero_int32:1"
+    "compact_string_write_requires_scalar_column:1"
+    "compact_string_write_chunk_requires_scalar_column:1"
 )
 
 # concurrent_calls_into_shared_reader/writer are deliberately not in the list

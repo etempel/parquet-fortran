@@ -4,8 +4,9 @@
 # bounded to one column's data at a time). Not part of `fpm test`/CI: this is purely a manual
 # tool.
 #
-# Runs 12 cases (6 scalar + 6 vector, one per supported data type) via RUN_VECTOR_CASES = .true.
-# in app/test_large_scale.f90. A large NROWS*NELEM for a vector case is not a problem: Arrow/
+# Runs 13 cases (7 scalar + 6 vector, one per supported data type plus the compact
+# parquet_string_column scalar-only case) via RUN_VECTOR_CASES = .true. in app/test_large_scale.f90.
+# A large NROWS*NELEM for a vector case is not a problem: Arrow/
 # Parquet's real list-element-count ceiling (2^31-1, a plain int32_t counter in Parquet's own
 # repetition/definition-level generation; see check_chunk_size_fits_limit_for_col_size in
 # parquet_wrapper.cpp) is scoped to one row group, not the whole file, and

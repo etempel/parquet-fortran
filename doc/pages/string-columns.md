@@ -7,15 +7,22 @@ variable-length strings compactly, in the same Arrow-like layout Parquet uses fo
 `BYTE_ARRAY`/`STRING` columns. It is designed for tens to hundreds of millions of rows and
 multi-gigabyte payloads, with a minimal allocation count and good cache locality.
 
-It is an **independent module** — `use parquet_strings` depends only on `iso_fortran_env` and
-`iso_c_binding`, nothing else in this library. It is not (yet) wired into
-[`parquet_read_column`](reading.html)/[`parquet_write_column`](writing.html); the buffer-level
-interop hooks that will connect it are described in
-[Interop hooks for the read/write path](#interop-hooks-for-the-readwrite-path) below.
+It is an **independent module** at its core — `use parquet_strings` depends only on
+`iso_fortran_env` and `iso_c_binding`, nothing else in this library — but its `parquet_string_column`
+type is also wired directly into [`parquet_read_column`/`parquet_write_column`/`parquet_read_column_chunk`/
+`parquet_write_column_chunk`](reading.html#streamingchunked-reads) as an alternative to a padded
+`character(len=...)` array; see
+[Reading and writing compact string columns](#reading-and-writing-compact-string-columns) below.
 
 To use it, add parquet-fortran as an FPM dependency (see
 [Minimal setup to depend on this library](../index.html#minimal-setup-to-depend-on-this-library) in
-the README for the `fpm.toml` snippet) and `use parquet_strings` in your code.
+the README for the `fpm.toml` snippet) and `use parquet` — the compact read/write entry points and
+both types (`parquet_string_column` and `parquet_string`) are re-exported from the main module, so
+every feature below (`find`/`contains`, the interop hooks, everything) is reachable through the
+types themselves once you have them in scope. A separate `use parquet_strings` is only needed if
+you want this module *without* the rest of the library — e.g. a project that wants compact string
+storage but not the Arrow/Parquet C++ dependency `parquet` (via `parquet_bindings`) pulls in;
+`parquet_strings` on its own depends on nothing but `iso_fortran_env`/`iso_c_binding`.
 
 ## Why not an array of allocatable strings?
 
@@ -380,10 +387,74 @@ thread-safety rule that applies.
 | `set` (different length), `erase`, `strip_all`, `trim_all`, `clone`, `to_character`, `shrink_to_fit` | O(N) |
 | `move_from`, `swap`, `clear` | O(1) |
 
+## Reading and writing compact string columns
+
+`parquet_write_column`/`parquet_read_column` and their chunked counterparts
+(`parquet_write_column_chunk`/`parquet_read_column_chunk`) accept a `parquet_string_column`
+directly, as an alternative to a padded `character(len=...)` array — see
+[Reading a column](reading.html)/[Writing a column](writing.html) for the general read/write API;
+this section only covers what's different for the compact path.
+
+```fortran
+use parquet
+use iso_fortran_env, only: int64
+
+type(parquet_writer) :: writer
+type(parquet_reader) :: reader
+type(parquet_string_column) :: names, names_back
+
+call names%append_string("Alice")
+call names%append_string("Bob")
+call names%append_null()
+
+call parquet_open_writer(writer, "data.parquet")
+call parquet_write_column(writer, "name", names)
+call parquet_close_writer(writer)
+
+call parquet_open_reader(reader, "data.parquet")
+call parquet_read_column(reader, "name", names_back)   ! cleared, then filled
+call parquet_close_reader(reader)
+
+if (names_back%is_null(3)) ...   ! nulls come back as real Nulls, not a sentinel string
+```
+
+Differences from the padded `character(len=...)` path:
+
+- **No `is_valid`/`null_value` arguments.** `parquet_string_column` already tracks its own
+  per-element null status (`%append_null()` on write, `%is_null(i)` on read) — every Null in the
+  file becomes `%append_null()` in the column, and vice versa, with no separate mask to plumb
+  through.
+- **No pre-sizing.** On read, `values` is cleared and grown to fit — unlike a padded array, you
+  never need to know the row count (or the longest string's length —
+  [`parquet_get_string_length`](reading.html) has no role here) ahead of time.
+- **Scalar (1-D) columns only.** There is no vector/matrix `parquet_string_column` specific — a
+  vector-of-strings column still needs the padded `character(len=...), dimension(:,:)` path.
+- **File format is identical either way.** Parquet's `BYTE_ARRAY` physical type is always
+  variable-length; the padded path's fixed width is a Fortran-side convenience that never reaches
+  disk (trailing padding is trimmed before writing). A file written via one path reads back
+  correctly via the other.
+- **Chunked (streaming) write/read** work the same way, one `parquet_string_column` per row
+  group: `values` on a chunk write must hold exactly the currently-open row group's rows (like
+  every other `parquet_write_column_chunk` specific); on a chunk read, `values` is cleared and
+  filled with just the requested row group's rows.
+
+```fortran
+! streaming write, one row group at a time
+type(parquet_string_column) :: chunk
+
+call parquet_new_row_group(writer, nrows)
+call chunk%append_string(...)          ! exactly nrows rows for this row group
+call parquet_write_column_chunk(writer, "name", chunk)
+call parquet_finish_row_group(writer)
+
+! streaming read, one row group at a time
+call parquet_read_column_chunk(reader, "name", row_group, chunk)   ! cleared, then filled
+```
+
 ## Interop hooks for the read/write path
 
-Two advanced procedures expose the internal buffers for a future Parquet read/write bridge, so
-strings never have to be reconstructed on the I/O path:
+Two advanced procedures expose the internal buffers that back the read/write integration above —
+ordinary users of `parquet_write_column`/`parquet_read_column` never need to call them directly:
 
 - `raw_buffers(offsets_ptr, data_ptr, validity_ptr, nrows, nchars, has_validity)` — exports
   `c_loc` pointers to the internal offsets/data/validity buffers plus counts, for a writer to
@@ -399,8 +470,9 @@ strings never have to be reconstructed on the I/O path:
   (not detectable from a raw pointer), so a source bitmap with a non-byte-aligned logical start
   must likewise be repacked by the caller before calling this.
 
-These reference only `iso_c_binding`, keeping the module independent; the actual Arrow/Parquet
-glue will live in the read/write layer and merely call them. Ordinary users do not need them.
+These reference only `iso_c_binding`, keeping the module independent of the rest of this
+library — `parquet_write.f90`/`parquet_read.f90` (the read/write integration layer) are the only
+callers.
 
 ## Example: word-frequency-style ingestion
 

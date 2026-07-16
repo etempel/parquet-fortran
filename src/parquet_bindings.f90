@@ -27,6 +27,7 @@ module parquet_bindings
     public :: parquet_append_float32_column, parquet_append_float64_column
     public :: parquet_append_bool8_column
     public :: parquet_append_string_column, parquet_append_string_array_column
+    public :: parquet_append_string_column_buffers
     ! Local (Fortran-side) names deliberately differ from their bind(C, name="...") C++ symbol,
     ! same reason parquet_append_int32_column (this binding) differs from parquet_write_column
     ! (the public generic parquet.f90 exposes for it): parquet_write.f90 is a submodule of
@@ -37,6 +38,7 @@ module parquet_bindings
     public :: parquet_append_float32_column_chunk, parquet_append_float64_column_chunk
     public :: parquet_append_bool8_column_chunk
     public :: parquet_append_string_column_chunk, parquet_append_string_array_column_chunk
+    public :: parquet_write_string_column_chunk_buffers
     public :: parquet_reader_get_nrows, parquet_reader_get_total_nrows, parquet_reader_get_column_col_size
     public :: parquet_reader_get_column_total_elements, parquet_reader_get_string_length
     public :: parquet_reader_get_table_metadata_count
@@ -51,6 +53,7 @@ module parquet_bindings
     public :: parquet_read_int32_array_column, parquet_read_int64_array_column
     public :: parquet_read_float32_array_column, parquet_read_float64_array_column
     public :: parquet_read_bool8_array_column, parquet_read_string_array_column
+    public :: parquet_read_string_column_buffers
     public :: parquet_read_int32_array_row, parquet_read_int64_array_row
     public :: parquet_read_float32_array_row, parquet_read_float64_array_row
     public :: parquet_read_bool8_array_row, parquet_read_string_array_row
@@ -65,6 +68,7 @@ module parquet_bindings
     public :: parquet_read_int32_array_column_chunk, parquet_read_int64_array_column_chunk
     public :: parquet_read_float32_array_column_chunk, parquet_read_float64_array_column_chunk
     public :: parquet_read_bool8_array_column_chunk, parquet_read_string_array_column_chunk
+    public :: parquet_read_string_column_chunk_buffers
 
     interface
         !> Creates a new parquet writer for `filename` and returns its opaque handle.
@@ -228,6 +232,25 @@ module parquet_bindings
             type(c_ptr), value :: valid_in
         end subroutine
 
+        !> Appends one scalar string column straight from a parquet_string_column's own raw
+        !> buffers (see parquet_strings.f90's raw_buffers) -- the compact counterpart to
+        !> parquet_append_string_column, avoiding the fixed-width padded intermediate entirely.
+        !> `offsets` is nrows+1 int64 values (0-based, offsets(1)=0); `data` is nchars bytes;
+        !> `validity` is a bit-packed Arrow-style bitmap (LSB-first, 1=valid), or c_null_ptr when
+        !> the column has no nulls. Always builds arrow::large_utf8(), matching the source
+        !> column's own int64-offset storage.
+        subroutine parquet_append_string_column_buffers(writer, name, nrows, nchars, offsets, data, validity) &
+                bind(C, name="parquet_append_string_column_buffers")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nchars
+            type(c_ptr), value :: offsets
+            type(c_ptr), value :: data
+            type(c_ptr), value :: validity
+        end subroutine
+
         !> Starts a new row group of `nrows` rows on `writer` -- every column already known must
         !> then receive exactly one parquet_append_*_column_chunk call (or already be a whole
         !> column written via parquet_append_*_column) before parquet_writer_finish_row_group.
@@ -317,6 +340,23 @@ module parquet_bindings
             integer(c_long_long), value :: item_len
             integer(c_long_long), value :: col_size
             type(c_ptr), value :: valid_in
+        end subroutine
+
+        !> Writes one scalar string column's chunk straight from a parquet_string_column's own
+        !> raw buffers -- the compact counterpart to parquet_append_string_column_chunk. Same
+        !> buffer contract as parquet_append_string_column_buffers above; `nrows` must equal the
+        !> currently-open row group's own row count (checked Fortran-side before this is called).
+        !> Always uses arrow::large_utf8(), same as parquet_append_string_column_chunk.
+        subroutine parquet_write_string_column_chunk_buffers(writer, name, nrows, nchars, offsets, data, validity) &
+                bind(C, name="parquet_write_string_column_chunk_buffers")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nchars
+            type(c_ptr), value :: offsets
+            type(c_ptr), value :: data
+            type(c_ptr), value :: validity
         end subroutine
 
         !> Ends the currently-open row group, verifying every known column received data for it
@@ -656,6 +696,31 @@ module parquet_bindings
             integer(c_long_long), value :: nrows
             integer(c_long_long), value :: col_size
             type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Reads scalar string column `name` from `reader` as its own raw offsets/data/validity
+        !> buffers -- the compact counterpart to parquet_read_string_column, for handing straight
+        !> to parquet_string_column's append_buffers instead of copying one string at a time into
+        !> a fixed-width padded buffer. All five output arguments are plain (non-`value`) dummies,
+        !> so they are passed by reference/address, exactly like a C `T *` out-parameter -- the
+        !> only such outputs in this module (every other binding's outputs are pre-sized arrays
+        !> the caller allocates first). The returned pointers reference memory owned by `reader`
+        !> (the file's own decoded/cached column array) and stay valid only until the next call
+        !> into this same reader; the caller (parquet_read.f90) is expected to consume them
+        !> (append_buffers) immediately, before making any other call on `reader`. `offsets_int32`
+        !> is 1 when `offsets` holds int32 values (a plain STRING column), 0 for int64
+        !> (LARGE_STRING) -- see parquet_strings.f90's append_buffers, which accepts both.
+        subroutine parquet_read_string_column_buffers(reader, name, nrows, nchars, offsets, data, validity, &
+                offsets_int32) bind(C, name="parquet_read_string_column_buffers")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), intent(out) :: nrows
+            integer(c_long_long), intent(out) :: nchars
+            type(c_ptr), intent(out) :: offsets
+            type(c_ptr), intent(out) :: data
+            type(c_ptr), intent(out) :: validity
+            integer(c_int8_t), intent(out) :: offsets_int32
         end subroutine
 
         !> Reads one row (`row_index`) of vector int32 column `name` from `reader` into `data`.
@@ -1002,6 +1067,25 @@ module parquet_bindings
             integer(c_long_long), value :: nrows
             integer(c_long_long), value :: col_size
             type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Reads row group `row_group`'s worth of scalar string column `name` as its own raw
+        !> offsets/data/validity buffers -- the compact counterpart to
+        !> parquet_read_string_column_chunk. Same by-reference output convention and buffer
+        !> lifetime as parquet_read_string_column_buffers above; the returned pointers are only
+        !> valid until the next call into this same `reader`.
+        subroutine parquet_read_string_column_chunk_buffers(reader, name, row_group, nrows, nchars, offsets, data, &
+                validity, offsets_int32) bind(C, name="parquet_read_string_column_chunk_buffers")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_long_long), intent(out) :: nrows
+            integer(c_long_long), intent(out) :: nchars
+            type(c_ptr), intent(out) :: offsets
+            type(c_ptr), intent(out) :: data
+            type(c_ptr), intent(out) :: validity
+            integer(c_int8_t), intent(out) :: offsets_int32
         end subroutine
     end interface
 

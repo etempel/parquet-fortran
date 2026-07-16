@@ -51,20 +51,24 @@ program test_large_scale
     call execute_command_line("mkdir -p test_run", wait=.true., cmdstat=cmdstat)
 
     test_num = 0
-    total_tests = merge(12, 6, RUN_VECTOR_CASES)
+    total_tests = merge(13, 7, RUN_VECTOR_CASES)
 
-    if (RUN_VECTOR_CASES) call int32_vector_case(test_num, total_tests, nrows, nelem, max_size_gb)
     call int32_scalar_case(test_num, total_tests, nrows, max_size_gb)
-    if (RUN_VECTOR_CASES) call int64_vector_case(test_num, total_tests, nrows, nelem, max_size_gb)
     call int64_scalar_case(test_num, total_tests, nrows, max_size_gb)
-    if (RUN_VECTOR_CASES) call float32_vector_case(test_num, total_tests, nrows, nelem, max_size_gb)
     call float32_scalar_case(test_num, total_tests, nrows, max_size_gb)
-    if (RUN_VECTOR_CASES) call float64_vector_case(test_num, total_tests, nrows, nelem, max_size_gb)
     call float64_scalar_case(test_num, total_tests, nrows, max_size_gb)
-    if (RUN_VECTOR_CASES) call logical_vector_case(test_num, total_tests, nrows, nelem, max_size_gb)
     call logical_scalar_case(test_num, total_tests, nrows, max_size_gb)
-    if (RUN_VECTOR_CASES) call string_vector_case(test_num, total_tests, nrows, nelem, max_size_gb)
+    call parquet_string_column_case(test_num, total_tests, nrows, max_size_gb)
     call string_scalar_case(test_num, total_tests, nrows, max_size_gb)
+
+    if (RUN_VECTOR_CASES) then
+        call int32_vector_case(test_num, total_tests, nrows, nelem, max_size_gb)
+        call int64_vector_case(test_num, total_tests, nrows, nelem, max_size_gb)
+        call float32_vector_case(test_num, total_tests, nrows, nelem, max_size_gb)
+        call float64_vector_case(test_num, total_tests, nrows, nelem, max_size_gb)
+        call logical_vector_case(test_num, total_tests, nrows, nelem, max_size_gb)
+        call string_vector_case(test_num, total_tests, nrows, nelem, max_size_gb)
+    end if
 
     if (.not. RUN_VECTOR_CASES) then
         write(output_unit, '(a)') "test_large_scale: vector-column cases were skipped " // &
@@ -898,6 +902,62 @@ contains
         call delete_file(TMPFILE)
         call print_done(test_num, total, label, start_time)
     end subroutine logical_scalar_case
+
+    !==============================================================
+    ! parquet_string_column (compact scalar string column type; scalar-only, no vector case)
+    !==============================================================
+
+    subroutine parquet_string_column_case(test_num, total, nrows, max_gb)
+        integer, intent(inout) :: test_num
+        integer, intent(in) :: total
+        integer(int64), intent(in) :: nrows
+        real(real64), intent(in) :: max_gb
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_string_column) :: values, back
+        character(len=:), allocatable :: s
+        integer(int64) :: i, nrows_back
+        real(real64) :: gb
+        integer(int64) :: start_time
+        character(len=:), allocatable :: label
+
+        test_num = test_num + 1
+        label = case_label("parquet_string_column", "scalar", nrows, 1_int64)
+        gb = estimated_gb(nrows, 1_int64, BYTES_STRING)
+        if (gb > max_gb) then
+            call print_skipped(test_num, total, label, gb, max_gb)
+            return
+        end if
+        call print_start(test_num, total, label, start_time)
+
+        call values%reserve(nrows, nrows * int(STRING_LEN, int64))
+        do i = 1_int64, nrows
+            call values%append_string(trim(expected_string(i)))
+        end do
+
+        call parquet_open_writer(writer, TMPFILE)
+        call parquet_write_column(writer, COLNAME, values)
+        call parquet_close_writer(writer)
+        call values%clear()
+
+        call parquet_open_reader(reader, TMPFILE)
+        call parquet_get_nrows(reader, nrows_back)
+        if (nrows_back /= nrows) error stop "test_large_scale: "//label//": nrows mismatch"
+
+        call parquet_read_column(reader, COLNAME, back)
+        if (back%size() /= nrows) error stop "test_large_scale: "//label//": size mismatch on read-back"
+        do i = 1_int64, nrows
+            call back%get(i, s)
+            if (s /= trim(expected_string(i))) then
+                error stop "test_large_scale: "//label//": value mismatch on full read-back"
+            end if
+        end do
+        call back%clear()
+
+        call parquet_close_reader(reader)
+        call delete_file(TMPFILE)
+        call print_done(test_num, total, label, start_time)
+    end subroutine parquet_string_column_case
 
     !==============================================================
     ! string

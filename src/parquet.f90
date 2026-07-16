@@ -11,6 +11,7 @@ module parquet
     use iso_fortran_env, only: int8, int32, int64, real32, real64
     use parquet_bindings
     use parquet_maml_base, only: parquet_maml_file, parquet_maml_missing_column, parquet_maml_col_map_entry
+    use parquet_strings, only: parquet_string_column, parquet_string
     implicit none
     private
     !
@@ -322,6 +323,13 @@ module parquet
     !> matrix/vector values(:,:), (element, row) values). is_valid (optional)
     !> marks per-element nulls (matching values' rank); a .false. entry for a
     !> protected column (see parquet_column_type%is_protected) error stops.
+    !>
+    !> A scalar "string" column can also be passed as a `type(parquet_string_column)` (see
+    !> module parquet_strings, doc/pages/string-columns.md) instead of a padded
+    !> character(len=...) array -- this specific carries its own per-element null status (see
+    !> `%append_null`/`%is_null`), so `is_valid` is not accepted for it; every null already in the
+    !> column is written as a Parquet Null directly. Scalar (1-D) columns only -- there is no
+    !> vector/matrix parquet_string_column specific, unlike every other type family above.
     interface parquet_write_column
         module procedure parquet_write_int32_column
         module procedure parquet_write_int32_matrix_column
@@ -335,6 +343,7 @@ module parquet
         module procedure parquet_write_logical_matrix_column
         module procedure parquet_write_string_column
         module procedure parquet_write_string_matrix_column
+        module procedure parquet_write_string_column_compact
     end interface parquet_write_column
 
     !> Starts a new row group of `nrows` rows on `writer` -- see parquet_write_column_chunk
@@ -360,6 +369,10 @@ module parquet
     !> once via parquet_write_column can never also be written via parquet_write_column_chunk
     !> (or vice versa), and every column must appear in the *first* row group written for this
     !> writer, since a Parquet file's schema is fixed from that point on.
+    !>
+    !> A scalar "string" column can also be passed as a `type(parquet_string_column)` holding
+    !> exactly this row group's rows -- see parquet_write_column's own doc comment above for the
+    !> shared parquet_string_column notes (no is_valid, scalar only).
     interface parquet_write_column_chunk
         module procedure parquet_write_int32_column_chunk
         module procedure parquet_write_int32_matrix_column_chunk
@@ -373,6 +386,7 @@ module parquet
         module procedure parquet_write_logical_matrix_column_chunk
         module procedure parquet_write_string_column_chunk
         module procedure parquet_write_string_matrix_column_chunk
+        module procedure parquet_write_string_column_chunk_compact
     end interface parquet_write_column_chunk
 
     !> Returns `writer_or_reader`'s row-group size ("chunk_size", matching parquet_open_writer's
@@ -434,6 +448,12 @@ module parquet
     !> specifics, for a vector column). null_value (optional) fills missing
     !> entries; is_valid (optional) reports which elements were actually
     !> present (same rank as values).
+    !>
+    !> A scalar "string" column can also be read straight into a `type(parquet_string_column)`
+    !> (see module parquet_strings) instead of a padded character(len=...) array -- `values` is
+    !> cleared then filled with the whole column; every Null lands as `%append_null()`, so
+    !> neither null_value nor is_valid is accepted for this specific -- check `%is_null(i)`
+    !> afterward instead. Scalar (1-D) columns only.
     interface parquet_read_column
         module procedure parquet_read_int32_column_1d
         module procedure parquet_read_int64_column_1d
@@ -447,6 +467,7 @@ module parquet
         module procedure parquet_read_float64_array_full
         module procedure parquet_read_logical_array_full
         module procedure parquet_read_string_array_full
+        module procedure parquet_read_string_column_compact
     end interface parquet_read_column
 
     !> Reads one row of a vector (array) column named `name` from an open
@@ -524,6 +545,10 @@ module parquet
     !> (qc_soft=.false.) violation error stops naming the offending row group; a soft-mode
     !> (qc_soft=.true.) violation warns at most once per column, same throttling as every other
     !> read path. See "Streaming/chunked reads" in doc/pages/reading.md.
+    !>
+    !> A scalar "string" column can also be read into a `type(parquet_string_column)` holding
+    !> just row group `row_group`'s rows -- `values` is cleared then filled, same no-null_value/
+    !> no-is_valid convention as parquet_read_column's own parquet_string_column specific above.
     interface parquet_read_column_chunk
         module procedure parquet_read_int32_column_chunk_rg32
         module procedure parquet_read_int32_column_chunk_rg64
@@ -549,6 +574,8 @@ module parquet
         module procedure parquet_read_string_column_chunk_rg64
         module procedure parquet_read_string_array_column_chunk_rg32
         module procedure parquet_read_string_array_column_chunk_rg64
+        module procedure parquet_read_string_column_chunk_compact_rg32
+        module procedure parquet_read_string_column_chunk_compact_rg64
     end interface parquet_read_column_chunk
 
     !> Returns `reader`'s post-filter row count in `nrows`, dispatched by
@@ -656,6 +683,8 @@ module parquet
     public :: parquet_table_metadata
     public :: parquet_schema
     public :: parquet_maml_file
+    public :: parquet_string_column
+    public :: parquet_string
     public :: parquet_open_writer
     public :: parquet_write_column
     public :: parquet_new_row_group
@@ -962,6 +991,15 @@ module parquet
             logical, intent(in), optional :: is_valid(:,:) !! per-element validity mask (.false. => null).
         end subroutine parquet_write_string_matrix_column
 
+        !> Compact (parquet_string_column) specific of parquet_write_column; see the generic
+        !> interface's own doc comment above for the parquet_string_column notes.
+        module subroutine parquet_write_string_column_compact(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_string_column), intent(in), target :: values !! one value (or Null) per row;
+            !! target so raw_buffers can be called on it without copying.
+        end subroutine parquet_write_string_column_compact
+
         !> int32 specific of parquet_new_row_group -- see the generic interface above.
         module subroutine parquet_new_row_group_int32(writer, nrows)
             type(parquet_writer), intent(inout) :: writer !! open writer.
@@ -1071,6 +1109,15 @@ module parquet
             character(len=*), intent(in) :: values(:,:) !! (element, row) values of the open row group.
             logical, intent(in), optional :: is_valid(:,:) !! per-element validity mask (.false. => null).
         end subroutine parquet_write_string_matrix_column_chunk
+
+        !> Compact (parquet_string_column) specific of parquet_write_column_chunk; see the generic
+        !> interface's own doc comment above for the parquet_string_column notes.
+        module subroutine parquet_write_string_column_chunk_compact(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_string_column), intent(in), target :: values !! one value (or Null) per row of the
+            !! open row group; target so raw_buffers can be called on it without copying.
+        end subroutine parquet_write_string_column_chunk_compact
 
         !> Ends the currently-open row group -- see parquet_new_row_group above. Error stops if
         !> any column known to `writer` has no data for this row group (either a chunk just
@@ -2028,6 +2075,14 @@ module parquet
             logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
         end subroutine parquet_read_string_array_full
 
+        !> Compact (parquet_string_column) specific of parquet_read_column; see the generic
+        !> interface's own doc comment above for the parquet_string_column notes.
+        module subroutine parquet_read_string_column_compact(reader, name, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_string_column), intent(inout) :: values !! cleared, then filled with the whole column.
+        end subroutine parquet_read_string_column_compact
+
         !> Scalar int32, int32 row_group specific of parquet_read_column_chunk; see the generic
         !> interface above. A paired _rg64 specific (same value type, int64 row_group) also
         !> exists for a file with more than 2,147,483,647 row groups.
@@ -2304,6 +2359,24 @@ module parquet
             character(len=*), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
         end subroutine parquet_read_string_array_column_chunk_rg64
+
+        !> Compact (parquet_string_column), int32 row_group specific of parquet_read_column_chunk;
+        !> see the generic interface's own doc comment above for the parquet_string_column notes.
+        module subroutine parquet_read_string_column_chunk_compact_rg32(reader, name, row_group, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            integer(int32), intent(in) :: row_group !! 1-based row group to read.
+            type(parquet_string_column), intent(inout) :: values !! cleared, then filled with this row group's rows.
+        end subroutine parquet_read_string_column_chunk_compact_rg32
+
+        !> Compact (parquet_string_column), int64 row_group specific of parquet_read_column_chunk;
+        !> see parquet_read_string_column_chunk_compact_rg32.
+        module subroutine parquet_read_string_column_chunk_compact_rg64(reader, name, row_group, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            integer(int64), intent(in) :: row_group !! 1-based row group to read.
+            type(parquet_string_column), intent(inout) :: values !! cleared, then filled with this row group's rows.
+        end subroutine parquet_read_string_column_chunk_compact_rg64
 
         !> int32 value / int32 row_index specific of parquet_read_array_row_mode; see the generic
         !> interface above for the shared "one row of a vector column" behavior. A paired

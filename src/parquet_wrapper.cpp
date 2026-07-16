@@ -9,6 +9,7 @@
 #include <arrow/compute/api.h>
 #include <arrow/compute/initialize.h>
 #include <arrow/io/api.h>
+#include <arrow/util/bit_util.h>
 #include <arrow/util/byte_size.h>
 #include <arrow/util/compression.h>
 #include <arrow/util/thread_pool.h>
@@ -334,6 +335,14 @@ extern "C"
 		// from parquet_close_reader(check_complete=.true.).
 		int64_t num_row_groups = 0;
 		std::unordered_map<int, std::unordered_set<int64_t>> chunk_read_row_groups;
+		// Pins the most recent array handed out (by pointer, not value) by
+		// parquet_read_string_column_chunk_buffers, whose row-group-scoped array (from
+		// get_row_group_chunk_array) is otherwise never retained anywhere -- unlike a whole-column
+		// read's array, which column_cache already keeps alive for the reader's whole lifetime.
+		// Fortran (parquet_read.f90) always consumes the returned buffer pointers immediately
+		// (append_buffers), before any other call on this same reader, so a single slot -- next
+		// overwritten by the next such call -- is sufficient; it does not need per-column tracking.
+		std::shared_ptr<arrow::Array> last_chunk_buffers_array;
 		std::atomic<bool> busy{false}; // guards against two threads calling into the same reader at once; see ConcurrencyGuard.
 	};
 
@@ -542,6 +551,50 @@ extern "C"
 			[arr](int64_t i) { return arr->IsNull(i); },
 			[arr](int64_t i) { return arr->GetView(i); },
 			arr->length()};
+	}
+
+	// Buffer-level counterpart to make_string_like_accessor: exposes a STRING/LARGE_STRING
+	// array's own offsets/data/validity buffers directly, for handing straight to
+	// parquet_strings.f90's append_buffers instead of copying one string at a time via GetView.
+	// `array`'s type_id() must satisfy is_string_like_type, same precondition as
+	// make_string_like_accessor. offsets_int32_out is set to 1 for a plain STRING array (int32
+	// offsets) or 0 for LARGE_STRING (int64 offsets) -- append_buffers accepts both.
+	//
+	// Relies on `array`'s own offset() being 0: every caller of this reaches `array` via
+	// combine_column_chunks (either directly, for a whole-column read, or through
+	// get_row_group_chunk_array, for a chunked read), which only ever returns a freshly
+	// ReadColumn/ReadRowGroup-decoded chunk or the result of arrow::Concatenate -- never a
+	// genuine Slice() -- so offset() is 0 in every reachable case today. This is deliberately not
+	// re-verified/rebased here: doing so correctly would need an O(nrows) copy of the offsets
+	// buffer (rebasing every entry), which isn't worth paying for a case that cannot currently
+	// occur. If that ever changes, parquet_strings.f90's append_buffers has its own precondition
+	// guard (offsets(1) must be 0) that aborts loudly instead of silently misplacing bytes --
+	// see its doc comment. data_out is still correctly rebased by raw_value_offsets()[0] below (a
+	// single pointer add, always correct and free to do regardless); only the offsets values
+	// themselves and the validity bitmap rely on the offset()==0 assumption.
+	static void extract_string_buffers(const std::shared_ptr<arrow::Array> &array,
+		int64_t *nrows_out, int64_t *nchars_out,
+		const void **offsets_out, const void **data_out, const void **validity_out,
+		int8_t *offsets_int32_out)
+	{
+		bool is_large = array->type_id() == arrow::Type::LARGE_STRING;
+		*offsets_int32_out = is_large ? 0 : 1;
+		*nrows_out = array->length();
+		if (is_large)
+		{
+			auto arr = std::static_pointer_cast<arrow::LargeStringArray>(array);
+			*nchars_out = arr->total_values_length();
+			*offsets_out = arr->raw_value_offsets();
+			*data_out = arr->raw_data() + (arr->length() > 0 ? arr->raw_value_offsets()[0] : 0);
+		}
+		else
+		{
+			auto arr = std::static_pointer_cast<arrow::StringArray>(array);
+			*nchars_out = arr->total_values_length();
+			*offsets_out = arr->raw_value_offsets();
+			*data_out = arr->raw_data() + (arr->length() > 0 ? arr->raw_value_offsets()[0] : 0);
+		}
+		*validity_out = array->null_bitmap_data();
 	}
 
 	// Arrow's real limit for a plain STRING array: its offsets buffer is int32, capping total
@@ -3267,6 +3320,30 @@ extern "C"
 		mark_read_string(reader_handle, name, item_len, array);
 	}
 
+	// Compact counterpart to parquet_read_string_column, above: instead of copying one string at
+	// a time into a fixed-width padded Fortran buffer, hands back the decoded column's own
+	// offsets/data/validity buffers directly (see extract_string_buffers), for the caller
+	// (parquet_read.f90) to bulk-append straight into a parquet_string_column via its own
+	// append_buffers. The array is already kept alive indefinitely by get_single_chunk_array's
+	// own column_cache, so -- unlike the row-group-scoped chunk variant below -- no extra pinning
+	// is needed here: the returned pointers stay valid for the reader's whole remaining lifetime,
+	// not just until the next call.
+	void parquet_read_string_column_buffers(void *handle, const char *name,
+		int64_t *nrows_out, int64_t *nchars_out,
+		const void **offsets_out, const void **data_out, const void **validity_out,
+		int8_t *offsets_int32_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_single_chunk_array(reader_handle, name);
+		if (!is_string_like_type(array->type_id()))
+		{
+			report_fatal_error("parquet_read_column", std::string("type mismatch for column: ") + name +
+				" (expected string, got " + array->type()->ToString() + ")");
+		}
+		extract_string_buffers(array, nrows_out, nchars_out, offsets_out, data_out, validity_out, offsets_int32_out);
+		mark_read(reader_handle, name, "string", array);
+	}
+
 	// Reads the full vector int32 column `name` (every row) into `data`.
 	void parquet_read_int32_array_column(void *handle, const char *name, int32_t *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
 	{
@@ -3733,6 +3810,32 @@ extern "C"
 			copy_string_with_padding(data + i * item_len, item_len, view);
 		}
 		fill_null_default_string(data, item_len, valid_out, nrows);
+	}
+
+	// Compact counterpart to parquet_read_string_column_chunk, above -- same buffer-handoff idea
+	// as parquet_read_string_column_buffers, but sourced from get_row_group_chunk_array instead
+	// of the whole-column cache. That array is otherwise never retained anywhere once this call
+	// returns (unlike a whole-column read's, which column_cache keeps alive indefinitely), so it
+	// is pinned in reader_handle->last_chunk_buffers_array for the caller (parquet_read.f90,
+	// which always consumes the returned pointers immediately via append_buffers, before any
+	// other call on this reader) -- see that field's own comment. No mark_read call here, same as
+	// every other *_column_chunk read: was_read/output_type_used (parquet_reader_print_stat) are
+	// scoped to whole-column reads only; QC for a chunked read already runs inside
+	// get_row_group_chunk_array itself.
+	void parquet_read_string_column_chunk_buffers(void *handle, const char *name, int64_t row_group,
+		int64_t *nrows_out, int64_t *nchars_out,
+		const void **offsets_out, const void **data_out, const void **validity_out,
+		int8_t *offsets_int32_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_row_group_chunk_array(reader_handle, name, row_group, "parquet_read_column_chunk");
+		if (!is_string_like_type(array->type_id()))
+		{
+			report_fatal_error("parquet_read_column_chunk", std::string("type mismatch for column: ") + name +
+				" (expected string, got " + array->type()->ToString() + ")");
+		}
+		reader_handle->last_chunk_buffers_array = array;
+		extract_string_buffers(array, nrows_out, nchars_out, offsets_out, data_out, validity_out, offsets_int32_out);
 	}
 
 	// Reads row group `row_group`'s full vector int32 column `name` into `data`.
@@ -4227,6 +4330,49 @@ extern "C"
 		append_column(writer_handle, name, build_field(name, use_large ? arrow::large_utf8() : arrow::utf8(), col_size), array);
 	}
 
+	// Appends one scalar string column straight from a parquet_string_column's own raw buffers
+	// (offsets/data/validity, from parquet_strings.f90's raw_buffers) -- the compact counterpart
+	// to parquet_append_string_column above, skipping both the fixed-width padded intermediate
+	// and its trim_right_spaces_and_nuls step entirely (the source is already exact, unpadded
+	// string content -- one copy total, the builder's own, instead of pad-then-trim-then-copy).
+	// `offsets` is nrows+1 int64 values (0-based, offsets[0]=0); `validity` is a bit-packed
+	// Arrow-style bitmap (LSB-first, 1=valid) or nullptr when the column has no nulls -- exactly
+	// parquet_string_column's own internal layout, so no conversion is needed on either side of
+	// this call. Always builds arrow::large_utf8(), matching the source column's own int64-offset
+	// storage -- unlike parquet_append_string_column's small/large auto-selection, there is no
+	// int32-offset variant to consider here at all.
+	void parquet_append_string_column_buffers(void *handle, const char *name, int64_t nrows, int64_t nchars,
+		const int64_t *offsets, const char *data, const uint8_t *validity)
+	{
+		auto writer_handle = as_handle(handle);
+		(void)nchars; // implied by offsets[nrows]; kept as an argument for a self-describing C signature.
+
+		arrow::LargeStringBuilder builder;
+		arrow::Status status;
+		bool any_null = false;
+		for (int64_t i = 0; i < nrows; ++i)
+		{
+			if (validity != nullptr && !arrow::bit_util::GetBit(validity, static_cast<uint64_t>(i)))
+			{
+				any_null = true;
+				status = builder.AppendNull();
+			}
+			else
+			{
+				status = builder.Append(data + offsets[i], offsets[i + 1] - offsets[i]);
+			}
+			if (!status.ok())
+				throw std::runtime_error(status.ToString());
+		}
+
+		std::shared_ptr<arrow::Array> array;
+		status = builder.Finish(&array);
+		if (!status.ok())
+			throw std::runtime_error(status.ToString());
+
+		append_column(writer_handle, name, build_field(name, arrow::large_utf8(), 1, any_null), array);
+	}
+
 	// --- Streaming row-group API: parquet_new_row_group / parquet_write_*_column_chunk /
 	// parquet_finish_row_group. See close_parquet_writer for how a streaming writer's close
 	// differs from the WriteTable-based batch path above, and check_column_chunk_write_
@@ -4378,6 +4524,49 @@ extern "C"
 		{
 			if (writer_handle->fields.size() <= idx) writer_handle->fields.resize(idx + 1);
 			writer_handle->fields[idx] = build_field(name, arrow::large_utf8(), col_size);
+		}
+		if (writer_handle->arrays.size() <= idx) writer_handle->arrays.resize(idx + 1);
+		writer_handle->pending_chunk_arrays[static_cast<int>(idx)] = array;
+	}
+
+	// Streaming counterpart to parquet_append_string_column_buffers: builds this row group's
+	// array straight from a parquet_string_column's own raw buffers, same buffer contract as
+	// parquet_append_string_column_buffers above. Always arrow::large_utf8() and always
+	// nullable=true on first_chunk_ever, same reasoning as parquet_write_string_column_chunk's
+	// own comment (a later row group's genuine null must not be rejected by an already-locked
+	// non-nullable field).
+	void parquet_write_string_column_chunk_buffers(void *handle, const char *name, int64_t nrows, int64_t nchars,
+		const int64_t *offsets, const char *data, const uint8_t *validity)
+	{
+		auto writer_handle = as_handle(handle);
+		(void)nchars; // implied by offsets[nrows]; kept as an argument for a self-describing C signature.
+		bool first_chunk_ever;
+		auto idx = check_column_chunk_write_preconditions(writer_handle, name, first_chunk_ever);
+
+		arrow::LargeStringBuilder builder;
+		arrow::Status status;
+		for (int64_t i = 0; i < nrows; ++i)
+		{
+			if (validity != nullptr && !arrow::bit_util::GetBit(validity, static_cast<uint64_t>(i)))
+			{
+				status = builder.AppendNull();
+			}
+			else
+			{
+				status = builder.Append(data + offsets[i], offsets[i + 1] - offsets[i]);
+			}
+			if (!status.ok())
+				throw std::runtime_error(status.ToString());
+		}
+		std::shared_ptr<arrow::Array> array;
+		status = builder.Finish(&array);
+		if (!status.ok())
+			throw std::runtime_error(status.ToString());
+
+		if (first_chunk_ever)
+		{
+			if (writer_handle->fields.size() <= idx) writer_handle->fields.resize(idx + 1);
+			writer_handle->fields[idx] = build_field(name, arrow::large_utf8(), 1, /*nullable=*/true);
 		}
 		if (writer_handle->arrays.size() <= idx) writer_handle->arrays.resize(idx + 1);
 		writer_handle->pending_chunk_arrays[static_cast<int>(idx)] = array;

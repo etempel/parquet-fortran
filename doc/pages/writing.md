@@ -68,6 +68,15 @@ Notes:
   ! aborts if data.parquet already exists, instead of silently truncating it
   ```
 
+### Writing a large scalar string column with parquet_string_column
+
+A scalar `string` column can also be written from a `type(parquet_string_column)` (`call
+parquet_write_column(writer, "name", names)`) instead of a padded `character(len=...)` array —
+no `is_valid` mask needed, since the column already tracks its own Nulls. See [Reading and
+writing compact string columns](string-columns.html#reading-and-writing-compact-string-columns)
+for the details and a full example; this is purely an alternative to the `character(len=...)`
+form above, not a different file format.
+
 ### Streaming/chunked writes
 
 `parquet_write_column` needs the whole column as one complete array — fine for most data, but not for a column too large to hold in memory that way (e.g. hundreds of millions of rows of a wide vector column). `parquet_new_row_group`/`parquet_write_column_chunk`/`parquet_finish_row_group` write such a column incrementally instead, one Parquet row group at a time, so peak memory is bounded by a row group's worth of data rather than the whole column (see [Streaming/chunked reads](reading.html#streamingchunked-reads) for the read-side mirror):

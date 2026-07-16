@@ -52,6 +52,8 @@ contains
                 test_write_undeclared_column_logical_aborts), &
             new_unittest("writing an undeclared string column aborts", &
                 test_write_undeclared_column_string_aborts), &
+            new_unittest("writing an undeclared column via a compact string write aborts", &
+                test_write_undeclared_column_string_compact_aborts), &
             new_unittest("writing an undeclared int32 matrix column aborts", &
                 test_write_undeclared_column_int32_matrix_aborts), &
             new_unittest("writing an undeclared int64 matrix column aborts", &
@@ -98,6 +100,8 @@ contains
                 test_write_chunk_undeclared_column_logical_aborts), &
             new_unittest("streaming: writing an undeclared string chunk column aborts", &
                 test_write_chunk_undeclared_column_string_aborts), &
+            new_unittest("streaming: writing an undeclared column via a compact string chunk write aborts", &
+                test_write_chunk_undeclared_column_string_compact_aborts), &
             new_unittest("streaming: writing an undeclared int32 matrix chunk column aborts", &
                 test_write_chunk_undeclared_column_int32_matrix_aborts), &
             new_unittest("streaming: writing an undeclared int64 matrix chunk column aborts", &
@@ -356,7 +360,13 @@ contains
             new_unittest("parquet_string stale handle index aborts", &
                 test_string_handle_stale_index_aborts), &
             new_unittest("parquet_string_column append_buffers with un-rebased offsets aborts", &
-                test_string_column_append_buffers_offset_not_zero_aborts) &
+                test_string_column_append_buffers_offset_not_zero_aborts), &
+            new_unittest("parquet_string_column append_buffers with un-rebased int32 offsets aborts", &
+                test_string_column_append_buffers_offset_not_zero_int32_aborts), &
+            new_unittest("compact string write into a vector (col_size>1) schema column aborts", &
+                test_compact_string_write_requires_scalar_column_aborts), &
+            new_unittest("compact string chunk write into a vector (col_size>1) schema column aborts", &
+                test_compact_string_write_chunk_requires_scalar_column_aborts) &
             ]
     end subroutine collect_tests_parquet_errors
 
@@ -402,6 +412,30 @@ contains
             failure_message="append_buffers with a source offsets(1) /= 0 was expected to abort", &
             required_stderr="parquet_strings: append_buffers: source offsets(1) must be 0")
     end subroutine test_string_column_append_buffers_offset_not_zero_aborts
+
+    subroutine test_string_column_append_buffers_offset_not_zero_int32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_column_append_buffers_offset_not_zero_int32", &
+            expect_abort=.true., &
+            failure_message="append_buffers with a source int32 offsets(1) /= 0 was expected to abort", &
+            required_stderr="parquet_strings: append_buffers: source offsets(1) must be 0")
+    end subroutine test_string_column_append_buffers_offset_not_zero_int32_aborts
+
+    subroutine test_compact_string_write_requires_scalar_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "compact_string_write_requires_scalar_column", &
+            expect_abort=.true., &
+            failure_message="a compact string write into a vector (col_size>1) column was expected to abort", &
+            required_stderr="a parquet_string_column write requires a scalar (col_size=1) column")
+    end subroutine test_compact_string_write_requires_scalar_column_aborts
+
+    subroutine test_compact_string_write_chunk_requires_scalar_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "compact_string_write_chunk_requires_scalar_column", &
+            expect_abort=.true., &
+            failure_message="a compact string chunk write into a vector (col_size>1) column was expected to abort", &
+            required_stderr="a parquet_string_column write requires a scalar (col_size=1) column")
+    end subroutine test_compact_string_write_chunk_requires_scalar_column_aborts
 
     subroutine test_ok_scenario_exits_cleanly(error)
         type(error_type), allocatable, intent(out) :: error
@@ -455,6 +489,13 @@ contains
         call check_scenario_exit_status(error, "write_undeclared_column_string", expect_abort=.true., &
             failure_message="writing an undeclared string column was expected to error stop")
     end subroutine test_write_undeclared_column_string_aborts
+
+    subroutine test_write_undeclared_column_string_compact_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_undeclared_column_string_compact", expect_abort=.true., &
+            failure_message="writing an undeclared column via a compact string write was expected to error stop")
+    end subroutine test_write_undeclared_column_string_compact_aborts
 
     subroutine test_write_undeclared_column_int32_matrix_aborts(error)
         type(error_type), allocatable, intent(out) :: error
@@ -623,6 +664,13 @@ contains
         call check_scenario_exit_status(error, "write_chunk_undeclared_column_string", expect_abort=.true., &
             failure_message="writing an undeclared string chunk column was expected to error stop")
     end subroutine test_write_chunk_undeclared_column_string_aborts
+
+    subroutine test_write_chunk_undeclared_column_string_compact_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_chunk_undeclared_column_string_compact", expect_abort=.true., &
+            failure_message="writing an undeclared column via a compact string chunk write was expected to error stop")
+    end subroutine test_write_chunk_undeclared_column_string_compact_aborts
 
     subroutine test_write_chunk_undeclared_column_int32_matrix_aborts(error)
         type(error_type), allocatable, intent(out) :: error

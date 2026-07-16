@@ -275,6 +275,42 @@ one element). User guide: `doc/pages/string-columns.md`.
 - **`transfer(source, mold, size)` into a longer target leaves the trailing bytes undefined**, not
   blank-padded. To place a short string into a longer fixed-length slot, assign normally (which
   blank-pads); reserve `transfer` for exact-size byte moves.
+- **Calling a function that returns `character(len=:), allocatable` on a type with two or more
+  allocatable components can be silently corrupted by gfortran/OpenMP under concurrent
+  execution — prefer a subroutine with an `intent(out), allocatable character` argument for any
+  such accessor.** Root-caused across a full investigation (see the session that produced this
+  bullet); the finding narrowed twice from an initial broader guess, each narrowing confirmed
+  with a minimal, library-independent reproducer:
+    - **Not about construction/destruction, and not about object lifetime.** The first
+      hypothesis — that concurrently constructing/destroying a multi-allocatable-component local
+      was the trigger — turned out to be too broad. A type built *once* per thread and never
+      rebuilt, with its accessor called repeatedly across thousands of later iterations, corrupts
+      just as reliably as one rebuilt every iteration. The actual trigger is simply *calling* the
+      function, repeatedly, concurrently.
+    - **Not about `class()` polymorphism.** A plain `type(x)` dummy in an ordinary (non-type-
+      bound) module function corrupts at the same rate as a `class(x)`-dispatched type-bound
+      procedure. Free functions taking a derived-type argument are just as exposed as type-bound
+      accessors.
+    - **Specific to `character(len=:), allocatable` function results.** The same type/harness
+      with an `integer(int32), allocatable` result instead (scalar or array) reproduced **zero**
+      failures across 80,000 iterations, vs. hundreds of failures per 8000 for the character-
+      function-result version. Rewriting the accessor as a subroutine with an
+      `intent(out), allocatable character` argument (instead of returning `character(len=:),
+      allocatable` as a function result) also reproduced **zero** failures — this is the
+      confirmed, working fix, not just a workaround.
+    - The one still-necessary condition: the type must have ≥2 allocatable components (a type
+      with only one, otherwise identical, does not reproduce it).
+
+  `parquet_string_column` (`offsets`/`data`/`validity`, 3 allocatable components) hit this via
+  its function-result `get` — see its test suite's exclusion from parallel execution in
+  `test/run_tester.f90`'s `suite_is_safe_to_parallelize` and the caveat in
+  `doc/pages/string-columns.md`'s "Thread safety" section (that caveat still describes the
+  original, broader — and now superseded — construction/destruction hypothesis; needs updating
+  to match this corrected understanding). Any new or existing public accessor that returns
+  `character(len=:), allocatable` from a type with ≥2 allocatable components should be written
+  (or converted) as a subroutine, not a function, unless proven single-threaded-only; other
+  allocatable result kinds (numeric scalars/arrays, allocatable arrays of a derived type) are
+  confirmed *not* affected and don't need this treatment.
 
 ## Renames/refactors: only apply low-blast-radius changes
 

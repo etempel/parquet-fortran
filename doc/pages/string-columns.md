@@ -328,6 +328,51 @@ read-only operations (`get`, `view`, `length`, the comparisons, `find`, the size
 long as no thread mutates the column concurrently. Any mutation must be externally
 synchronized, and a handle must not be used across a mutation on any thread.
 
+**Known gfortran/OpenMP runtime caveat — `get()` and anything built on it, not construction or
+sharing.** The rule above is about *sharing one column* across threads; it says nothing about
+each thread having its own, fully independent `parquet_string_column`. That turned out to
+matter, but not for the reason first suspected. On the gfortran/OpenMP combination this
+project's tests are built with, **calling a function that returns `character(len=:), allocatable`
+on a type with two or more allocatable components can silently corrupt memory under concurrent
+execution** — `parquet_string_column` (`offsets`/`data`/`validity`, 3 allocatable components) has
+exactly this shape, and `get` is exactly such a function. Confirmed with a minimal reproducer
+built from scratch, using no code from this library, and narrowed down precisely:
+
+- **Not about construction/destruction.** A column built *once* per thread and never rebuilt,
+  with `get` called on it repeatedly across thousands of later calls, corrupts just as reliably
+  as one freshly constructed on every call. Merely *calling* the function repeatedly, concurrently,
+  is enough — no construction or scope-exit needs to be involved at all.
+- **Not about `class()` dispatch, and not about sharing.** A plain, non-polymorphic argument in
+  an ordinary function corrupts at the same rate as a type-bound, `class()`-dispatched call. Every
+  reproduction used fully independent, per-thread objects — this is not the "many-readers xor
+  single-writer" shared-mutation hazard above; it reproduces even when nothing is ever shared
+  between threads.
+- **Specific to `character(len=:), allocatable` function results.** The identical type and test
+  harness with an `integer(int32), allocatable` result instead (scalar or array) reproduced
+  **zero** failures across 80,000 iterations, vs. hundreds of failures per 8000 for the
+  character-function-result version. Rewriting the accessor as a subroutine with an
+  `intent(out), allocatable character` argument instead of returning `character(len=:),
+  allocatable` as a function result also reproduced **zero** failures — a confirmed, working
+  fix, not just a workaround, but not yet applied to this module's source.
+
+**What's actually exposed in this module today:** `get` (both the column's and the
+`parquet_string` handle's `to_string`, which forwards to it) and `summary` are themselves
+`character(len=:), allocatable` functions on `parquet_string_column` and are directly exposed.
+`to_character`, `print`, and the handle's `print` are subroutines, but each calls `get`
+internally per element/row, so they carry the same exposure indirectly. **Not exposed**: `find`,
+`contains`, `startswith`, `endswith`, `equals` compare bytes directly against the stored buffer
+and never call `get` or return an allocatable `character` result, so they're unaffected by this
+specific issue — likewise every non-string-returning query (`size`, `length`, `is_null`,
+`is_empty`, `capacity`, `null_count`, `memory_usage`, `validate`, `view`).
+
+**Practical guidance until this is fixed upstream (in gfortran) or worked around (in this
+module):** treat any concurrent call to `get`, `to_character`, `print`, `summary`, or the
+`parquet_string` handle's `to_string`/`print` — on *any* `parquet_string_column`, independent or
+shared, freshly built or long-lived — as unsafe unless externally serialized (e.g. a single
+`!$omp critical` region around the call). This is broader than "don't share a column across
+threads": it applies even to two threads each calling `get()` on their own, entirely separate
+columns at the same time.
+
 ## Complexity at a glance
 
 | Operation | Complexity |

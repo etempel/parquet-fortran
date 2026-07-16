@@ -114,9 +114,21 @@ contains
     !> unsafe with libiomp5 (observed: deterministic SIGSEGV inside
     !> __kmp_invoke_microtask). Run those suites' tests sequentially instead
     !> so the fork always happens with no other team threads active.
+    !>
+    !> "parquet_string" is excluded for a different reason: a gfortran/OpenMP
+    !> runtime bug (not a bug in parquet_strings.f90's own logic -- reproduced
+    !> with a from-scratch, unrelated derived type using no code from this
+    !> library) silently corrupts memory when multiple threads concurrently
+    !> construct/destroy independent instances of a `class()`-dispatched
+    !> derived type that has two or more allocatable array components, even
+    !> when only one of those components is ever touched. Every
+    !> `parquet_string_column` local in this suite's tests hits exactly that
+    !> shape. Full root-cause investigation, minimal reproducer, and the
+    !> confirmation that serializing eliminates it: see `debug.md`.
     logical function suite_is_safe_to_parallelize(name) result(safe)
         character(len=*), intent(in) :: name
-        safe = .not. (name == "writing" .or. name == "errors" .or. name == "metadata" .or. name == "maml")
+        safe = .not. (name == "writing" .or. name == "errors" .or. name == "metadata" .or. name == "maml" &
+            .or. name == "parquet_string")
     end function suite_is_safe_to_parallelize
 
 end program tester

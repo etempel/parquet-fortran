@@ -115,15 +115,18 @@ A few more `tools/` scripts, unrelated to fixtures and not part of the build or 
 `tools/benchmark_threads.sh` measures how write and read throughput scale with Arrow's internal
 thread-pool size (`parquet_set_max_threads`), sweeping a log-spaced set of thread counts and
 driving `app/benchmark_threads.f90` (a maintainer-only fpm executable, not part of the public
-library) once per (mode, thread-count) data point. `MAX_STEPS`, `TARGET_FILE_SIZE_GB` and
-`TEST_FILE` are its own env-overridable config (`VECTOR_COL_LEN`/`STRING_LEN` are hardcoded in
-`app/benchmark_threads.f90` itself); by default the synthetic test file is written under a fresh
-`mktemp -d` directory and deleted when the script exits — set `TEST_FILE` to give it a path of
-your own choosing instead, which also keeps the file around afterward for inspection or reuse:
+library) once per (mode, thread-count) data point. The synthetic file's schema is 5 scalar
+columns (int32/int64/float32/float64/boolean), replicated `NMULT` times (`i32_1`, `i32_2`, ...,
+`i64_1`, ...) so the file has `5*NMULT` columns — threading benefits more from many columns than
+from few. `MAX_STEPS`, `TARGET_FILE_SIZE_GB`, `NMULT` and `TEST_FILE` are its own env-overridable
+config; by default the synthetic test file is written under a fresh `mktemp -d` directory and
+deleted when the script exits — set `TEST_FILE` to give it a path of your own choosing instead,
+which also keeps the file around afterward for inspection or reuse:
 
 ```bash
 tools/benchmark_threads.sh
 MAX_STEPS=6 TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads.sh
+NMULT=20 TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads.sh
 TEST_FILE=/tmp/benchmark.parquet TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads.sh
 ```
 

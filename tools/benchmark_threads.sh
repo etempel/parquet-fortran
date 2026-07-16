@@ -17,6 +17,9 @@
 # Config (env-overridable, matching this repo's other tools/*.sh scripts):
 #   MAX_STEPS=10             Max number of thread-count steps to sweep (log-spaced, 1..cores).
 #   TARGET_FILE_SIZE_GB=1.0  Approximate uncompressed (in-memory) size of the test file.
+#   NMULT=1                  Replicate the 5-column int32/int64/float32/float64/boolean scalar
+#                             schema this many times (so the file has 5*NMULT columns) --
+#                             threading benefits more from many columns than from few.
 #   TEST_FILE                Path for the synthetic test file. Default: a fresh mktemp -d
 #                             directory, deleted automatically when the script exits. Set this
 #                             to keep the file around afterward (e.g. to inspect it, or reuse it
@@ -29,6 +32,7 @@ cd "$ROOT_DIR"
 
 MAX_STEPS="${MAX_STEPS:-10}"
 TARGET_FILE_SIZE_GB="${TARGET_FILE_SIZE_GB:-1.0}"
+NMULT="${NMULT:-1}"
 TEST_FILE="${TEST_FILE:-}"
 
 if command -v nproc >/dev/null 2>&1; then
@@ -39,7 +43,7 @@ else
     total_cores=1
 fi
 
-echo "Detected cores: $total_cores (up to $MAX_STEPS steps, target size ${TARGET_FILE_SIZE_GB}GB)" >&2
+echo "Detected cores: $total_cores (up to $MAX_STEPS steps, target size ${TARGET_FILE_SIZE_GB}GB, nmult=${NMULT})" >&2
 
 # Log-spaced thread-count list from 1..total_cores, capped at MAX_STEPS distinct steps
 # (duplicates collapsed after rounding -- see CONTRIBUTING.md's benchmark_threads entry for
@@ -103,7 +107,7 @@ write_cores=()
 write_times=()
 echo "Running write sweep..." >&2
 for n in "${core_list[@]}"; do
-    line="$(fpm run benchmark_threads -- --mode=write --threads="$n" --size="$TARGET_FILE_SIZE_GB" --file="$tmpfile")"
+    line="$(fpm run benchmark_threads -- --mode=write --threads="$n" --size="$TARGET_FILE_SIZE_GB" --nmult="$NMULT" --file="$tmpfile")"
     elapsed="$(parse_elapsed "$line")"
     write_cores+=("$n")
     write_times+=("$elapsed")
@@ -115,7 +119,7 @@ read_times=()
 last_index=$((${#core_list[@]} - 1))
 echo "Running read sweep (single static file, written above at threads=${core_list[$last_index]})..." >&2
 for n in "${core_list[@]}"; do
-    line="$(fpm run benchmark_threads -- --mode=read --threads="$n" --file="$tmpfile")"
+    line="$(fpm run benchmark_threads -- --mode=read --threads="$n" --nmult="$NMULT" --file="$tmpfile")"
     elapsed="$(parse_elapsed "$line")"
     read_cores+=("$n")
     read_times+=("$elapsed")

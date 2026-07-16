@@ -32,7 +32,7 @@ program test_large_scale
     integer(int64), parameter :: BYTES_FLOAT64 = 8_int64
     integer(int64), parameter :: BYTES_LOGICAL = 4_int64
     integer(int64), parameter :: BYTES_STRING = 12_int64
-    integer, parameter :: STRING_LEN = 12
+    integer, parameter :: MAX_STRING_LEN = 12
     character(len=*), parameter :: TMPFILE = "test_run/test_large_scale_tmp.parquet"
     character(len=*), parameter :: COLNAME = "v"
 
@@ -267,13 +267,24 @@ contains
         v = (mod(flat_idx - 1_int64, 2_int64) == 0_int64)
     end function expected_logical
 
+    !> Deterministic, variable-length string content for flat index `flat_idx`: cycles the
+    !! (trimmed) length through 0..MAX_STRING_LEN (inclusive, so zero-length strings occur
+    !! periodically, once every MAX_STRING_LEN+1 rows) rather than a fixed width, so the compact
+    !! parquet_string_column path is genuinely exercised with variable-length rows rather than
+    !! rows that all happen to fit a fixed slot. Remaining characters up to MAX_STRING_LEN are
+    !! left blank (trimmed away by callers that want the exact, unpadded content).
     function expected_string(flat_idx) result(s)
         integer(int64), intent(in) :: flat_idx
-        character(len=STRING_LEN) :: s
+        character(len=MAX_STRING_LEN) :: s
         integer(int64) :: v
+        integer :: slen, k
 
-        v = mod(flat_idx - 1_int64, 100000_int64)
-        write(s, '(i0)') v
+        slen = int(mod(flat_idx - 1_int64, int(MAX_STRING_LEN, int64) + 1_int64))
+        v = mod(flat_idx - 1_int64, 1000000_int64)
+        s = ''
+        do k = 1, slen
+            s(k:k) = achar(iachar('0') + int(mod(v + int(k - 1, int64), 10_int64)))
+        end do
     end function expected_string
 
     !==============================================================
@@ -915,7 +926,6 @@ contains
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
         type(parquet_string_column) :: values, back
-        character(len=:), allocatable :: s
         integer(int64) :: i, nrows_back
         real(real64) :: gb
         integer(int64) :: start_time
@@ -930,7 +940,7 @@ contains
         end if
         call print_start(test_num, total, label, start_time)
 
-        call values%reserve(nrows, nrows * int(STRING_LEN, int64))
+        call values%reserve(nrows, nrows * int(MAX_STRING_LEN, int64))
         do i = 1_int64, nrows
             call values%append_string(trim(expected_string(i)))
         end do
@@ -946,9 +956,11 @@ contains
 
         call parquet_read_column(reader, COLNAME, back)
         if (back%size() /= nrows) error stop "test_large_scale: "//label//": size mismatch on read-back"
+        ! equals() compares directly against the column's own byte buffer (no per-row
+        ! allocation, unlike get()), so a full nrows-row content check stays cheap at scale.
         do i = 1_int64, nrows
-            call back%get(i, s)
-            if (s /= trim(expected_string(i))) then
+            if (back%is_null(i)) error stop "test_large_scale: "//label//": unexpected null on read-back"
+            if (.not. back%equals(i, trim(expected_string(i)))) then
                 error stop "test_large_scale: "//label//": value mismatch on full read-back"
             end if
         end do
@@ -970,7 +982,7 @@ contains
         real(real64), intent(in) :: max_gb
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
-        character(len=STRING_LEN), allocatable :: values(:,:), row_buf(:)
+        character(len=MAX_STRING_LEN), allocatable :: values(:,:), row_buf(:)
         integer(int64) :: i, j, flat, nrows_back, total_elems, check_rows(4)
         integer :: col_size_back, n_checks, k
         real(real64) :: gb
@@ -1043,7 +1055,7 @@ contains
         real(real64), intent(in) :: max_gb
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
-        character(len=STRING_LEN), allocatable :: values(:), back(:)
+        character(len=MAX_STRING_LEN), allocatable :: values(:), back(:)
         integer(int64) :: i, nrows_back
         real(real64) :: gb
         integer(int64) :: start_time

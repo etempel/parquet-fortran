@@ -1356,12 +1356,23 @@ contains
     !! int64; length nrows_in+1, 0-based), and an optional Arrow validity bitmap (`validity` =
     !! C_NULL_PTR means all valid). Offsets are rebased onto the existing payload (int32 widened to
     !! int64 in the same pass); the validity bit region is merged (handling a non-byte-aligned join).
+    !!
+    !! **Precondition: `offsets` must already be rebased to this chunk, i.e. its first entry
+    !! (`offsets(1)` in the Fortran 1-based view of the C array) must be exactly 0, and `data`
+    !! must point at the first payload byte that first entry refers to.** A source sliced out of
+    !! a larger buffer -- e.g. an Arrow array with a non-zero `offset()` -- is not rebased by
+    !! construction and must be rebased by the caller (subtract the slice's own starting offset
+    !! from every offsets entry, and advance `data` by that same amount) before calling this;
+    !! passing an un-rebased `offsets` aborts immediately rather than silently misplacing every
+    !! element's bytes. `validity`, when not C_NULL_PTR, has the same requirement for its bit 0
+    !! (must already correspond to element 1 of this chunk) -- that misalignment cannot be
+    !! detected from a raw bitmap pointer alone, so it is documented here rather than guarded.
     subroutine append_buffers(self, nrows_in, nchars_in, offsets, data, validity, offsets_int32)
         class(parquet_string_column), intent(inout) :: self !! the destination column.
         integer(int64), intent(in) :: nrows_in              !! number of incoming elements.
         integer(int64), intent(in) :: nchars_in             !! incoming payload byte count.
-        type(c_ptr), intent(in) :: offsets                  !! -> int32/int64 offsets(0:nrows_in).
-        type(c_ptr), intent(in) :: data                     !! -> nchars_in payload bytes.
+        type(c_ptr), intent(in) :: offsets                  !! -> int32/int64 offsets(0:nrows_in), offsets(0)=0.
+        type(c_ptr), intent(in) :: data                     !! -> nchars_in payload bytes, at offsets(0).
         type(c_ptr), intent(in) :: validity                 !! -> Arrow bitmap, or C_NULL_PTR.
         logical, intent(in) :: offsets_int32                !! .true. => source offsets are int32.
         integer(int64), pointer :: off64(:)
@@ -1370,6 +1381,17 @@ contains
         integer(int8), pointer :: vin(:)
         integer(int64) :: base, k
         if (nrows_in <= 0) return
+        if (offsets_int32) then
+            call c_f_pointer(offsets, off32, [nrows_in+1])
+            if (off32(1) /= 0_int32) then
+                error stop EP//"append_buffers: source offsets(1) must be 0 -- rebase a sliced source before calling"
+            end if
+        else
+            call c_f_pointer(offsets, off64, [nrows_in+1])
+            if (off64(1) /= 0_int64) then
+                error stop EP//"append_buffers: source offsets(1) must be 0 -- rebase a sliced source before calling"
+            end if
+        end if
         call ensure_offsets_cap(self, self%nrows + nrows_in)
         if (nchars_in > 0) then
             call ensure_data_cap(self, self%nchars + nchars_in)
@@ -1378,12 +1400,10 @@ contains
         end if
         base = self%nchars
         if (offsets_int32) then
-            call c_f_pointer(offsets, off32, [nrows_in+1])
             do k = 1_int64, nrows_in
                 self%offsets(self%nrows+1+k) = base + int(off32(k+1), int64)
             end do
         else
-            call c_f_pointer(offsets, off64, [nrows_in+1])
             do k = 1_int64, nrows_in
                 self%offsets(self%nrows+1+k) = base + off64(k+1)
             end do

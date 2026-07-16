@@ -391,7 +391,13 @@ strings never have to be reconstructed on the I/O path:
 - `append_buffers(nrows_in, nchars_in, offsets, data, validity, offsets_int32)` — bulk-appends
   one row group straight from C buffers (offsets/data/validity from a decoded Arrow array),
   handling both int32 (`STRING`) and int64 (`LargeString`) source offsets and merging the
-  validity bitmap.
+  validity bitmap. `offsets` must already be rebased to this chunk (its first entry must be 0,
+  with `data` pointing at the payload byte that entry refers to) — a source sliced out of a
+  larger buffer (e.g. an Arrow array with a non-zero `offset()`) must be rebased by the caller
+  first; an un-rebased `offsets` aborts immediately rather than silently misplacing every
+  element's bytes. `validity`'s bit 0 has the same requirement and is not separately guarded
+  (not detectable from a raw pointer), so a source bitmap with a non-byte-aligned logical start
+  must likewise be repacked by the caller before calling this.
 
 These reference only `iso_c_binding`, keeping the module independent; the actual Arrow/Parquet
 glue will live in the read/write layer and merely call them. Ordinary users do not need them.

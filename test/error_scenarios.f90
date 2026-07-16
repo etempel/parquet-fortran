@@ -458,6 +458,8 @@ program error_scenarios
         call scenario_string_handle_unassociated()
     case ("string_handle_stale_index")
         call scenario_string_handle_stale_index()
+    case ("string_column_append_buffers_offset_not_zero")
+        call scenario_string_column_append_buffers_offset_not_zero()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -4078,5 +4080,20 @@ contains
         n = h%length()      ! idx 3 > nrows 1 -> aborts
         print '(a,i0)', "unexpectedly used a stale handle, length=", n
     end subroutine scenario_string_handle_stale_index
+
+    !> parquet_string_column%append_buffers: a source offsets buffer whose first entry isn't 0
+    !! (e.g. straight from a sliced Arrow array, not rebased by the caller) aborts rather than
+    !! silently misplacing every element's bytes -- see the precondition documented on
+    !! append_buffers itself.
+    subroutine scenario_string_column_append_buffers_offset_not_zero()
+        use, intrinsic :: iso_c_binding, only : c_loc, c_null_ptr
+        type(parquet_string_column) :: col
+        integer(int64), target :: off64(3)
+        character(len=1), target :: dat(4)
+        off64 = [1_int64, 3_int64, 4_int64]   ! first entry is 1, not 0 -> not rebased
+        dat = [character(len=1) :: "a", "b", "c", "d"]
+        call col%append_buffers(2_int64, 3_int64, c_loc(off64), c_loc(dat), c_null_ptr, .false.)
+        print '(a,i0)', "unexpectedly accepted un-rebased offsets, size=", col%size()
+    end subroutine scenario_string_column_append_buffers_offset_not_zero
 
 end program error_scenarios

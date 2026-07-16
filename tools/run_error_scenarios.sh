@@ -269,6 +269,7 @@ scenarios=(
     "string_column_to_character_null:1"
     "string_handle_unassociated:1"
     "string_handle_stale_index:1"
+    "string_column_append_buffers_offset_not_zero:1"
 )
 
 # concurrent_calls_into_shared_reader/writer are deliberately not in the list

@@ -354,7 +354,9 @@ contains
             new_unittest("parquet_string unassociated handle aborts", &
                 test_string_handle_unassociated_aborts), &
             new_unittest("parquet_string stale handle index aborts", &
-                test_string_handle_stale_index_aborts) &
+                test_string_handle_stale_index_aborts), &
+            new_unittest("parquet_string_column append_buffers with un-rebased offsets aborts", &
+                test_string_column_append_buffers_offset_not_zero_aborts) &
             ]
     end subroutine collect_tests_parquet_errors
 
@@ -392,6 +394,14 @@ contains
             failure_message="using a parquet_string handle whose index no longer exists was expected to abort", &
             required_stderr="parquet_strings: string handle index out of range (column changed?) in length")
     end subroutine test_string_handle_stale_index_aborts
+
+    subroutine test_string_column_append_buffers_offset_not_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_column_append_buffers_offset_not_zero", &
+            expect_abort=.true., &
+            failure_message="append_buffers with a source offsets(1) /= 0 was expected to abort", &
+            required_stderr="parquet_strings: append_buffers: source offsets(1) must be 0")
+    end subroutine test_string_column_append_buffers_offset_not_zero_aborts
 
     subroutine test_ok_scenario_exits_cleanly(error)
         type(error_type), allocatable, intent(out) :: error

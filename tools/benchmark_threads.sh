@@ -97,37 +97,45 @@ else
     tmpfile="$tmpdir/benchmark_threads.parquet"
 fi
 
-parse_elapsed() {
-    # $1: a "RESULT mode=... threads=... nrows=... elapsed_s=..." line (possibly preceded by
-    # other fpm run build-status noise on earlier lines).
-    printf '%s\n' "$1" | grep -oE 'elapsed_s=[0-9.]+' | cut -d= -f2
+parse_field() {
+    # $1: a "RESULT mode=... threads=... nmult=... ncols=... nrows=... elapsed_s=..." line
+    # (possibly preceded by other fpm run build-status noise on earlier lines). $2: field name.
+    printf '%s\n' "$1" | grep -oE "$2=[0-9.]+" | cut -d= -f2
 }
 
 write_cores=()
 write_times=()
+write_ncols=""
+write_nrows=""
 echo "Running write sweep..." >&2
 for n in "${core_list[@]}"; do
     line="$(fpm run benchmark_threads -- --mode=write --threads="$n" --size="$TARGET_FILE_SIZE_GB" --nmult="$NMULT" --file="$tmpfile")"
-    elapsed="$(parse_elapsed "$line")"
+    elapsed="$(parse_field "$line" elapsed_s)"
+    write_ncols="$(parse_field "$line" ncols)"
+    write_nrows="$(parse_field "$line" nrows)"
     write_cores+=("$n")
     write_times+=("$elapsed")
-    echo "  threads=$n elapsed_s=$elapsed" >&2
+    echo "  threads=$n ncols=$write_ncols nrows=$write_nrows elapsed_s=$elapsed" >&2
 done
 
 read_cores=()
 read_times=()
+read_ncols=""
+read_nrows=""
 last_index=$((${#core_list[@]} - 1))
 echo "Running read sweep (single static file, written above at threads=${core_list[$last_index]})..." >&2
 for n in "${core_list[@]}"; do
     line="$(fpm run benchmark_threads -- --mode=read --threads="$n" --nmult="$NMULT" --file="$tmpfile")"
-    elapsed="$(parse_elapsed "$line")"
+    elapsed="$(parse_field "$line" elapsed_s)"
+    read_ncols="$(parse_field "$line" ncols)"
+    read_nrows="$(parse_field "$line" nrows)"
     read_cores+=("$n")
     read_times+=("$elapsed")
-    echo "  threads=$n elapsed_s=$elapsed" >&2
+    echo "  threads=$n ncols=$read_ncols nrows=$read_nrows elapsed_s=$elapsed" >&2
 done
 
 echo
-echo "Write (threads vs. time)"
+echo "Write (ncols=$write_ncols, nrows=$write_nrows) -- threads vs. time"
 printf '%8s  %12s  %12s\n' "cores" "total_s" "s_per_core"
 printf -- '------------------------------------\n'
 for i in "${!write_cores[@]}"; do
@@ -138,7 +146,7 @@ for i in "${!write_cores[@]}"; do
 done
 
 echo
-echo "Read (threads vs. time)"
+echo "Read (ncols=$read_ncols, nrows=$read_nrows) -- threads vs. time"
 printf '%8s  %12s  %12s\n' "cores" "total_s" "s_per_core"
 printf -- '------------------------------------\n'
 for i in "${!read_cores[@]}"; do

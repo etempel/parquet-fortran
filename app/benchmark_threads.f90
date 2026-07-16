@@ -11,6 +11,8 @@ program benchmark_threads
     ! NMULT times); file size, thread count and NMULT are supplied per-run by
     ! tools/benchmark_threads.sh instead, since those are what the sweep varies -- this program
     ! is only ever one data point of it.
+    integer, parameter :: NUM_BASE_COLS = 5 !! int32 + int64 + float32 + float64 + boolean.
+
     character(len=:), allocatable :: mode, file
     integer :: threads, nmult
     real(real64) :: size_gb
@@ -288,8 +290,9 @@ contains
         elapsed_ticks = elapsed_ticks + (t1 - t0)
 
         elapsed_s = real(elapsed_ticks, real64) / real(count_rate, real64)
-        write(output_unit, '(a, i0, a, i0, a, i0, a, f0.6)') &
-            "RESULT mode=write threads=", threads, " nmult=", nmult, " nrows=", nrows, " elapsed_s=", elapsed_s
+        write(output_unit, '(a, i0, a, i0, a, i0, a, i0, a, f0.6)') &
+            "RESULT mode=write threads=", threads, " nmult=", nmult, " ncols=", NUM_BASE_COLS * nmult, &
+            " nrows=", nrows, " elapsed_s=", elapsed_s
     end subroutine run_write_benchmark
 
     !> Times parquet_open_reader (prefetch=.true., so this is where the actual decode work
@@ -375,8 +378,9 @@ contains
         elapsed_ticks = elapsed_ticks + (t1 - t0)
 
         elapsed_s = real(elapsed_ticks, real64) / real(count_rate, real64)
-        write(output_unit, '(a, i0, a, i0, a, i0, a, f0.6)') &
-            "RESULT mode=read threads=", threads, " nmult=", nmult, " nrows=", nrows, " elapsed_s=", elapsed_s
+        write(output_unit, '(a, i0, a, i0, a, i0, a, i0, a, f0.6)') &
+            "RESULT mode=read threads=", threads, " nmult=", nmult, " ncols=", NUM_BASE_COLS * nmult, &
+            " nrows=", nrows, " elapsed_s=", elapsed_s
     end subroutine run_read_benchmark
 
 end program benchmark_threads

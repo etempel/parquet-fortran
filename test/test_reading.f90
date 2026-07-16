@@ -57,7 +57,11 @@ contains
                 "group was read", test_read_column_chunk_check_complete_pass), &
             new_unittest("parquet_get_col_size/parquet_get_column_total_elements/parquet_read_array_row_mode/" // &
                 "parquet_read_array_element_mode avoid a whole-column read", &
-                test_col_size_and_row_mode_avoid_whole_column_read) &
+                test_col_size_and_row_mode_avoid_whole_column_read), &
+            new_unittest("read extended source types (int8/16, uint8/16/32/64, half_float, decimal32/64/128/256)", &
+                test_read_extended_types), &
+            new_unittest("row filter on an extended (int8) source type column", &
+                test_filter_extended_type) &
             ]
     end subroutine collect_tests_parquet_reading
 
@@ -1603,5 +1607,195 @@ contains
             failure_message="parquet_get_col_size/parquet_get_column_total_elements/" // &
                 "parquet_read_array_row_mode/parquet_read_array_element_mode did not all avoid a whole-column read")
     end subroutine test_col_size_and_row_mode_avoid_whole_column_read
+    !
+    !> Read-time widening support for Arrow physical types this library's own
+    !> writer never produces (see CONTRIBUTING.md's "Additional scalar types"
+    !> note and doc/pages/supported-data-types.md): INT8/16, UINT8/16/32/64,
+    !> HALF_FLOAT, and DECIMAL32/64/128/256, all converted via
+    !> convert_values_to_int32/int64/float32/float64 in parquet_wrapper.cpp.
+    !> Exercises at least one int-target and one real-target read per source
+    !> type (except v_decimal_scaled, genuinely fractional -- real-target
+    !> only, since a fractional value read into an int array is an error, not
+    !> a success case; see the "extended types abort" scenarios in
+    !> error_scenarios.f90 for that side of it) against
+    !> test/fixtures/extended_types.parquet (see its own generation comment
+    !> in tools/generate_fixtures.cpp for the full column layout).
+    subroutine test_read_extended_types(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: in_file = "test/fixtures/extended_types.parquet"
+        logical :: exists
+        integer :: nrows
+        integer(int32) :: i32(3)
+        integer(int64) :: i64(3)
+        real(real32) :: r32(3)
+        real(real64) :: r64(3)
+        !
+        inquire(file=in_file, exist=exists)
+        call check(error, exists)
+        if (allocated(error)) then
+            call test_failed(error, "input parquet file missing: expected test/fixtures/extended_types.parquet")
+            return
+        end if
+        !
+        call parquet_open_reader(reader, in_file)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 3)
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "unexpected number of rows in extended_types fixture")
+            return
+        end if
+        !
+        ! INT8/INT16/UINT8/UINT16 -> int32, all always-exact widenings.
+        call parquet_read_column(reader, "v_int8", i32)
+        call check(error, all(i32 == [5_int32, -128_int32, 127_int32]))
+        call fail_if_error(error, reader, "v_int8 -> int32")
+        if (allocated(error)) return
+        call parquet_read_column(reader, "v_int16", i32)
+        call check(error, all(i32 == [100_int32, -32768_int32, 32767_int32]))
+        call fail_if_error(error, reader, "v_int16 -> int32")
+        if (allocated(error)) return
+        call parquet_read_column(reader, "v_uint8", i32)
+        call check(error, all(i32 == [10_int32, 0_int32, 255_int32]))
+        call fail_if_error(error, reader, "v_uint8 -> int32")
+        if (allocated(error)) return
+        call parquet_read_column(reader, "v_uint16", i32)
+        call check(error, all(i32 == [1000_int32, 0_int32, 65535_int32]))
+        call fail_if_error(error, reader, "v_uint16 -> int32")
+        if (allocated(error)) return
+        !
+        ! UINT32 -> both int32 (fits, since every fixture value <= 2000000000)
+        ! and int64.
+        call parquet_read_column(reader, "v_uint32", i32)
+        call check(error, all(i32 == [1000_int32, 0_int32, 2000000000_int32]))
+        call fail_if_error(error, reader, "v_uint32 -> int32")
+        if (allocated(error)) return
+        call parquet_read_column(reader, "v_uint32", i64)
+        call check(error, all(i64 == [1000_int64, 0_int64, 2000000000_int64]))
+        call fail_if_error(error, reader, "v_uint32 -> int64")
+        if (allocated(error)) return
+        !
+        ! UINT64 -> int64, and widened into real64.
+        call parquet_read_column(reader, "v_uint64", i64)
+        call check(error, all(i64 == [1000_int64, 0_int64, 2000000000_int64]))
+        call fail_if_error(error, reader, "v_uint64 -> int64")
+        if (allocated(error)) return
+        call parquet_read_column(reader, "v_uint64", r64)
+        call check(error, all(abs(r64 - [1000.0_real64, 0.0_real64, 2000000000.0_real64]) < 1.0e-6_real64))
+        call fail_if_error(error, reader, "v_uint64 -> real64")
+        if (allocated(error)) return
+        !
+        ! HALF_FLOAT -> int32 (every fixture value is exactly integral) and
+        ! real32/real64.
+        call parquet_read_column(reader, "v_half_float", i32)
+        call check(error, all(i32 == [2_int32, -3_int32, 100_int32]))
+        call fail_if_error(error, reader, "v_half_float -> int32")
+        if (allocated(error)) return
+        call parquet_read_column(reader, "v_half_float", r32)
+        call check(error, all(abs(r32 - [2.0_real32, -3.0_real32, 100.0_real32]) < 1.0e-3_real32))
+        call fail_if_error(error, reader, "v_half_float -> real32")
+        if (allocated(error)) return
+        call parquet_read_column(reader, "v_half_float", r64)
+        call check(error, all(abs(r64 - [2.0_real64, -3.0_real64, 100.0_real64]) < 1.0e-3_real64))
+        call fail_if_error(error, reader, "v_half_float -> real64")
+        if (allocated(error)) return
+        !
+        ! DECIMAL32/64/128/256 (all scale 0 -- an "accidentally decimal"
+        ! integer column) -> int64 and real64, one column per width so every
+        ! branch of decimal_to_int64_checked/decimal_value_at is exercised.
+        call parquet_read_column(reader, "v_decimal32", i64)
+        call check(error, all(i64 == [12_int64, -34_int64, 999_int64]))
+        call fail_if_error(error, reader, "v_decimal32 -> int64")
+        if (allocated(error)) return
+        call parquet_read_column(reader, "v_decimal32", r64)
+        call check(error, all(abs(r64 - [12.0_real64, -34.0_real64, 999.0_real64]) < 1.0e-6_real64))
+        call fail_if_error(error, reader, "v_decimal32 -> real64")
+        if (allocated(error)) return
+        !
+        call parquet_read_column(reader, "v_decimal64", i64)
+        call check(error, all(i64 == [123456_int64, -7890_int64, 999999999_int64]))
+        call fail_if_error(error, reader, "v_decimal64 -> int64")
+        if (allocated(error)) return
+        call parquet_read_column(reader, "v_decimal64", r64)
+        call check(error, all(abs(r64 - [123456.0_real64, -7890.0_real64, 999999999.0_real64]) < 1.0e-3_real64))
+        call fail_if_error(error, reader, "v_decimal64 -> real64")
+        if (allocated(error)) return
+        !
+        call parquet_read_column(reader, "v_decimal128", i64)
+        call check(error, all(i64 == [123456789012_int64, -1_int64, 999999999999_int64]))
+        call fail_if_error(error, reader, "v_decimal128 -> int64")
+        if (allocated(error)) return
+        call parquet_read_column(reader, "v_decimal128", r64)
+        call check(error, &
+            all(abs(r64 - [123456789012.0_real64, -1.0_real64, 999999999999.0_real64]) < 1.0_real64))
+        call fail_if_error(error, reader, "v_decimal128 -> real64")
+        if (allocated(error)) return
+        !
+        call parquet_read_column(reader, "v_decimal256", i64)
+        call check(error, all(i64 == [123456789012345_int64, -1_int64, 999999999999999_int64]))
+        call fail_if_error(error, reader, "v_decimal256 -> int64")
+        if (allocated(error)) return
+        call parquet_read_column(reader, "v_decimal256", r64)
+        call check(error, &
+            all(abs(r64 - [123456789012345.0_real64, -1.0_real64, 999999999999999.0_real64]) < 1.0_real64))
+        call fail_if_error(error, reader, "v_decimal256 -> real64")
+        if (allocated(error)) return
+        !
+        ! DECIMAL128(10, 2), genuinely fractional -- real-target only.
+        call parquet_read_column(reader, "v_decimal_scaled", r64)
+        call check(error, all(abs(r64 - [1.00_real64, -2.00_real64, 123.45_real64]) < 1.0e-6_real64))
+        call fail_if_error(error, reader, "v_decimal_scaled -> real64")
+        if (allocated(error)) return
+        !
+        call parquet_close_reader(reader)
+    end subroutine test_read_extended_types
+    !
+    !> Proves eval_filter_clause's extension to the new read-time source
+    !> types (see is_small_integer_family's own comment in
+    !> parquet_wrapper.cpp) actually filters rather than silently rejecting
+    !> the column or matching nothing. v_int8 in extended_types.parquet is
+    !> [5, -128, 127] (rows 1-3); "v_int8 > 0" should keep rows 1 and 3 only.
+    subroutine test_filter_extended_type(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer :: nrows
+        integer(int32), allocatable :: id(:)
+        !
+        call filt%add("v_int8 > 0")
+        call parquet_open_reader(reader, "test/fixtures/extended_types.parquet", filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 2)
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "filtering v_int8 > 0 did not keep exactly 2 rows")
+            return
+        end if
+        !
+        allocate(id(nrows))
+        call parquet_read_column(reader, "id", id)
+        call parquet_close_reader(reader)
+        call check(error, all(id == [1_int32, 3_int32]))
+        if (allocated(error)) then
+            call test_failed(error, "filtering v_int8 > 0 did not keep the expected rows (id 1 and 3)")
+            return
+        end if
+    end subroutine test_filter_extended_type
+    !
+    !> Shared failure-reporting helper for test_read_extended_types: closes
+    !> the reader and fails the test with a message naming which column/target
+    !> combination produced the wrong values, without repeating that
+    !> boilerplate after every parquet_read_column call above.
+    subroutine fail_if_error(error, reader, what)
+        type(error_type), allocatable, intent(inout) :: error
+        type(parquet_reader), intent(inout) :: reader
+        character(len=*), intent(in) :: what
+        !
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, trim(what) // " did not read the expected values")
+        end if
+    end subroutine fail_if_error
     !
 end module test_reading

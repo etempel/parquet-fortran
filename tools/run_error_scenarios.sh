@@ -203,6 +203,7 @@ scenarios=(
     "filter_bad_boolean_value:1"
     "filter_bool_ordering_not_supported:1"
     "qc_range_violation_warns:0"
+    "extended_qc_range_violation_warns:0"
     "qc_maml_stray_no_colon_line:0"
     "qc_null_violation_warns:0"
     "qc_range_violation_hard_aborts:1"
@@ -275,6 +276,17 @@ scenarios=(
     "string_column_append_buffers_offset_not_zero_int32:1"
     "compact_string_write_requires_scalar_column:1"
     "compact_string_write_chunk_requires_scalar_column:1"
+    "extended_uint32_overflow_int32:1"
+    "extended_uint64_overflow_int32:1"
+    "extended_uint64_overflow_int64:1"
+    "extended_real_nonintegral_int32:1"
+    "extended_real_overflow_int32:1"
+    "extended_real_nonintegral_int64:1"
+    "extended_real_overflow_int64:1"
+    "extended_decimal_nonintegral_int32:1"
+    "extended_decimal_overflow_int32:1"
+    "extended_decimal_nonintegral_int64:1"
+    "extended_decimal_overflow_int64:1"
 )
 
 # concurrent_calls_into_shared_reader/writer are deliberately not in the list

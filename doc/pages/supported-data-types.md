@@ -55,19 +55,25 @@ mid-write.
 
 | Requested `values` kind | Convertible **from** stored `data_type` |
 |--------------------------|-------------------------------------------|
-| `integer(int32)`         | `int32`, `int64` (checked for overflow — see below) |
-| `integer(int64)`         | `int64`, `int32` |
-| `real(real32)`           | `float32`, `float64`, `int32`, `int64` |
-| `real(real64)`           | `float64`, `float32`, `int32`, `int64` |
+| `integer(int32)`         | `int32`, `int64` (checked for overflow — see below); `int8`, `int16`, `uint8`, `uint16` (always exact); `uint32`, `uint64` (checked for overflow); `float32`, `float64`, `half_float`, and `decimal` (checked for a fractional part and for overflow — see below) |
+| `integer(int64)`         | `int64`, `int32`, `int8`, `int16`, `uint8`, `uint16`, `uint32` (always exact); `uint64` (checked for overflow); `float32`, `float64`, `half_float`, and `decimal` (checked for a fractional part and for overflow — see below) |
+| `real(real32)`           | `float32`, `float64`, `int32`, `int64`, `int8`, `int16`, `uint8`, `uint16`, `uint32`, `uint64`, `half_float`, `decimal` |
+| `real(real64)`           | `float64`, `float32`, `int32`, `int64`, `int8`, `int16`, `uint8`, `uint16`, `uint32`, `uint64`, `half_float`, `decimal` |
 | `logical`                | `boolean` only |
 | `character(len=*)`       | `string` only |
 
-Anything not listed for a given `values` kind (e.g. requesting `integer` from a `float32`/`float64` column, or `logical`/`string` from anything else) fails immediately with `error stop`, naming the column and the type mismatch — there is no float-to-integer or integer/float-to-boolean/string conversion in either direction.
+`int8`/`int16`/`uint8`/`uint16`/`uint32`/`uint64`/`half_float`/`decimal` here are physical Parquet/Arrow storage types this library's own writer never produces (writing stays limited to the six types in the table at the top of this page) — they only ever arise from a file written by some other tool. There is nothing to declare for them in a MAML schema or anywhere else: the conversion is purely internal to the read path, triggered automatically by whatever physical type the column already has on disk.
 
-Two conversions above lose information silently, with no warning:
+Anything not listed for a given `values` kind (e.g. requesting `logical`/`string` from anything else) fails immediately with `error stop`, naming the column and the type mismatch.
 
-- `int64` → `integer(int32)` is the one integer narrowing checked for overflow: a stored value outside `int32`'s range fails with `error stop` (`"...int64->int32 overflow..."`) rather than wrapping.
-- `int32`/`int64` → `real32`/`real64`, and `float64` → `real32`, are **not** checked for precision loss — a large `int64` (beyond ~2^53) or `int32` (beyond ~2^24) read into `real32` silently loses exact-integer precision, the same way a plain Fortran `real(int_value, kind=real32)` conversion would.
+Conversions that lose information silently, with no warning:
+
+- `int64` → `integer(int32)`, and `uint32`/`uint64` → `integer(int32)`/`integer(int64)` where the value doesn't fit, are checked for overflow: a stored value outside the target's range fails with `error stop` (e.g. `"...int64->int32 overflow..."`, `"...uint64->int64 overflow..."`) rather than wrapping.
+- `int32`/`int64`/`int8`/`int16`/`uint8`/`uint16`/`uint32`/`uint64` → `real32`/`real64`, `float64` → `real32`, and `half_float`/`decimal` → `real32`/`real64`, are **not** checked for precision loss — a large `int64` (beyond ~2^53) or `int32` (beyond ~2^24) read into `real32` silently loses exact-integer precision, the same way a plain Fortran `real(int_value, kind=real32)` conversion would.
+
+A `float32`/`float64`/`half_float`/`decimal` value read into an `integer(int32)`/`integer(int64)` array is **never** silently truncated, unlike the narrowing above: a value with a nonzero fractional part fails immediately with `error stop` (e.g. `"...double value has a fractional part, cannot convert to int32 for column: ..."`), and an otherwise-integral value that doesn't fit the target width fails with the same kind of overflow `error stop` as the integer conversions above (e.g. `"...double->int64 overflow for column: ..."`). This exists specifically to support reading a column that is intrinsically an integer quantity but happens to have been written as a floating-point or decimal type by whatever tool produced the file — not to allow lossy float-to-int rounding.
+
+`qc: min:`/`max:` range checks and row filtering (`parquet_filter`) cover every type in the table above the same way they already cover `int32`/`int64`/`float32`/`float64` — both compare against the column's raw physical value regardless of its stored type, so no MAML/filter-side change is needed to use them against one of these extended types.
 
 ### Null values
 

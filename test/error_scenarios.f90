@@ -260,6 +260,8 @@ program error_scenarios
         call scenario_filter_bool_ordering_not_supported()
     case ("qc_range_violation_warns")
         call scenario_qc_range_violation_warns()
+    case ("extended_qc_range_violation_warns")
+        call scenario_extended_qc_range_violation_warns()
     case ("qc_maml_stray_no_colon_line")
         call scenario_qc_maml_stray_no_colon_line()
     case ("qc_null_violation_warns")
@@ -470,6 +472,28 @@ program error_scenarios
         call scenario_compact_string_write_requires_scalar_column()
     case ("compact_string_write_chunk_requires_scalar_column")
         call scenario_compact_string_write_chunk_requires_scalar_column()
+    case ("extended_uint32_overflow_int32")
+        call scenario_extended_uint32_overflow_int32()
+    case ("extended_uint64_overflow_int32")
+        call scenario_extended_uint64_overflow_int32()
+    case ("extended_uint64_overflow_int64")
+        call scenario_extended_uint64_overflow_int64()
+    case ("extended_real_nonintegral_int32")
+        call scenario_extended_real_nonintegral_int32()
+    case ("extended_real_overflow_int32")
+        call scenario_extended_real_overflow_int32()
+    case ("extended_real_nonintegral_int64")
+        call scenario_extended_real_nonintegral_int64()
+    case ("extended_real_overflow_int64")
+        call scenario_extended_real_overflow_int64()
+    case ("extended_decimal_nonintegral_int32")
+        call scenario_extended_decimal_nonintegral_int32()
+    case ("extended_decimal_overflow_int32")
+        call scenario_extended_decimal_overflow_int32()
+    case ("extended_decimal_nonintegral_int64")
+        call scenario_extended_decimal_nonintegral_int64()
+    case ("extended_decimal_overflow_int64")
+        call scenario_extended_decimal_overflow_int64()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -1879,6 +1903,128 @@ contains
         print '(a)', "unexpectedly read a column of an unsupported physical type without error"
     end subroutine scenario_read_unsupported_physical_type
 
+    !> The 11 scenarios below each exercise exactly one report_fatal_error
+    !> call site added to convert_values_to_int32/int64 (parquet_wrapper.cpp)
+    !> for the extended read-time source types (INT8/16, UINT8/16/32/64,
+    !> HALF_FLOAT, DECIMAL32/64/128/256 -- see CONTRIBUTING.md's "Additional
+    !> scalar types" note and doc/pages/supported-data-types.md). Each reads
+    !> one column of test/fixtures/extended_types.parquet (see its own
+    !> generation comment in tools/generate_fixtures.cpp) whose row 3 was
+    !> deliberately built to trigger exactly one of: an unsigned/real/decimal
+    !> source value overflowing the requested int32/int64 target width, or a
+    !> real/decimal source value with a nonzero fractional part (which this
+    !> feature always rejects with a hard error rather than truncating).
+
+    !> UINT32 value 4294967295 (> int32 max) read into an int32 array.
+    subroutine scenario_extended_uint32_overflow_int32()
+        type(parquet_reader) :: reader
+        integer(int32) :: values(3)
+
+        call parquet_open_reader(reader, "test/fixtures/extended_types.parquet")
+        call parquet_read_column(reader, "v_uint32_ovf", values)
+        print '(a)', "unexpectedly read a uint32 value exceeding int32 range without error"
+    end subroutine scenario_extended_uint32_overflow_int32
+
+    !> UINT64 value 5000000000 (fits int64, not int32) read into an int32 array.
+    subroutine scenario_extended_uint64_overflow_int32()
+        type(parquet_reader) :: reader
+        integer(int32) :: values(3)
+
+        call parquet_open_reader(reader, "test/fixtures/extended_types.parquet")
+        call parquet_read_column(reader, "v_uint64_ovf32", values)
+        print '(a)', "unexpectedly read a uint64 value exceeding int32 range without error"
+    end subroutine scenario_extended_uint64_overflow_int32
+
+    !> UINT64 value 18446744073709551615 (UINT64_MAX, > int64 max) read into an int64 array.
+    subroutine scenario_extended_uint64_overflow_int64()
+        type(parquet_reader) :: reader
+        integer(int64) :: values(3)
+
+        call parquet_open_reader(reader, "test/fixtures/extended_types.parquet")
+        call parquet_read_column(reader, "v_uint64_ovf64", values)
+        print '(a)', "unexpectedly read a uint64 value exceeding int64 range without error"
+    end subroutine scenario_extended_uint64_overflow_int64
+
+    !> DOUBLE value 3.14 (nonzero fractional part) read into an int32 array.
+    subroutine scenario_extended_real_nonintegral_int32()
+        type(parquet_reader) :: reader
+        integer(int32) :: values(3)
+
+        call parquet_open_reader(reader, "test/fixtures/extended_types.parquet")
+        call parquet_read_column(reader, "v_double_fractional", values)
+        print '(a)', "unexpectedly read a non-integral double value into int32 without error"
+    end subroutine scenario_extended_real_nonintegral_int32
+
+    !> DOUBLE value 5.0e9 (fits int64, not int32) read into an int32 array.
+    subroutine scenario_extended_real_overflow_int32()
+        type(parquet_reader) :: reader
+        integer(int32) :: values(3)
+
+        call parquet_open_reader(reader, "test/fixtures/extended_types.parquet")
+        call parquet_read_column(reader, "v_double_ovf32", values)
+        print '(a)', "unexpectedly read a double value exceeding int32 range without error"
+    end subroutine scenario_extended_real_overflow_int32
+
+    !> DOUBLE value 3.14 (nonzero fractional part) read into an int64 array.
+    subroutine scenario_extended_real_nonintegral_int64()
+        type(parquet_reader) :: reader
+        integer(int64) :: values(3)
+
+        call parquet_open_reader(reader, "test/fixtures/extended_types.parquet")
+        call parquet_read_column(reader, "v_double_fractional", values)
+        print '(a)', "unexpectedly read a non-integral double value into int64 without error"
+    end subroutine scenario_extended_real_nonintegral_int64
+
+    !> DOUBLE value 1.0e20 (> int64 max) read into an int64 array.
+    subroutine scenario_extended_real_overflow_int64()
+        type(parquet_reader) :: reader
+        integer(int64) :: values(3)
+
+        call parquet_open_reader(reader, "test/fixtures/extended_types.parquet")
+        call parquet_read_column(reader, "v_double_ovf64", values)
+        print '(a)', "unexpectedly read a double value exceeding int64 range without error"
+    end subroutine scenario_extended_real_overflow_int64
+
+    !> DECIMAL128(10, 2) value 123.45 (nonzero fractional part) read into an int32 array.
+    subroutine scenario_extended_decimal_nonintegral_int32()
+        type(parquet_reader) :: reader
+        integer(int32) :: values(3)
+
+        call parquet_open_reader(reader, "test/fixtures/extended_types.parquet")
+        call parquet_read_column(reader, "v_decimal_scaled", values)
+        print '(a)', "unexpectedly read a non-integral decimal value into int32 without error"
+    end subroutine scenario_extended_decimal_nonintegral_int32
+
+    !> DECIMAL128(20, 0) value 5000000000 (fits int64, not int32) read into an int32 array.
+    subroutine scenario_extended_decimal_overflow_int32()
+        type(parquet_reader) :: reader
+        integer(int32) :: values(3)
+
+        call parquet_open_reader(reader, "test/fixtures/extended_types.parquet")
+        call parquet_read_column(reader, "v_decimal_ovf32", values)
+        print '(a)', "unexpectedly read a decimal value exceeding int32 range without error"
+    end subroutine scenario_extended_decimal_overflow_int32
+
+    !> DECIMAL128(10, 2) value 123.45 (nonzero fractional part) read into an int64 array.
+    subroutine scenario_extended_decimal_nonintegral_int64()
+        type(parquet_reader) :: reader
+        integer(int64) :: values(3)
+
+        call parquet_open_reader(reader, "test/fixtures/extended_types.parquet")
+        call parquet_read_column(reader, "v_decimal_scaled", values)
+        print '(a)', "unexpectedly read a non-integral decimal value into int64 without error"
+    end subroutine scenario_extended_decimal_nonintegral_int64
+
+    !> DECIMAL128(30, 0) value 1e20 (> int64 max) read into an int64 array.
+    subroutine scenario_extended_decimal_overflow_int64()
+        type(parquet_reader) :: reader
+        integer(int64) :: values(3)
+
+        call parquet_open_reader(reader, "test/fixtures/extended_types.parquet")
+        call parquet_read_column(reader, "v_decimal_ovf64", values)
+        print '(a)', "unexpectedly read a decimal value exceeding int64 range without error"
+    end subroutine scenario_extended_decimal_overflow_int64
+
     !> Arrow/Parquet requires every column in a table to have the same number
     !> of rows. parquet_write_column now records the row count of the first
     !> column written and error stops with a dedicated message the moment a
@@ -2673,6 +2819,27 @@ contains
         call parquet_read_column(reader, "ra", ra_back)
         call parquet_close_reader(reader)
     end subroutine scenario_qc_range_violation_warns
+
+    !> Same as scenario_qc_range_violation_warns, but against one of the
+    !> extended read-time source types (UINT16 -- see run_qc_range_check's
+    !> is_small_integer_family branch in parquet_wrapper.cpp) instead of a
+    !> plain INT32 column, proving qc range checking was actually extended to
+    !> cover these types rather than silently never firing for them (see
+    !> CONTRIBUTING.md's "Additional scalar types" note). Reads
+    !> test/fixtures/extended_types.parquet's v_uint16 column (values 1000,
+    !> 0, 65535) against a declared max: 1000 -- row 3's 65535 violates.
+    subroutine scenario_extended_qc_range_violation_warns()
+        type(parquet_reader) :: reader
+        integer(int32) :: values(3)
+
+        call write_text_file("test_run/qc_extended.maml", [character(len=32) :: &
+            "fields:", "- name: v_uint16", "  qc:", "    max: 1000"])
+
+        call parquet_open_reader(reader, "test/fixtures/extended_types.parquet", &
+            schema=parquet_load_qc_maml_file("test_run/qc_extended.maml"), qc_soft=.true.)
+        call parquet_read_column(reader, "v_uint16", values)
+        call parquet_close_reader(reader)
+    end subroutine scenario_extended_qc_range_violation_warns
 
     !> A stray line with no colon inside a qc-maml field block (not blank,
     !> not "#"-prefixed) is silently skipped by parquet_split_key_value's

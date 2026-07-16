@@ -209,6 +209,28 @@ contains
                 test_read_column_with_nulls_aborts), &
             new_unittest("reading a column of an unsupported physical type aborts", &
                 test_read_unsupported_physical_type_aborts), &
+            new_unittest("reading an out-of-int32-range uint32 value aborts", &
+                test_extended_uint32_overflow_int32_aborts), &
+            new_unittest("reading an out-of-int32-range uint64 value aborts", &
+                test_extended_uint64_overflow_int32_aborts), &
+            new_unittest("reading an out-of-int64-range uint64 value aborts", &
+                test_extended_uint64_overflow_int64_aborts), &
+            new_unittest("reading a non-integral double value into int32 aborts", &
+                test_extended_real_nonintegral_int32_aborts), &
+            new_unittest("reading an out-of-int32-range double value aborts", &
+                test_extended_real_overflow_int32_aborts), &
+            new_unittest("reading a non-integral double value into int64 aborts", &
+                test_extended_real_nonintegral_int64_aborts), &
+            new_unittest("reading an out-of-int64-range double value aborts", &
+                test_extended_real_overflow_int64_aborts), &
+            new_unittest("reading a non-integral decimal value into int32 aborts", &
+                test_extended_decimal_nonintegral_int32_aborts), &
+            new_unittest("reading an out-of-int32-range decimal value aborts", &
+                test_extended_decimal_overflow_int32_aborts), &
+            new_unittest("reading a non-integral decimal value into int64 aborts", &
+                test_extended_decimal_nonintegral_int64_aborts), &
+            new_unittest("reading an out-of-int64-range decimal value aborts", &
+                test_extended_decimal_overflow_int64_aborts), &
             new_unittest("writing a vector column with col_size exceeding Arrow's FixedSizeListType limit aborts", &
                 test_write_col_size_overflow_aborts), &
             new_unittest("writing a vector column with an explicit chunk_size*col_size exceeding Arrow/Parquet's " // &
@@ -1152,6 +1174,101 @@ contains
         call check_scenario_exit_status(error, "read_unsupported_physical_type", expect_abort=.true., &
             failure_message="reading a column of an unsupported physical Parquet type was expected to abort")
     end subroutine test_read_unsupported_physical_type_aborts
+
+    !> The 11 tests below are the Fortran-side counterpart of
+    !> error_scenarios.f90's own "extended_..." scenarios documented there --
+    !> each checks the exact stderr message for one report_fatal_error call
+    !> site added to convert_values_to_int32/int64 (parquet_wrapper.cpp) for
+    !> the extended read-time source types (see doc/pages/supported-data-types.md
+    !> and CONTRIBUTING.md's "Additional scalar types" note).
+
+    subroutine test_extended_uint32_overflow_int32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "extended_uint32_overflow_int32", expect_abort=.true., &
+            failure_message="reading a uint32 value exceeding int32 range was expected to error stop", &
+            required_stderr="uint32->int32 overflow for column: v_uint32_ovf")
+    end subroutine test_extended_uint32_overflow_int32_aborts
+
+    subroutine test_extended_uint64_overflow_int32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "extended_uint64_overflow_int32", expect_abort=.true., &
+            failure_message="reading a uint64 value exceeding int32 range was expected to error stop", &
+            required_stderr="uint64->int32 overflow for column: v_uint64_ovf32")
+    end subroutine test_extended_uint64_overflow_int32_aborts
+
+    subroutine test_extended_uint64_overflow_int64_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "extended_uint64_overflow_int64", expect_abort=.true., &
+            failure_message="reading a uint64 value exceeding int64 range was expected to error stop", &
+            required_stderr="uint64->int64 overflow for column: v_uint64_ovf64")
+    end subroutine test_extended_uint64_overflow_int64_aborts
+
+    subroutine test_extended_real_nonintegral_int32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "extended_real_nonintegral_int32", expect_abort=.true., &
+            failure_message="reading a non-integral double value into int32 was expected to error stop", &
+            required_stderr="double value has a fractional part, cannot convert to int32 for column: v_double_fractional")
+    end subroutine test_extended_real_nonintegral_int32_aborts
+
+    subroutine test_extended_real_overflow_int32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "extended_real_overflow_int32", expect_abort=.true., &
+            failure_message="reading an out-of-int32-range double value was expected to error stop", &
+            required_stderr="double->int32 overflow for column: v_double_ovf32")
+    end subroutine test_extended_real_overflow_int32_aborts
+
+    subroutine test_extended_real_nonintegral_int64_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "extended_real_nonintegral_int64", expect_abort=.true., &
+            failure_message="reading a non-integral double value into int64 was expected to error stop", &
+            required_stderr="double value has a fractional part, cannot convert to int64 for column: v_double_fractional")
+    end subroutine test_extended_real_nonintegral_int64_aborts
+
+    subroutine test_extended_real_overflow_int64_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "extended_real_overflow_int64", expect_abort=.true., &
+            failure_message="reading an out-of-int64-range double value was expected to error stop", &
+            required_stderr="double->int64 overflow for column: v_double_ovf64")
+    end subroutine test_extended_real_overflow_int64_aborts
+
+    subroutine test_extended_decimal_nonintegral_int32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "extended_decimal_nonintegral_int32", expect_abort=.true., &
+            failure_message="reading a non-integral decimal value into int32 was expected to error stop", &
+            required_stderr="value has a fractional part, cannot convert to int32 for column: v_decimal_scaled")
+    end subroutine test_extended_decimal_nonintegral_int32_aborts
+
+    subroutine test_extended_decimal_overflow_int32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "extended_decimal_overflow_int32", expect_abort=.true., &
+            failure_message="reading an out-of-int32-range decimal value was expected to error stop", &
+            required_stderr="->int32 overflow for column: v_decimal_ovf32")
+    end subroutine test_extended_decimal_overflow_int32_aborts
+
+    subroutine test_extended_decimal_nonintegral_int64_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "extended_decimal_nonintegral_int64", expect_abort=.true., &
+            failure_message="reading a non-integral decimal value into int64 was expected to error stop", &
+            required_stderr="value has a fractional part, cannot convert to int64 for column: v_decimal_scaled")
+    end subroutine test_extended_decimal_nonintegral_int64_aborts
+
+    subroutine test_extended_decimal_overflow_int64_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "extended_decimal_overflow_int64", expect_abort=.true., &
+            failure_message="reading an out-of-int64-range decimal value was expected to error stop", &
+            required_stderr="->int64 overflow for column: v_decimal_ovf64")
+    end subroutine test_extended_decimal_overflow_int64_aborts
 
     !> check_col_size_fits_arrow_limit in parquet_wrapper.cpp aborts via a C++-level
     !> report_fatal_error (not a Fortran error stop) the moment a vector column's col_size

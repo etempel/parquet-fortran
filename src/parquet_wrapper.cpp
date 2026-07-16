@@ -4,6 +4,7 @@
 #endif
 
 #include <arrow/api.h>
+#include <arrow/array/array_decimal.h>
 #include <arrow/array/concatenate.h>
 #include <arrow/array/util.h>
 #include <arrow/compute/api.h>
@@ -12,6 +13,8 @@
 #include <arrow/util/bit_util.h>
 #include <arrow/util/byte_size.h>
 #include <arrow/util/compression.h>
+#include <arrow/util/decimal.h>
+#include <arrow/util/float16.h>
 #include <arrow/util/thread_pool.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/arrow/writer.h>
@@ -20,6 +23,7 @@
 #include <atomic>
 #include <cctype>
 #include <cerrno>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -952,6 +956,212 @@ extern "C"
 		return true;
 	}
 
+	// Outcome of a checked conversion of one source value (real or decimal)
+	// into an integer output: kOk on success, kNonIntegral if the source
+	// value has a nonzero fractional part, kOverflow if the (integral) value
+	// doesn't fit the requested target width. Used by convert_values_to_int32/
+	// int64 further below for every source type that can fail this way --
+	// unlike the existing, silently-lossy int->real/double->float narrowing
+	// elsewhere in this file, a real or decimal value being converted to an
+	// integer is never silently truncated: either check failing is a hard
+	// error.
+	enum class NumericConvertStatus { kOk, kNonIntegral, kOverflow };
+
+	// Checks whether `v` (already widened to double -- see real_family_value_at)
+	// is both exactly integral and in range for int32_t/int64_t, filling `out`
+	// on success. Two plain overloads rather than one template: this whole
+	// file lives inside `extern "C" { ... }` blocks, and templates cannot
+	// appear inside a linkage-specification block at all.
+	static NumericConvertStatus real_to_int_checked(double v, int32_t &out)
+	{
+		if (!std::isfinite(v) || v != std::trunc(v)) return NumericConvertStatus::kNonIntegral;
+		if (v < static_cast<double>(std::numeric_limits<int32_t>::min()) ||
+			v > static_cast<double>(std::numeric_limits<int32_t>::max()))
+			return NumericConvertStatus::kOverflow;
+		out = static_cast<int32_t>(v);
+		return NumericConvertStatus::kOk;
+	}
+	static NumericConvertStatus real_to_int_checked(double v, int64_t &out)
+	{
+		if (!std::isfinite(v) || v != std::trunc(v)) return NumericConvertStatus::kNonIntegral;
+		if (v < static_cast<double>(std::numeric_limits<int64_t>::min()) ||
+			v > static_cast<double>(std::numeric_limits<int64_t>::max()))
+			return NumericConvertStatus::kOverflow;
+		out = static_cast<int64_t>(v);
+		return NumericConvertStatus::kOk;
+	}
+
+	// Extracts element `idx` of a FLOAT/HALF_FLOAT/DOUBLE array as a double --
+	// shared by convert_values_to_int32/int64 (via real_to_int_checked above),
+	// convert_values_to_float32/float64's HALF_FLOAT widening case, and
+	// run_qc_range_check/eval_filter_clause below.
+	static double real_family_value_at(const std::shared_ptr<arrow::Array> &vals, int64_t idx)
+	{
+		switch (vals->type_id())
+		{
+		case arrow::Type::FLOAT:
+			return static_cast<double>(std::static_pointer_cast<arrow::FloatArray>(vals)->Value(idx));
+		case arrow::Type::HALF_FLOAT:
+		{
+			auto arr = std::static_pointer_cast<arrow::HalfFloatArray>(vals);
+			return static_cast<double>(arrow::util::Float16::FromBits(arr->Value(idx)).ToFloat());
+		}
+		default: // arrow::Type::DOUBLE
+			return std::static_pointer_cast<arrow::DoubleArray>(vals)->Value(idx);
+		}
+	}
+
+	// Returns this decimal column's declared scale (digits after the point) --
+	// shared by every DECIMAL32/64/128/256 case below. DecimalType is the
+	// common base every decimal width's concrete type class derives from, so
+	// this one accessor works regardless of which width `vals` actually is.
+	static int32_t decimal_scale_of(const std::shared_ptr<arrow::Array> &vals)
+	{
+		return std::static_pointer_cast<arrow::DecimalType>(vals->type())->scale();
+	}
+
+	// Converts element `idx` of a DECIMAL32/64/128/256 array into an exact
+	// int64_t via Rescale(scale, 0, ...) -- which fails with
+	// DecimalStatus::kRescaleDataLoss exactly when the value has a nonzero
+	// fractional part (nonzero digits below the decimal point), giving the
+	// same "no silent truncation" behavior real_to_int_checked applies to
+	// float/double/half_float sources. Deliberately calls BasicDecimalNN's
+	// own Rescale directly (rather than the Decimal128::Rescale/
+	// Decimal256::Rescale Result<> wrappers) so kRescaleDataLoss can be told
+	// apart from a genuine overflow, instead of collapsing both into one
+	// opaque Status.
+	static NumericConvertStatus decimal_to_int64_checked(const std::shared_ptr<arrow::Array> &vals, int64_t idx, int64_t &out)
+	{
+		int32_t scale = decimal_scale_of(vals);
+		switch (vals->type_id())
+		{
+		case arrow::Type::DECIMAL32:
+		{
+			auto arr = std::static_pointer_cast<arrow::Decimal32Array>(vals);
+			arrow::Decimal32 dec(arr->GetValue(idx));
+			arrow::BasicDecimal32 rescaled;
+			auto status = dec.BasicDecimal32::Rescale(scale, 0, &rescaled);
+			if (status == arrow::DecimalStatus::kRescaleDataLoss) return NumericConvertStatus::kNonIntegral;
+			if (status != arrow::DecimalStatus::kSuccess) return NumericConvertStatus::kOverflow;
+			out = static_cast<int64_t>(rescaled.value());
+			return NumericConvertStatus::kOk;
+		}
+		case arrow::Type::DECIMAL64:
+		{
+			auto arr = std::static_pointer_cast<arrow::Decimal64Array>(vals);
+			arrow::Decimal64 dec(arr->GetValue(idx));
+			arrow::BasicDecimal64 rescaled;
+			auto status = dec.BasicDecimal64::Rescale(scale, 0, &rescaled);
+			if (status == arrow::DecimalStatus::kRescaleDataLoss) return NumericConvertStatus::kNonIntegral;
+			if (status != arrow::DecimalStatus::kSuccess) return NumericConvertStatus::kOverflow;
+			out = rescaled.value();
+			return NumericConvertStatus::kOk;
+		}
+		case arrow::Type::DECIMAL128:
+		{
+			auto arr = std::static_pointer_cast<arrow::Decimal128Array>(vals);
+			arrow::Decimal128 dec(arr->GetValue(idx));
+			arrow::BasicDecimal128 rescaled;
+			auto status = dec.BasicDecimal128::Rescale(scale, 0, &rescaled);
+			if (status == arrow::DecimalStatus::kRescaleDataLoss) return NumericConvertStatus::kNonIntegral;
+			if (status != arrow::DecimalStatus::kSuccess) return NumericConvertStatus::kOverflow;
+			auto as_int = arrow::Decimal128(rescaled).ToInteger<int64_t>();
+			if (!as_int.ok()) return NumericConvertStatus::kOverflow;
+			out = as_int.ValueOrDie();
+			return NumericConvertStatus::kOk;
+		}
+		default: // arrow::Type::DECIMAL256
+		{
+			auto arr = std::static_pointer_cast<arrow::Decimal256Array>(vals);
+			arrow::Decimal256 dec(arr->GetValue(idx));
+			arrow::BasicDecimal256 rescaled;
+			auto status = dec.BasicDecimal256::Rescale(scale, 0, &rescaled);
+			if (status == arrow::DecimalStatus::kRescaleDataLoss) return NumericConvertStatus::kNonIntegral;
+			if (status != arrow::DecimalStatus::kSuccess) return NumericConvertStatus::kOverflow;
+			// Decimal256 has no ToInteger<T>() (unlike 32/64/128 above) -- it
+			// fits in int64_t exactly iff every word above the lowest one is
+			// just the sign-extension of the low word's own sign bit.
+			auto words = rescaled.native_endian_array();
+			int64_t low = static_cast<int64_t>(words[0]);
+			uint64_t sign_ext = (low < 0) ? ~uint64_t{0} : uint64_t{0};
+			for (size_t w = 1; w < words.size(); ++w)
+			{
+				if (words[w] != sign_ext) return NumericConvertStatus::kOverflow;
+			}
+			out = low;
+			return NumericConvertStatus::kOk;
+		}
+		}
+	}
+
+	// Converts element `idx` of a DECIMAL32/64/128/256 array to a scaled
+	// double -- shared by convert_values_to_float32/float64's unchecked
+	// (silently lossy, same stance as int64->real32/double->real32 narrowing
+	// elsewhere in this file) widening cases, and run_qc_range_check/
+	// eval_filter_clause below.
+	static double decimal_value_at(const std::shared_ptr<arrow::Array> &vals, int64_t idx)
+	{
+		int32_t scale = decimal_scale_of(vals);
+		switch (vals->type_id())
+		{
+		case arrow::Type::DECIMAL32:
+			return arrow::Decimal32(std::static_pointer_cast<arrow::Decimal32Array>(vals)->GetValue(idx)).ToDouble(scale);
+		case arrow::Type::DECIMAL64:
+			return arrow::Decimal64(std::static_pointer_cast<arrow::Decimal64Array>(vals)->GetValue(idx)).ToDouble(scale);
+		case arrow::Type::DECIMAL128:
+			return arrow::Decimal128(std::static_pointer_cast<arrow::Decimal128Array>(vals)->GetValue(idx)).ToDouble(scale);
+		default: // arrow::Type::DECIMAL256
+			return arrow::Decimal256(std::static_pointer_cast<arrow::Decimal256Array>(vals)->GetValue(idx)).ToDouble(scale);
+		}
+	}
+
+	// True for every Arrow physical type that widens into an int64_t with no
+	// possibility of overflow -- INT8/16/32/64 and UINT8/16/32, but not
+	// UINT64 (which can exceed INT64_MAX). Shared by convert_values_to_int64
+	// further below and by run_qc_range_check/eval_filter_clause (qc/filter
+	// always compare the raw physical value, never the maml-declared
+	// data_type -- see those functions' own comments).
+	static bool is_small_integer_family(arrow::Type::type id)
+	{
+		switch (id)
+		{
+		case arrow::Type::INT8:
+		case arrow::Type::INT16:
+		case arrow::Type::INT32:
+		case arrow::Type::INT64:
+		case arrow::Type::UINT8:
+		case arrow::Type::UINT16:
+		case arrow::Type::UINT32:
+			return true;
+		default:
+			return false;
+		}
+	}
+
+	// Extracts element `idx` of any is_small_integer_family array as an exact
+	// int64_t. Shared by convert_values_to_int32/int64 and
+	// run_qc_range_check/eval_filter_clause.
+	static int64_t small_integer_value_at(const std::shared_ptr<arrow::Array> &vals, int64_t idx)
+	{
+		switch (vals->type_id())
+		{
+		case arrow::Type::INT8:
+			return static_cast<int64_t>(std::static_pointer_cast<arrow::Int8Array>(vals)->Value(idx));
+		case arrow::Type::INT16:
+			return static_cast<int64_t>(std::static_pointer_cast<arrow::Int16Array>(vals)->Value(idx));
+		case arrow::Type::UINT8:
+			return static_cast<int64_t>(std::static_pointer_cast<arrow::UInt8Array>(vals)->Value(idx));
+		case arrow::Type::UINT16:
+			return static_cast<int64_t>(std::static_pointer_cast<arrow::UInt16Array>(vals)->Value(idx));
+		case arrow::Type::UINT32:
+			return static_cast<int64_t>(std::static_pointer_cast<arrow::UInt32Array>(vals)->Value(idx));
+		case arrow::Type::INT32:
+			return static_cast<int64_t>(std::static_pointer_cast<arrow::Int32Array>(vals)->Value(idx));
+		default: // arrow::Type::INT64
+			return std::static_pointer_cast<arrow::Int64Array>(vals)->Value(idx);
+		}
+	}
+
 	// Read-time QC (see the QcRule struct and parquet_reader_set_qc further
 	// below): checks `array` (already the filtered version, if a filter is
 	// set -- see apply_filter_mask) against `rule`'s declared Null policy.
@@ -999,6 +1209,11 @@ extern "C"
 		{
 		case arrow::Type::INT32:
 		case arrow::Type::INT64:
+		case arrow::Type::INT8:
+		case arrow::Type::INT16:
+		case arrow::Type::UINT8:
+		case arrow::Type::UINT16:
+		case arrow::Type::UINT32:
 		{
 			int64_t min_bound = 0, max_bound = 0;
 			bool have_min = rule.has_min && parse_int64_strict(rule.min_raw, min_bound);
@@ -1015,16 +1230,7 @@ extern "C"
 				if (have_max) ok = ok && compare_op<int64_t>(v, max_bound, rule.max_op);
 				if (!ok) n_violate++;
 			};
-			if (array->type_id() == arrow::Type::INT32)
-			{
-				auto arr = std::static_pointer_cast<arrow::Int32Array>(array);
-				for (int64_t i = 0; i < n; ++i) if (!arr->IsNull(i)) scan(arr->Value(i));
-			}
-			else
-			{
-				auto arr = std::static_pointer_cast<arrow::Int64Array>(array);
-				for (int64_t i = 0; i < n; ++i) if (!arr->IsNull(i)) scan(arr->Value(i));
-			}
+			for (int64_t i = 0; i < n; ++i) if (!array->IsNull(i)) scan(small_integer_value_at(array, i));
 			if (!any_valid || n_violate == 0) return false;
 			if (have_min) bounds_desc = "min " + rule.min_op + " " + std::to_string(min_bound);
 			if (have_max)
@@ -1038,6 +1244,12 @@ extern "C"
 		}
 		case arrow::Type::FLOAT:
 		case arrow::Type::DOUBLE:
+		case arrow::Type::HALF_FLOAT:
+		case arrow::Type::UINT64:
+		case arrow::Type::DECIMAL32:
+		case arrow::Type::DECIMAL64:
+		case arrow::Type::DECIMAL128:
+		case arrow::Type::DECIMAL256:
 		{
 			double min_bound = 0, max_bound = 0;
 			bool have_min = rule.has_min && parse_double_strict(rule.min_raw, min_bound);
@@ -1054,15 +1266,15 @@ extern "C"
 				if (have_max) ok = ok && compare_op<double>(v, max_bound, rule.max_op);
 				if (!ok) n_violate++;
 			};
-			if (array->type_id() == arrow::Type::FLOAT)
+			auto type_id = array->type_id();
+			bool is_decimal = type_id == arrow::Type::DECIMAL32 || type_id == arrow::Type::DECIMAL64 ||
+				type_id == arrow::Type::DECIMAL128 || type_id == arrow::Type::DECIMAL256;
+			for (int64_t i = 0; i < n; ++i)
 			{
-				auto arr = std::static_pointer_cast<arrow::FloatArray>(array);
-				for (int64_t i = 0; i < n; ++i) if (!arr->IsNull(i)) scan(static_cast<double>(arr->Value(i)));
-			}
-			else
-			{
-				auto arr = std::static_pointer_cast<arrow::DoubleArray>(array);
-				for (int64_t i = 0; i < n; ++i) if (!arr->IsNull(i)) scan(arr->Value(i));
+				if (array->IsNull(i)) continue;
+				if (is_decimal) scan(decimal_value_at(array, i));
+				else if (type_id == arrow::Type::UINT64) scan(static_cast<double>(std::static_pointer_cast<arrow::UInt64Array>(array)->Value(i)));
+				else scan(real_family_value_at(array, i));
 			}
 			if (!any_valid || n_violate == 0) return false;
 			if (have_min) bounds_desc = "min " + rule.min_op + " " + format_stat_double(min_bound);
@@ -1985,6 +2197,11 @@ extern "C"
 		{
 		case arrow::Type::INT32:
 		case arrow::Type::INT64:
+		case arrow::Type::INT8:
+		case arrow::Type::INT16:
+		case arrow::Type::UINT8:
+		case arrow::Type::UINT16:
+		case arrow::Type::UINT32:
 		{
 			int64_t parsed;
 			if (is_string || !parse_int64_strict(value_text, parsed))
@@ -2007,7 +2224,7 @@ extern "C"
 					combined[static_cast<size_t>(i)] = combined[static_cast<size_t>(i)] && ok;
 				}
 			}
-			else
+			else if (array->type_id() == arrow::Type::INT64)
 			{
 				auto arr = std::static_pointer_cast<arrow::Int64Array>(array);
 				for (int64_t i = 0; i < n; ++i)
@@ -2016,10 +2233,27 @@ extern "C"
 					combined[static_cast<size_t>(i)] = combined[static_cast<size_t>(i)] && ok;
 				}
 			}
+			else
+			{
+				// INT8/INT16/UINT8/UINT16/UINT32: every value widens into
+				// int64_t exactly, so compare directly with no extra range
+				// pre-check (same as the plain INT64 branch above).
+				for (int64_t i = 0; i < n; ++i)
+				{
+					bool ok = !array->IsNull(i) && compare_op<int64_t>(small_integer_value_at(array, i), parsed, op);
+					combined[static_cast<size_t>(i)] = combined[static_cast<size_t>(i)] && ok;
+				}
+			}
 			return true;
 		}
 		case arrow::Type::FLOAT:
 		case arrow::Type::DOUBLE:
+		case arrow::Type::HALF_FLOAT:
+		case arrow::Type::UINT64:
+		case arrow::Type::DECIMAL32:
+		case arrow::Type::DECIMAL64:
+		case arrow::Type::DECIMAL128:
+		case arrow::Type::DECIMAL256:
 		{
 			double parsed;
 			if (is_string || !parse_double_strict(value_text, parsed))
@@ -2027,9 +2261,18 @@ extern "C"
 				err = "value '" + value_text + "' is not a valid number for column '" + colname + "'";
 				return false;
 			}
-			if (array->type_id() == arrow::Type::FLOAT)
+			if (array->type_id() == arrow::Type::FLOAT || array->type_id() == arrow::Type::DOUBLE ||
+				array->type_id() == arrow::Type::HALF_FLOAT)
 			{
-				auto arr = std::static_pointer_cast<arrow::FloatArray>(array);
+				for (int64_t i = 0; i < n; ++i)
+				{
+					bool ok = !array->IsNull(i) && compare_op<double>(real_family_value_at(array, i), parsed, op);
+					combined[static_cast<size_t>(i)] = combined[static_cast<size_t>(i)] && ok;
+				}
+			}
+			else if (array->type_id() == arrow::Type::UINT64)
+			{
+				auto arr = std::static_pointer_cast<arrow::UInt64Array>(array);
 				for (int64_t i = 0; i < n; ++i)
 				{
 					bool ok = !arr->IsNull(i) && compare_op<double>(static_cast<double>(arr->Value(i)), parsed, op);
@@ -2038,10 +2281,10 @@ extern "C"
 			}
 			else
 			{
-				auto arr = std::static_pointer_cast<arrow::DoubleArray>(array);
+				// DECIMAL32/64/128/256.
 				for (int64_t i = 0; i < n; ++i)
 				{
-					bool ok = !arr->IsNull(i) && compare_op<double>(arr->Value(i), parsed, op);
+					bool ok = !array->IsNull(i) && compare_op<double>(decimal_value_at(array, i), parsed, op);
 					combined[static_cast<size_t>(i)] = combined[static_cast<size_t>(i)] && ok;
 				}
 			}
@@ -2883,6 +3126,88 @@ extern "C"
 			}
 			break;
 		}
+		case arrow::Type::INT8:
+		case arrow::Type::INT16:
+		case arrow::Type::UINT8:
+		case arrow::Type::UINT16:
+		{
+			// Always fits int32 exactly -- no overflow check needed.
+			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<int32_t>(small_integer_value_at(vals, offset + i * stride));
+			break;
+		}
+		case arrow::Type::UINT32:
+		{
+			auto arr = std::static_pointer_cast<arrow::UInt32Array>(vals);
+			for (int64_t i = 0; i < n; ++i)
+			{
+				uint32_t v = arr->Value(offset + i * stride);
+				if (v > static_cast<uint32_t>(std::numeric_limits<int32_t>::max()))
+				{
+					report_fatal_error(context, std::string("uint32->int32 overflow for column: ") + name);
+				}
+				data[i] = static_cast<int32_t>(v);
+			}
+			break;
+		}
+		case arrow::Type::UINT64:
+		{
+			auto arr = std::static_pointer_cast<arrow::UInt64Array>(vals);
+			for (int64_t i = 0; i < n; ++i)
+			{
+				uint64_t v = arr->Value(offset + i * stride);
+				if (v > static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))
+				{
+					report_fatal_error(context, std::string("uint64->int32 overflow for column: ") + name);
+				}
+				data[i] = static_cast<int32_t>(v);
+			}
+			break;
+		}
+		case arrow::Type::FLOAT:
+		case arrow::Type::DOUBLE:
+		case arrow::Type::HALF_FLOAT:
+		{
+			std::string type_name = vals->type()->ToString();
+			for (int64_t i = 0; i < n; ++i)
+			{
+				double v = real_family_value_at(vals, offset + i * stride);
+				int32_t out;
+				auto status = real_to_int_checked(v, out);
+				if (status == NumericConvertStatus::kNonIntegral)
+				{
+					report_fatal_error(context, type_name + " value has a fractional part, cannot convert to int32 for column: " + name);
+				}
+				if (status == NumericConvertStatus::kOverflow)
+				{
+					report_fatal_error(context, type_name + "->int32 overflow for column: " + name);
+				}
+				data[i] = out;
+			}
+			break;
+		}
+		case arrow::Type::DECIMAL32:
+		case arrow::Type::DECIMAL64:
+		case arrow::Type::DECIMAL128:
+		case arrow::Type::DECIMAL256:
+		{
+			std::string type_name = vals->type()->ToString();
+			for (int64_t i = 0; i < n; ++i)
+			{
+				int64_t v64;
+				auto status = decimal_to_int64_checked(vals, offset + i * stride, v64);
+				if (status == NumericConvertStatus::kNonIntegral)
+				{
+					report_fatal_error(context, type_name + " value has a fractional part, cannot convert to int32 for column: " + name);
+				}
+				if (status == NumericConvertStatus::kOverflow ||
+					v64 < std::numeric_limits<int32_t>::min() || v64 > std::numeric_limits<int32_t>::max())
+				{
+					report_fatal_error(context, type_name + "->int32 overflow for column: " + name);
+				}
+				data[i] = static_cast<int32_t>(v64);
+			}
+			break;
+		}
 		default:
 			report_fatal_error(context, std::string("type mismatch for column: ") + name +
 				" (expected int32/int64, got " + vals->type()->ToString() + ")");
@@ -2903,9 +3228,72 @@ extern "C"
 			break;
 		}
 		case arrow::Type::INT32:
+		case arrow::Type::INT8:
+		case arrow::Type::INT16:
+		case arrow::Type::UINT8:
+		case arrow::Type::UINT16:
+		case arrow::Type::UINT32:
 		{
-			auto arr = std::static_pointer_cast<arrow::Int32Array>(vals);
-			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<int64_t>(arr->Value(offset + i * stride));
+			// Always fits int64 exactly -- no overflow check needed.
+			for (int64_t i = 0; i < n; ++i) data[i] = small_integer_value_at(vals, offset + i * stride);
+			break;
+		}
+		case arrow::Type::UINT64:
+		{
+			auto arr = std::static_pointer_cast<arrow::UInt64Array>(vals);
+			for (int64_t i = 0; i < n; ++i)
+			{
+				uint64_t v = arr->Value(offset + i * stride);
+				if (v > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+				{
+					report_fatal_error(context, std::string("uint64->int64 overflow for column: ") + name);
+				}
+				data[i] = static_cast<int64_t>(v);
+			}
+			break;
+		}
+		case arrow::Type::FLOAT:
+		case arrow::Type::DOUBLE:
+		case arrow::Type::HALF_FLOAT:
+		{
+			std::string type_name = vals->type()->ToString();
+			for (int64_t i = 0; i < n; ++i)
+			{
+				double v = real_family_value_at(vals, offset + i * stride);
+				int64_t out;
+				auto status = real_to_int_checked(v, out);
+				if (status == NumericConvertStatus::kNonIntegral)
+				{
+					report_fatal_error(context, type_name + " value has a fractional part, cannot convert to int64 for column: " + name);
+				}
+				if (status == NumericConvertStatus::kOverflow)
+				{
+					report_fatal_error(context, type_name + "->int64 overflow for column: " + name);
+				}
+				data[i] = out;
+			}
+			break;
+		}
+		case arrow::Type::DECIMAL32:
+		case arrow::Type::DECIMAL64:
+		case arrow::Type::DECIMAL128:
+		case arrow::Type::DECIMAL256:
+		{
+			std::string type_name = vals->type()->ToString();
+			for (int64_t i = 0; i < n; ++i)
+			{
+				int64_t v64;
+				auto status = decimal_to_int64_checked(vals, offset + i * stride, v64);
+				if (status == NumericConvertStatus::kNonIntegral)
+				{
+					report_fatal_error(context, type_name + " value has a fractional part, cannot convert to int64 for column: " + name);
+				}
+				if (status == NumericConvertStatus::kOverflow)
+				{
+					report_fatal_error(context, type_name + "->int64 overflow for column: " + name);
+				}
+				data[i] = v64;
+			}
 			break;
 		}
 		default:
@@ -2934,15 +3322,33 @@ extern "C"
 			break;
 		}
 		case arrow::Type::INT32:
+		case arrow::Type::INT64:
+		case arrow::Type::INT8:
+		case arrow::Type::INT16:
+		case arrow::Type::UINT8:
+		case arrow::Type::UINT16:
+		case arrow::Type::UINT32:
 		{
-			auto arr = std::static_pointer_cast<arrow::Int32Array>(vals);
+			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<float>(small_integer_value_at(vals, offset + i * stride));
+			break;
+		}
+		case arrow::Type::UINT64:
+		{
+			auto arr = std::static_pointer_cast<arrow::UInt64Array>(vals);
 			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<float>(arr->Value(offset + i * stride));
 			break;
 		}
-		case arrow::Type::INT64:
+		case arrow::Type::HALF_FLOAT:
 		{
-			auto arr = std::static_pointer_cast<arrow::Int64Array>(vals);
-			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<float>(arr->Value(offset + i * stride));
+			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<float>(real_family_value_at(vals, offset + i * stride));
+			break;
+		}
+		case arrow::Type::DECIMAL32:
+		case arrow::Type::DECIMAL64:
+		case arrow::Type::DECIMAL128:
+		case arrow::Type::DECIMAL256:
+		{
+			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<float>(decimal_value_at(vals, offset + i * stride));
 			break;
 		}
 		default:
@@ -2971,15 +3377,33 @@ extern "C"
 			break;
 		}
 		case arrow::Type::INT32:
+		case arrow::Type::INT64:
+		case arrow::Type::INT8:
+		case arrow::Type::INT16:
+		case arrow::Type::UINT8:
+		case arrow::Type::UINT16:
+		case arrow::Type::UINT32:
 		{
-			auto arr = std::static_pointer_cast<arrow::Int32Array>(vals);
+			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<double>(small_integer_value_at(vals, offset + i * stride));
+			break;
+		}
+		case arrow::Type::UINT64:
+		{
+			auto arr = std::static_pointer_cast<arrow::UInt64Array>(vals);
 			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<double>(arr->Value(offset + i * stride));
 			break;
 		}
-		case arrow::Type::INT64:
+		case arrow::Type::HALF_FLOAT:
 		{
-			auto arr = std::static_pointer_cast<arrow::Int64Array>(vals);
-			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<double>(arr->Value(offset + i * stride));
+			for (int64_t i = 0; i < n; ++i) data[i] = real_family_value_at(vals, offset + i * stride);
+			break;
+		}
+		case arrow::Type::DECIMAL32:
+		case arrow::Type::DECIMAL64:
+		case arrow::Type::DECIMAL128:
+		case arrow::Type::DECIMAL256:
+		{
+			for (int64_t i = 0; i < n; ++i) data[i] = decimal_value_at(vals, offset + i * stride);
 			break;
 		}
 		default:

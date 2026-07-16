@@ -116,6 +116,8 @@ contains
                 test_list_element_count_auto_multi_row_group_roundtrip), &
             new_unittest("qc: range violation prints a WARNING but does not abort", &
                 test_qc_range_violation_warns), &
+            new_unittest("qc: range violation on an extended (uint16) source type warns but does not abort", &
+                test_extended_qc_range_violation_warns), &
             new_unittest("qc-maml: a stray no-colon line before qc: still warns correctly", &
                 test_qc_maml_stray_no_colon_line_ok), &
             new_unittest("qc: unexpected Null prints a WARNING but does not abort", &
@@ -1495,6 +1497,19 @@ contains
             failure_message="a qc: range violation must warn, not abort", &
             required_stderr="WARNING: qc violation for column 'ra'")
     end subroutine test_qc_range_violation_warns
+
+    !> Same as test_qc_range_violation_warns, but proves run_qc_range_check's
+    !> extension to the new read-time source types (see
+    !> scenario_extended_qc_range_violation_warns's own comment in
+    !> error_scenarios.f90) actually fires rather than silently never
+    !> checking a UINT16 column.
+    subroutine test_extended_qc_range_violation_warns(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "extended_qc_range_violation_warns", expect_abort=.false., &
+            failure_message="a qc: range violation on a uint16 column must warn, not abort", &
+            required_stderr="WARNING: qc violation for column 'v_uint16'")
+    end subroutine test_extended_qc_range_violation_warns
 
     !> A stray line with no colon inside a qc-maml field block (before its
     !> qc: sub-block) must be silently skipped rather than breaking parsing

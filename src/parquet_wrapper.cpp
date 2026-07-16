@@ -969,10 +969,14 @@ extern "C"
 
 	// Checks whether `v` (already widened to double -- see real_family_value_at)
 	// is both exactly integral and in range for int32_t/int64_t, filling `out`
-	// on success. Two plain overloads rather than one template: this whole
-	// file lives inside `extern "C" { ... }` blocks, and templates cannot
-	// appear inside a linkage-specification block at all.
-	static NumericConvertStatus real_to_int_checked(double v, int32_t &out)
+	// on success. Two distinctly-named functions rather than one template or
+	// one overloaded name: this whole file lives inside `extern "C" { ... }`
+	// blocks, which forbids both templates (rejected by every compiler) and
+	// overloading (accepted by clang, but rejected by gcc as a "conflicting
+	// declaration of C function" -- C linkage doesn't encode parameter types
+	// into the symbol name, so two same-named functions genuinely conflict
+	// there even though clang doesn't catch it).
+	static NumericConvertStatus real_to_int32_checked(double v, int32_t &out)
 	{
 		if (!std::isfinite(v) || v != std::trunc(v)) return NumericConvertStatus::kNonIntegral;
 		if (v < static_cast<double>(std::numeric_limits<int32_t>::min()) ||
@@ -981,7 +985,7 @@ extern "C"
 		out = static_cast<int32_t>(v);
 		return NumericConvertStatus::kOk;
 	}
-	static NumericConvertStatus real_to_int_checked(double v, int64_t &out)
+	static NumericConvertStatus real_to_int64_checked(double v, int64_t &out)
 	{
 		if (!std::isfinite(v) || v != std::trunc(v)) return NumericConvertStatus::kNonIntegral;
 		if (v < static_cast<double>(std::numeric_limits<int64_t>::min()) ||
@@ -3172,7 +3176,7 @@ extern "C"
 			{
 				double v = real_family_value_at(vals, offset + i * stride);
 				int32_t out;
-				auto status = real_to_int_checked(v, out);
+				auto status = real_to_int32_checked(v, out);
 				if (status == NumericConvertStatus::kNonIntegral)
 				{
 					report_fatal_error(context, type_name + " value has a fractional part, cannot convert to int32 for column: " + name);
@@ -3261,7 +3265,7 @@ extern "C"
 			{
 				double v = real_family_value_at(vals, offset + i * stride);
 				int64_t out;
-				auto status = real_to_int_checked(v, out);
+				auto status = real_to_int64_checked(v, out);
 				if (status == NumericConvertStatus::kNonIntegral)
 				{
 					report_fatal_error(context, type_name + " value has a fractional part, cannot convert to int64 for column: " + name);

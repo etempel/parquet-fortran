@@ -608,7 +608,6 @@ contains
         if (allocated(error)) return
         call col%get(10, s1)
         call col%get(11, s2)
-        print*, "batch3: ", s1, " : ", s2, " : test debug!" !keep it for now
         call check(error, s1 == "m" .and. s2 == "n", "batch3 content")
         if (allocated(error)) return
         call check(error, .not. col%is_null(10) .and. .not. col%is_null(11), "batch3 rows valid")

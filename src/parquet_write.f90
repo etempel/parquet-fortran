@@ -2389,7 +2389,9 @@ contains
         if (allocated(writer%all_columns)) deallocate(writer%all_columns)
         if (allocated(writer%write_counts)) deallocate(writer%write_counts)
         if (allocated(writer%enabled_columns)) deallocate(writer%enabled_columns)
+        if (allocated(writer%written_names)) deallocate(writer%written_names)
         writer%is_schema_enforced = .false.
+        writer%expected_nrows = -1_c_long_long
     end procedure parquet_close_writer
 
     !> Safety net for a writer whose handle is still open when it goes out of

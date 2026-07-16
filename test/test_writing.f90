@@ -89,6 +89,8 @@ contains
                 test_overwrite_false_new_file), &
             new_unittest("overwrite defaults to .true. and truncates an existing file", &
                 test_overwrite_default_truncates), &
+            new_unittest("reusing the same writer variable across two files leaves no stale " // &
+                "row-count/written-name state", test_reused_writer_variable_across_files_no_stale_state), &
             new_unittest("chunk_size forces multiple row groups and still round-trips", &
                 test_chunk_size_round_trip), &
             new_unittest("chunk_size auto-sizes when not given and still round-trips", &
@@ -1105,6 +1107,39 @@ contains
         call check(error, nrows == 2_int64 .and. all(read_back == second_values), &
             "default overwrite behavior did not truncate the file down to the second write")
     end subroutine test_overwrite_default_truncates
+
+    !> Reusing the same schema-less parquet_writer variable across two separate
+    !! open/write/close cycles must not carry over per-file bookkeeping (row-count
+    !! expectation, written-column names) from the first file to the second: writing
+    !! the same column name with a different row count on the second file must not
+    !! spuriously trip either the row-count-mismatch or already-written-name checks.
+    subroutine test_reused_writer_variable_across_files_no_stale_state(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: first_values(3) = [1, 2, 3]
+        integer(int32) :: second_values(2) = [9, 8]
+        integer(int32) :: read_back(2)
+        integer(int64) :: nrows
+        character(len=*), parameter :: first_file = "test_run/test_reused_writer_first.parquet"
+        character(len=*), parameter :: second_file = "test_run/test_reused_writer_second.parquet"
+
+        call parquet_open_writer(writer, first_file)
+        call parquet_write_column(writer, "v", first_values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_writer(writer, second_file)
+        call parquet_write_column(writer, "v", second_values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, second_file)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_read_column(reader, "v", read_back)
+        call parquet_close_reader(reader)
+
+        call check(error, nrows == 2_int64 .and. all(read_back == second_values), &
+            "reusing the writer variable across files leaked stale row-count/written-name state")
+    end subroutine test_reused_writer_variable_across_files_no_stale_state
 
     !> A small chunk_size (row group length) relative to the row count forces
     !> multiple row groups; the file must still read back correctly.

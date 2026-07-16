@@ -169,12 +169,12 @@ call parquet_read_column(reader, "ra", ra_back)
 call parquet_close_reader(reader)
 ```
 
-### Building a qc-maml in code with `add_col_qc` and `get_col_qc`
+### Building a qc-maml in code with `add_col_qc` and `set_col_qc`
 
 Instead of authoring a `.maml` file, you can build the qc-maml in memory a column at a time from a compact, comma-separated string, then pass it straight to `parquet_open_reader(..., schema=)`. The `type(parquet_schema)` type provides two forms of the same builder — they append the identical field entry and differ only in how the parsed column name comes back:
 
 - **`call schema%add_col_qc(qc_input [, col_name])`** — the parsed name is returned in the optional `col_name` argument (`character(len=:), allocatable, intent(out)`) when present; omit it to just add the entry.
-- **`call schema%get_col_qc(col)`** — in-place: `col` is `intent(inout)` and must already be `character(len=:), allocatable`. It holds the compact `qc_input` string on entry and the parsed column name on exit, so a single variable is reused rather than assigning a result back into it.
+- **`call schema%set_col_qc(col)`** — in-place: `col` is `intent(inout)` and must already be `character(len=:), allocatable`. It holds the compact `qc_input` string on entry and the parsed column name on exit, so a single variable is reused rather than assigning a result back into it.
 
 ```fortran
 type(parquet_schema) :: qc
@@ -187,13 +187,13 @@ call qc%add_col_qc("dec, , <=90")                ! col_name omitted: just add
 
 ! in-place form: col holds qc_input on entry, the parsed name on exit
 col = "mag, 5"
-call qc%get_col_qc(col)                           ! col becomes "mag" (bare 5 => >= 5)
+call qc%set_col_qc(col)                           ! col becomes "mag" (bare 5 => >= 5)
 
 call parquet_open_reader(reader, "data.parquet", schema=qc)
 call parquet_read_column(reader, col, mag)        ! reuse the returned name
 ```
 
-> **Why two forms?** `add_col_qc`'s `col_name` is `intent(out)`, so you must **not** pass the same variable as both arguments (`call maml%add_col_qc(x, x)`) — aliasing an `intent(out)` argument is undefined and corrupts the input. When you want the in-place `x` reused as both input and output, use `get_col_qc`, whose single argument is `intent(inout)` for exactly that. Note `get_col_qc` still **mutates** `maml` (it adds the entry) despite the `get_` name — it's a builder that also returns the name, not a pure query. (Neither form is a function returning `character(len=:), allocatable` — see [Thread safety](string-columns.html#thread-safety) in the string-columns guide for why that matters on some compilers.)
+> **Why two forms?** `add_col_qc`'s `col_name` is `intent(out)`, so you must **not** pass the same variable as both arguments (`call maml%add_col_qc(x, x)`) — aliasing an `intent(out)` argument is undefined and corrupts the input. When you want the in-place `x` reused as both input and output, use `set_col_qc`, whose single argument is `intent(inout)` for exactly that — it still **mutates** `maml` (it adds the entry, like `add_col_qc`); it's a builder that also returns the name, not a pure query, hence `set_` rather than `get_`. (Neither form is a function returning `character(len=:), allocatable` — see [Thread safety](string-columns.html#thread-safety) in the string-columns guide for why that matters on some compilers.)
 
 Both forms share the same input format and validation:
 

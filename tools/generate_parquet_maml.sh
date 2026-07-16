@@ -113,7 +113,7 @@ if is_base:
     lines.append('!> Base-library MAML fixtures: embeds every .maml file under schemas/ bundled')
     lines.append('!> with this library as a compiled-in string array, addressable by filename via')
     lines.append('!> get_parquet_maml, plus the shared parquet_maml_file type and its')
-    lines.append('!> add_col_qc/get_col_qc qc-maml builders.')
+    lines.append('!> add_col_qc/set_col_qc qc-maml builders.')
 else:
     lines.append('!> Downstream-project MAML fixtures: embeds every local .maml schema file as a')
     lines.append('!> compiled-in string array, addressable by name via get_parquet_maml/set_maml,')
@@ -148,7 +148,7 @@ if is_base:
     lines.append('')
     lines.append('    !> One embedded or user-supplied MAML file: its raw source lines plus, once')
     lines.append('    !> parsed/validated, the columns missing relative to the base schema and any')
-    lines.append('    !> col_map: renames it declares. add_col_qc/get_col_qc build a qc-maml')
+    lines.append('    !> col_map: renames it declares. add_col_qc/set_col_qc build a qc-maml')
     lines.append('    !> incrementally (see parquet_maml_base_add_col_qc.f90).')
     lines.append('    type, public :: parquet_maml_file')
     lines.append('        logical :: user_maml = .false. !! true if this is a user defined MAML file')
@@ -164,17 +164,21 @@ if is_base:
     lines.append('        type(parquet_maml_col_map_entry), allocatable :: col_map(:)')
     lines.append('    contains')
     lines.append("        procedure :: add_col_qc => parquet_maml_add_col_qc !! Appends one qc: field entry.")
-    lines.append("        procedure :: get_col_qc => parquet_maml_get_col_qc !! Function form; returns the parsed name.")
+    lines.append("        procedure :: set_col_qc => parquet_maml_set_col_qc !! In-place form; parses the name into its argument.")
     lines.append('    end type parquet_maml_file')
     lines.append('')
-    # add_col_qc/get_col_qc are two forms of the same type-bound builder for
+    # add_col_qc/set_col_qc are two forms of the same type-bound builder for
     # read-time qc-mamls: both append one qc: field entry from a compact
     # "col, min, max, miss" string. add_col_qc is a subroutine returning the
-    # parsed name via an optional out-argument; get_col_qc is a function
-    # returning it as the result (so it can be assigned back into the same
-    # variable: col = maml%get_col_qc(col), which the subroutine cannot do
-    # because aliasing an intent(out) argument is illegal). Both bodies are
-    # hand-written (string parsing + validation) in the submodule
+    # parsed name via an optional out-argument; set_col_qc is also a
+    # subroutine, but takes its single col_name argument as intent(inout): it
+    # holds the compact string on entry and the parsed name on exit, so a
+    # caller reuses one variable (call maml%set_col_qc(col)) instead of
+    # assigning a function result back into it -- a subroutine can't alias the
+    # same actual argument to separate intent(in)/intent(out) dummies, and a
+    # function returning character(len=:), allocatable is never used in this
+    # codebase (see "Build and compiler notes" in CLAUDE.md for why). Both
+    # bodies are hand-written (string parsing + validation) in the submodule
     # src/parquet_maml_base_add_col_qc.f90 rather than embedded here, so they
     # are deferred via module-procedure interfaces: parquet_maml_base is at the
     # bottom of the module stack, so the body must stay self-contained (it
@@ -189,15 +193,15 @@ if is_base:
     lines.append('            character(len=*), intent(in) :: qc_input !! compact "col, min, max, miss" string.')
     lines.append('            character(len=:), allocatable, intent(out), optional :: col_name !! parsed column name.')
     lines.append('        end subroutine parquet_maml_add_col_qc')
-    lines.append('        !> Function form of add_col_qc: appends the same qc: field entry and')
-    lines.append('        !> returns the parsed column name as the result, so it may be assigned')
-    lines.append('        !> back into the argument variable (col = maml%get_col_qc(col)). NB it')
-    lines.append('        !> mutates self (adds the entry) despite the get_ name.')
-    lines.append('        module function parquet_maml_get_col_qc(self, qc_input) result(col_name)')
+    lines.append('        !> In-place form of add_col_qc: appends the same qc: field entry. `col_name` is')
+    lines.append('        !> `intent(inout)`: it holds the compact "col, min, max, miss" string on entry and')
+    lines.append('        !> the parsed column name on exit, so a caller reuses one variable')
+    lines.append('        !> (call maml%set_col_qc(col)) instead of naming a separate input and output.')
+    lines.append('        module subroutine parquet_maml_set_col_qc(self, col_name)')
     lines.append('            class(parquet_maml_file), intent(inout) :: self !! qc-maml being built; gains a fields: entry.')
-    lines.append('            character(len=*), intent(in) :: qc_input !! compact "col, min, max, miss" string.')
-    lines.append('            character(len=:), allocatable :: col_name !! parsed column name.')
-    lines.append('        end function parquet_maml_get_col_qc')
+    lines.append('            character(len=:), allocatable, intent(inout) :: col_name !! compact "col, min, max, miss" string on')
+    lines.append('            !! entry; parsed column name on exit.')
+    lines.append('        end subroutine parquet_maml_set_col_qc')
     lines.append('    end interface')
     lines.append('')
 

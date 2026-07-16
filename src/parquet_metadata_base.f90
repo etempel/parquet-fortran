@@ -34,7 +34,7 @@ contains
         integer :: n
         character(len=:), allocatable :: desc_val
 
-        if (len_trim(key) == 0) return ! GCOVR_EXCL_LINE
+        if (len_trim(key) == 0) return
 
         desc_val = ""
         if (present(description)) desc_val = trim(description)
@@ -239,7 +239,7 @@ contains
         if (allocated(this%col)) then
             get_num_fields = size(this%col)
         else
-            get_num_fields = 0 ! GCOVR_EXCL_LINE
+            get_num_fields = 0
         end if
     end procedure get_num_fields
 

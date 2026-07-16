@@ -66,14 +66,16 @@ contains
     end subroutine maml_push_line
 
     !> True if any line of maml%lines equals `target` after trimming leading
-    !> and trailing blanks (used for the fields: header check).
+    !> and trailing blanks (used for the fields: header check). Only ever
+    !> called from schema_add_field, which requires schema%init (always
+    !> pushes a "table:" line first) to have run -- so maml%lines is always
+    !> allocated here.
     logical function maml_line_exists(maml, target) result(found)
         type(parquet_maml_file), intent(in) :: maml !! schema being built.
         character(len=*), intent(in) :: target !! line text to look for (matched after trim(adjustl(...))).
         integer :: i
 
         found = .false.
-        if (.not. allocated(maml%lines)) return ! GCOVR_EXCL_LINE
         do i = 1, size(maml%lines)
             if (trim(adjustl(maml%lines(i))) == trim(target)) then
                 found = .true.
@@ -83,7 +85,9 @@ contains
     end function maml_line_exists
 
     !> True if maml%lines already declares a fields: entry named `name`, i.e.
-    !> a "- name: <name>" line.
+    !> a "- name: <name>" line. Only ever called from schema_add_field, which
+    !> requires schema%init (always pushes a "table:" line first) to have
+    !> run -- so maml%lines is always allocated here.
     logical function maml_field_name_exists(maml, name) result(found)
         type(parquet_maml_file), intent(in) :: maml !! schema being built.
         character(len=*), intent(in) :: name !! field name to look for (case-sensitive).
@@ -91,7 +95,6 @@ contains
         character(len=:), allocatable :: t, key, val, key_lower
 
         found = .false.
-        if (.not. allocated(maml%lines)) return ! GCOVR_EXCL_LINE
         do i = 1, size(maml%lines)
             t = trim(adjustl(maml%lines(i)))
             if (len(t) == 0) cycle
@@ -343,9 +346,9 @@ contains
         call this%maml%add_col_qc(qc_input, col_name)
     end procedure schema_add_col_qc
 
-    module procedure schema_get_col_qc
-        call this%maml%get_col_qc(col_name)
-    end procedure schema_get_col_qc
+    module procedure schema_set_col_qc
+        call this%maml%set_col_qc(col_name)
+    end procedure schema_set_col_qc
 
     module procedure schema_add_metadata_int32
         call this%metadata%add_metadata(key, value, description)

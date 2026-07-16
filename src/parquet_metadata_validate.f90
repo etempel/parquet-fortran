@@ -231,9 +231,9 @@ contains
 
         errors = ""
 
-        if (.not. allocated(cinfo%col)) then
-            errors = errors // "no fields defined; " ! GCOVR_EXCL_LINE
-        else if (size(cinfo%col) == 0) then
+        ! cinfo%col is always allocated here (parquet_parse_maml_lines never leaves it
+        ! unallocated -- it allocates an explicit zero-size array when there are no fields).
+        if (size(cinfo%col) == 0) then
             errors = errors // "no fields defined; "
         else
             do i = 1, size(cinfo%col)
@@ -299,10 +299,10 @@ contains
                     end if
                     if (cinfo%col(i)%has_qc_max) then
                         if (.not. parquet_qc_numeric_bound( &
-                                cinfo%col(i)%qc_max_raw, cinfo%col(i)%data_type, qc_bound_value)) then ! GCOVR_EXCL_START
+                                cinfo%col(i)%qc_max_raw, cinfo%col(i)%data_type, qc_bound_value)) then
                             errors = errors // "field '" // cur_name // "' has an invalid qc: max value '" // &
                                 trim(cinfo%col(i)%qc_max_raw) // "' for data_type " // trim(cinfo%col(i)%data_type) // "; "
-                        end if ! GCOVR_EXCL_STOP
+                        end if
                     end if
                 end select
             end do

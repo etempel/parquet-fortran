@@ -149,13 +149,13 @@ module parquet
         procedure :: get_column_index => schema_get_column_index !! 1-based index of a column by name, or 0 if not found.
         procedure :: get_num_fields => schema_get_num_fields !! Total number of declared fields.
         procedure :: get_field_name => schema_get_field_name !! Field name at a given 1-based MAML source position.
-        ! add_col_qc/get_col_qc build a read-time qc-maml. Two intentional
+        ! add_col_qc/set_col_qc build a read-time qc-maml. Two intentional
         ! naming choices here: (1) "col_qc" is a deliberate domain abbreviation
         ! for "column quality-control" (the qc: block of a fields: entry) --
-        ! kept short because it appears in every qc-building call. (2) get_col_qc
-        ! is deliberately named get_ even though it MUTATES the schema (it
-        ! appends the entry, like add_col_qc): the get_ form exists so a caller
-        ! can reuse one variable in place (call schema%get_col_qc(col) -- col holds
+        ! kept short because it appears in every qc-building call. (2) set_col_qc
+        ! is named set_ (not get_) precisely because it MUTATES the schema (it
+        ! appends the entry, like add_col_qc): the set_ form exists so a caller
+        ! can reuse one variable in place (call schema%set_col_qc(col) -- col holds
         ! the qc_input string on entry, the parsed column name on exit) instead of
         ! separately naming an input and an output variable the way add_col_qc's
         ! optional col_name argument requires. It is a builder that also returns
@@ -163,7 +163,7 @@ module parquet
         ! character(len=:), allocatable as a function result (see "Build and
         ! compiler notes" in CLAUDE.md for why that matters).
         procedure :: add_col_qc => schema_add_col_qc !! Appends one qc: field entry from a compact string.
-        procedure :: get_col_qc => schema_get_col_qc !! In-place form of %add_col_qc; parses the name into its argument.
+        procedure :: set_col_qc => schema_set_col_qc !! In-place form of %add_col_qc; parses the name into its argument.
         procedure :: schema_add_metadata_int32 !! int32 specific.
         procedure :: schema_add_metadata_int64 !! int64 specific.
         procedure :: schema_add_metadata_float32 !! float32 specific.
@@ -693,7 +693,10 @@ module parquet
         end function parquet_get_enabled_column_index
 
         !> 1-based index of `name` in writer%all_columns (every declared
-        !> column, enabled or not), or 0 if not found among them.
+        !> column, enabled or not), or 0 if not found among them. Assumes
+        !> writer%all_columns is allocated -- every caller only calls this
+        !> when writer%is_schema_enforced is true, which is set exactly when
+        !> parquet_open_writer also allocates writer%all_columns.
         module integer function parquet_get_defined_column_index(writer, name)
             type(parquet_writer), intent(in) :: writer !! open writer to search.
             character(len=*), intent(in) :: name !! column name to look up.
@@ -1307,17 +1310,17 @@ module parquet
             character(len=:), allocatable, intent(out), optional :: col_name !! parsed column name.
         end subroutine schema_add_col_qc
 
-        !> In-place form of %add_col_qc: forwards to %maml%get_col_qc. `col_name` is
+        !> In-place form of %add_col_qc: forwards to %maml%set_col_qc. `col_name` is
         !> `intent(inout)`, not separate in/out arguments: on entry it holds the compact
         !> "col, min, max, miss" string, and on exit it holds just the parsed column name --
-        !> so a caller reuses one variable (call schema%get_col_qc(col)) rather than
+        !> so a caller reuses one variable (call schema%set_col_qc(col)) rather than
         !> assigning a function result back into it (a subroutine can't alias the same
         !> actual argument to separate intent(in)/intent(out) dummies).
-        module subroutine schema_get_col_qc(this, col_name)
+        module subroutine schema_set_col_qc(this, col_name)
             class(parquet_schema), intent(inout) :: this !! schema whose %maml gains one fields: entry.
             character(len=:), allocatable, intent(inout) :: col_name !! compact "col, min, max, miss" string on
             !! entry; parsed column name on exit.
-        end subroutine schema_get_col_qc
+        end subroutine schema_set_col_qc
 
         !> int32 specific of %add_metadata; forwards to %metadata%add_metadata
         !> (see the parquet_get_metadata generic interface above for the

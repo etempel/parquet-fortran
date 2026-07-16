@@ -164,6 +164,8 @@ contains
             new_unittest("validating data_type: date aborts", test_validate_excluded_date_type_aborts), &
             new_unittest("validating data_type: timestamp aborts", test_validate_excluded_timestamp_type_aborts), &
             new_unittest("validating data_type: decimal aborts", test_validate_excluded_decimal_type_aborts), &
+            new_unittest("validating a fields: entry with no name: sub-key aborts", &
+                test_validate_empty_field_name_aborts), &
             new_unittest("validating a duplicate field name aborts", test_validate_duplicate_name_aborts), &
             new_unittest("validating a MAML without table: aborts", test_validate_missing_table_aborts), &
             new_unittest("validating a MAML without fields aborts", test_validate_no_fields_aborts), &
@@ -287,6 +289,8 @@ contains
                 test_write_protected_column_with_null_aborts), &
             new_unittest("qc: min value that does not parse as a number aborts", &
                 test_validate_qc_min_not_numeric_aborts), &
+            new_unittest("qc: max value that does not parse as a number aborts", &
+                test_validate_qc_max_not_numeric_aborts), &
             new_unittest("qc: min value with a fractional part on an int32 field aborts", &
                 test_validate_qc_min_non_integral_for_int32_aborts), &
             new_unittest("qc: min value out of int32 range aborts", &
@@ -321,8 +325,8 @@ contains
                 test_add_col_qc_duplicate_column_single_quoted_aborts), &
             new_unittest("add_col_qc: duplicate column name (double-quoted existing entry) aborts", &
                 test_add_col_qc_duplicate_column_double_quoted_aborts), &
-            new_unittest("get_col_qc: reversed min operator aborts (shared validation)", &
-                test_get_col_qc_reversed_operator_aborts), &
+            new_unittest("set_col_qc: reversed min operator aborts (shared validation)", &
+                test_set_col_qc_reversed_operator_aborts), &
             new_unittest("writing values(:) not divisible by col_size aborts", &
                 test_write_values_not_divisible_by_col_size_aborts), &
             new_unittest("writing an out-of-int32-range int64 value to an int32 schema column aborts", &
@@ -900,6 +904,13 @@ contains
         call check_scenario_exit_status(error, "validate_excluded_decimal_type", expect_abort=.true., &
             failure_message="'decimal' is documented as unsupported and was expected to error stop")
     end subroutine test_validate_excluded_decimal_type_aborts
+
+    subroutine test_validate_empty_field_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "validate_empty_field_name", expect_abort=.true., &
+            failure_message="validating a fields: entry with no name: sub-key was expected to error stop")
+    end subroutine test_validate_empty_field_name_aborts
 
     subroutine test_validate_duplicate_name_aborts(error)
         type(error_type), allocatable, intent(out) :: error
@@ -1567,6 +1578,13 @@ contains
             failure_message="qc: min: value that does not parse as a number was expected to error stop")
     end subroutine test_validate_qc_min_not_numeric_aborts
 
+    subroutine test_validate_qc_max_not_numeric_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "validate_qc_max_not_numeric", expect_abort=.true., &
+            failure_message="qc: max: value that does not parse as a number was expected to error stop")
+    end subroutine test_validate_qc_max_not_numeric_aborts
+
     subroutine test_validate_qc_min_non_integral_for_int32_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
@@ -1692,12 +1710,12 @@ contains
                 "existing entry was expected to error stop")
     end subroutine test_add_col_qc_duplicate_column_double_quoted_aborts
 
-    subroutine test_get_col_qc_reversed_operator_aborts(error)
+    subroutine test_set_col_qc_reversed_operator_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
-        call check_scenario_exit_status(error, "get_col_qc_reversed_operator", expect_abort=.true., &
-            failure_message="get_col_qc with a reversed min operator was expected to error stop")
-    end subroutine test_get_col_qc_reversed_operator_aborts
+        call check_scenario_exit_status(error, "set_col_qc_reversed_operator", expect_abort=.true., &
+            failure_message="set_col_qc with a reversed min operator was expected to error stop")
+    end subroutine test_set_col_qc_reversed_operator_aborts
 
     !> Also checks the error now names the column, output file and maml --
     !> previously it named none of those (see writer_context_suffix in

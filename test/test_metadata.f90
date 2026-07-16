@@ -77,7 +77,8 @@ contains
             new_unittest("unparsable logical array value with no default aborts", &
                 test_conversion_logical_array_no_default_aborts), &
             new_unittest("missing string array key with no default aborts", &
-                test_missing_string_array_no_default_aborts) &
+                test_missing_string_array_no_default_aborts), &
+            new_unittest("add_metadata with an empty key is a silent no-op", test_add_metadata_empty_key_noop) &
             ]
     end subroutine collect_tests_parquet_metadata
 
@@ -827,5 +828,19 @@ contains
             expect_abort=.true., &
             failure_message="reading a missing string array metadata key with no default was expected to abort")
     end subroutine test_missing_string_array_no_default_aborts
+
+    !> add_metadata("", ...) with an empty key must be a silent no-op (no
+    !> metadata entry appended), not an error -- see
+    !> parquet_metadata_append_entry's own guard in parquet_metadata_base.f90.
+    subroutine test_add_metadata_empty_key_noop(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+
+        call schema%init(table="empty_key_test")
+        call schema%add_metadata("", 1_int32)
+
+        call check(error, .not. allocated(schema%metadata%items), &
+            "add_metadata with an empty key should not append any metadata entry")
+    end subroutine test_add_metadata_empty_key_noop
 
 end module test_metadata

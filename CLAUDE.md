@@ -244,7 +244,7 @@ one element). User guide: `doc/pages/string-columns.md`.
   suppressions.
 - **Minimum gfortran is 13; don't work around compiler bugs in source.** gfortran ≤ 11
   miscompiles the optional allocatable-`character` argument in `schema%add_col_qc` /
-  `schema%get_col_qc` (corrupted column name → a spurious "column not found" abort at
+  `schema%set_col_qc` (corrupted column name → a spurious "column not found" abort at
   runtime — see README.md's Prerequisites). That's the reason for the version floor; don't
   refactor otherwise-correct source to accommodate an old compiler.
 - **Every `submodule (parquet) name` file needs its own `implicit none`** (right after the
@@ -291,8 +291,9 @@ one element). User guide: `doc/pages/string-columns.md`.
   Every such function in this codebase has been converted: `parquet_string_column`'s `get`/
   `summary` and `parquet_string`'s `to_string` (in `parquet_strings.f90`); `parquet_unquote`/
   `parquet_to_lower`/`schema_get_field_name`/`parquet_column_info%get_field_name` (`parquet.f90`
-  + submodules); `schema_get_col_qc`/`parquet_maml_file%get_col_qc` (converted to a single
-  `intent(inout)` argument — see below); and the private helpers
+  + submodules); `schema_set_col_qc`/`parquet_maml_file%set_col_qc` (converted to a single
+  `intent(inout)` argument — see below; named `get_col_qc` at the time of this fix, renamed to
+  `set_col_qc` later — see the note further below); and the private helpers
   `parquet_column_output_name`/`parquet_resolve_output_name`/`parquet_get_schema_type`/
   `writer_context_suffix`/`parquet_qc_format_real`/`parquet_qc_format_int` (`parquet_write.f90`),
   `maml_name_suffix` (`parquet_metadata.f90`), `reader_filename_suffix` (`parquet_read.f90`),
@@ -301,15 +302,23 @@ one element). User guide: `doc/pages/string-columns.md`.
   ongoing regression check — verified clean across 20 repeated runs under
   `-fcheck=bounds,do,mem,pointer` before being re-enabled.
 
-  **`get_col_qc` design note**: converting a function whose whole point was `col =
-  schema%get_col_qc(col)` (assign the result back into the same variable used as input) needed a
-  real design change, not a mechanical swap — a subroutine can't alias the same actual argument to
-  separate `intent(in)`/`intent(out)` dummies. Fixed by making the single argument
-  `intent(inout)`: it holds the compact input string on entry and the parsed name on exit, so
-  `call schema%get_col_qc(col)` preserves the original single-variable ergonomics. Same treatment
-  for `parquet_maml_file%get_col_qc` underneath it. `add_col_qc` (a genuinely separate two-argument
-  subroutine, `qc_input` `intent(in)` + optional `col_name` `intent(out)`) was already a
-  subroutine and needed no change.
+  **`set_col_qc` design note** (named `get_col_qc` at the time): converting a function whose whole
+  point was `col = schema%get_col_qc(col)` (assign the result back into the same variable used as
+  input) needed a real design change, not a mechanical swap — a subroutine can't alias the same
+  actual argument to separate `intent(in)`/`intent(out)` dummies. Fixed by making the single
+  argument `intent(inout)`: it holds the compact input string on entry and the parsed name on
+  exit, so `call schema%get_col_qc(col)` (now `set_col_qc`, see below) preserves the original
+  single-variable ergonomics. Same treatment for `parquet_maml_file%get_col_qc` underneath it.
+  `add_col_qc` (a genuinely separate two-argument subroutine, `qc_input` `intent(in)` + optional
+  `col_name` `intent(out)`) was already a subroutine and needed no change.
+
+  **Renamed `get_col_qc` → `set_col_qc`** (2026-07-16): `get_` read as a non-mutating query, but
+  the procedure always appends a `fields:` entry to the schema/maml, same as `add_col_qc` —
+  `set_` correctly signals the mutation while keeping the short, `add_col_qc`-paired name (see
+  [doc/pages/reading.md](doc/pages/reading.md)'s "Building a qc-maml in code" section for the
+  user-facing rationale). `add_col_qc` itself was deliberately left untouched — it's a separate,
+  heavily-used public entry point (see its own doc-comment), not a candidate for merging or
+  renaming.
 
   **Not affected, no action needed**: functions with no multi-allocatable-component "self" type
   at all (e.g. plain string/numeric helpers), and any function returning an allocatable
@@ -373,6 +382,11 @@ reachable by extending an existing test with different data/arguments. Genuinely
 coverable and not worth chasing: `end module`/`end submodule` lines, implicit finalizers,
 and interface-only / `extern "C"` files (`parquet_bindings.f90`, and `parquet_wrapper.cpp`,
 which the local gcov toolchain doesn't instrument at all).
+
+If you ever find a line marked `GCOVR_EXCL_LINE`/inside a `GCOVR_EXCL_START`/`GCOVR_EXCL_STOP`
+block that is actually reachable in normal (non-abort) operation — i.e. the exclusion looks
+wrong, not just the line being hard to test — stop and notify the user about it rather than
+silently leaving it excluded or removing the marker yourself.
 
 ## Regression tests for "sized/typed from the first element" bugs
 

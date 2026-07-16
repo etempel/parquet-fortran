@@ -6,7 +6,7 @@
 !> Base-library MAML fixtures: embeds every .maml file under schemas/ bundled
 !> with this library as a compiled-in string array, addressable by filename via
 !> get_parquet_maml, plus the shared parquet_maml_file type and its
-!> add_col_qc/get_col_qc qc-maml builders.
+!> add_col_qc/set_col_qc qc-maml builders.
 module parquet_maml_base
     implicit none
     private
@@ -33,7 +33,7 @@ module parquet_maml_base
 
     !> One embedded or user-supplied MAML file: its raw source lines plus, once
     !> parsed/validated, the columns missing relative to the base schema and any
-    !> col_map: renames it declares. add_col_qc/get_col_qc build a qc-maml
+    !> col_map: renames it declares. add_col_qc/set_col_qc build a qc-maml
     !> incrementally (see parquet_maml_base_add_col_qc.f90).
     type, public :: parquet_maml_file
         logical :: user_maml = .false. !! true if this is a user defined MAML file
@@ -49,7 +49,7 @@ module parquet_maml_base
         type(parquet_maml_col_map_entry), allocatable :: col_map(:)
     contains
         procedure :: add_col_qc => parquet_maml_add_col_qc !! Appends one qc: field entry.
-        procedure :: get_col_qc => parquet_maml_get_col_qc !! Function form; returns the parsed name.
+        procedure :: set_col_qc => parquet_maml_set_col_qc !! In-place form; parses the name into its argument.
     end type parquet_maml_file
 
     interface
@@ -65,13 +65,12 @@ module parquet_maml_base
         !> In-place form of add_col_qc: appends the same qc: field entry. `col_name` is
         !> `intent(inout)`: it holds the compact "col, min, max, miss" string on entry and
         !> the parsed column name on exit, so a caller reuses one variable
-        !> (call maml%get_col_qc(col)) instead of naming a separate input and output. NB it
-        !> mutates self (adds the entry) despite the get_ name.
-        module subroutine parquet_maml_get_col_qc(self, col_name)
+        !> (call maml%set_col_qc(col)) instead of naming a separate input and output.
+        module subroutine parquet_maml_set_col_qc(self, col_name)
             class(parquet_maml_file), intent(inout) :: self !! qc-maml being built; gains a fields: entry.
             character(len=:), allocatable, intent(inout) :: col_name !! compact "col, min, max, miss" string on
             !! entry; parsed column name on exit.
-        end subroutine parquet_maml_get_col_qc
+        end subroutine parquet_maml_set_col_qc
     end interface
 
     public :: get_parquet_maml

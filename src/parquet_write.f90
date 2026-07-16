@@ -72,7 +72,6 @@ contains
         integer :: i
 
         parquet_get_defined_column_index = 0
-        if (.not. allocated(writer%all_columns)) return ! GCOVR_EXCL_LINE
 
         do i = 1, size(writer%all_columns)
             if (trim(writer%all_columns(i)%name) == trim(name)) then
@@ -606,10 +605,11 @@ contains
                     error stop "parquet_open_writer: write_maml=.true. requires a schema " // &
                         "(prepared by parquet_parse_maml) to be present (file: " // trim(filename) // ")"
                 end if
-                if (.not. allocated(schema%metadata%source_maml_lines)) then ! GCOVR_EXCL_START
-                    error stop "parquet_open_writer: write_maml=.true. requires a schema " // &
-                        "obtained from parquet_parse_maml (no source MAML content found) (file: " // trim(filename) // ")"
-                end if ! GCOVR_EXCL_STOP
+                ! No separate "schema present but not obtained from parquet_parse_maml" check here:
+                ! schema%cinfo%col (read just above, unconditionally, to populate writer%all_columns)
+                ! is only ever populated by parquet_parse_maml (object or file form), and both of
+                ! those forms unconditionally also set schema%metadata%source_maml_lines -- so by the
+                ! time a schema safely reaches this point, source_maml_lines is already allocated.
                 block
                     character(len=:), allocatable :: sidecar_lines(:)
                     sidecar_lines = schema%metadata%source_maml_lines

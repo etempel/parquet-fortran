@@ -1,13 +1,13 @@
 !> Hand-written submodule of parquet_maml_base (NOT generated). Implements the
-!> parquet_maml_file%add_col_qc and %get_col_qc (both subroutines) type-bound
+!> parquet_maml_file%add_col_qc and %set_col_qc (both subroutines) type-bound
 !> procedures, whose deferred module-procedure interfaces are declared in the
 !> (generated) src/parquet_maml_base.f90. Both share one worker (add_col_qc_impl)
 !> and differ only in how the parsed column name is returned: add_col_qc via an
-!> optional out-argument, get_col_qc via its own intent(inout) argument (so a
+!> optional out-argument, set_col_qc via its own intent(inout) argument (so a
 !> caller can reuse one variable in place, which add_col_qc's two-argument form
 !> cannot do due to intent(out)/intent(in) aliasing).
 !>
-!> add_col_qc/get_col_qc build a read-time qc-maml incrementally from a compact
+!> add_col_qc/set_col_qc build a read-time qc-maml incrementally from a compact
 !> one-line "col, min, max, miss" string, appending a fields: entry with a qc: block.
 !> It is deliberately self-contained (only intrinsic string handling): its
 !> parent module sits at the bottom of the module stack, so it cannot reuse the
@@ -23,7 +23,7 @@ contains
     !> and `qc_input` MUST be different variables -- passing the same variable
     !> as both aliases an intent(out) argument, which is undefined behaviour
     !> (the intent(out) deallocation destroys the input first). Use the
-    !> get_col_qc in-place form for `call maml%get_col_qc(col)` instead.
+    !> set_col_qc in-place form for `call maml%set_col_qc(col)` instead.
     module subroutine parquet_maml_add_col_qc(self, qc_input, col_name)
         class(parquet_maml_file), intent(inout) :: self !! qc-maml being built; gains one fields: entry.
         character(len=*), intent(in) :: qc_input !! compact "col, min, max, miss" string.
@@ -37,12 +37,12 @@ contains
     !> In-place form. Appends the same qc entry; `col_name` is `intent(inout)` --
     !> it holds the compact "col, min, max, miss" string on entry and the parsed
     !> column name on exit, so a caller reuses one variable
-    !> (`call maml%get_col_qc(col)`) instead of separately naming an input and
+    !> (`call maml%set_col_qc(col)`) instead of separately naming an input and
     !> an output (add_col_qc's own optional col_name argument cannot alias
     !> qc_input, since that would alias an intent(out) argument). NB: like
-    !> add_col_qc it mutates `self` (adds the entry), despite the get_ name; it
-    !> is a builder that also returns the name, not a pure query.
-    module subroutine parquet_maml_get_col_qc(self, col_name)
+    !> add_col_qc it mutates `self` (adds the entry) -- the set_ name reflects
+    !> that; it is a builder that also returns the name, not a pure query.
+    module subroutine parquet_maml_set_col_qc(self, col_name)
         class(parquet_maml_file), intent(inout) :: self !! qc-maml being built; gains one fields: entry.
         character(len=:), allocatable, intent(inout) :: col_name !! compact "col, min, max, miss" string on
         !! entry; parsed column name on exit.
@@ -50,7 +50,7 @@ contains
 
         qc_input = col_name
         call add_col_qc_impl(self, qc_input, col_name)
-    end subroutine parquet_maml_get_col_qc
+    end subroutine parquet_maml_set_col_qc
 
     !> Shared worker for both forms above: parses and validates qc_input,
     !> appends the field entry to self%lines, and always returns the parsed
@@ -83,7 +83,7 @@ contains
             if (qc_input(i:i) == ",") ntok = ntok + 1
         end do
         if (ntok > 4) then
-            error stop "parquet_maml_file add_col_qc/get_col_qc: qc_input has more than 4 comma-separated fields: '" // &
+            error stop "parquet_maml_file add_col_qc/set_col_qc: qc_input has more than 4 comma-separated fields: '" // &
                 trim(qc_input) // "'"
         end if
 
@@ -97,14 +97,14 @@ contains
 
         ! 1) column name (first field) must be non-empty.
         if (len_trim(name_str) == 0) then
-            error stop "parquet_maml_file add_col_qc/get_col_qc: the first field (column name) must not be empty: '" // &
+            error stop "parquet_maml_file add_col_qc/set_col_qc: the first field (column name) must not be empty: '" // &
                 trim(qc_input) // "'"
         end if
         col_name = trim(name_str)
 
         ! 2) the column must not already be declared in this MAML.
         if (maml_field_name_exists(self, col_name)) then
-            error stop "parquet_maml_file add_col_qc/get_col_qc: column '" // col_name // &
+            error stop "parquet_maml_file add_col_qc/set_col_qc: column '" // col_name // &
                 "' is already declared in this qc-maml"
         end if
 
@@ -116,7 +116,7 @@ contains
         if (len_trim(miss_str) > 0) then
             miss_low = to_lower(trim(adjustl(miss_str)))
             if (.not. (miss_low == "null" .or. miss_low == "na")) then
-                error stop "parquet_maml_file add_col_qc/get_col_qc: invalid qc miss value '" // trim(adjustl(miss_str)) // &
+                error stop "parquet_maml_file add_col_qc/set_col_qc: invalid qc miss value '" // trim(adjustl(miss_str)) // &
                     "' for column '" // col_name // "' (expected Null/NA or empty)"
             end if
         end if
@@ -198,19 +198,19 @@ contains
 
             if (has_op) then
                 if (is_min .and. op(1:1) == "<") then
-                    error stop "parquet_maml_file add_col_qc/get_col_qc: qc: min: for column '" // trim(colname) // &
+                    error stop "parquet_maml_file add_col_qc/set_col_qc: qc: min: for column '" // trim(colname) // &
                         "' uses a '" // trim(op) // "' operator; min: accepts only >= or > (use max: for an upper bound)"
                 end if
                 if (.not. is_min .and. op(1:1) == ">") then
-                    error stop "parquet_maml_file add_col_qc/get_col_qc: qc: max: for column '" // trim(colname) // &
+                    error stop "parquet_maml_file add_col_qc/set_col_qc: qc: max: for column '" // trim(colname) // &
                         "' uses a '" // trim(op) // "' operator; max: accepts only <= or < (use min: for a lower bound)"
                 end if
                 if (len_trim(rem) == 0) then
                     if (is_min) then
-                        error stop "parquet_maml_file add_col_qc/get_col_qc: bad qc min value provided for column '" // &
+                        error stop "parquet_maml_file add_col_qc/set_col_qc: bad qc min value provided for column '" // &
                             trim(colname) // "'"
                     else
-                        error stop "parquet_maml_file add_col_qc/get_col_qc: bad qc max value provided for column '" // &
+                        error stop "parquet_maml_file add_col_qc/set_col_qc: bad qc max value provided for column '" // &
                             trim(colname) // "'"
                     end if
                 end if

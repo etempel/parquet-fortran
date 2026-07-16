@@ -249,7 +249,7 @@ contains
             if (trim(tlo1) == &
                 trim(tlo2) .and. &
                 trim(tlo3) == &
-                trim(tlo4)) then ! GCOVR_EXCL_LINE
+                trim(tlo4)) then
                 idx = k
                 return
             end if

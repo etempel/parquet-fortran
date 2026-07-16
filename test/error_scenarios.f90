@@ -188,6 +188,8 @@ program error_scenarios
         call scenario_validate_bad_data_type_named("timestamp")
     case ("validate_excluded_decimal_type")
         call scenario_validate_bad_data_type_named("decimal")
+    case ("validate_empty_field_name")
+        call scenario_validate_empty_field_name()
     case ("validate_duplicate_name")
         call scenario_validate_duplicate_name()
     case ("validate_missing_table")
@@ -314,6 +316,8 @@ program error_scenarios
         call scenario_write_protected_column_with_null()
     case ("validate_qc_min_not_numeric")
         call scenario_validate_qc_min_not_numeric()
+    case ("validate_qc_max_not_numeric")
+        call scenario_validate_qc_max_not_numeric()
     case ("validate_qc_min_non_integral_for_int32")
         call scenario_validate_qc_min_non_integral_for_int32()
     case ("validate_qc_min_out_of_int32_range")
@@ -346,8 +350,8 @@ program error_scenarios
         call scenario_add_col_qc_duplicate_column_single_quoted()
     case ("add_col_qc_duplicate_column_double_quoted")
         call scenario_add_col_qc_duplicate_column_double_quoted()
-    case ("get_col_qc_reversed_operator")
-        call scenario_get_col_qc_reversed_operator()
+    case ("set_col_qc_reversed_operator")
+        call scenario_set_col_qc_reversed_operator()
     case ("qc_warning_numeric")
         call scenario_qc_warning_numeric()
     case ("qc_warning_fractional_bound")
@@ -1385,6 +1389,22 @@ contains
 
         call parquet_validate_maml(maml)
     end subroutine scenario_validate_bad_data_type_named
+
+    !> A fields: entry with no name: sub-key at all leaves cinfo%col(i)%name
+    !> at its default "" -- parquet_validate_maml_internal's own empty-name
+    !> check (parquet_metadata_validate.f90) must catch this before it ever
+    !> reaches type_ok/duplicate-name checks that assume a real name.
+    subroutine scenario_validate_empty_field_name()
+        type(parquet_maml_file) :: maml
+
+        maml%name = "empty_field_name.maml"
+        maml%lines = [character(len=40) :: &
+            "table: bad_table", &
+            "fields:", &
+            "- data_type: int32" ]
+
+        call parquet_validate_maml(maml)
+    end subroutine scenario_validate_empty_field_name
 
     subroutine scenario_validate_duplicate_name()
         type(parquet_maml_file) :: maml
@@ -2979,16 +2999,16 @@ contains
         print '(a)', "unexpectedly accepted a duplicate column name (double-quoted) in add_col_qc"
     end subroutine scenario_add_col_qc_duplicate_column_double_quoted
 
-    !> The get_col_qc in-place form shares add_col_qc's worker, so it enforces
+    !> The set_col_qc in-place form shares add_col_qc's worker, so it enforces
     !> the same validation -- e.g. a reversed min: operator aborts here too.
-    subroutine scenario_get_col_qc_reversed_operator()
+    subroutine scenario_set_col_qc_reversed_operator()
         type(parquet_maml_file) :: maml
         character(len=:), allocatable :: col_name
 
         col_name = "ra, <5"
-        call maml%get_col_qc(col_name)
-        print '(a)', "unexpectedly accepted a reversed qc min operator in get_col_qc"
-    end subroutine scenario_get_col_qc_reversed_operator
+        call maml%set_col_qc(col_name)
+        print '(a)', "unexpectedly accepted a reversed qc min operator in set_col_qc"
+    end subroutine scenario_set_col_qc_reversed_operator
 
     !> A fields: entry with no name: at all is rejected -- name is the one
     !> required attribute for a qc-maml field (everything else, including
@@ -3175,6 +3195,25 @@ contains
 
         call parquet_validate_maml(maml)
     end subroutine scenario_validate_qc_min_not_numeric
+
+    !> Mirrors scenario_validate_qc_min_not_numeric but for qc: max: -- exercises the
+    !> separate has_qc_max/qc_max_raw numeric-convertibility check in
+    !> parquet_validate_maml_internal (parquet_metadata_validate.f90), distinct from the
+    !> qc_min one above.
+    subroutine scenario_validate_qc_max_not_numeric()
+        type(parquet_maml_file) :: maml
+
+        maml%name = "qc_max_not_numeric.maml"
+        maml%lines = [character(len=40) :: &
+            "table: qc_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32", &
+            "  qc:", &
+            "    max: not_a_number" ]
+
+        call parquet_validate_maml(maml)
+    end subroutine scenario_validate_qc_max_not_numeric
 
     subroutine scenario_validate_qc_min_non_integral_for_int32()
         type(parquet_maml_file) :: maml

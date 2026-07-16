@@ -107,6 +107,60 @@ extra:
 ```
 Every name listed must be one of this same MAML file's own declared `fields:` (checked by `parquet_validate_maml`; unknown names fail validation). If a user MAML overrides a base MAML, `protected_cols:` is taken from whichever MAML is actually used to build the writer's schema (the user MAML if one is provided, otherwise the base MAML) — not merged across both. Writing an `is_valid` mask with any `.false.` entry for a protected column fails immediately with `error stop`. This only applies when writing against a MAML-derived schema (`parquet_open_writer(..., schema, ...)`); a schema-less writer has no `protected_cols:` to enforce.
 
+### Reading a nested struct field
+
+A Parquet `STRUCT` column's individual fields — at any nesting depth — can be read directly by
+passing a dot-separated path as the `name` argument to `parquet_read_column`,
+`parquet_read_array_row_mode`/`parquet_read_array_element_mode`, `parquet_read_column_chunk`,
+`parquet_get_col_size`/`parquet_get_column_total_elements`, `qc:` bounds in a MAML schema, and
+`parquet_filter` rules — every one of these dispatches on `name` the same way, so a struct-nested
+column is used identically to a top-level one everywhere. Given a file with
+
+```
+main : STRUCT
+├── id    : int32
+└── inner : STRUCT
+    ├── name : string
+    └── age  : int32
+```
+
+`parquet_read_column(reader, "main.id", ...)` and `parquet_read_column(reader, "main.inner.age",
+...)` read those two leaves directly; nesting depth is unlimited (`"main.inner.deeper.value"` works
+the same way). An exact top-level field name always wins over path-splitting first, so an existing
+column literally named with a `.` in it is unaffected. A dotted path may also resolve to a vector
+(`FIXED_SIZE_LIST`) leaf nested inside a struct — reading it behaves exactly like any other vector
+column (`col_size`, row/element modes, `(col_size, nrows)` shape, all apply unchanged).
+
+A path must resolve all the way down to a leaf column: naming an intermediate struct directly
+(`"main.inner"`, or just `"main"` when `main` is itself a struct) is not readable by any type this
+library supports and fails the same way as any other unknown column (`error stop
+"...: column not found in parquet file: ..."`) — there is no struct/record output type to read it
+into. `MAP` columns, and variable-length `LIST` columns, are not supported anywhere along a struct
+path — neither as an intermediate hop nor as the terminal leaf — and are rejected with the same
+"column not found" class of error rather than a silent wrong answer or a crash.
+
+**Null handling** combines every level a path passes through: a leaf is reported/treated as Null
+(via `null_value=`/`is_valid=`, [above](#null-values)) if the top-level struct itself is missing
+for that row, *or* any intermediate struct field is missing, *or* the leaf itself is missing —
+generalizing the same "missing if either the row or the specific slot is missing" principle vector
+columns already use, from one level of list-nesting to arbitrary levels of struct-nesting.
+
+**`qc:` and `parquet_filter` both work against a dotted path** exactly as they do against a
+top-level column — a MAML field's `name:` can be a dotted path, and a `parquet_filter%add` rule's
+column can be one too.
+
+**`parquet_close_reader(..., print_stat=.true.)`** ([above](reading.html#printing-reader-statistics-with-parquet_close_reader-print_stattrue))
+shows one row per top-level *physical* struct column touched by any of its leaves being read, not
+one row per leaf — its `nulls`/`min`/`max` reflect the whole struct's own top-level figures (which
+degrade to blank/`-` for a struct, since those statistics aren't well-defined for a nested type),
+and `output_type` shows whichever leaf under that struct was most recently read. This is a known,
+accepted limitation, not a bug: reading two different leaves under one struct is still reported as
+a single touched column.
+
+This library's own writer cannot produce `STRUCT` columns — like the extended read-only source
+types in [Reading a column into a different numeric kind](#reading-a-column-into-a-different-numeric-kind)
+above, struct support is read-only, for files produced by some other tool.
+
 ### Quality control (qc:) range checks on write
 
 A MAML field can declare a `qc:` block with `min:`/`max:` bounds:

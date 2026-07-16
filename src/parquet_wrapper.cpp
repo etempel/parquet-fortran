@@ -17,6 +17,7 @@
 #include <arrow/util/float16.h>
 #include <arrow/util/thread_pool.h>
 #include <parquet/arrow/reader.h>
+#include <parquet/arrow/schema.h>
 #include <parquet/arrow/writer.h>
 
 #include <algorithm>
@@ -272,6 +273,14 @@ extern "C"
 	{
 		std::unique_ptr<parquet::arrow::FileReader> reader;
 		std::shared_ptr<arrow::Schema> schema;
+		// Bridges arrow::Schema field paths to Parquet's own flat leaf-column indices -- built
+		// once at open time (create_parquet_reader). Needed because ReadRowGroup/ReadTable's
+		// `column_indices` parameter is indexed against the flat physical leaf schema (unlike
+		// ReadColumn's `i`, which is a top-level arrow::Schema field index and can read a whole
+		// struct in one call) -- these coincide only when every top-level field contributes
+		// exactly one leaf (true for every file before struct columns existed, which is why nothing
+		// needed this before). See resolve_single_leaf_index/collect_leaf_indices, below.
+		parquet::arrow::SchemaManifest manifest;
 		std::string filename;
 		int64_t nrows = 0; // effective row count: equal to total_nrows until a filter narrows it (see parquet_reader_set_filter).
 		int64_t total_nrows = 0; // the file's true, unfiltered row count -- kept for parquet_reader_print_stat's "of N total".
@@ -324,11 +333,16 @@ extern "C"
 		// WARNING in soft mode, so repeated reads of the same column during
 		// the reader's lifetime don't spam the same warning again (moot in
 		// hard mode, which aborts on the first violation) -- see run_qc_checks.
+		// All three are keyed by the exact column path string (a plain name, or
+		// a dotted struct-leaf path) rather than a physical column index: two
+		// different struct leaves can share one physical top-level index, and
+		// an int-keyed map would let a second leaf's rule silently clobber the
+		// first's (see run_qc_checks's own comment).
 		bool qc_enabled = false;
 		bool qc_soft = false;
-		std::unordered_map<int, QcRule> qc_rules;
-		std::unordered_set<int> qc_null_warned;
-		std::unordered_set<int> qc_range_warned;
+		std::unordered_map<std::string, QcRule> qc_rules;
+		std::unordered_set<std::string> qc_null_warned;
+		std::unordered_set<std::string> qc_range_warned;
 		// Row-group-chunked read support (parquet_read_column_chunk / parquet_get_num_row_groups /
 		// parquet_get_chunk_size(reader,...) -- see get_row_group_chunk_array). num_row_groups is
 		// the file's row-group count, read once from the footer at open time
@@ -387,6 +401,232 @@ extern "C"
 			throw std::runtime_error(std::string("Column not found: ") + name);
 		}
 		return static_cast<int64_t>(idx);
+	}
+
+	// Describes how a (possibly dotted) column name resolves against the schema: either an exact
+	// top-level field match (child_path empty), or a walk through nested STRUCT fields down to a
+	// leaf. Schema-only -- never reads any column data, so this is cheap enough to call from
+	// existence checks (parquet_reader_has_column) as well as before an actual read.
+	struct StructPathInfo
+	{
+		std::string top_level_name;
+		std::vector<std::string> child_path; // empty => `top_level_name` is the whole story
+		std::shared_ptr<arrow::Field> leaf_field; // the resolved leaf's schema-level field
+	};
+
+	// Resolves `name` against `schema`, walking a dotted path through nested STRUCT fields if it
+	// isn't itself a literal top-level field name (exact match always wins, so an existing column
+	// literally named with a "." in it is unaffected). Every non-terminal path segment must be a
+	// STRUCT field; the terminal segment must resolve to something other than STRUCT/LIST/
+	// LARGE_LIST/MAP -- a FIXED_SIZE_LIST or scalar leaf is fine. Struct-of-struct nesting to any
+	// depth is supported, but a path stopping at an intermediate struct, or passing through/
+	// landing on a MAP or (variable-length) LIST, is not (see CLAUDE.md's nested-struct-field
+	// design notes). Throws std::runtime_error, same as get_column_index, on any failure --
+	// callers that need a non-throwing probe should use struct_path_exists instead.
+	static StructPathInfo resolve_struct_path(const std::shared_ptr<arrow::Schema> &schema, const std::string &name)
+	{
+		auto direct_idx = schema->GetFieldIndex(name);
+		if (direct_idx >= 0)
+		{
+			return StructPathInfo{name, {}, schema->field(direct_idx)};
+		}
+
+		std::vector<std::string> segments;
+		size_t start = 0;
+		while (true)
+		{
+			auto dot = name.find('.', start);
+			segments.push_back(name.substr(start, dot == std::string::npos ? std::string::npos : dot - start));
+			if (dot == std::string::npos) break;
+			start = dot + 1;
+		}
+		if (segments.size() < 2)
+		{
+			throw std::runtime_error(std::string("Column not found: ") + name);
+		}
+
+		auto top_idx = schema->GetFieldIndex(segments[0]);
+		if (top_idx < 0)
+		{
+			throw std::runtime_error(std::string("Column not found: ") + name);
+		}
+
+		std::shared_ptr<arrow::Field> field = schema->field(top_idx);
+		std::string walked_so_far = segments[0];
+		for (size_t i = 1; i < segments.size(); ++i)
+		{
+			if (field->type()->id() != arrow::Type::STRUCT)
+			{
+				throw std::runtime_error(std::string("Column not found: ") + name + " (path segment '" + walked_so_far +
+					"' is not a struct, found type: " + field->type()->ToString() + ")");
+			}
+			auto struct_type = std::static_pointer_cast<arrow::StructType>(field->type());
+			auto child_field = struct_type->GetFieldByName(segments[i]);
+			if (!child_field)
+			{
+				throw std::runtime_error(std::string("Column not found: ") + name + " (no field '" + segments[i] +
+					"' under '" + walked_so_far + "')");
+			}
+			field = child_field;
+			walked_so_far += "." + segments[i];
+		}
+
+		auto leaf_id = field->type()->id();
+		if (leaf_id == arrow::Type::STRUCT || leaf_id == arrow::Type::LIST ||
+			leaf_id == arrow::Type::LARGE_LIST || leaf_id == arrow::Type::MAP)
+		{
+			throw std::runtime_error(std::string("Column not found: ") + name +
+				" (resolves to a " + field->type()->ToString() +
+				" column; struct paths must resolve to a leaf scalar/vector column, and MAP/LIST are not supported)");
+		}
+
+		return StructPathInfo{segments[0], std::vector<std::string>(segments.begin() + 1, segments.end()), field};
+	}
+
+	// Non-throwing existence probe for a (possibly dotted) column path -- used by
+	// parquet_reader_has_column/parquet_reader_set_qc/parquet_reader_set_filter so a caller can
+	// validate names up front without an uncaught exception crossing the Fortran/C++ boundary.
+	// Deliberately a standalone, exception-free walk mirroring resolve_struct_path's logic --
+	// NOT "try { resolve_struct_path(...); return true; } catch (...) { return false; }" -- a
+	// throw from resolve_struct_path here was empirically found to escape uncaught even through
+	// an enclosing try/catch in the same translation unit (reproduced with
+	// test_add_col_qc_roundtrip's intentionally-absent "extra_dummy" qc column, which reaches
+	// exactly this call), some mismatch in how this project's mixed gfortran-driven link handles
+	// C++ exception unwinding across the static library boundary. Keep this independent of
+	// resolve_struct_path rather than reintroducing a try/catch around it.
+	static bool struct_path_exists(const std::shared_ptr<arrow::Schema> &schema, const std::string &name)
+	{
+		if (schema->GetFieldIndex(name) >= 0) return true;
+
+		std::vector<std::string> segments;
+		size_t start = 0;
+		while (true)
+		{
+			auto dot = name.find('.', start);
+			segments.push_back(name.substr(start, dot == std::string::npos ? std::string::npos : dot - start));
+			if (dot == std::string::npos) break;
+			start = dot + 1;
+		}
+		if (segments.size() < 2) return false;
+
+		auto top_idx = schema->GetFieldIndex(segments[0]);
+		if (top_idx < 0) return false;
+
+		std::shared_ptr<arrow::Field> field = schema->field(top_idx);
+		for (size_t i = 1; i < segments.size(); ++i)
+		{
+			if (field->type()->id() != arrow::Type::STRUCT) return false;
+			auto struct_type = std::static_pointer_cast<arrow::StructType>(field->type());
+			auto child_field = struct_type->GetFieldByName(segments[i]);
+			if (!child_field) return false;
+			field = child_field;
+		}
+
+		auto leaf_id = field->type()->id();
+		return leaf_id != arrow::Type::STRUCT && leaf_id != arrow::Type::LIST &&
+			leaf_id != arrow::Type::LARGE_LIST && leaf_id != arrow::Type::MAP;
+	}
+
+	// Walks `child_path` through nested STRUCT fields of `root` (the already-read top-level
+	// struct array), combining every hop's own validity bit -- root's own, each intermediate
+	// struct's, and the final leaf's -- into one mask: a row is null in the result if the
+	// top-level struct was null there, any intermediate struct field was null there, or the leaf
+	// itself was null there (see CLAUDE.md's nested-struct-field design notes -- the same
+	// "combine independently" principle already used for FixedSizeList's outer/inner nulls,
+	// generalized from one level of list-nesting to N levels of struct-nesting). Returns a
+	// freshly materialized Array sharing the leaf's own value buffers but with that combined mask
+	// as its validity bitmap, so every existing column-consuming function (convert_values_to_*,
+	// qc, filter, array row/element mode, print_stat's stat computation) sees an ordinary Array
+	// and needs no struct-specific handling of its own. `root`/`child_path` are assumed already
+	// validated against the schema by resolve_struct_path -- this does no error-checking itself.
+	static std::shared_ptr<arrow::Array> unwrap_struct_path(
+		const std::shared_ptr<arrow::Array> &root, const std::vector<std::string> &child_path)
+	{
+		int64_t n = root->length();
+		std::vector<bool> combined_valid(static_cast<size_t>(n));
+		for (int64_t i = 0; i < n; ++i) combined_valid[static_cast<size_t>(i)] = root->IsValid(i);
+
+		std::shared_ptr<arrow::Array> current = root;
+		for (const auto &segment : child_path)
+		{
+			auto struct_arr = std::static_pointer_cast<arrow::StructArray>(current);
+			current = struct_arr->GetFieldByName(segment);
+			for (int64_t i = 0; i < n; ++i)
+			{
+				if (combined_valid[static_cast<size_t>(i)] && !current->IsValid(i))
+				{
+					combined_valid[static_cast<size_t>(i)] = false;
+				}
+			}
+		}
+
+		int64_t base_offset = current->data()->offset;
+		auto alloc = arrow::AllocateBitmap(base_offset + n);
+		if (!alloc.ok())
+		{
+			throw std::runtime_error(std::string("Failed to allocate combined-validity bitmap: ") + alloc.status().ToString());
+		}
+		auto buffer = alloc.ValueOrDie();
+		for (int64_t i = 0; i < n; ++i)
+		{
+			arrow::bit_util::SetBitTo(buffer->mutable_data(), base_offset + i, combined_valid[static_cast<size_t>(i)]);
+		}
+		auto new_data = current->data()->Copy();
+		new_data->buffers[0] = buffer;
+		new_data->null_count = arrow::kUnknownNullCount;
+		return arrow::MakeArray(new_data);
+	}
+
+	// Appends every leaf Parquet column index found under `field` (depth-first, left to right) --
+	// for a plain scalar/FIXED_SIZE_LIST arrow field this is exactly one index; for a struct this
+	// recurses through every descendant. A FIXED_SIZE_LIST/LIST field is itself never a leaf in
+	// parquet::arrow::SchemaManifest's tree (Parquet's own 2/3-level list encoding always wraps
+	// the actual value in at least one synthetic child node, e.g. "spectrum" -> "element") --
+	// recursing through `.children` handles that uniformly alongside genuine STRUCT nesting,
+	// with no special-casing needed here for list-typed fields.
+	static void collect_leaf_indices(const parquet::arrow::SchemaField &field, std::vector<int> &out)
+	{
+		if (field.is_leaf())
+		{
+			out.push_back(field.column_index);
+			return;
+		}
+		for (const auto &child : field.children)
+		{
+			collect_leaf_indices(child, out);
+		}
+	}
+
+	// Resolves the single Parquet leaf column index reached by walking `child_path` (by field
+	// name) down from top-level field `top_level_idx`'s manifest entry, then descending any
+	// further single-child wrapper nodes (a FIXED_SIZE_LIST/LIST's own internal encoding) until a
+	// leaf is reached. Assumes `child_path` was already validated against the schema by
+	// resolve_struct_path -- every name lookup here is expected to succeed. Needed for
+	// ReadRowGroup/ReadTable's `column_indices`, which (unlike ReadColumn's plain top-level field
+	// index) is indexed against Parquet's flat leaf schema -- see ParquetReaderHandle::manifest's
+	// own comment for why this coincides with `top_level_idx` alone only for a childless field.
+	static int64_t resolve_single_leaf_index(
+		const ParquetReaderHandle *reader_handle, int top_level_idx, const std::vector<std::string> &child_path)
+	{
+		const parquet::arrow::SchemaField *current = &reader_handle->manifest.schema_fields[top_level_idx];
+		for (const auto &segment : child_path)
+		{
+			const parquet::arrow::SchemaField *next = nullptr;
+			for (const auto &child : current->children)
+			{
+				if (child.field->name() == segment)
+				{
+					next = &child;
+					break;
+				}
+			}
+			current = next;
+		}
+		while (!current->is_leaf())
+		{
+			current = &current->children[0];
+		}
+		return current->column_index;
 	}
 
 	// A column chunk read via FileReader::ReadColumn can still be split
@@ -461,35 +701,61 @@ extern "C"
 	// that flips it runs as its own isolated subprocess.
 	static bool g_debug_force_whole_column_read_error = false;
 
+	// Test-only: counts every genuine disk ReadColumn call get_single_chunk_array issues (a cache
+	// miss) -- never incremented on a cache hit. Lets test/error_scenarios.f90's
+	// scenario_nested_struct_shares_cached_read prove that reading two different leaf paths under
+	// the same top-level struct column (e.g. "main.id" then "main.inner.age") triggers exactly one
+	// real disk read of "main" -- i.e. that struct-path resolution shares get_single_chunk_array's
+	// existing column_cache instead of re-reading per leaf path.
+	static int64_t g_debug_physical_column_read_count = 0;
+
 	// Reads (and caches) exactly one column's data from disk -- every other
 	// column in the file is never touched, regardless of how many columns
 	// the file has or how large they are. This is what makes reading a
 	// large file with many columns, but only asking for a few of them,
 	// cheap: nothing beyond the footer/schema is read until this is called.
+	// `name` may be a dotted struct-field path (see resolve_struct_path):
+	// the top-level struct column is read/cached exactly as any other column
+	// would be (keyed by its own physical index, same as always -- so
+	// reading two different leaves under one struct still only reads that
+	// struct's data from disk once), then unwrap_struct_path walks down to
+	// the requested leaf, so every caller downstream of this function
+	// (conversion, qc, filter, array row/element mode, print_stat) keeps
+	// seeing an ordinary Array and needs no struct-specific handling.
 	static std::shared_ptr<arrow::Array> get_single_chunk_array(ParquetReaderHandle *reader_handle, const char *name)
 	{
-		auto idx = get_column_index(reader_handle, name);
+		auto resolved = resolve_struct_path(reader_handle->schema, name);
+		auto idx = get_column_index(reader_handle, resolved.top_level_name.c_str());
 		auto cached = reader_handle->column_cache.find(static_cast<int>(idx));
+		std::shared_ptr<arrow::Array> array;
 		if (cached != reader_handle->column_cache.end())
 		{
-			return cached->second;
+			array = cached->second;
 		}
-
-		if (g_debug_force_whole_column_read_error)
+		else
 		{
-			report_fatal_error("get_single_chunk_array",
-				std::string("forced debug error: whole-column read attempted for column: ") + name);
+			if (g_debug_force_whole_column_read_error)
+			{
+				report_fatal_error("get_single_chunk_array",
+					std::string("forced debug error: whole-column read attempted for column: ") + name);
+			}
+
+			std::shared_ptr<arrow::ChunkedArray> chunked;
+			auto status = reader_handle->reader->ReadColumn(static_cast<int>(idx), &chunked);
+			if (!status.ok())
+			{
+				throw std::runtime_error(status.ToString());
+			}
+
+			array = apply_filter_mask(reader_handle, combine_column_chunks(chunked, resolved.top_level_name));
+			reader_handle->column_cache.emplace(static_cast<int>(idx), array);
+			++g_debug_physical_column_read_count;
 		}
 
-		std::shared_ptr<arrow::ChunkedArray> chunked;
-		auto status = reader_handle->reader->ReadColumn(static_cast<int>(idx), &chunked);
-		if (!status.ok())
+		if (!resolved.child_path.empty())
 		{
-			throw std::runtime_error(status.ToString());
+			array = unwrap_struct_path(array, resolved.child_path);
 		}
-
-		auto array = apply_filter_mask(reader_handle, combine_column_chunks(chunked, name));
-		reader_handle->column_cache.emplace(static_cast<int>(idx), array);
 		return array;
 	}
 
@@ -1330,31 +1596,34 @@ extern "C"
 		return true;
 	}
 
-	// Runs both read-time QC checks for column `idx`/`name` against
-	// `array` (whatever was just decoded/cached for it -- already the
-	// filtered version, if a filter is set), if this reader has qc enabled
-	// and this column has a rule declared for it. In soft mode (qc_soft),
-	// each of the two checks (Null-presence, range) prints a WARNING to
-	// stdout at most once per column for the whole lifetime of the reader
-	// -- qc_null_warned/qc_range_warned record that, so a column
-	// read/prefetched/filtered more than once doesn't repeat the same
-	// warning. In hard mode (the default), the first violation of either
-	// check aborts the process via report_fatal_error, so the throttling
-	// sets are never consulted. Called from mark_read/mark_read_string (an
-	// actual typed read), parquet_reader_prefetch_columns, and
-	// parquet_reader_set_filter (for a column the filter itself touches) --
-	// i.e. every place this reader already tracks as "touched" for
-	// parquet_reader_print_stat.
-	static void run_qc_checks(ParquetReaderHandle *reader_handle, int idx, const std::string &name,
+	// Runs both read-time QC checks for column `qc_key` (a plain column name, or a full dotted
+	// struct-leaf path) against `array` (whatever was just decoded/cached/unwrapped for it --
+	// already the filtered version, if a filter is set), if this reader has qc enabled and this
+	// exact qc_key has a rule declared for it. `qc_key` is deliberately a separate parameter from
+	// `name` (used only for messages): they're the same string at every call site except
+	// get_row_group_chunk_array, which appends a " [row group N]" suffix to `name` for display
+	// but must still look the rule up by the bare column path. qc_rules/qc_null_warned/
+	// qc_range_warned are keyed by this exact string (not a physical column index) because two
+	// different struct-leaf paths can share one physical top-level column index -- an int-keyed
+	// map would let one leaf's rule silently clobber another's. In soft mode (qc_soft), each of
+	// the two checks (Null-presence, range) prints a WARNING to stdout at most once per qc_key for
+	// the whole lifetime of the reader -- qc_null_warned/qc_range_warned record that, so reading/
+	// prefetching/filtering the same column more than once doesn't repeat the same warning. In
+	// hard mode (the default), the first violation of either check aborts the process via
+	// report_fatal_error, so the throttling sets are never consulted. Called from mark_read/
+	// mark_read_string (an actual typed read), parquet_reader_prefetch_columns, and
+	// parquet_reader_set_filter (for a column the filter itself touches) -- i.e. every place this
+	// reader already tracks as "touched" for parquet_reader_print_stat.
+	static void run_qc_checks(ParquetReaderHandle *reader_handle, const std::string &qc_key, const std::string &name,
 		const std::shared_ptr<arrow::Array> &array)
 	{
 		if (!reader_handle->qc_enabled) return;
-		auto it = reader_handle->qc_rules.find(idx);
+		auto it = reader_handle->qc_rules.find(qc_key);
 		if (it == reader_handle->qc_rules.end()) return;
 
 		auto flat = flatten_for_stats(array);
 
-		if (reader_handle->qc_null_warned.find(idx) == reader_handle->qc_null_warned.end())
+		if (reader_handle->qc_null_warned.find(qc_key) == reader_handle->qc_null_warned.end())
 		{
 			std::string msg;
 			if (run_qc_null_check(flat, it->second, name, msg))
@@ -1364,11 +1633,11 @@ extern "C"
 					report_fatal_error("qc hard check", msg);
 				}
 				std::fprintf(stdout, "WARNING: %s\n", msg.c_str());
-				reader_handle->qc_null_warned.insert(idx);
+				reader_handle->qc_null_warned.insert(qc_key);
 			}
 		}
 
-		if (reader_handle->qc_range_warned.find(idx) == reader_handle->qc_range_warned.end())
+		if (reader_handle->qc_range_warned.find(qc_key) == reader_handle->qc_range_warned.end())
 		{
 			std::string msg;
 			if (run_qc_range_check(flat, it->second, name, msg))
@@ -1378,7 +1647,7 @@ extern "C"
 					report_fatal_error("qc hard check", msg);
 				}
 				std::fprintf(stdout, "WARNING: %s\n", msg.c_str());
-				reader_handle->qc_range_warned.insert(idx);
+				reader_handle->qc_range_warned.insert(qc_key);
 			}
 		}
 	}
@@ -1391,25 +1660,32 @@ extern "C"
 	// than looking it up in reader_handle->column_cache: a row-group-scoped read (see
 	// resolve_row_group_for_row/get_row_group_chunk_array, used by the row-mode read functions)
 	// never populates column_cache at all, so an at(idx) lookup there would throw
-	// std::out_of_range for those callers.
+	// std::out_of_range for those callers. `name` may be a dotted struct-leaf path: was_read/
+	// output_type_used stay keyed by the *physical top-level* column index (so a struct read via
+	// two different leaves shows up as one parquet_reader_print_stat row for the whole struct,
+	// not one row per leaf -- see CLAUDE.md's nested-struct-field design notes for why this is an
+	// accepted v1 limitation), while qc (which does need per-leaf precision) is run against the
+	// full, unresolved `name` -- see run_qc_checks's own comment.
 	static void mark_read(ParquetReaderHandle *reader_handle, const char *name, const char *type_name,
 		const std::shared_ptr<arrow::Array> &array)
 	{
-		auto idx = static_cast<int>(get_column_index(reader_handle, name));
+		auto resolved = resolve_struct_path(reader_handle->schema, name);
+		auto idx = static_cast<int>(get_column_index(reader_handle, resolved.top_level_name.c_str()));
 		reader_handle->was_read.insert(idx);
 		reader_handle->output_type_used[idx] = type_name;
-		run_qc_checks(reader_handle, idx, name, array);
+		run_qc_checks(reader_handle, name, name, array);
 	}
 
 	// Same as mark_read, but also records the declared string item_len (for parquet_reader_print_stat).
 	static void mark_read_string(ParquetReaderHandle *reader_handle, const char *name, int64_t item_len,
 		const std::shared_ptr<arrow::Array> &array)
 	{
-		auto idx = static_cast<int>(get_column_index(reader_handle, name));
+		auto resolved = resolve_struct_path(reader_handle->schema, name);
+		auto idx = static_cast<int>(get_column_index(reader_handle, resolved.top_level_name.c_str()));
 		reader_handle->was_read.insert(idx);
 		reader_handle->output_type_used[idx] = "string";
 		reader_handle->output_str_len_used[idx] = item_len;
-		run_qc_checks(reader_handle, idx, name, array);
+		run_qc_checks(reader_handle, name, name, array);
 	}
 
 	// Returns the vector-column element count of a fixed-size-list or list array (0 for a scalar column).
@@ -1912,6 +2188,16 @@ extern "C"
 				std::string("failed to open '") + filename + "': " + status.ToString());
 		}
 
+		auto *file_metadata = handle->reader->parquet_reader()->metadata().get();
+		status = parquet::arrow::SchemaManifest::Make(
+			file_metadata->schema(), file_metadata->key_value_metadata(), reader_properties, &handle->manifest);
+		if (!status.ok())
+		{
+			delete handle;
+			report_fatal_error("create_parquet_reader",
+				std::string("failed to open '") + filename + "': " + status.ToString());
+		}
+
 		handle->nrows = handle->reader->parquet_reader()->metadata()->num_rows();
 		handle->total_nrows = handle->nrows;
 		handle->num_row_groups = handle->reader->parquet_reader()->metadata()->num_row_groups();
@@ -1959,47 +2245,81 @@ extern "C"
 		// earlier lazy read via get_single_chunk_array) are skipped here, so
 		// that repeated/overlapping prefetch_columns calls accumulate a
 		// union of cached columns instead of re-reading and re-decoding
-		// columns that are already in column_cache.
+		// columns that are already in column_cache. A requested name may be a
+		// dotted struct-leaf path: the physical read/cache-fill below is
+		// always keyed by its top-level column (so two leaves under the same
+		// struct only trigger one disk read), while qc -- run in a separate
+		// pass at the end, once every physical read this call needs is done
+		// -- runs once per distinct requested name, unwrapping to the leaf
+		// first, so a leaf-specific qc rule still fires correctly.
+		struct Requested
+		{
+			std::string name;
+			int idx;
+			std::vector<std::string> child_path;
+		};
+		std::vector<Requested> requested;
+		requested.reserve(static_cast<size_t>(n));
+
 		std::vector<int> indices;
-		std::vector<std::string> names;
-		indices.reserve(static_cast<size_t>(n));
-		names.reserve(static_cast<size_t>(n));
+		std::vector<std::string> top_names;
 		for (int64_t i = 0; i < n; ++i)
 		{
 			std::string name(names_packed + i * item_len, static_cast<size_t>(item_len));
 			name = trim_right_spaces_and_nuls(name);
-			int idx = static_cast<int>(get_column_index(reader_handle, name.c_str()));
+			auto resolved = resolve_struct_path(reader_handle->schema, name);
+			int idx = static_cast<int>(get_column_index(reader_handle, resolved.top_level_name.c_str()));
 			reader_handle->was_prefetched.insert(idx);
-			auto cached = reader_handle->column_cache.find(idx);
-			if (cached != reader_handle->column_cache.end())
-			{
-				// Already decoded (by an earlier prefetch, read, or filter
-				// evaluation) -- still counts as "touched" by this prefetch
-				// call, so QC still runs for it here (it may not have, e.g.
-				// if the only earlier touch was a plain get_col_size/
-				// get_string_length query, which doesn't run QC itself).
-				run_qc_checks(reader_handle, idx, name, cached->second);
-				continue;
-			}
+			requested.push_back(Requested{name, idx, resolved.child_path});
+
+			if (reader_handle->column_cache.find(idx) != reader_handle->column_cache.end()) continue;
+			if (std::find(indices.begin(), indices.end(), idx) != indices.end()) continue;
 			indices.push_back(idx);
-			names.push_back(name);
+			top_names.push_back(resolved.top_level_name);
 		}
 
-		if (indices.empty()) return;
-
-		auto table_result = reader_handle->reader->ReadTable(indices);
-		if (!table_result.ok())
+		if (!indices.empty())
 		{
-			throw std::runtime_error(table_result.status().ToString());
+			// ReadTable's column_indices, unlike ReadColumn's, is indexed against Parquet's flat
+			// leaf schema (see ParquetReaderHandle::manifest's own comment) -- collect every leaf
+			// under each requested top-level field (one for a plain scalar/vector column, several
+			// for a struct) into one combined list, so this stays a single batched/parallelizable
+			// Arrow call regardless of how many of the requested columns are struct-typed.
+			std::vector<int> leaf_indices;
+			for (int idx : indices)
+			{
+				collect_leaf_indices(reader_handle->manifest.schema_fields[idx], leaf_indices);
+			}
+
+			auto table_result = reader_handle->reader->ReadTable(leaf_indices);
+			if (!table_result.ok())
+			{
+				throw std::runtime_error(table_result.status().ToString());
+			}
+			auto table = table_result.ValueOrDie();
+
+			for (size_t i = 0; i < indices.size(); ++i)
+			{
+				// The result table always reconstructs one column per distinct top-level field
+				// actually touched, in original schema order (regardless of leaf request order)
+				// -- so its own field name (unique at the top level) is what maps a requested
+				// column back to its result position, not a positional index into `indices`.
+				auto result_pos = table->schema()->GetFieldIndex(top_names[i]);
+				auto chunked = table->column(result_pos);
+				auto array = apply_filter_mask(reader_handle, combine_column_chunks(chunked, top_names[i]));
+				reader_handle->column_cache[indices[i]] = array;
+			}
 		}
-		auto table = table_result.ValueOrDie();
 
-		for (size_t i = 0; i < indices.size(); ++i)
+		// Already decoded (by an earlier prefetch, read, filter evaluation, or the fresh reads
+		// just above) -- still counts as "touched" by this prefetch call, so QC still runs for it
+		// here (it may not have, e.g. if the only earlier touch was a plain get_col_size/
+		// get_string_length query, which doesn't run QC itself).
+		for (const auto &req : requested)
 		{
-			auto chunked = table->column(static_cast<int>(i));
-			auto array = apply_filter_mask(reader_handle, combine_column_chunks(chunked, names[i]));
-			reader_handle->column_cache[indices[i]] = array;
-			run_qc_checks(reader_handle, indices[i], names[i], array);
+			auto array = reader_handle->column_cache.at(req.idx);
+			if (!req.child_path.empty()) array = unwrap_struct_path(array, req.child_path);
+			run_qc_checks(reader_handle, req.name, req.name, array);
 		}
 	}
 
@@ -2030,7 +2350,7 @@ extern "C"
 				// Already decoded -- still counts as "touched" by this
 				// prefetch, so QC still runs for it here, mirroring
 				// parquet_reader_prefetch_columns's own cache-hit handling.
-				run_qc_checks(reader_handle, idx, reader_handle->schema->field(idx)->name(), cached->second);
+				run_qc_checks(reader_handle, reader_handle->schema->field(idx)->name(), reader_handle->schema->field(idx)->name(), cached->second);
 				continue;
 			}
 			indices.push_back(idx);
@@ -2039,7 +2359,16 @@ extern "C"
 
 		if (indices.empty()) return;
 
-		auto table_result = reader_handle->reader->ReadTable(indices);
+		// See parquet_reader_prefetch_columns's identical comment: ReadTable's column_indices
+		// needs every leaf under each requested top-level field, not the top-level indices
+		// themselves.
+		std::vector<int> leaf_indices;
+		for (int idx : indices)
+		{
+			collect_leaf_indices(reader_handle->manifest.schema_fields[idx], leaf_indices);
+		}
+
+		auto table_result = reader_handle->reader->ReadTable(leaf_indices);
 		if (!table_result.ok())
 		{
 			throw std::runtime_error(table_result.status().ToString());
@@ -2048,10 +2377,11 @@ extern "C"
 
 		for (size_t i = 0; i < indices.size(); ++i)
 		{
-			auto chunked = table->column(static_cast<int>(i));
+			auto result_pos = table->schema()->GetFieldIndex(names[i]);
+			auto chunked = table->column(result_pos);
 			auto array = apply_filter_mask(reader_handle, combine_column_chunks(chunked, names[i]));
 			reader_handle->column_cache[indices[i]] = array;
-			run_qc_checks(reader_handle, indices[i], names[i], array);
+			run_qc_checks(reader_handle, names[i], names[i], array);
 		}
 	}
 
@@ -2132,8 +2462,9 @@ extern "C"
 			std::string name(names_packed + i * name_len, static_cast<size_t>(name_len));
 			name = trim_right_spaces_and_nuls(name);
 
-			auto idx = reader_handle->schema->GetFieldIndex(name);
-			if (idx < 0) continue; // qc-maml may declare columns not present in this file -- fine, just ignore them.
+			// qc-maml may declare columns (plain or dotted struct-leaf paths) not present in
+			// this file -- fine, just ignore them, same tolerance as the plain-column case.
+			if (!struct_path_exists(reader_handle->schema, name)) continue;
 
 			QcRule rule;
 			rule.has_min = has_min_flags[i] != 0;
@@ -2154,7 +2485,7 @@ extern "C"
 			}
 			rule.null_values_allowed = null_allowed_flags[i] != 0;
 
-			reader_handle->qc_rules[static_cast<int>(idx)] = rule;
+			reader_handle->qc_rules[name] = rule;
 		}
 	}
 
@@ -2369,6 +2700,7 @@ extern "C"
 
 		std::vector<uint8_t> combined(static_cast<size_t>(reader_handle->total_nrows), 1);
 		std::vector<int> touched_indices;
+		std::vector<std::string> touched_names; // every filter clause's own (possibly dotted) name, deduplicated
 
 		for (int64_t i = 0; i < n; ++i)
 		{
@@ -2380,7 +2712,7 @@ extern "C"
 			value = trim_right_spaces_and_nuls(value);
 			bool is_string = is_string_flags[i] != 0;
 
-			if (reader_handle->schema->GetFieldIndex(name) < 0)
+			if (!struct_path_exists(reader_handle->schema, name))
 			{
 				std::snprintf(err_out, static_cast<size_t>(err_cap), "unknown column in filter: %s", name.c_str());
 				return 1;
@@ -2404,10 +2736,15 @@ extern "C"
 				return 1;
 			}
 
-			int idx = static_cast<int>(reader_handle->schema->GetFieldIndex(name));
+			auto resolved = resolve_struct_path(reader_handle->schema, name);
+			int idx = static_cast<int>(get_column_index(reader_handle, resolved.top_level_name.c_str()));
 			if (std::find(touched_indices.begin(), touched_indices.end(), idx) == touched_indices.end())
 			{
 				touched_indices.push_back(idx);
+			}
+			if (std::find(touched_names.begin(), touched_names.end(), name) == touched_names.end())
+			{
+				touched_names.push_back(name);
 			}
 
 			std::string err;
@@ -2423,7 +2760,11 @@ extern "C"
 
 			// Retain this clause (operator+value, column name stripped) for the
 			// print_stat "filter" column; multiple clauses on one column are kept
-			// in order and joined with ", " at print time.
+			// in order and joined with ", " at print time. Keyed by the physical
+			// top-level column index -- two clauses on different leaves of the
+			// same struct show up merged under that struct's one print_stat row
+			// (see CLAUDE.md's nested-struct-field design notes; an accepted v1
+			// limitation, same as was_read/output_type_used above).
 			reader_handle->filter_clauses[idx].push_back(value.empty() ? op : op + value);
 		}
 
@@ -2451,6 +2792,12 @@ extern "C"
 		// filter_mask existed -- re-filter those specific cache entries now
 		// so they're consistent with every other column, which will only
 		// ever see the filtered version (via apply_filter_mask, from here on).
+		// Re-filtering is keyed by physical top-level index (touched_indices,
+		// deduplicated) so a struct column shared by two filtered leaves is
+		// only ever filtered once; qc is then re-run separately, once per
+		// distinct requested name (touched_names), unwrapping to the leaf
+		// first where needed, so a leaf-specific qc rule still fires
+		// correctly against the now-filtered data.
 		ensure_compute_initialized();
 		for (int idx : touched_indices)
 		{
@@ -2464,7 +2811,15 @@ extern "C"
 			}
 			it->second = filtered.ValueOrDie().make_array();
 			reader_handle->was_prefetched.insert(idx);
-			run_qc_checks(reader_handle, idx, reader_handle->schema->field(idx)->name(), it->second);
+		}
+
+		for (const auto &touched_name : touched_names)
+		{
+			auto resolved = resolve_struct_path(reader_handle->schema, touched_name);
+			auto idx = static_cast<int>(get_column_index(reader_handle, resolved.top_level_name.c_str()));
+			auto array = reader_handle->column_cache.at(idx);
+			if (!resolved.child_path.empty()) array = unwrap_struct_path(array, resolved.child_path);
+			run_qc_checks(reader_handle, touched_name, touched_name, array);
 		}
 
 		return 0;
@@ -2473,11 +2828,14 @@ extern "C"
 	// Non-throwing existence check, so callers (parquet_prefetch_columns) can
 	// validate names up front and report a clean Fortran-side error stop,
 	// instead of letting get_column_index's std::runtime_error escape
-	// uncaught across the Fortran/C++ boundary.
+	// uncaught across the Fortran/C++ boundary. `name` may be a dotted
+	// struct-leaf path (see resolve_struct_path) -- this returns true only if
+	// it resolves all the way down to a readable leaf, not merely to an
+	// intermediate struct.
 	int64_t parquet_reader_has_column(void *handle, const char *name)
 	{
 		auto reader_handle = as_reader_handle(handle);
-		return reader_handle->schema->GetFieldIndex(name) >= 0 ? 1 : 0;
+		return struct_path_exists(reader_handle->schema, name) ? 1 : 0;
 	}
 
 	// Returns the declared vector-column element count of `name` (0 for a scalar column),
@@ -2496,11 +2854,10 @@ extern "C"
 	int64_t parquet_reader_get_column_col_size(void *handle, const char *name)
 	{
 		auto reader_handle = as_reader_handle(handle);
-		auto idx = get_column_index(reader_handle, name);
-		auto field = reader_handle->schema->field(static_cast<int>(idx));
-		if (field->type()->id() == arrow::Type::FIXED_SIZE_LIST)
+		auto resolved = resolve_struct_path(reader_handle->schema, name);
+		if (resolved.leaf_field->type()->id() == arrow::Type::FIXED_SIZE_LIST)
 		{
-			return static_cast<int64_t>(std::static_pointer_cast<arrow::FixedSizeListType>(field->type())->list_size());
+			return static_cast<int64_t>(std::static_pointer_cast<arrow::FixedSizeListType>(resolved.leaf_field->type())->list_size());
 		}
 		auto array = get_single_chunk_array(reader_handle, name);
 		return get_col_size(array);
@@ -2518,11 +2875,10 @@ extern "C"
 	int64_t parquet_reader_get_column_total_elements(void *handle, const char *name)
 	{
 		auto reader_handle = as_reader_handle(handle);
-		auto idx = get_column_index(reader_handle, name);
-		auto field = reader_handle->schema->field(static_cast<int>(idx));
-		if (field->type()->id() == arrow::Type::FIXED_SIZE_LIST)
+		auto resolved = resolve_struct_path(reader_handle->schema, name);
+		if (resolved.leaf_field->type()->id() == arrow::Type::FIXED_SIZE_LIST)
 		{
-			auto col_size = static_cast<int64_t>(std::static_pointer_cast<arrow::FixedSizeListType>(field->type())->list_size());
+			auto col_size = static_cast<int64_t>(std::static_pointer_cast<arrow::FixedSizeListType>(resolved.leaf_field->type())->list_size());
 			return reader_handle->nrows * col_size;
 		}
 		auto nrows = reader_handle->nrows;
@@ -2780,7 +3136,7 @@ extern "C"
 			// qc bound/miss declarations for this column (blank when none),
 			// shown operator+value like the maml declared them (e.g. ">=0").
 			std::string qcmin_str, qcmax_str, qcmiss_str;
-			auto qc_it = reader_handle->qc_rules.find(idx);
+			auto qc_it = reader_handle->qc_rules.find(field->name());
 			if (qc_it != reader_handle->qc_rules.end())
 			{
 				const QcRule &rule = qc_it->second;
@@ -3497,11 +3853,10 @@ static void read_list_primitive_row(void *handle, const char *name, int64_t row_
 // fallback (this library always writes FIXED_SIZE_LIST for vector columns).
 static int64_t resolve_element_mode_col_size(ParquetReaderHandle *reader_handle, const char *name)
 {
-	auto idx = get_column_index(reader_handle, name);
-	auto field = reader_handle->schema->field(static_cast<int>(idx));
-	if (field->type()->id() == arrow::Type::FIXED_SIZE_LIST)
+	auto resolved = resolve_struct_path(reader_handle->schema, name);
+	if (resolved.leaf_field->type()->id() == arrow::Type::FIXED_SIZE_LIST)
 	{
-		return static_cast<int64_t>(std::static_pointer_cast<arrow::FixedSizeListType>(field->type())->list_size());
+		return static_cast<int64_t>(std::static_pointer_cast<arrow::FixedSizeListType>(resolved.leaf_field->type())->list_size());
 	}
 	auto array = get_single_chunk_array(reader_handle, name);
 	return get_col_size(array);
@@ -4116,16 +4471,23 @@ extern "C"
 	static std::shared_ptr<arrow::Array> get_row_group_chunk_array(ParquetReaderHandle *reader_handle,
 		const char *name, int64_t row_group, const char *context)
 	{
-		auto idx = get_column_index(reader_handle, name);
+		auto resolved = resolve_struct_path(reader_handle->schema, name);
+		auto idx = get_column_index(reader_handle, resolved.top_level_name.c_str());
+		auto leaf_idx = resolve_single_leaf_index(reader_handle, static_cast<int>(idx), resolved.child_path);
 		std::shared_ptr<arrow::Table> table;
-		auto status = reader_handle->reader->ReadRowGroup(static_cast<int>(row_group - 1), {static_cast<int>(idx)}, &table);
+		auto status =
+			reader_handle->reader->ReadRowGroup(static_cast<int>(row_group - 1), {static_cast<int>(leaf_idx)}, &table);
 		if (!status.ok())
 		{
 			throw std::runtime_error(status.ToString());
 		}
-		auto array = combine_column_chunks(table->column(0), name);
+		auto array = combine_column_chunks(table->column(0), resolved.top_level_name);
+		if (!resolved.child_path.empty())
+		{
+			array = unwrap_struct_path(array, resolved.child_path);
+		}
 		reader_handle->chunk_read_row_groups[static_cast<int>(idx)].insert(row_group);
-		run_qc_checks(reader_handle, static_cast<int>(idx), std::string(name) + " [row group " + std::to_string(row_group) + "]", array);
+		run_qc_checks(reader_handle, name, std::string(name) + " [row group " + std::to_string(row_group) + "]", array);
 		return array;
 	}
 
@@ -5175,6 +5537,23 @@ extern "C"
 	void parquet_debug_set_force_whole_column_read_error(int enable)
 	{
 		g_debug_force_whole_column_read_error = (enable != 0);
+	}
+
+	// Test-only: returns g_debug_physical_column_read_count (see its own comment) -- lets
+	// test/error_scenarios.f90's scenario_nested_struct_shares_cached_read prove that reading two
+	// different leaf paths under the same top-level struct column only triggers one genuine disk
+	// read of that struct, i.e. that struct-path resolution shares get_single_chunk_array's
+	// existing column_cache rather than re-reading per leaf path.
+	int64_t parquet_debug_get_physical_column_read_count()
+	{
+		return g_debug_physical_column_read_count;
+	}
+
+	// Test-only: resets g_debug_physical_column_read_count to 0, so a scenario can zero the
+	// counter right before the specific reads it wants to measure.
+	void parquet_debug_reset_physical_column_read_count()
+	{
+		g_debug_physical_column_read_count = 0;
 	}
 
 

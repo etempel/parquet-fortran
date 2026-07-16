@@ -306,6 +306,14 @@ program error_scenarios
         call scenario_close_writer_missing_write_unnamed_schema()
     case ("read_unknown_column")
         call scenario_read_unknown_column()
+    case ("read_nested_struct_field_not_found")
+        call scenario_read_nested_struct_field_not_found()
+    case ("read_nested_struct_path_not_a_struct")
+        call scenario_read_nested_struct_path_not_a_struct()
+    case ("read_nested_struct_intermediate_not_leaf")
+        call scenario_read_nested_struct_intermediate_not_leaf()
+    case ("nested_struct_shares_cached_read")
+        call scenario_nested_struct_shares_cached_read()
     case ("open_reader_missing_file")
         call scenario_open_reader_missing_file()
     case ("open_reader_nrows_zero_rows")
@@ -2102,6 +2110,89 @@ contains
         call parquet_read_column(reader, "not_a_real_column", values)
         print '(a)', "unexpectedly read an unknown column without error"
     end subroutine scenario_read_unknown_column
+
+    !> A dotted struct-field path whose top-level segment exists but an intermediate/leaf field
+    !> name does not (typo: "inr" instead of "inner") is rejected the same way as any other
+    !> unknown column -- check_column_exists/parquet_reader_has_column (backed by
+    !> struct_path_exists in parquet_wrapper.cpp) catches this before any read is attempted, same
+    !> clean error_stop message class as scenario_read_unknown_column, not a crash.
+    subroutine scenario_read_nested_struct_field_not_found()
+        type(parquet_reader) :: reader
+        integer(int32) :: age(5)
+
+        call parquet_open_reader(reader, "test/fixtures/nested_struct.parquet")
+        call parquet_read_column(reader, "main.inr.age", age)
+        print '(a)', "unexpectedly read a nonexistent nested struct field without error"
+    end subroutine scenario_read_nested_struct_field_not_found
+
+    !> A dotted path where a middle segment resolves to a scalar leaf rather than continuing to
+    !> nest (e.g. "main.id.extra" -- "id" is int32, not a struct) is rejected as "not found", the
+    !> same class of error as a plain typo -- not a crash from treating a non-struct array as a
+    !> StructArray (struct_path_exists's schema-level walk in parquet_wrapper.cpp requires every
+    !> non-terminal path segment to be a STRUCT field).
+    subroutine scenario_read_nested_struct_path_not_a_struct()
+        type(parquet_reader) :: reader
+        integer(int32) :: extra(5)
+
+        call parquet_open_reader(reader, "test/fixtures/nested_struct.parquet")
+        call parquet_read_column(reader, "main.id.extra", extra)
+        print '(a)', "unexpectedly read a struct path through a non-struct segment without error"
+    end subroutine scenario_read_nested_struct_path_not_a_struct
+
+    !> A dotted path that resolves exactly to an intermediate STRUCT (not a leaf) is rejected --
+    !> reading "main.inner" directly is not supported (this library has no struct/record output
+    !> type); the caller must name a path all the way down to a scalar/vector leaf column (see
+    !> struct_path_exists's terminal-type gate in parquet_wrapper.cpp, and CLAUDE.md's
+    !> nested-struct-field design notes).
+    subroutine scenario_read_nested_struct_intermediate_not_leaf()
+        type(parquet_reader) :: reader
+        integer(int32) :: bogus(5)
+
+        call parquet_open_reader(reader, "test/fixtures/nested_struct.parquet")
+        call parquet_read_column(reader, "main.inner", bogus)
+        print '(a)', "unexpectedly read an intermediate struct column without error"
+    end subroutine scenario_read_nested_struct_intermediate_not_leaf
+
+    !> Regression check for the nested-struct-field design: reading two different leaf paths
+    !> under the same physical top-level struct column ("main.id" then "main.inner.age") must
+    !> only trigger ONE genuine disk read of "main" -- proving struct-path resolution shares
+    !> get_single_chunk_array's existing column_cache instead of re-reading per leaf path (see
+    !> CLAUDE.md's nested-struct-field design notes, and
+    !> parquet_debug_get_physical_column_read_count's own comment in parquet_wrapper.cpp).
+    !> error stops (a hard scenario failure, not just a soft print) if the count is anything other
+    !> than 1 -- this scenario is expected to exit cleanly (expect_abort=0 in
+    !> tools/run_error_scenarios.sh), so reaching the error stop is itself the failure signal.
+    subroutine scenario_nested_struct_shares_cached_read()
+        interface
+            function parquet_debug_get_physical_column_read_count() result(n) &
+                bind(C, name="parquet_debug_get_physical_column_read_count")
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t) :: n
+            end function parquet_debug_get_physical_column_read_count
+
+            subroutine parquet_debug_reset_physical_column_read_count() &
+                bind(C, name="parquet_debug_reset_physical_column_read_count")
+            end subroutine parquet_debug_reset_physical_column_read_count
+        end interface
+
+        type(parquet_reader) :: reader
+        integer(int32) :: id(5), age(5)
+        integer(int64) :: count_after
+        character(len=32) :: count_str
+
+        call parquet_debug_reset_physical_column_read_count()
+        call parquet_open_reader(reader, "test/fixtures/nested_struct.parquet")
+        call parquet_read_column(reader, "main.id", id, null_value=-1_int32)
+        call parquet_read_column(reader, "main.inner.age", age, null_value=-1_int32)
+        call parquet_close_reader(reader)
+
+        count_after = parquet_debug_get_physical_column_read_count()
+        if (count_after /= 1) then
+            write(count_str, '(i0)') count_after
+            error stop "scenario_nested_struct_shares_cached_read: expected exactly 1 physical read of 'main', got " // &
+                trim(count_str)
+        end if
+    end subroutine scenario_nested_struct_shares_cached_read
 
     !> The same "reader has not been opened" guard now covers every other
     !> reader-taking procedure too (parquet_prefetch_columns, parquet_get_nrows/

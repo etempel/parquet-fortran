@@ -61,7 +61,11 @@ contains
             new_unittest("read extended source types (int8/16, uint8/16/32/64, half_float, decimal32/64/128/256)", &
                 test_read_extended_types), &
             new_unittest("row filter on an extended (int8) source type column", &
-                test_filter_extended_type) &
+                test_filter_extended_type), &
+            new_unittest("read nested struct-field scalar/vector leaves (arbitrary depth, combined nulls)", &
+                test_read_nested_struct_leaves), &
+            new_unittest("row filter on a nested struct-field leaf", &
+                test_filter_nested_struct_leaf) &
             ]
     end subroutine collect_tests_parquet_reading
 
@@ -1783,6 +1787,130 @@ contains
         end if
     end subroutine test_filter_extended_type
     !
+    !> Reads test/fixtures/nested_struct.parquet (see tools/generate_fixtures.cpp's
+    !> generate_nested_struct_fixture for the exact schema/row layout) via dotted struct-field
+    !> paths: "main.id" (a direct scalar leaf), "main.inner.name"/"main.inner.age" (2 levels deep),
+    !> "main.inner.deep.value" (3 levels deep, proving arbitrary nesting depth), and
+    !> "vecdata.spectrum" (a FIXED_SIZE_LIST vector-column leaf resolved through a struct path).
+    !> Checks that each leaf's combined validity correctly reflects every independent null source
+    !> along its own path (the struct itself null, an intermediate struct null, or the leaf itself
+    !> null -- see CLAUDE.md's nested-struct-field design notes): row 2 has "main" itself null
+    !> (every leaf under it invalid), row 3 has "main.inner" null (name/age/deep.value all invalid,
+    !> "main.id" still valid), row 4 has "main.inner.age" itself null only (name/deep.value stay
+    !> valid), row 5 has "main.inner.deep" null only (name/age stay valid) -- proving the
+    !> combination is independent per branch, not just per row.
+    subroutine test_read_nested_struct_leaves(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: in_file = "test/fixtures/nested_struct.parquet"
+        logical :: exists
+        integer :: nrows, col_size
+        integer(int32) :: id(5), age(5), deep_value(5)
+        character(len=16) :: name(5)
+        logical :: id_valid(5), name_valid(5), age_valid(5), deep_valid(5)
+        real(real64) :: spectrum(3, 5), spectrum_row(3)
+
+        inquire(file=in_file, exist=exists)
+        call check(error, exists)
+        if (allocated(error)) then
+            call test_failed(error, "input parquet file missing: expected test/fixtures/nested_struct.parquet")
+            return
+        end if
+
+        call parquet_open_reader(reader, in_file)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 5)
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "unexpected number of rows in nested_struct fixture")
+            return
+        end if
+
+        call parquet_read_column(reader, "main.id", id, null_value=-1_int32, is_valid=id_valid)
+        call check(error, all(id_valid .eqv. [.true., .false., .true., .true., .true.]))
+        call fail_if_error(error, reader, "main.id is_valid (root-level null only)")
+        if (allocated(error)) return
+        call check(error, id(1) == 1_int32 .and. id(3) == 3_int32 .and. id(4) == 4_int32 .and. id(5) == 5_int32)
+        call fail_if_error(error, reader, "main.id values")
+        if (allocated(error)) return
+
+        call parquet_read_column(reader, "main.inner.name", name, null_value="MISSING", is_valid=name_valid)
+        call check(error, all(name_valid .eqv. [.true., .false., .false., .true., .true.]))
+        call fail_if_error(error, reader, "main.inner.name is_valid (root + mid-level null combination)")
+        if (allocated(error)) return
+        call check(error, trim(name(1)) == "Alice" .and. trim(name(4)) == "Dave" .and. trim(name(5)) == "Eve")
+        call fail_if_error(error, reader, "main.inner.name values")
+        if (allocated(error)) return
+
+        call parquet_read_column(reader, "main.inner.age", age, null_value=-1_int32, is_valid=age_valid)
+        call check(error, all(age_valid .eqv. [.true., .false., .false., .false., .true.]))
+        call fail_if_error(error, reader, "main.inner.age is_valid (root + mid-level + leaf-level null combination)")
+        if (allocated(error)) return
+        call check(error, age(1) == 30_int32 .and. age(5) == 50_int32)
+        call fail_if_error(error, reader, "main.inner.age values")
+        if (allocated(error)) return
+
+        call parquet_read_column(reader, "main.inner.deep.value", deep_value, null_value=-1_int32, is_valid=deep_valid)
+        call check(error, all(deep_valid .eqv. [.true., .false., .false., .true., .false.]))
+        call fail_if_error(error, reader, "main.inner.deep.value is_valid (3-level-deep null combination)")
+        if (allocated(error)) return
+        call check(error, deep_value(1) == 100_int32 .and. deep_value(4) == 400_int32)
+        call fail_if_error(error, reader, "main.inner.deep.value values")
+        if (allocated(error)) return
+
+        ! "vecdata.spectrum": a FIXED_SIZE_LIST vector-column leaf resolved through a struct path
+        ! -- always valid, values row i = [i.0, i.1, i.2] (see the fixture generator).
+        call parquet_get_col_size(reader, "vecdata.spectrum", col_size)
+        call check(error, col_size == 3)
+        call fail_if_error(error, reader, "vecdata.spectrum col_size")
+        if (allocated(error)) return
+
+        call parquet_read_column(reader, "vecdata.spectrum", spectrum)
+        call check(error, all(abs(spectrum(:, 1) - [1.0_real64, 1.1_real64, 1.2_real64]) < 1.0e-9_real64))
+        call fail_if_error(error, reader, "vecdata.spectrum full-column values (row 1)")
+        if (allocated(error)) return
+
+        call parquet_read_array_row_mode(reader, "vecdata.spectrum", spectrum_row, 5)
+        call parquet_close_reader(reader)
+        call check(error, all(abs(spectrum_row - [5.0_real64, 5.1_real64, 5.2_real64]) < 1.0e-9_real64))
+        if (allocated(error)) then
+            call test_failed(error, "vecdata.spectrum row-mode read (row 5) did not match expected values")
+            return
+        end if
+    end subroutine test_read_nested_struct_leaves
+
+    !> Row filtering against a dotted struct-field path ("main.inner.age"): of the 5 rows, only
+    !> row 1 (age=30) and row 5 (age=50) have a valid (non-null) age at all, and only row 5's value
+    !> exceeds 35 -- rows with a null age (2, 3, 4, via three different null sources -- see
+    !> test_read_nested_struct_leaves) must be excluded from the filtered result, not misread as
+    !> matching or crash the filter evaluation.
+    subroutine test_filter_nested_struct_leaf(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer :: nrows
+        integer(int32), allocatable :: id(:)
+
+        call filt%add("main.inner.age > 35")
+        call parquet_open_reader(reader, "test/fixtures/nested_struct.parquet", filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 1)
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "filtering main.inner.age > 35 did not keep exactly 1 row")
+            return
+        end if
+
+        allocate(id(nrows))
+        call parquet_read_column(reader, "main.id", id)
+        call parquet_close_reader(reader)
+        call check(error, all(id == [5_int32]))
+        if (allocated(error)) then
+            call test_failed(error, "filtering main.inner.age > 35 did not keep the expected row (id 5)")
+            return
+        end if
+    end subroutine test_filter_nested_struct_leaf
+
     !> Shared failure-reporting helper for test_read_extended_types: closes
     !> the reader and fails the test with a message naming which column/target
     !> combination produced the wrong values, without repeating that

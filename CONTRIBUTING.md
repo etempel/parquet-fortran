@@ -92,11 +92,13 @@ After one `fpm build --tests`, the script runs scenarios directly against the bu
 
 ### Regenerating the test fixtures
 
-A handful of tests read pre-built Parquet files committed under `test/fixtures/` rather than files this library writes itself. These deliberately contain shapes this library's own writer *cannot* produce — genuine Arrow validity-bitmap Nulls, an unsupported physical column type, and a list-encoded (per-row array) vector column — so that the reader's handling of them can be exercised. They are built directly against the Arrow/Parquet C++ API by `tools/generate_fixtures.cpp` (one function per fixture):
+A handful of tests read pre-built Parquet files committed under `test/fixtures/` rather than files this library writes itself. These deliberately contain shapes this library's own writer *cannot* produce — genuine Arrow validity-bitmap Nulls, an unsupported physical column type, a list-encoded (per-row array) vector column, extended read-only source types, and a `STRUCT` column — so that the reader's handling of them can be exercised. They are built directly against the Arrow/Parquet C++ API by `tools/generate_fixtures.cpp` (one function per fixture):
 
 - `has_null.parquet` — columns with real Nulls (not sentinel values), read by the `errors`/`reading` suites.
 - `unsupported_type.parquet` — a column of a physical type this library refuses to read.
 - `list_vector.parquet` — a vector column stored as Parquet `LIST` rather than the fixed-size layout this library writes.
+- `extended_types.parquet` — columns of the extended read-only source types (`int8`/`int16`/unsigned integers/`half_float`/`decimal`).
+- `nested_struct.parquet` — a `STRUCT` column, nested 3 levels deep, with a `FIXED_SIZE_LIST` vector-column leaf in a sibling `STRUCT` column, and rows covering every independent null-combination source (see [Reading a nested struct field](doc/pages/supported-data-types.md#reading-a-nested-struct-field)).
 
 Because these files are committed, a normal `fpm test` never needs to regenerate them. Rebuild them only when you change `generate_fixtures.cpp` or otherwise need a fixture recreated, via:
 
@@ -283,7 +285,14 @@ These were looked at (during an audit comparing this library against Arrow C++'s
 
 **Bigger lifts, worth being cautious about:**
 - Predicate pushdown (statistics-based I/O skipping) — *not to be confused with row filtering, which is already implemented* (`parquet_filter` / `parquet_open_reader(..., filter=)`, see the [Row filtering section](doc/pages/reading.md#row-filtering-with-parquet_filter)). That existing filter is post-decode: it narrows the rows your code sees but still reads and decodes every referenced column in full. Genuine predicate pushdown — using per-row-group statistics (or Arrow's expression/compute-filter machinery) to skip reading matching row groups off disk entirely — is the unimplemented part, and the README's "No predicate pushdown" limitation treats it as an intentional non-goal for now.
-- Nested/struct/map/variable-length-list types — Arrow supports these natively, but they'd break the library's core "flat columns + fixed `col_size` vectors" data model that the whole Fortran-side API is built around; this would be a redesign, not an addition.
+- `MAP` columns, and variable-length `LIST` columns nested inside a `STRUCT` path (as opposed to
+  a top-level list-encoded vector column, already supported — see
+  [Reading a column into a different numeric kind](doc/pages/supported-data-types.md#reading-a-column-into-a-different-numeric-kind)'s
+  neighboring sections) — Arrow supports these natively, but they'd break the library's core
+  "flat columns + fixed `col_size` vectors" data model that the whole Fortran-side API is built
+  around; this would be a redesign, not an addition. (`STRUCT` columns themselves are already
+  supported for reading, at any nesting depth, down to a scalar or `FIXED_SIZE_LIST` leaf — see
+  [Reading a nested struct field](doc/pages/supported-data-types.md#reading-a-nested-struct-field).)
 - Additional scalar types on the **write** side (`int8`/`int16`/unsigned integers/`decimal` as a MAML-declarable/`parquet_write_column`-writable `data_type`) — straightforward from Arrow's side, but each new type multiplies the `parquet_write_*` interface surface (a dedicated subroutine pair per type already exists for each of the six supported types). Writing stays limited to the original six types; only the **read** side gained widening support for these (see below), since that side doesn't need new public entry points — it dispatches on the existing `values` array's Fortran kind, not a new declared type. A scoping pass mapped every remaining Arrow physical type against this library's six read targets (`int32`/`int64`/`real32`/`real64`/`boolean`/`string`) that is not yet supported for reading either:
   - Clean candidates: `STRING_VIEW`→string (same semantic as `STRING`/`LARGE_STRING`, needs its own accessor).
   - Weak/unsafe: `BINARY`/`LARGE_BINARY`/`BINARY_VIEW`→string only if the bytes happen to be valid UTF-8.

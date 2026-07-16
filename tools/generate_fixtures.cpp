@@ -385,6 +385,143 @@ static bool generate_extended_types_fixture()
     return status.ok();
 }
 
+// test/fixtures/nested_struct.parquet: exercises the arbitrary-depth nested-STRUCT-field read
+// support (dotted-path column names, e.g. "main.inner.age") -- this library's own writer cannot
+// produce STRUCT columns at all, so this fixture is hand-built directly against the Arrow API,
+// same as every other fixture in this file. Schema:
+//   main    : struct<
+//     id    : int32
+//     inner : struct<
+//       name : utf8
+//       age  : int32
+//       deep : struct< value : int32 >    -- a 3rd level of nesting, to exercise arbitrary depth
+//     >
+//   >
+//   vecdata : struct< spectrum : fixed_size_list<double, 3> >  -- a vector-column (FIXED_SIZE_LIST)
+//             leaf under a struct, kept in its own always-valid column (see below for why)
+// 5 rows, covering every independent null source a struct-leaf read must combine (see
+// CLAUDE.md's nested-struct-field design notes):
+//   row 1: everything present (id=1, name="Alice", age=30, deep.value=100)
+//   row 2: the whole "main" struct is null for this row (root-level null)
+//   row 3: "main" present (id=3) but "inner" is null (mid-level null) -- name/age/deep all null
+//   row 4: "inner" present but "age" itself is null (leaf-level null) -- name/deep present
+//   row 5: "inner"/"age"/"name" present but "deep" is null (a 3rd-level null, one level deeper
+//          than row 3's, to prove the combination generalizes past 2 levels)
+// "vecdata.spectrum" is deliberately its own top-level struct column, always valid in every row
+// (spectrum=[i.0, i.1, i.2] for row i), rather than a fourth field of "main": Arrow/Parquet's
+// writer rejects a FixedSizeList whose ancestor struct is null ("Lists with non-zero length null
+// components are not supported" -- the same restriction documented on generate_has_null_fixture's
+// own "arr_with_null" column, which likewise never makes that column's own row null). Since "main"
+// is null at row 2 and "inner" is null at row 3, a FixedSizeList nested anywhere under either would
+// hit that restriction; keeping it in a separate, never-null column sidesteps it while still
+// exercising "FIXED_SIZE_LIST leaf resolved through a struct path" on the read side.
+// Used by test/test_reading.f90's nested-struct-field tests and
+// test/error_scenarios.f90's corresponding path-resolution error scenarios.
+static bool generate_nested_struct_fixture()
+{
+    auto value_field = arrow::field("value", arrow::int32(), true);
+    auto deep_type = arrow::struct_({value_field});
+
+    auto name_field = arrow::field("name", arrow::utf8(), true);
+    auto age_field = arrow::field("age", arrow::int32(), true);
+    auto deep_field = arrow::field("deep", deep_type, true);
+    auto inner_type = arrow::struct_({name_field, age_field, deep_field});
+
+    auto id_field = arrow::field("id", arrow::int32(), true);
+    auto inner_field = arrow::field("inner", inner_type, true);
+    auto main_type = arrow::struct_({id_field, inner_field});
+    auto main_field = arrow::field("main", main_type, true);
+
+    auto spectrum_field = arrow::field("spectrum", arrow::fixed_size_list(arrow::float64(), 3), false);
+    auto vecdata_type = arrow::struct_({spectrum_field});
+    auto vecdata_field = arrow::field("vecdata", vecdata_type, false);
+
+    auto value_builder = std::make_shared<arrow::Int32Builder>();
+    std::vector<std::shared_ptr<arrow::ArrayBuilder>> deep_children = {value_builder};
+    auto deep_builder = std::make_shared<arrow::StructBuilder>(deep_type, arrow::default_memory_pool(), deep_children);
+
+    auto name_builder = std::make_shared<arrow::StringBuilder>();
+    auto age_builder = std::make_shared<arrow::Int32Builder>();
+    std::vector<std::shared_ptr<arrow::ArrayBuilder>> inner_children = {name_builder, age_builder, deep_builder};
+    auto inner_builder = std::make_shared<arrow::StructBuilder>(inner_type, arrow::default_memory_pool(), inner_children);
+
+    auto id_builder = std::make_shared<arrow::Int32Builder>();
+    std::vector<std::shared_ptr<arrow::ArrayBuilder>> main_children = {id_builder, inner_builder};
+    arrow::StructBuilder main_builder(main_type, arrow::default_memory_pool(), main_children);
+
+    auto spectrum_values_builder = std::make_shared<arrow::DoubleBuilder>();
+    auto spectrum_builder =
+        std::make_shared<arrow::FixedSizeListBuilder>(arrow::default_memory_pool(), spectrum_values_builder, 3);
+    std::vector<std::shared_ptr<arrow::ArrayBuilder>> vecdata_children = {spectrum_builder};
+    arrow::StructBuilder vecdata_builder(vecdata_type, arrow::default_memory_pool(), vecdata_children);
+
+    arrow::Status st;
+
+    // row 1: everything present
+    st = main_builder.Append();
+    st = id_builder->Append(1);
+    st = inner_builder->Append();
+    st = name_builder->Append("Alice");
+    st = age_builder->Append(30);
+    st = deep_builder->Append();
+    st = value_builder->Append(100);
+
+    // row 2: "main" itself is null -- every descendant gets an automatic empty placeholder
+    // (StructBuilder::AppendNull cascades this itself).
+    st = main_builder.AppendNull();
+
+    // row 3: "main" present, "inner" is null (auto-cascades to name/age/deep)
+    st = main_builder.Append();
+    st = id_builder->Append(3);
+    st = inner_builder->AppendNull();
+
+    // row 4: "inner" present, "age" itself is null (a leaf-level null)
+    st = main_builder.Append();
+    st = id_builder->Append(4);
+    st = inner_builder->Append();
+    st = name_builder->Append("Dave");
+    st = age_builder->AppendNull();
+    st = deep_builder->Append();
+    st = value_builder->Append(400);
+
+    // row 5: "inner"/"age" present, "deep" (a 3rd level) is null
+    st = main_builder.Append();
+    st = id_builder->Append(5);
+    st = inner_builder->Append();
+    st = name_builder->Append("Eve");
+    st = age_builder->Append(50);
+    st = deep_builder->AppendNull();
+
+    for (int row = 1; row <= 5; ++row)
+    {
+        st = vecdata_builder.Append();
+        st = spectrum_builder->Append();
+        st = spectrum_values_builder->Append(row + 0.0);
+        st = spectrum_values_builder->Append(row + 0.1);
+        st = spectrum_values_builder->Append(row + 0.2);
+    }
+
+    std::shared_ptr<arrow::Array> main_arr;
+    st = main_builder.Finish(&main_arr);
+    std::shared_ptr<arrow::Array> vecdata_arr;
+    st = vecdata_builder.Finish(&vecdata_arr);
+
+    auto schema = arrow::schema({main_field, vecdata_field});
+    auto table = arrow::Table::Make(schema, {main_arr, vecdata_arr});
+
+    auto maybe_outfile = arrow::io::FileOutputStream::Open("test/fixtures/nested_struct.parquet");
+    auto outfile = *maybe_outfile;
+    // Parquet has no native fixed-size-list physical type -- without store_schema(), "spectrum"
+    // would round-trip on read as a plain (variable-length) list<double> instead of
+    // fixed_size_list<double, 3>, same as this library's own writer needs it
+    // (arrow_writer_builder.store_schema() in parquet_wrapper.cpp) to preserve FIXED_SIZE_LIST.
+    parquet::ArrowWriterProperties::Builder arrow_writer_builder;
+    arrow_writer_builder.store_schema();
+    auto status = parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile, 5,
+        parquet::default_writer_properties(), arrow_writer_builder.build());
+    return status.ok();
+}
+
 int main()
 {
     struct Fixture
@@ -398,6 +535,7 @@ int main()
         {"test/fixtures/unsupported_type.parquet", generate_unsupported_type_fixture},
         {"test/fixtures/list_vector.parquet", generate_list_vector_fixture},
         {"test/fixtures/extended_types.parquet", generate_extended_types_fixture},
+        {"test/fixtures/nested_struct.parquet", generate_nested_struct_fixture},
     };
 
     int failures = 0;

@@ -299,6 +299,14 @@ contains
                 "aborts with an unnamed-schema message", test_close_writer_missing_write_unnamed_schema_aborts), &
             new_unittest("reading an unknown column via parquet_read_column aborts", &
                 test_read_unknown_column_aborts), &
+            new_unittest("reading a nested struct-field path with a mid-path typo aborts", &
+                test_read_nested_struct_field_not_found_aborts), &
+            new_unittest("reading a nested struct-field path through a non-struct segment aborts", &
+                test_read_nested_struct_path_not_a_struct_aborts), &
+            new_unittest("reading a nested struct-field path that resolves to an intermediate struct aborts", &
+                test_read_nested_struct_intermediate_not_leaf_aborts), &
+            new_unittest("reading two nested struct-field leaves under one struct shares one physical read", &
+                test_nested_struct_shares_cached_read), &
             new_unittest("opening a nonexistent file for reading aborts", &
                 test_open_reader_missing_file_aborts), &
             new_unittest("parquet_open_reader(nrows=) with a filter matching zero rows aborts", &
@@ -1679,6 +1687,56 @@ contains
             required_stderr="parquet_read_column: column not found in parquet file: not_a_real_column " // &
                 "(file: test/fixtures/has_null.parquet)")
     end subroutine test_read_unknown_column_aborts
+
+    !> A dotted struct-field path with a mid-path typo ("main.inr.age") is rejected the same way
+    !> as any other unknown column name -- check_column_exists catches it before any read is
+    !> attempted (struct_path_exists's schema-level walk in parquet_wrapper.cpp), same clean
+    !> error_stop message class as test_read_unknown_column_aborts, not a crash.
+    subroutine test_read_nested_struct_field_not_found_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "read_nested_struct_field_not_found", expect_abort=.true., &
+            failure_message="reading a nested struct-field path with a mid-path typo was expected to abort", &
+            required_stderr="parquet_read_column: column not found in parquet file: main.inr.age " // &
+                "(file: test/fixtures/nested_struct.parquet)")
+    end subroutine test_read_nested_struct_field_not_found_aborts
+
+    !> A dotted path where a middle segment resolves to a scalar leaf rather than continuing to
+    !> nest ("main.id.extra" -- "id" is int32, not a struct) is rejected as "not found", not a
+    !> crash from treating a non-struct array as a StructArray.
+    subroutine test_read_nested_struct_path_not_a_struct_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "read_nested_struct_path_not_a_struct", expect_abort=.true., &
+            failure_message="reading a nested struct-field path through a non-struct segment was expected to abort", &
+            required_stderr="parquet_read_column: column not found in parquet file: main.id.extra " // &
+                "(file: test/fixtures/nested_struct.parquet)")
+    end subroutine test_read_nested_struct_path_not_a_struct_aborts
+
+    !> A dotted path that resolves exactly to an intermediate STRUCT ("main.inner", not a leaf)
+    !> is rejected -- this library has no struct/record output type, so a path must always name a
+    !> scalar/vector leaf column (struct_path_exists's terminal-type gate in parquet_wrapper.cpp).
+    subroutine test_read_nested_struct_intermediate_not_leaf_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "read_nested_struct_intermediate_not_leaf", expect_abort=.true., &
+            failure_message="reading a nested struct-field path resolving to an intermediate struct was expected to abort", &
+            required_stderr="parquet_read_column: column not found in parquet file: main.inner " // &
+                "(file: test/fixtures/nested_struct.parquet)")
+    end subroutine test_read_nested_struct_intermediate_not_leaf_aborts
+
+    !> Confirms (via a process-global disk-read counter, parquet_debug_get_physical_column_read_count
+    !> -- see its own comment in parquet_wrapper.cpp) that reading two different leaf paths under
+    !> the same physical top-level struct column only triggers one real disk read of that struct --
+    !> i.e. struct-path resolution shares get_single_chunk_array's existing column_cache rather
+    !> than re-reading per leaf path. This scenario itself error stops if the invariant is
+    !> violated, so it is expected to exit cleanly here (expect_abort=.false.).
+    subroutine test_nested_struct_shares_cached_read(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "nested_struct_shares_cached_read", expect_abort=.false., &
+            failure_message="reading two leaves under the same struct should share one physical disk read")
+    end subroutine test_nested_struct_shares_cached_read
 
     !> create_parquet_reader (parquet_wrapper.cpp) now checks Arrow's file-open
     !> status directly instead of calling ValueOrDie() unchecked, so a missing

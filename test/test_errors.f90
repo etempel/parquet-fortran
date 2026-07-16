@@ -396,7 +396,9 @@ contains
             new_unittest("compact string write into a vector (col_size>1) schema column aborts", &
                 test_compact_string_write_requires_scalar_column_aborts), &
             new_unittest("compact string chunk write into a vector (col_size>1) schema column aborts", &
-                test_compact_string_write_chunk_requires_scalar_column_aborts) &
+                test_compact_string_write_chunk_requires_scalar_column_aborts), &
+            new_unittest("reading a STRING_VIEW column into a compact parquet_string_column aborts", &
+                test_string_view_compact_read_unsupported_aborts) &
             ]
     end subroutine collect_tests_parquet_errors
 
@@ -466,6 +468,14 @@ contains
             failure_message="a compact string chunk write into a vector (col_size>1) column was expected to abort", &
             required_stderr="a parquet_string_column write requires a scalar (col_size=1) column")
     end subroutine test_compact_string_write_chunk_requires_scalar_column_aborts
+
+    subroutine test_string_view_compact_read_unsupported_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_view_compact_read_unsupported", &
+            expect_abort=.true., &
+            failure_message="reading a STRING_VIEW column into a compact parquet_string_column was expected to abort", &
+            required_stderr="STRING_VIEW columns are not supported by this compact buffer read")
+    end subroutine test_string_view_compact_read_unsupported_aborts
 
     subroutine test_ok_scenario_exits_cleanly(error)
         type(error_type), allocatable, intent(out) :: error

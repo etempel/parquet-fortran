@@ -668,6 +668,23 @@ extern "C"
 		std::call_once(compute_init_flag, []() { auto st = arrow::compute::Initialize(); (void)st; });
 	}
 
+	// arrow::compute::Filter (Arrow 24) has no "array_filter" kernel for arrow::Type::STRING_VIEW
+	// at all -- confirmed via NotImplementedError ("Function 'array_filter' has no kernel
+	// matching input types (string_view, bool)"). Since every read-side call site already treats
+	// STRING_VIEW identically to STRING/LARGE_STRING via is_string_like_type/
+	// make_string_like_accessor, working around this Arrow gap by casting to arrow::large_utf8()
+	// first (rather than teaching every filter call site about STRING_VIEW specifically) is
+	// lossless for every consumer -- the one visible side effect is that a STRING_VIEW column's
+	// reported parquet_type in parquet_reader_print_stat becomes "large_string" once a filter is
+	// active on the reader (parquet_type reflects the column_cache's actual decoded type, not
+	// the original file schema's). Returns `array` unchanged for every other type.
+	static arrow::Result<std::shared_ptr<arrow::Array>> coerce_for_filter_kernel(const std::shared_ptr<arrow::Array> &array)
+	{
+		if (array->type_id() != arrow::Type::STRING_VIEW) return array;
+		ARROW_ASSIGN_OR_RAISE(auto cast_datum, arrow::compute::Cast(array, arrow::large_utf8()));
+		return cast_datum.make_array();
+	}
+
 	// Applies a reader's filter_mask (if set -- see parquet_reader_set_filter)
 	// to a just-decoded column array, keeping only the rows that pass every
 	// filter clause. A no-op (returns `array` unchanged) if no filter is set.
@@ -679,7 +696,12 @@ extern "C"
 	{
 		if (!reader_handle->filter_mask) return array;
 		ensure_compute_initialized();
-		auto filtered = arrow::compute::Filter(array, reader_handle->filter_mask);
+		auto coerced = coerce_for_filter_kernel(array);
+		if (!coerced.ok())
+		{
+			throw std::runtime_error(coerced.status().ToString());
+		}
+		auto filtered = arrow::compute::Filter(coerced.ValueOrDie(), reader_handle->filter_mask);
 		if (!filtered.ok())
 		{
 			throw std::runtime_error(filtered.status().ToString());
@@ -779,26 +801,46 @@ extern "C"
 		return array;
 	}
 
-	// True for either Arrow string representation this library may write to a column --
-	// STRING (int32 offsets, the default) or LARGE_STRING (int64 offsets, used only for a
-	// column whose own byte payload would overflow STRING's 2^31-1 limit -- see
+	// True for any Arrow string representation this library's read paths can decode via
+	// make_string_like_accessor's GetView/IsNull interface -- STRING (int32 offsets, the
+	// default this library writes), LARGE_STRING (int64 offsets, used only for a column whose
+	// own byte payload would overflow STRING's 2^31-1 limit -- see
 	// would_overflow_string_offset_limit and parquet_append_string_column/
-	// parquet_append_string_array_column). A file written with the large variant round-trips
-	// back as exactly that type on read (arrow_writer_builder.store_schema(), set in
-	// close_parquet_writer, preserves the precise original Arrow type rather than letting a
-	// reopen infer one from Parquet's own physical byte_array column, which doesn't distinguish
-	// the two) -- so every STRING-only check on the read side must also accept LARGE_STRING
-	// indefinitely, not just while writing a new large column.
+	// parquet_append_string_array_column), and STRING_VIEW (Arrow's view-array representation:
+	// inlined short values plus out-of-line data buffers for longer ones). This library's own
+	// writer never produces STRING_VIEW -- it can only arrive from a Parquet file written by
+	// another Arrow-based tool whose stored Arrow schema (arrow_writer_builder.store_schema())
+	// declared the column as utf8_view(), which this library's reader then reconstructs
+	// faithfully rather than coercing to STRING/LARGE_STRING. A file written with the large
+	// variant round-trips back as exactly that type on read (same store_schema mechanism) -- so
+	// every STRING-only check on the read side must also accept LARGE_STRING and STRING_VIEW
+	// indefinitely, not just while writing a new large column. NOTE: is_string_like_type is the
+	// *value-accessor* gate (GetView/IsNull, one value at a time) -- the separate buffer-level
+	// fast path (extract_string_buffers, offsets+data+validity handed straight to
+	// parquet_strings.f90's append_buffers) does NOT support STRING_VIEW, since a view array has
+	// no offsets buffer at all; its call sites use is_offset_string_type instead, below.
 	static bool is_string_like_type(arrow::Type::type type_id)
+	{
+		return type_id == arrow::Type::STRING || type_id == arrow::Type::LARGE_STRING ||
+			type_id == arrow::Type::STRING_VIEW;
+	}
+
+	// Narrower than is_string_like_type: true only for the two offset-based representations
+	// (STRING/LARGE_STRING) that extract_string_buffers knows how to decode. STRING_VIEW has no
+	// offsets/data buffer pair to expose this way (its values are inlined or held in separate
+	// variadic data buffers) -- callers needing the buffer-level fast path check this instead of
+	// is_string_like_type, and reject STRING_VIEW with a clear error rather than misreading it.
+	static bool is_offset_string_type(arrow::Type::type type_id)
 	{
 		return type_id == arrow::Type::STRING || type_id == arrow::Type::LARGE_STRING;
 	}
 
-	// Uniform (length/IsNull/GetView) accessor over a STRING or LARGE_STRING array, erasing the
-	// otherwise-unrelated-at-compile-time arrow::StringArray/arrow::LargeStringArray distinction
-	// so read-side call sites need one code path instead of two near-identical ones. `array`'s
-	// type_id() must satisfy is_string_like_type -- callers are expected to have already
-	// checked/branched on that themselves (so their own error message can name the actual type).
+	// Uniform (length/IsNull/GetView) accessor over a STRING, LARGE_STRING, or STRING_VIEW
+	// array, erasing the otherwise-unrelated-at-compile-time arrow::StringArray/
+	// arrow::LargeStringArray/arrow::StringViewArray distinction so read-side call sites need
+	// one code path instead of three near-identical ones. `array`'s type_id() must satisfy
+	// is_string_like_type -- callers are expected to have already checked/branched on that
+	// themselves (so their own error message can name the actual type).
 	struct StringLikeAccessor
 	{
 		std::function<bool(int64_t)> is_null;
@@ -816,6 +858,14 @@ extern "C"
 				[arr](int64_t i) { return arr->GetView(i); },
 				arr->length()};
 		}
+		if (array->type_id() == arrow::Type::STRING_VIEW)
+		{
+			auto arr = std::static_pointer_cast<arrow::StringViewArray>(array);
+			return StringLikeAccessor{
+				[arr](int64_t i) { return arr->IsNull(i); },
+				[arr](int64_t i) { return arr->GetView(i); },
+				arr->length()};
+		}
 		auto arr = std::static_pointer_cast<arrow::StringArray>(array);
 		return StringLikeAccessor{
 			[arr](int64_t i) { return arr->IsNull(i); },
@@ -826,8 +876,9 @@ extern "C"
 	// Buffer-level counterpart to make_string_like_accessor: exposes a STRING/LARGE_STRING
 	// array's own offsets/data/validity buffers directly, for handing straight to
 	// parquet_strings.f90's append_buffers instead of copying one string at a time via GetView.
-	// `array`'s type_id() must satisfy is_string_like_type, same precondition as
-	// make_string_like_accessor. offsets_int32_out is set to 1 for a plain STRING array (int32
+	// `array`'s type_id() must satisfy is_offset_string_type (STRING/LARGE_STRING only --
+	// STRING_VIEW is not supported here, see is_offset_string_type's own comment).
+	// offsets_int32_out is set to 1 for a plain STRING array (int32
 	// offsets) or 0 for LARGE_STRING (int64 offsets) -- append_buffers accepts both.
 	//
 	// Relies on `array`'s own offset() being 0: every caller of this reaches `array` via
@@ -1559,6 +1610,7 @@ extern "C"
 		}
 		case arrow::Type::STRING:
 		case arrow::Type::LARGE_STRING:
+		case arrow::Type::STRING_VIEW:
 		{
 			auto acc = make_string_like_accessor(array);
 			std::string data_min, data_max;
@@ -2656,6 +2708,7 @@ extern "C"
 		}
 		case arrow::Type::STRING:
 		case arrow::Type::LARGE_STRING:
+		case arrow::Type::STRING_VIEW:
 		{
 			if (!is_string)
 			{
@@ -2803,7 +2856,13 @@ extern "C"
 		{
 			auto it = reader_handle->column_cache.find(idx);
 			if (it == reader_handle->column_cache.end()) continue;
-			auto filtered = arrow::compute::Filter(it->second, reader_handle->filter_mask);
+			auto coerced = coerce_for_filter_kernel(it->second);
+			if (!coerced.ok())
+			{
+				std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to apply filter: %s", coerced.status().ToString().c_str());
+				return 1;
+			}
+			auto filtered = arrow::compute::Filter(coerced.ValueOrDie(), reader_handle->filter_mask);
 			if (!filtered.ok())
 			{
 				std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to apply filter: %s", filtered.status().ToString().c_str());
@@ -3029,6 +3088,8 @@ extern "C"
 			return "\"" + std::static_pointer_cast<arrow::StringScalar>(s)->value->ToString() + "\"";
 		case arrow::Type::LARGE_STRING:
 			return "\"" + std::static_pointer_cast<arrow::LargeStringScalar>(s)->value->ToString() + "\"";
+		case arrow::Type::STRING_VIEW:
+			return "\"" + std::static_pointer_cast<arrow::StringViewScalar>(s)->value->ToString() + "\"";
 		default:
 			return s->ToString();
 		}
@@ -4118,10 +4179,13 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
-		if (!is_string_like_type(array->type_id()))
+		if (!is_offset_string_type(array->type_id()))
 		{
 			report_fatal_error("parquet_read_column", std::string("type mismatch for column: ") + name +
-				" (expected string, got " + array->type()->ToString() + ")");
+				" (expected string, got " + array->type()->ToString() +
+				(array->type_id() == arrow::Type::STRING_VIEW ?
+					" -- STRING_VIEW columns are not supported by this compact buffer read; "
+					"use a fixed-width parquet_read_column instead" : "") + ")");
 		}
 		extract_string_buffers(array, nrows_out, nchars_out, offsets_out, data_out, validity_out, offsets_int32_out);
 		mark_read(reader_handle, name, "string", array);
@@ -4619,10 +4683,13 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_row_group_chunk_array(reader_handle, name, row_group, "parquet_read_column_chunk");
-		if (!is_string_like_type(array->type_id()))
+		if (!is_offset_string_type(array->type_id()))
 		{
 			report_fatal_error("parquet_read_column_chunk", std::string("type mismatch for column: ") + name +
-				" (expected string, got " + array->type()->ToString() + ")");
+				" (expected string, got " + array->type()->ToString() +
+				(array->type_id() == arrow::Type::STRING_VIEW ?
+					" -- STRING_VIEW columns are not supported by this compact buffer read; "
+					"use a fixed-width parquet_read_column instead" : "") + ")");
 		}
 		reader_handle->last_chunk_buffers_array = array;
 		extract_string_buffers(array, nrows_out, nchars_out, offsets_out, data_out, validity_out, offsets_int32_out);
@@ -5556,6 +5623,56 @@ extern "C"
 		g_debug_physical_column_read_count = 0;
 	}
 
+	// Test-only: writes a tiny fixture file with one arrow::utf8_view() column named `name`,
+	// bypassing this library's own writer entirely -- unlike LARGE_STRING (reachable through
+	// parquet_append_string_column once would_overflow_string_offset_limit trips), this library
+	// never writes STRING_VIEW itself, so exercising the read side (is_string_like_type/
+	// make_string_like_accessor's STRING_VIEW branches) needs a file built directly with Arrow's
+	// own StringViewBuilder + parquet::arrow::WriteTable(..., store_schema()) -- the same
+	// stored-Arrow-schema mechanism that lets a file written by another Arrow-based tool round-
+	// trip its column as STRING_VIEW on read, per is_string_like_type's own comment. Five fixed
+	// rows deliberately cover StringView's inlined-vs-out-of-line boundary (values <= 12 bytes
+	// are stored inline in the view itself; longer ones spill to an out-of-line data buffer):
+	// a short inlined value, an empty inlined value, a Null, a long out-of-line value, and a
+	// value exactly at the 12-byte inline boundary. Reachable only via a bind(C) interface
+	// declared locally in test/error_scenarios.f90, never src/parquet_bindings.f90 -- same
+	// convention as every other parquet_debug_* hook in this file.
+	void parquet_debug_write_string_view_fixture(const char *path, const char *column_name)
+	{
+		arrow::StringViewBuilder builder;
+		auto check = [](const arrow::Status &st)
+		{
+			if (!st.ok()) throw std::runtime_error("parquet_debug_write_string_view_fixture: " + st.ToString());
+		};
+		check(builder.Append("short"));
+		check(builder.Append(""));
+		check(builder.AppendNull());
+		check(builder.Append("this value exceeds twelve bytes for sure"));
+		check(builder.Append("exactly12chr"));
+
+		std::shared_ptr<arrow::Array> array;
+		check(builder.Finish(&array));
+
+		auto field = arrow::field(column_name, arrow::utf8_view());
+		auto schema = arrow::schema({field});
+		auto table = arrow::Table::Make(schema, {array});
+
+		auto outfile_result = arrow::io::FileOutputStream::Open(path);
+		if (!outfile_result.ok())
+			throw std::runtime_error("parquet_debug_write_string_view_fixture: failed to open '" +
+				std::string(path) + "': " + outfile_result.status().ToString());
+		auto outfile = outfile_result.ValueOrDie();
+
+		parquet::ArrowWriterProperties::Builder arrow_writer_builder;
+		arrow_writer_builder.store_schema();
+		auto arrow_writer_properties = arrow_writer_builder.build();
+		auto writer_properties = parquet::WriterProperties::Builder().build();
+
+		auto status = parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile,
+			table->num_rows(), writer_properties, arrow_writer_properties);
+		check(status);
+		check(outfile->Close());
+	}
 
 	// Builds the final Arrow table from every appended column, writes it to the output file
 	// (error stops if any declared column was never written), and frees `handle`. A writer that

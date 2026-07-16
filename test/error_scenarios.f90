@@ -36,6 +36,10 @@ program error_scenarios
         call scenario_print_stat_smoke()
     case ("large_string_roundtrip")
         call scenario_large_string_roundtrip()
+    case ("string_view_roundtrip")
+        call scenario_string_view_roundtrip()
+    case ("string_view_compact_read_unsupported")
+        call scenario_string_view_compact_read_unsupported()
     case ("col_size_overflow")
         call scenario_col_size_overflow()
     case ("col_size_and_row_mode_avoid_whole_column_read")
@@ -2376,6 +2380,70 @@ contains
         end if
     end subroutine scenario_large_string_roundtrip
 
+    !> Proves the arrow::Type::STRING_VIEW read path (is_string_like_type/make_string_like_accessor's
+    !> STRING_VIEW branches, added alongside STRING/LARGE_STRING in parquet_wrapper.cpp) round-trips
+    !> correctly. Unlike LARGE_STRING (reachable by shrinking a real threshold via
+    !> parquet_debug_set_string_offset_limit -- see scenario_large_string_roundtrip, above), this
+    !> library's own writer never produces STRING_VIEW at all: it can only arrive from a file written
+    !> by another Arrow-based tool whose stored Arrow schema declared the column as utf8_view() (see
+    !> is_string_like_type's own comment). So this scenario instead calls
+    !> parquet_debug_write_string_view_fixture (a test-only hook declared locally below, not part of
+    !> the public Fortran API -- see its own comment in parquet_wrapper.cpp) to build such a file
+    !> directly with Arrow's own StringViewBuilder, bypassing this library's writer entirely.
+    subroutine scenario_string_view_roundtrip()
+        interface
+            subroutine parquet_debug_write_string_view_fixture(path, column_name) &
+                bind(C, name="parquet_debug_write_string_view_fixture")
+                use iso_c_binding, only : c_char
+                character(kind=c_char), intent(in) :: path(*) !! null-terminated output file path.
+                character(kind=c_char), intent(in) :: column_name(*) !! null-terminated STRING_VIEW column name.
+            end subroutine parquet_debug_write_string_view_fixture
+        end interface
+
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_string_view.parquet"
+        character(len=45) :: s_back(5)
+        character(len=45), parameter :: s_expect(5) = [character(len=45) :: &
+            "short", "", "", "this value exceeds twelve bytes for sure", "exactly12chr"]
+        logical :: is_valid(5)
+        integer :: strlen_max
+        integer(int64) :: nrows
+
+        ! Five fixed rows deliberately cover StringView's inlined-vs-out-of-line boundary -- see
+        ! parquet_debug_write_string_view_fixture's own comment in parquet_wrapper.cpp: a short
+        ! inlined value, an empty inlined value, a Null, a long out-of-line value, and a value
+        ! exactly at the 12-byte inline boundary.
+        call parquet_debug_write_string_view_fixture( &
+            "test_run/error_scenario_string_view.parquet"//char(0), "sv"//char(0))
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "sv", s_back, is_valid=is_valid)
+        call parquet_get_string_length(reader, "sv", strlen_max)
+        call parquet_close_reader(reader, print_stat=.true.)
+
+        if (.not. all(s_back == s_expect)) then
+            error stop "STRING_VIEW column did not round-trip correctly through parquet_read_column"
+        end if
+        if (.not. (is_valid(1) .and. is_valid(2) .and. .not. is_valid(3) &
+                .and. is_valid(4) .and. is_valid(5))) then
+            error stop "STRING_VIEW column's Null (row 3) was not reported correctly via is_valid"
+        end if
+        if (strlen_max /= 40) then
+            error stop "parquet_get_string_length was wrong for a STRING_VIEW scalar string column"
+        end if
+
+        ! Row-filtering (eval_filter_clause) on a STRING_VIEW scalar string column.
+        call filt%add('sv == "short"')
+        call parquet_open_reader(reader, out_file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+
+        if (nrows /= 1_int64) then
+            error stop "row filter on a STRING_VIEW scalar string column did not match exactly one row"
+        end if
+    end subroutine scenario_string_view_roundtrip
+
     !> Arrow's arrow::FixedSizeListBuilder/fixed_size_list() take a vector column's per-row
     !> width (col_size) as a plain int32_t -- unlike the string byte-offset limit above, there
     !> is no "large" variant to auto-upgrade to, so check_col_size_fits_arrow_limit in
@@ -4441,5 +4509,34 @@ contains
         call parquet_close_writer(writer)
         print '(a)', "unexpectedly wrote a compact string column chunk into a vector (col_size>1) schema field"
     end subroutine scenario_compact_string_write_chunk_requires_scalar_column
+
+    !> parquet_read_string_column_buffers/parquet_read_string_column_chunk_buffers (the compact
+    !> buffer-handoff path behind reading a STRING_VIEW column into a parquet_string_column) only
+    !> understand the two offset-based string representations (STRING/LARGE_STRING) -- a
+    !> STRING_VIEW array has no offsets buffer at all, so is_offset_string_type in
+    !> parquet_wrapper.cpp rejects it with a clear error rather than misreading it (see that
+    !> function's own comment). Proves that error fires cleanly instead of the fixed-width
+    !> parquet_read_column path used by scenario_string_view_roundtrip, above.
+    subroutine scenario_string_view_compact_read_unsupported()
+        interface
+            subroutine parquet_debug_write_string_view_fixture(path, column_name) &
+                bind(C, name="parquet_debug_write_string_view_fixture")
+                use iso_c_binding, only : c_char
+                character(kind=c_char), intent(in) :: path(*) !! null-terminated output file path.
+                character(kind=c_char), intent(in) :: column_name(*) !! null-terminated STRING_VIEW column name.
+            end subroutine parquet_debug_write_string_view_fixture
+        end interface
+
+        type(parquet_reader) :: reader
+        type(parquet_string_column) :: col
+        character(len=*), parameter :: out_file = "test_run/error_scenario_string_view_compact.parquet"
+
+        call parquet_debug_write_string_view_fixture(out_file//char(0), "sv"//char(0))
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "sv", col)
+        call parquet_close_reader(reader)
+        print '(a)', "unexpectedly read a STRING_VIEW column into a compact parquet_string_column"
+    end subroutine scenario_string_view_compact_read_unsupported
 
 end program error_scenarios

@@ -111,6 +111,8 @@ contains
                 test_close_reader_print_stat_smoke), &
             new_unittest("a string/string-vector column too large for arrow::utf8() round-trips via large_utf8()", &
                 test_large_string_column_roundtrip), &
+            new_unittest("a STRING_VIEW column (from a file written by another Arrow-based tool) round-trips " // &
+                "correctly", test_string_view_column_roundtrip), &
             new_unittest("a vector column whose auto-sized row-group size is clamped for the int32 " // &
                 "list-element-count limit still round-trips, split across multiple row groups", &
                 test_list_element_count_auto_multi_row_group_roundtrip), &
@@ -1466,6 +1468,20 @@ contains
             failure_message="a string/string-vector column forced onto the arrow::large_utf8() path " // &
             "did not round-trip correctly")
     end subroutine test_large_string_column_roundtrip
+
+    !> Unlike LARGE_STRING (above), this library's own writer can never produce a STRING_VIEW
+    !> column at all -- it only ever arrives from a Parquet file written by another Arrow-based
+    !> tool whose stored Arrow schema declared the column as utf8_view() (see
+    !> is_string_like_type's own comment in parquet_wrapper.cpp). So the fixture here is built
+    !> directly with Arrow's own StringViewBuilder (parquet_debug_write_string_view_fixture, a
+    !> test-only hook), bypassing this library's writer entirely -- run out-of-process as
+    !> scenario_string_view_roundtrip in error_scenarios.f90; see that scenario's own comment.
+    subroutine test_string_view_column_roundtrip(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "string_view_roundtrip", expect_abort=.false., &
+            failure_message="a STRING_VIEW column did not round-trip correctly")
+    end subroutine test_string_view_column_roundtrip
 
     !> A vector column's flattened element count (nrows * col_size) is capped at 2^31-1 *per row
     !> group*, not per file -- close_parquet_writer's auto-sizing path silently clamps its own

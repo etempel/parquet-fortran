@@ -19,6 +19,23 @@ Vector column entries use the shape convention `(col_size, nrows)` for arrays pa
 
 A `string` (scalar or vector-of-strings) column's underlying Arrow representation is chosen automatically based on size. Normally it's Arrow's default `utf8` type, which caps a single column's total string byte payload at 2^31-1 bytes (~2 GiB) — but if writing a column would exceed that, this library transparently switches that column to `large_utf8` (64-bit offsets, no such limit) instead. This is fully automatic and requires no action from either the writer or reader side: `parquet_write_column`/`parquet_read_column` and every other read function behave identically either way, including row filtering (`parquet_filter`) and `qc:` range checks. The only place the difference is visible is `parquet_close_reader(print_stat=.true.)`'s `parquet_type` column, which shows `large_string`/`list<large_string>` instead of `string`/`list<string>` for a column that was promoted.
 
+### Reading `string_view` columns from other tools
+
+This library's own writer never produces Arrow's `string_view` representation — it only ever
+appears when reading a Parquet file written by another Arrow-based tool whose stored Arrow schema
+declared a column as `utf8_view()`. Reading such a column works transparently through
+`parquet_read_column`/`parquet_get_string_length` and every other scalar/vector string read
+function, exactly like `string`/`large_string` above, including `qc:` range checks and row
+filtering (`parquet_filter`). `parquet_close_reader(print_stat=.true.)`'s `parquet_type` column
+shows `string_view` for such a column — note that once a row filter is active on the reader, it
+shows as `large_string` instead, since filtering internally casts a `string_view` column to
+`large_utf8` first (Arrow's own row-filter compute kernel has no `string_view` support to call
+directly); this is transparent to every read result, just a cosmetic difference in that one
+diagnostic column. The one exception is the compact `parquet_string_column` (see
+[String columns](string-columns.html)) read path: its buffer-handoff fast path only understands
+`string`/`large_string`'s offset-based layout, so reading a `string_view` column that way aborts
+with a clear error — read it through a fixed-width `character` array instead.
+
 ### Vector-column width (`col_size`) limit
 
 Unlike a *scalar* column's row count, which this library supports beyond Fortran's default-integer

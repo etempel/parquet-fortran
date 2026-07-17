@@ -20,6 +20,14 @@
 #include <parquet/arrow/schema.h>
 #include <parquet/arrow/writer.h>
 
+// Arrow's vendored copy of Howard Hinnant's date library (date.h only -- deliberately not
+// datetime.h, whose tz.h part would drag in the timezone database): used solely by the
+// test-only parquet_debug_civil_from_days/parquet_debug_days_from_civil hooks below to
+// cross-validate src/parquet_temporal.f90's own pure-Fortran implementation of the same
+// civil<->days algorithm against Arrow's.
+#include <arrow/vendored/datetime/visibility.h>
+#include <arrow/vendored/datetime/date.h>
+
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -4038,6 +4046,410 @@ static void read_list_primitive_element(void *handle, const char *name, int64_t 
 	mark_read(reader_handle, name, ctype_name<CType>(), last_array);
 }
 
+// ============================================================================
+// Temporal (date/time/timestamp) support for parquet_temporal.f90's element types.
+//
+// Buffer transport across this boundary (kept single-valued so the vector/chunk/row/element
+// plumbing above is reused unchanged):
+//   * date      -- int32 days since 1970-01-01 (Arrow date32's own value). This side
+//                  normalizes a DATE64 (int64 ms) column to days on read, and always writes
+//                  date32; date has no unit.
+//   * time      -- int64 canonical nanoseconds-of-day. This side scales the file's own unit
+//                  (time32[s/ms], time64[us/ns]) to/from ns; canonical ns-of-day never
+//                  overflows an int64 in any unit, so the scaling (and the write-side
+//                  exact-precision check) lives here in C++.
+//   * timestamp -- int64 value in the column's own file unit, with that unit reported/accepted
+//                  as a separate int32 selector (1=s, 2=ms, 3=us, 4=ns). Unlike time, a
+//                  timestamp's full int64 range CAN overflow when rescaled between units, so
+//                  the (range-checked) unit conversion is done on the Fortran side instead
+//                  (parquet_temporal's set_unix/to_unix); this side only reports the stored
+//                  unit on read and builds timestamp(unit, tz) on write. INT96 columns are
+//                  decoded by Arrow to timestamp[ns] before they ever reach here.
+// The selector integers match parquet_temporal.f90's parquet_unit_* constants exactly.
+// ============================================================================
+
+// Maps a parquet_unit_* selector (1..4) to arrow::TimeUnit; aborts on an out-of-range selector.
+static arrow::TimeUnit::type temporal_selector_to_arrow_unit(int32_t unit, const char *context)
+{
+	switch (unit)
+	{
+	case 1: return arrow::TimeUnit::SECOND;
+	case 2: return arrow::TimeUnit::MILLI;
+	case 3: return arrow::TimeUnit::MICRO;
+	case 4: return arrow::TimeUnit::NANO;
+	default:
+		report_fatal_error(context, "invalid time unit selector (expected 1..4)");
+	}
+	return arrow::TimeUnit::MICRO; // unreachable (report_fatal_error does not return)
+}
+
+// Inverse of temporal_selector_to_arrow_unit: arrow::TimeUnit -> a parquet_unit_* selector.
+static int32_t arrow_unit_to_temporal_selector(arrow::TimeUnit::type unit)
+{
+	switch (unit)
+	{
+	case arrow::TimeUnit::SECOND: return 1;
+	case arrow::TimeUnit::MILLI:  return 2;
+	case arrow::TimeUnit::MICRO:  return 3;
+	case arrow::TimeUnit::NANO:   return 4;
+	}
+	return 3; // unreachable (all four TimeUnit values are covered above)
+}
+
+// Nanoseconds per one tick of `unit`: SECOND -> 1e9 ... NANO -> 1.
+static int64_t temporal_ns_per_unit(arrow::TimeUnit::type unit)
+{
+	switch (unit)
+	{
+	case arrow::TimeUnit::SECOND: return 1000000000LL;
+	case arrow::TimeUnit::MILLI:  return 1000000LL;
+	case arrow::TimeUnit::MICRO:  return 1000LL;
+	case arrow::TimeUnit::NANO:   return 1LL;
+	}
+	return 1LL; // unreachable
+}
+
+// Fills `data` with days-since-1970-01-01 (Parquet DATE / Arrow date32's own value), decoding
+// either a DATE32 column (identity) or a DATE64 column (milliseconds since the epoch, which
+// Arrow guarantees is an exact multiple of 86,400,000 -- verified here rather than assumed).
+// Signature matches convert_values_to_int32 so the vector/chunk/row/element plumbing is reused;
+// the default branch is the strict-typing guard (a non-date column read as a date aborts).
+//
+// The DATE64 branch is defensive, unreachable dead code for any genuine Parquet file: the
+// Parquet format's DATE logical type is specified to annotate an int32 physical value only
+// (days since the epoch) -- there is no int64/DATE64 physical representation at the format
+// level at all, confirmed empirically too (arrow::Date64Array written via
+// parquet::arrow::WriteTable, even with ArrowWriterProperties::store_schema(), is always
+// coerced to DATE32 physical on write, so no tool -- this library or any other -- can ever
+// produce a file this branch would fire on). Kept only in case a future Arrow/Parquet version
+// changes that; GCOVR_EXCL'd since it is not reachable to test via any real fixture.
+static void convert_date_values(const std::shared_ptr<arrow::Array> &vals, int32_t *data, int64_t n,
+	const char *name, const char *context, int64_t stride = 1, int64_t offset = 0)
+{
+	switch (vals->type_id())
+	{
+	case arrow::Type::DATE32:
+	{
+		auto arr = std::static_pointer_cast<arrow::Date32Array>(vals);
+		for (int64_t i = 0; i < n; ++i) data[i] = arr->Value(offset + i * stride);
+		break;
+	}
+	case arrow::Type::DATE64: // GCOVR_EXCL_START
+	{
+		auto arr = std::static_pointer_cast<arrow::Date64Array>(vals);
+		for (int64_t i = 0; i < n; ++i)
+		{
+			int64_t ms = arr->Value(offset + i * stride);
+			if (ms % 86400000LL != 0)
+			{
+				report_fatal_error(context, std::string("date64 value is not a whole number of days for column: ") + name);
+			}
+			data[i] = static_cast<int32_t>(ms / 86400000LL);
+		}
+		break;
+	} // GCOVR_EXCL_STOP
+	default:
+		report_fatal_error(context, std::string("type mismatch for column: ") + name +
+			" (expected date, got " + vals->type()->ToString() + ")");
+	}
+}
+
+// Fills `data` with canonical nanoseconds-of-day, scaling a TIME32 (seconds/millis) or TIME64
+// (micros/nanos) column's own unit up to ns. Signature matches convert_values_to_int64 for
+// plumbing reuse; the default branch is the strict-typing guard.
+static void convert_time_values(const std::shared_ptr<arrow::Array> &vals, int64_t *data, int64_t n,
+	const char *name, const char *context, int64_t stride = 1, int64_t offset = 0)
+{
+	switch (vals->type_id())
+	{
+	case arrow::Type::TIME32:
+	{
+		auto arr = std::static_pointer_cast<arrow::Time32Array>(vals);
+		int64_t scale = temporal_ns_per_unit(std::static_pointer_cast<arrow::Time32Type>(vals->type())->unit());
+		for (int64_t i = 0; i < n; ++i) data[i] = static_cast<int64_t>(arr->Value(offset + i * stride)) * scale;
+		break;
+	}
+	case arrow::Type::TIME64:
+	{
+		auto arr = std::static_pointer_cast<arrow::Time64Array>(vals);
+		int64_t scale = temporal_ns_per_unit(std::static_pointer_cast<arrow::Time64Type>(vals->type())->unit());
+		for (int64_t i = 0; i < n; ++i) data[i] = arr->Value(offset + i * stride) * scale;
+		break;
+	}
+	default:
+		report_fatal_error(context, std::string("type mismatch for column: ") + name +
+			" (expected time, got " + vals->type()->ToString() + ")");
+	}
+}
+
+// Fills `data` with a TIMESTAMP column's raw stored int64 values (in the column's own file
+// unit -- the unit itself is reported separately, see timestamp_unit_selector_of). Signature
+// matches convert_values_to_int64 for plumbing reuse; a non-timestamp column aborts (strict).
+static void convert_timestamp_values(const std::shared_ptr<arrow::Array> &vals, int64_t *data, int64_t n,
+	const char *name, const char *context, int64_t stride = 1, int64_t offset = 0)
+{
+	if (vals->type_id() != arrow::Type::TIMESTAMP)
+	{
+		report_fatal_error(context, std::string("type mismatch for column: ") + name +
+			" (expected timestamp, got " + vals->type()->ToString() + ")");
+	}
+	auto arr = std::static_pointer_cast<arrow::TimestampArray>(vals);
+	for (int64_t i = 0; i < n; ++i) data[i] = arr->Value(offset + i * stride);
+}
+
+// Returns the parquet_unit_* selector of a TIMESTAMP value array (aborts if it is not one).
+static int32_t timestamp_unit_selector_of(const std::shared_ptr<arrow::Array> &vals, const char *name, const char *context)
+{
+	if (vals->type_id() != arrow::Type::TIMESTAMP)
+	{
+		report_fatal_error(context, std::string("type mismatch for column: ") + name +
+			" (expected timestamp, got " + vals->type()->ToString() + ")");
+	}
+	return arrow_unit_to_temporal_selector(std::static_pointer_cast<arrow::TimestampType>(vals->type())->unit());
+}
+
+// The Arrow value type of a TIME column of the given unit: TIME32 for seconds/millis, TIME64
+// for micros/nanos (Arrow forbids the other two combinations).
+static std::shared_ptr<arrow::DataType> temporal_time_value_type(int32_t unit_selector, const char *context)
+{
+	auto unit = temporal_selector_to_arrow_unit(unit_selector, context);
+	return (unit == arrow::TimeUnit::SECOND || unit == arrow::TimeUnit::MILLI) ? arrow::time32(unit) : arrow::time64(unit);
+}
+
+// The Arrow value type of a TIMESTAMP column of the given unit, UTC-adjusted iff `is_utc`.
+static std::shared_ptr<arrow::DataType> temporal_timestamp_value_type(int32_t unit_selector, int32_t is_utc, const char *context)
+{
+	return arrow::timestamp(temporal_selector_to_arrow_unit(unit_selector, context), is_utc != 0 ? "UTC" : "");
+}
+
+// Builds a scalar (col_size == 1) or fixed-size-list (col_size > 1) Arrow TIME array from
+// canonical nanoseconds-of-day input, scaling ns down to the target file unit. A value with
+// finer precision than the unit (ns not divisible by the unit's ns count) aborts rather than
+// silently truncating. SECOND/MILLI produce a TIME32 column, MICRO/NANO a TIME64 column
+// (Arrow forbids the other two combinations), matching the value width Fortran expects on read.
+static std::shared_ptr<arrow::Array> build_time_array(const int64_t *ns, int64_t nrows, int64_t col_size,
+	int32_t unit_selector, const int8_t *valid_in, const char *name, const char *context)
+{
+	auto unit = temporal_selector_to_arrow_unit(unit_selector, context);
+	int64_t scale = temporal_ns_per_unit(unit);
+	bool use32 = (unit == arrow::TimeUnit::SECOND || unit == arrow::TimeUnit::MILLI);
+	auto value_type = use32 ? arrow::time32(unit) : arrow::time64(unit);
+	int64_t total = nrows * col_size;
+
+	// Appends every (possibly null) scaled value into `vb` -- a Time32Builder or Time64Builder.
+	auto append_all = [&](auto &vb)
+	{
+		using BuilderT = std::remove_reference_t<decltype(vb)>;
+		using ValueT = typename BuilderT::value_type;
+		for (int64_t i = 0; i < total; ++i)
+		{
+			arrow::Status s;
+			if (valid_in != nullptr && valid_in[i] == 0)
+			{
+				s = vb.AppendNull();
+			}
+			else
+			{
+				if (ns[i] % scale != 0)
+				{
+					report_fatal_error(context, std::string("time value has finer precision than the column's declared "
+						"unit for column: ") + name);
+				}
+				s = vb.Append(static_cast<ValueT>(ns[i] / scale));
+			}
+			if (!s.ok()) throw std::runtime_error(s.ToString());
+		}
+	};
+
+	std::shared_ptr<arrow::Array> array;
+	if (col_size > 1)
+	{
+		check_col_size_fits_arrow_limit(col_size, name, context);
+		std::shared_ptr<arrow::ArrayBuilder> value_builder = use32
+			? std::static_pointer_cast<arrow::ArrayBuilder>(std::make_shared<arrow::Time32Builder>(value_type, arrow::default_memory_pool()))
+			: std::static_pointer_cast<arrow::ArrayBuilder>(std::make_shared<arrow::Time64Builder>(value_type, arrow::default_memory_pool()));
+		arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(col_size));
+		auto s = list_builder.AppendValues(nrows);
+		if (!s.ok()) throw std::runtime_error(s.ToString());
+		if (use32) append_all(*std::static_pointer_cast<arrow::Time32Builder>(value_builder));
+		else append_all(*std::static_pointer_cast<arrow::Time64Builder>(value_builder));
+		s = list_builder.Finish(&array);
+		if (!s.ok()) throw std::runtime_error(s.ToString());
+	}
+	else if (use32)
+	{
+		arrow::Time32Builder builder(value_type, arrow::default_memory_pool());
+		append_all(builder);
+		auto s = builder.Finish(&array);
+		if (!s.ok()) throw std::runtime_error(s.ToString());
+	}
+	else
+	{
+		arrow::Time64Builder builder(value_type, arrow::default_memory_pool());
+		append_all(builder);
+		auto s = builder.Finish(&array);
+		if (!s.ok()) throw std::runtime_error(s.ToString());
+	}
+	return array;
+}
+
+// Builds a scalar or fixed-size-list Arrow TIMESTAMP array from int64 values already expressed
+// in `unit_selector`'s unit (Fortran did the canonical->unit conversion and its range check).
+// `is_utc` selects the "UTC" (adjusted-to-UTC instant) vs "" (timezone-naive local) Arrow type.
+static std::shared_ptr<arrow::Array> build_timestamp_array(const int64_t *values, int64_t nrows, int64_t col_size,
+	int32_t unit_selector, int32_t is_utc, const int8_t *valid_in, const char *name, const char *context)
+{
+	auto unit = temporal_selector_to_arrow_unit(unit_selector, context);
+	auto value_type = arrow::timestamp(unit, is_utc != 0 ? "UTC" : "");
+	int64_t total = nrows * col_size;
+
+	auto append_all = [&](arrow::TimestampBuilder &vb)
+	{
+		for (int64_t i = 0; i < total; ++i)
+		{
+			arrow::Status s = (valid_in != nullptr && valid_in[i] == 0) ? vb.AppendNull() : vb.Append(values[i]);
+			if (!s.ok()) throw std::runtime_error(s.ToString());
+		}
+	};
+
+	std::shared_ptr<arrow::Array> array;
+	if (col_size > 1)
+	{
+		check_col_size_fits_arrow_limit(col_size, name, context);
+		auto value_builder = std::make_shared<arrow::TimestampBuilder>(value_type, arrow::default_memory_pool());
+		arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(col_size));
+		auto s = list_builder.AppendValues(nrows);
+		if (!s.ok()) throw std::runtime_error(s.ToString());
+		append_all(*value_builder);
+		s = list_builder.Finish(&array);
+		if (!s.ok()) throw std::runtime_error(s.ToString());
+	}
+	else
+	{
+		arrow::TimestampBuilder builder(value_type, arrow::default_memory_pool());
+		append_all(builder);
+		auto s = builder.Finish(&array);
+		if (!s.ok()) throw std::runtime_error(s.ToString());
+	}
+	return array;
+}
+
+// Stashes a streamed temporal row-group `array` into pending_chunk_arrays for `name`, building
+// its field (always nullable, for the same reason append_typed_column_chunk documents) on the
+// column's first chunk. Shared by the temporal parquet_write_*_column_chunk entry points.
+static void stash_temporal_column_chunk(ParquetWriterHandle *writer_handle, const char *name, size_t idx,
+	bool first_chunk_ever, const std::shared_ptr<arrow::Array> &array,
+	const std::shared_ptr<arrow::DataType> &value_type, int64_t col_size)
+{
+	if (first_chunk_ever)
+	{
+		if (writer_handle->fields.size() <= idx) writer_handle->fields.resize(idx + 1);
+		writer_handle->fields[idx] = build_field(name, value_type, col_size, /*nullable=*/true);
+	}
+	if (writer_handle->arrays.size() <= idx) writer_handle->arrays.resize(idx + 1);
+	writer_handle->pending_chunk_arrays[static_cast<int>(idx)] = array;
+}
+
+// Resolves `name` to its leaf temporal value type (unwrapping a FIXED_SIZE_LIST vector column),
+// schema-only (no column data read) -- shared by the parquet_reader_get_column_time_* queries.
+static std::shared_ptr<arrow::DataType> resolve_temporal_value_type(ParquetReaderHandle *reader_handle, const char *name)
+{
+	auto resolved = resolve_struct_path(reader_handle->schema, name);
+	auto type = resolved.leaf_field->type();
+	if (type->id() == arrow::Type::FIXED_SIZE_LIST)
+	{
+		return std::static_pointer_cast<arrow::FixedSizeListType>(type)->value_type();
+	}
+	return type;
+}
+
+// Shared body for every temporal parquet_read_*_array_row entry point -- the temporal
+// counterpart of read_list_primitive_row (which is a CType template and so cannot dispatch on
+// the int32/int64 transport types date/time/timestamp reuse). `convert` is one of
+// convert_{date,time,timestamp}_values; `unit_out`, when non-null (timestamp only), receives the
+// column's stored unit selector.
+template <typename OutType, typename ConvertFn>
+static void read_temporal_row(void *handle, const char *name, int64_t row_index, OutType *data, int64_t col_size,
+	int8_t *valid_out, const char *context, const char *type_name, int32_t *unit_out, ConvertFn convert)
+{
+	auto reader_handle = as_reader_handle(handle);
+	std::shared_ptr<arrow::Array> array;
+	int64_t local_row_index = row_index;
+	if (reader_handle->filter_mask)
+	{
+		array = get_single_chunk_array(reader_handle, name);
+	}
+	else
+	{
+		int64_t row_group = 0;
+		resolve_row_group_for_row(reader_handle, row_index, context, row_group, local_row_index);
+		array = get_row_group_chunk_array(reader_handle, name, row_group, context);
+	}
+	auto vals_any = get_row_list_values(array, name, local_row_index, col_size, context);
+	report_nulls_list_full(array, vals_any, name, 1, col_size, local_row_index - 1, valid_out, context);
+	if (unit_out) *unit_out = timestamp_unit_selector_of(vals_any, name, context);
+	convert(vals_any, data, col_size, name, context, 1, 0);
+	fill_null_default(data, valid_out, col_size);
+	mark_read(reader_handle, name, type_name, array);
+}
+
+// Shared body for every temporal parquet_read_*_array_element entry point -- the temporal
+// counterpart of read_list_primitive_element. Streams row-group by row-group in the unfiltered
+// case exactly as that function does.
+template <typename OutType, typename ConvertFn>
+static void read_temporal_element(void *handle, const char *name, int64_t col_index, OutType *data, int64_t nrows,
+	int8_t *valid_out, const char *context, const char *type_name, int32_t *unit_out, ConvertFn convert)
+{
+	auto reader_handle = as_reader_handle(handle);
+	if (reader_handle->filter_mask)
+	{
+		auto array = get_single_chunk_array(reader_handle, name);
+		auto col_size = get_col_size(array);
+		if (col_index < 1 || col_index > col_size)
+		{
+			report_fatal_error(context, "col_index out of bounds");
+		}
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, context);
+		auto offset = col_index - 1;
+		report_nulls_list_element(array, vals_any, name, nrows, col_size, offset, valid_out, context);
+		if (unit_out) *unit_out = timestamp_unit_selector_of(vals_any, name, context);
+		convert(vals_any, data, nrows, name, context, col_size, offset);
+		fill_null_default(data, valid_out, nrows);
+		mark_read(reader_handle, name, type_name, array);
+		return;
+	}
+
+	auto col_size = resolve_element_mode_col_size(reader_handle, name);
+	if (col_index < 1 || col_index > col_size)
+	{
+		report_fatal_error(context, "col_index out of bounds");
+	}
+	auto offset = col_index - 1;
+	auto last_array = stream_element_mode_row_groups(reader_handle, name, col_size, nrows, context,
+		[&](const std::shared_ptr<arrow::Array> &array, const std::shared_ptr<arrow::Array> &vals_any,
+			int64_t rg_rows, int64_t row_offset)
+		{
+			(void)array;
+			int8_t *valid_slice = valid_out ? valid_out + row_offset : nullptr;
+			report_nulls_list_element(array, vals_any, name, rg_rows, col_size, offset, valid_slice, context);
+			if (unit_out) *unit_out = timestamp_unit_selector_of(vals_any, name, context);
+			convert(vals_any, data + row_offset, rg_rows, name, context, col_size, offset);
+		});
+	fill_null_default(data, valid_out, nrows);
+	if (!last_array)
+	{
+		// Zero-row column: no row group set last_array, and there are no values to derive the
+		// unit from -- take it from the schema-declared leaf type instead (timestamp only).
+		last_array = get_single_chunk_array(reader_handle, name);
+		if (unit_out)
+		{
+			auto vt = resolve_temporal_value_type(reader_handle, name);
+			*unit_out = arrow_unit_to_temporal_selector(std::static_pointer_cast<arrow::TimestampType>(vt)->unit());
+		}
+	}
+	mark_read(reader_handle, name, type_name, last_array);
+}
+
 extern "C"
 {
 
@@ -4515,6 +4927,228 @@ extern "C"
 		fill_null_default_string(data, item_len, valid_out, nrows);
 		if (!last_array) last_array = get_single_chunk_array(reader_handle, name);
 		mark_read_string(reader_handle, name, item_len, last_array);
+	}
+
+	// ------------------------------------------------------------------------
+	// Temporal read entry points (date/time/timestamp). See the transport note
+	// on convert_date_values/build_time_array above. Each mirrors its int64
+	// counterpart, swapping in the temporal value converter; timestamp variants
+	// additionally report the column's stored unit via `unit_out`.
+	// ------------------------------------------------------------------------
+
+	// --- date (int32 days) ---
+	void parquet_read_date_column(void *handle, const char *name, int32_t *data, int64_t nrows, int8_t *valid_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_single_chunk_array(reader_handle, name);
+		if (array->length() != nrows) report_fatal_error("parquet_read_date_column", std::string("nrows mismatch for column: ") + name);
+		check_or_report_nulls(array, name, valid_out, "parquet_read_date_column");
+		convert_date_values(array, data, nrows, name, "parquet_read_date_column");
+		fill_null_default(data, valid_out, nrows);
+		mark_read(reader_handle, name, "date", array);
+	}
+
+	void parquet_read_date_array_column(void *handle, const char *name, int32_t *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_single_chunk_array(reader_handle, name);
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_date_array_column");
+		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out, "parquet_read_date_array_column");
+		convert_date_values(vals_any, data, nrows * col_size, name, "parquet_read_date_array_column");
+		fill_null_default(data, valid_out, nrows * col_size);
+		mark_read(reader_handle, name, "date", array);
+	}
+
+	void parquet_read_date_column_chunk(void *handle, const char *name, int64_t row_group, int32_t *data, int64_t nrows, int8_t *valid_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_row_group_chunk_array(reader_handle, name, row_group, "parquet_read_date_column_chunk");
+		if (array->length() != nrows) report_fatal_error("parquet_read_date_column_chunk", std::string("nrows mismatch for column: ") + name);
+		check_or_report_nulls(array, name, valid_out, "parquet_read_date_column_chunk");
+		convert_date_values(array, data, nrows, name, "parquet_read_date_column_chunk");
+		fill_null_default(data, valid_out, nrows);
+	}
+
+	void parquet_read_date_array_column_chunk(void *handle, const char *name, int64_t row_group, int32_t *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_row_group_chunk_array(reader_handle, name, row_group, "parquet_read_date_array_column_chunk");
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_date_array_column_chunk");
+		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out, "parquet_read_date_array_column_chunk");
+		convert_date_values(vals_any, data, nrows * col_size, name, "parquet_read_date_array_column_chunk");
+		fill_null_default(data, valid_out, nrows * col_size);
+	}
+
+	void parquet_read_date_array_row(void *handle, const char *name, int64_t row_index, int32_t *data, int64_t col_size, int8_t *valid_out)
+	{
+		read_temporal_row(handle, name, row_index, data, col_size, valid_out, "parquet_read_array_row_mode", "date",
+			nullptr, convert_date_values);
+	}
+
+	void parquet_read_date_array_element(void *handle, const char *name, int64_t col_index, int32_t *data, int64_t nrows, int64_t, int8_t *valid_out)
+	{
+		read_temporal_element(handle, name, col_index, data, nrows, valid_out, "parquet_read_array_element_mode", "date",
+			nullptr, convert_date_values);
+	}
+
+	// --- time (int64 canonical nanoseconds-of-day) ---
+	void parquet_read_time_column(void *handle, const char *name, int64_t *data, int64_t nrows, int8_t *valid_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_single_chunk_array(reader_handle, name);
+		if (array->length() != nrows) report_fatal_error("parquet_read_time_column", std::string("nrows mismatch for column: ") + name);
+		check_or_report_nulls(array, name, valid_out, "parquet_read_time_column");
+		convert_time_values(array, data, nrows, name, "parquet_read_time_column");
+		fill_null_default(data, valid_out, nrows);
+		mark_read(reader_handle, name, "time", array);
+	}
+
+	void parquet_read_time_array_column(void *handle, const char *name, int64_t *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_single_chunk_array(reader_handle, name);
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_time_array_column");
+		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out, "parquet_read_time_array_column");
+		convert_time_values(vals_any, data, nrows * col_size, name, "parquet_read_time_array_column");
+		fill_null_default(data, valid_out, nrows * col_size);
+		mark_read(reader_handle, name, "time", array);
+	}
+
+	void parquet_read_time_column_chunk(void *handle, const char *name, int64_t row_group, int64_t *data, int64_t nrows, int8_t *valid_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_row_group_chunk_array(reader_handle, name, row_group, "parquet_read_time_column_chunk");
+		if (array->length() != nrows) report_fatal_error("parquet_read_time_column_chunk", std::string("nrows mismatch for column: ") + name);
+		check_or_report_nulls(array, name, valid_out, "parquet_read_time_column_chunk");
+		convert_time_values(array, data, nrows, name, "parquet_read_time_column_chunk");
+		fill_null_default(data, valid_out, nrows);
+	}
+
+	void parquet_read_time_array_column_chunk(void *handle, const char *name, int64_t row_group, int64_t *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_row_group_chunk_array(reader_handle, name, row_group, "parquet_read_time_array_column_chunk");
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_time_array_column_chunk");
+		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out, "parquet_read_time_array_column_chunk");
+		convert_time_values(vals_any, data, nrows * col_size, name, "parquet_read_time_array_column_chunk");
+		fill_null_default(data, valid_out, nrows * col_size);
+	}
+
+	void parquet_read_time_array_row(void *handle, const char *name, int64_t row_index, int64_t *data, int64_t col_size, int8_t *valid_out)
+	{
+		read_temporal_row(handle, name, row_index, data, col_size, valid_out, "parquet_read_array_row_mode", "time",
+			nullptr, convert_time_values);
+	}
+
+	void parquet_read_time_array_element(void *handle, const char *name, int64_t col_index, int64_t *data, int64_t nrows, int64_t, int8_t *valid_out)
+	{
+		read_temporal_element(handle, name, col_index, data, nrows, valid_out, "parquet_read_array_element_mode", "time",
+			nullptr, convert_time_values);
+	}
+
+	// --- timestamp (int64 value in the column's own unit + reported `unit_out`) ---
+	void parquet_read_timestamp_column(void *handle, const char *name, int64_t *data, int64_t nrows, int32_t *unit_out, int8_t *valid_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_single_chunk_array(reader_handle, name);
+		if (array->length() != nrows) report_fatal_error("parquet_read_timestamp_column", std::string("nrows mismatch for column: ") + name);
+		check_or_report_nulls(array, name, valid_out, "parquet_read_timestamp_column");
+		*unit_out = timestamp_unit_selector_of(array, name, "parquet_read_timestamp_column");
+		convert_timestamp_values(array, data, nrows, name, "parquet_read_timestamp_column");
+		fill_null_default(data, valid_out, nrows);
+		mark_read(reader_handle, name, "timestamp", array);
+	}
+
+	void parquet_read_timestamp_array_column(void *handle, const char *name, int64_t *data, int64_t nrows, int64_t col_size, int32_t *unit_out, int8_t *valid_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_single_chunk_array(reader_handle, name);
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_timestamp_array_column");
+		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out, "parquet_read_timestamp_array_column");
+		*unit_out = timestamp_unit_selector_of(vals_any, name, "parquet_read_timestamp_array_column");
+		convert_timestamp_values(vals_any, data, nrows * col_size, name, "parquet_read_timestamp_array_column");
+		fill_null_default(data, valid_out, nrows * col_size);
+		mark_read(reader_handle, name, "timestamp", array);
+	}
+
+	void parquet_read_timestamp_column_chunk(void *handle, const char *name, int64_t row_group, int64_t *data, int64_t nrows, int32_t *unit_out, int8_t *valid_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_row_group_chunk_array(reader_handle, name, row_group, "parquet_read_timestamp_column_chunk");
+		if (array->length() != nrows) report_fatal_error("parquet_read_timestamp_column_chunk", std::string("nrows mismatch for column: ") + name);
+		check_or_report_nulls(array, name, valid_out, "parquet_read_timestamp_column_chunk");
+		*unit_out = timestamp_unit_selector_of(array, name, "parquet_read_timestamp_column_chunk");
+		convert_timestamp_values(array, data, nrows, name, "parquet_read_timestamp_column_chunk");
+		fill_null_default(data, valid_out, nrows);
+	}
+
+	void parquet_read_timestamp_array_column_chunk(void *handle, const char *name, int64_t row_group, int64_t *data, int64_t nrows, int64_t col_size, int32_t *unit_out, int8_t *valid_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = get_row_group_chunk_array(reader_handle, name, row_group, "parquet_read_timestamp_array_column_chunk");
+		auto vals_any = get_uniform_list_values(array, name, nrows, col_size, "parquet_read_timestamp_array_column_chunk");
+		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out, "parquet_read_timestamp_array_column_chunk");
+		*unit_out = timestamp_unit_selector_of(vals_any, name, "parquet_read_timestamp_array_column_chunk");
+		convert_timestamp_values(vals_any, data, nrows * col_size, name, "parquet_read_timestamp_array_column_chunk");
+		fill_null_default(data, valid_out, nrows * col_size);
+	}
+
+	void parquet_read_timestamp_array_row(void *handle, const char *name, int64_t row_index, int64_t *data, int64_t col_size, int32_t *unit_out, int8_t *valid_out)
+	{
+		read_temporal_row(handle, name, row_index, data, col_size, valid_out, "parquet_read_array_row_mode", "timestamp",
+			unit_out, convert_timestamp_values);
+	}
+
+	void parquet_read_timestamp_array_element(void *handle, const char *name, int64_t col_index, int64_t *data, int64_t nrows, int64_t, int32_t *unit_out, int8_t *valid_out)
+	{
+		read_temporal_element(handle, name, col_index, data, nrows, valid_out, "parquet_read_array_element_mode", "timestamp",
+			unit_out, convert_timestamp_values);
+	}
+
+	// --- column time-unit / timezone queries (parquet_get_column_time_info) ---
+
+	// Returns the parquet_unit_* selector (1..4) of a TIME/TIMESTAMP column `name`; aborts for
+	// any other column type (there is no unit to report). Schema-only (reads no column data).
+	int32_t parquet_reader_get_column_time_unit(void *handle, const char *name)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto vt = resolve_temporal_value_type(reader_handle, name);
+		switch (vt->id())
+		{
+		case arrow::Type::TIME32: return arrow_unit_to_temporal_selector(std::static_pointer_cast<arrow::Time32Type>(vt)->unit());
+		case arrow::Type::TIME64: return arrow_unit_to_temporal_selector(std::static_pointer_cast<arrow::Time64Type>(vt)->unit());
+		case arrow::Type::TIMESTAMP: return arrow_unit_to_temporal_selector(std::static_pointer_cast<arrow::TimestampType>(vt)->unit());
+		default:
+			report_fatal_error("parquet_get_column_time_info", std::string("column is not a time/timestamp column: ") + name +
+				" (type " + vt->ToString() + ")");
+		}
+		return 3; // unreachable
+	}
+
+	// Byte length of a TIMESTAMP column's timezone string (0 for a naive timestamp or a TIME
+	// column); aborts for a non-time/timestamp column.
+	int64_t parquet_reader_get_column_timezone_length(void *handle, const char *name)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto vt = resolve_temporal_value_type(reader_handle, name);
+		if (vt->id() == arrow::Type::TIMESTAMP)
+			return static_cast<int64_t>(std::static_pointer_cast<arrow::TimestampType>(vt)->timezone().size());
+		if (vt->id() == arrow::Type::TIME32 || vt->id() == arrow::Type::TIME64) return 0;
+		report_fatal_error("parquet_get_column_time_info", std::string("column is not a time/timestamp column: ") + name +
+			" (type " + vt->ToString() + ")");
+		return 0; // unreachable
+	}
+
+	// Copies a TIMESTAMP column's timezone string into `buf` (blank for naive/TIME).
+	void parquet_reader_get_column_timezone(void *handle, const char *name, char *buf, int64_t buf_len)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto vt = resolve_temporal_value_type(reader_handle, name);
+		std::string tz;
+		if (vt->id() == arrow::Type::TIMESTAMP) tz = std::static_pointer_cast<arrow::TimestampType>(vt)->timezone();
+		else if (vt->id() != arrow::Type::TIME32 && vt->id() != arrow::Type::TIME64)
+			report_fatal_error("parquet_get_column_time_info", std::string("column is not a time/timestamp column: ") + name);
+		copy_string_with_padding(buf, buf_len, tz);
 	}
 
 } // extern "C"
@@ -5081,6 +5715,35 @@ extern "C"
 			handle, name, reinterpret_cast<const uint8_t *>(data), nrows, col_size, valid_in, arrow::boolean());
 	}
 
+	// --- temporal whole-column appends (date/time/timestamp). See the transport note on
+	//     convert_date_values/build_time_array. Date reuses the numeric append_typed_column
+	//     template (Date32Builder is default-constructible and takes int32 values); time and
+	//     timestamp use their dedicated array builders. ---
+	void parquet_append_date_column(void *handle, const char *name, const int32_t *data, int64_t nrows, int64_t col_size, const int8_t *valid_in)
+	{
+		append_typed_column<arrow::Date32Builder>(handle, name, data, nrows, col_size, valid_in, arrow::date32());
+	}
+
+	void parquet_append_time_column(void *handle, const char *name, const int64_t *data, int64_t nrows, int64_t col_size,
+		int32_t unit, const int8_t *valid_in)
+	{
+		auto writer_handle = as_handle(handle);
+		auto array = build_time_array(data, nrows, col_size, unit, valid_in, name, "parquet_append_time_column");
+		append_column(writer_handle, name,
+			build_field(name, temporal_time_value_type(unit, "parquet_append_time_column"), col_size,
+				has_any_null(valid_in, nrows * col_size)), array);
+	}
+
+	void parquet_append_timestamp_column(void *handle, const char *name, const int64_t *data, int64_t nrows, int64_t col_size,
+		int32_t unit, int32_t is_utc, const int8_t *valid_in)
+	{
+		auto writer_handle = as_handle(handle);
+		auto array = build_timestamp_array(data, nrows, col_size, unit, is_utc, valid_in, name, "parquet_append_timestamp_column");
+		append_column(writer_handle, name,
+			build_field(name, temporal_timestamp_value_type(unit, is_utc, "parquet_append_timestamp_column"), col_size,
+				has_any_null(valid_in, nrows * col_size)), array);
+	}
+
 	// Appends one scalar string column's values to `handle`. Auto-selects arrow::utf8()
 	// (int32 offsets) or, if this column's own byte payload would overflow that (see
 	// would_overflow_string_offset_limit), arrow::large_utf8() (int64 offsets) instead -- every
@@ -5285,6 +5948,47 @@ extern "C"
 	{
 		append_typed_column_chunk<arrow::BooleanBuilder>(
 			handle, name, reinterpret_cast<const uint8_t *>(data), col_size, valid_in, arrow::boolean());
+	}
+
+	// --- temporal streaming (row-group-chunked) appends (date/time/timestamp). Date reuses the
+	//     numeric append_typed_column_chunk template; time and timestamp build this row group's
+	//     array (nrows = current_row_group_nrows) and stash it via stash_temporal_column_chunk. ---
+	void parquet_write_date_column_chunk(void *handle, const char *name, const int32_t *data, int64_t col_size, const int8_t *valid_in)
+	{
+		append_typed_column_chunk<arrow::Date32Builder>(handle, name, data, col_size, valid_in, arrow::date32());
+	}
+
+	void parquet_write_time_column_chunk(void *handle, const char *name, const int64_t *data, int64_t col_size, int32_t unit, const int8_t *valid_in)
+	{
+		auto writer_handle = as_handle(handle);
+		bool first_chunk_ever;
+		auto idx = check_column_chunk_write_preconditions(writer_handle, name, first_chunk_ever);
+		auto nrows = writer_handle->current_row_group_nrows;
+		if (col_size > 1)
+		{
+			check_chunk_size_fits_limit_for_col_size(nrows, name, col_size, "parquet_write_column_chunk", "nrows",
+				"reduce this row group's nrows (parquet_new_row_group) or this column's col_size");
+		}
+		auto array = build_time_array(data, nrows, col_size, unit, valid_in, name, "parquet_write_time_column_chunk");
+		stash_temporal_column_chunk(writer_handle, name, idx, first_chunk_ever, array,
+			temporal_time_value_type(unit, "parquet_write_time_column_chunk"), col_size);
+	}
+
+	void parquet_write_timestamp_column_chunk(void *handle, const char *name, const int64_t *data, int64_t col_size,
+		int32_t unit, int32_t is_utc, const int8_t *valid_in)
+	{
+		auto writer_handle = as_handle(handle);
+		bool first_chunk_ever;
+		auto idx = check_column_chunk_write_preconditions(writer_handle, name, first_chunk_ever);
+		auto nrows = writer_handle->current_row_group_nrows;
+		if (col_size > 1)
+		{
+			check_chunk_size_fits_limit_for_col_size(nrows, name, col_size, "parquet_write_column_chunk", "nrows",
+				"reduce this row group's nrows (parquet_new_row_group) or this column's col_size");
+		}
+		auto array = build_timestamp_array(data, nrows, col_size, unit, is_utc, valid_in, name, "parquet_write_timestamp_column_chunk");
+		stash_temporal_column_chunk(writer_handle, name, idx, first_chunk_ever, array,
+			temporal_timestamp_value_type(unit, is_utc, "parquet_write_timestamp_column_chunk"), col_size);
 	}
 
 	// Streaming counterpart to parquet_append_string_column: unlike that whole-column write,
@@ -5637,6 +6341,34 @@ extern "C"
 	// value exactly at the 12-byte inline boundary. Reachable only via a bind(C) interface
 	// declared locally in test/error_scenarios.f90, never src/parquet_bindings.f90 -- same
 	// convention as every other parquet_debug_* hook in this file.
+	// Test-only: converts days-since-1970-01-01 to a civil (year, month, day) using Arrow's
+	// vendored copy of Howard Hinnant's date library -- the reference implementation
+	// src/parquet_temporal.f90's own pure-Fortran civil_from_days is cross-validated against
+	// by test/test_temporal.f90's "Arrow cross-validation" test. The vendored library's `year`
+	// is a 16-bit type, so callers must stay within years +-32767 (the test does). Reachable
+	// only via a bind(C) interface declared locally in the test file, never
+	// src/parquet_bindings.f90 -- same convention as every other parquet_debug_* hook here.
+	void parquet_debug_civil_from_days(int64_t days_since_epoch, int32_t *year, int32_t *month, int32_t *day)
+	{
+		using namespace arrow_vendored::date;
+		const year_month_day ymd{sys_days{days{static_cast<int>(days_since_epoch)}}};
+		*year = static_cast<int32_t>(static_cast<int>(ymd.year()));
+		*month = static_cast<int32_t>(static_cast<unsigned>(ymd.month()));
+		*day = static_cast<int32_t>(static_cast<unsigned>(ymd.day()));
+	}
+
+	// Test-only: the inverse of parquet_debug_civil_from_days -- civil (year, month, day) to
+	// days-since-1970-01-01 via Arrow's vendored date library, cross-validating
+	// src/parquet_temporal.f90's days_from_civil. Same +-32767 year bound and same
+	// locally-declared-bind(C)-only convention as above.
+	void parquet_debug_days_from_civil(int32_t year_in, int32_t month_in, int32_t day_in,
+		int64_t *days_since_epoch)
+	{
+		using namespace arrow_vendored::date;
+		const sys_days sd{year{year_in}/month{static_cast<unsigned>(month_in)}/day{static_cast<unsigned>(day_in)}};
+		*days_since_epoch = static_cast<int64_t>(sd.time_since_epoch().count());
+	}
+
 	void parquet_debug_write_string_view_fixture(const char *path, const char *column_name)
 	{
 		arrow::StringViewBuilder builder;
@@ -5668,6 +6400,83 @@ extern "C"
 		auto arrow_writer_properties = arrow_writer_builder.build();
 		auto writer_properties = parquet::WriterProperties::Builder().build();
 
+		auto status = parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile,
+			table->num_rows(), writer_properties, arrow_writer_properties);
+		check(status);
+		check(outfile->Close());
+	}
+
+	// Test-only: writes a tiny fixture file with one temporal column of a physical
+	// representation this library's own writer never produces, bypassing the writer entirely --
+	// same convention as parquet_debug_write_string_view_fixture above. `variant`:
+	//   "int96"    -- a legacy INT96-encoded timestamp column (nanosecond precision; the
+	//                 pre-Parquet-2.0 encoding old Impala/Spark files use). Reachable only via
+	//                 ArrowWriterProperties::enable_deprecated_int96_timestamps(), which this
+	//                 library's own writer never sets.
+	//   "tz"       -- a timestamp[us] column with a real, non-UTC IANA timezone string
+	//                 ("America/New_York"), confirming an arbitrary tz (not just UTC/naive, the
+	//                 only two this library's own writer produces) round-trips and is reported
+	//                 correctly by parquet_get_column_time_info.
+	// Five rows each, with one Null, mirroring the row count/null pattern this library's own
+	// fixtures use elsewhere in this file.
+	void parquet_debug_write_datetime_fixture(const char *path, const char *column_name, const char *variant)
+	{
+		std::string v(variant);
+		auto check = [](const arrow::Status &st)
+		{
+			if (!st.ok()) throw std::runtime_error("parquet_debug_write_datetime_fixture: " + st.ToString());
+		};
+
+		std::shared_ptr<arrow::DataType> value_type;
+		std::shared_ptr<arrow::Array> array;
+		parquet::ArrowWriterProperties::Builder arrow_writer_builder;
+		arrow_writer_builder.store_schema();
+
+		// Five instants a few years apart, in nanoseconds since the epoch (2021-03-14T09:26:53
+		// plus fractional seconds, then +1 year steps), row 3 is Null.
+		const int64_t ns_values[5] = {
+			1615714013123456789LL, 1647250013123456789LL, 0LL, 1710408413123456789LL, 1741944413123456789LL};
+
+		if (v == "int96")
+		{
+			value_type = arrow::timestamp(arrow::TimeUnit::NANO);
+			arrow::TimestampBuilder builder(value_type, arrow::default_memory_pool());
+			for (int i = 0; i < 5; ++i)
+			{
+				if (i == 2) check(builder.AppendNull());
+				else check(builder.Append(ns_values[i]));
+			}
+			check(builder.Finish(&array));
+			arrow_writer_builder.enable_deprecated_int96_timestamps();
+		}
+		else if (v == "tz")
+		{
+			value_type = arrow::timestamp(arrow::TimeUnit::MICRO, "America/New_York");
+			arrow::TimestampBuilder builder(value_type, arrow::default_memory_pool());
+			for (int i = 0; i < 5; ++i)
+			{
+				if (i == 2) check(builder.AppendNull());
+				else check(builder.Append(ns_values[i]/1000LL));
+			}
+			check(builder.Finish(&array));
+		}
+		else
+		{
+			throw std::runtime_error("parquet_debug_write_datetime_fixture: unknown variant: " + v);
+		}
+
+		auto field = arrow::field(column_name, value_type, /*nullable=*/true);
+		auto schema = arrow::schema({field});
+		auto table = arrow::Table::Make(schema, {array});
+
+		auto outfile_result = arrow::io::FileOutputStream::Open(path);
+		if (!outfile_result.ok())
+			throw std::runtime_error("parquet_debug_write_datetime_fixture: failed to open '" +
+				std::string(path) + "': " + outfile_result.status().ToString());
+		auto outfile = outfile_result.ValueOrDie();
+
+		auto arrow_writer_properties = arrow_writer_builder.build();
+		auto writer_properties = parquet::WriterProperties::Builder().build();
 		auto status = parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile,
 			table->num_rows(), writer_properties, arrow_writer_properties);
 		check(status);

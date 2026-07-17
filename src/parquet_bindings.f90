@@ -69,6 +69,18 @@ module parquet_bindings
     public :: parquet_read_float32_array_column_chunk, parquet_read_float64_array_column_chunk
     public :: parquet_read_bool8_array_column_chunk, parquet_read_string_array_column_chunk
     public :: parquet_read_string_column_chunk_buffers
+    ! Temporal (parquet_temporal: date/time/timestamp) bindings.
+    public :: parquet_append_date_column, parquet_append_time_column, parquet_append_timestamp_column
+    public :: parquet_append_date_column_chunk, parquet_append_time_column_chunk, parquet_append_timestamp_column_chunk
+    public :: parquet_read_date_column, parquet_read_time_column, parquet_read_timestamp_column
+    public :: parquet_read_date_array_column, parquet_read_time_array_column, parquet_read_timestamp_array_column
+    public :: parquet_read_date_column_chunk, parquet_read_time_column_chunk, parquet_read_timestamp_column_chunk
+    public :: parquet_read_date_array_column_chunk, parquet_read_time_array_column_chunk
+    public :: parquet_read_timestamp_array_column_chunk
+    public :: parquet_read_date_array_row, parquet_read_time_array_row, parquet_read_timestamp_array_row
+    public :: parquet_read_date_array_element, parquet_read_time_array_element, parquet_read_timestamp_array_element
+    public :: parquet_reader_get_column_time_unit
+    public :: parquet_reader_get_column_timezone_length, parquet_reader_get_column_timezone
 
     interface
         !> Creates a new parquet writer for `filename` and returns its opaque handle.
@@ -1086,6 +1098,348 @@ module parquet_bindings
             type(c_ptr), intent(out) :: data
             type(c_ptr), intent(out) :: validity
             integer(c_int8_t), intent(out) :: offsets_int32
+        end subroutine
+
+        ! ================================================================================
+        ! Temporal (parquet_temporal: date/time/timestamp) bindings. See the transport note
+        ! in src/parquet_wrapper.cpp (convert_date_values / build_time_array): date crosses as
+        ! int32 days, time as int64 canonical nanoseconds-of-day, timestamp as an int64 value
+        ! in a per-column `unit` selector (1=s, 2=ms, 3=us, 4=ns, matching parquet_temporal's
+        ! parquet_unit_* constants) plus an `is_utc` flag on write / no tz on read (the tz is a
+        ! separate parquet_reader_get_column_timezone query).
+        ! ================================================================================
+
+        !> Appends a date column (scalar or col_size>1 vector) of int32 days since 1970-01-01.
+        subroutine parquet_append_date_column(writer, name, data, nrows, col_size, valid_in) &
+                bind(C, name="parquet_append_date_column")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_int32_t) :: data(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: col_size
+            type(c_ptr), value :: valid_in
+        end subroutine
+
+        !> Appends a time column of canonical int64 nanoseconds-of-day, stored in file `unit`.
+        subroutine parquet_append_time_column(writer, name, data, nrows, col_size, unit, valid_in) &
+                bind(C, name="parquet_append_time_column")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_int64_t) :: data(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: col_size
+            integer(c_int32_t), value :: unit
+            type(c_ptr), value :: valid_in
+        end subroutine
+
+        !> Appends a timestamp column of int64 values already in file `unit`; `is_utc`/=0 marks
+        !> the column UTC-adjusted (else timezone-naive).
+        subroutine parquet_append_timestamp_column(writer, name, data, nrows, col_size, unit, is_utc, valid_in) &
+                bind(C, name="parquet_append_timestamp_column")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_int64_t) :: data(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: col_size
+            integer(c_int32_t), value :: unit
+            integer(c_int32_t), value :: is_utc
+            type(c_ptr), value :: valid_in
+        end subroutine
+
+        !> Streaming (row-group-chunked) date append; col_size>1 is a vector column.
+        subroutine parquet_append_date_column_chunk(writer, name, data, col_size, valid_in) &
+                bind(C, name="parquet_write_date_column_chunk")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_int32_t) :: data(*)
+            integer(c_long_long), value :: col_size
+            type(c_ptr), value :: valid_in
+        end subroutine
+
+        !> Streaming (row-group-chunked) time append, canonical ns-of-day stored in file `unit`.
+        subroutine parquet_append_time_column_chunk(writer, name, data, col_size, unit, valid_in) &
+                bind(C, name="parquet_write_time_column_chunk")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_int64_t) :: data(*)
+            integer(c_long_long), value :: col_size
+            integer(c_int32_t), value :: unit
+            type(c_ptr), value :: valid_in
+        end subroutine
+
+        !> Streaming (row-group-chunked) timestamp append; `data` already in file `unit`.
+        subroutine parquet_append_timestamp_column_chunk(writer, name, data, col_size, unit, is_utc, valid_in) &
+                bind(C, name="parquet_write_timestamp_column_chunk")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_int64_t) :: data(*)
+            integer(c_long_long), value :: col_size
+            integer(c_int32_t), value :: unit
+            integer(c_int32_t), value :: is_utc
+            type(c_ptr), value :: valid_in
+        end subroutine
+
+        !> Reads a scalar date column into `data` (int32 days since 1970-01-01).
+        subroutine parquet_read_date_column(reader, name, data, nrows, valid_out) &
+                bind(C, name="parquet_read_date_column")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_int32_t) :: data(*)
+            integer(c_long_long), value :: nrows
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Reads a scalar time column into `data` (canonical int64 nanoseconds-of-day).
+        subroutine parquet_read_time_column(reader, name, data, nrows, valid_out) &
+                bind(C, name="parquet_read_time_column")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_int64_t) :: data(*)
+            integer(c_long_long), value :: nrows
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Reads a scalar timestamp column into `data` (int64 in the column's own unit),
+        !> reporting that unit selector via `unit_out`.
+        subroutine parquet_read_timestamp_column(reader, name, data, nrows, unit_out, valid_out) &
+                bind(C, name="parquet_read_timestamp_column")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_int64_t) :: data(*)
+            integer(c_long_long), value :: nrows
+            integer(c_int32_t), intent(out) :: unit_out
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Reads a whole vector date column into `data` (flattened, col_size per row).
+        subroutine parquet_read_date_array_column(reader, name, data, nrows, col_size, valid_out) &
+                bind(C, name="parquet_read_date_array_column")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_int32_t) :: data(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: col_size
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Reads a whole vector time column into `data`.
+        subroutine parquet_read_time_array_column(reader, name, data, nrows, col_size, valid_out) &
+                bind(C, name="parquet_read_time_array_column")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_int64_t) :: data(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: col_size
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Reads a whole vector timestamp column into `data`, reporting the unit via `unit_out`.
+        subroutine parquet_read_timestamp_array_column(reader, name, data, nrows, col_size, unit_out, valid_out) &
+                bind(C, name="parquet_read_timestamp_array_column")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_int64_t) :: data(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: col_size
+            integer(c_int32_t), intent(out) :: unit_out
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Reads one row group of a scalar date column.
+        subroutine parquet_read_date_column_chunk(reader, name, row_group, data, nrows, valid_out) &
+                bind(C, name="parquet_read_date_column_chunk")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_int32_t) :: data(*)
+            integer(c_long_long), value :: nrows
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Reads one row group of a scalar time column.
+        subroutine parquet_read_time_column_chunk(reader, name, row_group, data, nrows, valid_out) &
+                bind(C, name="parquet_read_time_column_chunk")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_int64_t) :: data(*)
+            integer(c_long_long), value :: nrows
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Reads one row group of a scalar timestamp column, reporting the unit via `unit_out`.
+        subroutine parquet_read_timestamp_column_chunk(reader, name, row_group, data, nrows, unit_out, valid_out) &
+                bind(C, name="parquet_read_timestamp_column_chunk")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_int64_t) :: data(*)
+            integer(c_long_long), value :: nrows
+            integer(c_int32_t), intent(out) :: unit_out
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Reads one row group of a vector date column.
+        subroutine parquet_read_date_array_column_chunk(reader, name, row_group, data, nrows, col_size, valid_out) &
+                bind(C, name="parquet_read_date_array_column_chunk")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_int32_t) :: data(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: col_size
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Reads one row group of a vector time column.
+        subroutine parquet_read_time_array_column_chunk(reader, name, row_group, data, nrows, col_size, valid_out) &
+                bind(C, name="parquet_read_time_array_column_chunk")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_int64_t) :: data(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: col_size
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Reads one row group of a vector timestamp column, reporting the unit via `unit_out`.
+        subroutine parquet_read_timestamp_array_column_chunk(reader, name, row_group, data, nrows, col_size, unit_out, valid_out) &
+                bind(C, name="parquet_read_timestamp_array_column_chunk")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_int64_t) :: data(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: col_size
+            integer(c_int32_t), intent(out) :: unit_out
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Reads one row's element vector of a vector date column.
+        subroutine parquet_read_date_array_row(reader, name, row_index, data, col_size, valid_out) &
+                bind(C, name="parquet_read_date_array_row")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_index
+            integer(c_int32_t) :: data(*)
+            integer(c_long_long), value :: col_size
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Reads one row's element vector of a vector time column.
+        subroutine parquet_read_time_array_row(reader, name, row_index, data, col_size, valid_out) &
+                bind(C, name="parquet_read_time_array_row")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_index
+            integer(c_int64_t) :: data(*)
+            integer(c_long_long), value :: col_size
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Reads one row's element vector of a vector timestamp column (unit via `unit_out`).
+        subroutine parquet_read_timestamp_array_row(reader, name, row_index, data, col_size, unit_out, valid_out) &
+                bind(C, name="parquet_read_timestamp_array_row")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_index
+            integer(c_int64_t) :: data(*)
+            integer(c_long_long), value :: col_size
+            integer(c_int32_t), intent(out) :: unit_out
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Reads one element position of a vector date column across all rows. `col_size` is
+        !> accepted for binding symmetry with the numeric element readers but ignored by C
+        !> (element mode resolves it internally).
+        subroutine parquet_read_date_array_element(reader, name, col_index, data, nrows, col_size, valid_out) &
+                bind(C, name="parquet_read_date_array_element")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: col_index
+            integer(c_int32_t) :: data(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: col_size
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Reads one element position of a vector time column across all rows (col_size ignored).
+        subroutine parquet_read_time_array_element(reader, name, col_index, data, nrows, col_size, valid_out) &
+                bind(C, name="parquet_read_time_array_element")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: col_index
+            integer(c_int64_t) :: data(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: col_size
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Reads one element position of a vector timestamp column across all rows (col_size
+        !> ignored), reporting the unit via `unit_out`.
+        subroutine parquet_read_timestamp_array_element(reader, name, col_index, data, nrows, col_size, unit_out, valid_out) &
+                bind(C, name="parquet_read_timestamp_array_element")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: col_index
+            integer(c_int64_t) :: data(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: col_size
+            integer(c_int32_t), intent(out) :: unit_out
+            type(c_ptr), value :: valid_out
+        end subroutine
+
+        !> Returns the parquet_unit_* selector (1..4) of a time/timestamp column `name`.
+        function parquet_reader_get_column_time_unit(reader, name) &
+                bind(C, name="parquet_reader_get_column_time_unit") result(unit)
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_int32_t) :: unit
+        end function
+
+        !> Byte length of a timestamp column's timezone string (0 for naive / a time column).
+        function parquet_reader_get_column_timezone_length(reader, name) &
+                bind(C, name="parquet_reader_get_column_timezone_length") result(strlen)
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long) :: strlen
+        end function
+
+        !> Copies a timestamp column's timezone string into `buf`.
+        subroutine parquet_reader_get_column_timezone(reader, name, buf, buf_len) &
+                bind(C, name="parquet_reader_get_column_timezone")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            character(kind=c_char) :: buf(*)
+            integer(c_long_long), value :: buf_len
         end subroutine
     end interface
 

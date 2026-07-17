@@ -10,6 +10,7 @@ ordered_subpage: error-handling.md
 ordered_subpage: thread-safety.md
 ordered_subpage: supported-data-types.md
 ordered_subpage: string-columns.md
+ordered_subpage: date-time.md
 ordered_subpage: performance.md
 ordered_subpage: troubleshooting.md
 ---
@@ -29,5 +30,6 @@ under `use parquet`), see the [modules](../lists/modules.html) and
 - [Thread safety](thread-safety.html)
 - [Supported data types](supported-data-types.html)
 - [Compact string columns with `parquet_string_column`](string-columns.html)
+- [Date, time and timestamp columns](date-time.html)
 - [Performance and memory](performance.html)
 - [Troubleshooting](troubleshooting.html)

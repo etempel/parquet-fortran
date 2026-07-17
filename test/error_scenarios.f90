@@ -12,6 +12,8 @@ program error_scenarios
     use parquet
     use parquet_maml_base, only: parquet_maml_file, get_parquet_maml
     use parquet_strings, only : parquet_string_column, parquet_string
+    use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp, &
+        parquet_unit_seconds, parquet_unit_millis, parquet_unit_nanos
     use iso_fortran_env, only : int32, int64, real32, real64
     !$ use omp_lib, only : omp_get_max_threads, omp_get_thread_num
     implicit none
@@ -190,10 +192,6 @@ program error_scenarios
         call scenario_write_column_twice_no_schema()
     case ("validate_bad_data_type")
         call scenario_validate_bad_data_type()
-    case ("validate_excluded_date_type")
-        call scenario_validate_bad_data_type_named("date")
-    case ("validate_excluded_timestamp_type")
-        call scenario_validate_bad_data_type_named("timestamp")
     case ("validate_excluded_decimal_type")
         call scenario_validate_bad_data_type_named("decimal")
     case ("validate_empty_field_name")
@@ -506,6 +504,126 @@ program error_scenarios
         call scenario_extended_decimal_nonintegral_int64()
     case ("extended_decimal_overflow_int64")
         call scenario_extended_decimal_overflow_int64()
+    case ("temporal_date_set_invalid_month")
+        call scenario_temporal_date_set_invalid_month()
+    case ("temporal_date_set_invalid_day")
+        call scenario_temporal_date_set_invalid_day()
+    case ("temporal_date_set_out_of_range")
+        call scenario_temporal_date_set_out_of_range()
+    case ("temporal_date_set_mjd_out_of_range")
+        call scenario_temporal_date_set_mjd_out_of_range()
+    case ("temporal_date_parse_invalid")
+        call scenario_temporal_date_parse_invalid()
+    case ("temporal_date_null_get")
+        call scenario_temporal_date_null_get()
+    case ("temporal_date_null_comparison")
+        call scenario_temporal_date_null_comparison()
+    case ("temporal_time_set_invalid_hour")
+        call scenario_temporal_time_set_invalid_hour()
+    case ("temporal_time_set_invalid_nanosecond")
+        call scenario_temporal_time_set_invalid_nanosecond()
+    case ("temporal_time_set_raw_out_of_range")
+        call scenario_temporal_time_set_raw_out_of_range()
+    case ("temporal_time_parse_invalid")
+        call scenario_temporal_time_parse_invalid()
+    case ("temporal_time_null_get")
+        call scenario_temporal_time_null_get()
+    case ("temporal_ts_set_invalid_day")
+        call scenario_temporal_ts_set_invalid_day()
+    case ("temporal_ts_parse_invalid")
+        call scenario_temporal_ts_parse_invalid()
+    case ("temporal_ts_null_to_unix")
+        call scenario_temporal_ts_null_to_unix()
+    case ("temporal_ts_null_comparison")
+        call scenario_temporal_ts_null_comparison()
+    case ("temporal_ts_to_unix_precision_loss")
+        call scenario_temporal_ts_to_unix_precision_loss()
+    case ("temporal_ts_to_unix_overflow")
+        call scenario_temporal_ts_to_unix_overflow()
+    case ("temporal_ts_set_mjd_out_of_range")
+        call scenario_temporal_ts_set_mjd_out_of_range()
+    case ("temporal_ts_set_raw_invalid_nanoseconds")
+        call scenario_temporal_ts_set_raw_invalid_nanoseconds()
+    case ("temporal_invalid_time_unit")
+        call scenario_temporal_invalid_time_unit()
+    case ("temporal_ts_get_year_overflow")
+        call scenario_temporal_ts_get_year_overflow()
+    case ("temporal_write_time_precision_loss")
+        call scenario_temporal_write_time_precision_loss()
+    case ("temporal_protected_col_null")
+        call scenario_temporal_protected_col_null()
+    case ("temporal_read_date_via_int32")
+        call scenario_temporal_read_date_via_int32()
+    case ("temporal_read_int32_via_date")
+        call scenario_temporal_read_int32_via_date()
+    case ("temporal_foreign_int96_roundtrip")
+        call scenario_temporal_foreign_int96_roundtrip()
+    case ("temporal_foreign_tz_roundtrip")
+        call scenario_temporal_foreign_tz_roundtrip()
+    case ("schema_add_field_date_with_unit")
+        call scenario_schema_add_field_date_with_unit()
+    case ("validate_qc_on_temporal_column")
+        call scenario_validate_qc_on_temporal_column()
+    case ("schema_add_field_seconds_unit_rejected")
+        call scenario_schema_add_field_seconds_unit_rejected()
+    case ("schema_add_field_time_utc_rejected")
+        call scenario_schema_add_field_time_utc_rejected()
+    case ("schema_add_field_unclosed_bracket_rejected")
+        call scenario_schema_add_field_unclosed_bracket_rejected()
+    case ("temporal_date_eq_null")
+        call scenario_temporal_date_eq_null()
+    case ("temporal_time_get_null")
+        call scenario_temporal_time_get_null()
+    case ("temporal_time_minute_null")
+        call scenario_temporal_time_minute_null()
+    case ("temporal_time_second_null")
+        call scenario_temporal_time_second_null()
+    case ("temporal_time_nanosecond_null")
+        call scenario_temporal_time_nanosecond_null()
+    case ("temporal_time_eq_null")
+        call scenario_temporal_time_eq_null()
+    case ("temporal_time_lt_null")
+        call scenario_temporal_time_lt_null()
+    case ("temporal_date_year_null")
+        call scenario_temporal_date_year_null()
+    case ("temporal_date_month_null")
+        call scenario_temporal_date_month_null()
+    case ("temporal_date_day_null")
+        call scenario_temporal_date_day_null()
+    case ("temporal_date_to_mjd_null")
+        call scenario_temporal_date_to_mjd_null()
+    case ("temporal_date_to_string_null")
+        call scenario_temporal_date_to_string_null()
+    case ("temporal_time_to_string_null")
+        call scenario_temporal_time_to_string_null()
+    case ("temporal_ts_set_invalid_month")
+        call scenario_temporal_ts_set_invalid_month()
+    case ("temporal_ts_set_invalid_nanosecond")
+        call scenario_temporal_ts_set_invalid_nanosecond()
+    case ("temporal_ts_get_null")
+        call scenario_temporal_ts_get_null()
+    case ("temporal_ts_get_date_range_exceeded")
+        call scenario_temporal_ts_get_date_range_exceeded()
+    case ("temporal_ts_to_unix_overflow_negative")
+        call scenario_temporal_ts_to_unix_overflow_negative()
+    case ("temporal_ts_to_mjd_null")
+        call scenario_temporal_ts_to_mjd_null()
+    case ("temporal_ts_to_string_null")
+        call scenario_temporal_ts_to_string_null()
+    case ("temporal_ts_lt_null")
+        call scenario_temporal_ts_lt_null()
+    case ("temporal_write_column_not_defined")
+        call scenario_temporal_write_column_not_defined()
+    case ("temporal_write_array_size_mismatch")
+        call scenario_temporal_write_array_size_mismatch()
+    case ("temporal_write_type_mismatch")
+        call scenario_temporal_write_type_mismatch()
+    case ("temporal_chunk_column_not_defined")
+        call scenario_temporal_chunk_column_not_defined()
+    case ("temporal_chunk_array_size_mismatch")
+        call scenario_temporal_chunk_array_size_mismatch()
+    case ("temporal_chunk_type_mismatch")
+        call scenario_temporal_chunk_type_mismatch()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -1450,11 +1568,12 @@ contains
         call parquet_validate_maml(maml)
     end subroutine scenario_validate_bad_data_type
 
-    !> Locks in the specific type exclusions documented in the README's
-    !> Limitations section (no date/timestamp/decimal support): unlike
-    !> scenario_validate_bad_data_type's generic garbage token, this uses the
-    !> real excluded type name, so a future accidental addition of one of
-    !> these types to valid_maml_data_types would be caught here.
+    !> Locks in the "decimal" type exclusion documented in the README's Limitations section
+    !> (date/timestamp were also excluded here once, but are now supported -- see
+    !> src/parquet_temporal.f90 -- so those two cases were removed from this scenario): unlike
+    !> scenario_validate_bad_data_type's generic garbage token, this uses the real excluded type
+    !> name, so a future accidental addition of "decimal" to valid_maml_data_types would be
+    !> caught here.
     subroutine scenario_validate_bad_data_type_named(type_name)
         character(len=*), intent(in) :: type_name
         type(parquet_maml_file) :: maml
@@ -4538,5 +4657,671 @@ contains
         call parquet_close_reader(reader)
         print '(a)', "unexpectedly read a STRING_VIEW column into a compact parquet_string_column"
     end subroutine scenario_string_view_compact_read_unsupported
+
+    !> parquet_date: set with a month outside 1..12 aborts.
+    subroutine scenario_temporal_date_set_invalid_month()
+        type(parquet_date) :: d
+        call d%set(2024, 13, 1)   ! month 13 -> aborts
+        print '(a)', "unexpectedly accepted month 13"
+    end subroutine scenario_temporal_date_set_invalid_month
+
+    !> parquet_date: set with a day invalid for its month/year aborts (1900 is not a leap year).
+    subroutine scenario_temporal_date_set_invalid_day()
+        type(parquet_date) :: d
+        call d%set(1900, 2, 29)   ! century non-leap -> aborts
+        print '(a)', "unexpectedly accepted 1900-02-29"
+    end subroutine scenario_temporal_date_set_invalid_day
+
+    !> parquet_date: set with a year whose day count exceeds the int32 range aborts.
+    subroutine scenario_temporal_date_set_out_of_range()
+        type(parquet_date) :: d
+        call d%set(6000000, 1, 1)   ! ~2.2e9 days > huge(int32) -> aborts
+        print '(a)', "unexpectedly accepted a date beyond the representable range"
+    end subroutine scenario_temporal_date_set_out_of_range
+
+    !> parquet_date: set_mjd beyond the int32 day range aborts.
+    subroutine scenario_temporal_date_set_mjd_out_of_range()
+        type(parquet_date) :: d
+        call d%set_mjd(3000000000_int64)   ! beyond huge(int32) days -> aborts
+        print '(a)', "unexpectedly accepted an out-of-range MJD"
+    end subroutine scenario_temporal_date_set_mjd_out_of_range
+
+    !> parquet_date: parse failure without the optional success argument aborts.
+    subroutine scenario_temporal_date_parse_invalid()
+        type(parquet_date) :: d
+        call d%parse("not-a-date")   ! no success= -> aborts
+        print '(a)', "unexpectedly parsed garbage as a date"
+    end subroutine scenario_temporal_date_parse_invalid
+
+    !> parquet_date: a semantic accessor (get) on a null element aborts.
+    subroutine scenario_temporal_date_null_get()
+        type(parquet_date) :: d   ! default-initialized -> null
+        integer(int32) :: y, m, dd
+        call d%get(y, m, dd)   ! null -> aborts
+        print '(a,3i0)', "unexpectedly read a null date: ", y, m, dd
+    end subroutine scenario_temporal_date_null_get
+
+    !> parquet_date: comparing against a null element aborts.
+    subroutine scenario_temporal_date_null_comparison()
+        type(parquet_date) :: a, b
+        logical :: res
+        call a%set(2024, 7, 16)   ! b stays null
+        res = a < b   ! null operand -> aborts
+        print '(a,l1)', "unexpectedly compared against a null date: ", res
+    end subroutine scenario_temporal_date_null_comparison
+
+    !> parquet_time: set with an hour outside 0..23 aborts.
+    subroutine scenario_temporal_time_set_invalid_hour()
+        type(parquet_time) :: t
+        call t%set(24, 0, 0)   ! hour 24 -> aborts
+        print '(a)', "unexpectedly accepted hour 24"
+    end subroutine scenario_temporal_time_set_invalid_hour
+
+    !> parquet_time: set with a nanosecond part outside 0..999999999 aborts.
+    subroutine scenario_temporal_time_set_invalid_nanosecond()
+        type(parquet_time) :: t
+        call t%set(12, 0, 0, 1000000000)   ! 1e9 ns -> aborts
+        print '(a)', "unexpectedly accepted nanosecond 1000000000"
+    end subroutine scenario_temporal_time_set_invalid_nanosecond
+
+    !> parquet_time: set_raw with a value outside a day aborts.
+    subroutine scenario_temporal_time_set_raw_out_of_range()
+        type(parquet_time) :: t
+        call t%set_raw(86400000000000_int64)   ! == a full day -> aborts
+        print '(a)', "unexpectedly accepted an out-of-day raw time"
+    end subroutine scenario_temporal_time_set_raw_out_of_range
+
+    !> parquet_time: parse failure without the optional success argument aborts.
+    subroutine scenario_temporal_time_parse_invalid()
+        type(parquet_time) :: t
+        call t%parse("25:99:99")   ! no success= -> aborts
+        print '(a)', "unexpectedly parsed garbage as a time"
+    end subroutine scenario_temporal_time_parse_invalid
+
+    !> parquet_time: a semantic accessor (hour) on a null element aborts.
+    subroutine scenario_temporal_time_null_get()
+        type(parquet_time) :: t   ! default-initialized -> null
+        integer(int32) :: h
+        h = t%hour()   ! null -> aborts
+        print '(a,i0)', "unexpectedly read a null time: ", h
+    end subroutine scenario_temporal_time_null_get
+
+    !> parquet_timestamp: set with a day invalid for its month aborts.
+    subroutine scenario_temporal_ts_set_invalid_day()
+        type(parquet_timestamp) :: ts
+        call ts%set(2024, 2, 30, 0, 0, 0)   ! Feb 30 -> aborts
+        print '(a)', "unexpectedly accepted 2024-02-30"
+    end subroutine scenario_temporal_ts_set_invalid_day
+
+    !> parquet_timestamp: parse failure without the optional success argument aborts.
+    subroutine scenario_temporal_ts_parse_invalid()
+        type(parquet_timestamp) :: ts
+        call ts%parse("2024-07-16")   ! date without time, no success= -> aborts
+        print '(a)', "unexpectedly parsed a timeless string as a timestamp"
+    end subroutine scenario_temporal_ts_parse_invalid
+
+    !> parquet_timestamp: to_unix on a null element aborts.
+    subroutine scenario_temporal_ts_null_to_unix()
+        type(parquet_timestamp) :: ts   ! default-initialized -> null
+        integer(int64) :: v
+        v = ts%to_unix(parquet_unit_seconds)   ! null -> aborts
+        print '(a,i0)', "unexpectedly converted a null timestamp: ", v
+    end subroutine scenario_temporal_ts_null_to_unix
+
+    !> parquet_timestamp: comparing against a null element aborts.
+    subroutine scenario_temporal_ts_null_comparison()
+        type(parquet_timestamp) :: a, b
+        logical :: res
+        call a%set(2024, 7, 16, 0, 0, 0)   ! b stays null
+        res = a == b   ! null operand -> aborts
+        print '(a,l1)', "unexpectedly compared against a null timestamp: ", res
+    end subroutine scenario_temporal_ts_null_comparison
+
+    !> parquet_timestamp: to_unix into a coarser unit than the value carries aborts by default.
+    subroutine scenario_temporal_ts_to_unix_precision_loss()
+        type(parquet_timestamp) :: ts
+        integer(int64) :: v
+        call ts%set(2024, 7, 16, 0, 0, 0, 123456789)
+        v = ts%to_unix(parquet_unit_millis)   ! sub-millisecond precision, no exact=.false. -> aborts
+        print '(a,i0)', "unexpectedly lost precision silently: ", v
+    end subroutine scenario_temporal_ts_to_unix_precision_loss
+
+    !> parquet_timestamp: to_unix whose result does not fit int64 in the requested unit aborts.
+    subroutine scenario_temporal_ts_to_unix_overflow()
+        type(parquet_timestamp) :: ts
+        integer(int64) :: v
+        call ts%set(3000, 1, 1, 0, 0, 0)   ! year 3000 in nanoseconds overflows int64
+        v = ts%to_unix(parquet_unit_nanos)   ! -> aborts
+        print '(a,i0)', "unexpectedly overflowed silently: ", v
+    end subroutine scenario_temporal_ts_to_unix_overflow
+
+    !> parquet_timestamp: set_mjd beyond the representable range aborts.
+    subroutine scenario_temporal_ts_set_mjd_out_of_range()
+        type(parquet_timestamp) :: ts
+        call ts%set_mjd(2.0e14_real64)   ! beyond the int64 seconds range -> aborts
+        print '(a)', "unexpectedly accepted an out-of-range MJD"
+    end subroutine scenario_temporal_ts_set_mjd_out_of_range
+
+    !> parquet_timestamp: set_raw with a non-normalized nanosecond part aborts.
+    subroutine scenario_temporal_ts_set_raw_invalid_nanoseconds()
+        type(parquet_timestamp) :: ts
+        call ts%set_raw(0_int64, -1_int32)   ! ns must be 0..999999999 -> aborts
+        print '(a)', "unexpectedly accepted a negative nanosecond part"
+    end subroutine scenario_temporal_ts_set_raw_invalid_nanoseconds
+
+    !> parquet_temporal: an unrecognized time-unit selector aborts.
+    subroutine scenario_temporal_invalid_time_unit()
+        type(parquet_timestamp) :: ts
+        integer(int64) :: v
+        call ts%set(2024, 7, 16, 0, 0, 0)
+        v = ts%to_unix(99)   ! not a parquet_unit_* constant -> aborts
+        print '(a,i0)', "unexpectedly accepted an invalid unit: ", v
+    end subroutine scenario_temporal_invalid_time_unit
+
+    !> parquet_timestamp: get on an instant whose civil year exceeds int32 aborts (to_string,
+    !> which prints the year in full, still works for such instants -- get's int32 year cannot).
+    subroutine scenario_temporal_ts_get_year_overflow()
+        type(parquet_timestamp) :: ts
+        integer(int32) :: y, mo, d, h, mi, s
+        call ts%set_unix(huge(0_int64), parquet_unit_seconds)   ! year ~2.9e11 > huge(int32)
+        call ts%get(y, mo, d, h, mi, s)   ! -> aborts
+        print '(a,i0)', "unexpectedly returned an overflowed year: ", y
+    end subroutine scenario_temporal_ts_get_year_overflow
+
+    !> Writing a parquet_time value with sub-unit precision (nanoseconds) into a column
+    !> declared time[ms] aborts -- this precision check lives entirely on the C++ side
+    !> (build_time_array in parquet_wrapper.cpp), unlike parquet_timestamp's own to_unix, which
+    !> already guards this at the Fortran level (see the temporal_ts_to_unix_precision_loss
+    !> scenario) -- so this is genuinely separate coverage, not a duplicate.
+    subroutine scenario_temporal_write_time_precision_loss()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_time) :: values(1)
+
+        schema%maml%lines = [character(len=32) :: &
+            "table: t", &
+            "fields:", &
+            "- name: clock", &
+            "  data_type: time[ms]" ]
+        call parquet_parse_maml(schema)
+        call values(1)%set(12, 0, 0, 123456789)   ! full nanosecond precision, declared unit is ms
+
+        call parquet_open_writer(writer, "test_run/error_scenario_time_precision_loss.parquet", schema)
+        call parquet_write_column(writer, "clock", values)   ! -> aborts (C++ build_time_array)
+        print '(a)', "unexpectedly wrote a sub-millisecond time value into a time[ms] column"
+    end subroutine scenario_temporal_write_time_precision_loss
+
+    !> Writing a null parquet_timestamp element into a MAML-protected column aborts, exactly
+    !> like the existing (numeric) protected_cols enforcement -- exercised here for the temporal
+    !> write path's own validity-gathering (temporal_valid_ptr in parquet_write.f90).
+    subroutine scenario_temporal_protected_col_null()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_timestamp) :: values(2)
+
+        schema%maml%lines = [character(len=32) :: &
+            "table: t", &
+            "extra:", &
+            "  protected_cols: ev", &
+            "fields:", &
+            "- name: ev", &
+            "  data_type: timestamp" ]
+        call parquet_parse_maml(schema)
+        call values(1)%set(2024, 7, 16, 0, 0, 0)
+        call values(2)%set_null()
+
+        call parquet_open_writer(writer, "test_run/error_scenario_protected_null.parquet", schema)
+        call parquet_write_column(writer, "ev", values)   ! -> aborts (protected column has a Null)
+        print '(a)', "unexpectedly wrote a Null into a protected timestamp column"
+    end subroutine scenario_temporal_protected_col_null
+
+    !> Reading a DATE column via the plain int32 parquet_read_column entry point aborts (strict
+    !> typing: a temporal column is only readable through its matching parquet_date/time/timestamp
+    !> type, per CLAUDE.md's "Strict reads" decision).
+    subroutine scenario_temporal_read_date_via_int32()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_date) :: dvals(1)
+        integer(int32) :: ivals(1)
+        character(len=*), parameter :: out_file = "test_run/error_scenario_read_date_via_int32.parquet"
+
+        call dvals(1)%set(2024, 7, 16)
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "d", dvals)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "d", ivals)   ! -> aborts (type mismatch: expected int, got date)
+        print '(a,i0)', "unexpectedly read a date column as int32: ", ivals(1)
+    end subroutine scenario_temporal_read_date_via_int32
+
+    !> The converse of the previous scenario: reading a plain int32 column via the
+    !> parquet_date-typed entry point aborts too (strict typing both directions).
+    subroutine scenario_temporal_read_int32_via_date()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: ivals(1) = [42_int32]
+        type(parquet_date) :: dvals(1)
+        character(len=*), parameter :: out_file = "test_run/error_scenario_read_int32_via_date.parquet"
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "n", ivals)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "n", dvals)   ! -> aborts (type mismatch: expected date, got int32)
+        print '(a)', "unexpectedly read an int32 column as a date"
+    end subroutine scenario_temporal_read_int32_via_date
+
+    !> Reads back a legacy INT96-encoded timestamp column (nanosecond precision), built directly
+    !> via parquet_debug_write_datetime_fixture since this library's own writer never produces
+    !> INT96 -- see that hook's own comment in parquet_wrapper.cpp. Arrow decodes INT96 to
+    !> timestamp[ns] transparently, so this exercises that read path plus the Null in row 3.
+    !> A control scenario ("ok"-like: exits cleanly), asserting via error stop on any mismatch.
+    subroutine scenario_temporal_foreign_int96_roundtrip()
+        interface
+            subroutine parquet_debug_write_datetime_fixture(path, column_name, variant) &
+                    bind(C, name="parquet_debug_write_datetime_fixture")
+                use iso_c_binding, only : c_char
+                character(kind=c_char) :: path(*)
+                character(kind=c_char) :: column_name(*)
+                character(kind=c_char) :: variant(*)
+            end subroutine parquet_debug_write_datetime_fixture
+        end interface
+        type(parquet_reader) :: reader
+        type(parquet_timestamp) :: values(5)
+        character(len=*), parameter :: out_file = "test_run/error_scenario_int96_fixture.parquet"
+        integer :: unit
+        integer(int64) :: ns_expected(5) = [1615714013123456789_int64, 1647250013123456789_int64, &
+            0_int64, 1710408413123456789_int64, 1741944413123456789_int64]
+        integer :: i
+
+        call parquet_debug_write_datetime_fixture(out_file//char(0), "ev"//char(0), "int96"//char(0))
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "ev", values)
+        call parquet_get_column_time_info(reader, "ev", unit=unit)
+        call parquet_close_reader(reader)
+
+        if (unit /= parquet_unit_nanos) error stop "INT96 fixture: expected unit=nanos"
+        do i = 1, 5
+            if (i == 3) then
+                if (.not. values(i)%is_null()) error stop "INT96 fixture: row 3 should be Null"
+            else
+                if (values(i)%is_null()) error stop "INT96 fixture: unexpected Null"
+                if (values(i)%to_unix(parquet_unit_nanos) /= ns_expected(i)) &
+                    error stop "INT96 fixture: value mismatch"
+            end if
+        end do
+    end subroutine scenario_temporal_foreign_int96_roundtrip
+
+    !> Reads back a real, non-UTC IANA timezone ("America/New_York") -- this library's own
+    !> writer only ever produces UTC or naive (no explicit tz), so this exercises the general
+    !> tz-string path of parquet_get_column_time_info against a file from another Arrow-based
+    !> tool. Control scenario, same assert-via-error-stop convention as the INT96 one above.
+    subroutine scenario_temporal_foreign_tz_roundtrip()
+        interface
+            subroutine parquet_debug_write_datetime_fixture(path, column_name, variant) &
+                    bind(C, name="parquet_debug_write_datetime_fixture")
+                use iso_c_binding, only : c_char
+                character(kind=c_char) :: path(*)
+                character(kind=c_char) :: column_name(*)
+                character(kind=c_char) :: variant(*)
+            end subroutine parquet_debug_write_datetime_fixture
+        end interface
+        type(parquet_reader) :: reader
+        type(parquet_timestamp) :: values(5)
+        character(len=*), parameter :: out_file = "test_run/error_scenario_tz_fixture.parquet"
+        integer :: unit
+        character(len=:), allocatable :: tz
+
+        call parquet_debug_write_datetime_fixture(out_file//char(0), "ev"//char(0), "tz"//char(0))
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "ev", values)
+        call parquet_get_column_time_info(reader, "ev", unit=unit, timezone=tz)
+        call parquet_close_reader(reader)
+
+        if (unit /= parquet_unit_micros) error stop "tz fixture: expected unit=micros"
+        if (tz /= "America/New_York") error stop "tz fixture: expected tz='America/New_York', got '"//tz//"'"
+        if (.not. values(3)%is_null()) error stop "tz fixture: row 3 should be Null"
+        if (values(1)%is_null()) error stop "tz fixture: row 1 should not be Null"
+    end subroutine scenario_temporal_foreign_tz_roundtrip
+
+    !> schema%add_field rejects "date" with a unit/utc suffix -- date is unitless (see
+    !> parquet_parse_temporal_type in parquet_metadata.f90).
+    subroutine scenario_schema_add_field_date_with_unit()
+        type(parquet_schema) :: schema
+
+        call schema%init(table="t")
+        call schema%add_field("x", "date[us]")
+        print '(a)', "unexpectedly added a date field with a unit suffix without error"
+    end subroutine scenario_schema_add_field_date_with_unit
+
+    !> parquet_validate_maml rejects qc: min:/max: on a date/time/timestamp field -- qc is not
+    !> supported for temporal columns yet (deferred scope, see feature_temporal.md).
+    subroutine scenario_validate_qc_on_temporal_column()
+        type(parquet_maml_file) :: maml
+
+        maml%lines = [character(len=32) :: &
+            "table: t", &
+            "fields:", &
+            "- name: ev", &
+            "  data_type: timestamp", &
+            "  qc:", &
+            "    min: '>=0'" ]
+        call parquet_validate_maml(maml)
+        print '(a)', "unexpectedly accepted qc: on a timestamp field"
+    end subroutine scenario_validate_qc_on_temporal_column
+
+    !> schema%add_field rejects "timestamp[s]"/an explicit seconds unit -- Parquet's physical
+    !> format has no seconds-resolution TIME/TIMESTAMP encoding (only MILLIS/MICROS/NANOS), so
+    !> honoring a declared "s" unit is impossible; see apply_temporal_unit_token's own comment
+    !> in parquet_metadata.f90 for the silent-mismatch bug this specifically prevents.
+    subroutine scenario_schema_add_field_seconds_unit_rejected()
+        type(parquet_schema) :: schema
+
+        call schema%init(table="t")
+        call schema%add_field("x", "timestamp[s]")
+        print '(a)', "unexpectedly added a timestamp[s] field without error"
+    end subroutine scenario_schema_add_field_seconds_unit_rejected
+
+    !> schema%add_field rejects "time[utc]" -- the ",utc" suffix is only meaningful for
+    !> "timestamp" (a UTC-adjusted instant); "time" (a time-of-day with no date part) has no
+    !> timezone concept, so this exercises apply_temporal_unit_token's allow_utc=.false. branch.
+    subroutine scenario_schema_add_field_time_utc_rejected()
+        type(parquet_schema) :: schema
+
+        call schema%init(table="t")
+        call schema%add_field("x", "time[ms,utc]")
+        print '(a)', "unexpectedly added a time[ms,utc] field without error"
+    end subroutine scenario_schema_add_field_time_utc_rejected
+
+    !> schema%add_field rejects a malformed/unclosed unit bracket ("time[ms", no closing "]")
+    !> -- exercises parse_temporal_suffix's has_bracket-but-not-closed guard in
+    !> parquet_metadata.f90.
+    subroutine scenario_schema_add_field_unclosed_bracket_rejected()
+        type(parquet_schema) :: schema
+
+        call schema%init(table="t")
+        call schema%add_field("x", "time[ms")
+        print '(a)', "unexpectedly added a time[ms (unclosed bracket) field without error"
+    end subroutine scenario_schema_add_field_unclosed_bracket_rejected
+
+    !> parquet_date: operator(==) with a null operand aborts (distinct from operator(<), which
+    !> is separately tested by scenario_temporal_date_null_comparison -- date_le/gt/ge delegate
+    !> to date_lt internally, and date_ne delegates to date_eq, so == and < together cover all
+    !> six operators' own guards).
+    subroutine scenario_temporal_date_eq_null()
+        type(parquet_date) :: a, b
+        logical :: res
+        call a%set(2024, 7, 16)   ! b stays null
+        res = a == b   ! null operand -> aborts
+        print '(a,l1)', "unexpectedly compared against a null date: ", res
+    end subroutine scenario_temporal_date_eq_null
+
+    !> parquet_time: get on a null element aborts (distinct from %hour(), already tested by
+    !> scenario_temporal_time_null_get).
+    subroutine scenario_temporal_time_get_null()
+        type(parquet_time) :: t   ! default-initialized -> null
+        integer(int32) :: h, mi, s
+        call t%get(h, mi, s)   ! null -> aborts
+        print '(a,3i0)', "unexpectedly read a null time: ", h, mi, s
+    end subroutine scenario_temporal_time_get_null
+
+    subroutine scenario_temporal_time_minute_null()
+        type(parquet_time) :: t
+        integer(int32) :: mi
+        mi = t%minute()   ! null -> aborts
+        print '(a,i0)', "unexpectedly read a null time minute: ", mi
+    end subroutine scenario_temporal_time_minute_null
+
+    subroutine scenario_temporal_time_second_null()
+        type(parquet_time) :: t
+        integer(int32) :: s
+        s = t%second()   ! null -> aborts
+        print '(a,i0)', "unexpectedly read a null time second: ", s
+    end subroutine scenario_temporal_time_second_null
+
+    subroutine scenario_temporal_time_nanosecond_null()
+        type(parquet_time) :: t
+        integer(int32) :: ns
+        ns = t%nanosecond()   ! null -> aborts
+        print '(a,i0)', "unexpectedly read a null time nanosecond: ", ns
+    end subroutine scenario_temporal_time_nanosecond_null
+
+    !> parquet_time: operator(==) with a null operand aborts.
+    subroutine scenario_temporal_time_eq_null()
+        type(parquet_time) :: a, b
+        logical :: res
+        call a%set(12, 0, 0)   ! b stays null
+        res = a == b   ! null operand -> aborts
+        print '(a,l1)', "unexpectedly compared against a null time: ", res
+    end subroutine scenario_temporal_time_eq_null
+
+    !> parquet_time: operator(<) with a null operand aborts.
+    subroutine scenario_temporal_time_lt_null()
+        type(parquet_time) :: a, b
+        logical :: res
+        call a%set(12, 0, 0)   ! b stays null
+        res = a < b   ! null operand -> aborts
+        print '(a,l1)', "unexpectedly compared against a null time: ", res
+    end subroutine scenario_temporal_time_lt_null
+
+    subroutine scenario_temporal_date_year_null()
+        type(parquet_date) :: d
+        integer(int32) :: y
+        y = d%year()   ! null -> aborts
+        print '(a,i0)', "unexpectedly read a null date year: ", y
+    end subroutine scenario_temporal_date_year_null
+
+    subroutine scenario_temporal_date_month_null()
+        type(parquet_date) :: d
+        integer(int32) :: m
+        m = d%month()   ! null -> aborts
+        print '(a,i0)', "unexpectedly read a null date month: ", m
+    end subroutine scenario_temporal_date_month_null
+
+    subroutine scenario_temporal_date_day_null()
+        type(parquet_date) :: d
+        integer(int32) :: dd
+        dd = d%day()   ! null -> aborts
+        print '(a,i0)', "unexpectedly read a null date day: ", dd
+    end subroutine scenario_temporal_date_day_null
+
+    subroutine scenario_temporal_date_to_mjd_null()
+        type(parquet_date) :: d
+        integer(int64) :: m
+        m = d%to_mjd()   ! null -> aborts
+        print '(a,i0)', "unexpectedly read a null date to_mjd: ", m
+    end subroutine scenario_temporal_date_to_mjd_null
+
+    subroutine scenario_temporal_date_to_string_null()
+        type(parquet_date) :: d
+        character(len=:), allocatable :: s
+        call d%to_string(s)   ! null -> aborts
+        print '(a)', "unexpectedly formatted a null date: "//s
+    end subroutine scenario_temporal_date_to_string_null
+
+    subroutine scenario_temporal_time_to_string_null()
+        type(parquet_time) :: t
+        character(len=:), allocatable :: s
+        call t%to_string(s)   ! null -> aborts
+        print '(a)', "unexpectedly formatted a null time: "//s
+    end subroutine scenario_temporal_time_to_string_null
+
+    !> parquet_timestamp: set with a month outside 1..12 aborts (distinct from the day check,
+    !> already tested by scenario_temporal_ts_set_invalid_day).
+    subroutine scenario_temporal_ts_set_invalid_month()
+        type(parquet_timestamp) :: ts
+        call ts%set(2024, 13, 1, 0, 0, 0)   ! month 13 -> aborts
+        print '(a)', "unexpectedly accepted month 13"
+    end subroutine scenario_temporal_ts_set_invalid_month
+
+    subroutine scenario_temporal_ts_set_invalid_nanosecond()
+        type(parquet_timestamp) :: ts
+        call ts%set(2024, 7, 16, 0, 0, 0, 1000000000)   ! 1e9 ns -> aborts
+        print '(a)', "unexpectedly accepted nanosecond 1000000000"
+    end subroutine scenario_temporal_ts_set_invalid_nanosecond
+
+    subroutine scenario_temporal_ts_get_null()
+        type(parquet_timestamp) :: ts
+        integer(int32) :: y, mo, d, h, mi, s
+        call ts%get(y, mo, d, h, mi, s)   ! null -> aborts
+        print '(a,i0)', "unexpectedly read a null timestamp: ", y
+    end subroutine scenario_temporal_ts_get_null
+
+    !> parquet_timestamp%get_date aborts if the date part falls outside parquet_date's
+    !> representable range (+-5.8 million years) -- reachable since parquet_timestamp itself
+    !> spans a far larger range (+-292 billion years) than parquet_date can.
+    subroutine scenario_temporal_ts_get_date_range_exceeded()
+        type(parquet_timestamp) :: ts
+        type(parquet_date) :: d
+        call ts%set_unix(huge(0_int64), parquet_unit_seconds)   ! year ~2.9e11, far beyond parquet_date
+        d = ts%get_date()   ! -> aborts
+        print '(a,i0)', "unexpectedly converted an out-of-range date part: ", d%raw()
+    end subroutine scenario_temporal_ts_get_date_range_exceeded
+
+    !> parquet_timestamp%to_unix overflow with a large-magnitude NEGATIVE (far pre-epoch)
+    !> instant -- distinct code branch from scenario_temporal_ts_to_unix_overflow, which only
+    !> exercises the positive-seconds overflow check.
+    subroutine scenario_temporal_ts_to_unix_overflow_negative()
+        type(parquet_timestamp) :: ts
+        integer(int64) :: v
+        call ts%set_raw(-9223372037_int64, 0)   ! seconds < INT64_MIN/1e9 -> overflows in nanos
+        v = ts%to_unix(parquet_unit_nanos)   ! -> aborts
+        print '(a,i0)', "unexpectedly overflowed silently (negative branch): ", v
+    end subroutine scenario_temporal_ts_to_unix_overflow_negative
+
+    subroutine scenario_temporal_ts_to_mjd_null()
+        type(parquet_timestamp) :: ts
+        real(real64) :: m
+        m = ts%to_mjd()   ! null -> aborts
+        print '(a,f0.3)', "unexpectedly read a null timestamp to_mjd: ", m
+    end subroutine scenario_temporal_ts_to_mjd_null
+
+    subroutine scenario_temporal_ts_to_string_null()
+        type(parquet_timestamp) :: ts
+        character(len=:), allocatable :: s
+        call ts%to_string(s)   ! null -> aborts
+        print '(a)', "unexpectedly formatted a null timestamp: "//s
+    end subroutine scenario_temporal_ts_to_string_null
+
+    !> parquet_timestamp: operator(<) with a null operand aborts (distinct from operator(==),
+    !> already tested by scenario_temporal_ts_null_comparison).
+    subroutine scenario_temporal_ts_lt_null()
+        type(parquet_timestamp) :: a, b
+        logical :: res
+        call a%set(2024, 7, 16, 0, 0, 0)   ! b stays null
+        res = a < b   ! null operand -> aborts
+        print '(a,l1)', "unexpectedly compared against a null timestamp: ", res
+    end subroutine scenario_temporal_ts_lt_null
+
+    !> Writing a temporal column not declared in the schema aborts (parquet_write_column's
+    !> schema-enforcement preamble, temporal_write_preamble in parquet_write.f90).
+    subroutine scenario_temporal_write_column_not_defined()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_date) :: values(1)
+
+        call schema%init(table="t")
+        call schema%add_field("day", "date")
+        call parquet_parse_maml(schema)
+        call values(1)%set(2024, 7, 16)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_temporal_write_undefined.parquet", schema)
+        call parquet_write_column(writer, "not_a_real_column", values)   ! -> aborts
+        print '(a)', "unexpectedly wrote an undeclared temporal column"
+    end subroutine scenario_temporal_write_column_not_defined
+
+    !> Writing a temporal vector column whose col_size doesn't match the schema's declared
+    !> col_size aborts.
+    subroutine scenario_temporal_write_array_size_mismatch()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_timestamp) :: values(3, 1)
+
+        call schema%init(table="t")
+        call schema%add_field("ev", "timestamp", col_size=2)
+        call parquet_parse_maml(schema)
+        call values(1,1)%set(2024, 7, 16, 0, 0, 0)
+        call values(2,1)%set(2024, 7, 16, 0, 0, 1)
+        call values(3,1)%set(2024, 7, 16, 0, 0, 2)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_temporal_write_size_mismatch.parquet", schema)
+        call parquet_write_column(writer, "ev", values)   ! col_size 3 != declared 2 -> aborts
+        print '(a)', "unexpectedly wrote a mismatched-col_size temporal column"
+    end subroutine scenario_temporal_write_array_size_mismatch
+
+    !> Writing a parquet_timestamp array against a column the schema declares as "date" aborts
+    !> (exact data_type match is required, same as any other type).
+    subroutine scenario_temporal_write_type_mismatch()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_timestamp) :: values(1)
+
+        call schema%init(table="t")
+        call schema%add_field("day", "date")
+        call parquet_parse_maml(schema)
+        call values(1)%set(2024, 7, 16, 0, 0, 0)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_temporal_write_type_mismatch.parquet", schema)
+        call parquet_write_column(writer, "day", values)   ! timestamp values into a date column -> aborts
+        print '(a)', "unexpectedly wrote a timestamp array into a date column"
+    end subroutine scenario_temporal_write_type_mismatch
+
+    !> Streaming-chunk counterpart of scenario_temporal_write_column_not_defined (exercises
+    !> temporal_chunk_preamble, not temporal_write_preamble).
+    subroutine scenario_temporal_chunk_column_not_defined()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_date) :: values(1)
+
+        call schema%init(table="t")
+        call schema%add_field("day", "date")
+        call parquet_parse_maml(schema)
+        call values(1)%set(2024, 7, 16)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_temporal_chunk_undefined.parquet", schema)
+        call parquet_new_row_group(writer, 1_int64)
+        call parquet_write_column_chunk(writer, "not_a_real_column", values)   ! -> aborts
+        print '(a)', "unexpectedly chunk-wrote an undeclared temporal column"
+    end subroutine scenario_temporal_chunk_column_not_defined
+
+    !> Streaming-chunk counterpart of scenario_temporal_write_array_size_mismatch.
+    subroutine scenario_temporal_chunk_array_size_mismatch()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_timestamp) :: values(3, 1)
+
+        call schema%init(table="t")
+        call schema%add_field("ev", "timestamp", col_size=2)
+        call parquet_parse_maml(schema)
+        call values(1,1)%set(2024, 7, 16, 0, 0, 0)
+        call values(2,1)%set(2024, 7, 16, 0, 0, 1)
+        call values(3,1)%set(2024, 7, 16, 0, 0, 2)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_temporal_chunk_size_mismatch.parquet", schema)
+        call parquet_new_row_group(writer, 1_int64)
+        call parquet_write_column_chunk(writer, "ev", values)   ! col_size 3 != declared 2 -> aborts
+        print '(a)', "unexpectedly chunk-wrote a mismatched-col_size temporal column"
+    end subroutine scenario_temporal_chunk_array_size_mismatch
+
+    !> Streaming-chunk counterpart of scenario_temporal_write_type_mismatch.
+    subroutine scenario_temporal_chunk_type_mismatch()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_timestamp) :: values(1)
+
+        call schema%init(table="t")
+        call schema%add_field("day", "date")
+        call parquet_parse_maml(schema)
+        call values(1)%set(2024, 7, 16, 0, 0, 0)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_temporal_chunk_type_mismatch.parquet", schema)
+        call parquet_new_row_group(writer, 1_int64)
+        call parquet_write_column_chunk(writer, "day", values)   ! timestamp values into a date column -> aborts
+        print '(a)', "unexpectedly chunk-wrote a timestamp array into a date column"
+    end subroutine scenario_temporal_chunk_type_mismatch
 
 end program error_scenarios

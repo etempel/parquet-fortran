@@ -166,8 +166,6 @@ contains
     end subroutine maml_name_suffix
 
     module procedure schema_add_field
-        logical :: type_ok
-        integer :: j
         character(len=:), allocatable :: miss_low
         character(len=32) :: buf
         logical :: have_qc_min, have_qc_max, have_qc_miss
@@ -188,14 +186,7 @@ contains
             error stop "parquet_schema%add_field: duplicate field name '" // trim(name) // "'" // name_suffix
         end if
 
-        type_ok = .false.
-        do j = 1, size(valid_maml_data_types)
-            if (trim(data_type) == trim(valid_maml_data_types(j))) then
-                type_ok = .true.
-                exit
-            end if
-        end do
-        if (.not. type_ok) then
+        if (.not. parquet_data_type_token_valid(data_type)) then
             call maml_name_suffix(this%maml, name_suffix)
             error stop "parquet_schema%add_field: field '" // trim(name) // "' has invalid data_type '" // &
                 trim(data_type) // "'" // name_suffix
@@ -318,6 +309,141 @@ contains
 
     end procedure schema_add_field
 
+    !> Applies one comma-separated suffix token (a unit s/ms/us/ns, or "utc") to a temporal
+    !> type's accumulating unit/utc/validity; an unrecognized token, or "utc" on a non-timestamp
+    !> (allow_utc=.false.), sets valid=.false.
+    subroutine apply_temporal_unit_token(tok, allow_utc, unit_sel, is_utc, valid)
+        character(len=*), intent(in) :: tok !! one lowercased, trimmed suffix token.
+        logical, intent(in) :: allow_utc !! .true. only for timestamp (time has no timezone).
+        integer, intent(inout) :: unit_sel !! accumulating unit selector.
+        logical, intent(inout) :: is_utc !! accumulating UTC flag.
+        logical, intent(inout) :: valid !! cleared on an unrecognized/misplaced token.
+        select case (tok)
+        ! "s"/"sec"/"seconds" is deliberately NOT accepted here: Parquet's physical format has
+        ! no seconds-resolution TIME/TIMESTAMP encoding at all (the format's own TimeUnit is
+        ! MILLIS/MICROS/NANOS only) -- Arrow's writer silently downgrades a SECOND-unit column to
+        ! MILLIS on write with no error, which would make a declared "timestamp[s]"/"time[s]"
+        ! column silently report a different unit than declared once written. Rejecting it here
+        ! (an "invalid data_type" error, same as any other malformed unit) fails fast instead of
+        ! producing that silent mismatch. parquet_unit_seconds itself is still valid/useful for
+        ! set_unix/to_unix (Unix-time interop, independent of what a file actually stores).
+        case ("ms", "milli", "millis")
+            unit_sel = parquet_unit_millis
+        case ("us", "micro", "micros")
+            unit_sel = parquet_unit_micros
+        case ("ns", "nano", "nanos")
+            unit_sel = parquet_unit_nanos
+        case ("utc")
+            if (allow_utc) then
+                is_utc = .true.
+            else
+                valid = .false.
+            end if
+        case default
+            valid = .false.
+        end select
+    end subroutine apply_temporal_unit_token
+
+    !> Parses a time/timestamp `[unit(,utc)]` suffix, defaulting to microseconds when empty.
+    subroutine parse_temporal_suffix(suffix, has_bracket, closed, allow_utc, unit_sel, is_utc, valid)
+        character(len=*), intent(in) :: suffix !! the text between [ and ] (empty if no bracket).
+        logical, intent(in) :: has_bracket !! whether a '[' was present.
+        logical, intent(in) :: closed !! whether the bracket closed with ']' at the end.
+        logical, intent(in) :: allow_utc !! .true. for timestamp; .false. for time.
+        integer, intent(out) :: unit_sel !! resolved unit selector.
+        logical, intent(inout) :: is_utc !! resolved UTC flag.
+        logical, intent(inout) :: valid !! cleared on any malformed part.
+        integer :: a, c
+        character(len=:), allocatable :: s
+
+        unit_sel = parquet_unit_micros
+        if (has_bracket .and. .not. closed) then
+            valid = .false.
+            return
+        end if
+        s = trim(adjustl(suffix))
+        if (len_trim(s) == 0) return
+        a = 1
+        do
+            c = index(s(a:), ",")
+            if (c == 0) then
+                call apply_temporal_unit_token(trim(adjustl(s(a:))), allow_utc, unit_sel, is_utc, valid)
+                exit
+            else
+                call apply_temporal_unit_token(trim(adjustl(s(a:a+c-2))), allow_utc, unit_sel, is_utc, valid)
+                a = a + c
+            end if
+        end do
+    end subroutine parse_temporal_suffix
+
+    module procedure parquet_parse_temporal_type
+        character(len=:), allocatable :: lo, base_tok, suffix
+        integer :: lb, rb
+        logical :: has_bracket, closed
+
+        is_temporal = .false.
+        valid = .true.
+        is_utc = .false.
+        unit_sel = 0
+        call parquet_to_lower(trim(adjustl(token)), lo)
+
+        lb = index(lo, "[")
+        has_bracket = lb > 0
+        if (has_bracket) then
+            rb = index(lo, "]", back=.true.)
+            closed = rb == len(lo) .and. rb > lb
+            base_tok = lo(1:lb-1)
+            if (closed) then
+                suffix = lo(lb+1:rb-1)
+            else
+                suffix = ""
+            end if
+        else
+            base_tok = lo
+            suffix = ""
+            closed = .true.
+        end if
+
+        select case (base_tok)
+        case ("date")
+            is_temporal = .true.
+            base = "date"
+            valid = .not. has_bracket ! date takes no unit/utc suffix
+        case ("timestamp")
+            is_temporal = .true.
+            base = "timestamp"
+            call parse_temporal_suffix(suffix, has_bracket, closed, .true., unit_sel, is_utc, valid)
+        case ("time")
+            is_temporal = .true.
+            base = "time"
+            call parse_temporal_suffix(suffix, has_bracket, closed, .false., unit_sel, is_utc, valid)
+        case default
+            base = lo
+        end select
+    end procedure parquet_parse_temporal_type
+
+    module procedure parquet_data_type_token_valid
+        character(len=:), allocatable :: base, lo
+        integer :: unit_sel, j
+        logical :: is_utc, is_temporal, valid
+
+        call parquet_parse_temporal_type(token, base, unit_sel, is_utc, is_temporal, valid)
+        if (is_temporal) then
+            parquet_data_type_token_valid = valid
+            return
+        end if
+        ! Non-temporal: an exact match against the numeric/string/boolean base tokens (same
+        ! rule the original add_field used, so behavior for those is unchanged).
+        call parquet_to_lower(trim(adjustl(token)), lo)
+        parquet_data_type_token_valid = .false.
+        do j = 1, size(valid_maml_data_types)
+            if (trim(lo) == trim(valid_maml_data_types(j))) then
+                parquet_data_type_token_valid = .true.
+                return
+            end if
+        end do
+    end procedure parquet_data_type_token_valid
+
     ! ---- parquet_schema flat convenience passthroughs ---------------------
     ! Each simply forwards to the matching procedure on %cinfo, %metadata or
     ! %maml. Absent optional arguments propagate unchanged.
@@ -429,6 +555,8 @@ contains
             merged(n_old + i)%info = maml%missing_columns(i)%info
             merged(n_old + i)%ucd = maml%missing_columns(i)%ucd
             merged(n_old + i)%data_type = maml%missing_columns(i)%data_type
+            merged(n_old + i)%time_unit = maml%missing_columns(i)%time_unit
+            merged(n_old + i)%is_utc = maml%missing_columns(i)%is_utc
             merged(n_old + i)%array_size = maml%missing_columns(i)%array_size
             merged(n_old + i)%col_size = maml%missing_columns(i)%col_size
             merged(n_old + i)%is_set = .false.
@@ -459,6 +587,9 @@ contains
         character(len=:), allocatable :: tuq1, tuq4, tuq5, tuq6, tuq7, tuq10, tuq11, tuq13, tuq14, tuq15, &
             tuq16, tuq18, tuq19, tuq20, tuq21, tuq22, tuq23, tuq24, tuq25, tuq26, tuq31, tuq32, tuq35, tuq36, &
             tuq38, tuq39, tuq40 !! scratch (unquote).
+        character(len=:), allocatable :: dt_base !! temporal base type scratch (parquet_parse_temporal_type).
+        integer :: dt_unit !! temporal unit selector scratch.
+        logical :: dt_utc, dt_is_temporal, dt_valid !! temporal utc/is-temporal/well-formed scratch.
 
         ! See g_maml_mutex in parquet_wrapper.cpp: this function's repeated
         ! "grow tmp(:), whole-array-assign the old contents in, move_alloc"
@@ -801,9 +932,20 @@ contains
                 call parquet_to_lower(tuq40, tlo41)
                 cvalue = tlo41
                 if (index(cvalue, "string") == 1) then
-                    cvalue = "string"
+                    tmp(n)%data_type = "string"
+                else
+                    ! Split a temporal token (timestamp[us,utc], time[ms], date) into its base
+                    ! type plus unit/utc; a malformed temporal token is stored verbatim so
+                    ! parquet_validate_maml rejects it (parquet_data_type_token_valid).
+                    call parquet_parse_temporal_type(cvalue, dt_base, dt_unit, dt_utc, dt_is_temporal, dt_valid)
+                    if (dt_is_temporal .and. dt_valid) then
+                        tmp(n)%data_type = dt_base
+                        tmp(n)%time_unit = dt_unit
+                        tmp(n)%is_utc = dt_utc
+                    else
+                        tmp(n)%data_type = cvalue
+                    end if
                 end if
-                tmp(n)%data_type = cvalue
             case ("array_size")
                 read(cvalue, *, iostat=ios) tmp(n)%array_size
                 if (ios /= 0) tmp(n)%array_size = 1

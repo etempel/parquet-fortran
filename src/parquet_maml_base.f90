@@ -18,7 +18,10 @@ module parquet_maml_base
         character(len=:), allocatable :: unit      !! The unit of measurement for the field.
         character(len=:), allocatable :: info      !! A short description of the field.
         character(len=:), allocatable :: ucd       !! Unified Content Descriptor for IVOA (can have many).
-        character(len=:), allocatable :: data_type !! The data type of the field [required].
+        character(len=:), allocatable :: data_type !! The data type of the field [required]; base token
+        !! only for a temporal column (unit/utc are in time_unit/is_utc).
+        integer :: time_unit = 0 !! time/timestamp stored unit (a parquet_unit_* selector; 0 if not temporal).
+        logical :: is_utc = .false. !! timestamp UTC-adjusted flag.
         integer :: array_size = 1 !! Maximum length of character strings.
         integer :: col_size = 1   !! The number of elements in the vector column.
     end type parquet_maml_missing_column

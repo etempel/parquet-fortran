@@ -12,6 +12,8 @@ module parquet
     use parquet_bindings
     use parquet_maml_base, only: parquet_maml_file, parquet_maml_missing_column, parquet_maml_col_map_entry
     use parquet_strings, only: parquet_string_column, parquet_string
+    use parquet_temporal, only: parquet_date, parquet_time, parquet_timestamp, &
+        parquet_unit_seconds, parquet_unit_millis, parquet_unit_micros, parquet_unit_nanos
     implicit none
     private
     !
@@ -52,7 +54,12 @@ module parquet
         character(len=:), allocatable :: unit      !! The unit of measurement for the field.
         character(len=:), allocatable :: info      !! A short description of the field.
         character(len=:), allocatable :: ucd       !! Unified Content Descriptor for IVOA (can have many).
-        character(len=:), allocatable :: data_type !! The data type of the field [required].
+        character(len=:), allocatable :: data_type !! The data type of the field [required]. For a temporal
+        !! column this is the base token only ("date"/"time"/"timestamp"); the unit/utc suffix is parsed out
+        !! into time_unit/is_utc below.
+        integer :: time_unit = 0 !! For a time/timestamp field, its stored unit as a parquet_unit_* selector
+        !! (0 = not a temporal column, or unset). A bare time/timestamp token resolves to parquet_unit_micros.
+        logical :: is_utc = .false. !! For a timestamp field, .true. if declared UTC-adjusted (timestamp[...,utc]).
         integer :: array_size = 1 !! Maximum length of character strings.
         integer :: col_size = 1   !! The number of elements in the vector column.
         character(len=:), allocatable :: output_name !! The name actually written to the parquet file/VOTable
@@ -344,6 +351,12 @@ module parquet
         module procedure parquet_write_string_column
         module procedure parquet_write_string_matrix_column
         module procedure parquet_write_string_column_compact
+        module procedure parquet_write_date_column
+        module procedure parquet_write_date_matrix_column
+        module procedure parquet_write_time_column
+        module procedure parquet_write_time_matrix_column
+        module procedure parquet_write_timestamp_column
+        module procedure parquet_write_timestamp_matrix_column
     end interface parquet_write_column
 
     !> Starts a new row group of `nrows` rows on `writer` -- see parquet_write_column_chunk
@@ -387,6 +400,12 @@ module parquet
         module procedure parquet_write_string_column_chunk
         module procedure parquet_write_string_matrix_column_chunk
         module procedure parquet_write_string_column_chunk_compact
+        module procedure parquet_write_date_column_chunk
+        module procedure parquet_write_date_matrix_column_chunk
+        module procedure parquet_write_time_column_chunk
+        module procedure parquet_write_time_matrix_column_chunk
+        module procedure parquet_write_timestamp_column_chunk
+        module procedure parquet_write_timestamp_matrix_column_chunk
     end interface parquet_write_column_chunk
 
     !> Returns `writer_or_reader`'s row-group size ("chunk_size", matching parquet_open_writer's
@@ -468,6 +487,12 @@ module parquet
         module procedure parquet_read_logical_array_full
         module procedure parquet_read_string_array_full
         module procedure parquet_read_string_column_compact
+        module procedure parquet_read_date_column_1d
+        module procedure parquet_read_date_array_full
+        module procedure parquet_read_time_column_1d
+        module procedure parquet_read_time_array_full
+        module procedure parquet_read_timestamp_column_1d
+        module procedure parquet_read_timestamp_array_full
     end interface parquet_read_column
 
     !> Reads one row of a vector (array) column named `name` from an open
@@ -496,6 +521,12 @@ module parquet
         module procedure parquet_read_logical_array_row_mode_row_index_int64
         module procedure parquet_read_string_array_row_mode
         module procedure parquet_read_string_array_row_mode_row_index_int64
+        module procedure parquet_read_date_array_row_mode
+        module procedure parquet_read_date_array_row_mode_row_index_int64
+        module procedure parquet_read_time_array_row_mode
+        module procedure parquet_read_time_array_row_mode_row_index_int64
+        module procedure parquet_read_timestamp_array_row_mode
+        module procedure parquet_read_timestamp_array_row_mode_row_index_int64
     end interface parquet_read_array_row_mode
 
     !> Reads one element position of a vector (array) column named `name`
@@ -520,6 +551,9 @@ module parquet
         module procedure parquet_read_float64_array_element_mode
         module procedure parquet_read_logical_array_element_mode
         module procedure parquet_read_string_array_element_mode
+        module procedure parquet_read_date_array_element_mode
+        module procedure parquet_read_time_array_element_mode
+        module procedure parquet_read_timestamp_array_element_mode
     end interface parquet_read_array_element_mode
 
     !> Reads one row group's worth of one column, named `name`, from an open parquet_reader
@@ -576,6 +610,18 @@ module parquet
         module procedure parquet_read_string_array_column_chunk_rg64
         module procedure parquet_read_string_column_chunk_compact_rg32
         module procedure parquet_read_string_column_chunk_compact_rg64
+        module procedure parquet_read_date_column_chunk_rg32
+        module procedure parquet_read_date_column_chunk_rg64
+        module procedure parquet_read_date_array_column_chunk_rg32
+        module procedure parquet_read_date_array_column_chunk_rg64
+        module procedure parquet_read_time_column_chunk_rg32
+        module procedure parquet_read_time_column_chunk_rg64
+        module procedure parquet_read_time_array_column_chunk_rg32
+        module procedure parquet_read_time_array_column_chunk_rg64
+        module procedure parquet_read_timestamp_column_chunk_rg32
+        module procedure parquet_read_timestamp_column_chunk_rg64
+        module procedure parquet_read_timestamp_array_column_chunk_rg32
+        module procedure parquet_read_timestamp_array_column_chunk_rg64
     end interface parquet_read_column_chunk
 
     !> Returns `reader`'s post-filter row count in `nrows`, dispatched by
@@ -685,6 +731,11 @@ module parquet
     public :: parquet_maml_file
     public :: parquet_string_column
     public :: parquet_string
+    ! Re-exported from parquet_temporal so users need only `use parquet` to get the date/time
+    ! element types and the unit selectors used by their set_unix/to_unix and MAML units.
+    public :: parquet_date, parquet_time, parquet_timestamp
+    public :: parquet_unit_seconds, parquet_unit_millis, parquet_unit_micros, parquet_unit_nanos
+    public :: parquet_get_column_time_info
     public :: parquet_open_writer
     public :: parquet_write_column
     public :: parquet_new_row_group
@@ -1000,6 +1051,93 @@ module parquet
             !! target so raw_buffers can be called on it without copying.
         end subroutine parquet_write_string_column_compact
 
+        !> Scalar date specific of parquet_write_column. Null elements (see parquet_date%is_null)
+        !> are written as genuine Parquet Nulls; there is no is_valid argument -- validity lives
+        !> in the elements themselves.
+        module subroutine parquet_write_date_column(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_date), intent(in) :: values(:) !! one date (or null element) per row.
+        end subroutine parquet_write_date_column
+
+        !> Vector (matrix) date specific of parquet_write_column, one row per column of `values`.
+        module subroutine parquet_write_date_matrix_column(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_date), intent(in) :: values(:,:) !! (element, row) dates.
+        end subroutine parquet_write_date_matrix_column
+
+        !> Scalar time specific of parquet_write_column; null elements become Parquet Nulls.
+        module subroutine parquet_write_time_column(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_time), intent(in) :: values(:) !! one time (or null element) per row.
+        end subroutine parquet_write_time_column
+
+        !> Vector (matrix) time specific of parquet_write_column.
+        module subroutine parquet_write_time_matrix_column(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_time), intent(in) :: values(:,:) !! (element, row) times.
+        end subroutine parquet_write_time_matrix_column
+
+        !> Scalar timestamp specific of parquet_write_column; null elements become Parquet Nulls.
+        module subroutine parquet_write_timestamp_column(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_timestamp), intent(in) :: values(:) !! one instant (or null element) per row.
+        end subroutine parquet_write_timestamp_column
+
+        !> Vector (matrix) timestamp specific of parquet_write_column.
+        module subroutine parquet_write_timestamp_matrix_column(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_timestamp), intent(in) :: values(:,:) !! (element, row) instants.
+        end subroutine parquet_write_timestamp_matrix_column
+
+        !> Scalar date specific of parquet_write_column_chunk (one row group's worth); nulls come
+        !> from the elements, so there is no is_valid argument.
+        module subroutine parquet_write_date_column_chunk(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_date), intent(in) :: values(:) !! this row group's dates.
+        end subroutine parquet_write_date_column_chunk
+
+        !> Vector date specific of parquet_write_column_chunk.
+        module subroutine parquet_write_date_matrix_column_chunk(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_date), intent(in) :: values(:,:) !! (element, row) dates for this row group.
+        end subroutine parquet_write_date_matrix_column_chunk
+
+        !> Scalar time specific of parquet_write_column_chunk.
+        module subroutine parquet_write_time_column_chunk(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_time), intent(in) :: values(:) !! this row group's times.
+        end subroutine parquet_write_time_column_chunk
+
+        !> Vector time specific of parquet_write_column_chunk.
+        module subroutine parquet_write_time_matrix_column_chunk(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_time), intent(in) :: values(:,:) !! (element, row) times for this row group.
+        end subroutine parquet_write_time_matrix_column_chunk
+
+        !> Scalar timestamp specific of parquet_write_column_chunk.
+        module subroutine parquet_write_timestamp_column_chunk(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_timestamp), intent(in) :: values(:) !! this row group's instants.
+        end subroutine parquet_write_timestamp_column_chunk
+
+        !> Vector timestamp specific of parquet_write_column_chunk.
+        module subroutine parquet_write_timestamp_matrix_column_chunk(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_timestamp), intent(in) :: values(:,:) !! (element, row) instants for this row group.
+        end subroutine parquet_write_timestamp_matrix_column_chunk
+
         !> int32 specific of parquet_new_row_group -- see the generic interface above.
         module subroutine parquet_new_row_group_int32(writer, nrows)
             type(parquet_writer), intent(inout) :: writer !! open writer.
@@ -1313,6 +1451,28 @@ module parquet
             character(len=*), intent(in), optional :: qc_max !! qc: max: bound (operator prefix allowed).
             character(len=*), intent(in), optional :: qc_miss !! qc: miss: value (Null/NA, case-insensitive).
         end subroutine schema_add_field
+
+        !> Parses a (already lowercased) MAML data_type `token` into its temporal base type and
+        !> unit/utc: recognizes `date`, `time[unit]`, `timestamp[unit(,utc)]` where unit is one
+        !> of s/ms/us/ns (bare = microseconds). `is_temporal` reports whether the token's base is
+        !> date/time/timestamp; `valid` whether it is well-formed (for a non-temporal token,
+        !> is_temporal=.false. and valid=.true. -- validity of those is decided elsewhere). On a
+        !> valid temporal token, `base` is "date"/"time"/"timestamp", `unit_sel` a parquet_unit_*
+        !> selector (0 for date), and `is_utc` the UTC flag.
+        module subroutine parquet_parse_temporal_type(token, base, unit_sel, is_utc, is_temporal, valid)
+            character(len=*), intent(in) :: token !! lowercased data_type token.
+            character(len=:), allocatable, intent(out) :: base !! base type, or the token itself if non-temporal.
+            integer, intent(out) :: unit_sel !! parquet_unit_* selector (0 for date/non-temporal).
+            logical, intent(out) :: is_utc !! UTC-adjusted flag (timestamp only).
+            logical, intent(out) :: is_temporal !! .true. if the base is date/time/timestamp.
+            logical, intent(out) :: valid !! .true. if the token is well-formed.
+        end subroutine parquet_parse_temporal_type
+
+        !> Whether `token` (a MAML data_type, any case) is a valid data_type: one of the numeric/
+        !> string/boolean base tokens, or a well-formed date/time/timestamp temporal token.
+        module logical function parquet_data_type_token_valid(token)
+            character(len=*), intent(in) :: token !! candidate data_type token.
+        end function parquet_data_type_token_valid
 
         ! Flat convenience passthroughs on parquet_schema -- each forwards to
         ! the matching procedure on %cinfo, %metadata or %maml.
@@ -2082,6 +2242,235 @@ module parquet
             character(len=*), intent(in) :: name !! column name.
             type(parquet_string_column), intent(inout) :: values !! cleared, then filled with the whole column.
         end subroutine parquet_read_string_column_compact
+
+        !> Scalar date specific of parquet_read_column. A Parquet Null in the column becomes a
+        !> null `values` element (parquet_date%is_null); there is no null_value/is_valid argument
+        !> -- validity lives in the elements themselves, so a null-containing date column reads
+        !> without the error-on-Null that the numeric/string readers apply by default.
+        module subroutine parquet_read_date_column_1d(reader, name, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_date), intent(out) :: values(:) !! one date (null where the column had a Null) per row.
+        end subroutine parquet_read_date_column_1d
+
+        !> Vector date specific of parquet_read_column; reads the whole (element, row) array.
+        module subroutine parquet_read_date_array_full(reader, name, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            type(parquet_date), intent(out) :: values(:,:) !! (element, row) dates.
+        end subroutine parquet_read_date_array_full
+
+        !> Scalar time specific of parquet_read_column; see parquet_read_date_column_1d on nulls.
+        module subroutine parquet_read_time_column_1d(reader, name, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_time), intent(out) :: values(:) !! one time per row.
+        end subroutine parquet_read_time_column_1d
+
+        !> Vector time specific of parquet_read_column.
+        module subroutine parquet_read_time_array_full(reader, name, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            type(parquet_time), intent(out) :: values(:,:) !! (element, row) times.
+        end subroutine parquet_read_time_array_full
+
+        !> Scalar timestamp specific of parquet_read_column; see parquet_read_date_column_1d on nulls.
+        module subroutine parquet_read_timestamp_column_1d(reader, name, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_timestamp), intent(out) :: values(:) !! one instant per row.
+        end subroutine parquet_read_timestamp_column_1d
+
+        !> Vector timestamp specific of parquet_read_column.
+        module subroutine parquet_read_timestamp_array_full(reader, name, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            type(parquet_timestamp), intent(out) :: values(:,:) !! (element, row) instants.
+        end subroutine parquet_read_timestamp_array_full
+
+        !> Returns column `name`'s stored time unit and (for a timestamp) timezone. `unit`
+        !> (optional) receives one of the parquet_unit_* selectors; `timezone` (optional,
+        !> allocatable) receives the IANA timezone string ("" for a timezone-naive timestamp or
+        !> a time column). Aborts if `name` is not a time/timestamp column. Distinct from
+        !> parquet_get_metadata, which serves user-defined key/value metadata rather than this
+        !> schema-level property.
+        module subroutine parquet_get_column_time_info(reader, name, unit, timezone)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! time/timestamp column name.
+            integer, intent(out), optional :: unit !! stored unit (a parquet_unit_* selector).
+            character(len=:), allocatable, intent(out), optional :: timezone !! IANA tz, or "" if naive.
+        end subroutine parquet_get_column_time_info
+
+        !> Scalar date, int32 row_group specific of parquet_read_column_chunk; a paired _rg64
+        !> (int64 row_group) also exists. Nulls fill their elements (parquet_date%set_null).
+        module subroutine parquet_read_date_column_chunk_rg32(reader, name, row_group, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            integer(int32), intent(in) :: row_group !! 1-based row group.
+            type(parquet_date), intent(out) :: values(:) !! that row group's dates.
+        end subroutine parquet_read_date_column_chunk_rg32
+
+        !> Scalar date, int64 row_group specific of parquet_read_column_chunk.
+        module subroutine parquet_read_date_column_chunk_rg64(reader, name, row_group, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            integer(int64), intent(in) :: row_group !! 1-based row group.
+            type(parquet_date), intent(out) :: values(:) !! that row group's dates.
+        end subroutine parquet_read_date_column_chunk_rg64
+
+        !> Vector date, int32 row_group specific of parquet_read_column_chunk.
+        module subroutine parquet_read_date_array_column_chunk_rg32(reader, name, row_group, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            integer(int32), intent(in) :: row_group !! 1-based row group.
+            type(parquet_date), intent(out) :: values(:,:) !! (element, row) dates for that row group.
+        end subroutine parquet_read_date_array_column_chunk_rg32
+
+        !> Vector date, int64 row_group specific of parquet_read_column_chunk.
+        module subroutine parquet_read_date_array_column_chunk_rg64(reader, name, row_group, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            integer(int64), intent(in) :: row_group !! 1-based row group.
+            type(parquet_date), intent(out) :: values(:,:) !! (element, row) dates for that row group.
+        end subroutine parquet_read_date_array_column_chunk_rg64
+
+        !> Scalar time, int32 row_group specific of parquet_read_column_chunk.
+        module subroutine parquet_read_time_column_chunk_rg32(reader, name, row_group, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            integer(int32), intent(in) :: row_group !! 1-based row group.
+            type(parquet_time), intent(out) :: values(:) !! that row group's times.
+        end subroutine parquet_read_time_column_chunk_rg32
+
+        !> Scalar time, int64 row_group specific of parquet_read_column_chunk.
+        module subroutine parquet_read_time_column_chunk_rg64(reader, name, row_group, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            integer(int64), intent(in) :: row_group !! 1-based row group.
+            type(parquet_time), intent(out) :: values(:) !! that row group's times.
+        end subroutine parquet_read_time_column_chunk_rg64
+
+        !> Vector time, int32 row_group specific of parquet_read_column_chunk.
+        module subroutine parquet_read_time_array_column_chunk_rg32(reader, name, row_group, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            integer(int32), intent(in) :: row_group !! 1-based row group.
+            type(parquet_time), intent(out) :: values(:,:) !! (element, row) times for that row group.
+        end subroutine parquet_read_time_array_column_chunk_rg32
+
+        !> Vector time, int64 row_group specific of parquet_read_column_chunk.
+        module subroutine parquet_read_time_array_column_chunk_rg64(reader, name, row_group, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            integer(int64), intent(in) :: row_group !! 1-based row group.
+            type(parquet_time), intent(out) :: values(:,:) !! (element, row) times for that row group.
+        end subroutine parquet_read_time_array_column_chunk_rg64
+
+        !> Scalar timestamp, int32 row_group specific of parquet_read_column_chunk.
+        module subroutine parquet_read_timestamp_column_chunk_rg32(reader, name, row_group, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            integer(int32), intent(in) :: row_group !! 1-based row group.
+            type(parquet_timestamp), intent(out) :: values(:) !! that row group's instants.
+        end subroutine parquet_read_timestamp_column_chunk_rg32
+
+        !> Scalar timestamp, int64 row_group specific of parquet_read_column_chunk.
+        module subroutine parquet_read_timestamp_column_chunk_rg64(reader, name, row_group, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            integer(int64), intent(in) :: row_group !! 1-based row group.
+            type(parquet_timestamp), intent(out) :: values(:) !! that row group's instants.
+        end subroutine parquet_read_timestamp_column_chunk_rg64
+
+        !> Vector timestamp, int32 row_group specific of parquet_read_column_chunk.
+        module subroutine parquet_read_timestamp_array_column_chunk_rg32(reader, name, row_group, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            integer(int32), intent(in) :: row_group !! 1-based row group.
+            type(parquet_timestamp), intent(out) :: values(:,:) !! (element, row) instants for that row group.
+        end subroutine parquet_read_timestamp_array_column_chunk_rg32
+
+        !> Vector timestamp, int64 row_group specific of parquet_read_column_chunk.
+        module subroutine parquet_read_timestamp_array_column_chunk_rg64(reader, name, row_group, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            integer(int64), intent(in) :: row_group !! 1-based row group.
+            type(parquet_timestamp), intent(out) :: values(:,:) !! (element, row) instants for that row group.
+        end subroutine parquet_read_timestamp_array_column_chunk_rg64
+
+        !> Date row-mode read (one row's element vector), int32 row_index specific; a paired
+        !> _row_index_int64 also exists. Nulls fill their elements (no is_valid argument).
+        module subroutine parquet_read_date_array_row_mode(reader, name, values, row_index)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            type(parquet_date), intent(out) :: values(:) !! that row's element vector.
+            integer(int32), intent(in) :: row_index !! 1-based row to read.
+        end subroutine parquet_read_date_array_row_mode
+
+        !> Date row-mode read, int64 row_index specific.
+        module subroutine parquet_read_date_array_row_mode_row_index_int64(reader, name, values, row_index)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            type(parquet_date), intent(out) :: values(:) !! that row's element vector.
+            integer(int64), intent(in) :: row_index !! 1-based row to read.
+        end subroutine parquet_read_date_array_row_mode_row_index_int64
+
+        !> Time row-mode read, int32 row_index specific.
+        module subroutine parquet_read_time_array_row_mode(reader, name, values, row_index)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            type(parquet_time), intent(out) :: values(:) !! that row's element vector.
+            integer(int32), intent(in) :: row_index !! 1-based row to read.
+        end subroutine parquet_read_time_array_row_mode
+
+        !> Time row-mode read, int64 row_index specific.
+        module subroutine parquet_read_time_array_row_mode_row_index_int64(reader, name, values, row_index)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            type(parquet_time), intent(out) :: values(:) !! that row's element vector.
+            integer(int64), intent(in) :: row_index !! 1-based row to read.
+        end subroutine parquet_read_time_array_row_mode_row_index_int64
+
+        !> Timestamp row-mode read, int32 row_index specific.
+        module subroutine parquet_read_timestamp_array_row_mode(reader, name, values, row_index)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            type(parquet_timestamp), intent(out) :: values(:) !! that row's element vector.
+            integer(int32), intent(in) :: row_index !! 1-based row to read.
+        end subroutine parquet_read_timestamp_array_row_mode
+
+        !> Timestamp row-mode read, int64 row_index specific.
+        module subroutine parquet_read_timestamp_array_row_mode_row_index_int64(reader, name, values, row_index)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            type(parquet_timestamp), intent(out) :: values(:) !! that row's element vector.
+            integer(int64), intent(in) :: row_index !! 1-based row to read.
+        end subroutine parquet_read_timestamp_array_row_mode_row_index_int64
+
+        !> Date element-mode read: element position `elem_index` from every row. Nulls fill their
+        !> elements (no is_valid argument).
+        module subroutine parquet_read_date_array_element_mode(reader, name, values, elem_index)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            type(parquet_date), intent(out) :: values(:) !! that element position from every row.
+            integer, intent(in) :: elem_index !! 1-based element position to read.
+        end subroutine parquet_read_date_array_element_mode
+
+        !> Time element-mode read.
+        module subroutine parquet_read_time_array_element_mode(reader, name, values, elem_index)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            type(parquet_time), intent(out) :: values(:) !! that element position from every row.
+            integer, intent(in) :: elem_index !! 1-based element position to read.
+        end subroutine parquet_read_time_array_element_mode
+
+        !> Timestamp element-mode read.
+        module subroutine parquet_read_timestamp_array_element_mode(reader, name, values, elem_index)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            type(parquet_timestamp), intent(out) :: values(:) !! that element position from every row.
+            integer, intent(in) :: elem_index !! 1-based element position to read.
+        end subroutine parquet_read_timestamp_array_element_mode
 
         !> Scalar int32, int32 row_group specific of parquet_read_column_chunk; see the generic
         !> interface above. A paired _rg64 specific (same value type, int64 row_group) also

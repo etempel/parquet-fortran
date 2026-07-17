@@ -58,7 +58,7 @@ fields:
 
 Notes on the `fields:` entries:
 
-- `name` and `data_type` are required for every field; `data_type` must be one of the [supported types](supported-data-types.html)' MAML names.
+- `name` and `data_type` are required for every field; `data_type` must be one of the [supported types](supported-data-types.html)' MAML names — including `date`/`time[unit]`/`timestamp[unit,utc]` (e.g. `timestamp[ns,utc]`); see [Date, time and timestamp columns](date-time.html#units-and-schema-declared-columns) for the full unit/timezone token syntax.
 - `col_size` (default `1`) makes the column a fixed-length vector column, read/written as a 2D array of shape `(col_size, nrows)`.
 - `array_size` sets the maximum string length for `string` columns; it is ignored for other types.
   > Don't confuse `col_size` with `array_size` — despite the similar-sounding names, they're unrelated: `col_size` is how many elements a vector column's row holds, `array_size` is how many characters a `string` column's values can hold.

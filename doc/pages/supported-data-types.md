@@ -15,6 +15,21 @@ The following intrinsic Fortran kinds (from `iso_fortran_env`) are supported thr
 
 Vector column entries use the shape convention `(col_size, nrows)` for arrays passed to `parquet_write_column` or produced by `parquet_read_column`.
 
+### Date, time and timestamp columns
+
+Three additional element-level types — `parquet_date`, `parquet_time`, `parquet_timestamp` (module
+`parquet_temporal`, re-exported from `use parquet`) — read and write Parquet `DATE`/`TIME`/
+`TIMESTAMP` columns, one value per element (`type(parquet_timestamp) :: ts(nrows)` for a scalar
+column, `ts(col_size, nrows)` for a vector column), through the same `parquet_write_column`/
+`parquet_read_column`/chunked/row-mode/element-mode calls as every type above. Unlike every type in
+the table above, these carry their own null state (no `is_valid=`/`null_value=` argument, and a
+null-containing column reads without the error-on-Null the numeric/string readers apply by
+default) and their write-time unit/timezone is declared via a MAML token
+(`timestamp[ns,utc]`/`time[ms]`/`date`) rather than inferred. See
+[Date, time and timestamp columns](date-time.html) for the full guide — types, null semantics,
+units, Unix-time/MJD/JD interop, and reading files from other tools (legacy `INT96`, arbitrary
+timezones). `qc:`/`parquet_filter` are not yet supported for these three types.
+
 ### Large string columns
 
 A `string` (scalar or vector-of-strings) column's underlying Arrow representation is chosen automatically based on size. Normally it's Arrow's default `utf8` type, which caps a single column's total string byte payload at 2^31-1 bytes (~2 GiB) — but if writing a column would exceed that, this library transparently switches that column to `large_utf8` (64-bit offsets, no such limit) instead. This is fully automatic and requires no action from either the writer or reader side: `parquet_write_column`/`parquet_read_column` and every other read function behave identically either way, including row filtering (`parquet_filter`) and `qc:` range checks. The only place the difference is visible is `parquet_close_reader(print_stat=.true.)`'s `parquet_type` column, which shows `large_string`/`list<large_string>` instead of `string`/`list<string>` for a column that was promoted.
@@ -93,6 +108,12 @@ A `float32`/`float64`/`half_float`/`decimal` value read into an `integer(int32)`
 `qc: min:`/`max:` range checks and row filtering (`parquet_filter`) cover every type in the table above the same way they already cover `int32`/`int64`/`float32`/`float64` — both compare against the column's raw physical value regardless of its stored type, so no MAML/filter-side change is needed to use them against one of these extended types.
 
 ### Null values
+
+> `date`/`time`/`timestamp` columns are the exception to this whole section: `parquet_date`/
+> `parquet_time`/`parquet_timestamp` carry their own null state per element, so there is no
+> `null_value=`/`is_valid=` argument for them anywhere, and a null-containing column reads
+> without the error-on-Null described below — see
+> [Null values are part of the element](date-time.html#null-values-are-part-of-the-element-not-a-separate-mask).
 
 Fortran has no per-element representation for a missing/Null value. On the **read** side, if a column contains any genuine Parquet Null (e.g. a file produced by another tool), the default behavior of `parquet_read_column`, `parquet_read_array_row_mode`, and `parquet_read_array_element_mode` is to abort the process immediately, rather than silently returning undefined data. This is a C++-level abort with a diagnostic printed to stderr (e.g. `parquet-fortran: parquet_read_int32_column: column contains Null value(s), which is not supported: <column>`), not a Fortran `error stop` — the same class of failure as the physical-type-mismatch case in [Limitations](../index.html#limitations).
 

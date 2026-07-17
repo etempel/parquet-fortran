@@ -181,7 +181,13 @@ contains
             new_unittest("compact string write under qc=.true. warns (does not abort) on a violation", &
                 test_compact_string_qc_warning), &
             new_unittest("compact string read reflects an active row filter", &
-                test_compact_string_filter_read) &
+                test_compact_string_filter_read), &
+            new_unittest("date/time/timestamp: scalar and vector round-trip, incl. nulls", &
+                test_datetime_scalar_vector_roundtrip), &
+            new_unittest("date/time/timestamp: streaming (chunked) round-trip across row groups", &
+                test_datetime_chunked_roundtrip), &
+            new_unittest("date/time/timestamp: MAML-declared units (incl. utc) preserve precision", &
+                test_datetime_schema_units_roundtrip) &
             ]
         !
     end subroutine collect_tests_parquet_writing
@@ -2968,5 +2974,231 @@ contains
         call back%get(2, s)
         call check(error, s == "four", "compact string read under a row filter: row 2 content")
     end subroutine test_compact_string_filter_read
+    !
+    ! ------------------------------------------------------------------------------
+    ! date/time/timestamp (parquet_temporal) read/write integration
+    ! ------------------------------------------------------------------------------
+    !
+    !> Schema-less scalar and vector round-trips for all three temporal types, each with an
+    !> interior Null -- validity lives in the elements (parquet_*%is_null), so there is no
+    !> is_valid argument on either side; see parquet_write_column's temporal specifics.
+    subroutine test_datetime_scalar_vector_roundtrip(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_date) :: d(3), rd(3)
+        type(parquet_time) :: t(3), rt(3)
+        type(parquet_timestamp) :: ts(3), rts(3)
+        type(parquet_timestamp) :: tsm(2, 3), rtsm(2, 3)
+        type(parquet_date) :: dm(2, 3), rdm(2, 3)
+        type(parquet_time) :: tm(2, 3), rtm(2, 3)
+        character(len=*), parameter :: out_file = "test_run/test_datetime_scalar_vector.parquet"
+
+        call d(1)%set(2024, 7, 16); call d(2)%set_null(); call d(3)%set(1970, 1, 1)
+        call t(1)%set(12, 34, 56); call t(2)%set(0, 0, 0); call t(3)%set_null()
+        call ts(1)%set(2024, 7, 16, 12, 0, 0); call ts(2)%set_null(); call ts(3)%set(1969, 12, 31, 23, 59, 59)
+        call tsm(1, 1)%set(2000, 1, 1, 0, 0, 0); call tsm(2, 1)%set(2000, 1, 2, 0, 0, 0)
+        call tsm(1, 2)%set(2001, 6, 15, 6, 30, 0); call tsm(2, 2)%set_null()
+        call tsm(1, 3)%set(2002, 3, 3, 3, 3, 3); call tsm(2, 3)%set(2002, 3, 4, 4, 4, 4)
+        ! vector date/time columns: same (col_size=2, 3 rows) shape as tsm, so this also
+        ! exercises parquet_read_date_array_full/parquet_read_time_array_full, which a
+        ! timestamp-only vector column never reaches.
+        call dm(1, 1)%set(2010, 1, 1); call dm(2, 1)%set_null()
+        call dm(1, 2)%set(2011, 6, 15); call dm(2, 2)%set(2011, 6, 16)
+        call dm(1, 3)%set(2012, 3, 3); call dm(2, 3)%set(2012, 3, 4)
+        call tm(1, 1)%set(6, 30, 15); call tm(2, 1)%set(7, 30, 15)
+        call tm(1, 2)%set_null(); call tm(2, 2)%set(8, 0, 0)
+        call tm(1, 3)%set(9, 0, 0); call tm(2, 3)%set(10, 0, 0)
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "d", d)
+        call parquet_write_column(writer, "t", t)
+        call parquet_write_column(writer, "ts", ts)
+        call parquet_write_column(writer, "tsm", tsm)
+        call parquet_write_column(writer, "dm", dm)
+        call parquet_write_column(writer, "tm", tm)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "d", rd)
+        call parquet_read_column(reader, "t", rt)
+        call parquet_read_column(reader, "ts", rts)
+        call parquet_read_column(reader, "tsm", rtsm)
+        call parquet_read_column(reader, "dm", rdm)
+        call parquet_read_column(reader, "tm", rtm)
+        call parquet_close_reader(reader)
+
+        call check(error, rd(1) == d(1) .and. rd(2)%is_null() .and. rd(3) == d(3), "date scalar round-trip")
+        if (allocated(error)) return
+        call check(error, rt(1) == t(1) .and. rt(2) == t(2) .and. rt(3)%is_null(), "time scalar round-trip")
+        if (allocated(error)) return
+        call check(error, rts(1) == ts(1) .and. rts(2)%is_null() .and. rts(3) == ts(3), &
+            "timestamp scalar round-trip")
+        if (allocated(error)) return
+        call check(error, rtsm(1,1) == tsm(1,1) .and. rtsm(2,1) == tsm(2,1) .and. rtsm(1,2) == tsm(1,2) &
+            .and. rtsm(2,2)%is_null() .and. rtsm(1,3) == tsm(1,3) .and. rtsm(2,3) == tsm(2,3), &
+            "timestamp vector round-trip")
+        if (allocated(error)) return
+        call check(error, rdm(1,1) == dm(1,1) .and. rdm(2,1)%is_null() .and. rdm(1,2) == dm(1,2) &
+            .and. rdm(2,3) == dm(2,3), "date vector round-trip")
+        if (allocated(error)) return
+        call check(error, rtm(1,1) == tm(1,1) .and. rtm(1,2)%is_null() .and. rtm(2,2) == tm(2,2) &
+            .and. rtm(2,3) == tm(2,3), "time vector round-trip")
+    end subroutine test_datetime_scalar_vector_roundtrip
+    !
+    !> Streaming (row-group-chunked) write of a temporal column across two row groups, read back
+    !> both via parquet_read_column_chunk (int32 and int64 row_group, one specific each) and via
+    !> the whole-column parquet_read_column -- exercising parquet_write_column_chunk's temporal
+    !> specifics end to end.
+    subroutine test_datetime_chunked_roundtrip(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_timestamp) :: ts(5), rts_rg1(3), rts_rg2(2), rts_whole(5)
+        type(parquet_date) :: d(5), rd_rg1(3), rd_rg2(2)
+        type(parquet_time) :: t(5), rt_rg1(3), rt_rg2(2)
+        ! vector (col_size=2) chunked columns -- exercise the *_array_column_chunk specifics,
+        ! which the scalar-only columns above never reach.
+        type(parquet_timestamp) :: tsm(2, 5), rtsm_rg1(2, 3), rtsm_rg2(2, 2)
+        type(parquet_date) :: dm(2, 5), rdm_rg1(2, 3), rdm_rg2(2, 2)
+        type(parquet_time) :: tm(2, 5), rtm_rg1(2, 3), rtm_rg2(2, 2)
+        integer(int64) :: ng, row_group2
+        integer :: i
+
+        do i = 1, 5
+            call ts(i)%set(2020 + i, 1, 1, 0, 0, 0)
+            call d(i)%set(2020 + i, 6, 15)
+            call t(i)%set(mod(i, 24), 0, 0)
+            call tsm(1, i)%set(2030 + i, 1, 1, 0, 0, 0); call tsm(2, i)%set(2030 + i, 1, 2, 0, 0, 0)
+            call dm(1, i)%set(2040 + i, 6, 15); call dm(2, i)%set(2040 + i, 6, 16)
+            call tm(1, i)%set(mod(i, 24), 0, 0); call tm(2, i)%set(mod(i + 1, 24), 0, 0)
+        end do
+        call ts(3)%set_null()
+        call d(4)%set_null()
+        call t(5)%set_null()
+        call tsm(1, 3)%set_null()
+        call dm(2, 4)%set_null()
+        call tm(1, 5)%set_null()
+
+        call parquet_open_writer(writer, "test_run/test_datetime_chunked.parquet")
+        call parquet_new_row_group(writer, 3_int64)
+        call parquet_write_column_chunk(writer, "ts", ts(1:3))
+        call parquet_write_column_chunk(writer, "d", d(1:3))
+        call parquet_write_column_chunk(writer, "t", t(1:3))
+        call parquet_write_column_chunk(writer, "tsm", tsm(:, 1:3))
+        call parquet_write_column_chunk(writer, "dm", dm(:, 1:3))
+        call parquet_write_column_chunk(writer, "tm", tm(:, 1:3))
+        call parquet_finish_row_group(writer)
+        call parquet_new_row_group(writer, 2_int64)
+        call parquet_write_column_chunk(writer, "ts", ts(4:5))
+        call parquet_write_column_chunk(writer, "d", d(4:5))
+        call parquet_write_column_chunk(writer, "t", t(4:5))
+        call parquet_write_column_chunk(writer, "tsm", tsm(:, 4:5))
+        call parquet_write_column_chunk(writer, "dm", dm(:, 4:5))
+        call parquet_write_column_chunk(writer, "tm", tm(:, 4:5))
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, "test_run/test_datetime_chunked.parquet")
+        call parquet_get_num_row_groups(reader, ng)
+        call check(error, ng == 2_int64, "expected 2 row groups")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+
+        call parquet_read_column_chunk(reader, "ts", 1, rts_rg1)          ! int32 row_group specific
+        call parquet_read_column_chunk(reader, "d", 1, rd_rg1)
+        call parquet_read_column_chunk(reader, "t", 1, rt_rg1)
+        call parquet_read_column_chunk(reader, "tsm", 1, rtsm_rg1)
+        call parquet_read_column_chunk(reader, "dm", 1, rdm_rg1)
+        call parquet_read_column_chunk(reader, "tm", 1, rtm_rg1)
+        row_group2 = 2_int64
+        call parquet_read_column_chunk(reader, "ts", row_group2, rts_rg2) ! int64 row_group specific
+        call parquet_read_column_chunk(reader, "d", row_group2, rd_rg2)
+        call parquet_read_column_chunk(reader, "t", row_group2, rt_rg2)
+        call parquet_read_column_chunk(reader, "tsm", row_group2, rtsm_rg2)
+        call parquet_read_column_chunk(reader, "dm", row_group2, rdm_rg2)
+        call parquet_read_column_chunk(reader, "tm", row_group2, rtm_rg2)
+        call parquet_read_column(reader, "ts", rts_whole)
+        call parquet_close_reader(reader)
+
+        call check(error, rts_rg1(1) == ts(1) .and. rts_rg1(3)%is_null(), "row group 1 timestamp values")
+        if (allocated(error)) return
+        call check(error, rd_rg1(2) == d(2), "row group 1 date values")
+        if (allocated(error)) return
+        call check(error, rt_rg1(1) == t(1), "row group 1 time values")
+        if (allocated(error)) return
+        call check(error, rts_rg2(1) == ts(4) .and. rts_rg2(2) == ts(5), "row group 2 timestamp values")
+        if (allocated(error)) return
+        call check(error, rd_rg2(1)%is_null() .and. rd_rg2(2) == d(5), "row group 2 date values")
+        if (allocated(error)) return
+        call check(error, rt_rg2(2)%is_null(), "row group 2 time values")
+        if (allocated(error)) return
+        call check(error, rtsm_rg1(1,3)%is_null() .and. rtsm_rg1(2,1) == tsm(2,1), &
+            "row group 1 vector timestamp values")
+        if (allocated(error)) return
+        call check(error, rdm_rg2(2,1)%is_null() .and. rdm_rg2(1,2) == dm(1,5), &
+            "row group 2 vector date values")
+        if (allocated(error)) return
+        call check(error, rtm_rg2(1,2)%is_null() .and. rtm_rg1(2,2) == tm(2,2), &
+            "vector time values (both row groups)")
+        if (allocated(error)) return
+        call check(error, rts_whole(1) == ts(1) .and. rts_whole(5) == ts(5), &
+            "whole-column read after chunked write")
+    end subroutine test_datetime_chunked_roundtrip
+    !
+    !> A MAML schema declaring timestamp[ns,utc]/time[ms]/date preserves the precision a
+    !> schema-less write's default (microseconds) would have rejected, and
+    !> parquet_get_column_time_info reports back the declared unit/timezone.
+    subroutine test_datetime_schema_units_roundtrip(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_timestamp) :: ts(2), rts(2)
+        type(parquet_time) :: tm(2), rtm(2)
+        type(parquet_date) :: dt(2), rdt(2)
+        integer :: unit
+        character(len=:), allocatable :: tz
+        logical :: ok
+
+        call schema%init(table="t")
+        call schema%add_field("ev", "timestamp[ns,utc]", info="event time")
+        call schema%add_field("clock", "time[ms]")
+        call schema%add_field("day", "date")
+        call parquet_parse_maml(schema)
+        call parquet_validate_maml(schema%maml)
+
+        call ts(1)%set(2024, 7, 16, 12, 0, 0, 123456789)   ! ns precision -- needs the declared ns unit
+        call ts(2)%set(1999, 1, 1, 0, 0, 0)
+        call tm(1)%set(6, 30, 15, 500000000)                ! .5 s -- fits ms exactly
+        call tm(2)%set(23, 59, 59)
+        call dt(1)%set(2024, 7, 16); call dt(2)%set(1970, 1, 1)
+
+        call parquet_open_writer(writer, "test_run/test_datetime_schema_units.parquet", schema)
+        call parquet_write_column(writer, "ev", ts)
+        call parquet_write_column(writer, "clock", tm)
+        call parquet_write_column(writer, "day", dt)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, "test_run/test_datetime_schema_units.parquet")
+        call parquet_read_column(reader, "ev", rts)
+        call parquet_read_column(reader, "clock", rtm)
+        call parquet_read_column(reader, "day", rdt)
+        call parquet_get_column_time_info(reader, "ev", unit=unit, timezone=tz)
+        call parquet_close_reader(reader)
+
+        ok = rts(1) == ts(1) .and. rts(2) == ts(2)
+        call check(error, ok, "ns precision preserved by the schema-declared timestamp[ns] unit")
+        if (allocated(error)) return
+        call check(error, rtm(1) == tm(1) .and. rtm(2) == tm(2), "time[ms] round-trip")
+        if (allocated(error)) return
+        call check(error, rdt(1) == dt(1) .and. rdt(2) == dt(2), "date round-trip")
+        if (allocated(error)) return
+        call check(error, unit == parquet_unit_nanos, "get_column_time_info reports the declared nanos unit")
+        if (allocated(error)) return
+        call check(error, tz == "UTC", "get_column_time_info reports the declared UTC timezone")
+    end subroutine test_datetime_schema_units_roundtrip
     !
 end module test_writing

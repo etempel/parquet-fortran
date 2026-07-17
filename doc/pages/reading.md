@@ -37,6 +37,9 @@ Notes:
   into a `type(parquet_string_column)` instead, which needs no pre-sizing; see
   [Reading and writing compact string columns](string-columns.html#reading-and-writing-compact-string-columns).
 - For vector columns, allocate 2D arrays with shape `(col_size, nrows)`.
+- A `DATE`/`TIME`/`TIMESTAMP` column reads into a `parquet_date`/`parquet_time`/`parquet_timestamp`
+  array instead — see [Date, time and timestamp columns](date-time.html); these three carry their
+  own null state, so `null_value=`/`is_valid=` don't apply to them.
 - A vector column may be stored on disk either as a `fixed_size_list` (what this library's own writer emits) or as a variable-length `list<element>` (the Parquet `LIST` layout many other producers use — including its legacy 2-level and non-standard inner-element-name variants, which Arrow's reader normalizes to the same `list` type); both are read back identically. The only requirement is that every row's vector has the same length (so it fits the `(col_size, nrows)` shape); a genuinely ragged `list` column (rows of differing length) is rejected with `error stop`. `col_size` is inferred from the data in either case.
 
 ### Reading only touches the columns you ask for

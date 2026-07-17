@@ -65,7 +65,11 @@ contains
             new_unittest("read nested struct-field scalar/vector leaves (arbitrary depth, combined nulls)", &
                 test_read_nested_struct_leaves), &
             new_unittest("row filter on a nested struct-field leaf", &
-                test_filter_nested_struct_leaf) &
+                test_filter_nested_struct_leaf), &
+            new_unittest("date/time/timestamp: row-mode and element-mode reads on a vector column", &
+                test_datetime_row_element_mode), &
+            new_unittest("date/time/timestamp: foreign INT96 and non-UTC-timezone fixtures round-trip", &
+                test_datetime_foreign_fixtures) &
             ]
     end subroutine collect_tests_parquet_reading
 
@@ -1925,5 +1929,103 @@ contains
             call test_failed(error, trim(what) // " did not read the expected values")
         end if
     end subroutine fail_if_error
+    !
+    ! ------------------------------------------------------------------------------
+    ! date/time/timestamp (parquet_temporal) read integration
+    ! ------------------------------------------------------------------------------
+    !
+    !> Row-mode (one row's element vector, both int32 and int64 row_index) and element-mode
+    !> (one element position across all rows) reads on a vector timestamp/date column, each
+    !> with an interior Null -- see parquet_read_array_row_mode/parquet_read_array_element_mode's
+    !> temporal specifics.
+    subroutine test_datetime_row_element_mode(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_timestamp) :: ts(3, 4), row(3), elem(4)
+        type(parquet_date) :: d(2, 4), drow(2), delem(4)
+        type(parquet_time) :: t(2, 4), trow(2), telem(4)
+        type(parquet_date) :: drow_i32(2)
+        type(parquet_time) :: trow_i64(2)
+        type(parquet_timestamp) :: row_i64(3)
+        integer :: i, j
+        character(len=*), parameter :: out_file = "test_run/test_datetime_row_element_mode.parquet"
+
+        do j = 1, 4
+            do i = 1, 3
+                call ts(i, j)%set(2000 + j, i, 1, 0, 0, 0)
+            end do
+            do i = 1, 2
+                call d(i, j)%set(2010 + j, i + 5, 10)
+                call t(i, j)%set(mod(i + j, 24), 0, 0)
+            end do
+        end do
+        call ts(2, 3)%set_null()
+        call d(1, 2)%set_null()
+        call t(2, 3)%set_null()
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "ts", ts)
+        call parquet_write_column(writer, "d", d)
+        call parquet_write_column(writer, "t", t)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_array_row_mode(reader, "ts", row, 3_int32)      ! int32 row_index specific
+        call parquet_read_array_row_mode(reader, "d", drow, 2_int64)      ! int64 row_index specific
+        call parquet_read_array_row_mode(reader, "t", trow, 3_int32)
+        ! the complementary row_index kind per type, so both specifics of each are exercised
+        call parquet_read_array_row_mode(reader, "d", drow_i32, 2_int32)
+        call parquet_read_array_row_mode(reader, "t", trow_i64, 3_int64)
+        call parquet_read_array_row_mode(reader, "ts", row_i64, 3_int64)
+        call parquet_read_array_element_mode(reader, "ts", elem, 2)
+        call parquet_read_array_element_mode(reader, "d", delem, 1)
+        call parquet_read_array_element_mode(reader, "t", telem, 2)
+        call parquet_close_reader(reader)
+
+        call check(error, row(1) == ts(1, 3) .and. row(3) == ts(3, 3) .and. row(2)%is_null(), &
+            "row mode: row 3 of the timestamp vector column")
+        if (allocated(error)) return
+        call check(error, drow(1)%is_null() .and. drow(2) == d(2, 2), &
+            "row mode: row 2 of the date vector column")
+        if (allocated(error)) return
+        call check(error, trow(2)%is_null() .and. trow(1) == t(1, 3), &
+            "row mode: row 3 of the time vector column")
+        if (allocated(error)) return
+        ! the complementary row_index kind must agree with the first call for each type
+        call check(error, drow_i32(1)%is_null() .and. drow_i32(2) == d(2, 2), &
+            "row mode (int32 row_index): row 2 of the date vector column")
+        if (allocated(error)) return
+        call check(error, trow_i64(2)%is_null() .and. trow_i64(1) == t(1, 3), &
+            "row mode (int64 row_index): row 3 of the time vector column")
+        if (allocated(error)) return
+        call check(error, row_i64(1) == ts(1, 3) .and. row_i64(3) == ts(3, 3) .and. row_i64(2)%is_null(), &
+            "row mode (int64 row_index): row 3 of the timestamp vector column")
+        if (allocated(error)) return
+        call check(error, elem(1) == ts(2, 1) .and. elem(4) == ts(2, 4) .and. elem(3)%is_null(), &
+            "element mode: element 2 of the timestamp vector column")
+        if (allocated(error)) return
+        call check(error, delem(2)%is_null() .and. delem(4) == d(1, 4), &
+            "element mode: element 1 of the date vector column")
+        if (allocated(error)) return
+        call check(error, telem(3)%is_null() .and. telem(4) == t(2, 4), &
+            "element mode: element 2 of the time vector column")
+    end subroutine test_datetime_row_element_mode
+    !
+    !> The actual assertions run out-of-process (scenario_temporal_foreign_int96_roundtrip/
+    !> scenario_temporal_foreign_tz_roundtrip in error_scenarios.f90, each error-stopping on any
+    !> mismatch) since building the fixtures needs a test-only debug hook -- this just checks
+    !> both scenarios exit cleanly. See those scenarios' own comments for what each verifies:
+    !> a legacy INT96 timestamp column and a real non-UTC IANA timezone, neither ever produced
+    !> by this library's own writer.
+    subroutine test_datetime_foreign_fixtures(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "temporal_foreign_int96_roundtrip", expect_abort=.false., &
+            failure_message="a legacy INT96 timestamp fixture did not round-trip correctly")
+        if (allocated(error)) return
+        call check_scenario_exit_status(error, "temporal_foreign_tz_roundtrip", expect_abort=.false., &
+            failure_message="a non-UTC timezone fixture did not round-trip correctly")
+    end subroutine test_datetime_foreign_fixtures
     !
 end module test_reading

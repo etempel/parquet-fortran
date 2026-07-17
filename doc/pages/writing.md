@@ -59,6 +59,9 @@ Omitting `write_maml`, or passing `write_maml=.false.`, behaves exactly as befor
 Notes:
 
 - Every call to `parquet_write_column` writes one full column.
+- A `parquet_date`/`parquet_time`/`parquet_timestamp` array writes a `DATE`/`TIME`/`TIMESTAMP`
+  column — see [Date, time and timestamp columns](date-time.html); there is no `is_valid=`
+  argument for these three, since validity lives in the elements themselves.
 - All columns in one file must contain the same number of rows. The first `parquet_write_column` call fixes the row count for the whole file; any later call with a different row count fails immediately with `error stop`, naming the column and both row counts.
 - Close the writer with `parquet_close_writer` to flush data and finalize the file.
 - By default, `parquet_open_writer` silently truncates an existing file at `filename` (Fortran's usual `OPEN`/replace behavior). Pass `overwrite=.false.` to instead fail immediately with `error stop`, naming the file, if it already exists — useful when accidentally clobbering a previous run's output would otherwise go unnoticed:

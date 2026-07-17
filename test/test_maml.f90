@@ -83,7 +83,19 @@ contains
             new_unittest("schema%add_field: qc operator with no value aborts", &
                 test_schema_add_field_qc_operator_without_value_aborts), &
             new_unittest("schema%add_field: invalid qc_miss value aborts", &
-                test_schema_add_field_bad_qc_miss_value_aborts) &
+                test_schema_add_field_bad_qc_miss_value_aborts), &
+            new_unittest("schema%add_field accepts date/time[unit]/timestamp[unit,utc] tokens", &
+                test_schema_add_field_temporal_tokens_ok), &
+            new_unittest("schema%add_field: a unit suffix on date aborts", &
+                test_schema_add_field_date_with_unit_aborts), &
+            new_unittest("parquet_validate_maml rejects qc: on a temporal field", &
+                test_validate_qc_on_temporal_column_aborts), &
+            new_unittest("schema%add_field: an explicit seconds unit aborts (Parquet has no " // &
+                "seconds-resolution TIME/TIMESTAMP encoding)", test_schema_add_field_seconds_unit_aborts), &
+            new_unittest("schema%add_field: a ,utc suffix on time (not timestamp) aborts", &
+                test_schema_add_field_time_utc_aborts), &
+            new_unittest("schema%add_field: an unclosed unit bracket aborts", &
+                test_schema_add_field_unclosed_bracket_aborts) &
             ]
     end subroutine collect_tests_parquet_maml
 
@@ -915,5 +927,92 @@ contains
         call check_scenario_exit_status(error, "schema_add_field_bad_qc_miss_value", expect_abort=.true., &
             failure_message="schema%add_field with an invalid qc_miss value was expected to error stop")
     end subroutine test_schema_add_field_bad_qc_miss_value_aborts
+    !
+    ! ------------------------------------------------------------------------------
+    ! date/time/timestamp (parquet_temporal) MAML token validation
+    ! ------------------------------------------------------------------------------
+    !
+    !> schema%add_field accepts every temporal token shape (bare date/time/timestamp, an
+    !> explicit unit, and timestamp's ",utc" suffix), and parquet_validate_maml accepts the
+    !> resulting schema -- see parquet_parse_temporal_type in parquet_metadata.f90.
+    subroutine test_schema_add_field_temporal_tokens_ok(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+
+        call schema%init(table="t")
+        call schema%add_field("day", "date")
+        call schema%add_field("clock", "time")
+        call schema%add_field("clock_ms", "time[ms]")
+        call schema%add_field("ev", "timestamp")
+        call schema%add_field("ev_ns", "timestamp[ns]")
+        call schema%add_field("ev_utc", "timestamp[us,utc]")
+        call parquet_parse_maml(schema)
+
+        ! Should not error stop: every token above is well-formed.
+        call parquet_validate_maml(schema%maml)
+
+        call check(error, schema%cinfo%col(1)%data_type == "date", "field 1 data_type should be 'date'")
+        if (allocated(error)) return
+        call check(error, schema%cinfo%col(4)%data_type == "timestamp" .and. schema%cinfo%col(4)%time_unit == 3, &
+            "bare 'timestamp' should default to time_unit 3 (microseconds)")
+        if (allocated(error)) return
+        call check(error, schema%cinfo%col(6)%time_unit == 3 .and. schema%cinfo%col(6)%is_utc, &
+            "'timestamp[us,utc]' should resolve to time_unit 3 and is_utc .true.")
+    end subroutine test_schema_add_field_temporal_tokens_ok
+
+    !> "date" takes no unit -- a bracketed suffix on it is rejected the same way any other
+    !> malformed data_type token is.
+    subroutine test_schema_add_field_date_with_unit_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "schema_add_field_date_with_unit", expect_abort=.true., &
+            failure_message="schema%add_field with 'date[us]' was expected to error stop", &
+            required_stderr="invalid data_type 'date[us]'")
+    end subroutine test_schema_add_field_date_with_unit_aborts
+
+    !> qc: min:/max: on a date/time/timestamp field is deliberately unsupported (see
+    !> feature_temporal.md); parquet_validate_maml rejects it with a clear message rather than
+    !> silently ignoring the declared bound.
+    subroutine test_validate_qc_on_temporal_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "validate_qc_on_temporal_column", expect_abort=.true., &
+            failure_message="qc: on a timestamp field was expected to error stop", &
+            required_stderr="declares qc:, which is not supported for a timestamp column")
+    end subroutine test_validate_qc_on_temporal_column_aborts
+
+    !> Regression test: an explicit seconds unit ("timestamp[s]") must be rejected at add_field
+    !> time, not silently accepted and then silently downgraded to milliseconds by Arrow's
+    !> Parquet writer on write (Parquet's physical format has no seconds-resolution TIME/
+    !> TIMESTAMP encoding at all) -- see apply_temporal_unit_token's own comment in
+    !> parquet_metadata.f90 for how this was caught.
+    subroutine test_schema_add_field_seconds_unit_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "schema_add_field_seconds_unit_rejected", &
+            expect_abort=.true., &
+            failure_message="schema%add_field with 'timestamp[s]' was expected to error stop", &
+            required_stderr="invalid data_type 'timestamp[s]'")
+    end subroutine test_schema_add_field_seconds_unit_aborts
+
+    !> "time" has no timezone concept (no date part to be UTC-adjusted relative to) -- only
+    !> "timestamp" accepts a ",utc" suffix.
+    subroutine test_schema_add_field_time_utc_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "schema_add_field_time_utc_rejected", &
+            expect_abort=.true., &
+            failure_message="schema%add_field with 'time[ms,utc]' was expected to error stop", &
+            required_stderr="invalid data_type 'time[ms,utc]'")
+    end subroutine test_schema_add_field_time_utc_aborts
+
+    subroutine test_schema_add_field_unclosed_bracket_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "schema_add_field_unclosed_bracket_rejected", &
+            expect_abort=.true., &
+            failure_message="schema%add_field with an unclosed unit bracket ('time[ms') was expected to error stop", &
+            required_stderr="invalid data_type 'time[ms'")
+    end subroutine test_schema_add_field_unclosed_bracket_aborts
     !
 end module test_maml

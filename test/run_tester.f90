@@ -21,6 +21,7 @@ program tester
     use test_metadata, only : collect_tests_parquet_metadata
     use test_openmp, only : collect_tests_parquet_openmp_write, collect_tests_parquet_openmp
     use test_parquet_string, only : collect_tests_parquet_string
+    use test_temporal, only : collect_tests_parquet_temporal
     use parquet_bindings, only : parquet_warmup_memory_pool
     !
     implicit none
@@ -61,7 +62,8 @@ program tester
         ! tests in the openmp suite depend on files this one writes.
         new_testsuite("openmp_write", collect_tests_parquet_openmp_write), &
         new_testsuite("openmp", collect_tests_parquet_openmp), &
-        new_testsuite("parquet_string", collect_tests_parquet_string) &
+        new_testsuite("parquet_string", collect_tests_parquet_string), &
+        new_testsuite("temporal", collect_tests_parquet_temporal) &
         ]
     !
     ! command line argument for a specific testsuite and test

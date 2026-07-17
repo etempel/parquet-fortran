@@ -165,8 +165,6 @@ contains
             new_unittest("writing the same column twice on a schema-less writer aborts", &
                 test_write_column_twice_no_schema_aborts), &
             new_unittest("validating an invalid data_type aborts", test_validate_bad_data_type_aborts), &
-            new_unittest("validating data_type: date aborts", test_validate_excluded_date_type_aborts), &
-            new_unittest("validating data_type: timestamp aborts", test_validate_excluded_timestamp_type_aborts), &
             new_unittest("validating data_type: decimal aborts", test_validate_excluded_decimal_type_aborts), &
             new_unittest("validating a fields: entry with no name: sub-key aborts", &
                 test_validate_empty_field_name_aborts), &
@@ -398,7 +396,98 @@ contains
             new_unittest("compact string chunk write into a vector (col_size>1) schema column aborts", &
                 test_compact_string_write_chunk_requires_scalar_column_aborts), &
             new_unittest("reading a STRING_VIEW column into a compact parquet_string_column aborts", &
-                test_string_view_compact_read_unsupported_aborts) &
+                test_string_view_compact_read_unsupported_aborts), &
+            new_unittest("parquet_date set with an invalid month aborts", &
+                test_temporal_date_set_invalid_month_aborts), &
+            new_unittest("parquet_date set with an invalid day aborts", &
+                test_temporal_date_set_invalid_day_aborts), &
+            new_unittest("parquet_date set beyond the representable range aborts", &
+                test_temporal_date_set_out_of_range_aborts), &
+            new_unittest("parquet_date set_mjd beyond the representable range aborts", &
+                test_temporal_date_set_mjd_out_of_range_aborts), &
+            new_unittest("parquet_date parse failure without success= aborts", &
+                test_temporal_date_parse_invalid_aborts), &
+            new_unittest("parquet_date get on a null element aborts", &
+                test_temporal_date_null_get_aborts), &
+            new_unittest("parquet_date comparison with a null element aborts", &
+                test_temporal_date_null_comparison_aborts), &
+            new_unittest("parquet_time set with an invalid hour aborts", &
+                test_temporal_time_set_invalid_hour_aborts), &
+            new_unittest("parquet_time set with an invalid nanosecond aborts", &
+                test_temporal_time_set_invalid_nanosecond_aborts), &
+            new_unittest("parquet_time set_raw outside a day aborts", &
+                test_temporal_time_set_raw_out_of_range_aborts), &
+            new_unittest("parquet_time parse failure without success= aborts", &
+                test_temporal_time_parse_invalid_aborts), &
+            new_unittest("parquet_time accessor on a null element aborts", &
+                test_temporal_time_null_get_aborts), &
+            new_unittest("parquet_timestamp set with an invalid day aborts", &
+                test_temporal_ts_set_invalid_day_aborts), &
+            new_unittest("parquet_timestamp parse failure without success= aborts", &
+                test_temporal_ts_parse_invalid_aborts), &
+            new_unittest("parquet_timestamp to_unix on a null element aborts", &
+                test_temporal_ts_null_to_unix_aborts), &
+            new_unittest("parquet_timestamp comparison with a null element aborts", &
+                test_temporal_ts_null_comparison_aborts), &
+            new_unittest("parquet_timestamp to_unix precision loss aborts by default", &
+                test_temporal_ts_to_unix_precision_loss_aborts), &
+            new_unittest("parquet_timestamp to_unix int64 overflow aborts", &
+                test_temporal_ts_to_unix_overflow_aborts), &
+            new_unittest("parquet_timestamp set_mjd beyond the representable range aborts", &
+                test_temporal_ts_set_mjd_out_of_range_aborts), &
+            new_unittest("parquet_timestamp set_raw with an invalid nanosecond part aborts", &
+                test_temporal_ts_set_raw_invalid_nanoseconds_aborts), &
+            new_unittest("an invalid time-unit selector aborts", &
+                test_temporal_invalid_time_unit_aborts), &
+            new_unittest("parquet_timestamp get with a year beyond int32 aborts", &
+                test_temporal_ts_get_year_overflow_aborts), &
+            new_unittest("writing a time value finer than its declared unit aborts", &
+                test_temporal_write_time_precision_loss_aborts), &
+            new_unittest("writing a Null into a protected timestamp column aborts", &
+                test_temporal_protected_col_null_aborts), &
+            new_unittest("reading a date column via the plain int32 reader aborts", &
+                test_temporal_read_date_via_int32_aborts), &
+            new_unittest("reading an int32 column via the date reader aborts", &
+                test_temporal_read_int32_via_date_aborts), &
+            new_unittest("parquet_date operator(==) with a null operand aborts", test_temporal_date_eq_null_aborts), &
+            new_unittest("parquet_time get on a null element aborts", test_temporal_time_get_null_aborts), &
+            new_unittest("parquet_time minute on a null element aborts", test_temporal_time_minute_null_aborts), &
+            new_unittest("parquet_time second on a null element aborts", test_temporal_time_second_null_aborts), &
+            new_unittest("parquet_time nanosecond on a null element aborts", &
+                test_temporal_time_nanosecond_null_aborts), &
+            new_unittest("parquet_time operator(==) with a null operand aborts", test_temporal_time_eq_null_aborts), &
+            new_unittest("parquet_time operator(<) with a null operand aborts", test_temporal_time_lt_null_aborts), &
+            new_unittest("parquet_date year on a null element aborts", test_temporal_date_year_null_aborts), &
+            new_unittest("parquet_date month on a null element aborts", test_temporal_date_month_null_aborts), &
+            new_unittest("parquet_date day on a null element aborts", test_temporal_date_day_null_aborts), &
+            new_unittest("parquet_date to_mjd on a null element aborts", test_temporal_date_to_mjd_null_aborts), &
+            new_unittest("parquet_date to_string on a null element aborts", test_temporal_date_to_string_null_aborts), &
+            new_unittest("parquet_time to_string on a null element aborts", test_temporal_time_to_string_null_aborts), &
+            new_unittest("parquet_timestamp set with an invalid month aborts", &
+                test_temporal_ts_set_invalid_month_aborts), &
+            new_unittest("parquet_timestamp set with an invalid nanosecond aborts", &
+                test_temporal_ts_set_invalid_nanosecond_aborts), &
+            new_unittest("parquet_timestamp get on a null element aborts", test_temporal_ts_get_null_aborts), &
+            new_unittest("parquet_timestamp get_date beyond parquet_date's range aborts", &
+                test_temporal_ts_get_date_range_exceeded_aborts), &
+            new_unittest("parquet_timestamp to_unix negative-branch overflow aborts", &
+                test_temporal_ts_to_unix_overflow_negative_aborts), &
+            new_unittest("parquet_timestamp to_mjd on a null element aborts", test_temporal_ts_to_mjd_null_aborts), &
+            new_unittest("parquet_timestamp to_string on a null element aborts", &
+                test_temporal_ts_to_string_null_aborts), &
+            new_unittest("parquet_timestamp operator(<) with a null operand aborts", test_temporal_ts_lt_null_aborts), &
+            new_unittest("writing an undeclared temporal column aborts", &
+                test_temporal_write_column_not_defined_aborts), &
+            new_unittest("writing a temporal vector column with the wrong col_size aborts", &
+                test_temporal_write_array_size_mismatch_aborts), &
+            new_unittest("writing a temporal column of the wrong data_type aborts", &
+                test_temporal_write_type_mismatch_aborts), &
+            new_unittest("chunk-writing an undeclared temporal column aborts", &
+                test_temporal_chunk_column_not_defined_aborts), &
+            new_unittest("chunk-writing a temporal vector column with the wrong col_size aborts", &
+                test_temporal_chunk_array_size_mismatch_aborts), &
+            new_unittest("chunk-writing a temporal column of the wrong data_type aborts", &
+                test_temporal_chunk_type_mismatch_aborts) &
             ]
     end subroutine collect_tests_parquet_errors
 
@@ -978,24 +1067,10 @@ contains
             failure_message="validating an invalid data_type was expected to error stop")
     end subroutine test_validate_bad_data_type_aborts
 
-    !> Locks in the specific type exclusions from the README's Limitations
-    !> section (no date/timestamp/decimal support) so that accidentally
-    !> adding one of these to the allowed type list would be caught here,
-    !> not just a generic invalid-token check.
-    subroutine test_validate_excluded_date_type_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "validate_excluded_date_type", expect_abort=.true., &
-            failure_message="'date' is documented as unsupported and was expected to error stop")
-    end subroutine test_validate_excluded_date_type_aborts
-
-    subroutine test_validate_excluded_timestamp_type_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "validate_excluded_timestamp_type", expect_abort=.true., &
-            failure_message="'timestamp' is documented as unsupported and was expected to error stop")
-    end subroutine test_validate_excluded_timestamp_type_aborts
-
+    !> Locks in the "decimal" type exclusion from the README's Limitations section (date/
+    !> timestamp were excluded here too once, but are now supported -- see
+    !> src/parquet_temporal.f90 -- so those two tests were removed) so that accidentally adding
+    !> it to the allowed type list would be caught here, not just a generic invalid-token check.
     subroutine test_validate_excluded_decimal_type_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
@@ -2242,4 +2317,391 @@ contains
             "expected output to NOT contain '" // trim(forbidden_text) // "' for scenario '" // trim(scenario) // "'")
     end subroutine check_scenario_exit_status_and_no_output
     !
+    ! ------------------------------------------------------------------------------
+    ! parquet_temporal (parquet_date/parquet_time/parquet_timestamp) abort paths
+    ! ------------------------------------------------------------------------------
+    !
+    subroutine test_temporal_date_set_invalid_month_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_date_set_invalid_month", expect_abort=.true., &
+            failure_message="parquet_date%set with month 13 was expected to abort", &
+            required_stderr="parquet_temporal: invalid month in parquet_date%set")
+    end subroutine test_temporal_date_set_invalid_month_aborts
+
+    subroutine test_temporal_date_set_invalid_day_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_date_set_invalid_day", expect_abort=.true., &
+            failure_message="parquet_date%set with 1900-02-29 was expected to abort", &
+            required_stderr="parquet_temporal: invalid day of month in parquet_date%set")
+    end subroutine test_temporal_date_set_invalid_day_aborts
+
+    subroutine test_temporal_date_set_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_date_set_out_of_range", expect_abort=.true., &
+            failure_message="parquet_date%set beyond the int32 day range was expected to abort", &
+            required_stderr="parquet_temporal: date out of range in parquet_date%set")
+    end subroutine test_temporal_date_set_out_of_range_aborts
+
+    subroutine test_temporal_date_set_mjd_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_date_set_mjd_out_of_range", expect_abort=.true., &
+            failure_message="parquet_date%set_mjd beyond the int32 day range was expected to abort", &
+            required_stderr="parquet_temporal: MJD out of range in parquet_date%set_mjd")
+    end subroutine test_temporal_date_set_mjd_out_of_range_aborts
+
+    subroutine test_temporal_date_parse_invalid_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_date_parse_invalid", expect_abort=.true., &
+            failure_message="parquet_date%parse failure without success= was expected to abort", &
+            required_stderr="parquet_temporal: not a valid ISO-8601 date (expected YYYY-MM-DD) in parquet_date%parse")
+    end subroutine test_temporal_date_parse_invalid_aborts
+
+    subroutine test_temporal_date_null_get_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_date_null_get", expect_abort=.true., &
+            failure_message="parquet_date%get on a null element was expected to abort", &
+            required_stderr="parquet_temporal: null parquet_date element accessed in get")
+    end subroutine test_temporal_date_null_get_aborts
+
+    subroutine test_temporal_date_null_comparison_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_date_null_comparison", expect_abort=.true., &
+            failure_message="comparing against a null parquet_date was expected to abort", &
+            required_stderr="parquet_temporal: comparison with a null parquet_date element")
+    end subroutine test_temporal_date_null_comparison_aborts
+
+    subroutine test_temporal_time_set_invalid_hour_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_time_set_invalid_hour", expect_abort=.true., &
+            failure_message="parquet_time%set with hour 24 was expected to abort", &
+            required_stderr="parquet_temporal: invalid hour in parquet_time%set")
+    end subroutine test_temporal_time_set_invalid_hour_aborts
+
+    subroutine test_temporal_time_set_invalid_nanosecond_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_time_set_invalid_nanosecond", expect_abort=.true., &
+            failure_message="parquet_time%set with nanosecond 1e9 was expected to abort", &
+            required_stderr="parquet_temporal: invalid nanosecond in parquet_time%set")
+    end subroutine test_temporal_time_set_invalid_nanosecond_aborts
+
+    subroutine test_temporal_time_set_raw_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_time_set_raw_out_of_range", expect_abort=.true., &
+            failure_message="parquet_time%set_raw outside a day was expected to abort", &
+            required_stderr="parquet_temporal: nanoseconds-of-day out of range in parquet_time%set_raw")
+    end subroutine test_temporal_time_set_raw_out_of_range_aborts
+
+    subroutine test_temporal_time_parse_invalid_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_time_parse_invalid", expect_abort=.true., &
+            failure_message="parquet_time%parse failure without success= was expected to abort", &
+            required_stderr="parquet_temporal: not a valid ISO-8601 time")
+    end subroutine test_temporal_time_parse_invalid_aborts
+
+    subroutine test_temporal_time_null_get_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_time_null_get", expect_abort=.true., &
+            failure_message="parquet_time%hour on a null element was expected to abort", &
+            required_stderr="parquet_temporal: null parquet_time element accessed in hour")
+    end subroutine test_temporal_time_null_get_aborts
+
+    subroutine test_temporal_ts_set_invalid_day_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_ts_set_invalid_day", expect_abort=.true., &
+            failure_message="parquet_timestamp%set with Feb 30 was expected to abort", &
+            required_stderr="parquet_temporal: invalid day of month in parquet_timestamp%set")
+    end subroutine test_temporal_ts_set_invalid_day_aborts
+
+    subroutine test_temporal_ts_parse_invalid_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_ts_parse_invalid", expect_abort=.true., &
+            failure_message="parquet_timestamp%parse failure without success= was expected to abort", &
+            required_stderr="parquet_temporal: not a valid ISO-8601 date-time")
+    end subroutine test_temporal_ts_parse_invalid_aborts
+
+    subroutine test_temporal_ts_null_to_unix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_ts_null_to_unix", expect_abort=.true., &
+            failure_message="parquet_timestamp%to_unix on a null element was expected to abort", &
+            required_stderr="parquet_temporal: null parquet_timestamp element accessed in to_unix")
+    end subroutine test_temporal_ts_null_to_unix_aborts
+
+    subroutine test_temporal_ts_null_comparison_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_ts_null_comparison", expect_abort=.true., &
+            failure_message="comparing against a null parquet_timestamp was expected to abort", &
+            required_stderr="parquet_temporal: comparison with a null parquet_timestamp element")
+    end subroutine test_temporal_ts_null_comparison_aborts
+
+    subroutine test_temporal_ts_to_unix_precision_loss_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_ts_to_unix_precision_loss", expect_abort=.true., &
+            failure_message="parquet_timestamp%to_unix with sub-unit precision was expected to abort", &
+            required_stderr="parquet_temporal: precision loss in parquet_timestamp%to_unix")
+    end subroutine test_temporal_ts_to_unix_precision_loss_aborts
+
+    subroutine test_temporal_ts_to_unix_overflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_ts_to_unix_overflow", expect_abort=.true., &
+            failure_message="parquet_timestamp%to_unix overflowing int64 was expected to abort", &
+            required_stderr="parquet_temporal: overflow in parquet_timestamp%to_unix")
+    end subroutine test_temporal_ts_to_unix_overflow_aborts
+
+    subroutine test_temporal_ts_set_mjd_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_ts_set_mjd_out_of_range", expect_abort=.true., &
+            failure_message="parquet_timestamp%set_mjd beyond the int64 seconds range was expected to abort", &
+            required_stderr="parquet_temporal: MJD out of range in parquet_timestamp%set_mjd")
+    end subroutine test_temporal_ts_set_mjd_out_of_range_aborts
+
+    subroutine test_temporal_ts_set_raw_invalid_nanoseconds_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_ts_set_raw_invalid_nanoseconds", &
+            expect_abort=.true., &
+            failure_message="parquet_timestamp%set_raw with a negative nanosecond part was expected to abort", &
+            required_stderr="parquet_temporal: nanosecond part out of range in parquet_timestamp%set_raw")
+    end subroutine test_temporal_ts_set_raw_invalid_nanoseconds_aborts
+
+    subroutine test_temporal_invalid_time_unit_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_invalid_time_unit", expect_abort=.true., &
+            failure_message="an invalid time-unit selector was expected to abort", &
+            required_stderr="parquet_temporal: invalid time unit")
+    end subroutine test_temporal_invalid_time_unit_aborts
+
+    subroutine test_temporal_ts_get_year_overflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_ts_get_year_overflow", expect_abort=.true., &
+            failure_message="parquet_timestamp%get with a year beyond int32 was expected to abort", &
+            required_stderr="parquet_temporal: year out of integer(int32) range in parquet_timestamp%get")
+    end subroutine test_temporal_ts_get_year_overflow_aborts
+
+    !> C++-side precision guard (build_time_array), distinct from parquet_timestamp%to_unix's own
+    !> Fortran-side guard (see test_temporal_ts_to_unix_precision_loss_aborts, above).
+    subroutine test_temporal_write_time_precision_loss_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_write_time_precision_loss", expect_abort=.true., &
+            failure_message="writing a sub-millisecond time value into a time[ms] column was expected to abort", &
+            required_stderr="time value has finer precision than the column's declared unit")
+    end subroutine test_temporal_write_time_precision_loss_aborts
+
+    subroutine test_temporal_protected_col_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_protected_col_null", expect_abort=.true., &
+            failure_message="writing a Null into a protected timestamp column was expected to abort", &
+            required_stderr="column 'ev' is protected")
+    end subroutine test_temporal_protected_col_null_aborts
+
+    subroutine test_temporal_read_date_via_int32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_read_date_via_int32", expect_abort=.true., &
+            failure_message="reading a date column via parquet_read_int32_column was expected to abort", &
+            required_stderr="expected int32/int64, got date32")
+    end subroutine test_temporal_read_date_via_int32_aborts
+
+    subroutine test_temporal_read_int32_via_date_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_read_int32_via_date", expect_abort=.true., &
+            failure_message="reading an int32 column via parquet_read_date_column was expected to abort", &
+            required_stderr="expected date, got int32")
+    end subroutine test_temporal_read_int32_via_date_aborts
+
+    subroutine test_temporal_date_eq_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_date_eq_null", expect_abort=.true., &
+            failure_message="parquet_date operator(==) with a null operand was expected to abort", &
+            required_stderr="comparison with a null parquet_date element")
+    end subroutine test_temporal_date_eq_null_aborts
+
+    subroutine test_temporal_time_get_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_time_get_null", expect_abort=.true., &
+            failure_message="parquet_time%get on a null element was expected to abort", &
+            required_stderr="null parquet_time element accessed in get")
+    end subroutine test_temporal_time_get_null_aborts
+
+    subroutine test_temporal_time_minute_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_time_minute_null", expect_abort=.true., &
+            failure_message="parquet_time%minute on a null element was expected to abort", &
+            required_stderr="null parquet_time element accessed in minute")
+    end subroutine test_temporal_time_minute_null_aborts
+
+    subroutine test_temporal_time_second_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_time_second_null", expect_abort=.true., &
+            failure_message="parquet_time%second on a null element was expected to abort", &
+            required_stderr="null parquet_time element accessed in second")
+    end subroutine test_temporal_time_second_null_aborts
+
+    subroutine test_temporal_time_nanosecond_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_time_nanosecond_null", expect_abort=.true., &
+            failure_message="parquet_time%nanosecond on a null element was expected to abort", &
+            required_stderr="null parquet_time element accessed in nanosecond")
+    end subroutine test_temporal_time_nanosecond_null_aborts
+
+    subroutine test_temporal_time_eq_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_time_eq_null", expect_abort=.true., &
+            failure_message="parquet_time operator(==) with a null operand was expected to abort", &
+            required_stderr="comparison with a null parquet_time element")
+    end subroutine test_temporal_time_eq_null_aborts
+
+    subroutine test_temporal_time_lt_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_time_lt_null", expect_abort=.true., &
+            failure_message="parquet_time operator(<) with a null operand was expected to abort", &
+            required_stderr="comparison with a null parquet_time element")
+    end subroutine test_temporal_time_lt_null_aborts
+
+    subroutine test_temporal_date_year_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_date_year_null", expect_abort=.true., &
+            failure_message="parquet_date%year on a null element was expected to abort", &
+            required_stderr="null parquet_date element accessed in year")
+    end subroutine test_temporal_date_year_null_aborts
+
+    subroutine test_temporal_date_month_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_date_month_null", expect_abort=.true., &
+            failure_message="parquet_date%month on a null element was expected to abort", &
+            required_stderr="null parquet_date element accessed in month")
+    end subroutine test_temporal_date_month_null_aborts
+
+    subroutine test_temporal_date_day_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_date_day_null", expect_abort=.true., &
+            failure_message="parquet_date%day on a null element was expected to abort", &
+            required_stderr="null parquet_date element accessed in day")
+    end subroutine test_temporal_date_day_null_aborts
+
+    subroutine test_temporal_date_to_mjd_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_date_to_mjd_null", expect_abort=.true., &
+            failure_message="parquet_date%to_mjd on a null element was expected to abort", &
+            required_stderr="null parquet_date element accessed in to_mjd")
+    end subroutine test_temporal_date_to_mjd_null_aborts
+
+    subroutine test_temporal_date_to_string_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_date_to_string_null", expect_abort=.true., &
+            failure_message="parquet_date%to_string on a null element was expected to abort", &
+            required_stderr="null parquet_date element accessed in to_string")
+    end subroutine test_temporal_date_to_string_null_aborts
+
+    subroutine test_temporal_time_to_string_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_time_to_string_null", expect_abort=.true., &
+            failure_message="parquet_time%to_string on a null element was expected to abort", &
+            required_stderr="null parquet_time element accessed in to_string")
+    end subroutine test_temporal_time_to_string_null_aborts
+
+    subroutine test_temporal_ts_set_invalid_month_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_ts_set_invalid_month", expect_abort=.true., &
+            failure_message="parquet_timestamp%set with month 13 was expected to abort", &
+            required_stderr="invalid month in parquet_timestamp%set")
+    end subroutine test_temporal_ts_set_invalid_month_aborts
+
+    subroutine test_temporal_ts_set_invalid_nanosecond_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_ts_set_invalid_nanosecond", expect_abort=.true., &
+            failure_message="parquet_timestamp%set with nanosecond 1e9 was expected to abort", &
+            required_stderr="invalid nanosecond in parquet_timestamp%set")
+    end subroutine test_temporal_ts_set_invalid_nanosecond_aborts
+
+    subroutine test_temporal_ts_get_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_ts_get_null", expect_abort=.true., &
+            failure_message="parquet_timestamp%get on a null element was expected to abort", &
+            required_stderr="null parquet_timestamp element accessed in get")
+    end subroutine test_temporal_ts_get_null_aborts
+
+    subroutine test_temporal_ts_get_date_range_exceeded_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_ts_get_date_range_exceeded", &
+            expect_abort=.true., &
+            failure_message="parquet_timestamp%get_date beyond parquet_date's range was expected to abort", &
+            required_stderr="date part out of parquet_date range in parquet_timestamp%get_date")
+    end subroutine test_temporal_ts_get_date_range_exceeded_aborts
+
+    subroutine test_temporal_ts_to_unix_overflow_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_ts_to_unix_overflow_negative", &
+            expect_abort=.true., &
+            failure_message="parquet_timestamp%to_unix negative-branch overflow was expected to abort", &
+            required_stderr="overflow in parquet_timestamp%to_unix")
+    end subroutine test_temporal_ts_to_unix_overflow_negative_aborts
+
+    subroutine test_temporal_ts_to_mjd_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_ts_to_mjd_null", expect_abort=.true., &
+            failure_message="parquet_timestamp%to_mjd on a null element was expected to abort", &
+            required_stderr="null parquet_timestamp element accessed in to_mjd")
+    end subroutine test_temporal_ts_to_mjd_null_aborts
+
+    subroutine test_temporal_ts_to_string_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_ts_to_string_null", expect_abort=.true., &
+            failure_message="parquet_timestamp%to_string on a null element was expected to abort", &
+            required_stderr="null parquet_timestamp element accessed in to_string")
+    end subroutine test_temporal_ts_to_string_null_aborts
+
+    subroutine test_temporal_ts_lt_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_ts_lt_null", expect_abort=.true., &
+            failure_message="parquet_timestamp operator(<) with a null operand was expected to abort", &
+            required_stderr="comparison with a null parquet_timestamp element")
+    end subroutine test_temporal_ts_lt_null_aborts
+
+    subroutine test_temporal_write_column_not_defined_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_write_column_not_defined", expect_abort=.true., &
+            failure_message="writing an undeclared temporal column was expected to abort", &
+            required_stderr="column not defined in parquet_open_writer: not_a_real_column")
+    end subroutine test_temporal_write_column_not_defined_aborts
+
+    subroutine test_temporal_write_array_size_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_write_array_size_mismatch", &
+            expect_abort=.true., &
+            failure_message="writing a temporal vector column with the wrong col_size was expected to abort", &
+            required_stderr="array size mismatch for column ev")
+    end subroutine test_temporal_write_array_size_mismatch_aborts
+
+    subroutine test_temporal_write_type_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_write_type_mismatch", expect_abort=.true., &
+            failure_message="writing a timestamp array into a date-declared column was expected to abort", &
+            required_stderr="type mismatch for column day (expected timestamp, got date)")
+    end subroutine test_temporal_write_type_mismatch_aborts
+
+    subroutine test_temporal_chunk_column_not_defined_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_chunk_column_not_defined", expect_abort=.true., &
+            failure_message="chunk-writing an undeclared temporal column was expected to abort", &
+            required_stderr="parquet_write_column_chunk: column not defined")
+    end subroutine test_temporal_chunk_column_not_defined_aborts
+
+    subroutine test_temporal_chunk_array_size_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_chunk_array_size_mismatch", &
+            expect_abort=.true., &
+            failure_message="chunk-writing a temporal vector column with the wrong col_size was expected to abort", &
+            required_stderr="parquet_write_column_chunk: array size mismatch for column ev")
+    end subroutine test_temporal_chunk_array_size_mismatch_aborts
+
+    subroutine test_temporal_chunk_type_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_chunk_type_mismatch", expect_abort=.true., &
+            failure_message="chunk-writing a timestamp array into a date-declared column was expected to abort", &
+            required_stderr="parquet_write_column_chunk: type mismatch for column day")
+    end subroutine test_temporal_chunk_type_mismatch_aborts
+    !
+    ! Note: the temporal_foreign_int96_roundtrip/temporal_foreign_tz_roundtrip scenarios (clean
+    ! exits, not aborts) are checked from test_reading.f90's test_datetime_foreign_fixtures, not
+    ! here -- same convention as test_writing.f90's test_large_string_column_roundtrip/
+    ! test_string_view_column_roundtrip, which also drive an out-of-process debug-hook fixture
+    ! via check_scenario_exit_status but live in the suite whose read/write feature they exercise.
 end module test_errors

@@ -211,6 +211,8 @@ contains
         maml%missing_columns(n)%info = col%info
         maml%missing_columns(n)%ucd = col%ucd
         maml%missing_columns(n)%data_type = col%data_type
+        maml%missing_columns(n)%time_unit = col%time_unit
+        maml%missing_columns(n)%is_utc = col%is_utc
         maml%missing_columns(n)%array_size = col%array_size
         maml%missing_columns(n)%col_size = col%col_size
         call parquet_maml_unlock()
@@ -224,7 +226,7 @@ contains
         character(len=:), allocatable :: protected_names(:)
         character(len=32) :: idx_buf
         integer :: i, j
-        logical :: type_ok, has_table, found
+        logical :: has_table, found
         real(real64) :: qc_bound_value
 
         call parquet_parse_maml_lines(maml%lines, cinfo, metadata)
@@ -245,17 +247,20 @@ contains
                     cycle
                 end if ! GCOVR_EXCL_STOP
 
-                type_ok = .false.
-                do j = 1, size(valid_maml_data_types)
-                    if (trim(cinfo%col(i)%data_type) == trim(valid_maml_data_types(j))) then
-                        type_ok = .true.
-                        exit
-                    end if
-                end do
-                if (.not. type_ok) then
+                if (.not. parquet_data_type_token_valid(cinfo%col(i)%data_type)) then
                     errors = errors // "field '" // cur_name // "' has invalid data_type '" // &
                         trim(cinfo%col(i)%data_type) // "'; "
                 end if
+
+                ! qc: is not supported for temporal (date/time/timestamp) columns yet -- reject
+                ! it with a clear message rather than silently ignoring a declared bound.
+                select case (trim(cinfo%col(i)%data_type))
+                case ("date", "time", "timestamp")
+                    if (cinfo%col(i)%has_qc_min .or. cinfo%col(i)%has_qc_max) then
+                        errors = errors // "field '" // cur_name // "' declares qc:, which is not " // &
+                            "supported for a " // trim(cinfo%col(i)%data_type) // " column; "
+                    end if
+                end select
 
                 do j = 1, i - 1
                     if (trim(cinfo%col(j)%name) == cur_name) then

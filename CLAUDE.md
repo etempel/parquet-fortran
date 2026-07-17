@@ -231,6 +231,48 @@ one element). User guide: `doc/pages/string-columns.md`.
 - **`allow_null=.true.` on `get`/`to_string` returns an empty string, not unallocated** — see the
   gfortran note in "Build and compiler notes" below.
 
+## The `parquet_temporal` module (date/time/timestamp)
+
+`src/parquet_temporal.f90` provides `parquet_date`/`parquet_time`/`parquet_timestamp` — one
+element each (unlike `parquet_string_column` above, which owns a whole column) — fully wired
+into `parquet_read_column`/`parquet_write_column` and every chunked/row-mode/element-mode
+counterpart. User guide: `doc/pages/date-time.md`.
+
+- **Domain-grouped module naming, not one-module-per-type — this is now the precedent for
+  future sibling modules.** The module was renamed from `parquet_datatype` to `parquet_temporal`
+  specifically so a future `parquet_map`/`parquet_list` module (for Parquet `MAP`/variable-length
+  `LIST` support, currently unimplemented — see "Features considered but not implemented" in
+  CONTRIBUTING.md) has an obviously-parallel name to grow into, rather than this one module
+  accumulating every future element type. Follow the same pattern: one module per *domain* of
+  related types, named after the domain (`temporal`, `map`, `list`), not after any single type
+  inside it.
+- **These three types carry their own null state — no `is_valid=`/`null_value=` argument
+  anywhere on their read/write path, unlike every other supported type.** A default-initialized
+  element is null; write gathers validity from the elements themselves; a null-containing column
+  reads without the error-on-Null the numeric/string readers apply by default. This is a
+  deliberate, documented deviation (see `doc/pages/date-time.md`'s "Null values are part of the
+  element" section and `supported-data-types.md`'s callout in its own "Null values" section) —
+  not an oversight to bring in line with the rest of the library. A future `parquet_map`/
+  `parquet_list` module should make its own considered choice here rather than assuming either
+  convention by default.
+- **Parquet's physical format has no seconds-resolution `TIME`/`TIMESTAMP` encoding at all**
+  (only milliseconds/microseconds/nanoseconds) **and no `DATE64` physical representation**
+  (`DATE` requires an `int32` day count) — confirmed empirically, not just from the spec: even
+  with `ArrowWriterProperties::store_schema()`, Arrow's writer silently coerces a `SECOND`-unit
+  `TIME`/`TIMESTAMP` array to `MILLI` on write, and a `date64()` array is always coerced to
+  `date32()`. A MAML `time[s]`/`timestamp[s]` token is therefore rejected at `add_field`/parse
+  time (`error stop`, not a silently-wrong stored unit) — see `apply_temporal_unit_token` in
+  `parquet_metadata.f90`. `parquet_unit_seconds` still exists as a constant, but only for
+  `set_unix`/`to_unix` (Unix-time interop), never as a file column's own declared/stored unit.
+  The `DATE64` decode branch in `parquet_wrapper.cpp`'s `convert_date_values` is kept as
+  defensive dead code (in case a future Arrow/Parquet version changes this) and `GCOVR_EXCL`'d
+  rather than chased with an unbuildable fixture.
+- **Legacy `INT96` timestamp test fixtures**: `enable_deprecated_int96_timestamps()` is a method
+  on `parquet::ArrowWriterProperties::Builder`, *not* `parquet::WriterProperties::Builder` (easy
+  to guess wrong — the name doesn't indicate which builder). See
+  `parquet_debug_write_datetime_fixture` in `parquet_wrapper.cpp` for the working pattern if a
+  future debug fixture needs another legacy/foreign Arrow encoding.
+
 ## Build and compiler notes
 
 - **132-column line limit is enforced — do not reintroduce `-ffree-line-length-none`.** As of
@@ -357,6 +399,12 @@ Follow these when adding new public API, types, or internal helpers:
   side's own naming (still generally `parquet_`-prefixed for the `extern "C"` surface) —
   don't rename these to match Fortran-side conventions.
 
+- **A new module holding several related element/handle types** (as opposed to one module per
+  type) should be named after the *domain* those types belong to, not any single type inside
+  it — e.g. `parquet_temporal` for `parquet_date`/`parquet_time`/`parquet_timestamp`. See "The
+  `parquet_temporal` module" above for the reasoning and the sibling modules (`parquet_map`,
+  `parquet_list`) this leaves room for.
+
 When in doubt, grep for an existing analogous name before inventing a new convention.
 
 ## Running a single test suite/test
@@ -391,6 +439,20 @@ If you ever find a line marked `GCOVR_EXCL_LINE`/inside a `GCOVR_EXCL_START`/`GC
 block that is actually reachable in normal (non-abort) operation — i.e. the exclusion looks
 wrong, not just the line being hard to test — stop and notify the user about it rather than
 silently leaving it excluded or removing the marker yourself.
+
+**A specific gcov/gfortran quirk to know about, not chase:** in `src/parquet_temporal.f90`, six
+`impure elemental` procedure header lines (`date_parse`, `date_new`, `time_parse`, `time_new`,
+`ts_parse`, `ts_new_civil`) never register as "hit" in gcov even though every other line of each
+one's body does — including their own `error stop` lines, which only execute on the actual abort
+path a dedicated error scenario triggers, proving the procedure genuinely runs end to end. No
+common dummy-argument shape distinguishes them from this same file's other, normally-attributed
+`impure elemental` procedure headers (e.g. `ts_set_civil`, same "optional argument" shape, is
+attributed fine) — root cause not identified, just confirmed to be a line-attribution artifact via
+the fully-covered body. Marked `GCOVR_EXCL_LINE` with an explanatory comment at each site, same
+category as `end module`/`end submodule` above. If a *new* elemental procedure header in this
+file (or a future sibling module) shows the same "0% but body covered" pattern, treat it the same
+way — confirm the body is fully covered first (that's the only way to tell it apart from a
+genuine gap), then exclude with a comment rather than spending more time chasing it.
 
 ## Regression tests for "sized/typed from the first element" bugs
 

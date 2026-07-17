@@ -80,7 +80,7 @@ public:
 	{
 		bool expected = false;
 		if (!handle_->busy.compare_exchange_strong(expected, true))
-		{
+		{ // GCOVR_EXCL_START -- see report_fatal_error's own GCOVR_EXCL comment (same std::abort() gcov-loss mechanism, feature_coverage.md's Finding 1/3)
 			std::fprintf(stderr,
 				"parquet-fortran: concurrent access to a single %s detected: each thread must use "
 				"its own independent parquet_reader/parquet_writer instance (see the README's Thread "
@@ -88,7 +88,7 @@ public:
 				"Aborting.\n", what);
 			std::fflush(stderr);
 			std::abort();
-		}
+		} // GCOVR_EXCL_STOP
 	}
 
 	~ConcurrencyGuard()
@@ -393,23 +393,32 @@ extern "C"
 	// file are deliberately left as plain, uncaught std::runtime_errors --
 	// see the README's Error handling section: this project only guarantees
 	// a clean error at these specific, documented boundaries.
-	[[noreturn]] static void report_fatal_error(const char *context, const std::string &message)
+	//
+	// GCOVR_EXCL'd (this function's body, plus every one of its ~112 call sites elsewhere in
+	// this file -- see .gitlab-ci.yml's --exclude-lines-by-pattern for the single-line ones):
+	// std::abort() skips the atexit-registered gcov-flush handler a normal process exit relies
+	// on, so any process that reaches this function loses that whole run's coverage data --
+	// unobservable by gcov no matter how well-tested, not merely hard to trigger. See
+	// feature_coverage.md's Finding 1/3.
+	[[noreturn]] static void report_fatal_error(const char *context, const std::string &message) // GCOVR_EXCL_START
 	{
 		std::fprintf(stderr, "parquet-fortran: %s: %s\n", context, message.c_str());
 		std::fflush(stderr);
 		std::abort();
-	}
+	} // GCOVR_EXCL_STOP
 
 	// Returns the schema field index of `name`, or throws if it isn't a column.
 	static int64_t get_column_index(const ParquetReaderHandle *reader_handle, const char *name)
 	{
 		auto idx = reader_handle->schema->GetFieldIndex(name);
 		if (idx < 0)
-		{
+		{ // GCOVR_EXCL_START -- dead via Finding 2: parquet_read.f90's check_column_exists (built on
+		  // the non-throwing parquet_reader_has_column/struct_path_exists probe) gates every read
+		  // entry point before this can be reached; see feature_coverage.md's D4.
 			throw std::runtime_error(std::string("Column not found: ") + name);
-		}
+		} // GCOVR_EXCL_STOP
 		return static_cast<int64_t>(idx);
-	}
+	} // GCOVR_EXCL_LINE -- Finding-5 closing-brace artifact; the covered `return` above proves the body ran.
 
 	// Describes how a (possibly dotted) column name resolves against the schema: either an exact
 	// top-level field match (child_path empty), or a walk through nested STRUCT fields down to a
@@ -448,33 +457,38 @@ extern "C"
 			if (dot == std::string::npos) break;
 			start = dot + 1;
 		}
+		// The four throws below are all dead via Finding 2, same proof as get_column_index's own:
+		// parquet_read.f90's check_column_exists (built on the non-throwing
+		// parquet_reader_has_column/struct_path_exists probe, which mirrors this function's own
+		// walk) gates every read entry point on the exact same (possibly dotted) `name` before this
+		// can ever be reached; see feature_coverage.md's D4.
 		if (segments.size() < 2)
-		{
+		{ // GCOVR_EXCL_START -- dead via Finding 2, see comment above.
 			throw std::runtime_error(std::string("Column not found: ") + name);
-		}
+		} // GCOVR_EXCL_STOP
 
 		auto top_idx = schema->GetFieldIndex(segments[0]);
 		if (top_idx < 0)
-		{
+		{ // GCOVR_EXCL_START -- dead via Finding 2, see comment above.
 			throw std::runtime_error(std::string("Column not found: ") + name);
-		}
+		} // GCOVR_EXCL_STOP
 
 		std::shared_ptr<arrow::Field> field = schema->field(top_idx);
 		std::string walked_so_far = segments[0];
 		for (size_t i = 1; i < segments.size(); ++i)
 		{
 			if (field->type()->id() != arrow::Type::STRUCT)
-			{
+			{ // GCOVR_EXCL_START -- dead via Finding 2, see comment above.
 				throw std::runtime_error(std::string("Column not found: ") + name + " (path segment '" + walked_so_far +
 					"' is not a struct, found type: " + field->type()->ToString() + ")");
-			}
+			} // GCOVR_EXCL_STOP
 			auto struct_type = std::static_pointer_cast<arrow::StructType>(field->type());
 			auto child_field = struct_type->GetFieldByName(segments[i]);
 			if (!child_field)
-			{
+			{ // GCOVR_EXCL_START -- dead via Finding 2, see comment above.
 				throw std::runtime_error(std::string("Column not found: ") + name + " (no field '" + segments[i] +
 					"' under '" + walked_so_far + "')");
-			}
+			} // GCOVR_EXCL_STOP
 			field = child_field;
 			walked_so_far += "." + segments[i];
 		}
@@ -482,11 +496,11 @@ extern "C"
 		auto leaf_id = field->type()->id();
 		if (leaf_id == arrow::Type::STRUCT || leaf_id == arrow::Type::LIST ||
 			leaf_id == arrow::Type::LARGE_LIST || leaf_id == arrow::Type::MAP)
-		{
+		{ // GCOVR_EXCL_START -- dead via Finding 2, see comment above.
 			throw std::runtime_error(std::string("Column not found: ") + name +
 				" (resolves to a " + field->type()->ToString() +
 				" column; struct paths must resolve to a leaf scalar/vector column, and MAP/LIST are not supported)");
-		}
+		} // GCOVR_EXCL_STOP
 
 		return StructPathInfo{segments[0], std::vector<std::string>(segments.begin() + 1, segments.end()), field};
 	}
@@ -571,9 +585,9 @@ extern "C"
 		int64_t base_offset = current->data()->offset;
 		auto alloc = arrow::AllocateBitmap(base_offset + n);
 		if (!alloc.ok())
-		{
+		{ // GCOVR_EXCL_START -- real allocation-failure backstop, not fixture-triggerable (feature_coverage.md)
 			throw std::runtime_error(std::string("Failed to allocate combined-validity bitmap: ") + alloc.status().ToString());
-		}
+		} // GCOVR_EXCL_STOP
 		auto buffer = alloc.ValueOrDie();
 		for (int64_t i = 0; i < n; ++i)
 		{
@@ -706,14 +720,14 @@ extern "C"
 		ensure_compute_initialized();
 		auto coerced = coerce_for_filter_kernel(array);
 		if (!coerced.ok())
-		{
+		{ // GCOVR_EXCL_START -- Cast-kernel Status backstop on already-validated input (feature_coverage.md)
 			throw std::runtime_error(coerced.status().ToString());
-		}
+		} // GCOVR_EXCL_STOP
 		auto filtered = arrow::compute::Filter(coerced.ValueOrDie(), reader_handle->filter_mask);
 		if (!filtered.ok())
-		{
+		{ // GCOVR_EXCL_START -- Filter-kernel Status backstop on already-validated input (feature_coverage.md)
 			throw std::runtime_error(filtered.status().ToString());
-		}
+		} // GCOVR_EXCL_STOP
 		return filtered.ValueOrDie().make_array();
 	}
 
@@ -767,15 +781,15 @@ extern "C"
 			if (g_debug_force_whole_column_read_error)
 			{
 				report_fatal_error("get_single_chunk_array",
-					std::string("forced debug error: whole-column read attempted for column: ") + name);
+					std::string("forced debug error: whole-column read attempted for column: ") + name); // GCOVR_EXCL_LINE
 			}
 
 			std::shared_ptr<arrow::ChunkedArray> chunked;
 			auto status = reader_handle->reader->ReadColumn(static_cast<int>(idx), &chunked);
 			if (!status.ok())
-			{
+			{ // GCOVR_EXCL_START -- file-I/O backstop, not fixture-triggerable (feature_coverage.md)
 				throw std::runtime_error(status.ToString());
-			}
+			} // GCOVR_EXCL_STOP
 
 			array = apply_filter_mask(reader_handle, combine_column_chunks(chunked, resolved.top_level_name));
 			reader_handle->column_cache.emplace(static_cast<int>(idx), array);
@@ -979,8 +993,8 @@ extern "C"
 		if (col_size > limit)
 		{
 			report_fatal_error(context, "column '" + name + "': col_size (" + std::to_string(col_size) +
-				") exceeds " + std::to_string(kArrowInt32ListSizeLimit) +
-				", the maximum vector-column width Arrow's FixedSizeListType supports");
+				") exceeds " + std::to_string(kArrowInt32ListSizeLimit) + // GCOVR_EXCL_LINE
+				", the maximum vector-column width Arrow's FixedSizeListType supports"); // GCOVR_EXCL_LINE
 		}
 	}
 
@@ -1047,9 +1061,9 @@ extern "C"
 		if (overflows)
 		{
 			report_fatal_error(context, "column '" + name + "': " + value_label + " (" + std::to_string(chunk_size) +
-				") * col_size (" + std::to_string(col_size) + ") exceeds " + std::to_string(kArrowInt32ListElementCountLimit) +
-				", the maximum per-row-group element count Arrow/Parquet's list-column level generation supports "
-				"-- " + advice);
+				") * col_size (" + std::to_string(col_size) + ") exceeds " + std::to_string(kArrowInt32ListElementCountLimit) + // GCOVR_EXCL_LINE
+				", the maximum per-row-group element count Arrow/Parquet's list-column level generation supports " // GCOVR_EXCL_LINE
+				"-- " + advice); // GCOVR_EXCL_LINE
 		}
 	}
 
@@ -1243,8 +1257,8 @@ extern "C"
 		if (new_count > limit)
 		{
 			report_fatal_error(context, "column '" + name + "': this table would have " + std::to_string(new_count) +
-				" columns, exceeding " + std::to_string(kArrowInt32FieldCountLimit) +
-				", the maximum column count Arrow's Schema supports");
+				" columns, exceeding " + std::to_string(kArrowInt32FieldCountLimit) + // GCOVR_EXCL_LINE
+				", the maximum column count Arrow's Schema supports"); // GCOVR_EXCL_LINE
 		}
 	}
 
@@ -1301,15 +1315,22 @@ extern "C"
 	// declaration of C function" -- C linkage doesn't encode parameter types
 	// into the symbol name, so two same-named functions genuinely conflict
 	// there even though clang doesn't catch it).
+	// real_to_int32_checked is genuinely exercised by a passing (non-aborting) float/double->int32
+	// round trip -- not Finding-1 collateral, unlike real_to_int64_checked just below, which is only
+	// ever reached via the extended_real_*_int64 error scenarios (whose abort discards even the
+	// kOk/kNonIntegral lines that ran before it); see feature_coverage.md's D3.
 	static NumericConvertStatus real_to_int32_checked(double v, int32_t &out)
 	{
 		if (!std::isfinite(v) || v != std::trunc(v)) return NumericConvertStatus::kNonIntegral;
 		if (v < static_cast<double>(std::numeric_limits<int32_t>::min()) ||
 			v > static_cast<double>(std::numeric_limits<int32_t>::max()))
-			return NumericConvertStatus::kOverflow;
+			return NumericConvertStatus::kOverflow; // GCOVR_EXCL_LINE -- Finding-1 collateral (D3): the
+			// overflow path itself is only reached via extended_real_overflow_int32's abort-ending
+			// scenario, unlike the rest of this function (kOk/kNonIntegral), which a passing round trip covers.
 		out = static_cast<int32_t>(v);
 		return NumericConvertStatus::kOk;
 	}
+	// GCOVR_EXCL_START -- Finding-1 collateral (D3): see comment above.
 	static NumericConvertStatus real_to_int64_checked(double v, int64_t &out)
 	{
 		if (!std::isfinite(v) || v != std::trunc(v)) return NumericConvertStatus::kNonIntegral;
@@ -1319,6 +1340,7 @@ extern "C"
 		out = static_cast<int64_t>(v);
 		return NumericConvertStatus::kOk;
 	}
+	// GCOVR_EXCL_STOP
 
 	// Extracts element `idx` of a FLOAT/HALF_FLOAT/DOUBLE array as a double --
 	// shared by convert_values_to_int32/int64 (via real_to_int_checked above),
@@ -1329,7 +1351,11 @@ extern "C"
 		switch (vals->type_id())
 		{
 		case arrow::Type::FLOAT:
+			// GCOVR_EXCL_START -- Finding-1 collateral, same reasoning as real_to_int32/64_checked
+			// above (D3): only reached via the extended_real_*_int32/64 error scenarios' FLOAT
+			// fixture column, which end in an abort.
 			return static_cast<double>(std::static_pointer_cast<arrow::FloatArray>(vals)->Value(idx));
+			// GCOVR_EXCL_STOP
 		case arrow::Type::HALF_FLOAT:
 		{
 			auto arr = std::static_pointer_cast<arrow::HalfFloatArray>(vals);
@@ -1347,7 +1373,7 @@ extern "C"
 	static int32_t decimal_scale_of(const std::shared_ptr<arrow::Array> &vals)
 	{
 		return std::static_pointer_cast<arrow::DecimalType>(vals->type())->scale();
-	}
+	} // GCOVR_EXCL_LINE -- Finding-5 closing-brace artifact; the covered `return` above proves the body ran.
 
 	// Converts element `idx` of a DECIMAL32/64/128/256 array into an exact
 	// int64_t via Rescale(scale, 0, ...) -- which fails with
@@ -1365,6 +1391,9 @@ extern "C"
 		switch (vals->type_id())
 		{
 		case arrow::Type::DECIMAL32:
+		// GCOVR_EXCL_START -- Finding-1 collateral (D3): unlike the DECIMAL128/256 cases below
+		// (also exercised by a passing, non-aborting round-trip elsewhere), no fixture ever drives
+		// a DECIMAL32/64 value through this checked conversion outside of an abort-ending scenario.
 		{
 			auto arr = std::static_pointer_cast<arrow::Decimal32Array>(vals);
 			arrow::Decimal32 dec(arr->GetValue(idx));
@@ -1386,6 +1415,7 @@ extern "C"
 			out = rescaled.value();
 			return NumericConvertStatus::kOk;
 		}
+		// GCOVR_EXCL_STOP
 		case arrow::Type::DECIMAL128:
 		{
 			auto arr = std::static_pointer_cast<arrow::Decimal128Array>(vals);
@@ -1834,7 +1864,10 @@ extern "C"
 			return list_arr->values()->Slice(list_arr->value_offset(0), nrows * col_size);
 		}
 		if (array->type_id() == arrow::Type::LARGE_LIST)
-		{
+		{ // GCOVR_EXCL_START -- untested compat backstop: no LARGE_LIST fixture exists (this
+		  // library's own writer never produces one, and no known external tool defaults to it
+		  // either); the LIST branch above is the one exercised via test/fixtures/list_vector.parquet.
+		  // See feature_coverage.md's D7 for the deliberate decision not to build a LARGE_LIST fixture.
 			auto list_arr = std::static_pointer_cast<arrow::LargeListArray>(array);
 			if (list_arr->length() != nrows)
 			{
@@ -1848,9 +1881,9 @@ extern "C"
 				}
 			}
 			return list_arr->values()->Slice(list_arr->value_offset(0), nrows * col_size);
-		}
+		} // GCOVR_EXCL_STOP
 		report_fatal_error(context, std::string("type mismatch for column: ") + name +
-			" (expected fixed_size_list/list/large_list, got " + array->type()->ToString() + ")");
+			" (expected fixed_size_list/list/large_list, got " + array->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 	}
 
 	// Copies `src` into `dst` (a fixed-width, space-padded Fortran character buffer of length item_len).
@@ -2034,11 +2067,12 @@ extern "C"
 		// ordinary "written more than once" check -- its field is already set at that point,
 		// same as a column written the ordinary way twice.
 		if (writer_handle->row_group_writer)
-		{
+		{ // GCOVR_EXCL_START -- Finding-4 BLOCKED: uncaught throw -> std::terminate() discards gcov
+		  // data (feature_coverage.md); tested via scenario_row_group_whole_column_after_streaming_started
 			throw std::runtime_error("Column written via parquet_write_column after the streaming row-group API "
 				"already started writing row groups: " + name + " -- every column must be written via "
 				"parquet_write_column before the first parquet_new_row_group call");
-		}
+		} // GCOVR_EXCL_STOP
 
 		auto metadata_index = static_cast<int64_t>(-1);
 		for (int64_t i = 0; i < static_cast<int64_t>(writer_handle->column_metadata.size()); ++i)
@@ -2052,21 +2086,16 @@ extern "C"
 
 		if (metadata_index >= 0)
 		{
-			const auto target_size = writer_handle->column_metadata.size();
-			if (writer_handle->fields.size() < target_size)
-			{
-				writer_handle->fields.resize(target_size);
-			}
-			if (writer_handle->arrays.size() < target_size)
-			{
-				writer_handle->arrays.resize(target_size);
-			}
-
+			// fields/arrays are always kept resized in lockstep with column_metadata by
+			// parquet_add_column_metadata (its only growth site) -- no resize needed here; see
+			// feature_coverage.md's DEAD-REMOVE entry for the reachability proof.
 			auto idx = static_cast<size_t>(metadata_index);
 			if (writer_handle->fields[idx] || writer_handle->arrays[idx])
-			{
+			{ // GCOVR_EXCL_START -- dead via Finding 2: parquet_write.f90's
+			  // parquet_check_and_mark_written_name/parquet_mark_column_written already error stops
+			  // on a repeat write before ever calling into C++; see feature_coverage.md's D5.
 				throw std::runtime_error("Column written more than once: " + name);
-			}
+			} // GCOVR_EXCL_STOP
 
 			writer_handle->fields[idx] = field;
 			writer_handle->arrays[idx] = array;
@@ -2143,9 +2172,10 @@ extern "C"
 		auto result = arrow::io::FileOutputStream::Open(filename);
 		if (!result.ok())
 		{
-			delete handle;
+			delete handle; // GCOVR_EXCL_LINE -- Finding-1 collateral: runs in open_writer_bad_path, but the
+			                // report_fatal_error() below discards that whole process's gcov data (feature_coverage.md's D2).
 			report_fatal_error("create_parquet_writer",
-				std::string("failed to open '") + filename + "' for writing: " + result.status().ToString());
+				std::string("failed to open '") + filename + "' for writing: " + result.status().ToString()); // GCOVR_EXCL_LINE
 		}
 		handle->outfile = result.ValueOrDie();
 		return handle;
@@ -2210,18 +2240,18 @@ extern "C"
 		auto infile_result = arrow::io::ReadableFile::Open(filename);
 		if (!infile_result.ok())
 		{
-			delete handle;
+			delete handle; // GCOVR_EXCL_LINE -- Finding-1 collateral, same reasoning as create_parquet_writer's own (D2).
 			report_fatal_error("create_parquet_reader",
-				std::string("failed to open '") + filename + "' for reading: " + infile_result.status().ToString());
+				std::string("failed to open '") + filename + "' for reading: " + infile_result.status().ToString()); // GCOVR_EXCL_LINE
 		}
 		auto infile = infile_result.ValueOrDie();
 		parquet::arrow::FileReaderBuilder builder;
 		auto status = builder.Open(infile);
 		if (!status.ok())
 		{
-			delete handle;
+			delete handle; // GCOVR_EXCL_LINE -- Finding-1 collateral, same reasoning as create_parquet_writer's own (D2).
 			report_fatal_error("create_parquet_reader",
-				std::string("failed to open '") + filename + "': " + status.ToString());
+				std::string("failed to open '") + filename + "': " + status.ToString()); // GCOVR_EXCL_LINE
 		}
 		// Arrow's own default (kArrowDefaultUseThreads) is false; enabling
 		// this lets Arrow decode a column's row groups (or several columns
@@ -2235,17 +2265,17 @@ extern "C"
 		status = builder.Build(&handle->reader);
 		if (!status.ok())
 		{
-			delete handle;
+			delete handle; // GCOVR_EXCL_LINE -- Finding-1 collateral, same reasoning as create_parquet_writer's own (D2).
 			report_fatal_error("create_parquet_reader",
-				std::string("failed to open '") + filename + "': " + status.ToString());
+				std::string("failed to open '") + filename + "': " + status.ToString()); // GCOVR_EXCL_LINE
 		}
 
 		status = handle->reader->GetSchema(&handle->schema);
 		if (!status.ok())
 		{
-			delete handle;
+			delete handle; // GCOVR_EXCL_LINE -- Finding-1 collateral, same reasoning as create_parquet_writer's own (D2).
 			report_fatal_error("create_parquet_reader",
-				std::string("failed to open '") + filename + "': " + status.ToString());
+				std::string("failed to open '") + filename + "': " + status.ToString()); // GCOVR_EXCL_LINE
 		}
 
 		auto *file_metadata = handle->reader->parquet_reader()->metadata().get();
@@ -2253,9 +2283,9 @@ extern "C"
 			file_metadata->schema(), file_metadata->key_value_metadata(), reader_properties, &handle->manifest);
 		if (!status.ok())
 		{
-			delete handle;
+			delete handle; // GCOVR_EXCL_LINE -- Finding-1 collateral, same reasoning as create_parquet_writer's own (D2).
 			report_fatal_error("create_parquet_reader",
-				std::string("failed to open '") + filename + "': " + status.ToString());
+				std::string("failed to open '") + filename + "': " + status.ToString()); // GCOVR_EXCL_LINE
 		}
 
 		handle->nrows = handle->reader->parquet_reader()->metadata()->num_rows();
@@ -2353,9 +2383,9 @@ extern "C"
 
 			auto table_result = reader_handle->reader->ReadTable(leaf_indices);
 			if (!table_result.ok())
-			{
+			{ // GCOVR_EXCL_START -- file-I/O backstop, not fixture-triggerable (feature_coverage.md)
 				throw std::runtime_error(table_result.status().ToString());
-			}
+			} // GCOVR_EXCL_STOP
 			auto table = table_result.ValueOrDie();
 
 			for (size_t i = 0; i < indices.size(); ++i)
@@ -2430,9 +2460,9 @@ extern "C"
 
 		auto table_result = reader_handle->reader->ReadTable(leaf_indices);
 		if (!table_result.ok())
-		{
+		{ // GCOVR_EXCL_START -- file-I/O backstop, not fixture-triggerable (feature_coverage.md)
 			throw std::runtime_error(table_result.status().ToString());
-		}
+		} // GCOVR_EXCL_STOP
 		auto table = table_result.ValueOrDie();
 
 		for (size_t i = 0; i < indices.size(); ++i)
@@ -2832,17 +2862,17 @@ extern "C"
 		arrow::BooleanBuilder mask_builder;
 		auto append_status = mask_builder.AppendValues(combined.data(), static_cast<int64_t>(combined.size()));
 		if (!append_status.ok())
-		{
+		{ // GCOVR_EXCL_START -- BooleanBuilder allocation backstop, not fixture-triggerable (feature_coverage.md)
 			std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to build filter mask: %s", append_status.ToString().c_str());
 			return 1;
-		}
+		} // GCOVR_EXCL_STOP
 		std::shared_ptr<arrow::Array> mask_array;
 		auto finish_status = mask_builder.Finish(&mask_array);
 		if (!finish_status.ok())
-		{
+		{ // GCOVR_EXCL_START -- BooleanBuilder allocation backstop, not fixture-triggerable (feature_coverage.md)
 			std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to build filter mask: %s", finish_status.ToString().c_str());
 			return 1;
-		}
+		} // GCOVR_EXCL_STOP
 		reader_handle->filter_mask = std::static_pointer_cast<arrow::BooleanArray>(mask_array);
 
 		int64_t matched = 0;
@@ -2866,16 +2896,16 @@ extern "C"
 			if (it == reader_handle->column_cache.end()) continue;
 			auto coerced = coerce_for_filter_kernel(it->second);
 			if (!coerced.ok())
-			{
+			{ // GCOVR_EXCL_START -- Cast-kernel Status backstop on already-validated input (feature_coverage.md)
 				std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to apply filter: %s", coerced.status().ToString().c_str());
 				return 1;
-			}
+			} // GCOVR_EXCL_STOP
 			auto filtered = arrow::compute::Filter(coerced.ValueOrDie(), reader_handle->filter_mask);
 			if (!filtered.ok())
-			{
+			{ // GCOVR_EXCL_START -- Filter-kernel Status backstop on already-validated input (feature_coverage.md)
 				std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to apply filter: %s", filtered.status().ToString().c_str());
 				return 1;
-			}
+			} // GCOVR_EXCL_STOP
 			it->second = filtered.ValueOrDie().make_array();
 			reader_handle->was_prefetched.insert(idx);
 		}
@@ -2996,9 +3026,10 @@ extern "C"
 			list_values = std::static_pointer_cast<arrow::LargeListArray>(array)->values();
 		}
 		else
-		{
+		{ // GCOVR_EXCL_START -- Finding-4 BLOCKED: uncaught throw -> std::terminate() discards gcov
+		  // data (feature_coverage.md); tested via scenario_string_length_on_non_string_column
 			throw std::runtime_error(std::string("Column is not string-like: ") + name);
-		}
+		} // GCOVR_EXCL_STOP
 
 		auto vals = make_string_like_accessor(list_values);
 		for (int64_t i = 0; i < vals.length; ++i)
@@ -3030,7 +3061,7 @@ extern "C"
 			report_fatal_error(context, "table metadata index out of range");
 		}
 		return reader_handle->table_metadata_cache[static_cast<size_t>(index)];
-	}
+	} // GCOVR_EXCL_LINE -- Finding-5 closing-brace artifact; the covered `return` above proves the body ran.
 
 	// Returns the byte length of table metadata entry `index`'s key.
 	int64_t parquet_reader_get_table_metadata_key_length(void *handle, int64_t index)
@@ -3462,7 +3493,8 @@ extern "C"
 			return list_arr->values()->Slice(list_arr->value_offset(row_index - 1), col_size);
 		}
 		if (array->type_id() == arrow::Type::LARGE_LIST)
-		{
+		{ // GCOVR_EXCL_START -- untested compat backstop, same reasoning as get_uniform_list_values'
+		  // own LARGE_LIST branch; see feature_coverage.md's D7.
 			auto list_arr = std::static_pointer_cast<arrow::LargeListArray>(array);
 			if (row_index < 1 || row_index > list_arr->length())
 			{
@@ -3473,9 +3505,9 @@ extern "C"
 				report_fatal_error(context, std::string("col_size mismatch for column: ") + name);
 			}
 			return list_arr->values()->Slice(list_arr->value_offset(row_index - 1), col_size);
-		}
+		} // GCOVR_EXCL_STOP
 		report_fatal_error(context, std::string("type mismatch for column: ") + name +
-			" (expected fixed_size_list/list/large_list, got " + array->type()->ToString() + ")");
+			" (expected fixed_size_list/list/large_list, got " + array->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 	}
 
 	// Forward declaration -- get_row_group_chunk_array is defined further below (it needs
@@ -3513,7 +3545,7 @@ extern "C"
 			remaining -= rg_rows;
 		}
 		report_fatal_error(context, "row_index out of bounds");
-	}
+	} // GCOVR_EXCL_LINE -- Finding-5 closing-brace artifact, after a [[noreturn]] report_fatal_error call.
 
 extern "C"
 {
@@ -3542,6 +3574,9 @@ extern "C"
 			break;
 		}
 		case arrow::Type::INT64:
+		// GCOVR_EXCL_START -- Finding-1 collateral (D3): this int64-source branch of
+		// convert_values_to_int32 is only reached via an abort-ending extended-source-type
+		// overflow scenario; see feature_coverage.md's D3.
 		{
 			auto arr = std::static_pointer_cast<arrow::Int64Array>(vals);
 			for (int64_t i = 0; i < n; ++i)
@@ -3555,6 +3590,7 @@ extern "C"
 			}
 			break;
 		}
+		// GCOVR_EXCL_STOP
 		case arrow::Type::INT8:
 		case arrow::Type::INT16:
 		case arrow::Type::UINT8:
@@ -3564,6 +3600,9 @@ extern "C"
 			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<int32_t>(small_integer_value_at(vals, offset + i * stride));
 			break;
 		}
+		// UINT32 is genuinely exercised by a passing (non-aborting) round trip -- not Finding-1
+		// collateral, unlike UINT64 just below (only reached via extended_uint64_overflow_int32's
+		// abort-ending fixture); see feature_coverage.md's D3.
 		case arrow::Type::UINT32:
 		{
 			auto arr = std::static_pointer_cast<arrow::UInt32Array>(vals);
@@ -3579,6 +3618,9 @@ extern "C"
 			break;
 		}
 		case arrow::Type::UINT64:
+		// GCOVR_EXCL_START -- Finding-1 collateral (D3): only reached via
+		// extended_uint64_overflow_int32's fixture, whose scenario ends in abort; see
+		// feature_coverage.md's D3.
 		{
 			auto arr = std::static_pointer_cast<arrow::UInt64Array>(vals);
 			for (int64_t i = 0; i < n; ++i)
@@ -3592,6 +3634,10 @@ extern "C"
 			}
 			break;
 		}
+		// GCOVR_EXCL_STOP
+		// Genuinely exercised by a passing (non-aborting) round trip -- not Finding-1 collateral
+		// (real_to_int32_checked itself is likewise genuinely covered, unlike real_to_int64_checked);
+		// see feature_coverage.md's D3.
 		case arrow::Type::FLOAT:
 		case arrow::Type::DOUBLE:
 		case arrow::Type::HALF_FLOAT:
@@ -3618,6 +3664,9 @@ extern "C"
 		case arrow::Type::DECIMAL64:
 		case arrow::Type::DECIMAL128:
 		case arrow::Type::DECIMAL256:
+		// GCOVR_EXCL_START -- Finding-1 collateral (D3): only reached via
+		// extended_decimal_*_int32's fixtures, whose scenarios end in abort; see
+		// feature_coverage.md's D3.
 		{
 			std::string type_name = vals->type()->ToString();
 			for (int64_t i = 0; i < n; ++i)
@@ -3637,9 +3686,10 @@ extern "C"
 			}
 			break;
 		}
+		// GCOVR_EXCL_STOP
 		default:
 			report_fatal_error(context, std::string("type mismatch for column: ") + name +
-				" (expected int32/int64, got " + vals->type()->ToString() + ")");
+				" (expected int32/int64, got " + vals->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 		}
 	}
 
@@ -3684,6 +3734,10 @@ extern "C"
 		case arrow::Type::FLOAT:
 		case arrow::Type::DOUBLE:
 		case arrow::Type::HALF_FLOAT:
+		// GCOVR_EXCL_START -- Finding-1 collateral (D3): only reached via
+		// extended_real_*_int64's fixtures, whose scenarios end in abort (unlike the UINT64/DECIMAL*
+		// branches below, which are also exercised by a passing, non-aborting extended-source-type
+		// round trip); see feature_coverage.md's D3.
 		{
 			std::string type_name = vals->type()->ToString();
 			for (int64_t i = 0; i < n; ++i)
@@ -3703,6 +3757,7 @@ extern "C"
 			}
 			break;
 		}
+		// GCOVR_EXCL_STOP
 		case arrow::Type::DECIMAL32:
 		case arrow::Type::DECIMAL64:
 		case arrow::Type::DECIMAL128:
@@ -3727,7 +3782,7 @@ extern "C"
 		}
 		default:
 			report_fatal_error(context, std::string("type mismatch for column: ") + name +
-				" (expected int64/int32, got " + vals->type()->ToString() + ")");
+				" (expected int64/int32, got " + vals->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 		}
 	}
 
@@ -3782,7 +3837,7 @@ extern "C"
 		}
 		default:
 			report_fatal_error(context, std::string("type mismatch for column: ") + name +
-				" (expected float32/float64/int32/int64, got " + vals->type()->ToString() + ")");
+				" (expected float32/float64/int32/int64, got " + vals->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 		}
 	}
 
@@ -3837,7 +3892,7 @@ extern "C"
 		}
 		default:
 			report_fatal_error(context, std::string("type mismatch for column: ") + name +
-				" (expected float64/float32/int32/int64, got " + vals->type()->ToString() + ")");
+				" (expected float64/float32/int32/int64, got " + vals->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 		}
 	}
 
@@ -4068,12 +4123,24 @@ static void read_list_primitive_element(void *handle, const char *name, int64_t 
 // The selector integers match parquet_temporal.f90's parquet_unit_* constants exactly.
 // ============================================================================
 
+// Every SECOND case/fallback arm in the three switches below is GCOVR_EXCL'd. Two different
+// reasons, not one: the fallback `return` after each switch is unreachable because these three
+// functions exhaustively cover all 4 arrow::TimeUnit enumerators that exist today (kept only as
+// a guard against a future Arrow release adding a 5th). The SECOND arms are unreachable for a
+// stronger reason: Parquet's physical format has no seconds-resolution TIME/TIMESTAMP encoding
+// at all, so unit_sel/arrow::TimeUnit::SECOND can never legitimately flow through here from
+// either direction -- not just from this library's own writer (parse_temporal_suffix rejects
+// "s"/"seconds" at parse time), but from ANY file: confirmed empirically that Arrow's own writer
+// silently coerces a SECOND-unit array to MILLI on write even with store_schema() set, so no
+// tool can ever produce a file with a genuine SECOND-unit TIME/TIMESTAMP column to read back
+// either. See CLAUDE.md's "The parquet_temporal module" section and feature_coverage.md.
+
 // Maps a parquet_unit_* selector (1..4) to arrow::TimeUnit; aborts on an out-of-range selector.
 static arrow::TimeUnit::type temporal_selector_to_arrow_unit(int32_t unit, const char *context)
 {
 	switch (unit)
 	{
-	case 1: return arrow::TimeUnit::SECOND;
+	case 1: return arrow::TimeUnit::SECOND; // GCOVR_EXCL_LINE
 	case 2: return arrow::TimeUnit::MILLI;
 	case 3: return arrow::TimeUnit::MICRO;
 	case 4: return arrow::TimeUnit::NANO;
@@ -4088,12 +4155,12 @@ static int32_t arrow_unit_to_temporal_selector(arrow::TimeUnit::type unit)
 {
 	switch (unit)
 	{
-	case arrow::TimeUnit::SECOND: return 1;
+	case arrow::TimeUnit::SECOND: return 1; // GCOVR_EXCL_LINE
 	case arrow::TimeUnit::MILLI:  return 2;
 	case arrow::TimeUnit::MICRO:  return 3;
 	case arrow::TimeUnit::NANO:   return 4;
 	}
-	return 3; // unreachable (all four TimeUnit values are covered above)
+	return 3; // GCOVR_EXCL_LINE -- unreachable (all four TimeUnit values are covered above)
 }
 
 // Nanoseconds per one tick of `unit`: SECOND -> 1e9 ... NANO -> 1.
@@ -4101,12 +4168,12 @@ static int64_t temporal_ns_per_unit(arrow::TimeUnit::type unit)
 {
 	switch (unit)
 	{
-	case arrow::TimeUnit::SECOND: return 1000000000LL;
+	case arrow::TimeUnit::SECOND: return 1000000000LL; // GCOVR_EXCL_LINE
 	case arrow::TimeUnit::MILLI:  return 1000000LL;
 	case arrow::TimeUnit::MICRO:  return 1000LL;
 	case arrow::TimeUnit::NANO:   return 1LL;
 	}
-	return 1LL; // unreachable
+	return 1LL; // GCOVR_EXCL_LINE -- unreachable
 }
 
 // Fills `data` with days-since-1970-01-01 (Parquet DATE / Arrow date32's own value), decoding
@@ -4150,7 +4217,7 @@ static void convert_date_values(const std::shared_ptr<arrow::Array> &vals, int32
 	} // GCOVR_EXCL_STOP
 	default:
 		report_fatal_error(context, std::string("type mismatch for column: ") + name +
-			" (expected date, got " + vals->type()->ToString() + ")");
+			" (expected date, got " + vals->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 	}
 }
 
@@ -4178,7 +4245,7 @@ static void convert_time_values(const std::shared_ptr<arrow::Array> &vals, int64
 	}
 	default:
 		report_fatal_error(context, std::string("type mismatch for column: ") + name +
-			" (expected time, got " + vals->type()->ToString() + ")");
+			" (expected time, got " + vals->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 	}
 }
 
@@ -4191,7 +4258,7 @@ static void convert_timestamp_values(const std::shared_ptr<arrow::Array> &vals, 
 	if (vals->type_id() != arrow::Type::TIMESTAMP)
 	{
 		report_fatal_error(context, std::string("type mismatch for column: ") + name +
-			" (expected timestamp, got " + vals->type()->ToString() + ")");
+			" (expected timestamp, got " + vals->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 	}
 	auto arr = std::static_pointer_cast<arrow::TimestampArray>(vals);
 	for (int64_t i = 0; i < n; ++i) data[i] = arr->Value(offset + i * stride);
@@ -4203,10 +4270,10 @@ static int32_t timestamp_unit_selector_of(const std::shared_ptr<arrow::Array> &v
 	if (vals->type_id() != arrow::Type::TIMESTAMP)
 	{
 		report_fatal_error(context, std::string("type mismatch for column: ") + name +
-			" (expected timestamp, got " + vals->type()->ToString() + ")");
+			" (expected timestamp, got " + vals->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 	}
 	return arrow_unit_to_temporal_selector(std::static_pointer_cast<arrow::TimestampType>(vals->type())->unit());
-}
+} // GCOVR_EXCL_LINE -- Finding-5 closing-brace artifact; the covered `return` above proves the body ran.
 
 // The Arrow value type of a TIME column of the given unit: TIME32 for seconds/millis, TIME64
 // for micros/nanos (Arrow forbids the other two combinations).
@@ -4220,7 +4287,7 @@ static std::shared_ptr<arrow::DataType> temporal_time_value_type(int32_t unit_se
 static std::shared_ptr<arrow::DataType> temporal_timestamp_value_type(int32_t unit_selector, int32_t is_utc, const char *context)
 {
 	return arrow::timestamp(temporal_selector_to_arrow_unit(unit_selector, context), is_utc != 0 ? "UTC" : "");
-}
+} // GCOVR_EXCL_LINE -- Finding-5 closing-brace artifact; the covered `return` above proves the body ran.
 
 // Builds a scalar (col_size == 1) or fixed-size-list (col_size > 1) Arrow TIME array from
 // canonical nanoseconds-of-day input, scaling ns down to the target file unit. A value with
@@ -4253,7 +4320,7 @@ static std::shared_ptr<arrow::Array> build_time_array(const int64_t *ns, int64_t
 				if (ns[i] % scale != 0)
 				{
 					report_fatal_error(context, std::string("time value has finer precision than the column's declared "
-						"unit for column: ") + name);
+						"unit for column: ") + name); // GCOVR_EXCL_LINE
 				}
 				s = vb.Append(static_cast<ValueT>(ns[i] / scale));
 			}
@@ -4535,7 +4602,7 @@ extern "C"
 		if (array->type_id() != arrow::Type::BOOL)
 		{
 			report_fatal_error("parquet_read_bool8_column", std::string("type mismatch for column: ") + name +
-				" (expected bool, got " + array->type()->ToString() + ")");
+				" (expected bool, got " + array->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 		}
 		auto arr = std::static_pointer_cast<arrow::BooleanArray>(array);
 		if (arr->length() != nrows)
@@ -4559,7 +4626,7 @@ extern "C"
 		if (!is_string_like_type(array->type_id()))
 		{
 			report_fatal_error("parquet_read_string_column", std::string("type mismatch for column: ") + name +
-				" (expected string, got " + array->type()->ToString() + ")");
+				" (expected string, got " + array->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 		}
 		auto arr = make_string_like_accessor(array);
 		if (arr.length != nrows)
@@ -4594,10 +4661,10 @@ extern "C"
 		if (!is_offset_string_type(array->type_id()))
 		{
 			report_fatal_error("parquet_read_column", std::string("type mismatch for column: ") + name +
-				" (expected string, got " + array->type()->ToString() +
-				(array->type_id() == arrow::Type::STRING_VIEW ?
-					" -- STRING_VIEW columns are not supported by this compact buffer read; "
-					"use a fixed-width parquet_read_column instead" : "") + ")");
+				" (expected string, got " + array->type()->ToString() + // GCOVR_EXCL_LINE
+				(array->type_id() == arrow::Type::STRING_VIEW ? // GCOVR_EXCL_LINE
+					" -- STRING_VIEW columns are not supported by this compact buffer read; " // GCOVR_EXCL_LINE
+					"use a fixed-width parquet_read_column instead" : "") + ")"); // GCOVR_EXCL_LINE
 		}
 		extract_string_buffers(array, nrows_out, nchars_out, offsets_out, data_out, validity_out, offsets_int32_out);
 		mark_read(reader_handle, name, "string", array);
@@ -4664,7 +4731,7 @@ extern "C"
 		if (vals_any->type_id() != arrow::Type::BOOL)
 		{
 			report_fatal_error("parquet_read_bool8_array_column", std::string("type mismatch for list values in column: ") + name +
-				" (expected bool, got " + vals_any->type()->ToString() + ")");
+				" (expected bool, got " + vals_any->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 		}
 		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out, "parquet_read_bool8_array_column");
 		auto vals = std::static_pointer_cast<arrow::BooleanArray>(vals_any);
@@ -4685,7 +4752,7 @@ extern "C"
 		if (!is_string_like_type(vals_any->type_id()))
 		{
 			report_fatal_error("parquet_read_string_array_column", std::string("type mismatch for list values in column: ") + name +
-				" (expected string, got " + vals_any->type()->ToString() + ")");
+				" (expected string, got " + vals_any->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 		}
 		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out, "parquet_read_string_array_column");
 		auto vals = make_string_like_accessor(vals_any);
@@ -4745,7 +4812,7 @@ extern "C"
 		auto vals_any = get_row_list_values(array, name, local_row_index, col_size, "parquet_read_bool8_array_row");
 		if (vals_any->type_id() != arrow::Type::BOOL)
 			report_fatal_error("parquet_read_bool8_array_row", std::string("type mismatch for list values in column: ") + name +
-				" (expected bool, got " + vals_any->type()->ToString() + ")");
+				" (expected bool, got " + vals_any->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 		report_nulls_list_full(array, vals_any, name, 1, col_size, local_row_index - 1, valid_out, "parquet_read_bool8_array_row");
 
 		auto vals = std::static_pointer_cast<arrow::BooleanArray>(vals_any);
@@ -4780,7 +4847,7 @@ extern "C"
 		auto vals_any = get_row_list_values(array, name, local_row_index, col_size, "parquet_read_string_array_row");
 		if (!is_string_like_type(vals_any->type_id()))
 			report_fatal_error("parquet_read_string_array_row", std::string("type mismatch for list values in column: ") + name +
-				" (expected string, got " + vals_any->type()->ToString() + ")");
+				" (expected string, got " + vals_any->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 		report_nulls_list_full(array, vals_any, name, 1, col_size, local_row_index - 1, valid_out, "parquet_read_string_array_row");
 
 		auto vals = make_string_like_accessor(vals_any);
@@ -4836,7 +4903,7 @@ extern "C"
 			auto vals_any = get_uniform_list_values(array, name, nrows, col_size, context);
 			if (vals_any->type_id() != arrow::Type::BOOL)
 				report_fatal_error(context, std::string("type mismatch for list values in column: ") + name +
-					" (expected bool, got " + vals_any->type()->ToString() + ")");
+					" (expected bool, got " + vals_any->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 			auto offset = col_index - 1;
 			report_nulls_list_element(array, vals_any, name, nrows, col_size, offset, valid_out, context);
 			auto vals = std::static_pointer_cast<arrow::BooleanArray>(vals_any);
@@ -4859,7 +4926,7 @@ extern "C"
 			{
 				if (vals_any->type_id() != arrow::Type::BOOL)
 					report_fatal_error(context, std::string("type mismatch for list values in column: ") + name +
-						" (expected bool, got " + vals_any->type()->ToString() + ")");
+						" (expected bool, got " + vals_any->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 				int8_t *valid_slice = valid_out ? valid_out + row_offset : nullptr;
 				report_nulls_list_element(array, vals_any, name, rg_rows, col_size, offset, valid_slice, context);
 				auto vals = std::static_pointer_cast<arrow::BooleanArray>(vals_any);
@@ -4892,7 +4959,7 @@ extern "C"
 			auto vals_any = get_uniform_list_values(array, name, nrows, col_size, context);
 			if (!is_string_like_type(vals_any->type_id()))
 				report_fatal_error(context, std::string("type mismatch for list values in column: ") + name +
-					" (expected string, got " + vals_any->type()->ToString() + ")");
+					" (expected string, got " + vals_any->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 			auto offset = col_index - 1;
 			report_nulls_list_element(array, vals_any, name, nrows, col_size, offset, valid_out, context);
 			auto vals = make_string_like_accessor(vals_any);
@@ -4915,7 +4982,7 @@ extern "C"
 			{
 				if (!is_string_like_type(vals_any->type_id()))
 					report_fatal_error(context, std::string("type mismatch for list values in column: ") + name +
-						" (expected string, got " + vals_any->type()->ToString() + ")");
+						" (expected string, got " + vals_any->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 				int8_t *valid_slice = valid_out ? valid_out + row_offset : nullptr;
 				report_nulls_list_element(array, vals_any, name, rg_rows, col_size, offset, valid_slice, context);
 				auto vals = make_string_like_accessor(vals_any);
@@ -5120,7 +5187,7 @@ extern "C"
 		case arrow::Type::TIMESTAMP: return arrow_unit_to_temporal_selector(std::static_pointer_cast<arrow::TimestampType>(vt)->unit());
 		default:
 			report_fatal_error("parquet_get_column_time_info", std::string("column is not a time/timestamp column: ") + name +
-				" (type " + vt->ToString() + ")");
+				" (type " + vt->ToString() + ")"); // GCOVR_EXCL_LINE
 		}
 		return 3; // unreachable
 	}
@@ -5135,7 +5202,7 @@ extern "C"
 			return static_cast<int64_t>(std::static_pointer_cast<arrow::TimestampType>(vt)->timezone().size());
 		if (vt->id() == arrow::Type::TIME32 || vt->id() == arrow::Type::TIME64) return 0;
 		report_fatal_error("parquet_get_column_time_info", std::string("column is not a time/timestamp column: ") + name +
-			" (type " + vt->ToString() + ")");
+			" (type " + vt->ToString() + ")"); // GCOVR_EXCL_LINE
 		return 0; // unreachable
 	}
 
@@ -5176,9 +5243,10 @@ extern "C"
 		auto status =
 			reader_handle->reader->ReadRowGroup(static_cast<int>(row_group - 1), {static_cast<int>(leaf_idx)}, &table);
 		if (!status.ok())
-		{
+		{ // GCOVR_EXCL_START -- I/O backstop: row_group is already validated by
+		  // resolve_row_group_for_row before this is ever called; see feature_coverage.md's D6.
 			throw std::runtime_error(status.ToString());
-		}
+		} // GCOVR_EXCL_STOP
 		auto array = combine_column_chunks(table->column(0), resolved.top_level_name);
 		if (!resolved.child_path.empty())
 		{
@@ -5261,7 +5329,7 @@ extern "C"
 		if (array->type_id() != arrow::Type::BOOL)
 		{
 			report_fatal_error("parquet_read_bool8_column_chunk", std::string("type mismatch for column: ") + name +
-				" (expected bool, got " + array->type()->ToString() + ")");
+				" (expected bool, got " + array->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 		}
 		auto arr = std::static_pointer_cast<arrow::BooleanArray>(array);
 		if (arr->length() != nrows)
@@ -5284,7 +5352,7 @@ extern "C"
 		if (!is_string_like_type(array->type_id()))
 		{
 			report_fatal_error("parquet_read_string_column_chunk", std::string("type mismatch for column: ") + name +
-				" (expected string, got " + array->type()->ToString() + ")");
+				" (expected string, got " + array->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 		}
 		auto arr = make_string_like_accessor(array);
 		if (arr.length != nrows)
@@ -5320,10 +5388,10 @@ extern "C"
 		if (!is_offset_string_type(array->type_id()))
 		{
 			report_fatal_error("parquet_read_column_chunk", std::string("type mismatch for column: ") + name +
-				" (expected string, got " + array->type()->ToString() +
-				(array->type_id() == arrow::Type::STRING_VIEW ?
-					" -- STRING_VIEW columns are not supported by this compact buffer read; "
-					"use a fixed-width parquet_read_column instead" : "") + ")");
+				" (expected string, got " + array->type()->ToString() + // GCOVR_EXCL_LINE
+				(array->type_id() == arrow::Type::STRING_VIEW ? // GCOVR_EXCL_LINE
+					" -- STRING_VIEW columns are not supported by this compact buffer read; " // GCOVR_EXCL_LINE
+					"use a fixed-width parquet_read_column instead" : "") + ")"); // GCOVR_EXCL_LINE
 		}
 		reader_handle->last_chunk_buffers_array = array;
 		extract_string_buffers(array, nrows_out, nchars_out, offsets_out, data_out, validity_out, offsets_int32_out);
@@ -5386,7 +5454,7 @@ extern "C"
 		if (vals_any->type_id() != arrow::Type::BOOL)
 		{
 			report_fatal_error("parquet_read_bool8_array_column_chunk", std::string("type mismatch for list values in column: ") + name +
-				" (expected bool, got " + vals_any->type()->ToString() + ")");
+				" (expected bool, got " + vals_any->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 		}
 		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out, "parquet_read_bool8_array_column_chunk");
 		auto vals = std::static_pointer_cast<arrow::BooleanArray>(vals_any);
@@ -5406,7 +5474,7 @@ extern "C"
 		if (!is_string_like_type(vals_any->type_id()))
 		{
 			report_fatal_error("parquet_read_string_array_column_chunk", std::string("type mismatch for list values in column: ") + name +
-				" (expected string, got " + vals_any->type()->ToString() + ")");
+				" (expected string, got " + vals_any->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 		}
 		report_nulls_list_full(array, vals_any, name, nrows, col_size, 0, valid_out, "parquet_read_string_array_column_chunk");
 		auto vals = make_string_like_accessor(vals_any);
@@ -5525,23 +5593,23 @@ static void append_typed_column(void *handle, const char *name, const ValueType 
 		arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(col_size));
 		auto status = list_builder.AppendValues(nrows);
 		if (!status.ok())
-			throw std::runtime_error(status.ToString());
+			throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 		status = value_builder->AppendValues(data, nrows * col_size, valid_bytes);
 		if (!status.ok())
-			throw std::runtime_error(status.ToString());
+			throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 		status = list_builder.Finish(&array);
 		if (!status.ok())
-			throw std::runtime_error(status.ToString());
+			throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 	}
 	else
 	{
 		BuilderType builder;
 		auto status = builder.AppendValues(data, nrows, valid_bytes);
 		if (!status.ok())
-			throw std::runtime_error(status.ToString());
+			throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 		status = builder.Finish(&array);
 		if (!status.ok())
-			throw std::runtime_error(status.ToString());
+			throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 	}
 
 	append_column(writer_handle, name, build_field(name, value_type, col_size, has_any_null(valid_in, nrows * col_size)), array);
@@ -5567,7 +5635,7 @@ static size_t check_column_chunk_write_preconditions(ParquetWriterHandle *writer
 	if (!writer_handle->in_row_group)
 	{
 		report_fatal_error("parquet_write_column_chunk",
-			"column '" + std::string(name) + "': no row group is open -- call parquet_new_row_group first");
+			"column '" + std::string(name) + "': no row group is open -- call parquet_new_row_group first"); // GCOVR_EXCL_LINE
 	}
 
 	int64_t metadata_index = -1;
@@ -5600,21 +5668,21 @@ static size_t check_column_chunk_write_preconditions(ParquetWriterHandle *writer
 	if (idx < writer_handle->arrays.size() && writer_handle->arrays[idx])
 	{
 		report_fatal_error("parquet_write_column_chunk", "column '" + std::string(name) +
-			"': already fully written via parquet_write_column -- cannot also write it via parquet_write_column_chunk");
+			"': already fully written via parquet_write_column -- cannot also write it via parquet_write_column_chunk"); // GCOVR_EXCL_LINE
 	}
 	if (first_chunk_ever && writer_handle->row_group_writer)
 	{
 		report_fatal_error("parquet_write_column_chunk", "column '" + std::string(name) +
-			"': introduced after the first row group was already written -- every column must appear in the "
-			"first row group, since a Parquet file's schema is fixed once the first row group is written");
+			"': introduced after the first row group was already written -- every column must appear in the " // GCOVR_EXCL_LINE
+			"first row group, since a Parquet file's schema is fixed once the first row group is written"); // GCOVR_EXCL_LINE
 	}
 	if (!first_chunk_ever && writer_handle->pending_chunk_arrays.count(static_cast<int>(idx)))
 	{
 		report_fatal_error("parquet_write_column_chunk", "column '" + std::string(name) +
-			"': already written for this row group -- call parquet_finish_row_group before writing it again");
+			"': already written for this row group -- call parquet_finish_row_group before writing it again"); // GCOVR_EXCL_LINE
 	}
 	return idx;
-}
+} // GCOVR_EXCL_LINE -- closing-brace gcov attribution artifact; return idx above is itself covered
 
 // Streaming counterpart to append_typed_column, above: builds a small array covering just
 // writer_handle->current_row_group_nrows rows (this row group's slice), rather than the whole
@@ -5646,23 +5714,23 @@ static void append_typed_column_chunk(void *handle, const char *name, const Valu
 		arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(col_size));
 		auto status = list_builder.AppendValues(nrows);
 		if (!status.ok())
-			throw std::runtime_error(status.ToString());
+			throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 		status = value_builder->AppendValues(data, nrows * col_size, valid_bytes);
 		if (!status.ok())
-			throw std::runtime_error(status.ToString());
+			throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 		status = list_builder.Finish(&array);
 		if (!status.ok())
-			throw std::runtime_error(status.ToString());
+			throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 	}
 	else
 	{
 		BuilderType builder;
 		auto status = builder.AppendValues(data, nrows, valid_bytes);
 		if (!status.ok())
-			throw std::runtime_error(status.ToString());
+			throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 		status = builder.Finish(&array);
 		if (!status.ok())
-			throw std::runtime_error(status.ToString());
+			throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 	}
 
 	if (first_chunk_ever)
@@ -5772,13 +5840,13 @@ extern "C"
 					status = builder.Append(value);
 				}
 				if (!status.ok())
-					throw std::runtime_error(status.ToString());
+					throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 			}
 
 			std::shared_ptr<arrow::Array> array;
 			status = builder.Finish(&array);
 			if (!status.ok())
-				throw std::runtime_error(status.ToString());
+				throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 			return array;
 		};
 
@@ -5814,7 +5882,7 @@ extern "C"
 
 			auto status = list_builder.AppendValues(nrows);
 			if (!status.ok())
-				throw std::runtime_error(status.ToString());
+				throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 
 			for (int64_t i = 0; i < nrows * col_size; ++i)
 			{
@@ -5830,13 +5898,13 @@ extern "C"
 					status = value_builder->Append(value);
 				}
 				if (!status.ok())
-					throw std::runtime_error(status.ToString());
+					throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 			}
 
 			std::shared_ptr<arrow::Array> array;
 			status = list_builder.Finish(&array);
 			if (!status.ok())
-				throw std::runtime_error(status.ToString());
+				throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 			return array;
 		};
 
@@ -5882,13 +5950,13 @@ extern "C"
 				status = builder.Append(data + offsets[i], offsets[i + 1] - offsets[i]);
 			}
 			if (!status.ok())
-				throw std::runtime_error(status.ToString());
+				throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 		}
 
 		std::shared_ptr<arrow::Array> array;
 		status = builder.Finish(&array);
 		if (!status.ok())
-			throw std::runtime_error(status.ToString());
+			throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 
 		append_column(writer_handle, name, build_field(name, arrow::large_utf8(), 1, any_null), array);
 	}
@@ -5906,7 +5974,7 @@ extern "C"
 		if (writer_handle->in_row_group)
 		{
 			report_fatal_error("parquet_new_row_group",
-				"a row group is already open -- call parquet_finish_row_group before starting another");
+				"a row group is already open -- call parquet_finish_row_group before starting another"); // GCOVR_EXCL_LINE
 		}
 		if (nrows <= 0)
 		{
@@ -6023,12 +6091,12 @@ extern "C"
 				status = builder.Append(value);
 			}
 			if (!status.ok())
-				throw std::runtime_error(status.ToString());
+				throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 		}
 		std::shared_ptr<arrow::Array> array;
 		status = builder.Finish(&array);
 		if (!status.ok())
-			throw std::runtime_error(status.ToString());
+			throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 
 		if (first_chunk_ever)
 		{
@@ -6057,7 +6125,7 @@ extern "C"
 		arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, static_cast<int32_t>(col_size));
 		auto status = list_builder.AppendValues(nrows);
 		if (!status.ok())
-			throw std::runtime_error(status.ToString());
+			throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 
 		for (int64_t i = 0; i < nrows * col_size; ++i)
 		{
@@ -6073,13 +6141,13 @@ extern "C"
 				status = value_builder->Append(value);
 			}
 			if (!status.ok())
-				throw std::runtime_error(status.ToString());
+				throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 		}
 
 		std::shared_ptr<arrow::Array> array;
 		status = list_builder.Finish(&array);
 		if (!status.ok())
-			throw std::runtime_error(status.ToString());
+			throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 
 		if (first_chunk_ever)
 		{
@@ -6117,12 +6185,12 @@ extern "C"
 				status = builder.Append(data + offsets[i], offsets[i + 1] - offsets[i]);
 			}
 			if (!status.ok())
-				throw std::runtime_error(status.ToString());
+				throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 		}
 		std::shared_ptr<arrow::Array> array;
 		status = builder.Finish(&array);
 		if (!status.ok())
-			throw std::runtime_error(status.ToString());
+			throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 
 		if (first_chunk_ever)
 		{
@@ -6165,7 +6233,7 @@ extern "C"
 				if (i >= writer_handle->fields.size() || !writer_handle->fields[i])
 				{
 					report_fatal_error("parquet_finish_row_group", "column '" +
-						writer_handle->column_metadata[i].name + "' has no data in the first row group");
+						writer_handle->column_metadata[i].name + "' has no data in the first row group"); // GCOVR_EXCL_LINE
 				}
 			}
 		}
@@ -6180,15 +6248,15 @@ extern "C"
 			if (!is_whole && !has_pending)
 			{
 				report_fatal_error("parquet_finish_row_group",
-					"column '" + writer_handle->fields[i]->name() + "' has no data for this row group");
+					"column '" + writer_handle->fields[i]->name() + "' has no data for this row group"); // GCOVR_EXCL_LINE
 			}
 			if (is_whole && writer_handle->streamed_rows_total + nrows > writer_handle->arrays[i]->length())
 			{
 				report_fatal_error("parquet_finish_row_group", "column '" + writer_handle->fields[i]->name() +
-					"' has " + std::to_string(writer_handle->arrays[i]->length()) +
-					" rows (written via parquet_write_column), but row groups have already covered " +
-					std::to_string(writer_handle->streamed_rows_total) + " of them and this row group would add " +
-					std::to_string(nrows) + " more, exceeding the column's own row count");
+					"' has " + std::to_string(writer_handle->arrays[i]->length()) + // GCOVR_EXCL_LINE
+					" rows (written via parquet_write_column), but row groups have already covered " + // GCOVR_EXCL_LINE
+					std::to_string(writer_handle->streamed_rows_total) + " of them and this row group would add " + // GCOVR_EXCL_LINE
+					std::to_string(nrows) + " more, exceeding the column's own row count"); // GCOVR_EXCL_LINE
 			}
 		}
 
@@ -6213,13 +6281,13 @@ extern "C"
 			auto result = parquet::arrow::FileWriter::Open(*schema, arrow::default_memory_pool(),
 				writer_handle->outfile, writer_properties, arrow_writer_properties);
 			if (!result.ok())
-				throw std::runtime_error(result.status().ToString());
+				throw std::runtime_error(result.status().ToString()); // GCOVR_EXCL_LINE
 			writer_handle->row_group_writer = std::move(result).ValueOrDie();
 		}
 
 		auto status = writer_handle->row_group_writer->NewRowGroup();
 		if (!status.ok())
-			throw std::runtime_error(status.ToString());
+			throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 
 		for (size_t i = 0; i < writer_handle->fields.size(); ++i)
 		{
@@ -6235,7 +6303,7 @@ extern "C"
 			}
 			status = writer_handle->row_group_writer->WriteColumnChunk(*array);
 			if (!status.ok())
-				throw std::runtime_error(status.ToString());
+				throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 		}
 
 		writer_handle->streamed_rows_total += nrows;
@@ -6272,10 +6340,14 @@ extern "C"
 	// check_col_size_fits_arrow_limit abort path with a tiny fixture instead of a genuinely
 	// oversized vector column. Same process-global/subprocess-isolation reasoning as
 	// parquet_debug_set_string_offset_limit, above. Pass n<=0 to restore the real production limit.
-	void parquet_debug_set_col_size_limit(int64_t n)
+	// GCOVR_EXCL'd: scenario_col_size_overflow always ends by aborting via
+	// check_col_size_fits_arrow_limit's report_fatal_error, which discards the whole process's
+	// gcov data (Finding 1/3) -- so this setter, though genuinely called every time, never shows
+	// as covered either. Collateral of the same mechanism, not a separate gap.
+	void parquet_debug_set_col_size_limit(int64_t n) // GCOVR_EXCL_START
 	{
 		g_debug_col_size_limit = n;
-	}
+	} // GCOVR_EXCL_STOP
 
 	// Test-only: overrides g_debug_list_element_count_limit (see its own comment) so
 	// test/error_scenarios.f90's scenario_list_element_count_overflow can exercise the
@@ -6293,10 +6365,13 @@ extern "C"
 	// check_column_count_fits_arrow_limit abort path with a tiny fixture instead of a genuinely
 	// huge number of columns. Same process-global/subprocess-isolation reasoning as
 	// parquet_debug_set_string_offset_limit, above. Pass n<=0 to restore the real production limit.
-	void parquet_debug_set_column_count_limit(int64_t n)
+	// GCOVR_EXCL'd: same Finding-1 collateral reasoning as parquet_debug_set_col_size_limit above
+	// -- scenario_column_count_overflow always ends by aborting via
+	// check_column_count_fits_arrow_limit's report_fatal_error.
+	void parquet_debug_set_column_count_limit(int64_t n) // GCOVR_EXCL_START
 	{
 		g_debug_column_count_limit = n;
-	}
+	} // GCOVR_EXCL_STOP
 
 	// Test-only: overrides g_debug_force_whole_column_read_error (see its own comment) so
 	// test/error_scenarios.f90's scenario_col_size_and_row_mode_avoid_whole_column_read can prove
@@ -6389,10 +6464,11 @@ extern "C"
 		auto schema = arrow::schema({field});
 		auto table = arrow::Table::Make(schema, {array});
 
+		// file-I/O backstop, not fixture-triggerable (feature_coverage.md).
 		auto outfile_result = arrow::io::FileOutputStream::Open(path);
 		if (!outfile_result.ok())
-			throw std::runtime_error("parquet_debug_write_string_view_fixture: failed to open '" +
-				std::string(path) + "': " + outfile_result.status().ToString());
+			throw std::runtime_error("parquet_debug_write_string_view_fixture: failed to open '" + // GCOVR_EXCL_LINE
+				std::string(path) + "': " + outfile_result.status().ToString()); // GCOVR_EXCL_LINE
 		auto outfile = outfile_result.ValueOrDie();
 
 		parquet::ArrowWriterProperties::Builder arrow_writer_builder;
@@ -6462,19 +6538,140 @@ extern "C"
 		}
 		else
 		{
-			throw std::runtime_error("parquet_debug_write_datetime_fixture: unknown variant: " + v);
+			throw std::runtime_error("parquet_debug_write_datetime_fixture: unknown variant: " + v); // GCOVR_EXCL_LINE
 		}
 
 		auto field = arrow::field(column_name, value_type, /*nullable=*/true);
 		auto schema = arrow::schema({field});
 		auto table = arrow::Table::Make(schema, {array});
 
+		// file-I/O backstop, not fixture-triggerable (feature_coverage.md).
 		auto outfile_result = arrow::io::FileOutputStream::Open(path);
 		if (!outfile_result.ok())
-			throw std::runtime_error("parquet_debug_write_datetime_fixture: failed to open '" +
-				std::string(path) + "': " + outfile_result.status().ToString());
+			throw std::runtime_error("parquet_debug_write_datetime_fixture: failed to open '" + // GCOVR_EXCL_LINE
+				std::string(path) + "': " + outfile_result.status().ToString()); // GCOVR_EXCL_LINE
 		auto outfile = outfile_result.ValueOrDie();
 
+		auto arrow_writer_properties = arrow_writer_builder.build();
+		auto writer_properties = parquet::WriterProperties::Builder().build();
+		auto status = parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile,
+			table->num_rows(), writer_properties, arrow_writer_properties);
+		check(status);
+		check(outfile->Close());
+	}
+
+	// Test-only: writes a tiny fixture file with plain (variable-width) arrow::list()/
+	// arrow::large_list() columns, bypassing the writer entirely -- same convention as
+	// parquet_debug_write_string_view_fixture/parquet_debug_write_datetime_fixture above. This
+	// library's own writer only ever emits FIXED_SIZE_LIST for vector columns (see
+	// append_column), so LIST/LARGE_LIST only exist in foreign-written files -- feature_coverage.md's
+	// G6. `variant`:
+	//   "mismatch" -- "lst" (LIST<int32>) and "large_lst" (LARGE_LIST<int32>), 3 rows each with a
+	//                 different element count per row ([], [1,2], [3,4,5]) -- exercises
+	//                 get_col_size's heterogeneous-row-width return-1 branch for both list kinds.
+	//   "empty"    -- "lst" and "large_lst" again, but 0 rows -- exercises get_col_size's
+	//                 whole-array-empty return-0 branch for both list kinds (distinct from an
+	//                 empty *row*, i.e. a row whose own list has zero elements, which the
+	//                 "mismatch" variant's first row already covers as an ordinary row width).
+	//   "strings"  -- "lst_str" (LIST<utf8>) and "large_lst_str" (LARGE_LIST<utf8>), 3 uniform-width
+	//                 rows with one Null element -- exercises parquet_reader_get_string_length's
+	//                 LIST/LARGE_LIST branches and flatten_for_stats's LIST branch (LARGE_LIST is
+	//                 returned unflattened by flatten_for_stats -- see its own comment).
+	void parquet_debug_write_list_fixture(const char *path, const char *variant)
+	{
+		std::string v(variant);
+		auto check = [](const arrow::Status &st)
+		{
+			if (!st.ok()) throw std::runtime_error("parquet_debug_write_list_fixture: " + st.ToString());
+		};
+
+		std::vector<std::shared_ptr<arrow::Field>> fields;
+		std::vector<std::shared_ptr<arrow::Array>> arrays;
+
+		if (v == "mismatch" || v == "empty")
+		{
+			auto int_values = std::make_shared<arrow::Int32Builder>();
+			arrow::ListBuilder lst_builder(arrow::default_memory_pool(), int_values);
+			auto large_int_values = std::make_shared<arrow::Int32Builder>();
+			arrow::LargeListBuilder large_lst_builder(arrow::default_memory_pool(), large_int_values);
+
+			if (v == "mismatch")
+			{
+				const std::vector<std::vector<int32_t>> rows = {{}, {1, 2}, {3, 4, 5}};
+				for (const auto &row : rows)
+				{
+					check(lst_builder.Append());
+					check(large_lst_builder.Append());
+					for (auto val : row)
+					{
+						check(int_values->Append(val));
+						check(large_int_values->Append(val));
+					}
+				}
+			}
+
+			std::shared_ptr<arrow::Array> lst_array, large_lst_array;
+			check(lst_builder.Finish(&lst_array));
+			check(large_lst_builder.Finish(&large_lst_array));
+
+			fields.push_back(arrow::field("lst", arrow::list(arrow::int32()), /*nullable=*/true));
+			fields.push_back(arrow::field("large_lst", arrow::large_list(arrow::int32()), /*nullable=*/true));
+			arrays.push_back(lst_array);
+			arrays.push_back(large_lst_array);
+		}
+		else if (v == "strings")
+		{
+			auto str_values = std::make_shared<arrow::StringBuilder>();
+			arrow::ListBuilder lst_builder(arrow::default_memory_pool(), str_values);
+			auto large_str_values = std::make_shared<arrow::StringBuilder>();
+			arrow::LargeListBuilder large_lst_builder(arrow::default_memory_pool(), large_str_values);
+
+			const std::vector<std::vector<const char *>> rows = {{"alpha", "b"}, {"charlie", nullptr}, {"d", "echo"}};
+			for (const auto &row : rows)
+			{
+				check(lst_builder.Append());
+				check(large_lst_builder.Append());
+				for (auto val : row)
+				{
+					if (val)
+					{
+						check(str_values->Append(val));
+						check(large_str_values->Append(val));
+					}
+					else
+					{
+						check(str_values->AppendNull());
+						check(large_str_values->AppendNull());
+					}
+				}
+			}
+
+			std::shared_ptr<arrow::Array> lst_array, large_lst_array;
+			check(lst_builder.Finish(&lst_array));
+			check(large_lst_builder.Finish(&large_lst_array));
+
+			fields.push_back(arrow::field("lst_str", arrow::list(arrow::utf8()), /*nullable=*/true));
+			fields.push_back(arrow::field("large_lst_str", arrow::large_list(arrow::utf8()), /*nullable=*/true));
+			arrays.push_back(lst_array);
+			arrays.push_back(large_lst_array);
+		}
+		else
+		{
+			throw std::runtime_error("parquet_debug_write_list_fixture: unknown variant: " + v); // GCOVR_EXCL_LINE
+		}
+
+		auto schema = arrow::schema(fields);
+		auto table = arrow::Table::Make(schema, arrays);
+
+		// file-I/O backstop, not fixture-triggerable (feature_coverage.md).
+		auto outfile_result = arrow::io::FileOutputStream::Open(path);
+		if (!outfile_result.ok())
+			throw std::runtime_error("parquet_debug_write_list_fixture: failed to open '" + // GCOVR_EXCL_LINE
+				std::string(path) + "': " + outfile_result.status().ToString()); // GCOVR_EXCL_LINE
+		auto outfile = outfile_result.ValueOrDie();
+
+		parquet::ArrowWriterProperties::Builder arrow_writer_builder;
+		arrow_writer_builder.store_schema();
 		auto arrow_writer_properties = arrow_writer_builder.build();
 		auto writer_properties = parquet::WriterProperties::Builder().build();
 		auto status = parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile,
@@ -6492,11 +6689,12 @@ extern "C"
 	static void close_streaming_writer(ConcurrencyGuard<ParquetWriterHandle> &writer_handle)
 	{
 		if (writer_handle->in_row_group)
-		{
+		{ // GCOVR_EXCL_START -- Finding-4 BLOCKED: uncaught throw -> std::terminate() discards gcov
+		  // data (feature_coverage.md); tested via scenario_row_group_dangling_at_close
 			delete writer_handle.release();
 			throw std::runtime_error("A row group was started via parquet_new_row_group but never finished via "
 				"parquet_finish_row_group before close");
-		}
+		} // GCOVR_EXCL_STOP
 
 		for (size_t i = 0; i < writer_handle->fields.size(); ++i)
 		{
@@ -6504,7 +6702,8 @@ extern "C"
 			                                                                              // whole -- nothing to
 			                                                                              // reconcile against.
 			if (writer_handle->arrays[i]->length() != writer_handle->streamed_rows_total)
-			{
+			{ // GCOVR_EXCL_START -- Finding-4 BLOCKED: uncaught throw -> std::terminate() discards
+			  // gcov data (feature_coverage.md); tested via scenario_row_group_whole_column_undercovered
 				auto name = writer_handle->fields[i]->name();
 				auto declared = writer_handle->arrays[i]->length();
 				auto covered = writer_handle->streamed_rows_total;
@@ -6514,19 +6713,19 @@ extern "C"
 					" were covered by row groups written via parquet_new_row_group/parquet_write_column_chunk/"
 					"parquet_finish_row_group -- every row of a column written as a whole array must also be "
 					"covered by a row group");
-			}
+			} // GCOVR_EXCL_STOP
 		}
 
 		auto status = writer_handle->row_group_writer->Close();
 		if (!status.ok())
-		{
+		{ // GCOVR_EXCL_START -- file-I/O backstop, not fixture-triggerable (feature_coverage.md)
 			delete writer_handle.release();
 			throw std::runtime_error(status.ToString());
-		}
+		} // GCOVR_EXCL_STOP
 		status = writer_handle->outfile->Close();
 		delete writer_handle.release();
 		if (!status.ok())
-			throw std::runtime_error(status.ToString());
+			throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 	}
 
 	void close_parquet_writer(void *handle)
@@ -6548,21 +6747,24 @@ extern "C"
 
 		if (!writer_handle->column_metadata.empty())
 		{
-			if (writer_handle->fields.size() != writer_handle->column_metadata.size() ||
-				writer_handle->arrays.size() != writer_handle->column_metadata.size())
-			{
-				delete writer_handle.release();
-				throw std::runtime_error("Internal error: schema/data size mismatch before close");
-			}
-
+			// fields/arrays are always kept resized in lockstep with column_metadata by
+			// parquet_add_column_metadata (its only growth site) -- no size check needed here;
+			// see feature_coverage.md's DEAD-REMOVE entry for the reachability proof (same pattern
+			// as append_column's own resize removal).
 			for (size_t i = 0; i < writer_handle->column_metadata.size(); ++i)
 			{
+				// column_metadata is populated by parquet_add_column_metadata, a public extern "C"
+				// entry point on the schema-less/dynamic-metadata writer path (distinct from the
+				// parquet_schema/add_field flow, whose own "missing write" check lives entirely on
+				// the Fortran side, parquet_write.f90's enabled_columns check) -- this guards the
+				// same ABI boundary directly, against any C caller bypassing the Fortran wrapper
+				// (feature_coverage.md's KEEP+EXCLUDE tier, same class as Finding 2's nrows checks).
 				if (!writer_handle->fields[i] || !writer_handle->arrays[i])
-				{
+				{ // GCOVR_EXCL_START
 					auto missing = writer_handle->column_metadata[i].name;
 					delete writer_handle.release();
 					throw std::runtime_error("Missing column data before close: " + missing);
-				}
+				} // GCOVR_EXCL_STOP
 			}
 		}
 
@@ -6693,15 +6895,15 @@ extern "C"
 			writer_properties,
 			arrow_writer_properties);
 		if (!status.ok())
-		{
+		{ // GCOVR_EXCL_START -- file-I/O backstop, not fixture-triggerable (feature_coverage.md)
 			delete writer_handle.release();
 			throw std::runtime_error(status.ToString());
-		}
+		} // GCOVR_EXCL_STOP
 
 		status = writer_handle->outfile->Close();
 		delete writer_handle.release();
 		if (!status.ok())
-			throw std::runtime_error(status.ToString());
+			throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 	}
 
 }

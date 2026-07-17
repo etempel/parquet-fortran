@@ -207,6 +207,38 @@ contains
                 test_read_column_with_nulls_aborts), &
             new_unittest("reading a column of an unsupported physical type aborts", &
                 test_read_unsupported_physical_type_aborts), &
+            new_unittest("array-mode whole-column read of an int32 vector column as logical aborts", &
+                test_read_array_full_bool_type_mismatch_aborts), &
+            new_unittest("array-mode whole-column read of an int32 vector column as string aborts", &
+                test_read_array_full_string_type_mismatch_aborts), &
+            new_unittest("array-mode row_mode read of an int32 vector column as logical aborts", &
+                test_read_array_row_mode_bool_type_mismatch_aborts), &
+            new_unittest("array-mode row_mode read of an int32 vector column as string aborts", &
+                test_read_array_row_mode_string_type_mismatch_aborts), &
+            new_unittest("array-mode element_mode (filtered) with an out-of-range col_index (logical) aborts", &
+                test_read_array_em_filt_bool_oob_aborts), &
+            new_unittest("array-mode element_mode (filtered) read of an int32 vector column as logical aborts", &
+                test_read_array_em_filt_bool_tm_aborts), &
+            new_unittest("array-mode element_mode (filtered) with an out-of-range col_index (string) aborts", &
+                test_read_array_em_filt_string_oob_aborts), &
+            new_unittest("array-mode element_mode (filtered) read of an int32 vector column as string aborts", &
+                test_read_array_em_filt_string_tm_aborts), &
+            new_unittest("array-mode element_mode (unfiltered) with an out-of-range col_index (logical) aborts", &
+                test_read_array_em_bool_oob_aborts), &
+            new_unittest("array-mode element_mode (unfiltered) read of an int32 vector column as logical aborts", &
+                test_read_array_em_bool_tm_aborts), &
+            new_unittest("array-mode element_mode (unfiltered) with an out-of-range col_index (string) aborts", &
+                test_read_array_em_string_oob_aborts), &
+            new_unittest("array-mode element_mode (unfiltered) read of an int32 vector column as string aborts", &
+                test_read_array_em_string_tm_aborts), &
+            new_unittest("array-mode chunk read of an int32 vector column as logical aborts", &
+                test_read_array_column_chunk_bool_type_mismatch_aborts), &
+            new_unittest("array-mode chunk read of an int32 vector column as string aborts", &
+                test_read_array_column_chunk_string_type_mismatch_aborts), &
+            new_unittest("array-mode element_mode (filtered) with an out-of-range col_index (int32) aborts", &
+                test_read_array_em_filt_int32_oob_aborts), &
+            new_unittest("array-mode element_mode (unfiltered) with an out-of-range col_index (int32) aborts", &
+                test_read_array_em_int32_oob_aborts), &
             new_unittest("reading an out-of-int32-range uint32 value aborts", &
                 test_extended_uint32_overflow_int32_aborts), &
             new_unittest("reading an out-of-int32-range uint64 value aborts", &
@@ -243,6 +275,8 @@ contains
                 test_row_group_whole_column_overrun_aborts), &
             new_unittest("introducing a new column after the first row group aborts", &
                 test_row_group_new_column_after_first_aborts), &
+            new_unittest("a whole-column write after the streaming row-group API already started aborts", &
+                test_row_group_whole_column_after_streaming_started_aborts), &
             new_unittest("writing a table with column count exceeding Arrow's Schema field-count limit aborts", &
                 test_write_column_count_overflow_aborts), &
             new_unittest("prefetching an unknown column aborts", &
@@ -261,8 +295,14 @@ contains
                 test_filter_unquoted_string_value_aborts), &
             new_unittest("filter: invalid boolean value aborts", &
                 test_filter_bad_boolean_value_aborts), &
+            new_unittest("filter: a double-quoted boolean value aborts", &
+                test_filter_boolean_value_must_be_unquoted_aborts), &
             new_unittest("filter: ordering comparison against a boolean column aborts", &
                 test_filter_bool_ordering_not_supported_aborts), &
+            new_unittest("filter: filtering an unsupported (temporal) column type aborts", &
+                test_filter_unsupported_column_type_aborts), &
+            new_unittest("string length query on a non-string column aborts", &
+                test_string_length_on_non_string_column_aborts), &
             new_unittest("qc-maml: unrecognized miss: value aborts", &
                 test_qc_maml_bad_miss_value_aborts), &
             new_unittest("qc-maml: duplicate field name aborts", &
@@ -275,6 +315,10 @@ contains
                 test_qc_existing_null_abort_unchanged_aborts), &
             new_unittest("qc: hard mode (default) aborts on a range violation", &
                 test_qc_range_violation_hard_aborts), &
+            new_unittest("qc: hard mode (default) aborts on a range violation (string column)", &
+                test_qc_range_violation_string_hard_aborts), &
+            new_unittest("qc: hard mode (default) aborts on a range violation (float column)", &
+                test_qc_range_violation_float_hard_aborts), &
             new_unittest("qc: hard mode (default) aborts on an unexpected Null", &
                 test_qc_null_violation_hard_aborts), &
             new_unittest("writing columns with mismatched row counts aborts", &
@@ -1268,6 +1312,139 @@ contains
             failure_message="reading a column of an unsupported physical Parquet type was expected to abort")
     end subroutine test_read_unsupported_physical_type_aborts
 
+    !> The 16 tests below are the Fortran-side counterpart of the 16 scenarios added to
+    !> error_scenarios.f90 for feature_coverage.md's G9 group (array-mode bool8/string
+    !> type-mismatch + col_index bounds across whole-column/row-mode/element-mode/chunk-mode
+    !> reads), plus two extra element-mode col_index-bounds tests (numeric) found to be
+    !> untested while implementing G9 -- see error_scenarios.f90's own comment above those
+    !> 16 scenarios.
+
+    subroutine test_read_array_full_bool_type_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "read_array_full_bool_type_mismatch", expect_abort=.true., &
+            failure_message="reading an int32 vector column via the whole-column logical array specific " // &
+            "was expected to abort")
+    end subroutine test_read_array_full_bool_type_mismatch_aborts
+
+    subroutine test_read_array_full_string_type_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "read_array_full_string_type_mismatch", expect_abort=.true., &
+            failure_message="reading an int32 vector column via the whole-column string array specific " // &
+            "was expected to abort")
+    end subroutine test_read_array_full_string_type_mismatch_aborts
+
+    subroutine test_read_array_row_mode_bool_type_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "read_array_row_mode_bool_type_mismatch", expect_abort=.true., &
+            failure_message="reading one row of an int32 vector column via the logical row_mode specific " // &
+            "was expected to abort")
+    end subroutine test_read_array_row_mode_bool_type_mismatch_aborts
+
+    subroutine test_read_array_row_mode_string_type_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "read_array_row_mode_string_type_mismatch", expect_abort=.true., &
+            failure_message="reading one row of an int32 vector column via the string row_mode specific " // &
+            "was expected to abort")
+    end subroutine test_read_array_row_mode_string_type_mismatch_aborts
+
+    subroutine test_read_array_em_filt_bool_oob_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "read_array_element_mode_filtered_bool_col_index_out_of_range", &
+            expect_abort=.true., failure_message="element_mode with an out-of-range col_index on a filtered " // &
+            "logical reader was expected to abort")
+    end subroutine test_read_array_em_filt_bool_oob_aborts
+
+    subroutine test_read_array_em_filt_bool_tm_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "read_array_element_mode_filtered_bool_type_mismatch", &
+            expect_abort=.true., failure_message="element_mode read of an int32 vector column as logical on a " // &
+            "filtered reader was expected to abort")
+    end subroutine test_read_array_em_filt_bool_tm_aborts
+
+    subroutine test_read_array_em_filt_string_oob_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "read_array_element_mode_filtered_string_col_index_out_of_range", &
+            expect_abort=.true., failure_message="element_mode with an out-of-range col_index on a filtered " // &
+            "string reader was expected to abort")
+    end subroutine test_read_array_em_filt_string_oob_aborts
+
+    subroutine test_read_array_em_filt_string_tm_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "read_array_element_mode_filtered_string_type_mismatch", &
+            expect_abort=.true., failure_message="element_mode read of an int32 vector column as string on a " // &
+            "filtered reader was expected to abort")
+    end subroutine test_read_array_em_filt_string_tm_aborts
+
+    subroutine test_read_array_em_bool_oob_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "read_array_element_mode_bool_col_index_out_of_range", &
+            expect_abort=.true., failure_message="element_mode with an out-of-range col_index on an unfiltered " // &
+            "logical reader was expected to abort")
+    end subroutine test_read_array_em_bool_oob_aborts
+
+    subroutine test_read_array_em_bool_tm_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "read_array_element_mode_bool_type_mismatch", &
+            expect_abort=.true., failure_message="element_mode read of an int32 vector column as logical on an " // &
+            "unfiltered reader was expected to abort")
+    end subroutine test_read_array_em_bool_tm_aborts
+
+    subroutine test_read_array_em_string_oob_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "read_array_element_mode_string_col_index_out_of_range", &
+            expect_abort=.true., failure_message="element_mode with an out-of-range col_index on an unfiltered " // &
+            "string reader was expected to abort")
+    end subroutine test_read_array_em_string_oob_aborts
+
+    subroutine test_read_array_em_string_tm_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "read_array_element_mode_string_type_mismatch", &
+            expect_abort=.true., failure_message="element_mode read of an int32 vector column as string on an " // &
+            "unfiltered reader was expected to abort")
+    end subroutine test_read_array_em_string_tm_aborts
+
+    subroutine test_read_array_column_chunk_bool_type_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "read_array_column_chunk_bool_type_mismatch", expect_abort=.true., &
+            failure_message="reading a chunked int32 vector column as logical was expected to abort")
+    end subroutine test_read_array_column_chunk_bool_type_mismatch_aborts
+
+    subroutine test_read_array_column_chunk_string_type_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "read_array_column_chunk_string_type_mismatch", expect_abort=.true., &
+            failure_message="reading a chunked int32 vector column as string was expected to abort")
+    end subroutine test_read_array_column_chunk_string_type_mismatch_aborts
+
+    subroutine test_read_array_em_filt_int32_oob_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "read_array_element_mode_filtered_int32_col_index_out_of_range", &
+            expect_abort=.true., failure_message="element_mode with an out-of-range col_index on a filtered " // &
+            "int32 reader was expected to abort")
+    end subroutine test_read_array_em_filt_int32_oob_aborts
+
+    subroutine test_read_array_em_int32_oob_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "read_array_element_mode_int32_col_index_out_of_range", &
+            expect_abort=.true., failure_message="element_mode with an out-of-range col_index on an unfiltered " // &
+            "int32 reader was expected to abort")
+    end subroutine test_read_array_em_int32_oob_aborts
+
     !> The 11 tests below are the Fortran-side counterpart of
     !> error_scenarios.f90's own "extended_..." scenarios documented there --
     !> each checks the exact stderr message for one report_fatal_error call
@@ -1473,6 +1650,22 @@ contains
                 "file's schema is fixed once the first row group is written")
     end subroutine test_row_group_new_column_after_first_aborts
 
+    !> feature_coverage.md's G13: the converse -- append_column (the whole-column
+    !> parquet_write_column path) throws once the streaming row-group API has already started,
+    !> even for a column the streaming API never touched. Unlike
+    !> test_row_group_new_column_after_first_aborts above, this is a plain `throw`, not
+    !> report_fatal_error.
+    subroutine test_row_group_whole_column_after_streaming_started_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_group_whole_column_after_streaming_started", &
+            expect_abort=.true., &
+            failure_message="a whole-column write after the streaming row-group API already started " // &
+                "was expected to abort", &
+            required_stderr="Column written via parquet_write_column after the streaming row-group API " // &
+                "already started")
+    end subroutine test_row_group_whole_column_after_streaming_started_aborts
+
     !> check_column_count_fits_arrow_limit in parquet_wrapper.cpp aborts via a C++-level
     !> report_fatal_error (not a Fortran error stop) the moment a table's column count would
     !> exceed Arrow's Schema int32_t field-count limit -- see the README's Limitations section
@@ -1570,6 +1763,18 @@ contains
             required_stderr="is not true/false for boolean column")
     end subroutine test_filter_bad_boolean_value_aborts
 
+    !> feature_coverage.md's G7: a double-quoted boolean filter value ('flag == "true"') is
+    !> rejected too -- distinct from test_filter_bad_boolean_value_aborts above, which uses an
+    !> unquoted-but-invalid word.
+    subroutine test_filter_boolean_value_must_be_unquoted_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_boolean_value_must_be_unquoted", &
+            expect_abort=.true., &
+            failure_message="a double-quoted boolean filter value was expected to abort", &
+            required_stderr="must be true or false (unquoted)")
+    end subroutine test_filter_boolean_value_must_be_unquoted_aborts
+
     !> Ordering comparisons (>, >=, <, <=) aren't supported against a boolean
     !> filter column -- only ==//= are.
     subroutine test_filter_bool_ordering_not_supported_aborts(error)
@@ -1579,6 +1784,29 @@ contains
             failure_message="an ordering comparison against a boolean filter column was expected to abort", &
             required_stderr="ordering comparisons")
     end subroutine test_filter_bool_ordering_not_supported_aborts
+
+    !> feature_coverage.md's G7: eval_filter_clause's `default:` branch -- filtering a column
+    !> type (temporal) it doesn't support at all.
+    subroutine test_filter_unsupported_column_type_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_unsupported_column_type", expect_abort=.true., &
+            failure_message="filtering a temporal column was expected to abort", &
+            required_stderr="has a type that filtering does not support")
+    end subroutine test_filter_unsupported_column_type_aborts
+
+    !> feature_coverage.md's G8: parquet_reader_get_string_length's `default:` fallback for a
+    !> column that isn't string-like/LIST-typed at all -- reached via a plain `throw`, not
+    !> report_fatal_error, but still uncaught (Finding 4): terminates via std::terminate(), not
+    !> a clean Fortran `error stop`.
+    subroutine test_string_length_on_non_string_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "string_length_on_non_string_column", &
+            expect_abort=.true., &
+            failure_message="querying string length of a non-string column was expected to abort", &
+            required_stderr="Column is not string-like")
+    end subroutine test_string_length_on_non_string_column_aborts
 
     !> qc: miss: must be Null/NA (case-insensitive) or empty -- anything
     !> else is rejected as invalid qc-maml syntax before the parquet file is
@@ -1644,6 +1872,29 @@ contains
             failure_message="an out-of-range value under the default hard qc mode was expected to abort", &
             required_stderr="qc hard check: qc violation for column 'ra'")
     end subroutine test_qc_range_violation_hard_aborts
+
+    !> feature_coverage.md's G5: same as test_qc_range_violation_hard_aborts, but proves
+    !> run_qc_range_check's STRING/LARGE_STRING/STRING_VIEW branch under hard qc mode.
+    subroutine test_qc_range_violation_string_hard_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "qc_range_violation_string_hard_aborts", &
+            expect_abort=.true., &
+            failure_message="an out-of-range string value under the default hard qc mode was expected to abort", &
+            required_stderr="qc hard check: qc violation for column 'sv'")
+    end subroutine test_qc_range_violation_string_hard_aborts
+
+    !> feature_coverage.md's G5: same as test_qc_range_violation_hard_aborts, but proves
+    !> run_qc_range_check's FLOAT/DOUBLE/DECIMAL* bounds-description formatting branch under
+    !> hard qc mode.
+    subroutine test_qc_range_violation_float_hard_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "qc_range_violation_float_hard_aborts", &
+            expect_abort=.true., &
+            failure_message="an out-of-range float value under the default hard qc mode was expected to abort", &
+            required_stderr="qc hard check: qc violation for column 'fv'")
+    end subroutine test_qc_range_violation_float_hard_aborts
 
     !> The DEFAULT read-time qc mode (qc_soft=.false., hard): an unexpected
     !> Null aborts even when is_valid= was passed (so the read itself would

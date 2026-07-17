@@ -55,6 +55,8 @@ contains
                 "parquet_get_chunk_size(reader,...)", test_read_column_chunk_int64_row_group), &
             new_unittest("chunked read: parquet_close_reader(check_complete=.true.) passes when every row " // &
                 "group was read", test_read_column_chunk_check_complete_pass), &
+            new_unittest("chunked read: parquet_close_reader(check_complete=.true., check_hard=.false.) " // &
+                "warns instead of aborting on an incomplete read", test_read_column_chunk_check_complete_soft_warns), &
             new_unittest("parquet_get_col_size/parquet_get_column_total_elements/parquet_read_array_row_mode/" // &
                 "parquet_read_array_element_mode avoid a whole-column read", &
                 test_col_size_and_row_mode_avoid_whole_column_read), &
@@ -62,6 +64,12 @@ contains
                 test_read_extended_types), &
             new_unittest("row filter on an extended (int8) source type column", &
                 test_filter_extended_type), &
+            new_unittest("row filter passing-comparison on a half_float column", &
+                test_filter_extended_type_half_float), &
+            new_unittest("row filter passing-comparison on a uint64 column", &
+                test_filter_extended_type_uint64), &
+            new_unittest("row filter passing-comparison on a decimal32 column", &
+                test_filter_extended_type_decimal32), &
             new_unittest("read nested struct-field scalar/vector leaves (arbitrary depth, combined nulls)", &
                 test_read_nested_struct_leaves), &
             new_unittest("row filter on a nested struct-field leaf", &
@@ -69,7 +77,13 @@ contains
             new_unittest("date/time/timestamp: row-mode and element-mode reads on a vector column", &
                 test_datetime_row_element_mode), &
             new_unittest("date/time/timestamp: foreign INT96 and non-UTC-timezone fixtures round-trip", &
-                test_datetime_foreign_fixtures) &
+                test_datetime_foreign_fixtures), &
+            new_unittest("date/time/timestamp: row-mode and element-mode reads under an active row filter", &
+                test_datetime_array_filtered), &
+            new_unittest("int32/boolean/string: row-mode and element-mode reads under an active row filter", &
+                test_array_row_element_mode_filtered), &
+            new_unittest("plain LIST/LARGE_LIST columns from a foreign-written file (col_size, string length, print_stat)", &
+                test_list_type_foreign_fixture) &
             ]
     end subroutine collect_tests_parquet_reading
 
@@ -1592,6 +1606,34 @@ contains
             "check_complete=.true. unexpectedly disrupted a complete chunked read")
     end subroutine test_read_column_chunk_check_complete_pass
 
+    !> feature_coverage.md's G12: parquet_close_reader(check_complete=.true., check_hard=.false.)
+    !> on a genuinely incomplete chunked read (only row group 1 of 2 read) must print a WARNING
+    !> and continue, not abort -- the `hard` counterpart of this is already covered by
+    !> scenario_read_chunk_check_complete_hard_aborts in error_scenarios.f90 (default
+    !> check_hard=.true., which does abort). No abort here, so this is a plain in-process test:
+    !> the reader closing cleanly (and the already-read row group's data staying correct) is
+    !> what proves the soft path ran instead of the hard one.
+    subroutine test_read_column_chunk_check_complete_soft_warns(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = "test_run/test_read_chunk_complete_soft_warns.parquet"
+        integer(int32) :: values(4), back1(2)
+
+        values = [1, 2, 3, 4]
+        call parquet_open_writer(writer, out_file, chunk_size=2)
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column_chunk(reader, "v", 1, back1)
+        call parquet_close_reader(reader, check_complete=.true., check_hard=.false.)
+
+        call check(error, all(back1 == [1, 2]), &
+            "check_complete=.true., check_hard=.false. on an incomplete chunked read unexpectedly " // &
+            "aborted or disrupted the already-read row group")
+    end subroutine test_read_column_chunk_check_complete_soft_warns
+
     !> Regression coverage for the "List index overflow" crash parquet_get_col_size/
     !> parquet_get_column_total_elements/parquet_read_array_row_mode/parquet_read_array_element_
     !> mode used to hit once a vector column's total element count (nrows * col_size) exceeded
@@ -1790,6 +1832,100 @@ contains
             return
         end if
     end subroutine test_filter_extended_type
+    !
+    !> feature_coverage.md's G7: eval_filter_clause's FLOAT/DOUBLE/HALF_FLOAT successful
+    !> match-loop (parquet_wrapper.cpp) had only ever been exercised by malformed-value
+    !> scenarios, never a clause that actually matches rows. v_half_float in
+    !> extended_types.parquet is [2.0, -3.0, 100.0] (rows 1-3); "v_half_float > 0" should keep
+    !> rows 1 and 3 only -- same shape/expected rows as test_filter_extended_type, above.
+    subroutine test_filter_extended_type_half_float(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer :: nrows
+        integer(int32), allocatable :: id(:)
+        !
+        call filt%add("v_half_float > 0")
+        call parquet_open_reader(reader, "test/fixtures/extended_types.parquet", filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 2)
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "filtering v_half_float > 0 did not keep exactly 2 rows")
+            return
+        end if
+        !
+        allocate(id(nrows))
+        call parquet_read_column(reader, "id", id)
+        call parquet_close_reader(reader)
+        call check(error, all(id == [1_int32, 3_int32]))
+        if (allocated(error)) then
+            call test_failed(error, "filtering v_half_float > 0 did not keep the expected rows (id 1 and 3)")
+            return
+        end if
+    end subroutine test_filter_extended_type_half_float
+    !
+    !> feature_coverage.md's G7: eval_filter_clause's UINT64 successful match-loop had never
+    !> fired either. v_uint64 in extended_types.parquet is [1000, 0, 2000000000] (rows 1-3);
+    !> "v_uint64 >= 500" should keep rows 1 and 3 only.
+    subroutine test_filter_extended_type_uint64(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer :: nrows
+        integer(int32), allocatable :: id(:)
+        !
+        call filt%add("v_uint64 >= 500")
+        call parquet_open_reader(reader, "test/fixtures/extended_types.parquet", filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 2)
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "filtering v_uint64 >= 500 did not keep exactly 2 rows")
+            return
+        end if
+        !
+        allocate(id(nrows))
+        call parquet_read_column(reader, "id", id)
+        call parquet_close_reader(reader)
+        call check(error, all(id == [1_int32, 3_int32]))
+        if (allocated(error)) then
+            call test_failed(error, "filtering v_uint64 >= 500 did not keep the expected rows (id 1 and 3)")
+            return
+        end if
+    end subroutine test_filter_extended_type_uint64
+    !
+    !> feature_coverage.md's G7: eval_filter_clause's DECIMAL32/64/128/256 successful
+    !> match-loop had never fired either (all four kinds share this one source line, so a
+    !> single decimal32 test covers it regardless of decimal width). v_decimal32 in
+    !> extended_types.parquet is [12, -34, 999] (rows 1-3); "v_decimal32 > 0" should keep
+    !> rows 1 and 3 only.
+    subroutine test_filter_extended_type_decimal32(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer :: nrows
+        integer(int32), allocatable :: id(:)
+        !
+        call filt%add("v_decimal32 > 0")
+        call parquet_open_reader(reader, "test/fixtures/extended_types.parquet", filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 2)
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "filtering v_decimal32 > 0 did not keep exactly 2 rows")
+            return
+        end if
+        !
+        allocate(id(nrows))
+        call parquet_read_column(reader, "id", id)
+        call parquet_close_reader(reader)
+        call check(error, all(id == [1_int32, 3_int32]))
+        if (allocated(error)) then
+            call test_failed(error, "filtering v_decimal32 > 0 did not keep the expected rows (id 1 and 3)")
+            return
+        end if
+    end subroutine test_filter_extended_type_decimal32
     !
     !> Reads test/fixtures/nested_struct.parquet (see tools/generate_fixtures.cpp's
     !> generate_nested_struct_fixture for the exact schema/row layout) via dotted struct-field
@@ -2027,5 +2163,179 @@ contains
         call check_scenario_exit_status(error, "temporal_foreign_tz_roundtrip", expect_abort=.false., &
             failure_message="a non-UTC timezone fixture did not round-trip correctly")
     end subroutine test_datetime_foreign_fixtures
+    !
+    !> feature_coverage.md's G10: row-mode/element-mode reads of a temporal vector column under
+    !> an active row filter -- read_temporal_row/read_temporal_element's own `filter_mask` branch
+    !> (parquet_wrapper.cpp), never previously exercised since no existing temporal test opens a
+    !> reader with a filter= argument. row_index/nrows below index into the *filtered* result,
+    !> not the physical file row (see parquet_reader_set_filter's own doc-comment).
+    subroutine test_datetime_array_filtered(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        type(parquet_timestamp) :: ts(3, 4), row(3), elem(2)
+        integer(int32) :: id(4) = [1_int32, 2_int32, 3_int32, 4_int32]
+        integer(int64) :: nrows
+        integer :: i, j
+        character(len=*), parameter :: out_file = "test_run/test_datetime_array_filtered.parquet"
+
+        do j = 1, 4
+            do i = 1, 3
+                call ts(i, j)%set(2000 + j, i, 1, 0, 0, 0)
+            end do
+        end do
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_write_column(writer, "ts", ts)
+        call parquet_close_writer(writer)
+
+        call filt%add("id > 2")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 2_int64, "filtered reader did not keep the expected 2 rows")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+
+        call parquet_read_array_row_mode(reader, "ts", row, 1)
+        call parquet_read_array_element_mode(reader, "ts", elem, 2)
+        call parquet_close_reader(reader)
+
+        call check(error, all(row == ts(:, 3)), &
+            "filtered row mode: filtered row 1 should be the original file's row 3")
+        if (allocated(error)) return
+        call check(error, elem(1) == ts(2, 3) .and. elem(2) == ts(2, 4), &
+            "filtered element mode: element 2 across the 2 filtered rows")
+    end subroutine test_datetime_array_filtered
+    !
+    !> feature_coverage.md's G1: parquet_read_*_array_row/_element's `filter_mask` branch, under an
+    !> active row filter, for int32/int64/float32/float64 element-mode (read_list_primitive_element
+    !> -- row-mode was already covered by test_filter_leaves_vector_column_readable in the "writing"
+    !> suite, via its int64 column, but element-mode never was) and for boolean/string row-mode AND
+    !> element-mode (both are their own separately-coded, non-templated functions, so neither is
+    !> covered by the numeric case above). read_list_primitive_element's four `CType` specifics
+    !> dispatch their conversion call via `if constexpr`, which -- unlike the shared runtime
+    !> `if (filter_mask)` above it -- compiles a distinct line into each instantiation, so covering
+    !> int32 alone leaves int64/float32/float64's own conversion lines uncovered; all four are
+    !> exercised below for that reason. row_index/col_index index into the *filtered* result, not
+    !> the physical file row (see parquet_reader_set_filter's own doc-comment) -- same convention as
+    !> test_datetime_array_filtered above.
+    subroutine test_array_row_element_mode_filtered(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32) :: id(4) = [1_int32, 2_int32, 3_int32, 4_int32]
+        integer(int32) :: ivec(3, 4), ivec_row(3), ivec_elem(2)
+        integer(int64) :: i64vec(2, 4), i64vec_elem(2)
+        real(real32) :: f32vec(2, 4), f32vec_elem(2)
+        real(real64) :: f64vec(2, 4), f64vec_elem(2)
+        logical :: boolvec(2, 4), boolvec_row(2), boolvec_elem(2)
+        character(len=8) :: strvec(2, 4), strvec_row(2), strvec_elem(2)
+        integer(int64) :: nrows
+        integer :: i, j
+        character(len=*), parameter :: out_file = "test_run/test_array_row_element_mode_filtered.parquet"
+
+        do j = 1, 4
+            do i = 1, 3
+                ivec(i, j) = j * 10 + i
+            end do
+            do i = 1, 2
+                i64vec(i, j) = int(j * 100 + i, int64)
+                f32vec(i, j) = real(j * 10 + i, real32) + 0.5_real32
+                f64vec(i, j) = real(j * 10 + i, real64) + 0.25_real64
+                boolvec(i, j) = mod(i + j, 2) == 0
+            end do
+        end do
+        strvec = reshape([character(len=8) :: &
+            "r1c1", "r1c2", "r2c1", "r2c2", "r3c1", "r3c2", "r4c1", "r4c2"], [2, 4])
+
+        call schema%init(table="array_filter_table")
+        call schema%add_field("id", "int32")
+        call schema%add_field("ivec", "int32", col_size=3)
+        call schema%add_field("i64vec", "int64", col_size=2)
+        call schema%add_field("f32vec", "float32", col_size=2)
+        call schema%add_field("f64vec", "float64", col_size=2)
+        call schema%add_field("boolvec", "boolean", col_size=2)
+        call schema%add_field("strvec", "string", array_size=8, col_size=2)
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "id", id)
+        call parquet_write_column(writer, "ivec", ivec)
+        call parquet_write_column(writer, "i64vec", i64vec)
+        call parquet_write_column(writer, "f32vec", f32vec)
+        call parquet_write_column(writer, "f64vec", f64vec)
+        call parquet_write_column(writer, "boolvec", boolvec)
+        call parquet_write_column(writer, "strvec", strvec)
+        call parquet_close_writer(writer)
+
+        call filt%add("id > 2")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 2_int64, "filtered reader did not keep the expected 2 rows")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+
+        call parquet_read_array_row_mode(reader, "ivec", ivec_row, 1)
+        call parquet_read_array_element_mode(reader, "ivec", ivec_elem, 2)
+        call parquet_read_array_element_mode(reader, "i64vec", i64vec_elem, 2)
+        call parquet_read_array_element_mode(reader, "f32vec", f32vec_elem, 2)
+        call parquet_read_array_element_mode(reader, "f64vec", f64vec_elem, 2)
+        call parquet_read_array_row_mode(reader, "boolvec", boolvec_row, 1)
+        call parquet_read_array_element_mode(reader, "boolvec", boolvec_elem, 2)
+        call parquet_read_array_row_mode(reader, "strvec", strvec_row, 1)
+        call parquet_read_array_element_mode(reader, "strvec", strvec_elem, 2)
+        call parquet_close_reader(reader)
+
+        call check(error, all(ivec_row == ivec(:, 3)), &
+            "filtered row mode (int32): filtered row 1 should be the original file's row 3")
+        if (allocated(error)) return
+        call check(error, ivec_elem(1) == ivec(2, 3) .and. ivec_elem(2) == ivec(2, 4), &
+            "filtered element mode (int32): element 2 across the 2 filtered rows")
+        if (allocated(error)) return
+        call check(error, i64vec_elem(1) == i64vec(2, 3) .and. i64vec_elem(2) == i64vec(2, 4), &
+            "filtered element mode (int64): element 2 across the 2 filtered rows")
+        if (allocated(error)) return
+        call check(error, abs(f32vec_elem(1) - f32vec(2, 3)) < 1.0e-6_real32 .and. &
+                          abs(f32vec_elem(2) - f32vec(2, 4)) < 1.0e-6_real32, &
+            "filtered element mode (float32): element 2 across the 2 filtered rows")
+        if (allocated(error)) return
+        call check(error, abs(f64vec_elem(1) - f64vec(2, 3)) < 1.0e-9_real64 .and. &
+                          abs(f64vec_elem(2) - f64vec(2, 4)) < 1.0e-9_real64, &
+            "filtered element mode (float64): element 2 across the 2 filtered rows")
+        if (allocated(error)) return
+        call check(error, all(boolvec_row .eqv. boolvec(:, 3)), &
+            "filtered row mode (boolean): filtered row 1 should be the original file's row 3")
+        if (allocated(error)) return
+        call check(error, boolvec_elem(1) .eqv. boolvec(2, 3) .and. boolvec_elem(2) .eqv. boolvec(2, 4), &
+            "filtered element mode (boolean): element 2 across the 2 filtered rows")
+        if (allocated(error)) return
+        call check(error, all(strvec_row == strvec(:, 3)), &
+            "filtered row mode (string): filtered row 1 should be the original file's row 3")
+        if (allocated(error)) return
+        call check(error, trim(strvec_elem(1)) == trim(strvec(2, 3)) .and. trim(strvec_elem(2)) == trim(strvec(2, 4)), &
+            "filtered element mode (string): element 2 across the 2 filtered rows")
+    end subroutine test_array_row_element_mode_filtered
+    !
+    !> feature_coverage.md's G6: get_col_size/flatten_for_stats/parquet_reader_get_string_length's
+    !> plain LIST/LARGE_LIST branches -- this library's own writer only ever emits FIXED_SIZE_LIST,
+    !> so these are only reachable through a foreign-written file, built by
+    !> parquet_debug_write_list_fixture (a test-only C++ hook, see its own comment). The actual
+    !> assertions run out-of-process (scenario_list_type_foreign_fixture in error_scenarios.f90,
+    !> error-stopping on any mismatch, same convention as test_datetime_foreign_fixtures above) --
+    !> this just checks the scenario exits cleanly.
+    subroutine test_list_type_foreign_fixture(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "list_type_foreign_fixture", expect_abort=.false., &
+            failure_message="LIST/LARGE_LIST foreign-fixture columns did not report the expected sizes/lengths")
+    end subroutine test_list_type_foreign_fixture
     !
 end module test_reading

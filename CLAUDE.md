@@ -1,5 +1,13 @@
 # Instructions for Claude
 
+## Only modify files inside this repository
+
+Never edit, create, or delete files outside this library's own directory tree (e.g. files
+under a different project checkout, dotfiles like `~/.zprofile`, or other paths elsewhere on
+the machine) — even when doing so would streamline a task (such as setting a computer-specific
+environment variable). If something outside this repository genuinely needs to change, tell
+the user what's needed and let them make that change themselves.
+
 ## New features require tests and docs
 
 Whenever asked to implement a new feature in this repository, always:
@@ -433,7 +441,11 @@ by `.gitlab-ci.yml`'s `test` job (its `gfortran`/`gcc`/`g++` are one matched apt
 so `gcovr` reads its gcov data cleanly alongside the Fortran sources) but deliberately
 **not** by `tools/coverage.sh`'s local run, since an arbitrary dev machine's `FPM_CXX`
 (e.g. a default `clang++`) may not produce gcov data in a format the locally-resolved GNU
-`gcov` can read — see CONTRIBUTING.md's CI section.
+`gcov` can read — see CONTRIBUTING.md's CI section. For local `src/parquet_wrapper.cpp`
+coverage on exactly that kind of machine, use the separate `tools/coverage_cpp.sh` instead
+(not a flag on `tools/coverage.sh` — Fortran and C++ coverage can't be instrumented/collected
+in the same local pass when the toolchains don't match); see CONTRIBUTING.md's CI section for
+what it does and why it's a standalone script.
 
 If you ever find a line marked `GCOVR_EXCL_LINE`/inside a `GCOVR_EXCL_START`/`GCOVR_EXCL_STOP`
 block that is actually reachable in normal (non-abort) operation — i.e. the exclusion looks

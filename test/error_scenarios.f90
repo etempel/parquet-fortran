@@ -36,6 +36,10 @@ program error_scenarios
         continue
     case ("print_stat_smoke")
         call scenario_print_stat_smoke()
+    case ("print_stat_all_types")
+        call scenario_print_stat_all_types()
+    case ("print_stat_default_scalar_type")
+        call scenario_print_stat_default_scalar_type()
     case ("large_string_roundtrip")
         call scenario_large_string_roundtrip()
     case ("string_view_roundtrip")
@@ -48,6 +52,38 @@ program error_scenarios
         call scenario_col_size_and_row_mode_avoid_whole_column_read()
     case ("whole_column_read_forced_error_control")
         call scenario_whole_column_read_forced_error_control()
+    case ("read_array_full_bool_type_mismatch")
+        call scenario_read_array_full_bool_type_mismatch()
+    case ("read_array_full_string_type_mismatch")
+        call scenario_read_array_full_string_type_mismatch()
+    case ("read_array_row_mode_bool_type_mismatch")
+        call scenario_read_array_row_mode_bool_type_mismatch()
+    case ("read_array_row_mode_string_type_mismatch")
+        call scenario_read_array_row_mode_string_type_mismatch()
+    case ("read_array_element_mode_filtered_bool_col_index_out_of_range")
+        call scenario_read_array_em_filt_bool_oob()
+    case ("read_array_element_mode_filtered_bool_type_mismatch")
+        call scenario_read_array_em_filt_bool_tm()
+    case ("read_array_element_mode_filtered_string_col_index_out_of_range")
+        call scenario_read_array_em_filt_string_oob()
+    case ("read_array_element_mode_filtered_string_type_mismatch")
+        call scenario_read_array_em_filt_string_tm()
+    case ("read_array_element_mode_bool_col_index_out_of_range")
+        call scenario_read_array_em_bool_oob()
+    case ("read_array_element_mode_bool_type_mismatch")
+        call scenario_read_array_em_bool_tm()
+    case ("read_array_element_mode_string_col_index_out_of_range")
+        call scenario_read_array_em_string_oob()
+    case ("read_array_element_mode_string_type_mismatch")
+        call scenario_read_array_em_string_tm()
+    case ("read_array_column_chunk_bool_type_mismatch")
+        call scenario_read_array_column_chunk_bool_type_mismatch()
+    case ("read_array_column_chunk_string_type_mismatch")
+        call scenario_read_array_column_chunk_string_type_mismatch()
+    case ("read_array_element_mode_filtered_int32_col_index_out_of_range")
+        call scenario_read_array_em_filt_int32_oob()
+    case ("read_array_element_mode_int32_col_index_out_of_range")
+        call scenario_read_array_em_int32_oob()
     case ("list_element_count_auto_multi_row_group")
         call scenario_list_element_count_auto_multi_row_group()
     case ("list_element_count_explicit_chunk_size_overflow")
@@ -62,6 +98,8 @@ program error_scenarios
         call scenario_row_group_whole_column_overrun()
     case ("row_group_new_column_after_first")
         call scenario_row_group_new_column_after_first()
+    case ("row_group_whole_column_after_streaming_started")
+        call scenario_row_group_whole_column_after_streaming_started()
     case ("column_count_overflow")
         call scenario_column_count_overflow()
     case ("write_undeclared_column")
@@ -258,8 +296,14 @@ program error_scenarios
         call scenario_filter_unquoted_string_value()
     case ("filter_bad_boolean_value")
         call scenario_filter_bad_boolean_value()
+    case ("filter_boolean_value_must_be_unquoted")
+        call scenario_filter_boolean_value_must_be_unquoted()
     case ("filter_bool_ordering_not_supported")
         call scenario_filter_bool_ordering_not_supported()
+    case ("filter_unsupported_column_type")
+        call scenario_filter_unsupported_column_type()
+    case ("string_length_on_non_string_column")
+        call scenario_string_length_on_non_string_column()
     case ("qc_range_violation_warns")
         call scenario_qc_range_violation_warns()
     case ("extended_qc_range_violation_warns")
@@ -270,6 +314,14 @@ program error_scenarios
         call scenario_qc_null_violation_warns()
     case ("qc_range_violation_hard_aborts")
         call scenario_qc_range_violation_hard_aborts()
+    case ("qc_range_violation_string_warns")
+        call scenario_qc_range_violation_string_warns()
+    case ("qc_range_violation_string_hard_aborts")
+        call scenario_qc_range_violation_string_hard_aborts()
+    case ("qc_range_violation_float_warns")
+        call scenario_qc_range_violation_float_warns()
+    case ("qc_range_violation_float_hard_aborts")
+        call scenario_qc_range_violation_float_hard_aborts()
     case ("qc_null_violation_hard_aborts")
         call scenario_qc_null_violation_hard_aborts()
     case ("qc_miss_null_no_warning")
@@ -560,6 +612,8 @@ program error_scenarios
         call scenario_temporal_foreign_int96_roundtrip()
     case ("temporal_foreign_tz_roundtrip")
         call scenario_temporal_foreign_tz_roundtrip()
+    case ("list_type_foreign_fixture")
+        call scenario_list_type_foreign_fixture()
     case ("schema_add_field_date_with_unit")
         call scenario_schema_add_field_date_with_unit()
     case ("validate_qc_on_temporal_column")
@@ -2414,6 +2468,81 @@ contains
         end if
     end subroutine scenario_print_stat_smoke
 
+    !> feature_coverage.md's G4: scenario_print_stat_smoke above only ever runs three
+    !> integer(int32) columns through parquet_close_reader(print_stat=.true.), so
+    !> format_stat_scalar's INT64/FLOAT/DOUBLE/STRING cases, the boolean True/False count
+    !> display, the qc bound display column, and the active-filter display column had never
+    !> fired. This scenario adds one column of each of those kinds, all read (not just
+    !> prefetched, so run_qc_checks/mark_read populate every display column
+    !> parquet_reader_print_stat looks at), plus a qc rule (declared but not violated -- a
+    !> violation is exercised elsewhere, e.g. scenario_qc_range_violation_warns; here the point
+    !> is just to populate the qcmin/qcmax display columns) and an active row filter, so every
+    !> row (format_stat_scalar's INT64/FLOAT/DOUBLE/STRING branches, the BOOL True/False count
+    !> branch, the qc-bound display block, and the filter-clause display block) in
+    !> parquet_reader_print_stat's per-column table fires at least once.
+    subroutine scenario_print_stat_all_types()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32) :: qc_col(3), qc_back(3)
+        integer(int64) :: i64_values(3), i64_back(3)
+        real(real32) :: f32_values(3), f32_back(3)
+        real(real64) :: f64_values(3), f64_back(3)
+        character(len=8) :: s_values(3), s_back(3)
+        logical :: flag_values(3), flag_back(3)
+        character(len=*), parameter :: out_file = "test_run/error_scenario_print_stat_all_types.parquet"
+        character(len=*), parameter :: maml_file = "test_run/error_scenario_print_stat_all_types.maml"
+
+        qc_col = [1, 2, 3] ! within the [0, 100] qc bound declared below -- no violation intended
+        i64_values = [10_int64, 20_int64, 30_int64]
+        f32_values = [1.5_real32, 2.5_real32, 3.5_real32]
+        f64_values = [1.25_real64, 2.25_real64, 3.25_real64]
+        s_values = [character(len=8) :: "alpha", "beta", "gamma"]
+        flag_values = [.true., .false., .true.]
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "qc_col", qc_col)
+        call parquet_write_column(writer, "i64", i64_values)
+        call parquet_write_column(writer, "f32", f32_values)
+        call parquet_write_column(writer, "f64", f64_values)
+        call parquet_write_column(writer, "s", s_values)
+        call parquet_write_column(writer, "flag", flag_values)
+        call parquet_close_writer(writer)
+
+        call write_text_file(maml_file, [character(len=32) :: &
+            "fields:", "- name: qc_col", "  qc:", "    min: 0", "    max: 100"])
+
+        call filt%add("i64 >= 0")
+        call parquet_open_reader(reader, out_file, &
+            schema=parquet_load_qc_maml_file(maml_file), filter=filt)
+        call parquet_read_column(reader, "qc_col", qc_back)
+        call parquet_read_column(reader, "i64", i64_back)
+        call parquet_read_column(reader, "f32", f32_back)
+        call parquet_read_column(reader, "f64", f64_back)
+        call parquet_read_column(reader, "s", s_back)
+        call parquet_read_column(reader, "flag", flag_back)
+        call parquet_close_reader(reader, print_stat=.true.)
+        print '(a)', "print_stat covered int64/float32/float64/string/boolean/qc/filter columns"
+    end subroutine scenario_print_stat_all_types
+
+    !> feature_coverage.md's G4 (continued): format_stat_scalar's `default: return
+    !> s->ToString();` branch (parquet_wrapper.cpp) fires for any scalar min/max type it doesn't
+    !> special-case -- e.g. UINT64 (this library's own writer never produces one, but the read
+    !> side widens it -- see CONTRIBUTING.md's "Additional scalar types" note). Reads
+    !> test/fixtures/extended_types.parquet's v_uint64 column (values 1000, 0, 2000000000, all
+    !> safely within int64 -- see that fixture's own header comment) so
+    !> parquet_reader_print_stat's compute_stat_min_max sees the column's native UInt64Array
+    !> type (the Fortran-side int64 widening doesn't change what's cached/reported).
+    subroutine scenario_print_stat_default_scalar_type()
+        type(parquet_reader) :: reader
+        integer(int64) :: values(3)
+
+        call parquet_open_reader(reader, "test/fixtures/extended_types.parquet")
+        call parquet_read_column(reader, "v_uint64", values)
+        call parquet_close_reader(reader, print_stat=.true.)
+        print '(a)', "print_stat covered format_stat_scalar's default (UINT64) branch"
+    end subroutine scenario_print_stat_default_scalar_type
+
     !> Proves the arrow::large_utf8() write/read path (added for a string/string-vector column
     !> whose byte payload would overflow Arrow's real int32 STRING-offset limit, ~2GiB -- see
     !> would_overflow_string_offset_limit in parquet_wrapper.cpp) actually round-trips
@@ -2698,6 +2827,363 @@ contains
         print '(a)', "unexpectedly read a plain scalar column without triggering the forced whole-column-read error"
     end subroutine scenario_whole_column_read_forced_error_control
 
+    !> The 16 scenarios below cover array-mode (vector-column) read strict typing and
+    !> col_index bounds checking across all four read access patterns (whole-column,
+    !> row-mode, element-mode, chunk-mode) -- feature_coverage.md's G9 group, plus two extra
+    !> element-mode col_index-bounds scenarios (numeric, not just logical/string) found to be
+    !> untested while implementing G9. Every fixture below writes a plain int32 vector column
+    !> (col_size=3, nrows=2) and then reads it back through a mismatched Fortran type (logical
+    !> or character) or an out-of-range col_index/elem_index, mirroring the existing scalar
+    !> strict-typing scenarios (e.g. scenario_temporal_read_date_via_int32, above) for the
+    !> vector-column read entry points.
+
+    !> parquet_read_column dispatched to the logical (bool8) array-full specific
+    !> (parquet_read_logical_array_full -> parquet_read_bool8_array_column) on a column that is
+    !> actually int32-typed aborts with a type mismatch.
+    subroutine scenario_read_array_full_bool_type_mismatch()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: data(3, 2)
+        logical :: bool_back(3, 2)
+        character(len=*), parameter :: out_file = &
+            "test_run/error_scenario_read_array_full_bool_type_mismatch.parquet"
+
+        data = reshape([1, 2, 3, 4, 5, 6], [3, 2])
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "vec", data)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "vec", bool_back)   ! -> aborts (type mismatch: expected bool, got int32)
+        print '(a)', "unexpectedly read an int32 vector column as a logical array"
+    end subroutine scenario_read_array_full_bool_type_mismatch
+
+    !> Converse of scenario_read_array_full_bool_type_mismatch: the string array-full specific
+    !> (parquet_read_string_array_full -> parquet_read_string_array_column) on an int32 column.
+    subroutine scenario_read_array_full_string_type_mismatch()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: data(3, 2)
+        character(len=8) :: string_back(3, 2)
+        character(len=*), parameter :: out_file = &
+            "test_run/error_scenario_read_array_full_string_type_mismatch.parquet"
+
+        data = reshape([1, 2, 3, 4, 5, 6], [3, 2])
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "vec", data)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "vec", string_back)   ! -> aborts (type mismatch: expected string, got int32)
+        print '(a)', "unexpectedly read an int32 vector column as a string array"
+    end subroutine scenario_read_array_full_string_type_mismatch
+
+    !> parquet_read_array_row_mode dispatched to logical (parquet_read_bool8_array_row) on an
+    !> int32 vector column aborts with a type mismatch.
+    subroutine scenario_read_array_row_mode_bool_type_mismatch()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: data(3, 2)
+        logical :: row_back(3)
+        character(len=*), parameter :: out_file = &
+            "test_run/error_scenario_read_array_row_mode_bool_type_mismatch.parquet"
+
+        data = reshape([1, 2, 3, 4, 5, 6], [3, 2])
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "vec", data)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_array_row_mode(reader, "vec", row_back, 1)   ! -> aborts (type mismatch: expected bool, got int32)
+        print '(a)', "unexpectedly read one row of an int32 vector column as logical"
+    end subroutine scenario_read_array_row_mode_bool_type_mismatch
+
+    !> Converse of scenario_read_array_row_mode_bool_type_mismatch: parquet_read_string_array_row.
+    subroutine scenario_read_array_row_mode_string_type_mismatch()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: data(3, 2)
+        character(len=8) :: row_back(3)
+        character(len=*), parameter :: out_file = &
+            "test_run/error_scenario_read_array_row_mode_string_type_mismatch.parquet"
+
+        data = reshape([1, 2, 3, 4, 5, 6], [3, 2])
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "vec", data)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_array_row_mode(reader, "vec", row_back, 1)   ! -> aborts (type mismatch: expected string, got int32)
+        print '(a)', "unexpectedly read one row of an int32 vector column as string"
+    end subroutine scenario_read_array_row_mode_string_type_mismatch
+
+    !> parquet_read_array_element_mode's logical specific, on a reader opened with an active
+    !> filter (so parquet_read_bool8_array_element takes its filtered/whole-column branch),
+    !> with an elem_index (col_index) past col_size aborts with "col_index out of bounds"
+    !> before any type check runs.
+    subroutine scenario_read_array_em_filt_bool_oob()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32) :: id(2), data(3, 2)
+        logical :: elem_back(2)
+        character(len=*), parameter :: out_file = &
+            "test_run/error_scenario_read_array_element_mode_filtered_bool_col_index_out_of_range.parquet"
+
+        id = [1, 2]
+        data = reshape([1, 2, 3, 4, 5, 6], [3, 2])
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_write_column(writer, "vec", data)
+        call parquet_close_writer(writer)
+
+        call filt%add("id >= 0")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        call parquet_read_array_element_mode(reader, "vec", elem_back, 4)   ! -> aborts (col_index out of bounds)
+        print '(a)', "unexpectedly read element_mode with an out-of-range col_index on a filtered logical reader"
+    end subroutine scenario_read_array_em_filt_bool_oob
+
+    !> Same filtered branch as above, but with a valid col_index -- reaches the type-mismatch
+    !> check instead (the int32 column read via the logical specific).
+    subroutine scenario_read_array_em_filt_bool_tm()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32) :: id(2), data(3, 2)
+        logical :: elem_back(2)
+        character(len=*), parameter :: out_file = &
+            "test_run/error_scenario_read_array_element_mode_filtered_bool_type_mismatch.parquet"
+
+        id = [1, 2]
+        data = reshape([1, 2, 3, 4, 5, 6], [3, 2])
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_write_column(writer, "vec", data)
+        call parquet_close_writer(writer)
+
+        call filt%add("id >= 0")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        call parquet_read_array_element_mode(reader, "vec", elem_back, 2)   ! -> aborts (type mismatch: expected bool, got int32)
+        print '(a)', "unexpectedly read element_mode of an int32 vector column as logical on a filtered reader"
+    end subroutine scenario_read_array_em_filt_bool_tm
+
+    !> Converse of scenario_read_array_element_mode_filtered_bool_col_index_out_of_range: the
+    !> string specific (parquet_read_string_array_element), filtered, out-of-range col_index.
+    subroutine scenario_read_array_em_filt_string_oob()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32) :: id(2), data(3, 2)
+        character(len=8) :: elem_back(2)
+        character(len=*), parameter :: out_file = &
+            "test_run/error_scenario_read_array_element_mode_filtered_string_col_index_out_of_range.parquet"
+
+        id = [1, 2]
+        data = reshape([1, 2, 3, 4, 5, 6], [3, 2])
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_write_column(writer, "vec", data)
+        call parquet_close_writer(writer)
+
+        call filt%add("id >= 0")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        call parquet_read_array_element_mode(reader, "vec", elem_back, 4)   ! -> aborts (col_index out of bounds)
+        print '(a)', "unexpectedly read element_mode with an out-of-range col_index on a filtered string reader"
+    end subroutine scenario_read_array_em_filt_string_oob
+
+    !> Same filtered branch as above, but with a valid col_index -- reaches the type-mismatch
+    !> check instead (the int32 column read via the string specific).
+    subroutine scenario_read_array_em_filt_string_tm()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32) :: id(2), data(3, 2)
+        character(len=8) :: elem_back(2)
+        character(len=*), parameter :: out_file = &
+            "test_run/error_scenario_read_array_element_mode_filtered_string_type_mismatch.parquet"
+
+        id = [1, 2]
+        data = reshape([1, 2, 3, 4, 5, 6], [3, 2])
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_write_column(writer, "vec", data)
+        call parquet_close_writer(writer)
+
+        call filt%add("id >= 0")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        call parquet_read_array_element_mode(reader, "vec", elem_back, 2)   ! -> aborts (type mismatch: expected string, got int32)
+        print '(a)', "unexpectedly read element_mode of an int32 vector column as string on a filtered reader"
+    end subroutine scenario_read_array_em_filt_string_tm
+
+    !> parquet_read_array_element_mode's logical specific, unfiltered (so
+    !> parquet_read_bool8_array_element takes its row-group-streamed branch via
+    !> resolve_element_mode_col_size/stream_element_mode_row_groups), with an out-of-range
+    !> col_index aborts before any row group is ever streamed.
+    subroutine scenario_read_array_em_bool_oob()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: data(3, 2)
+        logical :: elem_back(2)
+        character(len=*), parameter :: out_file = &
+            "test_run/error_scenario_read_array_element_mode_bool_col_index_out_of_range.parquet"
+
+        data = reshape([1, 2, 3, 4, 5, 6], [3, 2])
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "vec", data)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_array_element_mode(reader, "vec", elem_back, 4)   ! -> aborts (col_index out of bounds)
+        print '(a)', "unexpectedly read element_mode with an out-of-range col_index on an unfiltered logical reader"
+    end subroutine scenario_read_array_em_bool_oob
+
+    !> Same unfiltered/streamed branch as above, but with a valid col_index -- reaches the
+    !> type-mismatch check inside stream_element_mode_row_groups's per-row-group callback.
+    subroutine scenario_read_array_em_bool_tm()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: data(3, 2)
+        logical :: elem_back(2)
+        character(len=*), parameter :: out_file = &
+            "test_run/error_scenario_read_array_element_mode_bool_type_mismatch.parquet"
+
+        data = reshape([1, 2, 3, 4, 5, 6], [3, 2])
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "vec", data)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_array_element_mode(reader, "vec", elem_back, 2)   ! -> aborts (type mismatch: expected bool, got int32)
+        print '(a)', "unexpectedly read element_mode of an int32 vector column as logical on an unfiltered reader"
+    end subroutine scenario_read_array_em_bool_tm
+
+    !> Converse of scenario_read_array_element_mode_bool_col_index_out_of_range: the string
+    !> specific, unfiltered/streamed, out-of-range col_index.
+    subroutine scenario_read_array_em_string_oob()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: data(3, 2)
+        character(len=8) :: elem_back(2)
+        character(len=*), parameter :: out_file = &
+            "test_run/error_scenario_read_array_element_mode_string_col_index_out_of_range.parquet"
+
+        data = reshape([1, 2, 3, 4, 5, 6], [3, 2])
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "vec", data)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_array_element_mode(reader, "vec", elem_back, 4)   ! -> aborts (col_index out of bounds)
+        print '(a)', "unexpectedly read element_mode with an out-of-range col_index on an unfiltered string reader"
+    end subroutine scenario_read_array_em_string_oob
+
+    !> Same unfiltered/streamed branch as above, but with a valid col_index -- reaches the
+    !> type-mismatch check inside stream_element_mode_row_groups's per-row-group callback.
+    subroutine scenario_read_array_em_string_tm()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: data(3, 2)
+        character(len=8) :: elem_back(2)
+        character(len=*), parameter :: out_file = &
+            "test_run/error_scenario_read_array_element_mode_string_type_mismatch.parquet"
+
+        data = reshape([1, 2, 3, 4, 5, 6], [3, 2])
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "vec", data)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_array_element_mode(reader, "vec", elem_back, 2)   ! -> aborts (type mismatch: expected string, got int32)
+        print '(a)', "unexpectedly read element_mode of an int32 vector column as string on an unfiltered reader"
+    end subroutine scenario_read_array_em_string_tm
+
+    !> parquet_read_column_chunk dispatched to logical (parquet_read_bool8_array_column_chunk)
+    !> on a chunk-written int32 vector column aborts with a type mismatch.
+    subroutine scenario_read_array_column_chunk_bool_type_mismatch()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: data(3, 2)
+        logical :: chunk_back(3, 2)
+        character(len=*), parameter :: out_file = &
+            "test_run/error_scenario_read_array_column_chunk_bool_type_mismatch.parquet"
+
+        data = reshape([1, 2, 3, 4, 5, 6], [3, 2])
+        call parquet_open_writer(writer, out_file, chunk_size=2)
+        call parquet_new_row_group(writer, 2)
+        call parquet_write_column_chunk(writer, "vec", data)
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column_chunk(reader, "vec", 1, chunk_back)   ! -> aborts (type mismatch: expected bool, got int32)
+        print '(a)', "unexpectedly read a chunked int32 vector column as logical"
+    end subroutine scenario_read_array_column_chunk_bool_type_mismatch
+
+    !> Converse of scenario_read_array_column_chunk_bool_type_mismatch: the string chunk
+    !> specific (parquet_read_string_array_column_chunk).
+    subroutine scenario_read_array_column_chunk_string_type_mismatch()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: data(3, 2)
+        character(len=8) :: chunk_back(3, 2)
+        character(len=*), parameter :: out_file = &
+            "test_run/error_scenario_read_array_column_chunk_string_type_mismatch.parquet"
+
+        data = reshape([1, 2, 3, 4, 5, 6], [3, 2])
+        call parquet_open_writer(writer, out_file, chunk_size=2)
+        call parquet_new_row_group(writer, 2)
+        call parquet_write_column_chunk(writer, "vec", data)
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column_chunk(reader, "vec", 1, chunk_back)   ! -> aborts (type mismatch: expected string, got int32)
+        print '(a)', "unexpectedly read a chunked int32 vector column as string"
+    end subroutine scenario_read_array_column_chunk_string_type_mismatch
+
+    !> Extra gap found while implementing G9 (not in feature_coverage.md's original group):
+    !> read_list_primitive_element's own col_index bounds check (shared by every numeric
+    !> parquet_read_*_array_element specific, not just logical/string) was completely untested,
+    !> filtered branch included -- this is the filtered-branch half.
+    subroutine scenario_read_array_em_filt_int32_oob()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32) :: id(2), data(3, 2), elem_back(2)
+        character(len=*), parameter :: out_file = &
+            "test_run/error_scenario_read_array_element_mode_filtered_int32_col_index_out_of_range.parquet"
+
+        id = [1, 2]
+        data = reshape([1, 2, 3, 4, 5, 6], [3, 2])
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_write_column(writer, "vec", data)
+        call parquet_close_writer(writer)
+
+        call filt%add("id >= 0")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        call parquet_read_array_element_mode(reader, "vec", elem_back, 4)   ! -> aborts (col_index out of bounds)
+        print '(a)', "unexpectedly read element_mode with an out-of-range col_index on a filtered int32 reader"
+    end subroutine scenario_read_array_em_filt_int32_oob
+
+    !> Unfiltered/streamed counterpart of scenario_read_array_element_mode_filtered_int32_col_index_out_of_range.
+    subroutine scenario_read_array_em_int32_oob()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: data(3, 2), elem_back(2)
+        character(len=*), parameter :: out_file = &
+            "test_run/error_scenario_read_array_element_mode_int32_col_index_out_of_range.parquet"
+
+        data = reshape([1, 2, 3, 4, 5, 6], [3, 2])
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "vec", data)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_array_element_mode(reader, "vec", elem_back, 4)   ! -> aborts (col_index out of bounds)
+        print '(a)', "unexpectedly read element_mode with an out-of-range col_index on an unfiltered int32 reader"
+    end subroutine scenario_read_array_em_int32_oob
+
     !> Separate from col_size alone (scenario_col_size_overflow, above): Parquet's own
     !> repetition/definition-level generation for list-typed columns walks every flattened
     !> element *of a single row group* (row_group_rows * col_size) with a plain int32_t counter.
@@ -2898,6 +3384,27 @@ contains
         print '(a)', "unexpectedly introduced a new column after the first row group without error"
     end subroutine scenario_row_group_new_column_after_first
 
+    !> feature_coverage.md's G13: the converse of scenario_row_group_new_column_after_first
+    !> above (a row-group-chunk column introduced late) -- once the streaming row-group API has
+    !> locked the file's schema (parquet_finish_row_group's first successful call sets
+    !> writer_handle->row_group_writer), a *whole-column* (parquet_write_column) write is never
+    !> valid again, even for a column never touched by the streaming API at all.
+    subroutine scenario_row_group_whole_column_after_streaming_started()
+        type(parquet_writer) :: writer
+        integer(int32) :: a_data(2), b_data(2)
+
+        a_data = [1, 2]
+        b_data = [10, 20]
+        call parquet_open_writer(writer, &
+            "test_run/error_scenario_row_group_whole_column_after_streaming_started.parquet", chunk_size=2)
+        call parquet_new_row_group(writer, 2)
+        call parquet_write_column_chunk(writer, "a", a_data)
+        call parquet_finish_row_group(writer)
+
+        call parquet_write_column(writer, "b", b_data)
+        print '(a)', "unexpectedly wrote a whole column after the streaming row-group API already started"
+    end subroutine scenario_row_group_whole_column_after_streaming_started
+
     !> Arrow's arrow::Schema::num_fields()/GetFieldIndex() both return a plain int32_t internally
     !> -- unlike row count there is no "large" variant for column count at all, so
     !> check_column_count_fits_arrow_limit in parquet_wrapper.cpp (called from both the
@@ -3038,6 +3545,27 @@ contains
         print '(a)', "unexpectedly opened a reader with an invalid boolean value in a filter rule"
     end subroutine scenario_filter_bad_boolean_value
 
+    !> feature_coverage.md's G7 (found via the post-implementation coverage diff, not the
+    !> original write-up -- line 2697-2698 was mis-labeled there as the "unsupported column
+    !> type" default branch, which is actually 2734-2736; this is a distinct, separate gap):
+    !> eval_filter_clause's BOOL branch rejects a double-quoted value ("true"/"false" must be
+    !> unquoted bare words, matching every other non-string filter value convention) --
+    !> distinct from scenario_filter_bad_boolean_value above, which uses an unquoted-but-invalid
+    !> word ("flag == 5"), never a quoted one.
+    subroutine scenario_filter_boolean_value_must_be_unquoted()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+
+        call parquet_open_writer(writer, "test_run/filter_boolean_quoted.parquet")
+        call parquet_write_column(writer, "flag", [.true., .false.])
+        call parquet_close_writer(writer)
+
+        call filt%add('flag == "true"')
+        call parquet_open_reader(reader, "test_run/filter_boolean_quoted.parquet", filter=filt)
+        print '(a)', "unexpectedly opened a reader with a double-quoted boolean filter value"
+    end subroutine scenario_filter_boolean_value_must_be_unquoted
+
     !> Ordering comparisons (>, >=, <, <=) don't have a meaningful definition
     !> for a boolean column -- only ==/=/= are accepted; an ordering operator
     !> against a boolean column is rejected.
@@ -3054,6 +3582,55 @@ contains
         call parquet_open_reader(reader, "test_run/filter_bool_ordering.parquet", filter=filt)
         print '(a)', "unexpectedly opened a reader with an ordering comparison against a boolean filter column"
     end subroutine scenario_filter_bool_ordering_not_supported
+
+    !> feature_coverage.md's G7: eval_filter_clause's `default:` branch (parquet_wrapper.cpp) --
+    !> a column type filtering doesn't support at all -- had no scenario. A temporal (date)
+    !> column isn't in eval_filter_clause's type switch (only INT*/FLOAT*/UINT64/DECIMAL*/BOOL/
+    !> STRING* are), so filtering on one reaches this fallback. Aborts via a clean Fortran
+    !> `error stop` (parquet_apply_filter, parquet_read.f90), not report_fatal_error -- exit
+    !> code 1, not SIGABRT.
+    subroutine scenario_filter_unsupported_column_type()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        type(parquet_date) :: day(2)
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_unsupported_column_type.parquet"
+
+        call day(1)%set(2024, 1, 1)
+        call day(2)%set(2024, 1, 2)
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "day", day)
+        call parquet_close_writer(writer)
+
+        call filt%add("day == 2024")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with a filter clause against a temporal column"
+    end subroutine scenario_filter_unsupported_column_type
+
+    !> feature_coverage.md's G8: parquet_reader_get_string_length's `default:` fallback
+    !> (parquet_wrapper.cpp) for a column that isn't string-like/LIST/LARGE_LIST/FIXED_SIZE_LIST
+    !> at all -- calling it against a plain int32 column reaches this. NOTE: unlike most
+    !> `report_fatal_error` gaps documented elsewhere in feature_coverage.md, this line is a
+    !> `throw std::runtime_error(...)` with no catch anywhere in its call chain (confirmed: this
+    !> whole file has exactly one `catch` block, in parquet_reader_set_filter, unrelated to this
+    !> function) -- expected to cross the extern "C" boundary uncaught and abort via
+    !> std::terminate(), the same Finding 4 mechanism as G13, not a clean `error stop`.
+    subroutine scenario_string_length_on_non_string_column()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: data(3) = [1_int32, 2_int32, 3_int32]
+        integer(int32) :: strlen_max
+        character(len=*), parameter :: out_file = &
+            "test_run/error_scenario_string_length_on_non_string_column.parquet"
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "n", data)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_string_length(reader, "n", strlen_max)
+        print '(a,i0)', "unexpectedly got a string length for a non-string column: ", strlen_max
+    end subroutine scenario_string_length_on_non_string_column
 
     !> Writes `lines` verbatim to `path`, one per record -- used by the
     !> read-time qc scenarios below to produce a throwaway qc-maml file
@@ -3204,6 +3781,95 @@ contains
         call parquet_read_column(reader, "ra", ra_back)
         print '(a)', "unexpectedly read an out-of-range value without aborting in hard qc mode"
     end subroutine scenario_qc_range_violation_hard_aborts
+
+    !> feature_coverage.md's G5: scenario_qc_range_violation_warns/_hard_aborts above only ever
+    !> use an INT32 column, so run_qc_range_check's STRING/LARGE_STRING/STRING_VIEW branch
+    !> (parquet_wrapper.cpp) had never fired. Same shape as scenario_qc_range_violation_warns,
+    !> but a string column with a qc min/max bound.
+    subroutine scenario_qc_range_violation_string_warns()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=8) :: sv(4), sv_back(4)
+
+        sv = [character(len=8) :: "mango", "apple", "banana", "zebra"] ! "apple" and "zebra" are outside [banana, mango]
+
+        call parquet_open_writer(writer, "test_run/qc_range_string.parquet")
+        call parquet_write_column(writer, "sv", sv)
+        call parquet_close_writer(writer)
+
+        call write_text_file("test_run/qc_range_string.maml", [character(len=32) :: &
+            "fields:", "- name: sv", "  qc:", "    min: banana", "    max: mango"])
+
+        call parquet_open_reader(reader, "test_run/qc_range_string.parquet", &
+            schema=parquet_load_qc_maml_file("test_run/qc_range_string.maml"), qc_soft=.true.)
+        call parquet_read_column(reader, "sv", sv_back)
+        call parquet_close_reader(reader)
+    end subroutine scenario_qc_range_violation_string_warns
+
+    !> Default (qc_soft=.false., hard) counterpart of scenario_qc_range_violation_string_warns.
+    subroutine scenario_qc_range_violation_string_hard_aborts()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=8) :: sv(4), sv_back(4)
+
+        sv = [character(len=8) :: "mango", "apple", "banana", "zebra"] ! "apple" and "zebra" are outside [banana, mango]
+
+        call parquet_open_writer(writer, "test_run/qc_range_string_hard.parquet")
+        call parquet_write_column(writer, "sv", sv)
+        call parquet_close_writer(writer)
+
+        call write_text_file("test_run/qc_range_string_hard.maml", [character(len=32) :: &
+            "fields:", "- name: sv", "  qc:", "    min: banana", "    max: mango"])
+
+        call parquet_open_reader(reader, "test_run/qc_range_string_hard.parquet", &
+            schema=parquet_load_qc_maml_file("test_run/qc_range_string_hard.maml"))
+        call parquet_read_column(reader, "sv", sv_back)
+        print '(a)', "unexpectedly read an out-of-range string value without aborting in hard qc mode"
+    end subroutine scenario_qc_range_violation_string_hard_aborts
+
+    !> feature_coverage.md's G5: run_qc_range_check's FLOAT/DOUBLE/DECIMAL* bounds-description
+    !> formatting branch (parquet_wrapper.cpp) had never fired either -- same shape as
+    !> scenario_qc_range_violation_warns, but a real64 column with a qc min/max bound.
+    subroutine scenario_qc_range_violation_float_warns()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        real(real64) :: fv(4), fv_back(4)
+
+        fv = [10.5_real64, 400.25_real64, -5.5_real64, 300.0_real64] ! 400.25 and -5.5 are outside [0, 360]
+
+        call parquet_open_writer(writer, "test_run/qc_range_float.parquet")
+        call parquet_write_column(writer, "fv", fv)
+        call parquet_close_writer(writer)
+
+        call write_text_file("test_run/qc_range_float.maml", [character(len=32) :: &
+            "fields:", "- name: fv", "  qc:", "    min: 0.0", "    max: 360.0"])
+
+        call parquet_open_reader(reader, "test_run/qc_range_float.parquet", &
+            schema=parquet_load_qc_maml_file("test_run/qc_range_float.maml"), qc_soft=.true.)
+        call parquet_read_column(reader, "fv", fv_back)
+        call parquet_close_reader(reader)
+    end subroutine scenario_qc_range_violation_float_warns
+
+    !> Default (qc_soft=.false., hard) counterpart of scenario_qc_range_violation_float_warns.
+    subroutine scenario_qc_range_violation_float_hard_aborts()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        real(real64) :: fv(4), fv_back(4)
+
+        fv = [10.5_real64, 400.25_real64, -5.5_real64, 300.0_real64] ! 400.25 and -5.5 are outside [0, 360]
+
+        call parquet_open_writer(writer, "test_run/qc_range_float_hard.parquet")
+        call parquet_write_column(writer, "fv", fv)
+        call parquet_close_writer(writer)
+
+        call write_text_file("test_run/qc_range_float_hard.maml", [character(len=32) :: &
+            "fields:", "- name: fv", "  qc:", "    min: 0.0", "    max: 360.0"])
+
+        call parquet_open_reader(reader, "test_run/qc_range_float_hard.parquet", &
+            schema=parquet_load_qc_maml_file("test_run/qc_range_float_hard.maml"))
+        call parquet_read_column(reader, "fv", fv_back)
+        print '(a)', "unexpectedly read an out-of-range float value without aborting in hard qc mode"
+    end subroutine scenario_qc_range_violation_float_hard_aborts
 
     !> Default (qc_soft=.false., hard): an unexpected Null (miss: not
     !> Null/NA) with qc active aborts the process, even when is_valid= was
@@ -4987,6 +5653,60 @@ contains
         if (.not. values(3)%is_null()) error stop "tz fixture: row 3 should be Null"
         if (values(1)%is_null()) error stop "tz fixture: row 1 should not be Null"
     end subroutine scenario_temporal_foreign_tz_roundtrip
+
+    !> feature_coverage.md's G6: get_col_size/flatten_for_stats/parquet_reader_get_string_length's
+    !> LIST/LARGE_LIST branches -- this library's own writer only ever emits FIXED_SIZE_LIST for
+    !> vector columns, so plain LIST/LARGE_LIST columns only exist in foreign-written files, built
+    !> here via parquet_debug_write_list_fixture (see that hook's own comment in
+    !> parquet_wrapper.cpp for what each variant contains). Control scenario, same
+    !> assert-via-error-stop convention as the temporal foreign-fixture scenarios above.
+    subroutine scenario_list_type_foreign_fixture()
+        interface
+            subroutine parquet_debug_write_list_fixture(path, variant) &
+                    bind(C, name="parquet_debug_write_list_fixture")
+                use iso_c_binding, only : c_char
+                character(kind=c_char) :: path(*)
+                character(kind=c_char) :: variant(*)
+            end subroutine parquet_debug_write_list_fixture
+        end interface
+        type(parquet_reader) :: reader
+        integer :: col_size, large_col_size, strlen_lst, strlen_large_lst
+        character(len=*), parameter :: mismatch_file = "test_run/error_scenario_list_mismatch.parquet"
+        character(len=*), parameter :: empty_file = "test_run/error_scenario_list_empty.parquet"
+        character(len=*), parameter :: strings_file = "test_run/error_scenario_list_strings.parquet"
+
+        ! "mismatch": row widths differ (0, 2, 3 elements) -- get_col_size's heterogeneous-width
+        ! branch, both list kinds.
+        call parquet_debug_write_list_fixture(mismatch_file//char(0), "mismatch"//char(0))
+        call parquet_open_reader(reader, mismatch_file)
+        call parquet_get_col_size(reader, "lst", col_size)
+        call parquet_get_col_size(reader, "large_lst", large_col_size)
+        call parquet_close_reader(reader)
+        if (col_size /= 1) error stop "list fixture: mismatched-width LIST column should report col_size=1"
+        if (large_col_size /= 1) error stop "list fixture: mismatched-width LARGE_LIST column should report col_size=1"
+
+        ! "empty": both columns have zero rows -- get_col_size's whole-array-empty branch, both
+        ! list kinds (distinct from an individual row's list being empty, already exercised above).
+        call parquet_debug_write_list_fixture(empty_file//char(0), "empty"//char(0))
+        call parquet_open_reader(reader, empty_file)
+        call parquet_get_col_size(reader, "lst", col_size)
+        call parquet_get_col_size(reader, "large_lst", large_col_size)
+        call parquet_close_reader(reader)
+        if (col_size /= 0) error stop "list fixture: zero-row LIST column should report col_size=0"
+        if (large_col_size /= 0) error stop "list fixture: zero-row LARGE_LIST column should report col_size=0"
+
+        ! "strings": uniform-width LIST<utf8>/LARGE_LIST<utf8> with a Null element -- exercises
+        ! parquet_get_string_length's LIST/LARGE_LIST branches (longest non-null value is
+        ! "charlie", 7 bytes) plus flatten_for_stats's LIST branch via print_stat.
+        call parquet_debug_write_list_fixture(strings_file//char(0), "strings"//char(0))
+        call parquet_open_reader(reader, strings_file)
+        call parquet_prefetch_columns(reader, "lst_str,large_lst_str")
+        call parquet_get_string_length(reader, "lst_str", strlen_lst)
+        call parquet_get_string_length(reader, "large_lst_str", strlen_large_lst)
+        call parquet_close_reader(reader, print_stat=.true.)
+        if (strlen_lst /= 7) error stop "list fixture: LIST<utf8> get_string_length expected 7 ('charlie')"
+        if (strlen_large_lst /= 7) error stop "list fixture: LARGE_LIST<utf8> get_string_length expected 7 ('charlie')"
+    end subroutine scenario_list_type_foreign_fixture
 
     !> schema%add_field rejects "date" with a unit/utc suffix -- date is unitless (see
     !> parquet_parse_temporal_type in parquet_metadata.f90).

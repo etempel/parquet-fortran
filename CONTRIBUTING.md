@@ -181,6 +181,12 @@ A few choices in that file are load-bearing — each one cost a debugging round 
 
 Coverage is computed by `gcovr` over `src/` and surfaced through GitLab's `coverage:` regex — this now includes `src/parquet_wrapper.cpp`'s line coverage alongside every `src/*.f90` file, since this job's `gfortran`/`gcc`/`g++` all come from the same apt GCC install (one matched GNU toolchain), so the `.cpp`'s gcov data reads back cleanly in the same `gcovr` pass. **This is CI-only** — `tools/coverage.sh` deliberately does *not* attempt the same for `src/parquet_wrapper.cpp`, since it can't assume a matched toolchain on an arbitrary dev machine (e.g. a Mac with `gfortran` from one distribution and a default `clang++` `FPM_CXX` would produce gcov data in Clang's own format, which plain GNU `gcov`/`gcovr` doesn't reliably parse — confirmed to be exactly this project's setup on at least one contributor's machine). `tools/coverage.sh` still builds with `--coverage`, runs the suite plus every error scenario, and prints per-file and total `src/*.f90` coverage only (resolving the `gcov` that matches your `gfortran` automatically).
 
+For local `src/parquet_wrapper.cpp` coverage on exactly this kind of mismatched-toolchain machine, use `tools/coverage_cpp.sh` instead — a separate script, not a flag on `tools/coverage.sh`, because the two can't be instrumented/collected in the same pass locally (Fortran's GNU gcov data and Clang's own gcov-compatible format need different collection code, and a `--coverage` build of one toolchain doesn't help report on the other). It auto-detects an Arrow install prefix (override with `ARROW_PREFIX`), builds `src/parquet_wrapper.cpp` with `--coverage` via `FPM_CXX` (`clang++` by default), and reports that one file's line coverage — via GNU `gcov -j` when the C++ compiler is GCC-like, or `xcrun llvm-cov gcov` when it's Clang:
+
+```bash
+tools/coverage_cpp.sh
+```
+
 Docs are published by two separate jobs, not the `test` job above: `.gitlab-ci.yml`'s `readthedocs` job (GitLab CI → gitlab.4most.eu's readthedocs-style docserver) and `.github/workflows/docs.yml` (GitHub Actions → GitHub Pages). Both just run `ford docs.md` plus `tools/fix_ford_page_links.sh` (fixes up `doc/pages/*.md` links that FORD doesn't resolve when embedding README.md's raw markdown as its front page — see that script's header) before publishing.
 
 ### Mirroring to GitHub

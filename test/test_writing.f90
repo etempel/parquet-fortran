@@ -109,6 +109,10 @@ contains
                 test_open_reader_prefetch_true_with_filter), &
             new_unittest("parquet_close_reader(print_stat=.true.) does not disturb a normal close", &
                 test_close_reader_print_stat_smoke), &
+            new_unittest("parquet_close_reader(print_stat=.true.) covers int64/float32/float64/string/" // &
+                "boolean/qc/filter columns", test_close_reader_print_stat_all_types), &
+            new_unittest("parquet_close_reader(print_stat=.true.) covers format_stat_scalar's default " // &
+                "(non-special-cased scalar type) branch", test_close_reader_print_stat_default_scalar_type), &
             new_unittest("a string/string-vector column too large for arrow::utf8() round-trips via large_utf8()", &
                 test_large_string_column_roundtrip), &
             new_unittest("a STRING_VIEW column (from a file written by another Arrow-based tool) round-trips " // &
@@ -118,6 +122,10 @@ contains
                 test_list_element_count_auto_multi_row_group_roundtrip), &
             new_unittest("qc: range violation prints a WARNING but does not abort", &
                 test_qc_range_violation_warns), &
+            new_unittest("qc: range violation on a string column warns but does not abort", &
+                test_qc_range_violation_string_warns), &
+            new_unittest("qc: range violation on a float column warns but does not abort", &
+                test_qc_range_violation_float_warns), &
             new_unittest("qc: range violation on an extended (uint16) source type warns but does not abort", &
                 test_extended_qc_range_violation_warns), &
             new_unittest("qc-maml: a stray no-colon line before qc: still warns correctly", &
@@ -168,10 +176,20 @@ contains
                 test_streaming_write_string_logical_roundtrip), &
             new_unittest("parquet_get_chunk_size(writer) returns a positive value before and during streaming", &
                 test_streaming_get_chunk_size), &
+            new_unittest("auto row-group sizing: the 1000-row floor still applies when it only moderately " // &
+                "overshoots the byte target", test_chunk_size_floor_overshoot_ok), &
+            new_unittest("auto row-group sizing: a row group smaller than the 1000-row floor is used when " // &
+                "the floor would blow far past the byte target", test_chunk_size_floor_blown_past), &
+            new_unittest("auto chunk-size schema estimate covers boolean/string/temporal (unrecognized-by-name) " // &
+                "column types", test_chunk_size_estimate_boolean_string_temporal), &
+            new_unittest("parquet_get_chunk_size(writer) with an explicit chunk_size= returns it before any " // &
+                "column is written", test_chunk_size_explicit_before_write), &
             new_unittest("streaming row-group write: every type/shape (incl. logical/string) round-trips " // &
                 "with is_valid+qc branches exercised", test_streaming_write_all_types_roundtrip), &
             new_unittest("streaming row-group write: col_size>1 string column via a flat rank-1 array round-trips", &
                 test_streaming_write_string_flat_vector_chunk), &
+            new_unittest("streaming row-group write: a Null string element round-trips (scalar and col_size>1)", &
+                test_streaming_write_string_chunk_null), &
             new_unittest("compact (parquet_string_column) string round-trip, incl. nulls/empty strings", &
                 test_compact_string_roundtrip), &
             new_unittest("compact string write is readable via the padded path, and vice versa", &
@@ -1458,6 +1476,29 @@ contains
             failure_message="parquet_close_reader(print_stat=.true.) was expected to exit cleanly")
     end subroutine test_close_reader_print_stat_smoke
 
+    !> feature_coverage.md's G4: see scenario_print_stat_all_types in error_scenarios.f90 for
+    !> why this exists (format_stat_scalar's INT64/FLOAT/DOUBLE/STRING cases, the boolean
+    !> True/False count display, the qc bound display column, and the active-filter display
+    !> column had never fired through print_stat).
+    subroutine test_close_reader_print_stat_all_types(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "print_stat_all_types", expect_abort=.false., &
+            failure_message="parquet_close_reader(print_stat=.true.) over int64/float32/float64/string/" // &
+            "boolean/qc/filter columns was expected to exit cleanly")
+    end subroutine test_close_reader_print_stat_all_types
+
+    !> feature_coverage.md's G4: see scenario_print_stat_default_scalar_type in
+    !> error_scenarios.f90 for why this exists (format_stat_scalar's `default:
+    !> return s->ToString();` branch, for a scalar min/max type not explicitly cased).
+    subroutine test_close_reader_print_stat_default_scalar_type(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "print_stat_default_scalar_type", expect_abort=.false., &
+            failure_message="parquet_close_reader(print_stat=.true.) over a UINT64 column was expected " // &
+            "to exit cleanly")
+    end subroutine test_close_reader_print_stat_default_scalar_type
+
     !> A string or string-vector column whose byte payload would overflow Arrow's real int32
     !> STRING-offset limit (~2GiB) is written as arrow::large_utf8() instead of arrow::utf8()
     !> (see would_overflow_string_offset_limit in parquet_wrapper.cpp) and must still round-trip
@@ -1519,6 +1560,28 @@ contains
             failure_message="a qc: range violation must warn, not abort", &
             required_stderr="WARNING: qc violation for column 'ra'")
     end subroutine test_qc_range_violation_warns
+
+    !> feature_coverage.md's G5: same as test_qc_range_violation_warns, but proves
+    !> run_qc_range_check's STRING/LARGE_STRING/STRING_VIEW branch (see
+    !> scenario_qc_range_violation_string_warns's own comment in error_scenarios.f90).
+    subroutine test_qc_range_violation_string_warns(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "qc_range_violation_string_warns", expect_abort=.false., &
+            failure_message="a qc: range violation on a string column must warn, not abort", &
+            required_stderr="WARNING: qc violation for column 'sv'")
+    end subroutine test_qc_range_violation_string_warns
+
+    !> feature_coverage.md's G5: same as test_qc_range_violation_warns, but proves
+    !> run_qc_range_check's FLOAT/DOUBLE/DECIMAL* bounds-description formatting branch (see
+    !> scenario_qc_range_violation_float_warns's own comment in error_scenarios.f90).
+    subroutine test_qc_range_violation_float_warns(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "qc_range_violation_float_warns", expect_abort=.false., &
+            failure_message="a qc: range violation on a float column must warn, not abort", &
+            required_stderr="WARNING: qc violation for column 'fv'")
+    end subroutine test_qc_range_violation_float_warns
 
     !> Same as test_qc_range_violation_warns, but proves run_qc_range_check's
     !> extension to the new read-time source types (see
@@ -2462,6 +2525,152 @@ contains
             "parquet_get_chunk_size(writer) did not return a positive value")
     end subroutine test_streaming_get_chunk_size
 
+    !> feature_coverage.md's G1: auto row-group sizing (chunk_size_from_bytes_per_row in
+    !> parquet_wrapper.cpp, and close_parquet_writer's own inline copy against real written
+    !> bytes) has three branches: the normal case (already covered elsewhere), "the 1000-row
+    !> floor overshoots the 256 MiB byte target, but only by a bounded (<=4x) amount -- apply
+    !> the floor anyway", and "even the floor would blow far past the target -- use a
+    !> smaller-than-floor row group instead". This test hits the first of those two: a
+    !> col_size=100000 int32 vector column gives bytes_per_row=400000, comfortably inside the
+    !> bounded-overshoot range. Queries parquet_get_chunk_size(writer) *before* writing anything
+    !> (hits chunk_size_from_bytes_per_row's own copy of the branch, driven off the schema
+    !> estimate) and then writes a couple of rows and closes with no explicit chunk_size= (hits
+    !> close_parquet_writer's mirrored copy, driven off the real written bytes) -- deliberately
+    !> only 2 rows, since which branch fires depends only on bytes_per_row, not on how many rows
+    !> are actually written, so this stays fast rather than needing >1000 real rows.
+    subroutine test_chunk_size_floor_overshoot_ok(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = "test_run/test_chunk_size_floor_overshoot_ok.parquet"
+        integer(int64) :: chunk_size_before
+        integer(int32) :: v(100000, 2)
+        integer(int64) :: num_row_groups, nrows
+        integer :: i
+
+        v = reshape([(i, i=1,200000)], [100000, 2])
+
+        call schema%init(table="chunk_size_overshoot_table")
+        call schema%add_field("v", "int32", col_size=100000)
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_get_chunk_size(writer, chunk_size_before)
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_get_num_row_groups(reader, num_row_groups)
+        call parquet_close_reader(reader)
+
+        call check(error, chunk_size_before > 0 .and. nrows == 2_int64 .and. num_row_groups == 1_int64, &
+            "auto row-group sizing (bounded floor-overshoot case) did not behave as expected")
+    end subroutine test_chunk_size_floor_overshoot_ok
+
+    !> Same shape as test_chunk_size_floor_overshoot_ok, but for the OTHER new branch: a
+    !> col_size=300000 int32 vector column gives bytes_per_row=1200000, past the point where
+    !> even the 1000-row floor would blow past the 256 MiB byte target by more than 4x -- so
+    !> chunk_size_from_bytes_per_row (and close_parquet_writer's mirrored copy) fall back to a
+    !> smaller-than-floor row group instead.
+    subroutine test_chunk_size_floor_blown_past(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = "test_run/test_chunk_size_floor_blown_past.parquet"
+        integer(int64) :: chunk_size_before
+        integer(int32) :: v(300000, 2)
+        integer(int64) :: num_row_groups, nrows
+        integer :: i
+
+        v = reshape([(i, i=1,600000)], [300000, 2])
+
+        call schema%init(table="chunk_size_blown_past_table")
+        call schema%add_field("v", "int32", col_size=300000)
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_get_chunk_size(writer, chunk_size_before)
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_get_num_row_groups(reader, num_row_groups)
+        call parquet_close_reader(reader)
+
+        call check(error, chunk_size_before > 0 .and. nrows == 2_int64 .and. num_row_groups == 1_int64, &
+            "auto row-group sizing (floor-blown-past case) did not behave as expected")
+    end subroutine test_chunk_size_floor_blown_past
+
+    !> feature_coverage.md's G2: estimated_bytes_per_element (parquet_wrapper.cpp) only ever
+    !> saw its int32/float32/int64/float64 branches exercised -- boolean (1-byte estimate),
+    !> string (uses the declared array_size as its estimate), and its final, unrecognized-type
+    !> 8-byte fallback had not. The fallback is reachable through a perfectly valid schema,
+    !> not just a hypothetical malformed one: a temporal field ("date"/"time"/"timestamp") is a
+    !> legitimate data_type this estimator doesn't special-case by name, so it falls through to
+    !> the generic 8-byte guess. Queries parquet_get_chunk_size(writer) before writing anything,
+    !> so this routes through estimate_chunk_size_from_schema -> estimated_bytes_per_element
+    !> without needing real data.
+    subroutine test_chunk_size_estimate_boolean_string_temporal(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        character(len=*), parameter :: out_file = &
+            "test_run/test_chunk_size_estimate_boolean_string_temporal.parquet"
+        integer(int64) :: chunk_size_before
+        logical :: flag(2)
+        character(len=8) :: name(2)
+        type(parquet_date) :: day(2)
+
+        flag = [.true., .false.]
+        name = [character(len=8) :: "alpha", "beta"]
+        call day(1)%set(2024, 1, 1)
+        call day(2)%set(2024, 1, 2)
+
+        call schema%init(table="chunk_size_estimate_table")
+        call schema%add_field("flag", "boolean")
+        call schema%add_field("name", "string", array_size=8)
+        call schema%add_field("day", "date")
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_get_chunk_size(writer, chunk_size_before)
+        call parquet_write_column(writer, "flag", flag)
+        call parquet_write_column(writer, "name", name)
+        call parquet_write_column(writer, "day", day)
+        call parquet_close_writer(writer)
+
+        call check(error, chunk_size_before > 0, &
+            "parquet_get_chunk_size(writer) over a boolean/string/temporal schema did not return " // &
+            "a positive value")
+    end subroutine test_chunk_size_estimate_boolean_string_temporal
+
+    !> feature_coverage.md's G3: resolve_chunk_size's `writer_handle->chunk_size > 0` branch
+    !> (an explicit chunk_size= passed to parquet_open_writer, queried via
+    !> parquet_get_chunk_size(writer) *before any column is written*) was untested -- distinct
+    !> from close_parquet_writer's own separate explicit-chunk_size validation, which only runs
+    !> at close.
+    subroutine test_chunk_size_explicit_before_write(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        character(len=*), parameter :: out_file = "test_run/test_chunk_size_explicit_before_write.parquet"
+        integer(int64) :: chunk_size_before
+        integer(int32) :: v(3)
+
+        v = [1, 2, 3]
+
+        call parquet_open_writer(writer, out_file, chunk_size=7)
+        call parquet_get_chunk_size(writer, chunk_size_before)
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+
+        call check(error, chunk_size_before == 7_int64, &
+            "parquet_get_chunk_size(writer) did not return the explicit chunk_size= before any write")
+    end subroutine test_chunk_size_explicit_before_write
+
     !> Covers every parquet_write_column_chunk type/shape specific across a SCHEMA-ENFORCED,
     !! qc-enabled writer: int32/int64/float32/float64 scalar+matrix, logical scalar+matrix, and
     !! string scalar+matrix -- including the schema-enforced branch of logical-scalar/string
@@ -2615,6 +2824,52 @@ contains
         call check(error, ok, &
             "chunk write of a col_size>1 string column via a flat rank-1 array did not round-trip")
     end subroutine test_streaming_write_string_flat_vector_chunk
+
+    !> A Null element in a streaming (parquet_write_column_chunk) string write -- scalar
+    !> (col_size=1) and col_size>1 -- exercises the AppendNull branch of
+    !> parquet_write_string_column_chunk/parquet_write_string_array_column_chunk in
+    !> parquet_wrapper.cpp, which test_streaming_write_all_types_roundtrip's own "strs"/"strv"
+    !> chunks never do (their is_valid mask there is always all-.true.).
+    subroutine test_streaming_write_string_chunk_null(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = "test_run/streaming_string_chunk_null.parquet"
+        character(len=8) :: scalar(3), scalar_back(3)
+        character(len=8) :: flat(6), flat_back(2, 3)
+        logical :: valid_scalar(3) = [.true., .false., .true.]
+        logical :: valid_flat(6) = [.true., .true., .true., .false., .true., .true.]
+        logical :: valid_scalar_out(3), valid_flat_out(2, 3)
+        logical :: ok
+
+        scalar = [character(len=8) :: "one", "two", "three"]
+        flat = [character(len=8) :: "a1", "a2", "b1", "b2", "c1", "c2"]
+
+        call schema%init(table="string_chunk_null_table")
+        call schema%add_field("s", "string", array_size=8)
+        call schema%add_field("v", "string", col_size=2, array_size=8)
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_new_row_group(writer, 3_int64)
+        call parquet_write_column_chunk(writer, "s", scalar, is_valid=valid_scalar)
+        call parquet_write_column_chunk(writer, "v", reshape(flat, [2, 3]), is_valid=reshape(valid_flat, [2, 3]))
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "s", scalar_back, is_valid=valid_scalar_out)
+        call parquet_read_column(reader, "v", flat_back, is_valid=valid_flat_out)
+        call parquet_close_reader(reader)
+
+        ok = valid_scalar_out(1) .and. (.not. valid_scalar_out(2)) .and. valid_scalar_out(3) .and. &
+             trim(scalar_back(1)) == "one" .and. trim(scalar_back(3)) == "three" .and. &
+             all(valid_flat_out .eqv. reshape(valid_flat, [2, 3])) .and. &
+             trim(flat_back(1, 1)) == "a1" .and. trim(flat_back(2, 1)) == "a2" .and. trim(flat_back(2, 3)) == "c2"
+
+        call check(error, ok, "streaming string chunk write with a Null did not round-trip (scalar and col_size>1)")
+    end subroutine test_streaming_write_string_chunk_null
 
     subroutine test_write_parquet_file(error)
         type(error_type), allocatable, intent(out) :: error
@@ -3157,15 +3412,18 @@ contains
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
         type(parquet_timestamp) :: ts(2), rts(2)
-        type(parquet_time) :: tm(2), rtm(2)
+        type(parquet_time) :: tm(2), rtm(2), tm_ns(2), rtm_ns(2)
         type(parquet_date) :: dt(2), rdt(2)
-        integer :: unit
+        integer :: unit, clock_unit, clock_ns_unit
         character(len=:), allocatable :: tz
         logical :: ok
 
         call schema%init(table="t")
         call schema%add_field("ev", "timestamp[ns,utc]", info="event time")
         call schema%add_field("clock", "time[ms]")
+        ! time[ns] is a TIME64 column, same width as time[us], but exercises
+        ! temporal_ns_per_unit's NANO arm in parquet_wrapper.cpp, which time[us]/time[ms] don't.
+        call schema%add_field("clock_ns", "time[ns]")
         call schema%add_field("day", "date")
         call parquet_parse_maml(schema)
         call parquet_validate_maml(schema%maml)
@@ -3174,19 +3432,28 @@ contains
         call ts(2)%set(1999, 1, 1, 0, 0, 0)
         call tm(1)%set(6, 30, 15, 500000000)                ! .5 s -- fits ms exactly
         call tm(2)%set(23, 59, 59)
+        call tm_ns(1)%set(6, 30, 15, 123456789)             ! ns precision -- needs the declared ns unit
+        call tm_ns(2)%set(23, 59, 59, 999999999)
         call dt(1)%set(2024, 7, 16); call dt(2)%set(1970, 1, 1)
 
         call parquet_open_writer(writer, "test_run/test_datetime_schema_units.parquet", schema)
         call parquet_write_column(writer, "ev", ts)
         call parquet_write_column(writer, "clock", tm)
+        call parquet_write_column(writer, "clock_ns", tm_ns)
         call parquet_write_column(writer, "day", dt)
         call parquet_close_writer(writer)
 
         call parquet_open_reader(reader, "test_run/test_datetime_schema_units.parquet")
         call parquet_read_column(reader, "ev", rts)
         call parquet_read_column(reader, "clock", rtm)
+        call parquet_read_column(reader, "clock_ns", rtm_ns)
         call parquet_read_column(reader, "day", rdt)
         call parquet_get_column_time_info(reader, "ev", unit=unit, timezone=tz)
+        ! feature_coverage.md's G11: "clock" is a TIME32 (time[ms]) column -- every prior
+        ! parquet_get_column_time_info call in this suite targets a TIMESTAMP (TIME64-equivalent
+        ! dispatch) column, never a TIME32 one, so this is the first test to reach that switch case.
+        call parquet_get_column_time_info(reader, "clock", unit=clock_unit)
+        call parquet_get_column_time_info(reader, "clock_ns", unit=clock_ns_unit)
         call parquet_close_reader(reader)
 
         ok = rts(1) == ts(1) .and. rts(2) == ts(2)
@@ -3199,6 +3466,14 @@ contains
         call check(error, unit == parquet_unit_nanos, "get_column_time_info reports the declared nanos unit")
         if (allocated(error)) return
         call check(error, tz == "UTC", "get_column_time_info reports the declared UTC timezone")
+        if (allocated(error)) return
+        call check(error, clock_unit == parquet_unit_millis, &
+            "get_column_time_info reports the declared millis unit for a TIME32 column")
+        if (allocated(error)) return
+        call check(error, rtm_ns(1) == tm_ns(1) .and. rtm_ns(2) == tm_ns(2), "time[ns] round-trip")
+        if (allocated(error)) return
+        call check(error, clock_ns_unit == parquet_unit_nanos, &
+            "get_column_time_info reports the declared nanos unit for a TIME64 column")
     end subroutine test_datetime_schema_units_roundtrip
     !
 end module test_writing

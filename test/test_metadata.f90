@@ -78,7 +78,9 @@ contains
                 test_conversion_logical_array_no_default_aborts), &
             new_unittest("missing string array key with no default aborts", &
                 test_missing_string_array_no_default_aborts), &
-            new_unittest("add_metadata with an empty key is a silent no-op", test_add_metadata_empty_key_noop) &
+            new_unittest("add_metadata with an empty key is a silent no-op", test_add_metadata_empty_key_noop), &
+            new_unittest("VOTable XML sidecar escapes &, <, "", and ' in unit/description/ucd", &
+                test_votable_xml_escapes_special_chars) &
             ]
     end subroutine collect_tests_parquet_metadata
 
@@ -346,6 +348,39 @@ contains
 
         call parquet_close_reader(reader)
     end subroutine test_reserved_key_readable
+
+    !> feature_coverage.md's G3: build_votable_xml/xml_escape (parquet_wrapper.cpp) escapes 5
+    !> reserved XML characters (& < > " '), and no existing test's unit/description/ucd strings
+    !> ever contained any of them (not even "&", despite this test's own doc-comment once assuming
+    !> otherwise -- verified empirically via tools/coverage_cpp.sh, not just inferred). The VOTable
+    !> XML itself isn't exposed by any Fortran API directly; it's readable back as an ordinary
+    !> string metadata value under the reserved key "IVOA.VOTable-Parquet.content" (see
+    !> build_file_metadata's own comment), the same way test_reserved_key_readable reads "DATE".
+    subroutine test_votable_xml_escapes_special_chars(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: id0(1) = [1_int32]
+        character(len=:), allocatable :: xml
+        character(len=*), parameter :: out_file = "test_run/metadata_votable_escape.parquet"
+
+        call schema%init(table="votable_escape_table")
+        call schema%add_field("id0", "int32", unit="a<b", info="say ""hi"" & bye", ucd="it's_a_ucd")
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "id0", id0)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_metadata(reader, "IVOA.VOTable-Parquet.content", xml)
+        call parquet_close_reader(reader)
+
+        call check(error, index(xml, "a&lt;b") > 0 .and. index(xml, "say &quot;hi&quot; &amp; bye") > 0 .and. &
+            index(xml, "it&apos;s_a_ucd") > 0, &
+            "VOTable XML sidecar did not escape &, <, "", and ' in unit/description/ucd")
+    end subroutine test_votable_xml_escapes_special_chars
 
     subroutine test_missing_key_default_warns(error)
         type(error_type), allocatable, intent(out) :: error

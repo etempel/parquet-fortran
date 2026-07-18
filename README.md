@@ -87,6 +87,7 @@ link = ["arrow", "parquet", "c++"]
 
 - Most failures are reported via Fortran `error stop` and abort the process immediately. There are no status/`ierr` return codes in the public API. Some lower-level Arrow/Parquet failures may abort via C++ rather than `error stop`.
 - Reading and writing a *scalar* column (`col_size = 1`) with more than 2,147,483,647 (2^31-1, Fortran's default-integer `huge(1)`) rows is fully supported for every data type — including addressing an individual row past that count via `parquet_read_array_row_mode`. A *vector* column (`col_size > 1`) is capped at that same limit for its own per-row width (`col_size`); its total element count (`nrows * col_size`) has no such cap — row-group sizing handles Parquet's per-row-group element-count ceiling automatically; see [Limitations](#limitations).
+- **API stability:** this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The stability promise covers exactly the public symbols in `src/parquet.f90`'s `public ::` list (the types/procedures documented under [API overview](#api-overview) below) — a breaking change to any of those requires a major version bump. Anything not in that list (private module internals, `src/parquet_wrapper.cpp`'s C++ surface, file/module layout) can change in a minor or patch release.
 
 See [Error handling](doc/pages/error-handling.md) and [Limitations](#limitations) for full details.
 

@@ -50,6 +50,7 @@ exclude = ["**/parquet_bindings.f90"]
 page_dir = "./doc/pages"
 output_dir = "./ford-doc"
 media_dir = "./doc/media"
+favicon = "./doc/media/favicon.png"
 css = "./doc/user.css"
 display = ["public", "protected"]
 source = true

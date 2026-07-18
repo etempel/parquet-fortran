@@ -80,6 +80,8 @@ contains
                 test_qc_silently_ignored_for_boolean), &
             new_unittest("compression=gzip round-trips and shrinks a compressible file", &
                 test_compression_gzip_round_trip), &
+            new_unittest("compression=zstd/brotli/lz4 round-trip", &
+                test_compression_zstd_brotli_lz4_round_trip), &
             new_unittest("compression=uncompressed writes a larger file than the snappy default", &
                 test_compression_uncompressed_larger_than_default), &
             new_unittest("an unknown compression codec aborts", test_compression_unknown_aborts), &
@@ -128,6 +130,8 @@ contains
                 test_qc_range_violation_float_warns), &
             new_unittest("qc: range violation on an extended (uint16) source type warns but does not abort", &
                 test_extended_qc_range_violation_warns), &
+            new_unittest("qc: range violation on an int64 column warns but does not abort", &
+                test_qc_range_violation_int64_warns), &
             new_unittest("qc-maml: a stray no-colon line before qc: still warns correctly", &
                 test_qc_maml_stray_no_colon_line_ok), &
             new_unittest("qc: unexpected Null prints a WARNING but does not abort", &
@@ -1030,6 +1034,55 @@ contains
             "compression=gzip did not round-trip the written data correctly")
     end subroutine test_compression_gzip_round_trip
 
+    !> parse_compression_name's zstd/brotli/lz4 branches (parquet_wrapper.cpp) had never fired --
+    !> only uncompressed/snappy(default)/gzip had a round-trip test. One subroutine covering all
+    !> three codecs, same shape as test_compression_gzip_round_trip above.
+    subroutine test_compression_zstd_brotli_lz4_round_trip(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: values(2000), read_back(2000)
+        integer(int64) :: nrows
+        character(len=*), parameter :: zstd_file = "test_run/test_compression_zstd.parquet"
+        character(len=*), parameter :: brotli_file = "test_run/test_compression_brotli.parquet"
+        character(len=*), parameter :: lz4_file = "test_run/test_compression_lz4.parquet"
+
+        values = 42_int32
+
+        call parquet_open_writer(writer, zstd_file, compression="zstd")
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+        call parquet_open_reader(reader, zstd_file)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_read_column(reader, "v", read_back)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 2000_int64 .and. all(read_back == values), &
+            "compression=zstd did not round-trip the written data correctly")
+        if (allocated(error)) return
+
+        call parquet_open_writer(writer, brotli_file, compression="brotli")
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+        call parquet_open_reader(reader, brotli_file)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_read_column(reader, "v", read_back)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 2000_int64 .and. all(read_back == values), &
+            "compression=brotli did not round-trip the written data correctly")
+        if (allocated(error)) return
+
+        call parquet_open_writer(writer, lz4_file, compression="lz4")
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+        call parquet_open_reader(reader, lz4_file)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_read_column(reader, "v", read_back)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 2000_int64 .and. all(read_back == values), &
+            "compression=lz4 did not round-trip the written data correctly")
+        if (allocated(error)) return
+    end subroutine test_compression_zstd_brotli_lz4_round_trip
+
     !> A single repeated value is fully collapsed by Parquet's own default
     !> dictionary encoding regardless of the compression codec on top, so
     !> that can't be used to demonstrate a codec-driven size difference. This
@@ -1476,10 +1529,10 @@ contains
             failure_message="parquet_close_reader(print_stat=.true.) was expected to exit cleanly")
     end subroutine test_close_reader_print_stat_smoke
 
-    !> feature_coverage.md's G4: see scenario_print_stat_all_types in error_scenarios.f90 for
-    !> why this exists (format_stat_scalar's INT64/FLOAT/DOUBLE/STRING cases, the boolean
-    !> True/False count display, the qc bound display column, and the active-filter display
-    !> column had never fired through print_stat).
+    !> See scenario_print_stat_all_types in error_scenarios.f90 for why this exists
+    !> (format_stat_scalar's INT64/FLOAT/DOUBLE/STRING cases, the boolean True/False count
+    !> display, the qc bound display column, and the active-filter display column had never
+    !> fired through print_stat).
     subroutine test_close_reader_print_stat_all_types(error)
         type(error_type), allocatable, intent(out) :: error
 
@@ -1488,9 +1541,9 @@ contains
             "boolean/qc/filter columns was expected to exit cleanly")
     end subroutine test_close_reader_print_stat_all_types
 
-    !> feature_coverage.md's G4: see scenario_print_stat_default_scalar_type in
-    !> error_scenarios.f90 for why this exists (format_stat_scalar's `default:
-    !> return s->ToString();` branch, for a scalar min/max type not explicitly cased).
+    !> See scenario_print_stat_default_scalar_type in error_scenarios.f90 for why this exists
+    !> (format_stat_scalar's `default: return s->ToString();` branch, for a scalar min/max type
+    !> not explicitly cased).
     subroutine test_close_reader_print_stat_default_scalar_type(error)
         type(error_type), allocatable, intent(out) :: error
 
@@ -1561,9 +1614,9 @@ contains
             required_stderr="WARNING: qc violation for column 'ra'")
     end subroutine test_qc_range_violation_warns
 
-    !> feature_coverage.md's G5: same as test_qc_range_violation_warns, but proves
-    !> run_qc_range_check's STRING/LARGE_STRING/STRING_VIEW branch (see
-    !> scenario_qc_range_violation_string_warns's own comment in error_scenarios.f90).
+    !> Same as test_qc_range_violation_warns, but proves run_qc_range_check's
+    !> STRING/LARGE_STRING/STRING_VIEW branch (see scenario_qc_range_violation_string_warns's
+    !> own comment in error_scenarios.f90).
     subroutine test_qc_range_violation_string_warns(error)
         type(error_type), allocatable, intent(out) :: error
 
@@ -1572,8 +1625,8 @@ contains
             required_stderr="WARNING: qc violation for column 'sv'")
     end subroutine test_qc_range_violation_string_warns
 
-    !> feature_coverage.md's G5: same as test_qc_range_violation_warns, but proves
-    !> run_qc_range_check's FLOAT/DOUBLE/DECIMAL* bounds-description formatting branch (see
+    !> Same as test_qc_range_violation_warns, but proves run_qc_range_check's
+    !> FLOAT/DOUBLE/DECIMAL* bounds-description formatting branch (see
     !> scenario_qc_range_violation_float_warns's own comment in error_scenarios.f90).
     subroutine test_qc_range_violation_float_warns(error)
         type(error_type), allocatable, intent(out) :: error
@@ -1595,6 +1648,18 @@ contains
             failure_message="a qc: range violation on a uint16 column must warn, not abort", &
             required_stderr="WARNING: qc violation for column 'v_uint16'")
     end subroutine test_extended_qc_range_violation_warns
+
+    !> Same as test_qc_range_violation_warns, but on a plain INT64 column instead of INT32 --
+    !> proves run_qc_range_check's is_small_integer_family branch actually reaches
+    !> small_integer_value_at's own INT64 case arm (see
+    !> scenario_qc_range_violation_int64_warns's own comment in error_scenarios.f90).
+    subroutine test_qc_range_violation_int64_warns(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "qc_range_violation_int64_warns", expect_abort=.false., &
+            failure_message="a qc: range violation on an int64 column must warn, not abort", &
+            required_stderr="WARNING: qc violation for column 'v'")
+    end subroutine test_qc_range_violation_int64_warns
 
     !> A stray line with no colon inside a qc-maml field block (before its
     !> qc: sub-block) must be silently skipped rather than breaking parsing
@@ -2525,8 +2590,8 @@ contains
             "parquet_get_chunk_size(writer) did not return a positive value")
     end subroutine test_streaming_get_chunk_size
 
-    !> feature_coverage.md's G1: auto row-group sizing (chunk_size_from_bytes_per_row in
-    !> parquet_wrapper.cpp, and close_parquet_writer's own inline copy against real written
+    !> Auto row-group sizing (chunk_size_from_bytes_per_row in parquet_wrapper.cpp, and
+    !> close_parquet_writer's own inline copy against real written
     !> bytes) has three branches: the normal case (already covered elsewhere), "the 1000-row
     !> floor overshoots the 256 MiB byte target, but only by a bounded (<=4x) amount -- apply
     !> the floor anyway", and "even the floor would blow far past the target -- use a
@@ -2605,8 +2670,8 @@ contains
             "auto row-group sizing (floor-blown-past case) did not behave as expected")
     end subroutine test_chunk_size_floor_blown_past
 
-    !> feature_coverage.md's G2: estimated_bytes_per_element (parquet_wrapper.cpp) only ever
-    !> saw its int32/float32/int64/float64 branches exercised -- boolean (1-byte estimate),
+    !> estimated_bytes_per_element (parquet_wrapper.cpp) only ever saw its int32/float32/int64/
+    !> float64 branches exercised -- boolean (1-byte estimate),
     !> string (uses the declared array_size as its estimate), and its final, unrecognized-type
     !> 8-byte fallback had not. The fallback is reachable through a perfectly valid schema,
     !> not just a hypothetical malformed one: a temporal field ("date"/"time"/"timestamp") is a
@@ -2648,8 +2713,8 @@ contains
             "a positive value")
     end subroutine test_chunk_size_estimate_boolean_string_temporal
 
-    !> feature_coverage.md's G3: resolve_chunk_size's `writer_handle->chunk_size > 0` branch
-    !> (an explicit chunk_size= passed to parquet_open_writer, queried via
+    !> resolve_chunk_size's `writer_handle->chunk_size > 0` branch (an explicit chunk_size=
+    !> passed to parquet_open_writer, queried via
     !> parquet_get_chunk_size(writer) *before any column is written*) was untested -- distinct
     !> from close_parquet_writer's own separate explicit-chunk_size validation, which only runs
     !> at close.
@@ -3413,9 +3478,10 @@ contains
         type(parquet_reader) :: reader
         type(parquet_timestamp) :: ts(2), rts(2)
         type(parquet_time) :: tm(2), rtm(2), tm_ns(2), rtm_ns(2)
+        type(parquet_time) :: clock_vec(2, 2), rclock_vec(2, 2)
         type(parquet_date) :: dt(2), rdt(2)
-        integer :: unit, clock_unit, clock_ns_unit
-        character(len=:), allocatable :: tz
+        integer :: unit, clock_unit, clock_ns_unit, clock_vec_unit
+        character(len=:), allocatable :: tz, clock_tz
         logical :: ok
 
         call schema%init(table="t")
@@ -3424,6 +3490,12 @@ contains
         ! time[ns] is a TIME64 column, same width as time[us], but exercises
         ! temporal_ns_per_unit's NANO arm in parquet_wrapper.cpp, which time[us]/time[ms] don't.
         call schema%add_field("clock_ns", "time[ns]")
+        ! A vector (col_size>1) TIME32 column -- every prior vector
+        ! time column in this suite defaults to microseconds (TIME64); this is the first to
+        ! declare time[ms] (TIME32) at col_size>1, exercising build_time_array's col_size>1/use32
+        ! branch, and the FIXED_SIZE_LIST unwrap in resolve_temporal_value_type when its unit is
+        ! queried below.
+        call schema%add_field("clock_vec", "time[ms]", col_size=2)
         call schema%add_field("day", "date")
         call parquet_parse_maml(schema)
         call parquet_validate_maml(schema%maml)
@@ -3434,12 +3506,15 @@ contains
         call tm(2)%set(23, 59, 59)
         call tm_ns(1)%set(6, 30, 15, 123456789)             ! ns precision -- needs the declared ns unit
         call tm_ns(2)%set(23, 59, 59, 999999999)
+        call clock_vec(1, 1)%set(1, 2, 3, 100000000); call clock_vec(2, 1)%set(4, 5, 6)
+        call clock_vec(1, 2)%set(7, 8, 9); call clock_vec(2, 2)%set(10, 11, 12, 250000000)
         call dt(1)%set(2024, 7, 16); call dt(2)%set(1970, 1, 1)
 
         call parquet_open_writer(writer, "test_run/test_datetime_schema_units.parquet", schema)
         call parquet_write_column(writer, "ev", ts)
         call parquet_write_column(writer, "clock", tm)
         call parquet_write_column(writer, "clock_ns", tm_ns)
+        call parquet_write_column(writer, "clock_vec", clock_vec)
         call parquet_write_column(writer, "day", dt)
         call parquet_close_writer(writer)
 
@@ -3447,12 +3522,17 @@ contains
         call parquet_read_column(reader, "ev", rts)
         call parquet_read_column(reader, "clock", rtm)
         call parquet_read_column(reader, "clock_ns", rtm_ns)
+        call parquet_read_column(reader, "clock_vec", rclock_vec)
         call parquet_read_column(reader, "day", rdt)
         call parquet_get_column_time_info(reader, "ev", unit=unit, timezone=tz)
-        ! feature_coverage.md's G11: "clock" is a TIME32 (time[ms]) column -- every prior
+        call parquet_get_column_time_info(reader, "clock_vec", unit=clock_vec_unit)
+        ! "clock" is a TIME32 (time[ms]) column -- every prior
         ! parquet_get_column_time_info call in this suite targets a TIMESTAMP (TIME64-equivalent
         ! dispatch) column, never a TIME32 one, so this is the first test to reach that switch case.
-        call parquet_get_column_time_info(reader, "clock", unit=clock_unit)
+        ! Also passes timezone= here (every prior call targeting a TIME
+        ! column only asked for unit=) -- exercises parquet_reader_get_column_timezone_length's own
+        ! TIME32/TIME64 branch (returns 0), which the plain unit= call never reached.
+        call parquet_get_column_time_info(reader, "clock", unit=clock_unit, timezone=clock_tz)
         call parquet_get_column_time_info(reader, "clock_ns", unit=clock_ns_unit)
         call parquet_close_reader(reader)
 
@@ -3470,10 +3550,19 @@ contains
         call check(error, clock_unit == parquet_unit_millis, &
             "get_column_time_info reports the declared millis unit for a TIME32 column")
         if (allocated(error)) return
+        call check(error, clock_tz == "", "get_column_time_info reports an empty timezone for a TIME column")
+        if (allocated(error)) return
         call check(error, rtm_ns(1) == tm_ns(1) .and. rtm_ns(2) == tm_ns(2), "time[ns] round-trip")
         if (allocated(error)) return
         call check(error, clock_ns_unit == parquet_unit_nanos, &
             "get_column_time_info reports the declared nanos unit for a TIME64 column")
+        if (allocated(error)) return
+        call check(error, rclock_vec(1,1) == clock_vec(1,1) .and. rclock_vec(2,1) == clock_vec(2,1) &
+            .and. rclock_vec(1,2) == clock_vec(1,2) .and. rclock_vec(2,2) == clock_vec(2,2), &
+            "vector time[ms] (TIME32, col_size=2) round-trip")
+        if (allocated(error)) return
+        call check(error, clock_vec_unit == parquet_unit_millis, &
+            "get_column_time_info reports the declared millis unit for a vector TIME32 column")
     end subroutine test_datetime_schema_units_roundtrip
     !
 end module test_writing

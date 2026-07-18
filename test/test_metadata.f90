@@ -349,10 +349,10 @@ contains
         call parquet_close_reader(reader)
     end subroutine test_reserved_key_readable
 
-    !> feature_coverage.md's G3: build_votable_xml/xml_escape (parquet_wrapper.cpp) escapes 5
-    !> reserved XML characters (& < > " '), and no existing test's unit/description/ucd strings
-    !> ever contained any of them (not even "&", despite this test's own doc-comment once assuming
-    !> otherwise -- verified empirically via tools/coverage_cpp.sh, not just inferred). The VOTable
+    !> build_votable_xml/xml_escape (parquet_wrapper.cpp) escapes 5 reserved XML characters
+    !> (& < > " '), and no existing test's unit/description/ucd strings ever contained any of
+    !> them (not even "&", despite this test's own doc-comment once assuming otherwise --
+    !> verified empirically via tools/coverage_cpp.sh, not just inferred). The VOTable
     !> XML itself isn't exposed by any Fortran API directly; it's readable back as an ordinary
     !> string metadata value under the reserved key "IVOA.VOTable-Parquet.content" (see
     !> build_file_metadata's own comment), the same way test_reserved_key_readable reads "DATE".

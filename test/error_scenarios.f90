@@ -40,6 +40,8 @@ program error_scenarios
         call scenario_print_stat_all_types()
     case ("print_stat_default_scalar_type")
         call scenario_print_stat_default_scalar_type()
+    case ("print_stat_filtered_rows")
+        call scenario_print_stat_filtered_rows()
     case ("large_string_roundtrip")
         call scenario_large_string_roundtrip()
     case ("string_view_roundtrip")
@@ -292,6 +294,10 @@ program error_scenarios
         call scenario_filter_rule_too_long()
     case ("filter_bad_numeric_value")
         call scenario_filter_bad_numeric_value()
+    case ("filter_int32_value_out_of_range")
+        call scenario_filter_int32_value_out_of_range()
+    case ("filter_bad_numeric_value_float")
+        call scenario_filter_bad_numeric_value_float()
     case ("filter_unquoted_string_value")
         call scenario_filter_unquoted_string_value()
     case ("filter_bad_boolean_value")
@@ -308,6 +314,8 @@ program error_scenarios
         call scenario_qc_range_violation_warns()
     case ("extended_qc_range_violation_warns")
         call scenario_extended_qc_range_violation_warns()
+    case ("qc_range_violation_int64_warns")
+        call scenario_qc_range_violation_int64_warns()
     case ("qc_maml_stray_no_colon_line")
         call scenario_qc_maml_stray_no_colon_line()
     case ("qc_null_violation_warns")
@@ -2468,7 +2476,7 @@ contains
         end if
     end subroutine scenario_print_stat_smoke
 
-    !> feature_coverage.md's G4: scenario_print_stat_smoke above only ever runs three
+    !> scenario_print_stat_smoke above only ever runs three
     !> integer(int32) columns through parquet_close_reader(print_stat=.true.), so
     !> format_stat_scalar's INT64/FLOAT/DOUBLE/STRING cases, the boolean True/False count
     !> display, the qc bound display column, and the active-filter display column had never
@@ -2525,7 +2533,7 @@ contains
         print '(a)', "print_stat covered int64/float32/float64/string/boolean/qc/filter columns"
     end subroutine scenario_print_stat_all_types
 
-    !> feature_coverage.md's G4 (continued): format_stat_scalar's `default: return
+    !> format_stat_scalar's `default: return
     !> s->ToString();` branch (parquet_wrapper.cpp) fires for any scalar min/max type it doesn't
     !> special-case -- e.g. UINT64 (this library's own writer never produces one, but the read
     !> side widens it -- see CONTRIBUTING.md's "Additional scalar types" note). Reads
@@ -2542,6 +2550,33 @@ contains
         call parquet_close_reader(reader, print_stat=.true.)
         print '(a)', "print_stat covered format_stat_scalar's default (UINT64) branch"
     end subroutine scenario_print_stat_default_scalar_type
+
+    !> Every other print_stat_* scenario above uses a filter
+    !> (scenario_print_stat_all_types) that keeps every row, so parquet_reader_print_stat's
+    !> "rows: N (of M total)" branch (taken when the active filter actually excludes at least
+    !> one row) had never fired -- only its "rows: N" (no filter, or a no-op filter) sibling had.
+    !> Writes 5 rows, filters down to 3, and closes with print_stat=.true. so nrows (3) !=
+    !> total_nrows (5).
+    subroutine scenario_print_stat_filtered_rows()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32) :: a_values(5), a_back(3)
+        integer :: i
+        character(len=*), parameter :: out_file = "test_run/error_scenario_print_stat_filtered_rows.parquet"
+
+        a_values = [(i, i=1,5)]
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "a", a_values)
+        call parquet_close_writer(writer)
+
+        call filt%add("a >= 3")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        call parquet_read_column(reader, "a", a_back)
+        call parquet_close_reader(reader, print_stat=.true.)
+        print '(a)', "print_stat covered the filtered 'rows: N (of M total)' summary branch"
+    end subroutine scenario_print_stat_filtered_rows
 
     !> Proves the arrow::large_utf8() write/read path (added for a string/string-vector column
     !> whose byte payload would overflow Arrow's real int32 STRING-offset limit, ~2GiB -- see
@@ -2829,9 +2864,8 @@ contains
 
     !> The 16 scenarios below cover array-mode (vector-column) read strict typing and
     !> col_index bounds checking across all four read access patterns (whole-column,
-    !> row-mode, element-mode, chunk-mode) -- feature_coverage.md's G9 group, plus two extra
-    !> element-mode col_index-bounds scenarios (numeric, not just logical/string) found to be
-    !> untested while implementing G9. Every fixture below writes a plain int32 vector column
+    !> row-mode, element-mode, chunk-mode), plus two extra element-mode col_index-bounds
+    !> scenarios (numeric, not just logical/string). Every fixture below writes a plain int32 vector column
     !> (col_size=3, nrows=2) and then reads it back through a mismatched Fortran type (logical
     !> or character) or an out-of-range col_index/elem_index, mirroring the existing scalar
     !> strict-typing scenarios (e.g. scenario_temporal_read_date_via_int32, above) for the
@@ -3141,7 +3175,6 @@ contains
         print '(a)', "unexpectedly read a chunked int32 vector column as string"
     end subroutine scenario_read_array_column_chunk_string_type_mismatch
 
-    !> Extra gap found while implementing G9 (not in feature_coverage.md's original group):
     !> read_list_primitive_element's own col_index bounds check (shared by every numeric
     !> parquet_read_*_array_element specific, not just logical/string) was completely untested,
     !> filtered branch included -- this is the filtered-branch half.
@@ -3384,7 +3417,7 @@ contains
         print '(a)', "unexpectedly introduced a new column after the first row group without error"
     end subroutine scenario_row_group_new_column_after_first
 
-    !> feature_coverage.md's G13: the converse of scenario_row_group_new_column_after_first
+    !> The converse of scenario_row_group_new_column_after_first
     !> above (a row-group-chunk column introduced late) -- once the streaming row-group API has
     !> locked the file's schema (parquet_finish_row_group's first successful call sets
     !> writer_handle->row_group_writer), a *whole-column* (parquet_write_column) write is never
@@ -3513,6 +3546,35 @@ contains
         print '(a)', "unexpectedly opened a reader with a non-numeric value against a numeric filter column"
     end subroutine scenario_filter_bad_numeric_value
 
+    !> A filter value that parses as an integer but doesn't fit
+    !> int32's range reports a clean error stop -- distinct from scenario_filter_bad_numeric_value
+    !> above, which uses a value that fails to parse as a number at all. id_with_null is int32.
+    subroutine scenario_filter_int32_value_out_of_range()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+
+        call filt%add("id_with_null > 99999999999")
+        call parquet_open_reader(reader, "test/fixtures/has_null.parquet", filter=filt)
+        print '(a)', "unexpectedly opened a reader with an out-of-int32-range filter value"
+    end subroutine scenario_filter_int32_value_out_of_range
+
+    !> eval_filter_clause's FLOAT/DOUBLE/HALF_FLOAT/UINT64/DECIMAL*
+    !> value-parse-failure branch had never fired -- scenario_filter_bad_numeric_value above only
+    !> ever targets an int32 column, hitting the separate integer-family parse-failure branch.
+    subroutine scenario_filter_bad_numeric_value_float()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+
+        call parquet_open_writer(writer, "test_run/filter_bad_numeric_value_float.parquet")
+        call parquet_write_column(writer, "v", [1.5_real64, 2.5_real64])
+        call parquet_close_writer(writer)
+
+        call filt%add("v > abc")
+        call parquet_open_reader(reader, "test_run/filter_bad_numeric_value_float.parquet", filter=filt)
+        print '(a)', "unexpectedly opened a reader with a non-numeric value against a float filter column"
+    end subroutine scenario_filter_bad_numeric_value_float
+
     !> A string column's filter value must be double-quoted; a bare,
     !> unquoted word is rejected rather than silently treated as a string.
     subroutine scenario_filter_unquoted_string_value()
@@ -3545,9 +3607,6 @@ contains
         print '(a)', "unexpectedly opened a reader with an invalid boolean value in a filter rule"
     end subroutine scenario_filter_bad_boolean_value
 
-    !> feature_coverage.md's G7 (found via the post-implementation coverage diff, not the
-    !> original write-up -- line 2697-2698 was mis-labeled there as the "unsupported column
-    !> type" default branch, which is actually 2734-2736; this is a distinct, separate gap):
     !> eval_filter_clause's BOOL branch rejects a double-quoted value ("true"/"false" must be
     !> unquoted bare words, matching every other non-string filter value convention) --
     !> distinct from scenario_filter_bad_boolean_value above, which uses an unquoted-but-invalid
@@ -3583,7 +3642,7 @@ contains
         print '(a)', "unexpectedly opened a reader with an ordering comparison against a boolean filter column"
     end subroutine scenario_filter_bool_ordering_not_supported
 
-    !> feature_coverage.md's G7: eval_filter_clause's `default:` branch (parquet_wrapper.cpp) --
+    !> eval_filter_clause's `default:` branch (parquet_wrapper.cpp) --
     !> a column type filtering doesn't support at all -- had no scenario. A temporal (date)
     !> column isn't in eval_filter_clause's type switch (only INT*/FLOAT*/UINT64/DECIMAL*/BOOL/
     !> STRING* are), so filtering on one reaches this fallback. Aborts via a clean Fortran
@@ -3607,14 +3666,14 @@ contains
         print '(a)', "unexpectedly opened a reader with a filter clause against a temporal column"
     end subroutine scenario_filter_unsupported_column_type
 
-    !> feature_coverage.md's G8: parquet_reader_get_string_length's `default:` fallback
+    !> parquet_reader_get_string_length's `default:` fallback
     !> (parquet_wrapper.cpp) for a column that isn't string-like/LIST/LARGE_LIST/FIXED_SIZE_LIST
     !> at all -- calling it against a plain int32 column reaches this. NOTE: unlike most
-    !> `report_fatal_error` gaps documented elsewhere in feature_coverage.md, this line is a
+    !> `report_fatal_error` gaps, this line is a
     !> `throw std::runtime_error(...)` with no catch anywhere in its call chain (confirmed: this
     !> whole file has exactly one `catch` block, in parquet_reader_set_filter, unrelated to this
     !> function) -- expected to cross the extern "C" boundary uncaught and abort via
-    !> std::terminate(), the same Finding 4 mechanism as G13, not a clean `error stop`.
+    !> std::terminate(), not a clean `error stop`.
     subroutine scenario_string_length_on_non_string_column()
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
@@ -3695,6 +3754,32 @@ contains
         call parquet_read_column(reader, "v_uint16", values)
         call parquet_close_reader(reader)
     end subroutine scenario_extended_qc_range_violation_warns
+
+    !> Same as scenario_qc_range_violation_warns, but against a plain INT64 column instead of
+    !> INT32 -- proves run_qc_range_check's is_small_integer_family branch actually reaches
+    !> small_integer_value_at's own INT64 case arm (parquet_wrapper.cpp). Every other qc range
+    !> scenario uses INT32/UINT16/STRING/FLOAT columns; eval_filter_clause and the array
+    !> conversion helpers all special-case INT64 directly and never call small_integer_value_at
+    !> with it, so this scenario is the only way to reach that case arm.
+    subroutine scenario_qc_range_violation_int64_warns()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int64) :: v(3), v_back(3)
+
+        v = [10_int64, 4000000000_int64, -5_int64] ! 4000000000 and -5 are outside [0, 1000]
+
+        call parquet_open_writer(writer, "test_run/qc_range_int64.parquet")
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+
+        call write_text_file("test_run/qc_range_int64.maml", [character(len=32) :: &
+            "fields:", "- name: v", "  qc:", "    min: 0", "    max: 1000"])
+
+        call parquet_open_reader(reader, "test_run/qc_range_int64.parquet", &
+            schema=parquet_load_qc_maml_file("test_run/qc_range_int64.maml"), qc_soft=.true.)
+        call parquet_read_column(reader, "v", v_back)
+        call parquet_close_reader(reader)
+    end subroutine scenario_qc_range_violation_int64_warns
 
     !> A stray line with no colon inside a qc-maml field block (not blank,
     !> not "#"-prefixed) is silently skipped by parquet_split_key_value's
@@ -3782,7 +3867,7 @@ contains
         print '(a)', "unexpectedly read an out-of-range value without aborting in hard qc mode"
     end subroutine scenario_qc_range_violation_hard_aborts
 
-    !> feature_coverage.md's G5: scenario_qc_range_violation_warns/_hard_aborts above only ever
+    !> scenario_qc_range_violation_warns/_hard_aborts above only ever
     !> use an INT32 column, so run_qc_range_check's STRING/LARGE_STRING/STRING_VIEW branch
     !> (parquet_wrapper.cpp) had never fired. Same shape as scenario_qc_range_violation_warns,
     !> but a string column with a qc min/max bound.
@@ -3827,7 +3912,7 @@ contains
         print '(a)', "unexpectedly read an out-of-range string value without aborting in hard qc mode"
     end subroutine scenario_qc_range_violation_string_hard_aborts
 
-    !> feature_coverage.md's G5: run_qc_range_check's FLOAT/DOUBLE/DECIMAL* bounds-description
+    !> run_qc_range_check's FLOAT/DOUBLE/DECIMAL* bounds-description
     !> formatting branch (parquet_wrapper.cpp) had never fired either -- same shape as
     !> scenario_qc_range_violation_warns, but a real64 column with a qc min/max bound.
     subroutine scenario_qc_range_violation_float_warns()
@@ -5654,7 +5739,7 @@ contains
         if (values(1)%is_null()) error stop "tz fixture: row 1 should not be Null"
     end subroutine scenario_temporal_foreign_tz_roundtrip
 
-    !> feature_coverage.md's G6: get_col_size/flatten_for_stats/parquet_reader_get_string_length's
+    !> get_col_size/flatten_for_stats/parquet_reader_get_string_length's
     !> LIST/LARGE_LIST branches -- this library's own writer only ever emits FIXED_SIZE_LIST for
     !> vector columns, so plain LIST/LARGE_LIST columns only exist in foreign-written files, built
     !> here via parquet_debug_write_list_fixture (see that hook's own comment in

@@ -75,37 +75,20 @@ test:
     # MacPorts GCC) and a default `clang++` FPM_CXX would produce gcov data
     # in Clang's format, which plain GNU `gcov`/`gcovr` cannot reliably read
     # -- see CONTRIBUTING.md's coverage section.
-    # This job's coverage percentage/uncovered-line list for src/parquet_wrapper.cpp reliably
-    # differs from a local `tools/coverage_cpp.sh` run on the identical source/test suite (CI
-    # reports ~40 more uncovered lines) -- see feature_coverage.md's coverage-mismatch analysis.
-    # -fprofile-update=atomic (tried first) makes gcov's per-line hit counters atomic instead of
-    # GCC's default plain increment, which would matter if test-drive's `!$omp parallel do`
-    # (testdrive.F90, real concurrency here via -fopenmp below) were racing on shared counters --
-    # but two otherwise-identical CI runs produced byte-identical output with and without this
-    # flag, ruling that out: there is no run-to-run variance to fix, so the mismatch is
-    # deterministic, not a race. Left in place anyway (harmless, standard practice for any
-    # coverage build with real thread-level concurrency) while OMP_NUM_THREADS=1 below is used to
-    # test the next hypothesis (a GCC-vs-Clang gcov line-attribution difference for switch/case
-    # labels and closing braces -- local's tools/coverage_cpp.sh defaults to clang++/llvm-cov,
-    # this job uses real GCC/gfortran/gcov): forcing single-threaded execution removes even the
-    # possibility of concurrency mattering, so identical output again here would confirm the
-    # deterministic/toolchain explanation rather than concurrency of any kind.
-    OMP_NUM_THREADS: "1"
-    FPM_CXXFLAGS: "-std=c++20 --coverage -fprofile-update=atomic"
+    FPM_CXXFLAGS: "-std=c++20 --coverage"
     FPM_LDFLAGS: "-lstdc++ --coverage"
   coverage: /^TOTAL.*\s+(\d+\%)$/
   script:
     # Source is kept within the standard 132-column free-form limit, so no
     # -ffree-line-length-none override is needed; FPM_FFLAGS only adds the
     # coverage/OpenMP flags fpm test itself needs. Note it still replaces
-    # fpm's default profile flags, same as before. -fprofile-update=atomic
-    # matches FPM_CXXFLAGS above -- see its own comment for why.
-    - FPM_FFLAGS="--coverage -fopenmp -fprofile-update=atomic" fpm test --verbose
+    # fpm's default profile flags, same as before.
+    - FPM_FFLAGS="--coverage -fopenmp" fpm test --verbose
     # --exclude-lines-by-pattern auto-excludes every standalone report_fatal_error(...) call
     # site in src/parquet_wrapper.cpp (present and future -- no per-call-site source comment
     # needed) without needing GCOVR_EXCL_LINE comments at each one: std::abort() there discards
     # that whole process's gcov data, so these lines can never show as covered no matter how
-    # well-tested -- see feature_coverage.md's Finding 1/3. Deliberately anchored to "only
+    # well-tested. Deliberately anchored to "only
     # whitespace before report_fatal_error(" rather than a bare ".*" -- a handful of call sites
     # are the tail of an `if (cond) report_fatal_error(...);` guard on one line (the temporal
     # nrows-mismatch checks), where the `if` itself genuinely runs on every normal read and a

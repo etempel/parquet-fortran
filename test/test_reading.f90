@@ -45,6 +45,8 @@ contains
             new_unittest("read string column with null_value and is_valid", test_read_string_null), &
             new_unittest("read array column with null_value and is_valid", test_read_array_null), &
             new_unittest("read list-encoded vector column", test_read_list_vector_column), &
+            new_unittest("array row-mode read at a row_index beyond the first row group", &
+                test_read_array_row_mode_beyond_first_row_group), &
             new_unittest("null_value on a Null-containing vector column (full/row/element modes, every type)", &
                 test_read_vector_null_value_all_types), &
             new_unittest("is_valid on a vector column with zero Nulls anywhere (full/row/element modes)", &
@@ -62,6 +64,7 @@ contains
                 test_col_size_and_row_mode_avoid_whole_column_read), &
             new_unittest("read extended source types (int8/16, uint8/16/32/64, half_float, decimal32/64/128/256)", &
                 test_read_extended_types), &
+            new_unittest("read a real32 column as real64", test_read_float32_column_as_float64), &
             new_unittest("row filter on an extended (int8) source type column", &
                 test_filter_extended_type), &
             new_unittest("row filter passing-comparison on a half_float column", &
@@ -76,6 +79,8 @@ contains
                 test_filter_nested_struct_leaf), &
             new_unittest("date/time/timestamp: row-mode and element-mode reads on a vector column", &
                 test_datetime_row_element_mode), &
+            new_unittest("array element-mode read on a genuinely zero-row vector column does not crash", &
+                test_read_array_element_mode_zero_rows), &
             new_unittest("date/time/timestamp: foreign INT96 and non-UTC-timezone fixtures round-trip", &
                 test_datetime_foreign_fixtures), &
             new_unittest("date/time/timestamp: row-mode and element-mode reads under an active row filter", &
@@ -1125,6 +1130,7 @@ contains
         integer(int32), allocatable :: id(:)
         real(real64), allocatable :: ra(:)
         real(real64), allocatable :: spec(:,:)
+        real(real64), allocatable :: row_out(:), elem_out(:)
         logical :: ok
         !
         inquire(file=in_file, exist=exists)
@@ -1158,6 +1164,26 @@ contains
         call parquet_read_column(reader, "ID", id)
         call parquet_read_column(reader, "ra", ra)
         call parquet_read_column(reader, "spec", spec)
+        !
+        ! row-mode/element-mode reads had never been exercised against
+        ! a LIST-encoded (as opposed to fixed_size_list) vector column -- get_row_list_values'
+        ! own LIST branch, and resolve_element_mode_col_size's LIST/LARGE_LIST fallback, only
+        ! ever ran against this library's own fixed_size_list writer output before.
+        allocate(row_out(nelem), elem_out(nrows))
+        call parquet_read_array_row_mode(reader, "spec", row_out, 2)
+        call check(error, all(abs(row_out - [1.1_real64, 1.2_real64, 1.3_real64]) < 1.0e-12_real64))
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "row-mode read of a LIST-encoded vector column did not match row 2")
+            return
+        end if
+        call parquet_read_array_element_mode(reader, "spec", elem_out, 2)
+        call check(error, all(abs(elem_out - [0.2_real64, 1.2_real64, 2.2_real64, 3.2_real64]) < 1.0e-12_real64))
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "element-mode read of a LIST-encoded vector column did not match element 2")
+            return
+        end if
         call parquet_close_reader(reader)
         !
         call check(error, all(id == [10_int32, 20_int32, 30_int32, 40_int32]))
@@ -1184,6 +1210,33 @@ contains
             return
         end if
     end subroutine test_read_list_vector_column
+
+    !> Every prior parquet_read_array_row_mode test reads from a
+    !> single-row-group file (or, when multi-row-group, only ever from row 1), so
+    !> resolve_row_group_for_row's "row isn't in this group, keep looking" loop-decrement branch
+    !> had never fired. Writes a 5-row, col_size=2 vector column with chunk_size=2 (3 row groups:
+    !> 2, 2, 1 rows) and reads row 4, which physically falls in the second row group (local row 2).
+    subroutine test_read_array_row_mode_beyond_first_row_group(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: v(2, 5), row_out(2)
+        character(len=*), parameter :: out_file = "test_run/test_row_mode_beyond_first_group.parquet"
+        integer :: k
+
+        v = reshape([(k, k=1,10)], [2, 5])
+
+        call parquet_open_writer(writer, out_file, chunk_size=2)
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_array_row_mode(reader, "v", row_out, 4)
+        call parquet_close_reader(reader)
+
+        call check(error, all(row_out == v(:, 4)), &
+            "array row-mode read did not match row 4 (second row group) values")
+    end subroutine test_read_array_row_mode_beyond_first_row_group
 
     !> The existing null_value tests read only int32/string scalar columns;
     !> this covers the null-replacement branch inside every *vector*-column read
@@ -1606,7 +1659,7 @@ contains
             "check_complete=.true. unexpectedly disrupted a complete chunked read")
     end subroutine test_read_column_chunk_check_complete_pass
 
-    !> feature_coverage.md's G12: parquet_close_reader(check_complete=.true., check_hard=.false.)
+    !> parquet_close_reader(check_complete=.true., check_hard=.false.)
     !> on a genuinely incomplete chunked read (only row group 1 of 2 read) must print a WARNING
     !> and continue, not abort -- the `hard` counterpart of this is already covered by
     !> scenario_read_chunk_check_complete_hard_aborts in error_scenarios.f90 (default
@@ -1726,7 +1779,7 @@ contains
         call fail_if_error(error, reader, "v_uint32 -> int64")
         if (allocated(error)) return
         !
-        ! UINT64 -> int64, and widened into real64.
+        ! UINT64 -> int64, and widened into real64 and real32.
         call parquet_read_column(reader, "v_uint64", i64)
         call check(error, all(i64 == [1000_int64, 0_int64, 2000000000_int64]))
         call fail_if_error(error, reader, "v_uint64 -> int64")
@@ -1734,6 +1787,12 @@ contains
         call parquet_read_column(reader, "v_uint64", r64)
         call check(error, all(abs(r64 - [1000.0_real64, 0.0_real64, 2000000000.0_real64]) < 1.0e-6_real64))
         call fail_if_error(error, reader, "v_uint64 -> real64")
+        if (allocated(error)) return
+        ! convert_values_to_float32's own UINT64 case had never fired
+        ! (only the real64-target UINT64 case, above, had).
+        call parquet_read_column(reader, "v_uint64", r32)
+        call check(error, all(abs(r32 - [1000.0_real32, 0.0_real32, 2000000000.0_real32]) < 1.0_real32))
+        call fail_if_error(error, reader, "v_uint64 -> real32")
         if (allocated(error)) return
         !
         ! HALF_FLOAT -> int32 (every fixture value is exactly integral) and
@@ -1761,6 +1820,13 @@ contains
         call parquet_read_column(reader, "v_decimal32", r64)
         call check(error, all(abs(r64 - [12.0_real64, -34.0_real64, 999.0_real64]) < 1.0e-6_real64))
         call fail_if_error(error, reader, "v_decimal32 -> real64")
+        if (allocated(error)) return
+        ! convert_values_to_float32's own DECIMAL32/64/128/256 case
+        ! (a single shared line for all four widths) had never fired -- only the real64-target
+        ! sibling in convert_values_to_float64, above, had.
+        call parquet_read_column(reader, "v_decimal32", r32)
+        call check(error, all(abs(r32 - [12.0_real32, -34.0_real32, 999.0_real32]) < 1.0e-3_real32))
+        call fail_if_error(error, reader, "v_decimal32 -> real32")
         if (allocated(error)) return
         !
         call parquet_read_column(reader, "v_decimal64", i64)
@@ -1801,6 +1867,31 @@ contains
         call parquet_close_reader(reader)
     end subroutine test_read_extended_types
     !
+    !> convert_values_to_float64's own FLOAT case had never fired --
+    !> no fixture has a plain real32 column read back as real64 (extended_types.parquet has no
+    !> FLOAT source column at all, only HALF_FLOAT/DOUBLE/UINT64/DECIMAL*). A fresh write/read
+    !> round trip, no fixture needed.
+    subroutine test_read_float32_column_as_float64(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        real(real32) :: values(3)
+        real(real64) :: back(3)
+        character(len=*), parameter :: out_file = "test_run/read_float32_as_float64.parquet"
+        !
+        values = [1.5_real32, -2.25_real32, 100.75_real32]
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+        !
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "v", back)
+        call check(error, all(abs(back - [1.5_real64, -2.25_real64, 100.75_real64]) < 1.0e-6_real64))
+        call fail_if_error(error, reader, "v (real32) -> real64")
+        if (allocated(error)) return
+        call parquet_close_reader(reader)
+    end subroutine test_read_float32_column_as_float64
+    !
     !> Proves eval_filter_clause's extension to the new read-time source
     !> types (see is_small_integer_family's own comment in
     !> parquet_wrapper.cpp) actually filters rather than silently rejecting
@@ -1833,7 +1924,7 @@ contains
         end if
     end subroutine test_filter_extended_type
     !
-    !> feature_coverage.md's G7: eval_filter_clause's FLOAT/DOUBLE/HALF_FLOAT successful
+    !> eval_filter_clause's FLOAT/DOUBLE/HALF_FLOAT successful
     !> match-loop (parquet_wrapper.cpp) had only ever been exercised by malformed-value
     !> scenarios, never a clause that actually matches rows. v_half_float in
     !> extended_types.parquet is [2.0, -3.0, 100.0] (rows 1-3); "v_half_float > 0" should keep
@@ -1865,7 +1956,7 @@ contains
         end if
     end subroutine test_filter_extended_type_half_float
     !
-    !> feature_coverage.md's G7: eval_filter_clause's UINT64 successful match-loop had never
+    !> eval_filter_clause's UINT64 successful match-loop had never
     !> fired either. v_uint64 in extended_types.parquet is [1000, 0, 2000000000] (rows 1-3);
     !> "v_uint64 >= 500" should keep rows 1 and 3 only.
     subroutine test_filter_extended_type_uint64(error)
@@ -1895,7 +1986,7 @@ contains
         end if
     end subroutine test_filter_extended_type_uint64
     !
-    !> feature_coverage.md's G7: eval_filter_clause's DECIMAL32/64/128/256 successful
+    !> eval_filter_clause's DECIMAL32/64/128/256 successful
     !> match-loop had never fired either (all four kinds share this one source line, so a
     !> single decimal32 test covers it regardless of decimal width). v_decimal32 in
     !> extended_types.parquet is [12, -34, 999] (rows 1-3); "v_decimal32 > 0" should keep
@@ -2147,6 +2238,43 @@ contains
         call check(error, telem(3)%is_null() .and. telem(4) == t(2, 4), &
             "element mode: element 2 of the time vector column")
     end subroutine test_datetime_row_element_mode
+
+    !> A genuinely zero-row vector column (not a filter matching zero rows, which is a
+    !> different code path -- reader_handle->filter_mask short-circuits before ever reaching
+    !> the row-group-streaming code below) read via parquet_read_array_element_mode must not
+    !> crash. Covers read_list_primitive_element's/read_temporal_element's own "no row group
+    !> had any rows" fallback (parquet_wrapper.cpp), including read_temporal_element's
+    !> unit_out branch for a zero-row timestamp vector column (unit has no values to be
+    !> derived from, so it falls back to the schema-declared leaf type). Also exercises
+    !> close_parquet_writer's auto-chunk-size "num_rows == 0" fallback on the write side,
+    !> since chunk_size= is deliberately left unspecified here.
+    subroutine test_read_array_element_mode_zero_rows(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: v(2, 0)
+        type(parquet_timestamp) :: ts(2, 0)
+        integer(int32) :: v_elem(0)
+        type(parquet_timestamp) :: ts_elem(0)
+        integer :: nrows
+        character(len=*), parameter :: out_file = "test_run/test_array_element_mode_zero_rows.parquet"
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "v", v)
+        call parquet_write_column(writer, "ts", ts)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_read_array_element_mode(reader, "v", v_elem, 1)
+        call parquet_read_array_element_mode(reader, "ts", ts_elem, 1)
+        call parquet_close_reader(reader)
+
+        call check(error, nrows == 0, "zero-row vector column file did not report nrows == 0")
+        if (allocated(error)) return
+        call check(error, size(v_elem) == 0 .and. size(ts_elem) == 0, &
+            "zero-row element-mode read returned a non-empty array")
+    end subroutine test_read_array_element_mode_zero_rows
     !
     !> The actual assertions run out-of-process (scenario_temporal_foreign_int96_roundtrip/
     !> scenario_temporal_foreign_tz_roundtrip in error_scenarios.f90, each error-stopping on any
@@ -2164,7 +2292,7 @@ contains
             failure_message="a non-UTC timezone fixture did not round-trip correctly")
     end subroutine test_datetime_foreign_fixtures
     !
-    !> feature_coverage.md's G10: row-mode/element-mode reads of a temporal vector column under
+    !> Row-mode/element-mode reads of a temporal vector column under
     !> an active row filter -- read_temporal_row/read_temporal_element's own `filter_mask` branch
     !> (parquet_wrapper.cpp), never previously exercised since no existing temporal test opens a
     !> reader with a filter= argument. row_index/nrows below index into the *filtered* result,
@@ -2211,7 +2339,7 @@ contains
             "filtered element mode: element 2 across the 2 filtered rows")
     end subroutine test_datetime_array_filtered
     !
-    !> feature_coverage.md's G1: parquet_read_*_array_row/_element's `filter_mask` branch, under an
+    !> parquet_read_*_array_row/_element's `filter_mask` branch, under an
     !> active row filter, for int32/int64/float32/float64 element-mode (read_list_primitive_element
     !> -- row-mode was already covered by test_filter_leaves_vector_column_readable in the "writing"
     !> suite, via its int64 column, but element-mode never was) and for boolean/string row-mode AND
@@ -2324,7 +2452,7 @@ contains
             "filtered element mode (string): element 2 across the 2 filtered rows")
     end subroutine test_array_row_element_mode_filtered
     !
-    !> feature_coverage.md's G6: get_col_size/flatten_for_stats/parquet_reader_get_string_length's
+    !> get_col_size/flatten_for_stats/parquet_reader_get_string_length's
     !> plain LIST/LARGE_LIST branches -- this library's own writer only ever emits FIXED_SIZE_LIST,
     !> so these are only reachable through a foreign-written file, built by
     !> parquet_debug_write_list_fixture (a test-only C++ hook, see its own comment). The actual

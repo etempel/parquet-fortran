@@ -224,8 +224,9 @@ target = "src/parquet_wrapper.cpp"
 
 # Mirrors gcovr's own exclusion rules (GCOVR_EXCL_LINE / GCOVR_EXCL_START.../GCOVR_EXCL_STOP
 # comment markers, plus .gitlab-ci.yml's --exclude-lines-by-pattern regexes) so this local tool's
-# percentage matches what CI's gcovr invocation reports, rather than counting lines Finding 1/3/4
-# (feature_coverage.md) established gcov can never observe as covered no matter how well-tested.
+# percentage matches what CI's gcovr invocation reports, rather than counting lines that std::abort()
+# (or an uncaught throw crossing the extern "C" boundary) makes gcov unable to ever observe as
+# covered, no matter how well-tested.
 # Deliberately anchored to "only whitespace before report_fatal_error(" (not ".*report_fatal_error(")
 # -- a handful of call sites are the tail end of an `if (cond) report_fatal_error(...);` guard on
 # one line (the temporal nrows-mismatch checks), where the `if` itself genuinely runs (and is hit)

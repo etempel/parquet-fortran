@@ -291,6 +291,10 @@ contains
                 test_filter_rule_too_long_aborts), &
             new_unittest("filter: non-numeric value against a numeric column aborts", &
                 test_filter_bad_numeric_value_aborts), &
+            new_unittest("filter: int32 value out of range aborts", &
+                test_filter_int32_value_out_of_range_aborts), &
+            new_unittest("filter: non-numeric value against a float column aborts", &
+                test_filter_bad_numeric_value_float_aborts), &
             new_unittest("filter: unquoted value against a string column aborts", &
                 test_filter_unquoted_string_value_aborts), &
             new_unittest("filter: invalid boolean value aborts", &
@@ -1312,11 +1316,10 @@ contains
             failure_message="reading a column of an unsupported physical Parquet type was expected to abort")
     end subroutine test_read_unsupported_physical_type_aborts
 
-    !> The 16 tests below are the Fortran-side counterpart of the 16 scenarios added to
-    !> error_scenarios.f90 for feature_coverage.md's G9 group (array-mode bool8/string
-    !> type-mismatch + col_index bounds across whole-column/row-mode/element-mode/chunk-mode
-    !> reads), plus two extra element-mode col_index-bounds tests (numeric) found to be
-    !> untested while implementing G9 -- see error_scenarios.f90's own comment above those
+    !> The 16 tests below are the Fortran-side counterpart of 16 scenarios added to
+    !> error_scenarios.f90 covering array-mode bool8/string type-mismatch + col_index bounds
+    !> across whole-column/row-mode/element-mode/chunk-mode reads, plus two extra element-mode
+    !> col_index-bounds tests (numeric) -- see error_scenarios.f90's own comment above those
     !> 16 scenarios.
 
     subroutine test_read_array_full_bool_type_mismatch_aborts(error)
@@ -1650,9 +1653,9 @@ contains
                 "file's schema is fixed once the first row group is written")
     end subroutine test_row_group_new_column_after_first_aborts
 
-    !> feature_coverage.md's G13: the converse -- append_column (the whole-column
-    !> parquet_write_column path) throws once the streaming row-group API has already started,
-    !> even for a column the streaming API never touched. Unlike
+    !> The converse of the test above: append_column (the whole-column parquet_write_column
+    !> path) throws once the streaming row-group API has already started, even for a column
+    !> the streaming API never touched. Unlike
     !> test_row_group_new_column_after_first_aborts above, this is a plain `throw`, not
     !> report_fatal_error.
     subroutine test_row_group_whole_column_after_streaming_started_aborts(error)
@@ -1744,6 +1747,22 @@ contains
             required_stderr="filter rule: value 'abc' is not a valid integer for column 'id_with_null'")
     end subroutine test_filter_bad_numeric_value_aborts
 
+    subroutine test_filter_int32_value_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_int32_value_out_of_range", expect_abort=.true., &
+            failure_message="an out-of-int32-range filter value was expected to abort", &
+            required_stderr="is out of int32 range for column 'id_with_null'")
+    end subroutine test_filter_int32_value_out_of_range_aborts
+
+    subroutine test_filter_bad_numeric_value_float_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_bad_numeric_value_float", expect_abort=.true., &
+            failure_message="a non-numeric filter value against a float column was expected to abort", &
+            required_stderr="value 'abc' is not a valid number for column 'v'")
+    end subroutine test_filter_bad_numeric_value_float_aborts
+
     !> A string column's filter value must be double-quoted -- a bare,
     !> unquoted word aborts rather than being silently treated as a string.
     subroutine test_filter_unquoted_string_value_aborts(error)
@@ -1763,9 +1782,8 @@ contains
             required_stderr="is not true/false for boolean column")
     end subroutine test_filter_bad_boolean_value_aborts
 
-    !> feature_coverage.md's G7: a double-quoted boolean filter value ('flag == "true"') is
-    !> rejected too -- distinct from test_filter_bad_boolean_value_aborts above, which uses an
-    !> unquoted-but-invalid word.
+    !> A double-quoted boolean filter value ('flag == "true"') is rejected too -- distinct from
+    !> test_filter_bad_boolean_value_aborts above, which uses an unquoted-but-invalid word.
     subroutine test_filter_boolean_value_must_be_unquoted_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
@@ -1785,8 +1803,8 @@ contains
             required_stderr="ordering comparisons")
     end subroutine test_filter_bool_ordering_not_supported_aborts
 
-    !> feature_coverage.md's G7: eval_filter_clause's `default:` branch -- filtering a column
-    !> type (temporal) it doesn't support at all.
+    !> eval_filter_clause's `default:` branch -- filtering a column type (temporal) it doesn't
+    !> support at all.
     subroutine test_filter_unsupported_column_type_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
@@ -1795,10 +1813,9 @@ contains
             required_stderr="has a type that filtering does not support")
     end subroutine test_filter_unsupported_column_type_aborts
 
-    !> feature_coverage.md's G8: parquet_reader_get_string_length's `default:` fallback for a
-    !> column that isn't string-like/LIST-typed at all -- reached via a plain `throw`, not
-    !> report_fatal_error, but still uncaught (Finding 4): terminates via std::terminate(), not
-    !> a clean Fortran `error stop`.
+    !> parquet_reader_get_string_length's `default:` fallback for a column that isn't
+    !> string-like/LIST-typed at all -- reached via a plain `throw`, not report_fatal_error, but
+    !> still uncaught: terminates via std::terminate(), not a clean Fortran `error stop`.
     subroutine test_string_length_on_non_string_column_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
@@ -1873,8 +1890,8 @@ contains
             required_stderr="qc hard check: qc violation for column 'ra'")
     end subroutine test_qc_range_violation_hard_aborts
 
-    !> feature_coverage.md's G5: same as test_qc_range_violation_hard_aborts, but proves
-    !> run_qc_range_check's STRING/LARGE_STRING/STRING_VIEW branch under hard qc mode.
+    !> Same as test_qc_range_violation_hard_aborts, but proves run_qc_range_check's
+    !> STRING/LARGE_STRING/STRING_VIEW branch under hard qc mode.
     subroutine test_qc_range_violation_string_hard_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
@@ -1884,9 +1901,8 @@ contains
             required_stderr="qc hard check: qc violation for column 'sv'")
     end subroutine test_qc_range_violation_string_hard_aborts
 
-    !> feature_coverage.md's G5: same as test_qc_range_violation_hard_aborts, but proves
-    !> run_qc_range_check's FLOAT/DOUBLE/DECIMAL* bounds-description formatting branch under
-    !> hard qc mode.
+    !> Same as test_qc_range_violation_hard_aborts, but proves run_qc_range_check's
+    !> FLOAT/DOUBLE/DECIMAL* bounds-description formatting branch under hard qc mode.
     subroutine test_qc_range_violation_float_hard_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 

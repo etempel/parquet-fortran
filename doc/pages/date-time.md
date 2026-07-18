@@ -248,7 +248,7 @@ serves user-defined key/value metadata rather than this schema-level property.
 
 ## Reading files written by other tools
 
-This library's own writer only ever produces `date32`, `time64[ms/us/ns]` and
+This library's own writer only ever produces `date32`, `time32[ms]`/`time64[us/ns]`, and
 `timestamp[ms/us/ns]` (naive or UTC-adjusted) columns. Reading is broader, since a file from
 another Arrow-based tool may use representations this library's writer never emits:
 

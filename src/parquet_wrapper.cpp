@@ -80,7 +80,7 @@ public:
 	{
 		bool expected = false;
 		if (!handle_->busy.compare_exchange_strong(expected, true))
-		{ // GCOVR_EXCL_START -- see report_fatal_error's own GCOVR_EXCL comment (same std::abort() gcov-loss mechanism, feature_coverage.md's Finding 1/3)
+		{ // GCOVR_EXCL_START -- same std::abort() gcov-loss mechanism as report_fatal_error's own GCOVR_EXCL comment
 			std::fprintf(stderr,
 				"parquet-fortran: concurrent access to a single %s detected: each thread must use "
 				"its own independent parquet_reader/parquet_writer instance (see the README's Thread "
@@ -398,8 +398,7 @@ extern "C"
 	// this file -- see .gitlab-ci.yml's --exclude-lines-by-pattern for the single-line ones):
 	// std::abort() skips the atexit-registered gcov-flush handler a normal process exit relies
 	// on, so any process that reaches this function loses that whole run's coverage data --
-	// unobservable by gcov no matter how well-tested, not merely hard to trigger. See
-	// feature_coverage.md's Finding 1/3.
+	// unobservable by gcov no matter how well-tested, not merely hard to trigger.
 	[[noreturn]] static void report_fatal_error(const char *context, const std::string &message) // GCOVR_EXCL_START
 	{
 		std::fprintf(stderr, "parquet-fortran: %s: %s\n", context, message.c_str());
@@ -412,13 +411,13 @@ extern "C"
 	{
 		auto idx = reader_handle->schema->GetFieldIndex(name);
 		if (idx < 0)
-		{ // GCOVR_EXCL_START -- dead via Finding 2: parquet_read.f90's check_column_exists (built on
-		  // the non-throwing parquet_reader_has_column/struct_path_exists probe) gates every read
-		  // entry point before this can be reached; see feature_coverage.md's D4.
+		{ // GCOVR_EXCL_START -- dead: parquet_read.f90's check_column_exists (built on the
+		  // non-throwing parquet_reader_has_column/struct_path_exists probe) gates every read
+		  // entry point before this can be reached.
 			throw std::runtime_error(std::string("Column not found: ") + name);
 		} // GCOVR_EXCL_STOP
 		return static_cast<int64_t>(idx);
-	} // GCOVR_EXCL_LINE -- Finding-5 closing-brace artifact; the covered `return` above proves the body ran.
+	} // GCOVR_EXCL_LINE -- gcov attribution artifact: this closing brace shows uncovered even though the covered `return` above proves the body ran.
 
 	// Describes how a (possibly dotted) column name resolves against the schema: either an exact
 	// top-level field match (child_path empty), or a walk through nested STRUCT fields down to a
@@ -457,19 +456,18 @@ extern "C"
 			if (dot == std::string::npos) break;
 			start = dot + 1;
 		}
-		// The four throws below are all dead via Finding 2, same proof as get_column_index's own:
-		// parquet_read.f90's check_column_exists (built on the non-throwing
-		// parquet_reader_has_column/struct_path_exists probe, which mirrors this function's own
-		// walk) gates every read entry point on the exact same (possibly dotted) `name` before this
-		// can ever be reached; see feature_coverage.md's D4.
+		// The four throws below are all dead, same proof as get_column_index's own: parquet_read.f90's
+		// check_column_exists (built on the non-throwing parquet_reader_has_column/struct_path_exists
+		// probe, which mirrors this function's own walk) gates every read entry point on the exact
+		// same (possibly dotted) `name` before this can ever be reached.
 		if (segments.size() < 2)
-		{ // GCOVR_EXCL_START -- dead via Finding 2, see comment above.
+		{ // GCOVR_EXCL_START -- dead, see comment above.
 			throw std::runtime_error(std::string("Column not found: ") + name);
 		} // GCOVR_EXCL_STOP
 
 		auto top_idx = schema->GetFieldIndex(segments[0]);
 		if (top_idx < 0)
-		{ // GCOVR_EXCL_START -- dead via Finding 2, see comment above.
+		{ // GCOVR_EXCL_START -- dead, see comment above.
 			throw std::runtime_error(std::string("Column not found: ") + name);
 		} // GCOVR_EXCL_STOP
 
@@ -478,14 +476,14 @@ extern "C"
 		for (size_t i = 1; i < segments.size(); ++i)
 		{
 			if (field->type()->id() != arrow::Type::STRUCT)
-			{ // GCOVR_EXCL_START -- dead via Finding 2, see comment above.
+			{ // GCOVR_EXCL_START -- dead, see comment above.
 				throw std::runtime_error(std::string("Column not found: ") + name + " (path segment '" + walked_so_far +
 					"' is not a struct, found type: " + field->type()->ToString() + ")");
 			} // GCOVR_EXCL_STOP
 			auto struct_type = std::static_pointer_cast<arrow::StructType>(field->type());
 			auto child_field = struct_type->GetFieldByName(segments[i]);
 			if (!child_field)
-			{ // GCOVR_EXCL_START -- dead via Finding 2, see comment above.
+			{ // GCOVR_EXCL_START -- dead, see comment above.
 				throw std::runtime_error(std::string("Column not found: ") + name + " (no field '" + segments[i] +
 					"' under '" + walked_so_far + "')");
 			} // GCOVR_EXCL_STOP
@@ -496,7 +494,7 @@ extern "C"
 		auto leaf_id = field->type()->id();
 		if (leaf_id == arrow::Type::STRUCT || leaf_id == arrow::Type::LIST ||
 			leaf_id == arrow::Type::LARGE_LIST || leaf_id == arrow::Type::MAP)
-		{ // GCOVR_EXCL_START -- dead via Finding 2, see comment above.
+		{ // GCOVR_EXCL_START -- dead, see comment above.
 			throw std::runtime_error(std::string("Column not found: ") + name +
 				" (resolves to a " + field->type()->ToString() +
 				" column; struct paths must resolve to a leaf scalar/vector column, and MAP/LIST are not supported)");
@@ -585,7 +583,7 @@ extern "C"
 		int64_t base_offset = current->data()->offset;
 		auto alloc = arrow::AllocateBitmap(base_offset + n);
 		if (!alloc.ok())
-		{ // GCOVR_EXCL_START -- real allocation-failure backstop, not fixture-triggerable (feature_coverage.md)
+		{ // GCOVR_EXCL_START -- real allocation-failure backstop, not fixture-triggerable
 			throw std::runtime_error(std::string("Failed to allocate combined-validity bitmap: ") + alloc.status().ToString());
 		} // GCOVR_EXCL_STOP
 		auto buffer = alloc.ValueOrDie();
@@ -662,6 +660,17 @@ extern "C"
 		{
 			return chunked->chunk(0);
 		}
+		// GCOVR_EXCL_START -- untested compat backstop, confirmed unreachable through this
+		// library's current read paths, not just untested: a temporary instrumented build (a
+		// counter printed on every call) showed every one of 400+ combine_column_chunks calls
+		// across the full test suite -- including a dedicated probe against a 3-row-group
+		// (chunk_size=2, 5 rows) file's whole-column read -- always sees exactly 1 chunk. Arrow's
+		// FileReader::ReadColumn/ReadTable evidently always coalesces every row group into a
+		// single chunk in this Arrow version, regardless of row-group count. Kept rather than
+		// deleted: a genuine second-level safeguard against a future Arrow version (or a
+		// different reader configuration) not coalescing this way, not dead code to remove --
+		// same reasoning as the pattern already used for genuinely file-I/O-triggered backstops
+		// elsewhere in this file.
 		if (chunked->num_chunks() == 0)
 		{
 			auto empty = arrow::MakeEmptyArray(chunked->type(), arrow::default_memory_pool());
@@ -677,6 +686,7 @@ extern "C"
 			throw std::runtime_error(std::string("Failed to combine chunks for column: ") + name + ": " + combined.status().ToString());
 		}
 		return combined.ValueOrDie();
+		// GCOVR_EXCL_STOP
 	}
 
 	// Arrow's compute kernels (MinMax, Filter, ...) live in a separate
@@ -720,12 +730,12 @@ extern "C"
 		ensure_compute_initialized();
 		auto coerced = coerce_for_filter_kernel(array);
 		if (!coerced.ok())
-		{ // GCOVR_EXCL_START -- Cast-kernel Status backstop on already-validated input (feature_coverage.md)
+		{ // GCOVR_EXCL_START -- Cast-kernel Status backstop on already-validated input
 			throw std::runtime_error(coerced.status().ToString());
 		} // GCOVR_EXCL_STOP
 		auto filtered = arrow::compute::Filter(coerced.ValueOrDie(), reader_handle->filter_mask);
 		if (!filtered.ok())
-		{ // GCOVR_EXCL_START -- Filter-kernel Status backstop on already-validated input (feature_coverage.md)
+		{ // GCOVR_EXCL_START -- Filter-kernel Status backstop on already-validated input
 			throw std::runtime_error(filtered.status().ToString());
 		} // GCOVR_EXCL_STOP
 		return filtered.ValueOrDie().make_array();
@@ -787,7 +797,7 @@ extern "C"
 			std::shared_ptr<arrow::ChunkedArray> chunked;
 			auto status = reader_handle->reader->ReadColumn(static_cast<int>(idx), &chunked);
 			if (!status.ok())
-			{ // GCOVR_EXCL_START -- file-I/O backstop, not fixture-triggerable (feature_coverage.md)
+			{ // GCOVR_EXCL_START -- file-I/O backstop, not fixture-triggerable
 				throw std::runtime_error(status.ToString());
 			} // GCOVR_EXCL_STOP
 
@@ -1316,21 +1326,22 @@ extern "C"
 	// into the symbol name, so two same-named functions genuinely conflict
 	// there even though clang doesn't catch it).
 	// real_to_int32_checked is genuinely exercised by a passing (non-aborting) float/double->int32
-	// round trip -- not Finding-1 collateral, unlike real_to_int64_checked just below, which is only
-	// ever reached via the extended_real_*_int64 error scenarios (whose abort discards even the
-	// kOk/kNonIntegral lines that ran before it); see feature_coverage.md's D3.
+	// round trip. real_to_int64_checked just below is not: it's only ever reached via the
+	// extended_real_*_int64 error scenarios, all of which end in std::abort() -- and std::abort()
+	// discards that whole process's gcov coverage, including the kOk/kNonIntegral lines that ran
+	// before it, not just the abort line itself.
 	static NumericConvertStatus real_to_int32_checked(double v, int32_t &out)
 	{
 		if (!std::isfinite(v) || v != std::trunc(v)) return NumericConvertStatus::kNonIntegral;
 		if (v < static_cast<double>(std::numeric_limits<int32_t>::min()) ||
 			v > static_cast<double>(std::numeric_limits<int32_t>::max()))
-			return NumericConvertStatus::kOverflow; // GCOVR_EXCL_LINE -- Finding-1 collateral (D3): the
-			// overflow path itself is only reached via extended_real_overflow_int32's abort-ending
-			// scenario, unlike the rest of this function (kOk/kNonIntegral), which a passing round trip covers.
+			return NumericConvertStatus::kOverflow; // GCOVR_EXCL_LINE -- the overflow path itself is
+			// only reached via extended_real_overflow_int32's abort-ending scenario, unlike the rest
+			// of this function (kOk/kNonIntegral), which a passing round trip covers.
 		out = static_cast<int32_t>(v);
 		return NumericConvertStatus::kOk;
 	}
-	// GCOVR_EXCL_START -- Finding-1 collateral (D3): see comment above.
+	// GCOVR_EXCL_START -- only reached via an abort-ending scenario, see comment above.
 	static NumericConvertStatus real_to_int64_checked(double v, int64_t &out)
 	{
 		if (!std::isfinite(v) || v != std::trunc(v)) return NumericConvertStatus::kNonIntegral;
@@ -1351,9 +1362,9 @@ extern "C"
 		switch (vals->type_id())
 		{
 		case arrow::Type::FLOAT:
-			// GCOVR_EXCL_START -- Finding-1 collateral, same reasoning as real_to_int32/64_checked
-			// above (D3): only reached via the extended_real_*_int32/64 error scenarios' FLOAT
-			// fixture column, which end in an abort.
+			// GCOVR_EXCL_START -- same reasoning as real_to_int32/64_checked above: only reached via
+			// the extended_real_*_int32/64 error scenarios' FLOAT fixture column, which end in an
+			// abort (discarding that whole process's gcov coverage).
 			return static_cast<double>(std::static_pointer_cast<arrow::FloatArray>(vals)->Value(idx));
 			// GCOVR_EXCL_STOP
 		case arrow::Type::HALF_FLOAT:
@@ -1373,7 +1384,7 @@ extern "C"
 	static int32_t decimal_scale_of(const std::shared_ptr<arrow::Array> &vals)
 	{
 		return std::static_pointer_cast<arrow::DecimalType>(vals->type())->scale();
-	} // GCOVR_EXCL_LINE -- Finding-5 closing-brace artifact; the covered `return` above proves the body ran.
+	} // GCOVR_EXCL_LINE -- gcov attribution artifact: this closing brace shows uncovered even though the covered `return` above proves the body ran.
 
 	// Converts element `idx` of a DECIMAL32/64/128/256 array into an exact
 	// int64_t via Rescale(scale, 0, ...) -- which fails with
@@ -1391,9 +1402,13 @@ extern "C"
 		switch (vals->type_id())
 		{
 		case arrow::Type::DECIMAL32:
-		// GCOVR_EXCL_START -- Finding-1 collateral (D3): unlike the DECIMAL128/256 cases below
-		// (also exercised by a passing, non-aborting round-trip elsewhere), no fixture ever drives
-		// a DECIMAL32/64 value through this checked conversion outside of an abort-ending scenario.
+		// GCOVR_EXCL_START -- permanently unreachable, not just hard to trigger via an
+		// abort-ending scenario (see decimal_value_at's own identically-reasoned exclusion above,
+		// verified there via a temporary type_id() debug print): Parquet C++'s Arrow reader always
+		// materializes a decimal column as Decimal128Array/Decimal256Array, never
+		// Decimal32Array/Decimal64Array, regardless of the physical Parquet decimal width written
+		// -- and this library never constructs one on the write path either (decimals are
+		// read-only here).
 		{
 			auto arr = std::static_pointer_cast<arrow::Decimal32Array>(vals);
 			arrow::Decimal32 dec(arr->GetValue(idx));
@@ -1463,10 +1478,21 @@ extern "C"
 		int32_t scale = decimal_scale_of(vals);
 		switch (vals->type_id())
 		{
+		// GCOVR_EXCL_START -- permanently unreachable, not just hard to trigger via an
+		// abort-ending scenario: verified empirically (temporary type_id() debug print, both
+		// DECIMAL32(9,0)/DECIMAL64(18,0)
+		// source columns) that Parquet C++'s Arrow reader always materializes a decimal column
+		// as Decimal128Array (or Decimal256Array for precision > 38), regardless of the
+		// physical Parquet decimal width written -- Decimal32Array/Decimal64Array are never
+		// produced on read at all. This library also never constructs a Decimal32Array/
+		// Decimal64Array on the write path (decimals are a read-only source type here -- see
+		// tools/generate_fixtures.cpp's own generation comment). So these two case arms have no
+		// reachable caller through the public API, on any input, successful or aborting.
 		case arrow::Type::DECIMAL32:
 			return arrow::Decimal32(std::static_pointer_cast<arrow::Decimal32Array>(vals)->GetValue(idx)).ToDouble(scale);
 		case arrow::Type::DECIMAL64:
 			return arrow::Decimal64(std::static_pointer_cast<arrow::Decimal64Array>(vals)->GetValue(idx)).ToDouble(scale);
+		// GCOVR_EXCL_STOP
 		case arrow::Type::DECIMAL128:
 			return arrow::Decimal128(std::static_pointer_cast<arrow::Decimal128Array>(vals)->GetValue(idx)).ToDouble(scale);
 		default: // arrow::Type::DECIMAL256
@@ -1650,7 +1676,14 @@ extern "C"
 		case arrow::Type::LARGE_STRING:
 		case arrow::Type::STRING_VIEW:
 		{
-			auto acc = make_string_like_accessor(array);
+			auto acc = make_string_like_accessor(array); // GCOVR_EXCL_LINE -- gcov attribution
+			// artifact, not a genuine gap: verified directly that this line does run (a passing,
+			// non-aborting scenario_qc_range_violation_string_warns exercises exactly this branch
+			// end to end, printing the correct string-column qc violation message), yet this one
+			// line never shows as hit while every other line in the same branch does. Same
+			// category as the closing-brace gcov artifact documented elsewhere in this file, just
+			// a different line shape (a variable initialization immediately followed by a lambda
+			// definition, rather than a closing brace after a [[noreturn]] call).
 			std::string data_min, data_max;
 			auto scan = [&](const std::string &v)
 			{
@@ -1674,9 +1707,16 @@ extern "C"
 			data_max_s = "\"" + data_max + "\"";
 			break;
 		}
+		// GCOVR_EXCL_START -- untested compat backstop: every physical Arrow type this library's
+		// own writer can produce for a column eligible for a qc rule is already an explicit case
+		// above (BOOL short-circuits at the top of this function; FIXED_SIZE_LIST/LIST are
+		// flattened to their element type by flatten_for_stats before this function is ever
+		// called; date/time/timestamp columns cannot carry a qc: rule at all -- rejected at MAML
+		// validation time). No known way to construct a fixture whose physical column type
+		// reaches here.
 		default:
 			return false;
-		}
+		} // GCOVR_EXCL_STOP
 
 		// Core message only (no "WARNING: "/"parquet-fortran: " prefix) --
 		// run_qc_checks adds whichever suits the soft vs hard mode.
@@ -1863,11 +1903,15 @@ extern "C"
 			}
 			return list_arr->values()->Slice(list_arr->value_offset(0), nrows * col_size);
 		}
+		// GCOVR_EXCL_START -- untested compat backstop: no LARGE_LIST fixture exists (this
+		// library's own writer never produces one, and no known external tool defaults to it
+		// either); the LIST branch above is the one exercised via test/fixtures/list_vector.parquet.
+		// The condition line itself is included in this exclusion (not just its body): the
+		// FIXED_SIZE_LIST/LIST branches above both unconditionally `return`, so this `if` is
+		// permanently unreachable too, not just "always executes and only the body is untested"
+		// like an ordinary if-line elsewhere in this file.
 		if (array->type_id() == arrow::Type::LARGE_LIST)
-		{ // GCOVR_EXCL_START -- untested compat backstop: no LARGE_LIST fixture exists (this
-		  // library's own writer never produces one, and no known external tool defaults to it
-		  // either); the LIST branch above is the one exercised via test/fixtures/list_vector.parquet.
-		  // See feature_coverage.md's D7 for the deliberate decision not to build a LARGE_LIST fixture.
+		{
 			auto list_arr = std::static_pointer_cast<arrow::LargeListArray>(array);
 			if (list_arr->length() != nrows)
 			{
@@ -2067,8 +2111,10 @@ extern "C"
 		// ordinary "written more than once" check -- its field is already set at that point,
 		// same as a column written the ordinary way twice.
 		if (writer_handle->row_group_writer)
-		{ // GCOVR_EXCL_START -- Finding-4 BLOCKED: uncaught throw -> std::terminate() discards gcov
-		  // data (feature_coverage.md); tested via scenario_row_group_whole_column_after_streaming_started
+		{ // GCOVR_EXCL_START -- this throw is never caught anywhere in the call chain, so it crosses
+		  // the extern "C" boundary uncaught -> std::terminate() -> abort, which discards that whole
+		  // process's gcov coverage just like std::abort() does; tested via
+		  // scenario_row_group_whole_column_after_streaming_started
 			throw std::runtime_error("Column written via parquet_write_column after the streaming row-group API "
 				"already started writing row groups: " + name + " -- every column must be written via "
 				"parquet_write_column before the first parquet_new_row_group call");
@@ -2087,13 +2133,12 @@ extern "C"
 		if (metadata_index >= 0)
 		{
 			// fields/arrays are always kept resized in lockstep with column_metadata by
-			// parquet_add_column_metadata (its only growth site) -- no resize needed here; see
-			// feature_coverage.md's DEAD-REMOVE entry for the reachability proof.
+			// parquet_add_column_metadata (its only growth site) -- no resize needed here.
 			auto idx = static_cast<size_t>(metadata_index);
 			if (writer_handle->fields[idx] || writer_handle->arrays[idx])
-			{ // GCOVR_EXCL_START -- dead via Finding 2: parquet_write.f90's
+			{ // GCOVR_EXCL_START -- dead: parquet_write.f90's
 			  // parquet_check_and_mark_written_name/parquet_mark_column_written already error stops
-			  // on a repeat write before ever calling into C++; see feature_coverage.md's D5.
+			  // on a repeat write before ever calling into C++.
 				throw std::runtime_error("Column written more than once: " + name);
 			} // GCOVR_EXCL_STOP
 
@@ -2172,8 +2217,9 @@ extern "C"
 		auto result = arrow::io::FileOutputStream::Open(filename);
 		if (!result.ok())
 		{
-			delete handle; // GCOVR_EXCL_LINE -- Finding-1 collateral: runs in open_writer_bad_path, but the
-			                // report_fatal_error() below discards that whole process's gcov data (feature_coverage.md's D2).
+			delete handle; // GCOVR_EXCL_LINE -- runs in open_writer_bad_path, but the report_fatal_error()
+			                // below calls std::abort(), which discards that whole process's gcov data,
+			                // including this line that ran just before it.
 			report_fatal_error("create_parquet_writer",
 				std::string("failed to open '") + filename + "' for writing: " + result.status().ToString()); // GCOVR_EXCL_LINE
 		}
@@ -2192,8 +2238,11 @@ extern "C"
 		if (compression_name == "gzip") return arrow::Compression::GZIP;
 		if (compression_name == "zstd") return arrow::Compression::ZSTD;
 		if (compression_name == "brotli") return arrow::Compression::BROTLI;
-		if (compression_name == "lz4") return arrow::Compression::LZ4_FRAME;
-		throw std::runtime_error("Unknown compression codec: " + compression_name);
+		if (compression_name == "lz4") return arrow::Compression::LZ4;
+		// Dead: parquet_write.f90's parquet_open_writer already validates compression= against the
+		// exact same 6-codec list before ever calling into C++ (its own "unknown compression codec"
+		// error stop), so this throw has no reachable caller through the public API.
+		throw std::runtime_error("Unknown compression codec: " + compression_name); // GCOVR_EXCL_LINE
 	}
 
 	// Sets compression codec/level, row-group chunk size, and threading on `handle`.
@@ -2216,13 +2265,20 @@ extern "C"
 	{
 		if (n < 1)
 		{
-			throw std::runtime_error("parquet_set_max_threads: n must be >= 1");
+			// Dead: parquet.f90's parquet_set_max_threads already does the identical "n < 1" check
+			// itself (error stop "parquet_set_max_threads: n must be >= 1") before ever calling into
+			// C, so this throw has no reachable caller through the public API.
+			throw std::runtime_error("parquet_set_max_threads: n must be >= 1"); // GCOVR_EXCL_LINE
 		}
 		auto status = arrow::SetCpuThreadPoolCapacity(n);
 		if (!status.ok())
-		{
+		{ // GCOVR_EXCL_START -- untested compat backstop: no known way to force Arrow's global CPU
+		  // thread pool resize to actually fail (no debug hook exists for it, unlike the
+		  // file-I/O-style backstops elsewhere in this file) -- SetCpuThreadPoolCapacity's own
+		  // documented failure modes (e.g. an invalid/negative capacity) are already excluded by
+		  // the n < 1 check above.
 			throw std::runtime_error(status.ToString());
-		}
+		} // GCOVR_EXCL_STOP
 	}
 
 	// Opens the file and parses its footer/schema only -- no column's actual
@@ -2240,7 +2296,7 @@ extern "C"
 		auto infile_result = arrow::io::ReadableFile::Open(filename);
 		if (!infile_result.ok())
 		{
-			delete handle; // GCOVR_EXCL_LINE -- Finding-1 collateral, same reasoning as create_parquet_writer's own (D2).
+			delete handle; // GCOVR_EXCL_LINE -- same reasoning as create_parquet_writer's own: the report_fatal_error() below discards this whole process's gcov data.
 			report_fatal_error("create_parquet_reader",
 				std::string("failed to open '") + filename + "' for reading: " + infile_result.status().ToString()); // GCOVR_EXCL_LINE
 		}
@@ -2249,7 +2305,7 @@ extern "C"
 		auto status = builder.Open(infile);
 		if (!status.ok())
 		{
-			delete handle; // GCOVR_EXCL_LINE -- Finding-1 collateral, same reasoning as create_parquet_writer's own (D2).
+			delete handle; // GCOVR_EXCL_LINE -- same reasoning as create_parquet_writer's own: the report_fatal_error() below discards this whole process's gcov data.
 			report_fatal_error("create_parquet_reader",
 				std::string("failed to open '") + filename + "': " + status.ToString()); // GCOVR_EXCL_LINE
 		}
@@ -2265,7 +2321,7 @@ extern "C"
 		status = builder.Build(&handle->reader);
 		if (!status.ok())
 		{
-			delete handle; // GCOVR_EXCL_LINE -- Finding-1 collateral, same reasoning as create_parquet_writer's own (D2).
+			delete handle; // GCOVR_EXCL_LINE -- same reasoning as create_parquet_writer's own: the report_fatal_error() below discards this whole process's gcov data.
 			report_fatal_error("create_parquet_reader",
 				std::string("failed to open '") + filename + "': " + status.ToString()); // GCOVR_EXCL_LINE
 		}
@@ -2273,7 +2329,7 @@ extern "C"
 		status = handle->reader->GetSchema(&handle->schema);
 		if (!status.ok())
 		{
-			delete handle; // GCOVR_EXCL_LINE -- Finding-1 collateral, same reasoning as create_parquet_writer's own (D2).
+			delete handle; // GCOVR_EXCL_LINE -- same reasoning as create_parquet_writer's own: the report_fatal_error() below discards this whole process's gcov data.
 			report_fatal_error("create_parquet_reader",
 				std::string("failed to open '") + filename + "': " + status.ToString()); // GCOVR_EXCL_LINE
 		}
@@ -2283,7 +2339,7 @@ extern "C"
 			file_metadata->schema(), file_metadata->key_value_metadata(), reader_properties, &handle->manifest);
 		if (!status.ok())
 		{
-			delete handle; // GCOVR_EXCL_LINE -- Finding-1 collateral, same reasoning as create_parquet_writer's own (D2).
+			delete handle; // GCOVR_EXCL_LINE -- same reasoning as create_parquet_writer's own: the report_fatal_error() below discards this whole process's gcov data.
 			report_fatal_error("create_parquet_reader",
 				std::string("failed to open '") + filename + "': " + status.ToString()); // GCOVR_EXCL_LINE
 		}
@@ -2383,7 +2439,7 @@ extern "C"
 
 			auto table_result = reader_handle->reader->ReadTable(leaf_indices);
 			if (!table_result.ok())
-			{ // GCOVR_EXCL_START -- file-I/O backstop, not fixture-triggerable (feature_coverage.md)
+			{ // GCOVR_EXCL_START -- file-I/O backstop, not fixture-triggerable
 				throw std::runtime_error(table_result.status().ToString());
 			} // GCOVR_EXCL_STOP
 			auto table = table_result.ValueOrDie();
@@ -2460,7 +2516,7 @@ extern "C"
 
 		auto table_result = reader_handle->reader->ReadTable(leaf_indices);
 		if (!table_result.ok())
-		{ // GCOVR_EXCL_START -- file-I/O backstop, not fixture-triggerable (feature_coverage.md)
+		{ // GCOVR_EXCL_START -- file-I/O backstop, not fixture-triggerable
 			throw std::runtime_error(table_result.status().ToString());
 		} // GCOVR_EXCL_STOP
 		auto table = table_result.ValueOrDie();
@@ -2815,10 +2871,23 @@ extern "C"
 				array = get_single_chunk_array(reader_handle, name.c_str());
 			}
 			catch (const std::exception &e)
-			{
+			{ // GCOVR_EXCL_START -- not fixture-triggerable in practice: parquet_read.f90's
+			  // prefetch_filter_columns unconditionally prefetches every filter column that
+			  // exists in the schema (via a separate ReadTable call) before parquet_apply_filter
+			  // ever calls into parquet_reader_set_filter, so this get_single_chunk_array call
+			  // always hits an already-cached column -- its own uncached-path ReadColumn failure
+			  // (the only throw that could reach here) is itself already excluded as a file-I/O
+			  // backstop with no fixture that triggers it (see get_single_chunk_array's own
+			  // comment). A debug-hook attempt to force an artificial throw here (to at least
+			  // verify the catch itself works) was tried and reverted: even an unconditional throw
+			  // placed at function entry, called from directly inside this try block, escaped
+			  // uncaught -- reproducing the same C++ exception-unwinding unreliability already
+			  // documented on struct_path_exists's own comment for this project's mixed
+			  // gfortran-driven static-library link, this time for parquet_reader_set_filter's own
+			  // try/catch (otherwise the one demonstrably-working catch block in this file).
 				std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to read filter column '%s': %s", name.c_str(), e.what());
 				return 1;
-			}
+			} // GCOVR_EXCL_STOP
 
 			if (array->type_id() == arrow::Type::FIXED_SIZE_LIST || array->type_id() == arrow::Type::LIST)
 			{
@@ -2862,14 +2931,14 @@ extern "C"
 		arrow::BooleanBuilder mask_builder;
 		auto append_status = mask_builder.AppendValues(combined.data(), static_cast<int64_t>(combined.size()));
 		if (!append_status.ok())
-		{ // GCOVR_EXCL_START -- BooleanBuilder allocation backstop, not fixture-triggerable (feature_coverage.md)
+		{ // GCOVR_EXCL_START -- BooleanBuilder allocation backstop, not fixture-triggerable
 			std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to build filter mask: %s", append_status.ToString().c_str());
 			return 1;
 		} // GCOVR_EXCL_STOP
 		std::shared_ptr<arrow::Array> mask_array;
 		auto finish_status = mask_builder.Finish(&mask_array);
 		if (!finish_status.ok())
-		{ // GCOVR_EXCL_START -- BooleanBuilder allocation backstop, not fixture-triggerable (feature_coverage.md)
+		{ // GCOVR_EXCL_START -- BooleanBuilder allocation backstop, not fixture-triggerable
 			std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to build filter mask: %s", finish_status.ToString().c_str());
 			return 1;
 		} // GCOVR_EXCL_STOP
@@ -2896,13 +2965,13 @@ extern "C"
 			if (it == reader_handle->column_cache.end()) continue;
 			auto coerced = coerce_for_filter_kernel(it->second);
 			if (!coerced.ok())
-			{ // GCOVR_EXCL_START -- Cast-kernel Status backstop on already-validated input (feature_coverage.md)
+			{ // GCOVR_EXCL_START -- Cast-kernel Status backstop on already-validated input
 				std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to apply filter: %s", coerced.status().ToString().c_str());
 				return 1;
 			} // GCOVR_EXCL_STOP
 			auto filtered = arrow::compute::Filter(coerced.ValueOrDie(), reader_handle->filter_mask);
 			if (!filtered.ok())
-			{ // GCOVR_EXCL_START -- Filter-kernel Status backstop on already-validated input (feature_coverage.md)
+			{ // GCOVR_EXCL_START -- Filter-kernel Status backstop on already-validated input
 				std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to apply filter: %s", filtered.status().ToString().c_str());
 				return 1;
 			} // GCOVR_EXCL_STOP
@@ -3026,8 +3095,9 @@ extern "C"
 			list_values = std::static_pointer_cast<arrow::LargeListArray>(array)->values();
 		}
 		else
-		{ // GCOVR_EXCL_START -- Finding-4 BLOCKED: uncaught throw -> std::terminate() discards gcov
-		  // data (feature_coverage.md); tested via scenario_string_length_on_non_string_column
+		{ // GCOVR_EXCL_START -- this throw is never caught anywhere in the call chain, so it crosses
+		  // the extern "C" boundary uncaught -> std::terminate() -> abort, discarding that whole
+		  // process's gcov coverage; tested via scenario_string_length_on_non_string_column
 			throw std::runtime_error(std::string("Column is not string-like: ") + name);
 		} // GCOVR_EXCL_STOP
 
@@ -3061,7 +3131,7 @@ extern "C"
 			report_fatal_error(context, "table metadata index out of range");
 		}
 		return reader_handle->table_metadata_cache[static_cast<size_t>(index)];
-	} // GCOVR_EXCL_LINE -- Finding-5 closing-brace artifact; the covered `return` above proves the body ran.
+	} // GCOVR_EXCL_LINE -- gcov attribution artifact: this closing brace shows uncovered even though the covered `return` above proves the body ran.
 
 	// Returns the byte length of table metadata entry `index`'s key.
 	int64_t parquet_reader_get_table_metadata_key_length(void *handle, int64_t index)
@@ -3128,7 +3198,13 @@ extern "C"
 		case arrow::Type::LARGE_STRING:
 			return "\"" + std::static_pointer_cast<arrow::LargeStringScalar>(s)->value->ToString() + "\"";
 		case arrow::Type::STRING_VIEW:
+			// GCOVR_EXCL_START -- confirmed unreachable, not just untested: arrow::compute::MinMax
+			// has no STRING_VIEW kernel registered in this Arrow build -- verified directly (a
+			// passing STRING_VIEW+print_stat=.true. scenario's own printed table shows "-"/"-" for
+			// min/max, meaning compute_stat_min_max's MinMax call itself already failed and
+			// returned before format_stat_scalar could ever be reached with a STRING_VIEW scalar).
 			return "\"" + std::static_pointer_cast<arrow::StringViewScalar>(s)->value->ToString() + "\"";
+			// GCOVR_EXCL_STOP
 		default:
 			return s->ToString();
 		}
@@ -3492,9 +3568,11 @@ extern "C"
 			}
 			return list_arr->values()->Slice(list_arr->value_offset(row_index - 1), col_size);
 		}
+		// GCOVR_EXCL_START -- untested compat backstop, same reasoning as get_uniform_list_values'
+		// own LARGE_LIST branch (including the condition line itself, permanently unreachable
+		// since the FIXED_SIZE_LIST/LIST branches above both unconditionally `return`).
 		if (array->type_id() == arrow::Type::LARGE_LIST)
-		{ // GCOVR_EXCL_START -- untested compat backstop, same reasoning as get_uniform_list_values'
-		  // own LARGE_LIST branch; see feature_coverage.md's D7.
+		{
 			auto list_arr = std::static_pointer_cast<arrow::LargeListArray>(array);
 			if (row_index < 1 || row_index > list_arr->length())
 			{
@@ -3545,7 +3623,7 @@ extern "C"
 			remaining -= rg_rows;
 		}
 		report_fatal_error(context, "row_index out of bounds");
-	} // GCOVR_EXCL_LINE -- Finding-5 closing-brace artifact, after a [[noreturn]] report_fatal_error call.
+	} // GCOVR_EXCL_LINE -- gcov attribution artifact: this closing brace shows uncovered, even though the [[noreturn]] report_fatal_error call above it demonstrably runs.
 
 extern "C"
 {
@@ -3574,9 +3652,9 @@ extern "C"
 			break;
 		}
 		case arrow::Type::INT64:
-		// GCOVR_EXCL_START -- Finding-1 collateral (D3): this int64-source branch of
-		// convert_values_to_int32 is only reached via an abort-ending extended-source-type
-		// overflow scenario; see feature_coverage.md's D3.
+		// GCOVR_EXCL_START -- this int64-source branch of convert_values_to_int32 is only reached
+		// via an abort-ending extended-source-type overflow scenario (std::abort() there discards
+		// that whole process's gcov coverage, including the lines that ran before it).
 		{
 			auto arr = std::static_pointer_cast<arrow::Int64Array>(vals);
 			for (int64_t i = 0; i < n; ++i)
@@ -3600,9 +3678,8 @@ extern "C"
 			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<int32_t>(small_integer_value_at(vals, offset + i * stride));
 			break;
 		}
-		// UINT32 is genuinely exercised by a passing (non-aborting) round trip -- not Finding-1
-		// collateral, unlike UINT64 just below (only reached via extended_uint64_overflow_int32's
-		// abort-ending fixture); see feature_coverage.md's D3.
+		// UINT32 is genuinely exercised by a passing (non-aborting) round trip, unlike UINT64 just
+		// below, which is only reached via extended_uint64_overflow_int32's abort-ending fixture.
 		case arrow::Type::UINT32:
 		{
 			auto arr = std::static_pointer_cast<arrow::UInt32Array>(vals);
@@ -3618,9 +3695,8 @@ extern "C"
 			break;
 		}
 		case arrow::Type::UINT64:
-		// GCOVR_EXCL_START -- Finding-1 collateral (D3): only reached via
-		// extended_uint64_overflow_int32's fixture, whose scenario ends in abort; see
-		// feature_coverage.md's D3.
+		// GCOVR_EXCL_START -- only reached via extended_uint64_overflow_int32's fixture, whose
+		// scenario ends in abort (discarding that whole process's gcov coverage).
 		{
 			auto arr = std::static_pointer_cast<arrow::UInt64Array>(vals);
 			for (int64_t i = 0; i < n; ++i)
@@ -3635,9 +3711,8 @@ extern "C"
 			break;
 		}
 		// GCOVR_EXCL_STOP
-		// Genuinely exercised by a passing (non-aborting) round trip -- not Finding-1 collateral
-		// (real_to_int32_checked itself is likewise genuinely covered, unlike real_to_int64_checked);
-		// see feature_coverage.md's D3.
+		// Genuinely exercised by a passing (non-aborting) round trip (real_to_int32_checked itself
+		// is likewise genuinely covered, unlike real_to_int64_checked).
 		case arrow::Type::FLOAT:
 		case arrow::Type::DOUBLE:
 		case arrow::Type::HALF_FLOAT:
@@ -3664,9 +3739,8 @@ extern "C"
 		case arrow::Type::DECIMAL64:
 		case arrow::Type::DECIMAL128:
 		case arrow::Type::DECIMAL256:
-		// GCOVR_EXCL_START -- Finding-1 collateral (D3): only reached via
-		// extended_decimal_*_int32's fixtures, whose scenarios end in abort; see
-		// feature_coverage.md's D3.
+		// GCOVR_EXCL_START -- only reached via extended_decimal_*_int32's fixtures, whose scenarios
+		// end in abort (discarding that whole process's gcov coverage).
 		{
 			std::string type_name = vals->type()->ToString();
 			for (int64_t i = 0; i < n; ++i)
@@ -3734,10 +3808,10 @@ extern "C"
 		case arrow::Type::FLOAT:
 		case arrow::Type::DOUBLE:
 		case arrow::Type::HALF_FLOAT:
-		// GCOVR_EXCL_START -- Finding-1 collateral (D3): only reached via
-		// extended_real_*_int64's fixtures, whose scenarios end in abort (unlike the UINT64/DECIMAL*
+		// GCOVR_EXCL_START -- only reached via extended_real_*_int64's fixtures, whose scenarios end
+		// in abort (discarding that whole process's gcov coverage), unlike the UINT64/DECIMAL*
 		// branches below, which are also exercised by a passing, non-aborting extended-source-type
-		// round trip); see feature_coverage.md's D3.
+		// round trip.
 		{
 			std::string type_name = vals->type()->ToString();
 			for (int64_t i = 0; i < n; ++i)
@@ -4133,7 +4207,7 @@ static void read_list_primitive_element(void *handle, const char *name, int64_t 
 // "s"/"seconds" at parse time), but from ANY file: confirmed empirically that Arrow's own writer
 // silently coerces a SECOND-unit array to MILLI on write even with store_schema() set, so no
 // tool can ever produce a file with a genuine SECOND-unit TIME/TIMESTAMP column to read back
-// either. See CLAUDE.md's "The parquet_temporal module" section and feature_coverage.md.
+// either. See CLAUDE.md's "The parquet_temporal module" section.
 
 // Maps a parquet_unit_* selector (1..4) to arrow::TimeUnit; aborts on an out-of-range selector.
 static arrow::TimeUnit::type temporal_selector_to_arrow_unit(int32_t unit, const char *context)
@@ -4273,7 +4347,7 @@ static int32_t timestamp_unit_selector_of(const std::shared_ptr<arrow::Array> &v
 			" (expected timestamp, got " + vals->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 	}
 	return arrow_unit_to_temporal_selector(std::static_pointer_cast<arrow::TimestampType>(vals->type())->unit());
-} // GCOVR_EXCL_LINE -- Finding-5 closing-brace artifact; the covered `return` above proves the body ran.
+} // GCOVR_EXCL_LINE -- gcov attribution artifact: this closing brace shows uncovered even though the covered `return` above proves the body ran.
 
 // The Arrow value type of a TIME column of the given unit: TIME32 for seconds/millis, TIME64
 // for micros/nanos (Arrow forbids the other two combinations).
@@ -4287,7 +4361,7 @@ static std::shared_ptr<arrow::DataType> temporal_time_value_type(int32_t unit_se
 static std::shared_ptr<arrow::DataType> temporal_timestamp_value_type(int32_t unit_selector, int32_t is_utc, const char *context)
 {
 	return arrow::timestamp(temporal_selector_to_arrow_unit(unit_selector, context), is_utc != 0 ? "UTC" : "");
-} // GCOVR_EXCL_LINE -- Finding-5 closing-brace artifact; the covered `return` above proves the body ran.
+} // GCOVR_EXCL_LINE -- gcov attribution artifact: this closing brace shows uncovered even though the covered `return` above proves the body ran.
 
 // Builds a scalar (col_size == 1) or fixed-size-list (col_size > 1) Arrow TIME array from
 // canonical nanoseconds-of-day input, scaling ns down to the target file unit. A value with
@@ -5213,8 +5287,14 @@ extern "C"
 		auto vt = resolve_temporal_value_type(reader_handle, name);
 		std::string tz;
 		if (vt->id() == arrow::Type::TIMESTAMP) tz = std::static_pointer_cast<arrow::TimestampType>(vt)->timezone();
+		// GCOVR_EXCL_START -- dead: parquet_read.f90's parquet_get_column_time_info only calls this
+		// function when parquet_reader_get_column_timezone_length's own result was > 0, which is
+		// only ever true for TIMESTAMP -- so this function is never reached at all (TIMESTAMP or
+		// otherwise) except with vt->id() == TIMESTAMP, making this whole else-if branch (and the
+		// TIME32/TIME64 case it's meant to skip past) unreachable through the public API.
 		else if (vt->id() != arrow::Type::TIME32 && vt->id() != arrow::Type::TIME64)
 			report_fatal_error("parquet_get_column_time_info", std::string("column is not a time/timestamp column: ") + name);
+		// GCOVR_EXCL_STOP
 		copy_string_with_padding(buf, buf_len, tz);
 	}
 
@@ -5244,7 +5324,7 @@ extern "C"
 			reader_handle->reader->ReadRowGroup(static_cast<int>(row_group - 1), {static_cast<int>(leaf_idx)}, &table);
 		if (!status.ok())
 		{ // GCOVR_EXCL_START -- I/O backstop: row_group is already validated by
-		  // resolve_row_group_for_row before this is ever called; see feature_coverage.md's D6.
+		  // resolve_row_group_for_row before this is ever called.
 			throw std::runtime_error(status.ToString());
 		} // GCOVR_EXCL_STOP
 		auto array = combine_column_chunks(table->column(0), resolved.top_level_name);
@@ -6342,8 +6422,8 @@ extern "C"
 	// parquet_debug_set_string_offset_limit, above. Pass n<=0 to restore the real production limit.
 	// GCOVR_EXCL'd: scenario_col_size_overflow always ends by aborting via
 	// check_col_size_fits_arrow_limit's report_fatal_error, which discards the whole process's
-	// gcov data (Finding 1/3) -- so this setter, though genuinely called every time, never shows
-	// as covered either. Collateral of the same mechanism, not a separate gap.
+	// gcov data -- so this setter, though genuinely called every time, never shows as covered
+	// either. Collateral of the same std::abort()-discards-coverage mechanism, not a separate gap.
 	void parquet_debug_set_col_size_limit(int64_t n) // GCOVR_EXCL_START
 	{
 		g_debug_col_size_limit = n;
@@ -6365,9 +6445,9 @@ extern "C"
 	// check_column_count_fits_arrow_limit abort path with a tiny fixture instead of a genuinely
 	// huge number of columns. Same process-global/subprocess-isolation reasoning as
 	// parquet_debug_set_string_offset_limit, above. Pass n<=0 to restore the real production limit.
-	// GCOVR_EXCL'd: same Finding-1 collateral reasoning as parquet_debug_set_col_size_limit above
-	// -- scenario_column_count_overflow always ends by aborting via
-	// check_column_count_fits_arrow_limit's report_fatal_error.
+	// GCOVR_EXCL'd: same reasoning as parquet_debug_set_col_size_limit above -- scenario_column_
+	// count_overflow always ends by aborting via check_column_count_fits_arrow_limit's
+	// report_fatal_error, which discards the whole process's gcov data.
 	void parquet_debug_set_column_count_limit(int64_t n) // GCOVR_EXCL_START
 	{
 		g_debug_column_count_limit = n;
@@ -6464,7 +6544,7 @@ extern "C"
 		auto schema = arrow::schema({field});
 		auto table = arrow::Table::Make(schema, {array});
 
-		// file-I/O backstop, not fixture-triggerable (feature_coverage.md).
+		// file-I/O backstop, not fixture-triggerable.
 		auto outfile_result = arrow::io::FileOutputStream::Open(path);
 		if (!outfile_result.ok())
 			throw std::runtime_error("parquet_debug_write_string_view_fixture: failed to open '" + // GCOVR_EXCL_LINE
@@ -6545,7 +6625,7 @@ extern "C"
 		auto schema = arrow::schema({field});
 		auto table = arrow::Table::Make(schema, {array});
 
-		// file-I/O backstop, not fixture-triggerable (feature_coverage.md).
+		// file-I/O backstop, not fixture-triggerable.
 		auto outfile_result = arrow::io::FileOutputStream::Open(path);
 		if (!outfile_result.ok())
 			throw std::runtime_error("parquet_debug_write_datetime_fixture: failed to open '" + // GCOVR_EXCL_LINE
@@ -6564,8 +6644,7 @@ extern "C"
 	// arrow::large_list() columns, bypassing the writer entirely -- same convention as
 	// parquet_debug_write_string_view_fixture/parquet_debug_write_datetime_fixture above. This
 	// library's own writer only ever emits FIXED_SIZE_LIST for vector columns (see
-	// append_column), so LIST/LARGE_LIST only exist in foreign-written files -- feature_coverage.md's
-	// G6. `variant`:
+	// append_column), so LIST/LARGE_LIST only exist in foreign-written files. `variant`:
 	//   "mismatch" -- "lst" (LIST<int32>) and "large_lst" (LARGE_LIST<int32>), 3 rows each with a
 	//                 different element count per row ([], [1,2], [3,4,5]) -- exercises
 	//                 get_col_size's heterogeneous-row-width return-1 branch for both list kinds.
@@ -6663,7 +6742,7 @@ extern "C"
 		auto schema = arrow::schema(fields);
 		auto table = arrow::Table::Make(schema, arrays);
 
-		// file-I/O backstop, not fixture-triggerable (feature_coverage.md).
+		// file-I/O backstop, not fixture-triggerable.
 		auto outfile_result = arrow::io::FileOutputStream::Open(path);
 		if (!outfile_result.ok())
 			throw std::runtime_error("parquet_debug_write_list_fixture: failed to open '" + // GCOVR_EXCL_LINE
@@ -6689,8 +6768,9 @@ extern "C"
 	static void close_streaming_writer(ConcurrencyGuard<ParquetWriterHandle> &writer_handle)
 	{
 		if (writer_handle->in_row_group)
-		{ // GCOVR_EXCL_START -- Finding-4 BLOCKED: uncaught throw -> std::terminate() discards gcov
-		  // data (feature_coverage.md); tested via scenario_row_group_dangling_at_close
+		{ // GCOVR_EXCL_START -- this throw is never caught anywhere in the call chain, so it crosses
+		  // the extern "C" boundary uncaught -> std::terminate() -> abort, discarding that whole
+		  // process's gcov coverage; tested via scenario_row_group_dangling_at_close
 			delete writer_handle.release();
 			throw std::runtime_error("A row group was started via parquet_new_row_group but never finished via "
 				"parquet_finish_row_group before close");
@@ -6702,8 +6782,10 @@ extern "C"
 			                                                                              // whole -- nothing to
 			                                                                              // reconcile against.
 			if (writer_handle->arrays[i]->length() != writer_handle->streamed_rows_total)
-			{ // GCOVR_EXCL_START -- Finding-4 BLOCKED: uncaught throw -> std::terminate() discards
-			  // gcov data (feature_coverage.md); tested via scenario_row_group_whole_column_undercovered
+			{ // GCOVR_EXCL_START -- this throw is never caught anywhere in the call chain, so it
+			  // crosses the extern "C" boundary uncaught -> std::terminate() -> abort, discarding
+			  // that whole process's gcov coverage; tested via
+			  // scenario_row_group_whole_column_undercovered
 				auto name = writer_handle->fields[i]->name();
 				auto declared = writer_handle->arrays[i]->length();
 				auto covered = writer_handle->streamed_rows_total;
@@ -6718,7 +6800,7 @@ extern "C"
 
 		auto status = writer_handle->row_group_writer->Close();
 		if (!status.ok())
-		{ // GCOVR_EXCL_START -- file-I/O backstop, not fixture-triggerable (feature_coverage.md)
+		{ // GCOVR_EXCL_START -- file-I/O backstop, not fixture-triggerable
 			delete writer_handle.release();
 			throw std::runtime_error(status.ToString());
 		} // GCOVR_EXCL_STOP
@@ -6748,17 +6830,15 @@ extern "C"
 		if (!writer_handle->column_metadata.empty())
 		{
 			// fields/arrays are always kept resized in lockstep with column_metadata by
-			// parquet_add_column_metadata (its only growth site) -- no size check needed here;
-			// see feature_coverage.md's DEAD-REMOVE entry for the reachability proof (same pattern
-			// as append_column's own resize removal).
+			// parquet_add_column_metadata (its only growth site) -- no size check needed here
+			// (same reasoning as append_column's own resize removal).
 			for (size_t i = 0; i < writer_handle->column_metadata.size(); ++i)
 			{
 				// column_metadata is populated by parquet_add_column_metadata, a public extern "C"
 				// entry point on the schema-less/dynamic-metadata writer path (distinct from the
 				// parquet_schema/add_field flow, whose own "missing write" check lives entirely on
 				// the Fortran side, parquet_write.f90's enabled_columns check) -- this guards the
-				// same ABI boundary directly, against any C caller bypassing the Fortran wrapper
-				// (feature_coverage.md's KEEP+EXCLUDE tier, same class as Finding 2's nrows checks).
+				// same ABI boundary directly, against any C caller bypassing the Fortran wrapper.
 				if (!writer_handle->fields[i] || !writer_handle->arrays[i])
 				{ // GCOVR_EXCL_START
 					auto missing = writer_handle->column_metadata[i].name;
@@ -6895,7 +6975,7 @@ extern "C"
 			writer_properties,
 			arrow_writer_properties);
 		if (!status.ok())
-		{ // GCOVR_EXCL_START -- file-I/O backstop, not fixture-triggerable (feature_coverage.md)
+		{ // GCOVR_EXCL_START -- file-I/O backstop, not fixture-triggerable
 			delete writer_handle.release();
 			throw std::runtime_error(status.ToString());
 		} // GCOVR_EXCL_STOP

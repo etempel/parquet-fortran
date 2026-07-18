@@ -8,6 +8,23 @@ the machine) — even when doing so would streamline a task (such as setting a c
 environment variable). If something outside this repository genuinely needs to change, tell
 the user what's needed and let them make that change themselves.
 
+## `feature_*.md` planning documents
+
+`feature_*.md` files in the repo root
+are design/planning documents for features not yet implemented — they are git-ignored
+(`.gitignore`'s `feature_*.md` entry), so they never reach a commit and exist purely as scratch
+design memory between sessions.
+
+**Whenever asked to write or update a `feature_*.md` file, write it to be fully self-explaining
+without relying on the current session's conversation for context** — a future session opening
+the file has no memory of this one. Concretely: don't reference "this conversation," "as discussed
+above" (meaning the chat, not the document), tool-call artifacts (e.g. a clarifying-question
+option that was offered but not visibly quoted), or any other detail that only makes sense to
+someone who was present for the conversation that produced the file. Quote the user's own
+decisions/wording directly in the document rather than alluding to them. Cross-references to
+other files in the repo (source, other `feature_*.md` docs, `CLAUDE.md` sections) are fine, since
+a future session can read those too.
+
 ## New features require tests and docs
 
 Whenever asked to implement a new feature in this repository, always:

@@ -155,10 +155,83 @@ def gcovr_excluded_lines(path):
     return excluded
 
 
+ARTIFACT_PHRASE = "gcov attribution artifact"
+
+
+def gcovr_artifact_lines(path):
+    """Excluded line numbers that are *expected* to show a positive gcov hit
+    count despite being genuinely dead/unreachable code -- a known gfortran/gcov
+    quirk (see CLAUDE.md's "Fortran gcov attribution artifacts" note), not
+    evidence of a stale exclusion: a guard-clause `if (...) then` condition is
+    evaluated -- and thus counted as "hit" -- on every call regardless of
+    whether the guarded body is ever reached, and a few bare `return`
+    statements suffer a similar mis-attribution. Sites known to hit this are
+    tagged with the literal phrase "gcov attribution artifact", either inline
+    on their own GCOVR_EXCL_START/GCOVR_EXCL_LINE marker line or on a
+    comment-only line (or contiguous run of them) directly above it (used when
+    the marker line has no room left under the 132-column limit). Any line so
+    tagged is dropped from the "candidates for a stale exclusion" report
+    below."""
+    tagged = set()
+    in_block = False
+    block_lines = []
+    block_tagged = False
+    try:
+        with open(path) as f:
+            raw_lines = f.readlines()
+    except FileNotFoundError:
+        return tagged
+
+    def preceded_by_phrase(i):
+        # i is 1-based. Scans upward through a contiguous run of comment-only
+        # lines directly above line i (the marker line itself is checked by
+        # the caller), since a long explanatory tag sometimes spans more than
+        # one comment line. Also walks back over `&`-continuation lines first
+        # -- gcov attributes a multi-line `if (...) then` condition's hit
+        # count to whichever physical line carries the `then` (and the
+        # GCOVR_EXCL_START marker), not the first line of the statement, so
+        # the explanatory comment two lines above still needs to be found.
+        j = i - 1
+        while j >= 1:
+            prev = raw_lines[j - 1]
+            if prev.rstrip().endswith("&"):
+                j -= 1
+                continue
+            if prev.strip().startswith("!"):
+                if ARTIFACT_PHRASE in prev:
+                    return True
+                j -= 1
+                continue
+            break
+        return False
+
+    for i, line in enumerate(raw_lines, start=1):
+        if "GCOVR_EXCL_START" in line:
+            in_block = True
+            block_lines = [i]
+            block_tagged = ARTIFACT_PHRASE in line or preceded_by_phrase(i)
+        elif "GCOVR_EXCL_STOP" in line:
+            block_lines.append(i)
+            if ARTIFACT_PHRASE in line:
+                block_tagged = True
+            if block_tagged:
+                tagged.update(block_lines)
+            in_block = False
+            block_lines = []
+        elif in_block:
+            block_lines.append(i)
+            if ARTIFACT_PHRASE in line:
+                block_tagged = True
+        elif "GCOVR_EXCL_LINE" in line and (ARTIFACT_PHRASE in line or preceded_by_phrase(i)):
+            tagged.add(i)
+    return tagged
+
+
 excluded_with_hits = {}  # src path -> sorted list of excluded line numbers that had count > 0
 for src in per_file:
     excluded = gcovr_excluded_lines(src)
-    hits = sorted(ln for ln in excluded if per_file[src].get(ln, 0) > 0)
+    artifacts = gcovr_artifact_lines(src)
+    hits = sorted(ln for ln in excluded if per_file[src].get(ln, 0) > 0 and ln not in artifacts)
     if hits:
         excluded_with_hits[src] = hits
     for ln in excluded:

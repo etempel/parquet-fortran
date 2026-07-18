@@ -3000,7 +3000,7 @@ contains
         !
         i = index(cversion, " ")
         !
-        if (cversion(2:i-1) /= ver_string) then ! GCOVR_EXCL_START
+        if (cversion(2:i-1) /= ver_string) then ! GCOVR_EXCL_START -- gcov attribution artifact
             write(*,*) "WARNING: using developmentparquet-fortran library!"
             write(*,*) "         library version: ", trim(cversion)
             write(*,*) "         RELEASE_VERSION: ", trim(ver_string)

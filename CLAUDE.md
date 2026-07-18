@@ -461,6 +461,47 @@ hits (the stale-exclusion candidates). `tools/coverage.sh` only needs the latter
 since Fortran coverage uses the same `gfortran`/`gcov` toolchain locally and in CI — there's no
 GCC-vs-Clang split to make for `src/*.f90`.
 
+## Fortran gcov attribution artifacts
+
+Confirmed by inspecting raw per-line gcov hit counts (not just `tools/coverage.sh`'s summary):
+gfortran/gcov sometimes marks an excluded, genuinely-dead line as "hit" even though it never
+executes — a different mechanism from the GCC-vs-Clang split documented below (this one is
+gfortran-only, present identically locally and in CI), so it needs its own convention rather than
+reusing that section's.
+
+Two confirmed shapes:
+
+- **A guard-clause `if (cond) then` line inside a `GCOVR_EXCL_START`/`GCOVR_EXCL_STOP` block.** The
+  condition itself is evaluated on *every* call to the function, whether or not the guarded
+  (excluded) body is ever reached — so gcov counts that line as executed regardless. The body
+  immediately inside (the `error stop`/diagnostic-and-`return`) reliably shows 0 hits, proving the
+  branch itself is never actually taken; only the `if` line's own hit count is misleading. Seen in
+  every `check_*_fits_arrow_limit`-style int32-ceiling guard (e.g. `parquet_read.f90`'s
+  `parquet_get_nrows_int32`), every defensive branch in `parquet_strings.f90`'s `validate()`, and
+  the col_map/duplicate-output-name/empty-name guards in `parquet_metadata_validate.f90`.
+- **A bare `return` statement mis-attributed to a different call site's execution count**, seen in
+  `parquet_read.f90`'s `parquet_tokenize_filter_rule`, `case default` arm: the `return` on the line
+  right after an `errmsg = ...` assignment shows positive hits while that `errmsg` line — the
+  *same* never-taken branch, one line above — reliably shows 0. Root cause not fully diagnosed
+  (build uses `-O0`, so this isn't ordinary optimizer basic-block merging); treat as gfortran/gcov
+  bookkeeping quirk, confirmed via the sibling line's zero count, not a real coverage gap.
+
+**Convention for tagging a confirmed site** (mirrors `src/parquet_wrapper.cpp`'s own "gcov
+attribution artifact under GCC" convention below, adapted for Fortran's stricter 132-column limit):
+carry the literal phrase `gcov attribution artifact` either inline on the same
+`GCOVR_EXCL_START`/`GCOVR_EXCL_LINE` marker line, or — when appending it inline would blow the
+132-column limit — on a plain comment line (or a short contiguous run of them) directly above the
+marker line instead. `tools/coverage.sh`'s `gcovr_artifact_lines()` recognizes both forms and drops
+those lines from the "candidates for a stale/no-longer-dead exclusion" report, so a positive hit
+there is expected and not something to chase. Before tagging a *new* site this way, verify it's
+actually this pattern (check the raw per-line JSON hit counts the way this note's examples were
+verified — a guard body genuinely showing 0 while its own `if` line shows positive, or a sibling
+line in the same unreachable branch showing 0) rather than assuming; an exclusion that's truly gone
+stale (the guarded code is now reachable and should count as covered) needs the marker removed
+instead, not tagged as an artifact — see `parquet_strings.f90`'s `compact_all` header line, which
+was found to be exactly that case (a real, now-covered subroutine header, not this artifact) and
+had its `GCOVR_EXCL_LINE` removed rather than tagged.
+
 ## `src/parquet_wrapper.cpp`: GCC vs Clang gcov attribution
 
 Confirmed (not just hypothesized) via a real GitLab CI run: GCC's actual gcov and Clang's

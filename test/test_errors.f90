@@ -427,6 +427,8 @@ contains
                 test_concurrent_calls_into_shared_writer_aborts), &
             new_unittest("parquet_string_column indexing out of range aborts", &
                 test_string_column_index_out_of_range_aborts), &
+            new_unittest("parquet_string_column view_all with a mismatched-size array aborts", &
+                test_string_column_view_all_size_mismatch_aborts), &
             new_unittest("parquet_string_column get on a null aborts", &
                 test_string_column_get_null_aborts), &
             new_unittest("parquet_string_column to_character on a null aborts", &
@@ -545,6 +547,13 @@ contains
             failure_message="indexing a parquet_string_column out of range was expected to abort", &
             required_stderr="parquet_strings: index out of range in get")
     end subroutine test_string_column_index_out_of_range_aborts
+
+    subroutine test_string_column_view_all_size_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_column_view_all_size_mismatch", expect_abort=.true., &
+            failure_message="view_all with a mismatched-size data_string array was expected to abort", &
+            required_stderr="parquet_strings: view_all: size(data_string) does not match self%size()")
+    end subroutine test_string_column_view_all_size_mismatch_aborts
 
     subroutine test_string_column_get_null_aborts(error)
         type(error_type), allocatable, intent(out) :: error

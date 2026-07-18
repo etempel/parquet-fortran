@@ -526,6 +526,8 @@ program error_scenarios
         call scenario_schema_add_field_bad_qc_miss_value()
     case ("string_column_index_out_of_range")
         call scenario_string_column_index_out_of_range()
+    case ("string_column_view_all_size_mismatch")
+        call scenario_string_column_view_all_size_mismatch()
     case ("string_column_get_null")
         call scenario_string_column_get_null()
     case ("string_column_to_character_null")
@@ -5274,6 +5276,17 @@ contains
         call col%get(5, s)   ! index 5 > nrows 2 -> aborts
         print '(a)', "unexpectedly read an out-of-range index: "//s
     end subroutine scenario_string_column_index_out_of_range
+
+    !> parquet_string_column%view_all: a data_string array whose size doesn't match self%size()
+    !! aborts rather than silently populating only the shorter length.
+    subroutine scenario_string_column_view_all_size_mismatch()
+        type(parquet_string_column), target :: col
+        type(parquet_string) :: handles(3)
+        call col%append_string("a")
+        call col%append_string("b")
+        call col%view_all(handles)   ! 3 handles, but col%size() == 2 -> aborts
+        print '(a)', "unexpectedly filled a mismatched-size view_all array"
+    end subroutine scenario_string_column_view_all_size_mismatch
 
     !> parquet_string_column: get on a null element with no null option aborts (fail_null).
     subroutine scenario_string_column_get_null()

@@ -81,6 +81,7 @@ module parquet_strings
         procedure, private :: view_i32                 !! int32 specific of view.
         procedure, private :: view_i64                 !! int64 specific of view.
         generic :: view => view_i32, view_i64          !! Zero-copy handle to element i.
+        procedure :: view_all                          !! One handle per element, in order.
         procedure, private :: is_null_i32              !! int32 specific of is_null.
         procedure, private :: is_null_i64              !! int64 specific of is_null.
         generic :: is_null => is_null_i32, is_null_i64 !! Whether element i is null.
@@ -658,6 +659,21 @@ contains
         h%col => self
         h%idx = i
     end function view_i64
+    !
+    !> Fills data_string with one handle per element of self, in order (view(1), view(2), ...).
+    !! Aborts if size(data_string) does not match self%size() (rather than silently clipping to
+    !! the shorter length, which would hide a caller bug behind a partially-populated result).
+    subroutine view_all(self, data_string)
+        class(parquet_string_column), intent(in), target :: self !! the column (must be a target).
+        type(parquet_string), dimension(:), intent(out) :: data_string !! receives one handle per element.
+        integer(int64) :: i
+        if (size(data_string, kind=int64) /= self%nrows) then
+            error stop EP//"view_all: size(data_string) does not match self%size()"
+        end if
+        do i = 1_int64, self%nrows
+            data_string(i) = self%view_i64(i)
+        end do
+    end subroutine view_all
     !
     !> int32 specific of is_null; see the is_null generic.
     logical function is_null_i32(self, i) result(res)

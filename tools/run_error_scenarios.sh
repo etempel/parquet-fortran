@@ -300,6 +300,7 @@ scenarios=(
     "schema_add_field_qc_max_operator_without_value:1"
     "schema_add_field_bad_qc_miss_value:1"
     "string_column_index_out_of_range:1"
+    "string_column_view_all_size_mismatch:1"
     "string_column_get_null:1"
     "string_column_to_character_null:1"
     "string_handle_unassociated:1"

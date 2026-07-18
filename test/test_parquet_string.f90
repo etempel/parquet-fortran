@@ -36,6 +36,7 @@ contains
             new_unittest("equals/contains/startswith/endswith", test_compare_ops), &
             new_unittest("view handle basics", test_view_handle), &
             new_unittest("handle survives appends (AoS pattern)", test_handle_survives_append), &
+            new_unittest("view_all fills one handle per element", test_view_all), &
             new_unittest("to_character materialization + null_value", test_to_character), &
             new_unittest("clone is an independent deep copy", test_clone_independence), &
             new_unittest("move_from empties source; swap exchanges", test_move_and_swap), &
@@ -418,6 +419,32 @@ contains
         if (allocated(error)) return
         call check(error, rows(2)%name%length() == 2, "handle 2 length after realloc")
     end subroutine test_handle_survives_append
+    !
+    subroutine test_view_all(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column), target :: col
+        type(t_row) :: rows(4)
+        character(len=:), allocatable :: s
+        integer :: i
+        call col%append_string("alice")
+        call col%append_string("bob")
+        call col%append_null()
+        call col%append_string("dave")
+        do i = 1, 4
+            rows(i)%id = i
+        end do
+        call col%view_all(rows(:)%name)
+        call rows(1)%name%to_string(s)
+        call check(error, s == "alice", "view_all element 1")
+        if (allocated(error)) return
+        call rows(2)%name%to_string(s)
+        call check(error, s == "bob", "view_all element 2")
+        if (allocated(error)) return
+        call check(error, rows(3)%name%is_null(), "view_all element 3 is null")
+        if (allocated(error)) return
+        call rows(4)%name%to_string(s)
+        call check(error, s == "dave", "view_all element 4")
+    end subroutine test_view_all
     !
     subroutine test_to_character(error)
         type(error_type), allocatable, intent(out) :: error

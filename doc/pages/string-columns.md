@@ -151,6 +151,18 @@ do i = 1, n
 end do
 ```
 
+The `table(i)%name = col_name%view(i)` loop above is the general form (useful when the row
+array isn't populated all at once, or the column and row array grow independently). When the
+column is already fully populated and `table` already has the right size, `view_all` does the
+same mapping in one call:
+
+```fortran
+call col_name%view_all(table(:)%name)   ! table(i)%name = col_name%view(i), for every i
+```
+
+It aborts if `size(table)` doesn't match `col_name%size()`, rather than silently filling only
+the shorter length. `col_name` must still be a `target`, exactly as for `view`.
+
 **Column → row usage / materialization:**
 
 ```fortran
@@ -379,6 +391,7 @@ thread-safety rule that applies.
 | Operation | Complexity |
 |---|---|
 | `size`, `capacity`, `character_size`, `null_count`, `is_null`, `is_empty`, `length`, `view` | O(1) |
+| `view_all` | O(N) |
 | `append_string` / `append_null` | amortized O(1) |
 | `append_column(other)` | O(other rows + other chars) |
 | `get(i)` | O(length) |

@@ -155,8 +155,13 @@ def gcovr_excluded_lines(path):
     return excluded
 
 
+excluded_with_hits = {}  # src path -> sorted list of excluded line numbers that had count > 0
 for src in per_file:
-    for ln in gcovr_excluded_lines(src):
+    excluded = gcovr_excluded_lines(src)
+    hits = sorted(ln for ln in excluded if per_file[src].get(ln, 0) > 0)
+    if hits:
+        excluded_with_hits[src] = hits
+    for ln in excluded:
         per_file[src].pop(ln, None)
 
 total_exec = 0
@@ -203,4 +208,14 @@ for src in sorted(per_file):
         continue
     print(f"{src}:")
     print("  " + ", ".join(condense_ranges(uncovered)))
+
+print()
+print("Excluded lines with positive hits (candidates for a stale/no-longer-dead exclusion):")
+print("-" * (name_w + 26))
+if not excluded_with_hits:
+    print("(none)")
+else:
+    for src in sorted(excluded_with_hits):
+        print(f"{src}:")
+        print("  " + ", ".join(condense_ranges(excluded_with_hits[src])))
 PY

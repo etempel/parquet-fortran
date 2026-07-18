@@ -2044,10 +2044,11 @@ extern "C"
 		xml << "<?xml version='1.0'?>\n"
 			<< "<VOTABLE version=\"1.4\" xmlns=\"http://www.ivoa.net/xml/VOTable/v1.3\">\n"
 			<< "<RESOURCE>\n"
-			<< "<TABLE name=\"" << xml_escape(table_name) << "\">\n" // GCOVR_EXCL_LINE -- gcov
-			// attribution artifact under GCC: this continuation line of a single chained
-			// operator<< statement shows uncovered even though build_votable_xml is directly
-			// exercised by test_metadata.f90's VOTable generation tests.
+			// GCOVR_EXCL_START -- gcov attribution artifact under GCC: this continuation line of a
+			// single chained operator<< statement shows uncovered even though build_votable_xml is
+			// directly exercised by test_metadata.f90's VOTable generation tests.
+			<< "<TABLE name=\"" << xml_escape(table_name) << "\">\n"
+			// GCOVR_EXCL_STOP
 			<< "<PARAM arraysize=\"19\" datatype=\"char\" name=\"DATE\" value=\""
 			<< xml_escape(date) << "\">\n"
 			<< "<DESCRIPTION>file creation date (YYYY-MM-DDThh:mm:ss UT)</DESCRIPTION>\n"
@@ -2057,9 +2058,11 @@ extern "C"
 		for (const auto &kv : table_metadata)
 		{
 			xml << "<PARAM datatype=\"char\" arraysize=\"*\" name=\""
-				<< xml_escape(kv.key) // GCOVR_EXCL_LINE -- same chained-statement gcov attribution
+				// GCOVR_EXCL_START -- gcov attribution artifact under GCC: same chained-statement
 				// artifact as build_votable_xml's other continuation-line exclusions above; this
 				// table_metadata loop is exercised by test_metadata.f90's VOTable generation tests.
+				<< xml_escape(kv.key)
+				// GCOVR_EXCL_STOP
 				<< "\" value=\""
 				<< xml_escape(kv.value)
 				<< "\"";
@@ -2075,10 +2078,11 @@ extern "C"
 
 		for (const auto &col : columns)
 		{
-			xml << "<FIELD datatype=\"" << xml_escape(col.data_type) // GCOVR_EXCL_LINE -- same
-			// chained-statement gcov attribution artifact as build_votable_xml's other
-			// continuation-line exclusions above; this columns loop is exercised by
-			// test_metadata.f90's VOTable generation tests.
+			// GCOVR_EXCL_START -- gcov attribution artifact under GCC: same chained-statement
+			// artifact as build_votable_xml's other continuation-line exclusions above; this
+			// columns loop is exercised by test_metadata.f90's VOTable generation tests.
+			xml << "<FIELD datatype=\"" << xml_escape(col.data_type)
+			// GCOVR_EXCL_STOP
 				<< "\" name=\"" << xml_escape(col.name) << "\"";
 			if (!col.unit.empty())
 			{
@@ -3436,13 +3440,13 @@ extern "C"
 		std::fprintf(stdout, "file: %s\n", reader_handle->filename.c_str());
 		if (reader_handle->nrows != reader_handle->total_nrows)
 		{
-			std::fprintf(stdout, "columns: %d   shown: %zu   rows: %lld (of %lld total)\n\n", // GCOVR_EXCL_LINE
-				reader_handle->schema->num_fields(), rows.size(), // GCOVR_EXCL_LINE
-				static_cast<long long>(reader_handle->nrows), static_cast<long long>(reader_handle->total_nrows)); // GCOVR_EXCL_LINE
-			// gcov attribution artifact under GCC: these continuation lines of a single fprintf
-			// call show uncovered even though this exact branch is directly exercised by
-			// error_scenarios.f90's print_stat_filtered_rows scenario (added and verified locally
-			// this session).
+			// GCOVR_EXCL_START -- gcov attribution artifact under GCC: these continuation lines of a
+			// single fprintf call show uncovered even though this exact branch is directly exercised
+			// by error_scenarios.f90's print_stat_filtered_rows scenario.
+			std::fprintf(stdout, "columns: %d   shown: %zu   rows: %lld (of %lld total)\n\n",
+				reader_handle->schema->num_fields(), rows.size(),
+				static_cast<long long>(reader_handle->nrows), static_cast<long long>(reader_handle->total_nrows));
+			// GCOVR_EXCL_STOP
 		}
 		else
 		{
@@ -5090,11 +5094,12 @@ extern "C"
 			report_fatal_error(context, "col_index out of bounds");
 		auto offset = col_index - 1;
 		auto last_array = stream_element_mode_row_groups(reader_handle, name, col_size, nrows, context,
-			[&](const std::shared_ptr<arrow::Array> &array, const std::shared_ptr<arrow::Array> &vals_any, // GCOVR_EXCL_LINE
-				// gcov attribution artifact under GCC: this lambda parameter-list line shows
-				// uncovered even though this bool element-mode read path is directly exercised by
-				// the vector-column test suite (its body's report_fatal_error is separately
-				// excluded via the CI pattern rule below).
+			// GCOVR_EXCL_START -- gcov attribution artifact under GCC: this lambda parameter-list
+			// line shows uncovered even though this bool element-mode read path is directly
+			// exercised by the vector-column test suite (its body's report_fatal_error is
+			// separately excluded via the CI pattern rule below).
+			[&](const std::shared_ptr<arrow::Array> &array, const std::shared_ptr<arrow::Array> &vals_any,
+				// GCOVR_EXCL_STOP
 				int64_t rg_rows, int64_t row_offset)
 			{
 				if (vals_any->type_id() != arrow::Type::BOOL)
@@ -5150,11 +5155,12 @@ extern "C"
 			report_fatal_error(context, "col_index out of bounds");
 		auto offset = col_index - 1;
 		auto last_array = stream_element_mode_row_groups(reader_handle, name, col_size, nrows, context,
-			[&](const std::shared_ptr<arrow::Array> &array, const std::shared_ptr<arrow::Array> &vals_any, // GCOVR_EXCL_LINE
-				// gcov attribution artifact under GCC: this lambda parameter-list line shows
-				// uncovered even though this string element-mode read path is directly exercised
-				// by the vector-column test suite (its body's report_fatal_error is separately
-				// excluded via the CI pattern rule below).
+			// GCOVR_EXCL_START -- gcov attribution artifact under GCC: this lambda parameter-list
+			// line shows uncovered even though this string element-mode read path is directly
+			// exercised by the vector-column test suite (its body's report_fatal_error is
+			// separately excluded via the CI pattern rule below).
+			[&](const std::shared_ptr<arrow::Array> &array, const std::shared_ptr<arrow::Array> &vals_any,
+				// GCOVR_EXCL_STOP
 				int64_t rg_rows, int64_t row_offset)
 			{
 				if (!is_string_like_type(vals_any->type_id()))

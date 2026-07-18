@@ -445,7 +445,91 @@ so `gcovr` reads its gcov data cleanly alongside the Fortran sources) but delibe
 coverage on exactly that kind of machine, use the separate `tools/coverage_cpp.sh` instead
 (not a flag on `tools/coverage.sh` — Fortran and C++ coverage can't be instrumented/collected
 in the same local pass when the toolchains don't match); see CONTRIBUTING.md's CI section for
-what it does and why it's a standalone script.
+what it does and why it's a standalone script. As of 2026-07-18, `src/parquet_wrapper.cpp` is
+at 100% line coverage confirmed under **both** toolchains (local `tools/coverage_cpp.sh` with
+Clang, and CI's real GCC/gcovr) — see "`src/parquet_wrapper.cpp`: GCC vs Clang gcov attribution"
+below for the mechanism that used to make these two disagree and the conventions that keep them
+in sync going forward.
+
+Both `tools/coverage.sh` and `tools/coverage_cpp.sh` report an extra section after the per-file
+summary and uncovered-line list: every `GCOVR_EXCL`'d line that actually had a positive local hit
+count, i.e. a candidate for a stale/no-longer-dead exclusion worth revisiting (not automatically
+fixed — just surfaced). `tools/coverage_cpp.sh` additionally splits this into two: lines tagged as
+a GCC-attribution artifact (see below) that unexpectedly show *zero* hits locally (investigate —
+these are expected to be genuinely covered under Clang) and everything else that shows *positive*
+hits (the stale-exclusion candidates). `tools/coverage.sh` only needs the latter, single section,
+since Fortran coverage uses the same `gfortran`/`gcov` toolchain locally and in CI — there's no
+GCC-vs-Clang split to make for `src/*.f90`.
+
+## `src/parquet_wrapper.cpp`: GCC vs Clang gcov attribution
+
+Confirmed (not just hypothesized) via a real GitLab CI run: GCC's actual gcov and Clang's
+`llvm-cov gcov` (the default backend `tools/coverage_cpp.sh` uses locally) attribute per-line hit
+counters differently for several C++ source shapes, even for code that unquestionably executes
+under both. This is why CI's coverage percentage used to diverge from a local
+`tools/coverage_cpp.sh` run on the identical commit, and why some `GCOVR_EXCL` markers exist on
+lines that are demonstrably, constantly covered — they aren't dead code, gcov just can't always
+see it. Divergent shapes found so far: switch `case`/`default:` labels (especially the first label
+of a fall-through group), a function's closing `}` immediately after its own `return`, a lambda's
+parameter-list line, and continuation lines of one multi-line chained statement (`xml << ... <<
+...`, a multi-line `fprintf`/function call). Before assuming a new CI-only-uncovered line is a real
+gap, check whether it's one of these shapes and whether the surrounding code is otherwise
+demonstrably covered (e.g. by a call-graph check, or the fact that a dependent test's assertions
+pass) — if so, it's this phenomenon, not a missing test.
+
+**Mechanical conventions to preserve when adding or moving a `GCOVR_EXCL` marker in this file**
+(violating any of these silently reintroduces a local/CI coverage mismatch or miscategorizes a
+report entry — confirmed the hard way, more than once, in the same session these were written):
+
+- **`GCOVR_EXCL_STOP` must be on its own dedicated comment-only line, never trailing real code**
+  (`<code>; } // GCOVR_EXCL_STOP` is wrong). Real `gcovr` (CI) does not extend the exclusion to a
+  `STOP` line that also carries code — only lines strictly between `START` and such a line are
+  excluded, leaving that line's own code counted as an ordinary (uncovered) line. This is *not*
+  what `tools/coverage_cpp.sh`'s own exclusion logic does locally (it always includes the `STOP`
+  line itself), which is exactly how this mismatch went unnoticed for a long time — the local tool
+  was more lenient than the tool CI actually runs.
+- **A `case`/`catch`/`default:` label sitting just outside its block's `START`/`STOP` (immediately
+  before `START`, or immediately after a preceding `STOP`) needs the marker moved to include it.**
+  GCC gives a label its own line-attribution, separate from the code that follows it — a marker
+  that only wraps the body leaves the label itself reported as a false gap.
+- **A new exclusion added because a line is genuinely covered but GCC misattributes it (as opposed
+  to genuinely dead/unreachable code) must carry the literal phrase `gcov attribution artifact
+  under GCC` on the *same physical line* as its `GCOVR_EXCL_LINE`/`START` marker.**
+  `tools/coverage_cpp.sh`'s reporting categorizes exclusions by searching for this exact substring
+  on the marker's own line — wrapping the phrase onto a following, unmarked comment line silently
+  drops it into the "other" (dead-code) bucket instead, and the new "zero hits" report won't catch
+  it either. This isn't a cosmetic nicety: it happened twice in the same editing pass (once caught
+  by re-reading the diff, once caught only by the new report itself on the next run) before every
+  site was fixed.
+
+**Confirmed root-cause mechanisms behind why so many lines in this file need `GCOVR_EXCL` at all**
+(general knowledge for any future coverage work here, not just the GCC/Clang split above):
+
+- `report_fatal_error` and `ConcurrencyGuard`'s constructor call `std::abort()` directly.
+  `std::abort()` skips every `atexit`-registered handler, which is how gcov/llvm-cov flush a
+  translation unit's counters — so a process that aborts contributes **zero** coverage data for
+  that entire run, for every line it executed, not just the abort line itself. This applies to
+  *every* `report_fatal_error` call site, present and future (`.gitlab-ci.yml`'s gcovr invocation
+  auto-excludes standalone `report_fatal_error(...)` lines via `--exclude-lines-by-pattern`, mirrored
+  by both coverage scripts' own `EXCLUDE_LINE_PATTERNS`) — but a helper function called just
+  *before* the abort needs its own reasoning check, not an assumption that it's covered elsewhere.
+- An uncaught C++ exception crossing the `extern "C"` boundary hits the same
+  discard-all-coverage-data wall via `std::terminate()`, not just `report_fatal_error`. This file
+  has exactly one working `try`/`catch` in its ~6800 lines (`parquet_reader_set_filter`) — even an
+  artificial `throw` placed at the very top of a function it calls, invoked from directly inside
+  that `try` block, was confirmed to escape uncaught under this project's mixed
+  gfortran-driven static-library link. Treat any other `throw` site in this file as unreachable by
+  a clean test by default.
+- A Fortran-side pre-check often makes a C++-side defensive branch unreachable through the public
+  API (e.g. `parquet_read.f90`'s `parquet_check_read_row_count`/`check_column_exists` make several
+  "mismatch"/"not found" `report_fatal_error`s in `parquet_wrapper.cpp` dead code). Before writing
+  a test for an uncovered `report_fatal_error`/`throw` line, `grep` the relevant
+  `src/parquet_*.f90` call site for an equivalent pre-check first.
+- Parquet C++'s Arrow reader always materializes a decimal column as `Decimal128Array`/
+  `Decimal256Array` on read, never `Decimal32Array`/`Decimal64Array`, regardless of the physical
+  `DECIMAL32`/`DECIMAL64` width actually written (confirmed via a temporary `type_id()` debug
+  print) — so those case arms in `decimal_value_at`/`decimal_to_int64_checked` are permanently
+  dead on the read path, not a testing gap, on any input.
 
 If you ever find a line marked `GCOVR_EXCL_LINE`/inside a `GCOVR_EXCL_START`/`GCOVR_EXCL_STOP`
 block that is actually reachable in normal (non-abort) operation — i.e. the exclusion looks

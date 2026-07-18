@@ -235,23 +235,49 @@ target = "src/parquet_wrapper.cpp"
 # .gitlab-ci.yml's gcovr call if that ever changes.
 EXCLUDE_LINE_PATTERNS = [re.compile(r"\s*report_fatal_error\(")]
 
+# Exclusions added specifically because GitLab CI's real GCC/gcovr toolchain attributes coverage
+# differently from this script's own gcov backend (see feature_coverage.md's "CI's reported
+# percentage historically didn't match the local baseline" for the full story) carry this exact
+# phrase on the same physical line as their GCOVR_EXCL_LINE/START marker -- by convention, not
+# automatically enforced, so keep it verbatim on the marker line when adding a new one of these.
+# Everything else (Finding-1/3/4 dead-via-abort code, older Finding-5 closing-brace flakiness,
+# genuinely-unreachable backstops, the report_fatal_error pattern above) is an "other" exclusion.
+GITLAB_GCC_ATTRIBUTION_TEXT = "gcov attribution artifact under GCC"
 
-def compute_excluded_lines(source_path):
+
+def compute_exclusion_categories(source_path):
     with open(source_path) as f:
         src_lines = f.readlines()
-    excluded = set()
+    gitlab_gcc_artifact = set()
+    other_gcovr_excluded = set()
     start_line = None
+    block_is_gitlab_gcc_artifact = False
     for lineno, text in enumerate(src_lines, start=1):
         if "GCOVR_EXCL_START" in text:
             start_line = lineno
+            block_is_gitlab_gcc_artifact = GITLAB_GCC_ATTRIBUTION_TEXT in text
         if "GCOVR_EXCL_LINE" in text:
-            excluded.add(lineno)
+            target_set = gitlab_gcc_artifact if GITLAB_GCC_ATTRIBUTION_TEXT in text else other_gcovr_excluded
+            target_set.add(lineno)
         if any(p.match(text) for p in EXCLUDE_LINE_PATTERNS):
-            excluded.add(lineno)
+            other_gcovr_excluded.add(lineno)
         if "GCOVR_EXCL_STOP" in text and start_line is not None:
-            excluded.update(range(start_line, lineno + 1))
+            block_lines = range(start_line, lineno + 1)
+            target_set = gitlab_gcc_artifact if block_is_gitlab_gcc_artifact else other_gcovr_excluded
+            target_set.update(block_lines)
             start_line = None
-    return excluded
+            block_is_gitlab_gcc_artifact = False
+    return gitlab_gcc_artifact, other_gcovr_excluded
+
+
+def condense_ranges(line_numbers):
+    ranges = []
+    for ln in sorted(line_numbers):
+        if ranges and ln == ranges[-1][1] + 1:
+            ranges[-1] = (ranges[-1][0], ln)
+        else:
+            ranges.append((ln, ln))
+    return ", ".join(str(a) if a == b else f"{a}-{b}" for a, b in ranges)
 
 
 lines = {}
@@ -287,12 +313,21 @@ if not lines:
     print("No coverage data found for src/parquet_wrapper.cpp", file=sys.stderr)
     sys.exit(1)
 
-excluded_lines = compute_excluded_lines(target)
+gitlab_gcc_artifact_lines, other_gcovr_excluded_lines = compute_exclusion_categories(target)
+excluded_lines = gitlab_gcc_artifact_lines | other_gcovr_excluded_lines
 excluded_with_hits = sorted(ln for ln in excluded_lines if lines.get(ln, 0) > 0)
 if excluded_with_hits:
     print(f"Warning: {len(excluded_with_hits)} GCOVR_EXCL'd line(s) actually had hits "
         f"(excluded from the totals below anyway, matching gcovr's own behavior): "
         f"{', '.join(str(ln) for ln in excluded_with_hits)}", file=sys.stderr)
+
+# Restricted to `ln in lines` (a line gcov actually instrumented) rather than every textually
+# excluded line number: a GCOVR_EXCL_START/STOP block's comment/brace lines never get their own
+# gcov counter at all under this script's backend, so treating "no counter" the same as "counter
+# reads 0" would flag most of a block's non-code lines as a false "regressed" signal every run.
+gitlab_gcc_artifact_uncovered = sorted(ln for ln in gitlab_gcc_artifact_lines if ln in lines and lines[ln] == 0)
+other_gcovr_excluded_hits = sorted(ln for ln in other_gcovr_excluded_lines if lines.get(ln, 0) > 0)
+
 for ln in excluded_lines:
     lines.pop(ln, None)
 
@@ -310,12 +345,19 @@ uncovered = sorted(ln for ln, c in lines.items() if c == 0)
 if not uncovered:
     print("Uncovered lines: (fully covered)")
 else:
-    ranges = []
-    for ln in uncovered:
-        if ranges and ln == ranges[-1][1] + 1:
-            ranges[-1] = (ranges[-1][0], ln)
-        else:
-            ranges.append((ln, ln))
-    text = ", ".join(str(a) if a == b else f"{a}-{b}" for a, b in ranges)
-    print(f"Uncovered lines: {text}")
+    print(f"Uncovered lines: {condense_ranges(uncovered)}")
+
+print()
+print("Excluded lines outside the totals above:")
+if gitlab_gcc_artifact_uncovered:
+    print("  GitLab/GCC attribution-artifact exclusions with zero hits locally (investigate --")
+    print("  these are expected to be genuinely covered under this script's own gcov backend):")
+    print(f"    {condense_ranges(gitlab_gcc_artifact_uncovered)}")
+else:
+    print("  GitLab/GCC attribution-artifact exclusions with zero hits locally: (none)")
+if other_gcovr_excluded_hits:
+    print("  Other exclusions with hits locally (candidates for a stale/no-longer-dead exclusion):")
+    print(f"    {condense_ranges(other_gcovr_excluded_hits)}")
+else:
+    print("  Other exclusions with hits locally: (none)")
 PY

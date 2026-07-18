@@ -75,15 +75,28 @@ test:
     # MacPorts GCC) and a default `clang++` FPM_CXX would produce gcov data
     # in Clang's format, which plain GNU `gcov`/`gcovr` cannot reliably read
     # -- see CONTRIBUTING.md's coverage section.
-    FPM_CXXFLAGS: "-std=c++20 --coverage"
+    # -fprofile-update=atomic makes gcov's per-line hit counters atomic instead of GCC's
+    # default plain (non-atomic) increment -- needed here because test-drive runs every test
+    # within a suite concurrently via `!$omp parallel do` (testdrive.F90), and this job's
+    # -fopenmp (below) makes that real thread-level concurrency: without atomic updates,
+    # concurrent threads incrementing the same shared line's counter in parquet_wrapper.cpp can
+    # race and silently lose hits, under-reporting coverage for lines exercised by many small,
+    # independently-scheduled tests (confirmed empirically: tools/coverage_cpp.sh's local run,
+    # which has no -fopenmp and so runs every test sequentially/single-threaded, reported ~40
+    # more covered lines than this CI job for the identical source and test suite -- see
+    # feature_coverage.md's coverage-mismatch analysis). Applied to both FPM_CXXFLAGS and
+    # FPM_FFLAGS (below) since the race applies equally to gfortran's own --coverage
+    # instrumentation of the Fortran sources, not just the C++ side.
+    FPM_CXXFLAGS: "-std=c++20 --coverage -fprofile-update=atomic"
     FPM_LDFLAGS: "-lstdc++ --coverage"
   coverage: /^TOTAL.*\s+(\d+\%)$/
   script:
     # Source is kept within the standard 132-column free-form limit, so no
     # -ffree-line-length-none override is needed; FPM_FFLAGS only adds the
     # coverage/OpenMP flags fpm test itself needs. Note it still replaces
-    # fpm's default profile flags, same as before.
-    - FPM_FFLAGS="--coverage -fopenmp" fpm test --verbose
+    # fpm's default profile flags, same as before. -fprofile-update=atomic
+    # matches FPM_CXXFLAGS above -- see its own comment for why.
+    - FPM_FFLAGS="--coverage -fopenmp -fprofile-update=atomic" fpm test --verbose
     # --exclude-lines-by-pattern auto-excludes every standalone report_fatal_error(...) call
     # site in src/parquet_wrapper.cpp (present and future -- no per-call-site source comment
     # needed) without needing GCOVR_EXCL_LINE comments at each one: std::abort() there discards

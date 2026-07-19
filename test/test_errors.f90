@@ -538,6 +538,34 @@ contains
                 test_temporal_chunk_array_size_mismatch_aborts), &
             new_unittest("chunk-writing a temporal column of the wrong data_type aborts", &
                 test_temporal_chunk_type_mismatch_aborts), &
+            new_unittest("parquet_write_row_mask after the writer has started aborts", &
+                test_mask_row_mask_after_write_started_aborts), &
+            new_unittest("a whole-column write whose row count doesn't match the mask aborts", &
+                test_mask_row_mask_shape_mismatch_aborts), &
+            new_unittest("parquet_write_row_mask with a zero-length mask aborts", &
+                test_mask_row_mask_zero_length_aborts), &
+            new_unittest("parquet_write_chunk_row_mask after parquet_write_row_mask aborts", &
+                test_mask_chunk_row_mask_after_row_mask_aborts), &
+            new_unittest("parquet_write_row_mask after the writer has started row groups aborts", &
+                test_mask_row_mask_after_chunk_row_mask_aborts), &
+            new_unittest("parquet_write_chunk_row_mask after a whole-column write aborts", &
+                test_mask_chunk_row_mask_after_whole_column_aborts), &
+            new_unittest("parquet_write_chunk_row_mask not used for every row group aborts", &
+                test_mask_chunk_row_mask_not_used_every_group_aborts), &
+            new_unittest("parquet_write_chunk_row_mask introduced after the row group's first chunk write aborts", &
+                test_mask_chunk_row_mask_introduced_late_aborts), &
+            new_unittest("parquet_write_chunk_row_mask with the wrong mask size aborts", &
+                test_mask_chunk_row_mask_size_mismatch_aborts), &
+            new_unittest("a row group claiming more mask positions than parquet_write_row_mask provided aborts", &
+                test_mask_row_mask_window_exhausted_aborts), &
+            new_unittest("closing a writer with an unconsumed parquet_write_row_mask tail aborts", &
+                test_mask_row_mask_not_fully_consumed_aborts), &
+            new_unittest("parquet_write_chunk_row_mask with no row group open aborts", &
+                test_mask_chunk_row_mask_no_row_group_open_aborts), &
+            new_unittest("parquet_write_chunk_row_mask after an earlier row group declined it aborts", &
+                test_mask_chunk_row_mask_scheme_declined_aborts), &
+            new_unittest("finishing a row group with no column ever written for it aborts", &
+                test_mask_row_group_no_writes_at_all_aborts), &
             new_unittest("parquet_get_version with an invalid mode aborts", &
                 test_get_version_invalid_mode_aborts) &
             ]
@@ -2983,6 +3011,111 @@ contains
             failure_message="parquet_get_version with an unrecognized mode was expected to abort", &
             required_stderr="parquet_get_version: invalid mode 'bogus'")
     end subroutine test_get_version_invalid_mode_aborts
+
+    subroutine test_mask_row_mask_after_write_started_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "mask_row_mask_after_write_started", expect_abort=.true., &
+            failure_message="parquet_write_row_mask after the writer had started was expected to abort", &
+            required_stderr="parquet_write_row_mask: must be called before the writer's first")
+    end subroutine test_mask_row_mask_after_write_started_aborts
+
+    subroutine test_mask_row_mask_shape_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "mask_row_mask_shape_mismatch", expect_abort=.true., &
+            failure_message="a whole-column write with the wrong row count for the mask was expected to abort", &
+            required_stderr="does not match the mask set via parquet_write_row_mask")
+    end subroutine test_mask_row_mask_shape_mismatch_aborts
+
+    subroutine test_mask_row_mask_zero_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "mask_row_mask_zero_length", expect_abort=.true., &
+            failure_message="parquet_write_row_mask with a zero-length mask was expected to abort", &
+            required_stderr="parquet_write_row_mask: mask must not be zero-length")
+    end subroutine test_mask_row_mask_zero_length_aborts
+
+    subroutine test_mask_chunk_row_mask_after_row_mask_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "mask_chunk_row_mask_after_row_mask", expect_abort=.true., &
+            failure_message="parquet_write_chunk_row_mask after parquet_write_row_mask was expected to abort", &
+            required_stderr="cannot be used together with parquet_write_row_mask")
+    end subroutine test_mask_chunk_row_mask_after_row_mask_aborts
+
+    subroutine test_mask_row_mask_after_chunk_row_mask_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "mask_row_mask_after_chunk_row_mask", expect_abort=.true., &
+            failure_message="parquet_write_row_mask after the writer had started row groups was expected to abort", &
+            required_stderr="parquet_write_row_mask: must be called before the writer's first")
+    end subroutine test_mask_row_mask_after_chunk_row_mask_aborts
+
+    subroutine test_mask_chunk_row_mask_after_whole_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "mask_chunk_row_mask_after_whole_column", &
+            expect_abort=.true., &
+            failure_message="parquet_write_chunk_row_mask after a whole-column write was expected to abort", &
+            required_stderr="unavailable once a column has been written whole")
+    end subroutine test_mask_chunk_row_mask_after_whole_column_aborts
+
+    subroutine test_mask_chunk_row_mask_not_used_every_group_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "mask_chunk_row_mask_not_used_every_group", &
+            expect_abort=.true., &
+            failure_message="a row group without parquet_write_chunk_row_mask after an earlier one used it " // &
+                "was expected to abort", &
+            required_stderr="parquet_write_chunk_row_mask must be called for every row group")
+    end subroutine test_mask_chunk_row_mask_not_used_every_group_aborts
+
+    subroutine test_mask_chunk_row_mask_introduced_late_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "mask_chunk_row_mask_introduced_late", expect_abort=.true., &
+            failure_message="parquet_write_chunk_row_mask after this row group's first chunk write " // &
+                "was expected to abort", &
+            required_stderr="must be called before this row group's first")
+    end subroutine test_mask_chunk_row_mask_introduced_late_aborts
+
+    subroutine test_mask_chunk_row_mask_size_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "mask_chunk_row_mask_size_mismatch", expect_abort=.true., &
+            failure_message="parquet_write_chunk_row_mask with the wrong mask size was expected to abort", &
+            required_stderr="mask size (3) does not match the open row group's own nrows (2)")
+    end subroutine test_mask_chunk_row_mask_size_mismatch_aborts
+
+    subroutine test_mask_row_mask_window_exhausted_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "mask_row_mask_window_exhausted", expect_abort=.true., &
+            failure_message="a row group claiming more mask positions than parquet_write_row_mask provided " // &
+                "was expected to abort", &
+            required_stderr="would claim more positions of the mask")
+    end subroutine test_mask_row_mask_window_exhausted_aborts
+
+    subroutine test_mask_row_mask_not_fully_consumed_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "mask_row_mask_not_fully_consumed", expect_abort=.true., &
+            failure_message="closing a writer with an unconsumed parquet_write_row_mask tail was expected to abort", &
+            required_stderr="was not fully consumed by this writer's row groups")
+    end subroutine test_mask_row_mask_not_fully_consumed_aborts
+
+    subroutine test_mask_chunk_row_mask_no_row_group_open_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "mask_chunk_row_mask_no_row_group_open", &
+            expect_abort=.true., &
+            failure_message="parquet_write_chunk_row_mask with no row group open was expected to abort", &
+            required_stderr="parquet_write_chunk_row_mask: no row group is open")
+    end subroutine test_mask_chunk_row_mask_no_row_group_open_aborts
+
+    subroutine test_mask_chunk_row_mask_scheme_declined_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "mask_chunk_row_mask_scheme_declined", expect_abort=.true., &
+            failure_message="parquet_write_chunk_row_mask after an earlier row group declined it " // &
+                "was expected to abort", &
+            required_stderr="was not used for this writer's first row group")
+    end subroutine test_mask_chunk_row_mask_scheme_declined_aborts
+
+    subroutine test_mask_row_group_no_writes_at_all_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "mask_row_group_no_writes_at_all", expect_abort=.true., &
+            failure_message="finishing a row group with no column ever written for it was expected to abort", &
+            required_stderr="no columns have been written")
+    end subroutine test_mask_row_group_no_writes_at_all_aborts
     !
     ! Note: the temporal_foreign_int96_roundtrip/temporal_foreign_tz_roundtrip scenarios (clean
     ! exits, not aborts) are checked from test_reading.f90's test_datetime_foreign_fixtures, not

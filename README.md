@@ -176,6 +176,8 @@ A quick index of the public `use parquet` API. For the full per-procedure refere
 
 **Writer — streaming row groups:** `parquet_new_row_group`, `parquet_write_column_chunk`, `parquet_finish_row_group` — an alternative to `parquet_write_column` for a column too large to hold as one complete array; see [Streaming/chunked writes](doc/pages/writing.md#streamingchunked-writes)
 
+**Writer — row filtering:** `parquet_write_row_mask`, `parquet_write_chunk_row_mask` — drop rows entirely (no trace, not a Null) from what gets written; see [Filtering rows with a mask](doc/pages/writing.md#filtering-rows-with-a-mask)
+
 **Reader — table & column info:** `parquet_open_reader`, `parquet_close_reader`, `parquet_get_nrows`, `parquet_get_num_row_groups`, `parquet_get_col_size`, `parquet_get_column_total_elements`, `parquet_get_string_length`, `parquet_get_column_time_info`, `parquet_prefetch_columns`, `parquet_get_metadata`, `parquet_filter` (`filt%add`)
 
 **Reader — column data:** `parquet_read_column`, `parquet_read_array_row_mode`, `parquet_read_array_element_mode`

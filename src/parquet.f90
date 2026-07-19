@@ -260,6 +260,44 @@ module parquet
         !> in_row_group is .true. -- every parquet_write_column_chunk call for the open row
         !> group must supply exactly this many rows.
         integer(c_long_long) :: current_row_group_nrows = 0
+        !> Row-filtering ("mask") state -- see parquet_write_row_mask/parquet_write_chunk_row_mask
+        !> and doc/pages/writing.md's "Filtering rows with a mask". The two masking schemes are
+        !> mutually exclusive per writer; only the fields relevant to whichever scheme (if any) is
+        !> actually used are ever populated.
+        logical, allocatable :: file_mask(:) !! Whole-file mask set by parquet_write_row_mask; unallocated if unused.
+        integer(c_long_long) :: mask_cursor = 0 !! Cursor of file_mask positions already claimed by row groups
+        !! (parquet_write_row_mask + row groups scheme only); see parquet_new_row_group_impl.
+        logical :: mask_used_with_row_groups = .false. !! true once file_mask windowing has been applied by at
+        !! least one parquet_new_row_group call -- drives the mask-fully-consumed check at
+        !! parquet_close_writer (irrelevant/unused for a pure whole-column masked writer).
+        logical, allocatable :: chunk_mask(:) !! Mask applicable to the currently-open row group: an identity
+        !! mask by default, a file_mask window (shared-mask scheme), or an explicit
+        !! parquet_write_chunk_row_mask call (per-row-group scheme) -- reset every parquet_new_row_group.
+        logical :: chunk_mask_set_this_group = .false. !! true once parquet_write_chunk_row_mask has been called
+        !! for the currently-open row group; reset by parquet_new_row_group.
+        integer :: chunk_mask_scheme = 0 !! 0 = undecided (no row group's first chunk write yet), 1 = per-row-group
+        !! masking (parquet_write_chunk_row_mask) used for every row group, 2 = never used -- fixed permanently
+        !! at the first parquet_write_column_chunk call of the writer's first row group.
+        logical :: row_group_first_write_done = .false. !! true once any parquet_write_column_chunk call has
+        !! happened for the currently-open row group; reset by parquet_new_row_group. Rejects a
+        !! parquet_write_chunk_row_mask call made too late (after that row group's first chunk write).
+        logical :: cpp_row_group_open = .false. !! true once the underlying C++ row group has actually been
+        !! opened (parquet_writer_new_row_group) for the currently-open Fortran-level row group; reset by
+        !! parquet_new_row_group. The C++ open must be told the row group's post-mask *kept* row count, which
+        !! isn't known at parquet_new_row_group time for the per-row-group mask scheme (its mask arrives in a
+        !! separate, later call) -- so the open is deferred until the kept count is actually known: immediately
+        !! if the shared whole-file mask windowing applies, else at whichever comes first of
+        !! parquet_write_chunk_row_mask or this row group's first parquet_write_column_chunk call.
+        logical :: row_group_is_empty = .false. !! true once the currently-open row group's post-mask kept
+        !! count is known to be exactly 0 -- a zero-row row group has no underlying C++ row group at all (Arrow's
+        !! own NewRowGroup requires a positive row count), so every parquet_write_column_chunk call for it must
+        !! skip its C++ append entirely (nothing to append into) and parquet_finish_row_group must skip both the
+        !! open and the finish. Reset by parquet_new_row_group.
+        logical :: any_whole_column_write = .false. !! true once any parquet_write_column call has actually
+        !! proceeded (not skipped as disabled) -- parquet_write_chunk_row_mask is unavailable once this is
+        !! true (only the whole-file parquet_write_row_mask scheme can mask a writer with whole-column writes).
+        logical :: write_started = .false. !! true once the writer's first parquet_write_column or
+        !! parquet_new_row_group call happens -- parquet_write_row_mask must be called before this.
     contains
         final :: writer_finalize !! Safety-net close if the writer is still open when it goes out of scope.
     end type parquet_writer
@@ -407,6 +445,47 @@ module parquet
         module procedure parquet_write_timestamp_column_chunk
         module procedure parquet_write_timestamp_matrix_column_chunk
     end interface parquet_write_column_chunk
+
+    !> Sets a whole-file row filter ("mask") on `writer`: `mask(i) = .false.` drops row `i`
+    !> entirely from every column written from this point on (no trace at all -- no offset, no
+    !> validity bit; this is not the same as writing a Null). Must be called after
+    !> parquet_open_writer and before the writer's first parquet_write_column or
+    !> parquet_new_row_group call, whichever comes first.
+    !>
+    !> For a writer using only parquet_write_column (no row groups): every subsequent
+    !> parquet_write_column call's `values` (or the row dimension of `values(:,:)`) must have
+    !> length `size(mask)` exactly, and the resulting column has `count(mask)` rows.
+    !>
+    !> For a writer using parquet_new_row_group/parquet_write_column_chunk: each
+    !> parquet_new_row_group(writer, nrows) call automatically claims the next `nrows` positions
+    !> of `mask` (in file order) as that row group's window, and every column's
+    !> parquet_write_column_chunk call for that row group must supply `values` of length exactly
+    !> `nrows`; the row group's actual written row count is `count()` of its window's mask slice
+    !> (which may be anywhere from 0 to `nrows`). `mask` must be fully consumed by the writer's
+    !> row groups by the time it closes (`error stop` at parquet_close_writer otherwise). See
+    !> doc/pages/writing.md's "Filtering rows with a mask" for a worked example.
+    !>
+    !> Mutually exclusive with parquet_write_chunk_row_mask on the same writer -- once either has
+    !> been used, calling the other is an `error stop`.
+    interface parquet_write_row_mask
+        module procedure parquet_write_row_mask_impl
+    end interface parquet_write_row_mask
+
+    !> Sets the row filter ("mask") for the currently-open row group only, for a writer using
+    !> exclusively parquet_write_column_chunk (no parquet_write_column calls anywhere in its
+    !> lifetime). Must be called once per row group, after that row group's parquet_new_row_group
+    !> and before its first parquet_write_column_chunk call; `size(mask)` must equal that row
+    !> group's own `nrows` (from parquet_new_row_group) exactly, and the row group's actual
+    !> written row count is `count(mask)`.
+    !>
+    !> If used for a writer's first row group, it must be used for **every** row group of that
+    !> writer (all-or-nothing per writer, not per row group) -- `error stop` otherwise. It is
+    !> unavailable (`error stop`) once any column has been written whole via parquet_write_column
+    !> anywhere in the writer's lifetime; that combination can only use parquet_write_row_mask
+    !> instead. Mutually exclusive with parquet_write_row_mask on the same writer.
+    interface parquet_write_chunk_row_mask
+        module procedure parquet_write_chunk_row_mask_impl
+    end interface parquet_write_chunk_row_mask
 
     !> Returns `writer_or_reader`'s row-group size ("chunk_size", matching parquet_open_writer's
     !> own chunk_size argument name -- Arrow's own WriteTable convenience function uses this same
@@ -740,6 +819,8 @@ module parquet
     public :: parquet_write_column
     public :: parquet_new_row_group
     public :: parquet_write_column_chunk
+    public :: parquet_write_row_mask
+    public :: parquet_write_chunk_row_mask
     public :: parquet_finish_row_group
     public :: parquet_get_chunk_size
     public :: parquet_close_writer
@@ -1137,6 +1218,18 @@ module parquet
             character(len=*), intent(in) :: name !! column name.
             type(parquet_timestamp), intent(in) :: values(:,:) !! (element, row) instants for this row group.
         end subroutine parquet_write_timestamp_matrix_column_chunk
+
+        !> Sole specific of parquet_write_row_mask -- see the generic interface above.
+        module subroutine parquet_write_row_mask_impl(writer, mask)
+            type(parquet_writer), intent(inout) :: writer !! open writer, before its first write/row group.
+            logical, intent(in) :: mask(:) !! .false. drops that row entirely; kept rows preserve order.
+        end subroutine parquet_write_row_mask_impl
+
+        !> Sole specific of parquet_write_chunk_row_mask -- see the generic interface above.
+        module subroutine parquet_write_chunk_row_mask_impl(writer, mask)
+            type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
+            logical, intent(in) :: mask(:) !! .false. drops that row entirely; must be this row group's own nrows long.
+        end subroutine parquet_write_chunk_row_mask_impl
 
         !> int32 specific of parquet_new_row_group -- see the generic interface above.
         module subroutine parquet_new_row_group_int32(writer, nrows)

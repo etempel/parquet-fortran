@@ -688,6 +688,34 @@ program error_scenarios
         call scenario_temporal_chunk_array_size_mismatch()
     case ("temporal_chunk_type_mismatch")
         call scenario_temporal_chunk_type_mismatch()
+    case ("mask_row_mask_after_write_started")
+        call scenario_mask_row_mask_after_write_started()
+    case ("mask_row_mask_shape_mismatch")
+        call scenario_mask_row_mask_shape_mismatch()
+    case ("mask_row_mask_zero_length")
+        call scenario_mask_row_mask_zero_length()
+    case ("mask_chunk_row_mask_after_row_mask")
+        call scenario_mask_chunk_row_mask_after_row_mask()
+    case ("mask_row_mask_after_chunk_row_mask")
+        call scenario_mask_row_mask_after_chunk_row_mask()
+    case ("mask_chunk_row_mask_after_whole_column")
+        call scenario_mask_chunk_row_mask_after_whole_column()
+    case ("mask_chunk_row_mask_not_used_every_group")
+        call scenario_mask_chunk_row_mask_not_used_every_group()
+    case ("mask_chunk_row_mask_introduced_late")
+        call scenario_mask_chunk_row_mask_introduced_late()
+    case ("mask_chunk_row_mask_size_mismatch")
+        call scenario_mask_chunk_row_mask_size_mismatch()
+    case ("mask_row_mask_window_exhausted")
+        call scenario_mask_row_mask_window_exhausted()
+    case ("mask_row_mask_not_fully_consumed")
+        call scenario_mask_row_mask_not_fully_consumed()
+    case ("mask_chunk_row_mask_no_row_group_open")
+        call scenario_mask_chunk_row_mask_no_row_group_open()
+    case ("mask_chunk_row_mask_scheme_declined")
+        call scenario_mask_chunk_row_mask_scheme_declined()
+    case ("mask_row_group_no_writes_at_all")
+        call scenario_mask_row_group_no_writes_at_all()
     case ("get_version_invalid_mode")
         call scenario_get_version_invalid_mode()
     case default
@@ -6143,6 +6171,204 @@ contains
         call parquet_write_column_chunk(writer, "day", values)   ! timestamp values into a date column -> aborts
         print '(a)', "unexpectedly chunk-wrote a timestamp array into a date column"
     end subroutine scenario_temporal_chunk_type_mismatch
+
+    ! ==================================================================================
+    ! Row-filtering ("mask") scenarios -- parquet_write_row_mask/parquet_write_chunk_row_mask.
+    ! See feature_write_mask.md for the full design this implements.
+    ! ==================================================================================
+
+    !> parquet_write_row_mask must be called before the writer's first write/row group.
+    subroutine scenario_mask_row_mask_after_write_started()
+        type(parquet_writer) :: writer
+        integer(int32) :: values(2) = [1_int32, 2_int32]
+        logical :: mask(2) = [.true., .false.]
+
+        call parquet_open_writer(writer, "test_run/error_scenario_mask_after_started.parquet")
+        call parquet_write_column(writer, "id", values)
+        call parquet_write_row_mask(writer, mask)   ! -> aborts, writer already started
+        print '(a)', "unexpectedly accepted parquet_write_row_mask after the writer had started"
+    end subroutine scenario_mask_row_mask_after_write_started
+
+    !> A whole-column write's row count must match the file_mask's own size exactly.
+    subroutine scenario_mask_row_mask_shape_mismatch()
+        type(parquet_writer) :: writer
+        integer(int32) :: values(2) = [1_int32, 2_int32]
+        logical :: mask(3) = [.true., .false., .true.]
+
+        call parquet_open_writer(writer, "test_run/error_scenario_mask_shape_mismatch.parquet")
+        call parquet_write_row_mask(writer, mask)
+        call parquet_write_column(writer, "id", values)   ! -> aborts, 2 values vs. mask of 3
+        print '(a)', "unexpectedly wrote a column whose row count didn't match the mask"
+    end subroutine scenario_mask_row_mask_shape_mismatch
+
+    !> parquet_write_row_mask rejects a zero-length mask.
+    subroutine scenario_mask_row_mask_zero_length()
+        type(parquet_writer) :: writer
+        logical, allocatable :: mask(:)
+
+        allocate(mask(0))
+        call parquet_open_writer(writer, "test_run/error_scenario_mask_zero_length.parquet")
+        call parquet_write_row_mask(writer, mask)   ! -> aborts
+        print '(a)', "unexpectedly accepted a zero-length parquet_write_row_mask mask"
+    end subroutine scenario_mask_row_mask_zero_length
+
+    !> parquet_write_chunk_row_mask is unavailable once parquet_write_row_mask has been used.
+    subroutine scenario_mask_chunk_row_mask_after_row_mask()
+        type(parquet_writer) :: writer
+        logical :: file_mask(2) = [.true., .true.]
+        logical :: chunk_mask(2) = [.true., .true.]
+
+        call parquet_open_writer(writer, "test_run/error_scenario_mask_chunk_after_row.parquet")
+        call parquet_write_row_mask(writer, file_mask)
+        call parquet_new_row_group(writer, 2_int64)
+        call parquet_write_chunk_row_mask(writer, chunk_mask)   ! -> aborts
+        print '(a)', "unexpectedly accepted parquet_write_chunk_row_mask after parquet_write_row_mask"
+    end subroutine scenario_mask_chunk_row_mask_after_row_mask
+
+    !> parquet_write_row_mask is unavailable once the writer has committed to per-row-group
+    !> masking (ordering already blocks this via write_started, exercised here via new_row_group).
+    subroutine scenario_mask_row_mask_after_chunk_row_mask()
+        type(parquet_writer) :: writer
+        logical :: chunk_mask(2) = [.true., .true.]
+        logical :: file_mask(2) = [.true., .true.]
+
+        call parquet_open_writer(writer, "test_run/error_scenario_mask_row_after_chunk.parquet")
+        call parquet_new_row_group(writer, 2_int64)
+        call parquet_write_chunk_row_mask(writer, chunk_mask)
+        call parquet_write_row_mask(writer, file_mask)   ! -> aborts, writer already started
+        print '(a)', "unexpectedly accepted parquet_write_row_mask after the writer had started row groups"
+    end subroutine scenario_mask_row_mask_after_chunk_row_mask
+
+    !> parquet_write_chunk_row_mask is unavailable once any column has been written whole.
+    subroutine scenario_mask_chunk_row_mask_after_whole_column()
+        type(parquet_writer) :: writer
+        integer(int32) :: values(2) = [1_int32, 2_int32]
+        logical :: chunk_mask(2) = [.true., .true.]
+
+        call parquet_open_writer(writer, "test_run/error_scenario_mask_chunk_after_whole.parquet")
+        call parquet_write_column(writer, "id", values)
+        call parquet_new_row_group(writer, 2_int64)
+        call parquet_write_chunk_row_mask(writer, chunk_mask)   ! -> aborts
+        print '(a)', "unexpectedly accepted parquet_write_chunk_row_mask after a whole-column write"
+    end subroutine scenario_mask_chunk_row_mask_after_whole_column
+
+    !> Once parquet_write_chunk_row_mask is used for a writer's first row group, it must be used
+    !> for every subsequent row group too.
+    subroutine scenario_mask_chunk_row_mask_not_used_every_group()
+        type(parquet_writer) :: writer
+        integer(int32) :: values(2) = [1_int32, 2_int32]
+        logical :: chunk_mask(2) = [.true., .true.]
+
+        call parquet_open_writer(writer, "test_run/error_scenario_mask_not_every_group.parquet")
+        call parquet_new_row_group(writer, 2_int64)
+        call parquet_write_chunk_row_mask(writer, chunk_mask)
+        call parquet_write_column_chunk(writer, "id", values)
+        call parquet_finish_row_group(writer)
+
+        call parquet_new_row_group(writer, 2_int64)
+        call parquet_write_column_chunk(writer, "id", values)   ! -> aborts, no chunk_row_mask this group
+        print '(a)', "unexpectedly accepted a row group without parquet_write_chunk_row_mask after an earlier one used it"
+    end subroutine scenario_mask_chunk_row_mask_not_used_every_group
+
+    !> parquet_write_chunk_row_mask must be called before this row group's first
+    !> parquet_write_column_chunk call.
+    subroutine scenario_mask_chunk_row_mask_introduced_late()
+        type(parquet_writer) :: writer
+        integer(int32) :: values(2) = [1_int32, 2_int32]
+        logical :: chunk_mask(2) = [.true., .true.]
+
+        call parquet_open_writer(writer, "test_run/error_scenario_mask_introduced_late.parquet")
+        call parquet_new_row_group(writer, 2_int64)
+        call parquet_write_column_chunk(writer, "id", values)
+        call parquet_write_chunk_row_mask(writer, chunk_mask)   ! -> aborts, too late for this group
+        print '(a)', "unexpectedly accepted parquet_write_chunk_row_mask after this row group's first chunk write"
+    end subroutine scenario_mask_chunk_row_mask_introduced_late
+
+    !> parquet_write_chunk_row_mask's mask must be exactly the open row group's own nrows long.
+    subroutine scenario_mask_chunk_row_mask_size_mismatch()
+        type(parquet_writer) :: writer
+        logical :: chunk_mask(3) = [.true., .true., .false.]
+
+        call parquet_open_writer(writer, "test_run/error_scenario_mask_chunk_size_mismatch.parquet")
+        call parquet_new_row_group(writer, 2_int64)
+        call parquet_write_chunk_row_mask(writer, chunk_mask)   ! -> aborts, mask is 3 long, row group is 2
+        print '(a)', "unexpectedly accepted a parquet_write_chunk_row_mask mask of the wrong size"
+    end subroutine scenario_mask_chunk_row_mask_size_mismatch
+
+    !> A row group's nrows window must not claim more positions than the shared file_mask has left.
+    subroutine scenario_mask_row_mask_window_exhausted()
+        type(parquet_writer) :: writer
+        logical :: file_mask(3) = [.true., .true., .false.]
+        integer(int32) :: values(2) = [1_int32, 2_int32]
+
+        call parquet_open_writer(writer, "test_run/error_scenario_mask_window_exhausted.parquet")
+        call parquet_write_row_mask(writer, file_mask)
+        call parquet_new_row_group(writer, 2_int64)
+        call parquet_write_column_chunk(writer, "id", values)
+        call parquet_finish_row_group(writer)
+
+        call parquet_new_row_group(writer, 2_int64)   ! -> aborts, only 1 position left in file_mask
+        print '(a)', "unexpectedly claimed more mask positions than parquet_write_row_mask provided"
+    end subroutine scenario_mask_row_mask_window_exhausted
+
+    !> parquet_close_writer aborts if the shared file_mask (parquet_write_row_mask) was not fully
+    !> consumed by the writer's row groups.
+    subroutine scenario_mask_row_mask_not_fully_consumed()
+        type(parquet_writer) :: writer
+        logical :: file_mask(3) = [.true., .true., .false.]
+        integer(int32) :: values(2) = [1_int32, 2_int32]
+
+        call parquet_open_writer(writer, "test_run/error_scenario_mask_not_fully_consumed.parquet")
+        call parquet_write_row_mask(writer, file_mask)
+        call parquet_new_row_group(writer, 2_int64)
+        call parquet_write_column_chunk(writer, "id", values)
+        call parquet_finish_row_group(writer)
+
+        call parquet_close_writer(writer)   ! -> aborts, 1 mask position never claimed
+        print '(a)', "unexpectedly closed a writer with an unconsumed parquet_write_row_mask tail"
+    end subroutine scenario_mask_row_mask_not_fully_consumed
+
+    !> parquet_write_chunk_row_mask requires an open row group.
+    subroutine scenario_mask_chunk_row_mask_no_row_group_open()
+        type(parquet_writer) :: writer
+        logical :: chunk_mask(2) = [.true., .true.]
+
+        call parquet_open_writer(writer, "test_run/error_scenario_mask_no_row_group_open.parquet")
+        call parquet_write_chunk_row_mask(writer, chunk_mask)   ! -> aborts, no row group open yet
+        print '(a)', "unexpectedly accepted parquet_write_chunk_row_mask with no row group open"
+    end subroutine scenario_mask_chunk_row_mask_no_row_group_open
+
+    !> Once a writer's first row group has *declined* per-row-group masking (no
+    !> parquet_write_chunk_row_mask call before its first parquet_write_column_chunk), it can never
+    !> be introduced for a later row group either -- the mirror image of
+    !> scenario_mask_chunk_row_mask_not_used_every_group (which starts by *using* it).
+    subroutine scenario_mask_chunk_row_mask_scheme_declined()
+        type(parquet_writer) :: writer
+        integer(int32) :: values(2) = [1_int32, 2_int32]
+        logical :: chunk_mask(2) = [.true., .true.]
+
+        call parquet_open_writer(writer, "test_run/error_scenario_mask_scheme_declined.parquet")
+        call parquet_new_row_group(writer, 2_int64)
+        call parquet_write_column_chunk(writer, "id", values)   ! no chunk_row_mask -- scheme decided: 2 (never)
+        call parquet_finish_row_group(writer)
+
+        call parquet_new_row_group(writer, 2_int64)
+        call parquet_write_chunk_row_mask(writer, chunk_mask)   ! -> aborts, scheme already declined
+        print '(a)', "unexpectedly introduced parquet_write_chunk_row_mask after an earlier row group declined it"
+    end subroutine scenario_mask_chunk_row_mask_scheme_declined
+
+    !> A row group opened and finished with no column ever written at all (no mask, no chunk
+    !> write) still aborts exactly as it did before masking existed ("no columns have been
+    !> written"), via parquet_finish_row_group's own fallback commit of the (otherwise still
+    !> deferred) underlying C++ row group.
+    subroutine scenario_mask_row_group_no_writes_at_all()
+        type(parquet_writer) :: writer
+
+        call parquet_open_writer(writer, "test_run/error_scenario_mask_no_writes_at_all.parquet")
+        call parquet_new_row_group(writer, 2_int64)
+        call parquet_finish_row_group(writer)   ! -> aborts, nothing was ever written for this row group
+        print '(a)', "unexpectedly finished a row group with no column ever written for it"
+    end subroutine scenario_mask_row_group_no_writes_at_all
 
     !> parquet_get_version(mode=...) rejects any value other than "internal"/"arrow"/"parquet".
     subroutine scenario_get_version_invalid_mode()

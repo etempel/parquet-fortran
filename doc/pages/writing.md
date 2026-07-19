@@ -124,3 +124,84 @@ call parquet_close_writer(writer)
 **Completeness checks:** `parquet_close_writer` fails with `error stop` if a row group was started (`parquet_new_row_group`) but never finished, or if a whole column's own row count doesn't match how many rows the row groups actually covered — the same "don't let a caller silently under/over-write a column" guarantee `parquet_write_column`'s own row-count check already gives you.
 
 **Threading:** `parquet_new_row_group`/`parquet_write_column_chunk`/`parquet_finish_row_group` must all be called from a single thread, in row-group order, for a given writer — same rule as `parquet_write_column` (see [Thread safety](thread-safety.html)). If you want to parallelize the work that *produces* each row group's data, do that in an `!$omp parallel do` (or similar) around the compute step only, then make the `parquet_new_row_group`/`parquet_write_column_chunk`/`parquet_finish_row_group` calls afterward, serially, on one thread.
+
+### Filtering rows with a mask
+
+`parquet_write_row_mask`/`parquet_write_chunk_row_mask` drop rows entirely from what gets written — a masked-out row leaves no trace at all in the output file (no offset, no validity bit). This is different from writing a Null: a Null still occupies a row (see `is_valid` above), while a masked-out row simply never appears. The two procedures are mutually exclusive on a given writer — pick whichever matches how you're writing:
+
+- **`parquet_write_row_mask(writer, mask)`** — a single, whole-file mask, for a writer using `parquet_write_column` (with or without row groups).
+- **`parquet_write_chunk_row_mask(writer, mask)`** — a mask scoped to one row group at a time, for a writer using **only** `parquet_write_column_chunk` (no whole-column writes at all).
+
+#### Whole-column writes
+
+Call `parquet_write_row_mask` right after `parquet_open_writer`, before any `parquet_write_column` call. Every subsequent `parquet_write_column` call's `values` (or the row dimension of `values(:,:)`) must then have length `size(mask)` exactly — the writer applies `mask` itself, so the column ends up with `count(mask)` rows:
+
+```fortran
+type(parquet_writer) :: writer
+integer(int32) :: id(5) = [1, 2, 3, 4, 5]
+logical :: mask(5) = [.true., .false., .true., .false., .true.]
+
+call parquet_open_writer(writer, "data.parquet")
+call parquet_write_row_mask(writer, mask)
+call parquet_write_column(writer, "id", id)   ! writes rows 1, 3, 5 only -- 3 rows on disk
+call parquet_close_writer(writer)
+```
+
+A mask that is entirely `.false.` is allowed and produces a genuine, valid zero-row file (Parquet supports a schema-only, zero-row file).
+
+#### Row groups
+
+`parquet_write_row_mask` also works with `parquet_new_row_group`/`parquet_write_column_chunk`: call it once, up front, before the first `parquet_new_row_group`. Each `parquet_new_row_group(writer, nrows)` call then automatically claims the *next* `nrows` positions of the stored mask, in file order, as that row group's window — `nrows` keeps its ordinary meaning (the width of the buffer every column's `parquet_write_column_chunk` call for that row group must supply), and the row group's actual row count on disk is `count()` of its window's slice of the mask, which can be anywhere from `0` up to `nrows`:
+
+```fortran
+! mask(1:8) = [T, F, T, F, F, T, T, F] -- windows below claim it 3+2+3 = 8 positions total.
+logical :: mask(8) = [.true., .false., .true., .false., .false., .true., .true., .false.]
+integer(int32) :: g1(3) = [1, 2, 3], g2(2) = [4, 5], g3(3) = [6, 7, 8]
+
+call parquet_open_writer(writer, "data.parquet")
+call parquet_write_row_mask(writer, mask)
+
+call parquet_new_row_group(writer, 3_int64)      ! claims mask(1:3) = [T,F,T] -> keeps rows 1 and 3
+call parquet_write_column_chunk(writer, "id", g1)
+call parquet_finish_row_group(writer)
+
+call parquet_new_row_group(writer, 2_int64)      ! claims mask(4:5) = [F,F] -> a genuine zero-row group
+call parquet_write_column_chunk(writer, "id", g2)
+call parquet_finish_row_group(writer)
+
+call parquet_new_row_group(writer, 3_int64)      ! claims mask(6:8) = [T,T,F] -> keeps rows 6 and 7
+call parquet_write_column_chunk(writer, "id", g3)
+call parquet_finish_row_group(writer)
+
+call parquet_close_writer(writer)   ! written file has 4 rows: 1, 3, 6, 7
+```
+
+A row group's window can legitimately be entirely `.false.` (as `g2` above) — this simply contributes zero rows, with no gap or corruption in the surrounding data; there is nothing special to opt into. `parquet_close_writer` checks that the mask was **fully** consumed by the writer's row groups (every position claimed by exactly one window) — a leftover, never-claimed tail is an `error stop`, since it almost always means the row groups' total `nrows` fell short of the mask actually built.
+
+If you'd rather mask each row group independently instead of pre-building one whole-file mask, use `parquet_write_chunk_row_mask(writer, mask)` — call it once per row group, after that row group's `parquet_new_row_group` and before its first `parquet_write_column_chunk` call, with a `mask` exactly `nrows` long:
+
+```fortran
+call parquet_open_writer(writer, "data.parquet")
+
+call parquet_new_row_group(writer, 3_int64)
+call parquet_write_chunk_row_mask(writer, [.true., .false., .true.])
+call parquet_write_column_chunk(writer, "id", g1)   ! keeps rows 1 and 3
+call parquet_finish_row_group(writer)
+
+call parquet_new_row_group(writer, 2_int64)
+call parquet_write_chunk_row_mask(writer, [.false., .false.])   ! a genuine zero-row group
+call parquet_write_column_chunk(writer, "id", g2)
+call parquet_finish_row_group(writer)
+
+call parquet_close_writer(writer)
+```
+
+If `parquet_write_chunk_row_mask` is used for a writer's first row group, it must be used for **every** row group of that writer (all-or-nothing per writer, not per row group) — and it is unavailable entirely on a writer that has any whole-column (`parquet_write_column`) write anywhere in its lifetime, since that combination can only use the shared `parquet_write_row_mask` scheme above instead.
+
+#### Interaction with `is_valid` and `protected_cols:`
+
+`is_valid` keeps its own, separate, pre-mask-indexed meaning: for a given call, `is_valid(i)` still refers to the same `values(i)`/`mask(i)` position, and only decides Null-vs-value among rows that survive the mask. A protected column (MAML `extra: protected_cols:`) only rejects a Null among *surviving* rows — a Null at a masked-out row is irrelevant, since it leaves no trace in the output at all.
+
+#### Interaction with other types
+
+Every column type/shape honors whichever mask is active, including `parquet_string_column` and `parquet_date`/`parquet_time`/`parquet_timestamp` — a masked-out row's own null state (these three carry their null state internally; see [Date, time and timestamp columns](date-time.html)) is simply irrelevant, exactly as for `is_valid` above.

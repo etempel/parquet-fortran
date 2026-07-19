@@ -209,7 +209,23 @@ contains
             new_unittest("date/time/timestamp: streaming (chunked) round-trip across row groups", &
                 test_datetime_chunked_roundtrip), &
             new_unittest("date/time/timestamp: MAML-declared units (incl. utc) preserve precision", &
-                test_datetime_schema_units_roundtrip) &
+                test_datetime_schema_units_roundtrip), &
+            new_unittest("parquet_write_row_mask compacts whole-column writes across multiple columns", &
+                test_mask_row_mask_whole_column), &
+            new_unittest("parquet_write_row_mask produces a genuine zero-row file when every row is masked out", &
+                test_mask_row_mask_whole_column_zero_rows), &
+            new_unittest("parquet_write_row_mask combined with is_valid keeps is_valid indexed pre-mask", &
+                test_mask_row_mask_with_is_valid), &
+            new_unittest("parquet_write_row_mask + row groups auto-windows across .false. runs, incl. a zero-row group", &
+                test_mask_row_mask_row_groups), &
+            new_unittest("parquet_write_chunk_row_mask masks each row group independently, incl. a zero-row group", &
+                test_mask_chunk_row_mask_row_groups), &
+            new_unittest("parquet_write_row_mask on a protected column allows a masked-out Null but not a surviving one", &
+                test_mask_row_mask_protected_cols), &
+            new_unittest("parquet_write_row_mask compacts a masked parquet_date/time/timestamp write", &
+                test_mask_row_mask_temporal), &
+            new_unittest("parquet_write_row_mask compacts a masked parquet_string_column (compact) write", &
+                test_mask_row_mask_string_column_compact) &
             ]
         !
     end subroutine collect_tests_parquet_writing
@@ -3564,5 +3580,287 @@ contains
         call check(error, clock_vec_unit == parquet_unit_millis, &
             "get_column_time_info reports the declared millis unit for a vector TIME32 column")
     end subroutine test_datetime_schema_units_roundtrip
+    !
+    ! ==================================================================================
+    ! Row-filtering ("mask") tests -- parquet_write_row_mask/parquet_write_chunk_row_mask.
+    ! See feature_write_mask.md for the full design; doc/pages/writing.md for the user guide.
+    ! ==================================================================================
+
+    !> parquet_write_row_mask applied to two whole-column writes: dropped rows leave no trace
+    !> (not a Null) and every surviving column ends up with the same, correctly compacted count.
+    subroutine test_mask_row_mask_whole_column(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: ids(5) = [1, 2, 3, 4, 5]
+        real(real64) :: vals(5) = [10.0d0, 20.0d0, 30.0d0, 40.0d0, 50.0d0]
+        logical :: mask(5) = [.true., .false., .true., .false., .true.]
+        integer(int32) :: read_ids(3)
+        real(real64) :: read_vals(3)
+        integer(int64) :: nrows
+        character(len=*), parameter :: out_file = "test_run/test_mask_whole_column.parquet"
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_row_mask(writer, mask)
+        call parquet_write_column(writer, "id", ids)
+        call parquet_write_column(writer, "val", vals)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 3_int64, "expected 3 surviving rows after masking")
+        if (allocated(error)) return
+        call parquet_read_column(reader, "id", read_ids)
+        call parquet_read_column(reader, "val", read_vals)
+        call parquet_close_reader(reader)
+
+        call check(error, all(read_ids == [1, 3, 5]), "masked-out rows were not dropped correctly (id)")
+        if (allocated(error)) return
+        call check(error, all(read_vals == [10.0d0, 30.0d0, 50.0d0]), &
+            "masked-out rows were not dropped correctly (val)")
+    end subroutine test_mask_row_mask_whole_column
+
+    !> A whole-file mask that is entirely .false. produces a genuine zero-row file.
+    subroutine test_mask_row_mask_whole_column_zero_rows(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: ids(3) = [1, 2, 3]
+        logical :: mask(3) = [.false., .false., .false.]
+        integer(int64) :: nrows
+        character(len=*), parameter :: out_file = "test_run/test_mask_whole_column_zero.parquet"
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_row_mask(writer, mask)
+        call parquet_write_column(writer, "id", ids)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+
+        call check(error, nrows == 0_int64, "expected a genuine zero-row file when every row is masked out")
+    end subroutine test_mask_row_mask_whole_column_zero_rows
+
+    !> is_valid stays indexed against the call's own pre-mask buffer: a Null at a masked-out row
+    !> is simply dropped along with that row, while a Null at a surviving row still round-trips.
+    subroutine test_mask_row_mask_with_is_valid(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: ids(4) = [1, 2, 3, 4]
+        logical :: mask(4) = [.true., .false., .true., .true.]
+        logical :: is_valid_in(4) = [.true., .false., .false., .true.]
+        integer(int32) :: read_ids(3)
+        logical :: read_valid(3)
+        character(len=*), parameter :: out_file = "test_run/test_mask_with_is_valid.parquet"
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_row_mask(writer, mask)
+        call parquet_write_column(writer, "id", ids, is_valid=is_valid_in)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "id", read_ids, is_valid=read_valid)
+        call parquet_close_reader(reader)
+
+        ! Surviving rows are 1, 3, 4 (row 2 dropped by the mask, taking its own Null with it).
+        call check(error, read_valid(1) .and. (.not. read_valid(2)) .and. read_valid(3), &
+            "is_valid for the surviving rows was not preserved correctly alongside masking")
+        if (allocated(error)) return
+        call check(error, read_ids(1) == 1 .and. read_ids(3) == 4, "surviving row values were not correct")
+    end subroutine test_mask_row_mask_with_is_valid
+
+    !> The shared whole-file mask (parquet_write_row_mask) used across row groups: nrows passed
+    !> to parquet_new_row_group is the pre-mask window width, the cursor auto-advances by that
+    !> width each call, and a window that happens to be entirely .false. yields a zero-row group
+    !> with no gap/corruption in the surrounding data.
+    subroutine test_mask_row_mask_row_groups(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        ! Mask windows: group1 = positions 1:3 (2 kept), group2 = positions 4:5 (0 kept, both
+        ! false), group3 = positions 6:8 (2 kept) -- deliberately puts the all-false window in
+        ! the middle, between two groups with real data.
+        logical :: mask(8) = [.true., .false., .true., .false., .false., .true., .true., .false.]
+        integer(int32) :: g1(3) = [1, 2, 3], g2(2) = [4, 5], g3(3) = [6, 7, 8]
+        integer(int64) :: nrows
+        integer(int32) :: read_back(4)
+        character(len=*), parameter :: out_file = "test_run/test_mask_row_groups.parquet"
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_row_mask(writer, mask)
+
+        call parquet_new_row_group(writer, 3_int64)
+        call parquet_write_column_chunk(writer, "id", g1)
+        call parquet_finish_row_group(writer)
+
+        call parquet_new_row_group(writer, 2_int64)
+        call parquet_write_column_chunk(writer, "id", g2)
+        call parquet_finish_row_group(writer)
+
+        call parquet_new_row_group(writer, 3_int64)
+        call parquet_write_column_chunk(writer, "id", g3)
+        call parquet_finish_row_group(writer)
+
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 4_int64, "expected 4 surviving rows (2 + 0 + 2) across the three row groups")
+        if (allocated(error)) return
+        call parquet_read_column(reader, "id", read_back)
+        call parquet_close_reader(reader)
+
+        call check(error, all(read_back == [1, 3, 6, 7]), &
+            "surviving row values across the row-group windows were not correct")
+    end subroutine test_mask_row_mask_row_groups
+
+    !> parquet_write_chunk_row_mask: a per-row-group mask (no shared whole-file mask), used for
+    !> every row group including one that is entirely masked out (a legitimate zero-row group,
+    !> with real data in the row groups around it).
+    subroutine test_mask_chunk_row_mask_row_groups(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        logical :: mask1(3) = [.true., .false., .true.]
+        logical :: mask2(2) = [.false., .false.]
+        logical :: mask3(2) = [.true., .true.]
+        integer(int32) :: g1(3) = [1, 2, 3], g2(2) = [4, 5], g3(2) = [6, 7]
+        integer(int64) :: nrows
+        integer(int32) :: read_back(4)
+        character(len=*), parameter :: out_file = "test_run/test_mask_chunk_row_groups.parquet"
+
+        call parquet_open_writer(writer, out_file)
+
+        call parquet_new_row_group(writer, 3_int64)
+        call parquet_write_chunk_row_mask(writer, mask1)
+        call parquet_write_column_chunk(writer, "id", g1)
+        call parquet_finish_row_group(writer)
+
+        call parquet_new_row_group(writer, 2_int64)
+        call parquet_write_chunk_row_mask(writer, mask2)
+        call parquet_write_column_chunk(writer, "id", g2)
+        call parquet_finish_row_group(writer)
+
+        call parquet_new_row_group(writer, 2_int64)
+        call parquet_write_chunk_row_mask(writer, mask3)
+        call parquet_write_column_chunk(writer, "id", g3)
+        call parquet_finish_row_group(writer)
+
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 4_int64, "expected 4 surviving rows (2 + 0 + 2) across the three chunk-masked row groups")
+        if (allocated(error)) return
+        call parquet_read_column(reader, "id", read_back)
+        call parquet_close_reader(reader)
+
+        call check(error, all(read_back == [1, 3, 6, 7]), &
+            "surviving row values across the per-row-group masks were not correct")
+    end subroutine test_mask_chunk_row_mask_row_groups
+
+    !> parquet_check_protected only rejects a Null among *surviving* rows: a Null at a masked-out
+    !> row is irrelevant (it leaves no trace at all), so a protected column may still contain one
+    !> in the pre-mask buffer without aborting.
+    subroutine test_mask_row_mask_protected_cols(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: values(3) = [1, 2, 3]
+        logical :: mask(3) = [.true., .false., .true.]
+        logical :: is_valid_in(3) = [.true., .false., .true.]
+        integer(int32) :: read_back(2)
+        character(len=*), parameter :: out_file = "test_run/test_mask_protected.parquet"
+
+        schema%maml%name = "mask_protected.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: mask_protected_table", &
+            "extra:", &
+            "  protected_cols: a", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32" ]
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_row_mask(writer, mask)
+        ! Row 2 (masked out) carries the only Null -- this must NOT abort, since it never
+        ! actually reaches the file.
+        call parquet_write_column(writer, "a", values, is_valid=is_valid_in)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "a", read_back)
+        call parquet_close_reader(reader)
+
+        call check(error, all(read_back == [1, 3]), &
+            "a protected column with a Null only at a masked-out row should write/read normally")
+    end subroutine test_mask_row_mask_protected_cols
+
+    !> A masked parquet_date/parquet_time/parquet_timestamp write: the temporal types' own
+    !> per-element null state is orthogonal to masking -- a dropped row's null state is simply
+    !> irrelevant, exactly as for is_valid elsewhere.
+    subroutine test_mask_row_mask_temporal(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_date) :: d(4), read_back(2)
+        logical :: mask(4) = [.true., .false., .false., .true.]
+        character(len=*), parameter :: out_file = "test_run/test_mask_temporal.parquet"
+
+        call d(1)%set(2024, 1, 1)
+        call d(2)%set(2024, 2, 2)
+        call d(3)%set_null()
+        call d(4)%set(2024, 4, 4)
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_row_mask(writer, mask)
+        call parquet_write_column(writer, "d", d)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "d", read_back)
+        call parquet_close_reader(reader)
+
+        call check(error, read_back(1) == d(1) .and. read_back(2) == d(4), &
+            "masked parquet_date write did not round-trip the surviving rows correctly")
+    end subroutine test_mask_row_mask_temporal
+
+    !> A masked parquet_string_column (compact) write: rows are dropped by iterating the
+    !> pre-mask column and appending only the kept elements (string or null) into a fresh
+    !> compacted column before the usual compact-string append path.
+    subroutine test_mask_row_mask_string_column_compact(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_string_column) :: col, back
+        logical :: mask(4) = [.true., .false., .true., .false.]
+        character(len=:), allocatable :: s
+        character(len=*), parameter :: out_file = "test_run/test_mask_string_column_compact.parquet"
+
+        call col%append_string("first")
+        call col%append_string("second")
+        call col%append_null()
+        call col%append_string("fourth")
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_row_mask(writer, mask)
+        call parquet_write_column(writer, "name", col)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "name", back)
+        call parquet_close_reader(reader)
+
+        call check(error, back%size() == 2_int64, "expected 2 surviving rows in the masked compact string column")
+        if (allocated(error)) return
+        call back%get(1, s)
+        call check(error, s == "first", "masked compact string write: row 1 content")
+        if (allocated(error)) return
+        call check(error, back%is_null(2), "masked compact string write: row 2 should be the un-masked Null (was row 3)")
+    end subroutine test_mask_row_mask_string_column_compact
     !
 end module test_writing

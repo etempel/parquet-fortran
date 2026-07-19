@@ -163,6 +163,18 @@ call col_name%view_all(table(:)%name)   ! table(i)%name = col_name%view(i), for 
 It aborts if `size(table)` doesn't match `col_name%size()`, rather than silently filling only
 the shorter length. `col_name` must still be a `target`, exactly as for `view`.
 
+`view_slice` is `view_all` restricted to a contiguous row range `[first, last]` (1-based,
+inclusive) — useful for mapping only part of an already-populated column into handles:
+
+```fortran
+type(parquet_string) :: page(10)
+call col_name%view_slice(21_int64, 30_int64, page)   ! page(1) = col_name%view(21), ..., page(10) = col_name%view(30)
+```
+
+It aborts if `size(page)` doesn't match `last - first + 1`, same convention as `view_all`, and
+if `[first, last]` isn't a valid non-empty range within the column (`first < 1`, `last >
+col_name%size()`, or `first > last`).
+
 **Column → row usage / materialization:**
 
 ```fortran
@@ -275,13 +287,31 @@ The same operations are available on a handle: `h%equals(str)`, `h%startswith(pr
 
 ```fortran
 call col%set(i, "new value")   ! replace element i (clears its null status)
+call col%set_null(i)           ! set element i to null, discarding its content
 call col%erase(i)              ! remove element i, shifting later elements down
 call col%append_column(other)  ! append every element (and null) from another column
 ```
 
 `set` is O(length) when the replacement is the same length, otherwise O(N) (it shifts the
-payload tail). `erase` compacts immediately and preserves order (O(N)). `append_column`
+payload tail). `set_null` is `set`'s null counterpart: it shrinks element `i`'s payload to zero
+width and marks it invalid, same O(N) tail-shift cost as a `set` that shortens an element.
+Calling it on an already-null element is a harmless no-op past the first call (`null_count()`
+isn't double-counted). `erase` compacts immediately and preserves order (O(N)). `append_column`
 bulk-copies the payload and merges the validity bitmaps; it never re-trims.
+
+`set_null` is also available on a `parquet_string` handle, as a **write-through**: it mutates the
+*referenced column*, not just the handle, exactly like every other handle accessor resolves live
+against the column rather than holding independent state:
+
+```fortran
+type(parquet_string) :: h
+h = col%view(i)
+call h%set_null()             ! col%is_null(i) is now .true. -- observable through col directly too
+```
+
+This is the intended way to neutralize a handle before it goes stale (e.g. before an `erase`
+shifts indices, or before gathering it with `build_from` below) — see
+[Gathering handles into a column: build_from](#gathering-handles-into-a-column-build_from).
 
 ## Ownership: clone, move, swap
 
@@ -293,6 +323,80 @@ call a%swap(b)         ! exchange contents in O(1); a%swap(b) == b%swap(a)
 
 `move_from` and `swap` move buffers rather than copying them, so transferring gigabytes of
 string data is O(1). `clone` is the only one that copies the payload.
+
+## Extracting a row range: slice
+
+`slice` materializes an independent, owning copy of a contiguous row range `[first, last]`
+(1-based, inclusive) into a destination column — useful for splitting one large, already-populated
+column into row-group-sized pieces for a chunked write:
+
+```fortran
+type(parquet_string_column) :: chunk
+call col%slice(21_int64, 30_int64, chunk)   ! chunk = independent copy of rows 21..30
+```
+
+`dest` (`chunk` above) is cleared first, then filled; `col` itself is left unchanged. Like `clone`,
+`slice` copies the payload bytes (one bulk copy) and rebases the offsets — it is not a zero-copy
+subview, because a subview's offsets would still need rebasing to be usable by anything downstream
+(e.g. the Parquet writer via `raw_buffers`), which costs the same as also copying the bytes, at the
+cost of a dangling-reference hazard if the source column is mutated afterward.
+
+`[first, last]` must be a valid, non-empty range: `first >= 1`, `last <= col%size()`, and
+`first <= last` — there is no "empty slice" call shape, same as `append_string`/`append_null` have
+no no-op mode either.
+
+A `slice` result must be assigned into a local variable before being passed on — `slice` is a
+subroutine, not a function (this module never returns an allocatable-heavy derived type or
+`character(len=:), allocatable` as a function result), so there is no expression form to chain
+inline:
+
+```fortran
+type(parquet_string_column) :: chunk
+integer(int64) :: chunk_start
+
+chunk_start = 1_int64
+do while (chunk_start <= col%size())
+    call col%slice(chunk_start, min(chunk_start + group_size - 1_int64, col%size()), chunk)
+    call parquet_write_column_chunk(writer, "name", chunk)
+    chunk_start = chunk_start + group_size
+end do
+```
+
+Use `view_slice` (see [Mapping a row type](#mapping-a-row-type-the-array-of-structs-pattern)
+above) instead when you only need to read/iterate a range without copying; use `slice` when an
+independent, self-contained buffer is actually needed (e.g. handing a range to the writer, as
+above).
+
+## Gathering handles into a column: build_from
+
+`build_from` is the reverse of `view_all`/`view_slice`: instead of scattering a column's elements
+into an array of handles, it **gathers** an array of independently-obtained `parquet_string`
+handles — potentially referring into different, unrelated columns, or the same column at
+non-contiguous indices — into a single column:
+
+```fortran
+type(parquet_string_column), target :: names
+type(t_row) :: rows(100)
+type(parquet_string_column) :: gathered
+
+! ... rows(:)%name populated via col%view(i) at various points, from various columns ...
+
+call gathered%build_from(rows(:)%name)   ! gathered%get(k) == rows(k)%name%to_string(), for every k
+```
+
+`self` (`gathered` above) is cleared first, then filled in array order; a null handle becomes
+`%append_null()`. Every handle is validated **before** `self` is touched, and aborts on the first
+handle (in array order) that is:
+
+- **an alias of `self` itself** — e.g. `call col%build_from(some_array_of_col_handles)` where
+  the handles were obtained from `col` (via `view`/`view_all`/`view_slice`) and `self` is that
+  same `col`. This is caught deliberately: `build_from` clears `self` before gathering, which
+  would otherwise silently destroy the very data the handles are about to read.
+- **unassociated** — a `parquet_string` that was never bound to a column via `view`.
+- **stale** — a handle whose index no longer exists in its source column (e.g. after an `erase`
+  shifted things). `build_from` does not skip or null out a stale handle on your behalf; call
+  `set_null()` on it explicitly beforehand (see [Modifying a column](#modifying-a-column) above)
+  if you want it to end up as a null row instead of aborting the whole call.
 
 ## Capacity management
 
@@ -341,11 +445,13 @@ lazily, most column operations do **not** invalidate outstanding handles:
 |---|---|
 | `append_string` / `append_null` / `append_column` | **No** (indices unchanged) |
 | `reserve` / `shrink_to_fit` | **No** |
-| `set(i, …)` | No (content of `i` changes; the handle to `i` stays valid) |
-| `get`, `view`, comparisons, `find`, size queries, `print` | No (read-only) |
+| `set(i, …)` / `set_null(i)` | No (content of `i` changes; the handle to `i` stays valid) |
+| `get`, `view`, `view_slice`, comparisons, `find`, size queries, `print` | No (read-only) |
 | `erase(j)` | Handles at index `>= j` (the element is gone/shifted) |
 | `clear` | **Yes** (the column is now empty) |
 | `move_from` / `swap` | **Yes** for handles into the emptied/swapped column |
+| `slice(first, last, dest)` | **Yes** for handles into `dest` (cleared first); handles into the source column are unaffected |
+| `build_from(handles)` (called as `self%build_from(...)`) | **Yes** for handles into `self` (cleared first) — and calling it with a handle that itself aliases `self` aborts rather than silently corrupting it, see [Gathering handles into a column: build_from](#gathering-handles-into-a-column-build_from) |
 | the column going out of scope / being finalized | **Yes** (dangling) |
 
 ## Thread safety
@@ -391,13 +497,15 @@ thread-safety rule that applies.
 | Operation | Complexity |
 |---|---|
 | `size`, `capacity`, `character_size`, `null_count`, `is_null`, `is_empty`, `length`, `view` | O(1) |
-| `view_all` | O(N) |
+| `view_all`, `view_slice` | O(N), O(range length) |
 | `append_string` / `append_null` | amortized O(1) |
 | `append_column(other)` | O(other rows + other chars) |
 | `get(i)` | O(length) |
 | `equals` / `contains` / `startswith` / `endswith` (one element) | O(length) |
 | `find` | O(rows × avg length) |
-| `set` (different length), `erase`, `strip_all`, `trim_all`, `clone`, `to_character`, `shrink_to_fit` | O(N) |
+| `set` (different length), `set_null`, `erase`, `strip_all`, `trim_all`, `clone`, `to_character`, `shrink_to_fit` | O(N) |
+| `slice(first, last, dest)` | O(range length + range chars) |
+| `build_from(handles)` | O(sum of gathered elements' lengths) |
 | `move_from`, `swap`, `clear` | O(1) |
 
 ## Reading and writing compact string columns
@@ -452,13 +560,23 @@ Differences from the padded `character(len=...)` path:
   filled with just the requested row group's rows.
 
 ```fortran
-! streaming write, one row group at a time
+! streaming write, one row group at a time -- names is a larger, already-populated column;
+! slice (see "Extracting a row range: slice" below) carves out one row group at a time
 type(parquet_string_column) :: chunk
+integer(int64) :: chunk_start
 
-call parquet_new_row_group(writer, nrows)
-call chunk%append_string(...)          ! exactly nrows rows for this row group
-call parquet_write_column_chunk(writer, "name", chunk)
-call parquet_finish_row_group(writer)
+chunk_start = 1_int64
+do while (chunk_start <= names%size())
+    block
+        integer(int64) :: chunk_end
+        chunk_end = min(chunk_start + group_size - 1_int64, names%size())
+        call parquet_new_row_group(writer, chunk_end - chunk_start + 1_int64)
+        call names%slice(chunk_start, chunk_end, chunk)   ! exactly this row group's rows
+        call parquet_write_column_chunk(writer, "name", chunk)
+        call parquet_finish_row_group(writer)
+        chunk_start = chunk_end + 1_int64
+    end block
+end do
 
 ! streaming read, one row group at a time
 call parquet_read_column_chunk(reader, "name", row_group, chunk)   ! cleared, then filled

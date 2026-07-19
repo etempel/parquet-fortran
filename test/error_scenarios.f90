@@ -536,6 +536,22 @@ program error_scenarios
         call scenario_string_handle_unassociated()
     case ("string_handle_stale_index")
         call scenario_string_handle_stale_index()
+    case ("string_set_null_unassociated")
+        call scenario_string_set_null_unassociated()
+    case ("string_set_null_stale_index")
+        call scenario_string_set_null_stale_index()
+    case ("string_slice_invalid_range")
+        call scenario_string_slice_invalid_range()
+    case ("string_view_slice_invalid_range")
+        call scenario_string_view_slice_invalid_range()
+    case ("string_view_slice_size_mismatch")
+        call scenario_string_view_slice_size_mismatch()
+    case ("string_build_from_self_alias")
+        call scenario_string_build_from_self_alias()
+    case ("string_build_from_unassociated")
+        call scenario_string_build_from_unassociated()
+    case ("string_build_from_stale_index")
+        call scenario_string_build_from_stale_index()
     case ("string_column_append_buffers_offset_not_zero")
         call scenario_string_column_append_buffers_offset_not_zero()
     case ("string_column_append_buffers_offset_not_zero_int32")
@@ -5360,6 +5376,106 @@ contains
         n = h%length()      ! idx 3 > nrows 1 -> aborts
         print '(a,i0)', "unexpectedly used a stale handle, length=", n
     end subroutine scenario_string_handle_stale_index
+
+    !> parquet_string handle: set_null on an unassociated handle aborts (check_handle), same
+    !! convention as every other handle accessor.
+    subroutine scenario_string_set_null_unassociated()
+        type(parquet_string) :: h
+        call h%set_null()   ! handle never associated with a column -> aborts
+        print '(a)', "unexpectedly called set_null on an unassociated handle"
+    end subroutine scenario_string_set_null_unassociated
+
+    !> parquet_string handle: set_null on a stale handle (index shifted out of range by an erase)
+    !! aborts (check_handle).
+    subroutine scenario_string_set_null_stale_index()
+        type(parquet_string_column), target :: col
+        type(parquet_string) :: h
+        call col%append_string("a")
+        call col%append_string("b")
+        call col%append_string("c")
+        h = col%view(3)
+        call col%erase(1)
+        call col%erase(1)   ! nrows now 1; handle still refers to index 3
+        call h%set_null()   ! idx 3 > nrows 1 -> aborts
+        print '(a)', "unexpectedly called set_null on a stale handle"
+    end subroutine scenario_string_set_null_stale_index
+
+    !> parquet_string_column%slice: first > last is an invalid range (check_range) and aborts --
+    !! there is no valid "empty slice" call shape.
+    subroutine scenario_string_slice_invalid_range()
+        type(parquet_string_column) :: col, dest
+        call col%append_string("a")
+        call col%append_string("b")
+        call col%append_string("c")
+        call col%slice(3_int64, 2_int64, dest)   ! first > last -> aborts
+        print '(a,i0)', "unexpectedly accepted an invalid slice range, dest size=", dest%size()
+    end subroutine scenario_string_slice_invalid_range
+
+    !> parquet_string_column%view_slice: last > self%size() is an invalid range (check_range) and
+    !! aborts -- a distinct call site from slice's own check_range coverage above.
+    subroutine scenario_string_view_slice_invalid_range()
+        type(parquet_string_column), target :: col
+        type(parquet_string) :: handles(3)
+        call col%append_string("a")
+        call col%append_string("b")
+        call col%view_slice(1_int64, 3_int64, handles)   ! last 3 > size() 2 -> aborts
+        print '(a)', "unexpectedly accepted an out-of-range view_slice"
+    end subroutine scenario_string_view_slice_invalid_range
+
+    !> parquet_string_column%view_slice: a data_string array whose size doesn't match
+    !! last-first+1 aborts rather than silently populating only the shorter length -- same
+    !! convention as view_all's own size-mismatch guard.
+    subroutine scenario_string_view_slice_size_mismatch()
+        type(parquet_string_column), target :: col
+        type(parquet_string) :: handles(3)
+        call col%append_string("a")
+        call col%append_string("b")
+        call col%append_string("c")
+        call col%view_slice(1_int64, 2_int64, handles)   ! range size 2, array size 3 -> aborts
+        print '(a)', "unexpectedly filled a mismatched-size view_slice array"
+    end subroutine scenario_string_view_slice_size_mismatch
+
+    !> parquet_string_column%build_from: a handle that aliases the destination column aborts
+    !! before self is cleared -- the exact scenario feature_stringcolumn.md's design flags as
+    !! forbidden (build_from clearing self would otherwise silently destroy the handles' own
+    !! source data before they could be read).
+    subroutine scenario_string_build_from_self_alias()
+        type(parquet_string_column), target :: global_string
+        type(parquet_string) :: my_string_array(2)
+        call global_string%append_string("a")
+        call global_string%append_string("b")
+        my_string_array(1) = global_string%view(1)
+        my_string_array(2) = global_string%view(2)
+        call global_string%build_from(my_string_array)   ! handles alias the destination -> aborts
+        print '(a,i0)', "unexpectedly overwrote a column aliased by its own build_from input, size=", &
+            global_string%size()
+    end subroutine scenario_string_build_from_self_alias
+
+    !> parquet_string_column%build_from: an unassociated handle in the input array is a distinct
+    !! programmer error and aborts before self is cleared.
+    subroutine scenario_string_build_from_unassociated()
+        type(parquet_string_column), target :: src, dest
+        type(parquet_string) :: handles(2)
+        call src%append_string("a")
+        handles(1) = src%view(1)
+        ! handles(2) left unassociated
+        call dest%build_from(handles)
+        print '(a,i0)', "unexpectedly gathered an unassociated handle, dest size=", dest%size()
+    end subroutine scenario_string_build_from_unassociated
+
+    !> parquet_string_column%build_from: a stale handle (index shifted out of range by an erase)
+    !! in the input array aborts before self is cleared -- the caller must explicitly set_null a
+    !! handle before it goes stale (see set_null above), not rely on build_from tolerating it.
+    subroutine scenario_string_build_from_stale_index()
+        type(parquet_string_column), target :: src, dest
+        type(parquet_string) :: handles(1)
+        call src%append_string("a")
+        call src%append_string("b")
+        handles(1) = src%view(2)
+        call src%erase(2)   ! nrows now 1; handle still refers to index 2
+        call dest%build_from(handles)
+        print '(a,i0)', "unexpectedly gathered a stale handle, dest size=", dest%size()
+    end subroutine scenario_string_build_from_stale_index
 
     !> parquet_string_column%append_buffers: a source offsets buffer whose first entry isn't 0
     !! (e.g. straight from a sliced Arrow array, not rebased by the caller) aborts rather than

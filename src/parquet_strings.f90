@@ -82,6 +82,9 @@ module parquet_strings
         procedure, private :: view_i64                 !! int64 specific of view.
         generic :: view => view_i32, view_i64          !! Zero-copy handle to element i.
         procedure :: view_all                          !! One handle per element, in order.
+        procedure, private :: view_slice_i32           !! int32 specific of view_slice.
+        procedure, private :: view_slice_i64           !! int64 specific of view_slice.
+        generic :: view_slice => view_slice_i32, view_slice_i64 !! One handle per row of [first, last].
         procedure, private :: is_null_i32              !! int32 specific of is_null.
         procedure, private :: is_null_i64              !! int64 specific of is_null.
         generic :: is_null => is_null_i32, is_null_i64 !! Whether element i is null.
@@ -92,9 +95,13 @@ module parquet_strings
         procedure :: append_string                     !! Append a string to the end.
         procedure :: append_null                       !! Append a null element to the end.
         procedure :: append_column                     !! Append all elements from another column.
+        procedure :: build_from                        !! Clears self, then gathers an array of handles into it.
         procedure, private :: set_i32                  !! int32 specific of set.
         procedure, private :: set_i64                  !! int64 specific of set.
         generic :: set => set_i32, set_i64             !! Replace the content of element i.
+        procedure, private :: set_null_i32             !! int32 specific of set_null.
+        procedure, private :: set_null_i64             !! int64 specific of set_null.
+        generic :: set_null => set_null_i32, set_null_i64 !! Sets element i to null (discards any content).
         procedure, private :: erase_i32                !! int32 specific of erase.
         procedure, private :: erase_i64                !! int64 specific of erase.
         generic :: erase => erase_i32, erase_i64       !! Remove element i (shifts later elements down).
@@ -117,6 +124,9 @@ module parquet_strings
         ! --- conversion / ownership ---
         procedure :: to_character                      !! Materialize the whole column as a char array.
         procedure :: clone                             !! Independent deep copy.
+        procedure, private :: slice_i32                !! int32 specific of slice.
+        procedure, private :: slice_i64                !! int64 specific of slice.
+        generic :: slice => slice_i32, slice_i64       !! Independent, owning copy of rows [first, last].
         procedure :: move_from                         !! Transfer all buffers from another column.
         procedure :: swap                              !! Exchange contents with another column.
         ! --- diagnostics ---
@@ -144,6 +154,7 @@ module parquet_strings
         procedure :: length => psv_length          !! Length of the referenced string.
         procedure :: is_empty => psv_is_empty       !! Whether the referenced string has zero length.
         procedure :: is_null => psv_is_null         !! Whether the referenced element is null.
+        procedure :: set_null => psv_set_null       !! Sets the referenced column element to null.
         procedure :: to_string => psv_to_string     !! Writes the referenced string into an argument.
         procedure :: equals => psv_equals           !! Exact comparison against str.
         procedure :: contains => psv_contains       !! Substring search for str.
@@ -168,6 +179,17 @@ contains
             error stop EP//"index out of range in "//proc
         end if
     end subroutine check_index
+    !
+    !> Aborts unless [first,last] is a valid, non-empty 1-based inclusive row range within c%nrows.
+    subroutine check_range(c, first, last, proc)
+        type(parquet_string_column), intent(in) :: c !! the column.
+        integer(int64), intent(in) :: first           !! first row of the range (1-based, inclusive).
+        integer(int64), intent(in) :: last            !! last row of the range (1-based, inclusive).
+        character(len=*), intent(in) :: proc          !! calling procedure name (for the message).
+        if (first < 1_int64 .or. last > c%nrows .or. first > last) then
+            error stop EP//"invalid row range in "//proc
+        end if
+    end subroutine check_range
     !
     !> Aborts because a null element was accessed where a non-null was required.
     subroutine fail_null(proc)
@@ -675,6 +697,35 @@ contains
         end do
     end subroutine view_all
     !
+    !> int32 specific of view_slice; see the view_slice generic.
+    subroutine view_slice_i32(self, first, last, data_string)
+        class(parquet_string_column), intent(in), target :: self !! the column (must be a target).
+        integer(int32), intent(in) :: first                       !! first row of the range (1-based, inclusive).
+        integer(int32), intent(in) :: last                        !! last row of the range (1-based, inclusive).
+        type(parquet_string), dimension(:), intent(out) :: data_string !! one handle per row in [first, last].
+        call self%view_slice_i64(int(first, int64), int(last, int64), data_string)
+    end subroutine view_slice_i32
+    !
+    !> int64 specific of view_slice: fills data_string with one zero-copy handle per row of
+    !! [first, last] (1-based, inclusive), in order (data_string(1) = view(first), ...) --
+    !! view_all restricted to a range. Aborts if size(data_string) /= last-first+1, same
+    !! convention as view_all.
+    subroutine view_slice_i64(self, first, last, data_string)
+        class(parquet_string_column), intent(in), target :: self !! the column (must be a target).
+        integer(int64), intent(in) :: first                       !! first row of the range (1-based, inclusive).
+        integer(int64), intent(in) :: last                        !! last row of the range (1-based, inclusive).
+        type(parquet_string), dimension(:), intent(out) :: data_string !! one handle per row in [first, last].
+        integer(int64) :: i, n
+        call check_range(self, first, last, "view_slice")
+        n = last - first + 1_int64
+        if (size(data_string, kind=int64) /= n) then
+            error stop EP//"view_slice: size(data_string) does not match last-first+1"
+        end if
+        do i = 1_int64, n
+            data_string(i) = self%view_i64(first + i - 1_int64)
+        end do
+    end subroutine view_slice_i64
+    !
     !> int32 specific of is_null; see the is_null generic.
     logical function is_null_i32(self, i) result(res)
         class(parquet_string_column), intent(in) :: self !! the column.
@@ -799,6 +850,40 @@ contains
         self%nchars = self%nchars + other%nchars
     end subroutine append_column
     !
+    !> Clears self, then gathers an array of independently-obtained parquet_string handles into it
+    !! (each handle's referenced element becomes one row, in array order; a null handle becomes
+    !! %append_null()). Every handle is validated before self is cleared or otherwise touched:
+    !! aborts if any handle aliases self (self%clear() would corrupt it before it could be read),
+    !! is unassociated, or refers to a stale/out-of-range index. The first handle (in array order)
+    !! that trips any of these three checks (in that priority order) determines the abort message
+    !! -- other handles are not scanned once one is found.
+    subroutine build_from(self, handles)
+        class(parquet_string_column), intent(inout), target :: self !! cleared, then filled from handles.
+        type(parquet_string), intent(in) :: handles(:)               !! source handles, in order.
+        integer(int64) :: k
+        character(len=:), allocatable :: s
+        do k = 1_int64, size(handles, kind=int64)
+            if (associated(handles(k)%col, self)) then
+                error stop EP//"build_from: handle aliases the destination column self"
+            end if
+            if (.not. associated(handles(k)%col)) then
+                error stop EP//"build_from: unassociated handle in input array"
+            end if
+            if (handles(k)%idx < 1_int64 .or. handles(k)%idx > handles(k)%col%nrows) then
+                error stop EP//"build_from: stale or out-of-range handle in input array"
+            end if
+        end do
+        call self%clear()
+        do k = 1_int64, size(handles, kind=int64)
+            if (handles(k)%is_null()) then
+                call self%append_null()
+            else
+                call handles(k)%to_string(s)
+                call self%append_string(s)
+            end if
+        end do
+    end subroutine build_from
+    !
     !> int32 specific of set; see the set generic.
     subroutine set_i32(self, i, str, strip, trim)
         class(parquet_string_column), intent(inout) :: self !! the column.
@@ -855,6 +940,41 @@ contains
             self%n_null = self%n_null - 1_int64
         end if
     end subroutine set_i64
+    !
+    !> int32 specific of set_null; see the set_null generic.
+    subroutine set_null_i32(self, i)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int32), intent(in) :: i                     !! 1-based element index.
+        call self%set_null_i64(int(i, int64))
+    end subroutine set_null_i32
+    !
+    !> int64 specific of set_null: sets element i to null, discarding any existing content (shrinks
+    !! its payload span to zero width, shifting the tail left by the same amount set_i64 would for
+    !! a same-index replacement with a shorter string). Idempotent: calling this on an already-null
+    !! element leaves it null without double-counting null_count().
+    subroutine set_null_i64(self, i)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int64), intent(in) :: i                     !! 1-based element index.
+        integer(int64) :: a, b, old_len, j
+        logical :: was_null
+        call check_index(self, i, "set_null")
+        was_null = .not. bit_valid(self, i)
+        call elem_bounds(self, i, a, b)
+        old_len = b - a + 1_int64
+        if (old_len > 0_int64) then
+            do j = b+1_int64, self%nchars
+                self%data(j-old_len) = self%data(j)
+            end do
+            do j = i+1_int64, self%nrows+1_int64
+                self%offsets(j) = self%offsets(j) - old_len
+            end do
+            self%nchars = self%nchars - old_len
+        end if
+        self%has_nulls = .true.
+        call ensure_validity_cap(self, self%nrows)
+        call set_bit_null(self, i)
+        if (.not. was_null) self%n_null = self%n_null + 1_int64
+    end subroutine set_null_i64
     !
     !> int32 specific of erase; see the erase generic.
     subroutine erase_i32(self, i)
@@ -1232,6 +1352,55 @@ contains
         end if
     end function clone
     !
+    !> int32 specific of slice; see the slice generic.
+    subroutine slice_i32(self, first, last, dest)
+        class(parquet_string_column), intent(in) :: self  !! the source column.
+        integer(int32), intent(in) :: first                !! first row of the range (1-based, inclusive).
+        integer(int32), intent(in) :: last                 !! last row of the range (1-based, inclusive).
+        type(parquet_string_column), intent(inout) :: dest !! cleared, then filled with rows [first, last].
+        call self%slice_i64(int(first, int64), int(last, int64), dest)
+    end subroutine slice_i32
+    !
+    !> int64 specific of slice: materializes an independent, owning copy of rows [first, last]
+    !! (1-based, inclusive) into dest -- one bulk data memcpy, one vectorized offset-rebase loop,
+    !! and one validity-bitmap slice, same overall shape as append_column but scoped to the range.
+    !! dest is cleared first; self is left unchanged.
+    subroutine slice_i64(self, first, last, dest)
+        class(parquet_string_column), intent(in) :: self  !! the source column.
+        integer(int64), intent(in) :: first                !! first row of the range (1-based, inclusive).
+        integer(int64), intent(in) :: last                 !! last row of the range (1-based, inclusive).
+        type(parquet_string_column), intent(inout) :: dest !! cleared, then filled with rows [first, last].
+        integer(int64) :: n, base, k, a, b
+        call check_range(self, first, last, "slice")
+        n = last - first + 1_int64
+        call dest%clear()
+        call ensure_offsets_cap(dest, n)
+        base = self%offsets(first)
+        a = base + 1_int64
+        b = self%offsets(last+1_int64)
+        if (b >= a) then
+            call ensure_data_cap(dest, b - a + 1_int64)
+            dest%data(1_int64 : b-a+1_int64) = self%data(a:b)
+        end if
+        do k = 1_int64, n
+            dest%offsets(k+1_int64) = self%offsets(first+k) - base
+        end do
+        if (self%has_nulls) then
+            dest%has_nulls = .true.
+            call ensure_validity_cap(dest, n)
+            do k = 1_int64, n
+                if (bit_valid(self, first+k-1_int64)) then
+                    call set_bit_valid(dest, k)
+                else
+                    call set_bit_null(dest, k)
+                    dest%n_null = dest%n_null + 1_int64
+                end if
+            end do
+        end if
+        dest%nrows = n
+        dest%nchars = b - base
+    end subroutine slice_i64
+    !
     !> Transfers all buffers from `other` into self, leaving `other` a valid empty column. Self's
     !! previous contents are released. Self-move (move_from with the same object) is a no-op.
     subroutine move_from(self, other)
@@ -1489,6 +1658,15 @@ contains
         call check_handle(self, "is_null")
         res = self%col%is_null_i64(self%idx)
     end function psv_is_null
+    !
+    !> Sets the referenced element to null (write-through: mutates the underlying column, not
+    !! just this handle -- consistent with every other parquet_string accessor resolving live
+    !! against the referenced column rather than holding independent state).
+    subroutine psv_set_null(self)
+        class(parquet_string), intent(in) :: self !! the handle.
+        call check_handle(self, "set_null")
+        call self%col%set_null_i64(self%idx)
+    end subroutine psv_set_null
     !
     !> Writes the referenced string into `res`. A null element error stops by default; pass
     !! `null_value` to substitute a string, or `allow_null=.true.` to suppress the abort and

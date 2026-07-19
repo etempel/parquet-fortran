@@ -30,6 +30,7 @@ contains
             new_unittest("null_value and allow_null on get", test_null_options), &
             new_unittest("strip/trim options on append", test_strip_trim), &
             new_unittest("set (same-length, longer, shorter, clears null)", test_set), &
+            new_unittest("set_null (column-level and handle write-through)", test_set_null), &
             new_unittest("erase preserves order and compacts", test_erase), &
             new_unittest("append_column merges payload and nulls", test_append_column), &
             new_unittest("find (exact, trimmed, reverse, absent)", test_find), &
@@ -37,6 +38,9 @@ contains
             new_unittest("view handle basics", test_view_handle), &
             new_unittest("handle survives appends (AoS pattern)", test_handle_survives_append), &
             new_unittest("view_all fills one handle per element", test_view_all), &
+            new_unittest("view_slice fills one handle per row of a range", test_view_slice), &
+            new_unittest("slice extracts an owning copy of a row range", test_slice), &
+            new_unittest("build_from gathers an array of handles into a column", test_build_from), &
             new_unittest("to_character materialization + null_value", test_to_character), &
             new_unittest("clone is an independent deep copy", test_clone_independence), &
             new_unittest("move_from empties source; swap exchanges", test_move_and_swap), &
@@ -198,6 +202,45 @@ contains
         if (allocated(error)) return
         call check(error, col%validate(), "invariants hold")
     end subroutine test_set
+    !
+    subroutine test_set_null(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column), target :: col
+        type(parquet_string) :: h
+        character(len=:), allocatable :: s1, s3
+        call col%append_string("aa")
+        call col%append_string("bb")
+        call col%append_string("cc")
+        call col%set_null(2_int64)
+        call check(error, col%is_null(2), "set_null marks element null")
+        if (allocated(error)) return
+        call check(error, col%length(2) == 0, "set_null shrinks length to 0")
+        if (allocated(error)) return
+        call check(error, col%null_count() == 1, "null_count reflects set_null")
+        if (allocated(error)) return
+        call col%get(1, s1)
+        call col%get(3, s3)
+        call check(error, s1 == "aa" .and. s3 == "cc", "neighbours intact after set_null")
+        if (allocated(error)) return
+        ! idempotent: calling set_null again on an already-null element doesn't double-count
+        call col%set_null(2_int64)
+        call check(error, col%null_count() == 1, "set_null idempotent, no double count")
+        if (allocated(error)) return
+        call check(error, col%validate(), "invariants hold after set_null")
+        if (allocated(error)) return
+        ! handle write-through: mutating via a view mutates the underlying column, not just the view
+        h = col%view(1_int64)
+        call h%set_null()
+        call check(error, col%is_null(1), "handle set_null writes through to the column")
+        if (allocated(error)) return
+        call check(error, h%is_null(), "handle itself now observes null too")
+        if (allocated(error)) return
+        call check(error, col%null_count() == 2, "null_count after handle set_null")
+        if (allocated(error)) return
+        ! dual-kind: int32 index
+        call col%set_null(3_int32)
+        call check(error, col%is_null(3), "set_null with int32 index")
+    end subroutine test_set_null
     !
     subroutine test_erase(error)
         type(error_type), allocatable, intent(out) :: error
@@ -445,6 +488,114 @@ contains
         call rows(4)%name%to_string(s)
         call check(error, s == "dave", "view_all element 4")
     end subroutine test_view_all
+    !
+    subroutine test_view_slice(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column), target :: col
+        type(parquet_string) :: hs(3), href
+        character(len=:), allocatable :: s1, s2
+        call col%append_string("a")
+        call col%append_string("bb")
+        call col%append_null()
+        call col%append_string("dddd")
+        call col%view_slice(2_int64, 4_int64, hs)
+        call check(error, hs(1)%length() == 2, "view_slice row 1 length")
+        if (allocated(error)) return
+        call check(error, hs(2)%is_null(), "view_slice row 2 null")
+        if (allocated(error)) return
+        call hs(3)%to_string(s1)
+        call check(error, s1 == "dddd", "view_slice row 3 content")
+        if (allocated(error)) return
+        ! matches view(i) for the same index
+        href = col%view(4_int64)
+        call href%to_string(s2)
+        call check(error, s1 == s2, "view_slice matches view(i) for the same index")
+        if (allocated(error)) return
+        ! int32 kind entry point
+        call col%view_slice(1_int32, 2_int32, hs(1:2))
+        call check(error, hs(1)%length() == 1, "view_slice int32 kind row 1")
+        if (allocated(error)) return
+        call hs(2)%to_string(s1)
+        call check(error, s1 == "bb", "view_slice int32 kind row 2")
+    end subroutine test_view_slice
+    !
+    subroutine test_slice(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: col, chunk
+        character(len=:), allocatable :: s
+        call col%append_string("a")
+        call col%append_string("bb")
+        call col%append_null()
+        call col%append_string("dddd")
+        call col%append_string("e")
+        ! mid-range slice [2,4]
+        call col%slice(2_int64, 4_int64, chunk)
+        call check(error, chunk%size() == 3, "slice size")
+        if (allocated(error)) return
+        call chunk%get(1, s)
+        call check(error, s == "bb", "slice row 1")
+        if (allocated(error)) return
+        call check(error, chunk%is_null(2), "slice row 2 null")
+        if (allocated(error)) return
+        call chunk%get(3, s)
+        call check(error, s == "dddd", "slice row 3")
+        if (allocated(error)) return
+        call check(error, chunk%validate(), "slice invariants hold")
+        if (allocated(error)) return
+        call check(error, col%size() == 5, "source unchanged by slice")
+        if (allocated(error)) return
+        ! full-column slice
+        call col%slice(1_int64, col%size(), chunk)
+        call check(error, chunk%size() == 5, "full-range slice size")
+        if (allocated(error)) return
+        ! single-element slice
+        call col%slice(5_int64, 5_int64, chunk)
+        call check(error, chunk%size() == 1, "single-element slice size")
+        if (allocated(error)) return
+        call chunk%get(1, s)
+        call check(error, s == "e", "single-element slice content")
+        if (allocated(error)) return
+        ! int32 kind entry point
+        call col%slice(2_int32, 3_int32, chunk)
+        call check(error, chunk%size() == 2, "slice int32 kind size")
+        if (allocated(error)) return
+        call chunk%get(1, s)
+        call check(error, s == "bb", "slice int32 kind content")
+    end subroutine test_slice
+    !
+    subroutine test_build_from(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column), target :: src, src2, dest
+        type(parquet_string) :: handles(4)
+        character(len=:), allocatable :: s
+        call src%append_string("alice")
+        call src%append_null()
+        call src%append_string("carol")
+        call src2%append_string("zeta")
+        handles(1) = src%view(3_int64)   ! "carol"
+        handles(2) = src%view(2_int64)   ! null
+        handles(3) = src%view(1_int64)   ! "alice"
+        handles(4) = src2%view(1_int64)  ! "zeta" -- from a different source column
+        ! pre-populate dest with unrelated content to verify build_from clears it first
+        call dest%append_string("stale")
+        call dest%build_from(handles)
+        call check(error, dest%size() == 4, "build_from gathered size")
+        if (allocated(error)) return
+        call dest%get(1, s)
+        call check(error, s == "carol", "build_from row 1")
+        if (allocated(error)) return
+        call check(error, dest%is_null(2), "build_from row 2 null")
+        if (allocated(error)) return
+        call dest%get(3, s)
+        call check(error, s == "alice", "build_from row 3")
+        if (allocated(error)) return
+        call dest%get(4, s)
+        call check(error, s == "zeta", "build_from row 4, from a different source column")
+        if (allocated(error)) return
+        call check(error, dest%null_count() == 1, "build_from null_count")
+        if (allocated(error)) return
+        call check(error, dest%validate(), "build_from invariants hold")
+    end subroutine test_build_from
     !
     subroutine test_to_character(error)
         type(error_type), allocatable, intent(out) :: error

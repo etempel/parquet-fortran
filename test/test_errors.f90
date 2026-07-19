@@ -437,6 +437,22 @@ contains
                 test_string_handle_unassociated_aborts), &
             new_unittest("parquet_string stale handle index aborts", &
                 test_string_handle_stale_index_aborts), &
+            new_unittest("parquet_string set_null on an unassociated handle aborts", &
+                test_string_set_null_unassociated_aborts), &
+            new_unittest("parquet_string set_null on a stale handle aborts", &
+                test_string_set_null_stale_index_aborts), &
+            new_unittest("parquet_string_column slice with first > last aborts", &
+                test_string_slice_invalid_range_aborts), &
+            new_unittest("parquet_string_column view_slice with an out-of-range last aborts", &
+                test_string_view_slice_invalid_range_aborts), &
+            new_unittest("parquet_string_column view_slice with a mismatched-size array aborts", &
+                test_string_view_slice_size_mismatch_aborts), &
+            new_unittest("parquet_string_column build_from with a self-aliasing handle aborts", &
+                test_string_build_from_self_alias_aborts), &
+            new_unittest("parquet_string_column build_from with an unassociated handle aborts", &
+                test_string_build_from_unassociated_aborts), &
+            new_unittest("parquet_string_column build_from with a stale handle aborts", &
+                test_string_build_from_stale_index_aborts), &
             new_unittest("parquet_string_column append_buffers with un-rebased offsets aborts", &
                 test_string_column_append_buffers_offset_not_zero_aborts), &
             new_unittest("parquet_string_column append_buffers with un-rebased int32 offsets aborts", &
@@ -612,6 +628,62 @@ contains
             failure_message="using a parquet_string handle whose index no longer exists was expected to abort", &
             required_stderr="parquet_strings: string handle index out of range (column changed?) in length")
     end subroutine test_string_handle_stale_index_aborts
+
+    subroutine test_string_set_null_unassociated_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_set_null_unassociated", expect_abort=.true., &
+            failure_message="set_null on an unassociated parquet_string handle was expected to abort", &
+            required_stderr="parquet_strings: unassociated string handle in set_null")
+    end subroutine test_string_set_null_unassociated_aborts
+
+    subroutine test_string_set_null_stale_index_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_set_null_stale_index", expect_abort=.true., &
+            failure_message="set_null on a stale parquet_string handle was expected to abort", &
+            required_stderr="parquet_strings: string handle index out of range (column changed?) in set_null")
+    end subroutine test_string_set_null_stale_index_aborts
+
+    subroutine test_string_slice_invalid_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_slice_invalid_range", expect_abort=.true., &
+            failure_message="slice with first > last was expected to abort", &
+            required_stderr="parquet_strings: invalid row range in slice")
+    end subroutine test_string_slice_invalid_range_aborts
+
+    subroutine test_string_view_slice_invalid_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_view_slice_invalid_range", expect_abort=.true., &
+            failure_message="view_slice with last > self%size() was expected to abort", &
+            required_stderr="parquet_strings: invalid row range in view_slice")
+    end subroutine test_string_view_slice_invalid_range_aborts
+
+    subroutine test_string_view_slice_size_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_view_slice_size_mismatch", expect_abort=.true., &
+            failure_message="view_slice with a mismatched-size data_string array was expected to abort", &
+            required_stderr="parquet_strings: view_slice: size(data_string) does not match last-first+1")
+    end subroutine test_string_view_slice_size_mismatch_aborts
+
+    subroutine test_string_build_from_self_alias_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_build_from_self_alias", expect_abort=.true., &
+            failure_message="build_from with a handle aliasing the destination column was expected to abort", &
+            required_stderr="parquet_strings: build_from: handle aliases the destination column self")
+    end subroutine test_string_build_from_self_alias_aborts
+
+    subroutine test_string_build_from_unassociated_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_build_from_unassociated", expect_abort=.true., &
+            failure_message="build_from with an unassociated handle in the input array was expected to abort", &
+            required_stderr="parquet_strings: build_from: unassociated handle in input array")
+    end subroutine test_string_build_from_unassociated_aborts
+
+    subroutine test_string_build_from_stale_index_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_build_from_stale_index", expect_abort=.true., &
+            failure_message="build_from with a stale handle in the input array was expected to abort", &
+            required_stderr="parquet_strings: build_from: stale or out-of-range handle in input array")
+    end subroutine test_string_build_from_stale_index_aborts
 
     subroutine test_string_column_append_buffers_offset_not_zero_aborts(error)
         type(error_type), allocatable, intent(out) :: error

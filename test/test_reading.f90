@@ -891,7 +891,7 @@ contains
 
     subroutine test_get_library_version(error)
         type(error_type), allocatable, intent(out) :: error
-        character(len=:), allocatable :: ver_string, explicit_ver_string, internal_ver_string
+        character(len=:), allocatable :: ver_string, internal_ver_string, arrow_ver_string, parquet_ver_string
 
         call parquet_get_version(ver_string)
 
@@ -901,31 +901,60 @@ contains
             return
         end if
 
-        ! internal=.false. is the explicit form of the default (release number
-        ! only, no v prefix); it must return exactly what the no-argument call
-        ! above does, exercising the else branch in parquet_get_version.
-        call parquet_get_version(explicit_ver_string, internal=.false.)
-
-        call check(error, explicit_ver_string == ver_string)
-        if (allocated(error)) then
-            call test_failed(error, "parquet_get_version(internal=.false.) did not match the default (no-argument) form")
-            return
-        end if
-
-        ! internal=.true. returns the full internal version string (e.g.
+        ! mode="internal" returns the full internal version string (e.g.
         ! "v0.9.0 (2026-07-11)": v-prefixed, with a trailing date), as opposed
-        ! to the default release-number-only form (e.g. "0.9.0") -- see the
-        ! parquet_get_version entry in MANUAL.md's "parquet module API".
-        call parquet_get_version(internal_ver_string, internal=.true.)
+        ! to the default release-number-only form (e.g. "0.9.0").
+        call parquet_get_version(internal_ver_string, mode="internal")
 
         call check(error, len_trim(internal_ver_string) > 0 .and. internal_ver_string(1:1) == "v" .and. &
             index(internal_ver_string, "(") > 0)
         if (allocated(error)) then
-            call test_failed(error, "parquet_get_version(internal=.true.) did not return a v-prefixed, " // &
+            call test_failed(error, "parquet_get_version(mode='internal') did not return a v-prefixed, " // &
                 "dated internal version string")
             return
         end if
+
+        ! mode="arrow"/mode="parquet" each format major.minor.patch from the linked Arrow/Parquet
+        ! C++ libraries -- the actual numbers vary by build, so just check the format.
+        call parquet_get_version(arrow_ver_string, mode="arrow")
+
+        call check(error, is_dotted_version_triplet(arrow_ver_string))
+        if (allocated(error)) then
+            call test_failed(error, "parquet_get_version(mode='arrow') did not return a major.minor.patch string, got '" // &
+                arrow_ver_string // "'")
+            return
+        end if
+
+        call parquet_get_version(parquet_ver_string, mode="parquet")
+
+        call check(error, is_dotted_version_triplet(parquet_ver_string))
+        if (allocated(error)) then
+            call test_failed(error, "parquet_get_version(mode='parquet') did not return a major.minor.patch string, got '" // &
+                parquet_ver_string // "'")
+            return
+        end if
     end subroutine test_get_library_version
+
+    !> True if `text` matches \d+\.\d+\.\d+ (a plain major.minor.patch version string).
+    function is_dotted_version_triplet(text) result(is_match)
+        character(len=*), intent(in) :: text !! candidate version string.
+        logical :: is_match !! .true. if text is three dot-separated non-empty digit runs.
+        integer :: dot1, dot2, k
+
+        is_match = .false.
+        dot1 = index(text, ".")
+        if (dot1 < 2) return
+        dot2 = index(text(dot1+1:), ".")
+        if (dot2 < 2) return
+        dot2 = dot1 + dot2
+        if (dot2 >= len_trim(text)) return
+
+        do k = 1, len_trim(text)
+            if (k == dot1 .or. k == dot2) cycle
+            if (text(k:k) < "0" .or. text(k:k) > "9") return
+        end do
+        is_match = .true.
+    end function is_dotted_version_triplet
 
     subroutine test_get_parquet_maml_examples(error)
         type(error_type), allocatable, intent(out) :: error

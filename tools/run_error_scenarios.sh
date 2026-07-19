@@ -381,6 +381,7 @@ scenarios=(
     "temporal_chunk_column_not_defined:1"
     "temporal_chunk_array_size_mismatch:1"
     "temporal_chunk_type_mismatch:1"
+    "get_version_invalid_mode:1"
 )
 
 # concurrent_calls_into_shared_reader/writer are deliberately not in the list

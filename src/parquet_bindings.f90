@@ -20,6 +20,7 @@ module parquet_bindings
     public :: parquet_reader_print_stat
     public :: parquet_set_writer_options
     public :: parquet_set_thread_pool_capacity
+    public :: parquet_get_arrow_version, parquet_get_parquet_version
     public :: parquet_maml_lock, parquet_maml_unlock
     public :: parquet_warmup_memory_pool
     public :: parquet_add_column_metadata, parquet_add_table_metadata
@@ -107,6 +108,24 @@ module parquet_bindings
                 bind(C, name="parquet_set_max_threads")
             import
             integer(c_int), value :: n
+        end subroutine
+
+        !> Reports the actually-linked Arrow library's runtime version.
+        subroutine parquet_get_arrow_version(major, minor, patch) &
+                bind(C, name="parquet_get_arrow_version")
+            import
+            integer(c_int), intent(out) :: major !! major version number.
+            integer(c_int), intent(out) :: minor !! minor version number.
+            integer(c_int), intent(out) :: patch !! patch version number.
+        end subroutine
+
+        !> Reports the compile-time Parquet C++ library version.
+        subroutine parquet_get_parquet_version(major, minor, patch) &
+                bind(C, name="parquet_get_parquet_version")
+            import
+            integer(c_int), intent(out) :: major !! major version number.
+            integer(c_int), intent(out) :: minor !! minor version number.
+            integer(c_int), intent(out) :: patch !! patch version number.
         end subroutine
 
         !> Acquires the process-wide mutex guarding non-reentrant Fortran-side

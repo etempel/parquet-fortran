@@ -188,10 +188,9 @@ GitHub Pages) are now confirmed working end-to-end. What's left, in order:
    inline procedure-name mentions (plain backtick spans today); a favicon/logo for `doc/media/`
    (exists, currently empty besides a `.gitkeep`).
 
-## MAML fixture directory: `schemas/` (renamed from `docs/`)
+## MAML fixture directory: `schemas/`
 
-`.maml` example/fixture files live in `schemas/`, not `docs/` (renamed to avoid confusion with
-`doc/`, FORD's `page_dir`/`media_dir`). `tools/generate_parquet_maml.sh` accepts
+`.maml` example/fixture files live in `schemas/`. `tools/generate_parquet_maml.sh` accepts
 `--dir=<name>`/`--dir <name>` (default `schemas`) so downstream projects embedding their own
 MAML schemas aren't forced to match this project's convention — see
 `doc/pages/embedding-maml-schemas.md` for the user-facing how-to.
@@ -232,7 +231,7 @@ uncommitted in the working tree for them to review and commit. (This is specific
 main/default branch; it doesn't apply to work you've been asked to do inside your own
 throwaway branch/worktree, if any.)
 
-## The `parquet_strings` module (standalone, not yet integrated)
+## The `parquet_strings` module
 
 `src/parquet_strings.f90` is an independent module (`use parquet_strings`; depends only on
 `iso_fortran_env`/`iso_c_binding`) providing `parquet_string_column` (Arrow-LargeUtf8-style
@@ -243,16 +242,19 @@ one element). User guide: `doc/pages/string-columns.md`.
   name in gfortran (`public :: parquet_string` binds to the module, and the type declaration
   then conflicts). The user-facing *type* is `parquet_string`, so the *module* had to differ —
   do not "fix" the plural back to `parquet_string`.
-- **It is deliberately NOT wired into the library yet.** The two interop hooks
+- **It is wired into the library.** `parquet_string_column` is a specific of
+  `parquet_write_column`/`parquet_write_column_chunk`/`parquet_read_column`/
+  `parquet_read_column_chunk`, going through new C++ entry points that pass offsets+data+validity
+  directly (`parquet_append_string_column_buffers` write-side, the buffer-fill counterpart
+  read-side — see `parquet_bindings.f90`) rather than the legacy fixed-width, space-padded block
+  (`parquet_append_string_column`/`parquet_read_string_column`) every other string path still
+  uses. This write path does **not** trim (the column stores bytes verbatim by default; the
+  padded path trims because padding is indistinguishable from real trailing spaces). Scope is
+  scalar 1-D string columns only — there is no vector/matrix `parquet_string_column` specific;
+  vector/matrix string columns stay on the legacy padded path. The two interop hooks
   `raw_buffers` (export c_loc pointers for a writer) and `append_buffers` (bulk-append one row
-  group from C buffers, int32/int64 offsets + validity merge) are the extension points for a
-  future `parquet_read_column`/`parquet_write_column` integration. When integrating: the current
-  Fortran↔C++ string boundary is a fixed-width, space-padded block (`parquet_read_string_column`/
-  `parquet_append_string_column`), so efficient support needs NEW C++ entry points that pass
-  offsets+data+validity directly — and the write path **must not trim** (the column stores bytes
-  verbatim by default; the padded path trims because padding is indistinguishable from real
-  trailing spaces). Scope is scalar 1-D string columns only; vector/matrix string columns stay on
-  the legacy padded path.
+  group from C buffers, int32/int64 offsets + validity merge) are what this integration is built
+  on.
 - **`allow_null=.true.` on `get`/`to_string` returns an empty string, not unallocated** — see the
   gfortran note in "Build and compiler notes" below.
 
@@ -610,10 +612,17 @@ genuine gap), then exclude with a comment rather than spending more time chasing
 
 ## Regression tests for "sized/typed from the first element" bugs
 
-When writing a regression test for a bug where a value/size/length was incorrectly derived
-from the first element of an array/vector column (e.g. the string-vector-column tests in
+This bug class specifically affects **character vectors/arrays**: a fixed per-element length
+gets derived from the *first* element's own length instead of the true maximum, silently
+truncating every later, longer element. E.g. for a string vector `['a', 'bc', 'cd']`, if the
+length is (incorrectly) derived from the first element `'a'` (length 1), the second and third
+elements arrive truncated to `'b'` and `'c'`.
+
+When writing a regression test for this bug class (e.g. the string-vector-column tests in
 `test/test_reading.f90` — `test_read_string_vector_short_first`), construct the fixture so
-the first element is deliberately the extreme/shortest case and a later element is longer.
+the first element is deliberately the extreme/shortest case and a later element is longer —
+i.e. whenever a test needs to provide a string array, deliberately make the *first* element the
+shortest one, to actively try to trigger this bug rather than merely avoid it by accident.
 A fixture where the first element happens to be the longest (or same-length) can pass even
 if the underlying bug is still present.
 

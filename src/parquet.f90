@@ -2972,16 +2972,22 @@ module parquet
 
 contains
 
-    !> Returns the library version. Default: the RELEASE_VERSION build macro's
-    !> bare release number; prints a WARNING to stdout first if that disagrees
-    !> with cversion (a hand-maintained "vX.Y.Z (date)" string), which signals
-    !> a build that skipped fpm's macro substitution or a version bump missed
-    !> on one side. internal=.true. instead returns cversion verbatim.
-    subroutine parquet_get_version(ver_string, internal)
+    !> Returns a version string. Default (mode absent): the RELEASE_VERSION build
+    !> macro's bare release number; prints a WARNING to stdout first if that
+    !> disagrees with cversion (a hand-maintained "vX.Y.Z (date)" string), which
+    !> signals a build that skipped fpm's macro substitution or a version bump
+    !> missed on one side. mode="internal" instead returns cversion verbatim.
+    !> mode="arrow"/mode="parquet" return the actually-linked Arrow library's
+    !> runtime version, respectively the compile-time Parquet C++ library
+    !> version, each formatted "major.minor.patch". Any other mode value is an
+    !> error.
+    subroutine parquet_get_version(ver_string, mode)
         implicit none
         character(len=:), allocatable, intent(out) :: ver_string !! resulting version string.
-        logical, intent(in), optional :: internal !! .true. returns cversion verbatim instead of RELEASE_VERSION.
+        character(len=*), intent(in), optional :: mode !! "internal" | "arrow" | "parquet"; absent = default RELEASE_VERSION behavior.
         integer :: i
+        integer(c_int) :: major, minor, patch
+        character(len=32) :: buf
         !
 ! Accept solution from https://stackoverflow.com/questions/31649691/stringify-macro-with-gnu-gfortran
 ! which provides the easiest way to pass a macro to a string in Fortran complying with both
@@ -3001,17 +3007,29 @@ contains
         i = index(cversion, " ")
         !
         if (cversion(2:i-1) /= ver_string) then ! GCOVR_EXCL_START -- gcov attribution artifact
-            write(*,*) "WARNING: using developmentparquet-fortran library!"
+            write(*,*) "WARNING: using development parquet-fortran library!"
             write(*,*) "         library version: ", trim(cversion)
             write(*,*) "         RELEASE_VERSION: ", trim(ver_string)
         end if ! GCOVR_EXCL_STOP
         !
-        if (present(internal)) then
-            if (internal) then
+        if (present(mode)) then
+            select case (mode)
+            case ("internal")
                 ver_string = trim(cversion)
-            else
-                ver_string = trim(ver_string)
-            end if
+            case ("arrow")
+                call parquet_get_arrow_version(major, minor, patch)
+                write(buf, '(i0,".",i0,".",i0)') major, minor, patch
+                ver_string = trim(buf)
+            case ("parquet")
+                call parquet_get_parquet_version(major, minor, patch)
+                write(buf, '(i0,".",i0,".",i0)') major, minor, patch
+                ver_string = trim(buf)
+            case default
+                error stop "parquet_get_version: invalid mode '" // mode // &
+                    "' (must be 'internal', 'arrow', or 'parquet')"
+            end select
+        else
+            ver_string = trim(ver_string)
         end if
         !
     end subroutine parquet_get_version

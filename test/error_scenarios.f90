@@ -688,6 +688,8 @@ program error_scenarios
         call scenario_temporal_chunk_array_size_mismatch()
     case ("temporal_chunk_type_mismatch")
         call scenario_temporal_chunk_type_mismatch()
+    case ("get_version_invalid_mode")
+        call scenario_get_version_invalid_mode()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -6141,5 +6143,13 @@ contains
         call parquet_write_column_chunk(writer, "day", values)   ! timestamp values into a date column -> aborts
         print '(a)', "unexpectedly chunk-wrote a timestamp array into a date column"
     end subroutine scenario_temporal_chunk_type_mismatch
+
+    !> parquet_get_version(mode=...) rejects any value other than "internal"/"arrow"/"parquet".
+    subroutine scenario_get_version_invalid_mode()
+        character(len=:), allocatable :: ver_string
+
+        call parquet_get_version(ver_string, mode="bogus")
+        print '(a)', "unexpectedly returned a version string for an invalid mode"
+    end subroutine scenario_get_version_invalid_mode
 
 end program error_scenarios

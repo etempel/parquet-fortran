@@ -19,6 +19,7 @@
 #include <parquet/arrow/reader.h>
 #include <parquet/arrow/schema.h>
 #include <parquet/arrow/writer.h>
+#include <parquet/parquet_version.h>
 
 // Arrow's vendored copy of Howard Hinnant's date library (date.h only -- deliberately not
 // datetime.h, whose tz.h part would drag in the timezone database): used solely by the
@@ -2329,6 +2330,27 @@ extern "C"
 			throw std::runtime_error(status.ToString());
 		}
 		// GCOVR_EXCL_STOP
+	}
+
+	// Reports the actually-linked Arrow library's runtime version (arrow::GetBuildInfo(),
+	// not just what fpm compiled against) -- used by parquet.f90's parquet_get_version(mode="arrow").
+	void parquet_get_arrow_version(int *major, int *minor, int *patch)
+	{
+		const auto &info = arrow::GetBuildInfo();
+		*major = info.version_major;
+		*minor = info.version_minor;
+		*patch = info.version_patch;
+	}
+
+	// Reports the compile-time Parquet C++ version (PARQUET_VERSION_MAJOR/MINOR/PATCH macros --
+	// parquet-cpp has no GetBuildInfo()-style runtime call). Parquet C++ ships in lockstep with
+	// Arrow from the same monorepo release, so these macros track the linked library reliably.
+	// Used by parquet.f90's parquet_get_version(mode="parquet").
+	void parquet_get_parquet_version(int *major, int *minor, int *patch)
+	{
+		*major = PARQUET_VERSION_MAJOR;
+		*minor = PARQUET_VERSION_MINOR;
+		*patch = PARQUET_VERSION_PATCH;
 	}
 
 	// Opens the file and parses its footer/schema only -- no column's actual

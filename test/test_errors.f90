@@ -537,7 +537,9 @@ contains
             new_unittest("chunk-writing a temporal vector column with the wrong col_size aborts", &
                 test_temporal_chunk_array_size_mismatch_aborts), &
             new_unittest("chunk-writing a temporal column of the wrong data_type aborts", &
-                test_temporal_chunk_type_mismatch_aborts) &
+                test_temporal_chunk_type_mismatch_aborts), &
+            new_unittest("parquet_get_version with an invalid mode aborts", &
+                test_get_version_invalid_mode_aborts) &
             ]
     end subroutine collect_tests_parquet_errors
 
@@ -2974,6 +2976,13 @@ contains
             failure_message="chunk-writing a timestamp array into a date-declared column was expected to abort", &
             required_stderr="parquet_write_column_chunk: type mismatch for column day")
     end subroutine test_temporal_chunk_type_mismatch_aborts
+
+    subroutine test_get_version_invalid_mode_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "get_version_invalid_mode", expect_abort=.true., &
+            failure_message="parquet_get_version with an unrecognized mode was expected to abort", &
+            required_stderr="parquet_get_version: invalid mode 'bogus'")
+    end subroutine test_get_version_invalid_mode_aborts
     !
     ! Note: the temporal_foreign_int96_roundtrip/temporal_foreign_tz_roundtrip scenarios (clean
     ! exits, not aborts) are checked from test_reading.f90's test_datetime_foreign_fixtures, not

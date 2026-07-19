@@ -845,34 +845,8 @@ module parquet
     public :: parquet_read_array_element_mode
     public :: parquet_set_max_threads
 
+    ! ---- Schema / column-info / table-metadata plumbing ----
     interface
-        !> 1-based index of `name` in writer%enabled_columns (currently
-        !> enabled/set columns only), or 0 if not found among them.
-        module integer function parquet_get_enabled_column_index(writer, name)
-            type(parquet_writer), intent(in) :: writer !! open writer to search.
-            character(len=*), intent(in) :: name !! column name to look up.
-        end function parquet_get_enabled_column_index
-
-        !> 1-based index of `name` in writer%all_columns (every declared
-        !> column, enabled or not), or 0 if not found among them. Assumes
-        !> writer%all_columns is allocated -- every caller only calls this
-        !> when writer%is_schema_enforced is true, which is set exactly when
-        !> parquet_open_writer also allocates writer%all_columns.
-        module integer function parquet_get_defined_column_index(writer, name)
-            type(parquet_writer), intent(in) :: writer !! open writer to search.
-            character(len=*), intent(in) :: name !! column name to look up.
-        end function parquet_get_defined_column_index
-
-        !> True if a parquet_write_column call declaring `expected_type`
-        !> (the actual/declared Fortran type/kind of `values`) is compatible
-        !> with the schema's own `actual_type` for that column -- exact match,
-        !> or a numeric widening (e.g. int32/int64 values written into a
-        !> float32/float64 schema column).
-        module logical function parquet_is_type_compatible(actual_type, expected_type)
-            character(len=*), intent(in) :: actual_type !! schema-declared data_type for the column.
-            character(len=*), intent(in) :: expected_type !! data_type implied by the write call's own values.
-        end function parquet_is_type_compatible
-
         !> Parses `raw` (a qc: min:/max: bound, operator already stripped) as
         !> a real64 number appropriate for `data_type`: for float32/float64,
         !> just requires a finite (non-NaN/non-Inf) parse; for int32/int64,
@@ -886,525 +860,12 @@ module parquet
             character(len=*), intent(in) :: data_type !! field's declared data_type; selects the parsing rule.
             real(real64), intent(out) :: value !! parsed bound value; only meaningful when the function returns .true.
         end function parquet_qc_numeric_bound
-
-        !> Parses one qc: min:/max: value (already unquoted or not) into an
-        !> operator + bound-text pair: a leading ">=", "<=", ">", or "<" (checked
-        !> in that order, so the two-char operators are never mistaken for the
-        !> one-char ones) is stripped and used as the operator; otherwise
-        !> `default_op` applies (">=" for min:, "<=" for max:, matching the MAML
-        !> format's documented inclusive-by-default convention). The remaining
-        !> text is kept verbatim (not yet converted to a number) -- numeric
-        !> parsing/validity is deferred to parquet_validate_maml_internal and to
-        !> the write-time qc check, since it depends on the field's data_type,
-        !> which may not be known yet at this point in parsing.
-        module subroutine parquet_set_qc_bound(has_flag, op, raw, cvalue, default_op)
-            logical, intent(out) :: has_flag !! .true. once set (a qc: min:/max: value was present).
-            character(len=2), intent(out) :: op !! parsed operator (">=", "<=", "> ", or "< ").
-            character(len=:), allocatable, intent(out) :: raw !! bound text, verbatim, operator prefix stripped.
-            character(len=*), intent(in) :: cvalue !! raw qc: min:/max: value text (possibly quoted).
-            character(len=*), intent(in) :: default_op !! operator to use when cvalue has no explicit prefix.
-        end subroutine parquet_set_qc_bound
-
-        !> Parses a `protected_cols:` entry nested inside `extra:`, e.g.:
-        !>   extra:
-        !>     protected_cols: col1;col2; col3
-        !> or, equivalently:
-        !>   extra:
-        !>     protected_cols:
-        !>     - col1
-        !>     - col2
-        !>     - col3
-        !> `names` is a zero-size array if there is no extra:/protected_cols:
-        !> section. Names are trimmed and unquoted; empty tokens (e.g. a stray
-        !> ";;" or trailing ";") are skipped. Matching against declared field
-        !> names (by output_name) is done by the caller -- this subroutine only
-        !> extracts the raw name list. Subroutine (not a function returning
-        !> names) to sidestep a gfortran 15.2.0 ICE with a submodule-implemented
-        !> module function returning a deferred-length character array result.
-        module subroutine parquet_parse_protected_cols(lines, names)
-            character(len=*), intent(in) :: lines(:) !! raw MAML source lines to scan.
-            character(len=:), allocatable, intent(out) :: names(:) !! trimmed, unquoted protected column names.
-        end subroutine parquet_parse_protected_cols
-
-        !> Parses a `col_map:` block nested inside `extra:` (col_map: is NOT a
-        !> valid top-level MAML section) into (internal_name -> output_name)
-        !> entries. Each list item is a single "<internal_name>: <output_name>"
-        !> line (with its leading "- "), e.g.:
-        !>   extra:
-        !>     col_map:
-        !>     - col_internal: col_user
-        !> Unlike every other map-list section (fields:, keyarray:, ...), the key
-        !> here IS the data (an arbitrary internal column name) rather than a
-        !> fixed sub-key label, so this is a dedicated parser rather than a
-        !> generic one. extra:'s own content is otherwise entirely unvalidated
-        !> (see the "extra" entry in allowed_maml_sections), so this is a
-        !> narrow, specific lookup rather than a generically-validated section.
-        !> Returns a zero-size array if there is no extra:/col_map: section.
-        module function parquet_parse_col_map(lines) result(col_map)
-            character(len=*), intent(in) :: lines(:) !! raw MAML source lines to scan.
-            type(parquet_maml_col_map_entry), allocatable :: col_map(:) !! parsed (internal_name, output_name) entries.
-        end function parquet_parse_col_map
-
-        !> Error stops if `name` is defined with a data_type incompatible with
-        !> `expected_type` (see parquet_is_type_compatible). Assumes `name` is
-        !> already known to be a defined column -- every caller checks that
-        !> itself (and error stops on a not-defined column) before calling this.
-        module subroutine parquet_assert_column_type(writer, name, expected_type)
-            type(parquet_writer), intent(in) :: writer !! open writer to check against.
-            character(len=*), intent(in) :: name !! column name being written.
-            character(len=*), intent(in) :: expected_type !! data_type implied by the write call's own values.
-        end subroutine parquet_assert_column_type
-
-        !> Records that `name` has now been written at least once, growing
-        !> writer%written_names (schema-less writer only) so a later repeat
-        !> write to the same name can be detected.
-        module subroutine parquet_mark_column_written(writer, name)
-            type(parquet_writer), intent(inout) :: writer !! open (schema-less) writer being written to.
-            character(len=*), intent(in) :: name !! column name just written.
-        end subroutine parquet_mark_column_written
-
-        !> True if `name` is a currently enabled/set column of a schema-
-        !> enforced writer (see parquet_column_type%is_set); always .true.
-        !> for a schema-less writer once the column has been defined.
-        module logical function parquet_is_column_enabled(writer, name)
-            type(parquet_writer), intent(in) :: writer !! open writer to check.
-            character(len=*), intent(in) :: name !! column name to look up.
-        end function parquet_is_column_enabled
-
-        !> The declared col_size (vector-column element count) for `name`,
-        !> from the writer's schema; error stops if `name` is not defined.
-        module integer function parquet_get_column_col_size(writer, name)
-            type(parquet_writer), intent(in) :: writer !! open (schema-enforced) writer to check.
-            character(len=*), intent(in) :: name !! column name to look up.
-        end function parquet_get_column_col_size
-
-        !> Every column in a file must have the same number of rows (Arrow/Parquet
-        !> requirement). Called by every parquet_write_column variant with that
-        !> call's own row count: the first call for a given writer fixes the
-        !> expected row count, every later call must match it or error stop.
-        module subroutine parquet_check_row_count(writer, name, nrows)
-            type(parquet_writer), intent(inout) :: writer !! open writer whose expected_nrows this call checks/sets.
-            character(len=*), intent(in) :: name !! column being written; named only in the error-stop message.
-            integer(c_long_long), intent(in) :: nrows !! row count of this write call's own values.
-        end subroutine parquet_check_row_count
-
-        !> Creates `filename` and opens `writer` for writing. Without `schema`,
-        !> the writer is schema-less: columns are inferred from the first
-        !> parquet_write_column call for each name, with no field metadata/QC.
-        !> With `schema`, every column/type/QC rule is fixed up front and
-        !> enforced on every write. By default (`overwrite=.true.`) an existing
-        !> file at `filename` is silently truncated; pass `overwrite=.false.`
-        !> to instead fail immediately with `error stop` if `filename` already
-        !> exists, rather than clobbering it.
-        module subroutine parquet_open_writer(writer, filename, schema, write_maml, qc, &
-                compression, compression_level, chunk_size, use_threads, overwrite)
-            type(parquet_writer), intent(out) :: writer !! writer to open.
-            character(len=*), intent(in) :: filename !! output .parquet path.
-            type(parquet_schema), intent(in), optional :: schema !! schema to enforce; schema-less writer if absent.
-            logical, intent(in), optional :: write_maml !! also save a sidecar .maml next to filename (needs schema).
-            logical, intent(in), optional :: qc !! enable qc: min/max WARNING checks on write (needs schema).
-            character(len=*), intent(in), optional :: compression !! Arrow compression codec name (e.g. "snappy", "zstd").
-            integer, intent(in), optional :: compression_level !! codec-specific compression level.
-            integer, intent(in), optional :: chunk_size !! Parquet row-group size.
-            logical, intent(in), optional :: use_threads !! use Arrow's multi-threaded writer.
-            logical, intent(in), optional :: overwrite !! allow truncating an existing file at filename; default .true.
-        end subroutine parquet_open_writer
-
-        !> Declares one column on a schema-less writer (%is_schema_enforced
-        !> .false.), mirroring the field metadata a MAML fields: entry would
-        !> otherwise supply. Called internally the first time each column
-        !> name is written; not part of the public API.
-        module subroutine parquet_add_column_info(writer, name, unit, description, ucd, data_type, array_size, col_size)
-            type(parquet_writer), intent(inout) :: writer !! schema-less writer gaining this column.
-            character(len=*), intent(in) :: name !! column name.
-            character(len=*), intent(in) :: unit !! unit of measurement.
-            character(len=*), intent(in) :: description !! short free-text description.
-            character(len=*), intent(in) :: ucd !! IVOA Unified Content Descriptor.
-            character(len=*), intent(in) :: data_type !! column's data type.
-            integer, intent(in) :: array_size !! maximum string length (string columns only).
-            integer, intent(in) :: col_size !! vector-column element count (1 for a scalar column).
-        end subroutine parquet_add_column_info
-
-        !> Writes a scalar int32 column; see the parquet_write_column generic
-        !> interface above for the shared behavior of this whole family.
-        module subroutine parquet_write_int32_column(writer, name, values, is_valid)
-            type(parquet_writer), intent(inout) :: writer !! open writer.
-            character(len=*), intent(in) :: name !! column name.
-            integer(int32), intent(in) :: values(:) !! one value per row.
-            logical, intent(in), optional :: is_valid(:) !! per-row validity mask (.false. => null).
-        end subroutine parquet_write_int32_column
-
-        !> Writes a vector (matrix) int32 column, one row per column of
-        !> `values`; see parquet_write_column above.
-        module subroutine parquet_write_int32_matrix_column(writer, name, values, is_valid)
-            type(parquet_writer), intent(inout) :: writer !! open writer.
-            character(len=*), intent(in) :: name !! column name.
-            integer(int32), intent(in) :: values(:,:) !! (element, row) values.
-            logical, intent(in), optional :: is_valid(:,:) !! per-element validity mask (.false. => null).
-        end subroutine parquet_write_int32_matrix_column
-
-        !> Writes a scalar int64 column; see parquet_write_column above.
-        module subroutine parquet_write_int64_column(writer, name, values, is_valid)
-            type(parquet_writer), intent(inout) :: writer !! open writer.
-            character(len=*), intent(in) :: name !! column name.
-            integer(int64), intent(in) :: values(:) !! one value per row.
-            logical, intent(in), optional :: is_valid(:) !! per-row validity mask (.false. => null).
-        end subroutine parquet_write_int64_column
-
-        !> Writes a vector (matrix) int64 column; see parquet_write_column above.
-        module subroutine parquet_write_int64_matrix_column(writer, name, values, is_valid)
-            type(parquet_writer), intent(inout) :: writer !! open writer.
-            character(len=*), intent(in) :: name !! column name.
-            integer(int64), intent(in) :: values(:,:) !! (element, row) values.
-            logical, intent(in), optional :: is_valid(:,:) !! per-element validity mask (.false. => null).
-        end subroutine parquet_write_int64_matrix_column
-
-        !> Writes a scalar float32 column; see parquet_write_column above.
-        module subroutine parquet_write_float32_column(writer, name, values, is_valid)
-            type(parquet_writer), intent(inout) :: writer !! open writer.
-            character(len=*), intent(in) :: name !! column name.
-            real(real32), intent(in) :: values(:) !! one value per row.
-            logical, intent(in), optional :: is_valid(:) !! per-row validity mask (.false. => null).
-        end subroutine parquet_write_float32_column
-
-        !> Writes a vector (matrix) float32 column; see parquet_write_column above.
-        module subroutine parquet_write_float32_matrix_column(writer, name, values, is_valid)
-            type(parquet_writer), intent(inout) :: writer !! open writer.
-            character(len=*), intent(in) :: name !! column name.
-            real(real32), intent(in) :: values(:,:) !! (element, row) values.
-            logical, intent(in), optional :: is_valid(:,:) !! per-element validity mask (.false. => null).
-        end subroutine parquet_write_float32_matrix_column
-
-        !> Writes a scalar float64 column; see parquet_write_column above.
-        module subroutine parquet_write_float64_column(writer, name, values, is_valid)
-            type(parquet_writer), intent(inout) :: writer !! open writer.
-            character(len=*), intent(in) :: name !! column name.
-            real(real64), intent(in) :: values(:) !! one value per row.
-            logical, intent(in), optional :: is_valid(:) !! per-row validity mask (.false. => null).
-        end subroutine parquet_write_float64_column
-
-        !> Writes a vector (matrix) float64 column; see parquet_write_column above.
-        module subroutine parquet_write_float64_matrix_column(writer, name, values, is_valid)
-            type(parquet_writer), intent(inout) :: writer !! open writer.
-            character(len=*), intent(in) :: name !! column name.
-            real(real64), intent(in) :: values(:,:) !! (element, row) values.
-            logical, intent(in), optional :: is_valid(:,:) !! per-element validity mask (.false. => null).
-        end subroutine parquet_write_float64_matrix_column
-
-        !> Writes a scalar logical (boolean) column; see parquet_write_column above.
-        module subroutine parquet_write_logical_column(writer, name, values, is_valid)
-            type(parquet_writer), intent(inout) :: writer !! open writer.
-            character(len=*), intent(in) :: name !! column name.
-            logical, intent(in) :: values(:) !! one value per row.
-            logical, intent(in), optional :: is_valid(:) !! per-row validity mask (.false. => null).
-        end subroutine parquet_write_logical_column
-
-        !> Writes a vector (matrix) logical (boolean) column; see parquet_write_column above.
-        module subroutine parquet_write_logical_matrix_column(writer, name, values, is_valid)
-            type(parquet_writer), intent(inout) :: writer !! open writer.
-            character(len=*), intent(in) :: name !! column name.
-            logical, intent(in) :: values(:,:) !! (element, row) values.
-            logical, intent(in), optional :: is_valid(:,:) !! per-element validity mask (.false. => null).
-        end subroutine parquet_write_logical_matrix_column
-
-        !> Writes a scalar string column; see parquet_write_column above.
-        module subroutine parquet_write_string_column(writer, name, values, is_valid)
-            type(parquet_writer), intent(inout) :: writer !! open writer.
-            character(len=*), intent(in) :: name !! column name.
-            character(len=*), intent(in) :: values(:) !! one value per row.
-            logical, intent(in), optional :: is_valid(:) !! per-row validity mask (.false. => null).
-        end subroutine parquet_write_string_column
-
-        !> Writes a vector (matrix) string column; see parquet_write_column above.
-        module subroutine parquet_write_string_matrix_column(writer, name, values, is_valid)
-            type(parquet_writer), intent(inout) :: writer !! open writer.
-            character(len=*), intent(in) :: name !! column name.
-            character(len=*), intent(in) :: values(:,:) !! (element, row) values.
-            logical, intent(in), optional :: is_valid(:,:) !! per-element validity mask (.false. => null).
-        end subroutine parquet_write_string_matrix_column
-
-        !> Compact (parquet_string_column) specific of parquet_write_column; see the generic
-        !> interface's own doc comment above for the parquet_string_column notes.
-        module subroutine parquet_write_string_column_compact(writer, name, values)
-            type(parquet_writer), intent(inout) :: writer !! open writer.
-            character(len=*), intent(in) :: name !! column name.
-            type(parquet_string_column), intent(in), target :: values !! one value (or Null) per row;
-            !! target so raw_buffers can be called on it without copying.
-        end subroutine parquet_write_string_column_compact
-
-        !> Scalar date specific of parquet_write_column. Null elements (see parquet_date%is_null)
-        !> are written as genuine Parquet Nulls; there is no is_valid argument -- validity lives
-        !> in the elements themselves.
-        module subroutine parquet_write_date_column(writer, name, values)
-            type(parquet_writer), intent(inout) :: writer !! open writer.
-            character(len=*), intent(in) :: name !! column name.
-            type(parquet_date), intent(in) :: values(:) !! one date (or null element) per row.
-        end subroutine parquet_write_date_column
-
-        !> Vector (matrix) date specific of parquet_write_column, one row per column of `values`.
-        module subroutine parquet_write_date_matrix_column(writer, name, values)
-            type(parquet_writer), intent(inout) :: writer !! open writer.
-            character(len=*), intent(in) :: name !! column name.
-            type(parquet_date), intent(in) :: values(:,:) !! (element, row) dates.
-        end subroutine parquet_write_date_matrix_column
-
-        !> Scalar time specific of parquet_write_column; null elements become Parquet Nulls.
-        module subroutine parquet_write_time_column(writer, name, values)
-            type(parquet_writer), intent(inout) :: writer !! open writer.
-            character(len=*), intent(in) :: name !! column name.
-            type(parquet_time), intent(in) :: values(:) !! one time (or null element) per row.
-        end subroutine parquet_write_time_column
-
-        !> Vector (matrix) time specific of parquet_write_column.
-        module subroutine parquet_write_time_matrix_column(writer, name, values)
-            type(parquet_writer), intent(inout) :: writer !! open writer.
-            character(len=*), intent(in) :: name !! column name.
-            type(parquet_time), intent(in) :: values(:,:) !! (element, row) times.
-        end subroutine parquet_write_time_matrix_column
-
-        !> Scalar timestamp specific of parquet_write_column; null elements become Parquet Nulls.
-        module subroutine parquet_write_timestamp_column(writer, name, values)
-            type(parquet_writer), intent(inout) :: writer !! open writer.
-            character(len=*), intent(in) :: name !! column name.
-            type(parquet_timestamp), intent(in) :: values(:) !! one instant (or null element) per row.
-        end subroutine parquet_write_timestamp_column
-
-        !> Vector (matrix) timestamp specific of parquet_write_column.
-        module subroutine parquet_write_timestamp_matrix_column(writer, name, values)
-            type(parquet_writer), intent(inout) :: writer !! open writer.
-            character(len=*), intent(in) :: name !! column name.
-            type(parquet_timestamp), intent(in) :: values(:,:) !! (element, row) instants.
-        end subroutine parquet_write_timestamp_matrix_column
-
-        !> Scalar date specific of parquet_write_column_chunk (one row group's worth); nulls come
-        !> from the elements, so there is no is_valid argument.
-        module subroutine parquet_write_date_column_chunk(writer, name, values)
-            type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
-            character(len=*), intent(in) :: name !! column name.
-            type(parquet_date), intent(in) :: values(:) !! this row group's dates.
-        end subroutine parquet_write_date_column_chunk
-
-        !> Vector date specific of parquet_write_column_chunk.
-        module subroutine parquet_write_date_matrix_column_chunk(writer, name, values)
-            type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
-            character(len=*), intent(in) :: name !! column name.
-            type(parquet_date), intent(in) :: values(:,:) !! (element, row) dates for this row group.
-        end subroutine parquet_write_date_matrix_column_chunk
-
-        !> Scalar time specific of parquet_write_column_chunk.
-        module subroutine parquet_write_time_column_chunk(writer, name, values)
-            type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
-            character(len=*), intent(in) :: name !! column name.
-            type(parquet_time), intent(in) :: values(:) !! this row group's times.
-        end subroutine parquet_write_time_column_chunk
-
-        !> Vector time specific of parquet_write_column_chunk.
-        module subroutine parquet_write_time_matrix_column_chunk(writer, name, values)
-            type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
-            character(len=*), intent(in) :: name !! column name.
-            type(parquet_time), intent(in) :: values(:,:) !! (element, row) times for this row group.
-        end subroutine parquet_write_time_matrix_column_chunk
-
-        !> Scalar timestamp specific of parquet_write_column_chunk.
-        module subroutine parquet_write_timestamp_column_chunk(writer, name, values)
-            type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
-            character(len=*), intent(in) :: name !! column name.
-            type(parquet_timestamp), intent(in) :: values(:) !! this row group's instants.
-        end subroutine parquet_write_timestamp_column_chunk
-
-        !> Vector timestamp specific of parquet_write_column_chunk.
-        module subroutine parquet_write_timestamp_matrix_column_chunk(writer, name, values)
-            type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
-            character(len=*), intent(in) :: name !! column name.
-            type(parquet_timestamp), intent(in) :: values(:,:) !! (element, row) instants for this row group.
-        end subroutine parquet_write_timestamp_matrix_column_chunk
-
-        !> Sole specific of parquet_write_row_mask -- see the generic interface above.
-        module subroutine parquet_write_row_mask_impl(writer, mask)
-            type(parquet_writer), intent(inout) :: writer !! open writer, before its first write/row group.
-            logical, intent(in) :: mask(:) !! .false. drops that row entirely; kept rows preserve order.
-        end subroutine parquet_write_row_mask_impl
-
-        !> Sole specific of parquet_write_chunk_row_mask -- see the generic interface above.
-        module subroutine parquet_write_chunk_row_mask_impl(writer, mask)
-            type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
-            logical, intent(in) :: mask(:) !! .false. drops that row entirely; must be this row group's own nrows long.
-        end subroutine parquet_write_chunk_row_mask_impl
-
-        !> int32 specific of parquet_new_row_group -- see the generic interface above.
-        module subroutine parquet_new_row_group_int32(writer, nrows)
-            type(parquet_writer), intent(inout) :: writer !! open writer.
-            integer(int32), intent(in) :: nrows !! row count for the new row group; must be positive.
-        end subroutine parquet_new_row_group_int32
-
-        !> int64 specific of parquet_new_row_group -- see the generic interface above.
-        module subroutine parquet_new_row_group_int64(writer, nrows)
-            type(parquet_writer), intent(inout) :: writer !! open writer.
-            integer(int64), intent(in) :: nrows !! row count for the new row group; must be positive.
-        end subroutine parquet_new_row_group_int64
-
-        !> Writes a scalar int32 column's chunk for the currently-open row group; see
-        !> parquet_write_column_chunk above for the shared behavior of this whole family.
-        module subroutine parquet_write_int32_column_chunk(writer, name, values, is_valid)
-            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
-            character(len=*), intent(in) :: name !! column name.
-            integer(int32), intent(in) :: values(:) !! one value per row of the open row group.
-            logical, intent(in), optional :: is_valid(:) !! per-row validity mask (.false. => null).
-        end subroutine parquet_write_int32_column_chunk
-
-        !> Writes a vector (matrix) int32 column's chunk; see parquet_write_column_chunk above.
-        module subroutine parquet_write_int32_matrix_column_chunk(writer, name, values, is_valid)
-            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
-            character(len=*), intent(in) :: name !! column name.
-            integer(int32), intent(in) :: values(:,:) !! (element, row) values of the open row group.
-            logical, intent(in), optional :: is_valid(:,:) !! per-element validity mask (.false. => null).
-        end subroutine parquet_write_int32_matrix_column_chunk
-
-        !> Writes a scalar int64 column's chunk; see parquet_write_column_chunk above.
-        module subroutine parquet_write_int64_column_chunk(writer, name, values, is_valid)
-            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
-            character(len=*), intent(in) :: name !! column name.
-            integer(int64), intent(in) :: values(:) !! one value per row of the open row group.
-            logical, intent(in), optional :: is_valid(:) !! per-row validity mask (.false. => null).
-        end subroutine parquet_write_int64_column_chunk
-
-        !> Writes a vector (matrix) int64 column's chunk; see parquet_write_column_chunk above.
-        module subroutine parquet_write_int64_matrix_column_chunk(writer, name, values, is_valid)
-            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
-            character(len=*), intent(in) :: name !! column name.
-            integer(int64), intent(in) :: values(:,:) !! (element, row) values of the open row group.
-            logical, intent(in), optional :: is_valid(:,:) !! per-element validity mask (.false. => null).
-        end subroutine parquet_write_int64_matrix_column_chunk
-
-        !> Writes a scalar float32 column's chunk; see parquet_write_column_chunk above.
-        module subroutine parquet_write_float32_column_chunk(writer, name, values, is_valid)
-            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
-            character(len=*), intent(in) :: name !! column name.
-            real(real32), intent(in) :: values(:) !! one value per row of the open row group.
-            logical, intent(in), optional :: is_valid(:) !! per-row validity mask (.false. => null).
-        end subroutine parquet_write_float32_column_chunk
-
-        !> Writes a vector (matrix) float32 column's chunk; see parquet_write_column_chunk above.
-        module subroutine parquet_write_float32_matrix_column_chunk(writer, name, values, is_valid)
-            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
-            character(len=*), intent(in) :: name !! column name.
-            real(real32), intent(in) :: values(:,:) !! (element, row) values of the open row group.
-            logical, intent(in), optional :: is_valid(:,:) !! per-element validity mask (.false. => null).
-        end subroutine parquet_write_float32_matrix_column_chunk
-
-        !> Writes a scalar float64 column's chunk; see parquet_write_column_chunk above.
-        module subroutine parquet_write_float64_column_chunk(writer, name, values, is_valid)
-            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
-            character(len=*), intent(in) :: name !! column name.
-            real(real64), intent(in) :: values(:) !! one value per row of the open row group.
-            logical, intent(in), optional :: is_valid(:) !! per-row validity mask (.false. => null).
-        end subroutine parquet_write_float64_column_chunk
-
-        !> Writes a vector (matrix) float64 column's chunk; see parquet_write_column_chunk above.
-        module subroutine parquet_write_float64_matrix_column_chunk(writer, name, values, is_valid)
-            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
-            character(len=*), intent(in) :: name !! column name.
-            real(real64), intent(in) :: values(:,:) !! (element, row) values of the open row group.
-            logical, intent(in), optional :: is_valid(:,:) !! per-element validity mask (.false. => null).
-        end subroutine parquet_write_float64_matrix_column_chunk
-
-        !> Writes a scalar logical (boolean) column's chunk; see parquet_write_column_chunk above.
-        module subroutine parquet_write_logical_column_chunk(writer, name, values, is_valid)
-            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
-            character(len=*), intent(in) :: name !! column name.
-            logical, intent(in) :: values(:) !! one value per row of the open row group.
-            logical, intent(in), optional :: is_valid(:) !! per-row validity mask (.false. => null).
-        end subroutine parquet_write_logical_column_chunk
-
-        !> Writes a vector (matrix) logical (boolean) column's chunk; see
-        !> parquet_write_column_chunk above.
-        module subroutine parquet_write_logical_matrix_column_chunk(writer, name, values, is_valid)
-            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
-            character(len=*), intent(in) :: name !! column name.
-            logical, intent(in) :: values(:,:) !! (element, row) values of the open row group.
-            logical, intent(in), optional :: is_valid(:,:) !! per-element validity mask (.false. => null).
-        end subroutine parquet_write_logical_matrix_column_chunk
-
-        !> Writes a scalar string column's chunk; see parquet_write_column_chunk above.
-        module subroutine parquet_write_string_column_chunk(writer, name, values, is_valid)
-            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
-            character(len=*), intent(in) :: name !! column name.
-            character(len=*), intent(in) :: values(:) !! one value per row of the open row group.
-            logical, intent(in), optional :: is_valid(:) !! per-row validity mask (.false. => null).
-        end subroutine parquet_write_string_column_chunk
-
-        !> Writes a vector (matrix) string column's chunk; see parquet_write_column_chunk above.
-        module subroutine parquet_write_string_matrix_column_chunk(writer, name, values, is_valid)
-            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
-            character(len=*), intent(in) :: name !! column name.
-            character(len=*), intent(in) :: values(:,:) !! (element, row) values of the open row group.
-            logical, intent(in), optional :: is_valid(:,:) !! per-element validity mask (.false. => null).
-        end subroutine parquet_write_string_matrix_column_chunk
-
-        !> Compact (parquet_string_column) specific of parquet_write_column_chunk; see the generic
-        !> interface's own doc comment above for the parquet_string_column notes.
-        module subroutine parquet_write_string_column_chunk_compact(writer, name, values)
-            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
-            character(len=*), intent(in) :: name !! column name.
-            type(parquet_string_column), intent(in), target :: values !! one value (or Null) per row of the
-            !! open row group; target so raw_buffers can be called on it without copying.
-        end subroutine parquet_write_string_column_chunk_compact
-
-        !> Ends the currently-open row group -- see parquet_new_row_group above. Error stops if
-        !> any column known to `writer` has no data for this row group (either a chunk just
-        !> written, or an already-whole column with enough rows left to slice). On the very
-        !> first call for `writer`, also locks the file's schema (from every column established
-        !> by then) and opens it for writing -- no column can be introduced after this point.
-        module subroutine parquet_finish_row_group(writer)
-            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
-        end subroutine parquet_finish_row_group
-
-        !> Writer, int32 specific of parquet_get_chunk_size -- see the generic interface above.
-        module subroutine parquet_get_chunk_size_writer_int32(writer, chunk_size)
-            type(parquet_writer), intent(inout) :: writer !! open writer.
-            integer(int32), intent(out) :: chunk_size !! writer's resolved/authoritative row-group size.
-        end subroutine parquet_get_chunk_size_writer_int32
-
-        !> Writer, int64 specific of parquet_get_chunk_size -- see the generic interface above.
-        module subroutine parquet_get_chunk_size_writer_int64(writer, chunk_size)
-            type(parquet_writer), intent(inout) :: writer !! open writer.
-            integer(int64), intent(out) :: chunk_size !! writer's resolved/authoritative row-group size.
-        end subroutine parquet_get_chunk_size_writer_int64
-
-        !> Reader, int32 specific of parquet_get_chunk_size -- see the generic interface above.
-        module subroutine parquet_get_chunk_size_reader_int32(reader, chunk_size, row_group)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            integer(int32), intent(out) :: chunk_size !! row group's own physical row count.
-            integer(int32), intent(in), optional :: row_group !! 1-based; omitted defaults to the first row group.
-        end subroutine parquet_get_chunk_size_reader_int32
-
-        !> Reader, int64 specific of parquet_get_chunk_size -- see the generic interface above.
-        module subroutine parquet_get_chunk_size_reader_int64(reader, chunk_size, row_group)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            integer(int64), intent(out) :: chunk_size !! row group's own physical row count.
-            integer(int64), intent(in), optional :: row_group !! 1-based; omitted defaults to the first row group.
-        end subroutine parquet_get_chunk_size_reader_int64
-
-        !> Flushes and closes `writer`; error stops if any declared/enabled
-        !> column was never written (schema-enforced writer only).
-        module subroutine parquet_close_writer(writer)
-            type(parquet_writer), intent(inout) :: writer !! writer to close.
-        end subroutine parquet_close_writer
-
-        !> FINAL procedure: safety-net close for a writer whose variable goes
-        !> out of scope (or is overwritten) still open; see parquet_writer's
-        !> own doc comment for why this is not a substitute for %close.
-        module subroutine writer_finalize(this)
-            type(parquet_writer), intent(inout) :: this !! writer being finalized.
-        end subroutine writer_finalize
-
         !> File form of parquet_parse_maml: loads `filename` from disk, then
         !> parses/validates it into `schema` (%maml, %cinfo, %metadata).
         module subroutine parquet_parse_maml_from_file(filename, schema)
             character(len=*), intent(in) :: filename !! .maml file path.
             type(parquet_schema), intent(out) :: schema !! fully parsed schema.
         end subroutine parquet_parse_maml_from_file
-
         !> Loads `filename`'s raw lines from disk into a parquet_maml_file,
         !> running the full parquet_validate_maml checks (table:, at least
         !> one field, valid data_type, ...); not parsed into a schema yet
@@ -1413,7 +874,6 @@ module parquet
             character(len=*), intent(in) :: filename !! .maml file path.
             type(parquet_maml_file) :: maml !! validated raw MAML.
         end function parquet_load_maml_file
-
         !> Loads a qc-maml's raw lines from disk WITHOUT running the full
         !> parquet_validate_maml checks parquet_load_maml_file always applies
         !> (table:, at least one field, valid data_type, ...) -- a qc-maml
@@ -1426,7 +886,6 @@ module parquet
             character(len=*), intent(in) :: filename !! qc-maml file path.
             type(parquet_schema) :: schema !! schema with only %maml populated (raw qc-maml lines).
         end function parquet_load_qc_maml_file
-
         !> Validates and parses a qc-maml's fields: entries into `rules`, one
         !> entry per field that has at least a name (data_type/unit/ucd/etc.
         !> are irrelevant here and never required) -- error stops on a
@@ -1438,7 +897,6 @@ module parquet
             type(parquet_maml_file), intent(in) :: maml !! raw qc-maml (e.g. from parquet_load_qc_maml_file).
             type(parquet_qc_rule), allocatable, intent(out) :: rules(:) !! one entry per field with at least a name.
         end subroutine parquet_parse_qc_maml
-
         !> Validates `user_maml` against `base_maml` (the full base schema):
         !> populates user_maml%missing_columns/%col_map, error stops on any
         !> field user_maml declares that base_maml doesn't.
@@ -1446,38 +904,22 @@ module parquet
             type(parquet_maml_file), intent(in) :: base_maml !! the full base schema to validate against.
             type(parquet_maml_file), intent(inout) :: user_maml !! user-supplied MAML being validated.
         end subroutine parquet_validate_user_maml
-
         !> Runs the full parquet_validate_maml checks (table:, at least one
         !> field, valid data_type, ...) against an already-loaded MAML.
         module subroutine parquet_validate_maml_internal(maml)
             type(parquet_maml_file), intent(in) :: maml !! raw MAML to validate.
         end subroutine parquet_validate_maml_internal
-
-        !> Checks every top-level section name (and, for map-list sections
-        !> like fields:/keyarray:, their items' sub-keys) in `lines` against
-        !> the allowed_maml_sections/allowed_maml_nested_sections schema
-        !> (src/parquet_metadata_sections.f90); appends one message per
-        !> violation to `errors` (key presence only, not semantic content).
-        !> Called by both parquet_validate_maml_internal (full schema mamls)
-        !> and parquet_parse_qc_maml (qc-mamls, a strict subset of the schema).
-        module subroutine parquet_validate_maml_sections(lines, errors)
-            character(len=*), intent(in) :: lines(:) !! raw MAML source lines to check.
-            character(len=:), allocatable, intent(inout) :: errors !! accumulated error messages; appended to, not reset.
-        end subroutine parquet_validate_maml_sections
-
         !> File form of parquet_validate_maml: loads `maml` from disk first,
         !> then runs the same checks as parquet_validate_maml_internal.
         module subroutine parquet_validate_maml_file(maml)
             character(len=*), intent(in) :: maml !! .maml file path.
         end subroutine parquet_validate_maml_file
-
         !> Object form of parquet_parse_maml: parses/validates a schema whose
         !> %maml has already been populated (e.g. built in memory), filling
         !> in %cinfo/%metadata in place.
         module subroutine parquet_parse_maml_from_object(schema)
             type(parquet_schema), intent(inout) :: schema !! schema with %maml already populated.
         end subroutine parquet_parse_maml_from_object
-
         !> Initializes a from-scratch parquet_schema: sets the (required)
         !> table: key and any of the optional scalar top-level MAML keys
         !> given, and marks this schema ready for %add_field. Error stops if
@@ -1499,7 +941,6 @@ module parquet
             character(len=*), intent(in), optional :: license !! optional license: key.
             character(len=*), intent(in), optional :: maml_version !! optional MAML_version: key.
         end subroutine schema_init
-
         !> Structure-constructor form of %init: builds and returns an
         !> initialized parquet_schema in one expression instead of
         !> declaring the variable and calling %init separately. Same
@@ -1517,7 +958,6 @@ module parquet
             character(len=*), intent(in), optional :: maml_version !! optional MAML_version: key.
             type(parquet_schema) :: this !! newly initialized schema.
         end function parquet_schema_new
-
         !> Appends one fields: entry to a schema built from scratch (%init
         !> must be called first). name/data_type are required (data_type
         !> must be one of the supported types); unit/info/ucd/array_size/
@@ -1544,7 +984,6 @@ module parquet
             character(len=*), intent(in), optional :: qc_max !! qc: max: bound (operator prefix allowed).
             character(len=*), intent(in), optional :: qc_miss !! qc: miss: value (Null/NA, case-insensitive).
         end subroutine schema_add_field
-
         !> Parses a (already lowercased) MAML data_type `token` into its temporal base type and
         !> unit/utc: recognizes `date`, `time[unit]`, `timestamp[unit(,utc)]` where unit is one
         !> of s/ms/us/ns (bare = microseconds). `is_temporal` reports whether the token's base is
@@ -1560,13 +999,11 @@ module parquet
             logical, intent(out) :: is_temporal !! .true. if the base is date/time/timestamp.
             logical, intent(out) :: valid !! .true. if the token is well-formed.
         end subroutine parquet_parse_temporal_type
-
         !> Whether `token` (a MAML data_type, any case) is a valid data_type: one of the numeric/
         !> string/boolean base tokens, or a well-formed date/time/timestamp temporal token.
         module logical function parquet_data_type_token_valid(token)
             character(len=*), intent(in) :: token !! candidate data_type token.
         end function parquet_data_type_token_valid
-
         ! Flat convenience passthroughs on parquet_schema -- each forwards to
         ! the matching procedure on %cinfo, %metadata or %maml.
         !> Forwards to %cinfo%set_column_available; enables `name`, or every
@@ -1575,32 +1012,27 @@ module parquet
             class(parquet_schema), intent(inout) :: this !! schema whose cinfo is updated.
             character(len=*), intent(in), optional :: name !! column to enable; every column if absent.
         end subroutine set_column_available
-
         !> Forwards to %cinfo%set_column_unavailable; disables `name`, or
         !> every non-deactivated column if `name` is absent.
         module subroutine set_column_unavailable(this, name)
             class(parquet_schema), intent(inout) :: this !! schema whose cinfo is updated.
             character(len=*), intent(in), optional :: name !! column to disable; every column if absent.
         end subroutine set_column_unavailable
-
         !> Forwards to %cinfo%get_column_index.
         module integer function schema_get_column_index(this, name)
             class(parquet_schema), intent(in) :: this !! schema to search.
             character(len=*), intent(in) :: name !! column name to look up.
         end function schema_get_column_index
-
         !> Forwards to %cinfo%get_num_fields.
         module integer function schema_get_num_fields(this)
             class(parquet_schema), intent(in) :: this !! schema to query.
         end function schema_get_num_fields
-
         !> Forwards to %cinfo%get_field_name.
         module subroutine schema_get_field_name(this, index, name)
             class(parquet_schema), intent(in) :: this !! schema to query.
             integer, intent(in) :: index !! 1-based field position in MAML source order.
             character(len=:), allocatable, intent(out) :: name !! field name at that position.
         end subroutine schema_get_field_name
-
         !> Subroutine form of %add_col_qc: forwards to %maml%add_col_qc. See
         !> parquet_maml_add_col_qc (parquet_maml_base_add_col_qc.f90) for the
         !> "col, min, max, miss" input syntax and validation rules.
@@ -1609,7 +1041,6 @@ module parquet
             character(len=*), intent(in) :: qc_input !! compact "col, min, max, miss" string.
             character(len=:), allocatable, intent(out), optional :: col_name !! parsed column name.
         end subroutine schema_add_col_qc
-
         !> In-place form of %add_col_qc: forwards to %maml%set_col_qc. `col_name` is
         !> `intent(inout)`, not separate in/out arguments: on entry it holds the compact
         !> "col, min, max, miss" string, and on exit it holds just the parsed column name --
@@ -1621,7 +1052,6 @@ module parquet
             character(len=:), allocatable, intent(inout) :: col_name !! compact "col, min, max, miss" string on
             !! entry; parsed column name on exit.
         end subroutine schema_set_col_qc
-
         !> int32 specific of %add_metadata; forwards to %metadata%add_metadata
         !> (see the parquet_get_metadata generic interface above for the
         !> read-side counterpart and its stored-representation semantics).
@@ -1631,7 +1061,6 @@ module parquet
             integer(int32), intent(in) :: value !! metadata value.
             character(len=*), intent(in), optional :: description !! optional free-text description.
         end subroutine schema_add_metadata_int32
-
         !> int64 specific of %add_metadata; see schema_add_metadata_int32.
         module subroutine schema_add_metadata_int64(this, key, value, description)
             class(parquet_schema), intent(inout) :: this !! schema whose %metadata gains one entry.
@@ -1639,7 +1068,6 @@ module parquet
             integer(int64), intent(in) :: value !! metadata value.
             character(len=*), intent(in), optional :: description !! optional free-text description.
         end subroutine schema_add_metadata_int64
-
         !> float32 specific of %add_metadata; see schema_add_metadata_int32.
         module subroutine schema_add_metadata_float32(this, key, value, description, fmt)
             class(parquet_schema), intent(inout) :: this !! schema whose %metadata gains one entry.
@@ -1648,7 +1076,6 @@ module parquet
             character(len=*), intent(in), optional :: description !! optional free-text description.
             character(len=*), intent(in), optional :: fmt !! optional Fortran edit descriptor for the stored text.
         end subroutine schema_add_metadata_float32
-
         !> float64 specific of %add_metadata; see schema_add_metadata_int32.
         module subroutine schema_add_metadata_float64(this, key, value, description, fmt)
             class(parquet_schema), intent(inout) :: this !! schema whose %metadata gains one entry.
@@ -1657,7 +1084,6 @@ module parquet
             character(len=*), intent(in), optional :: description !! optional free-text description.
             character(len=*), intent(in), optional :: fmt !! optional Fortran edit descriptor for the stored text.
         end subroutine schema_add_metadata_float64
-
         !> logical specific of %add_metadata; see schema_add_metadata_int32.
         module subroutine schema_add_metadata_logical(this, key, value, description)
             class(parquet_schema), intent(inout) :: this !! schema whose %metadata gains one entry.
@@ -1665,7 +1091,6 @@ module parquet
             logical, intent(in) :: value !! metadata value.
             character(len=*), intent(in), optional :: description !! optional free-text description.
         end subroutine schema_add_metadata_logical
-
         !> string specific of %add_metadata; see schema_add_metadata_int32.
         module subroutine schema_add_metadata_string(this, key, value, description)
             class(parquet_schema), intent(inout) :: this !! schema whose %metadata gains one entry.
@@ -1673,7 +1098,6 @@ module parquet
             character(len=*), intent(in) :: value !! metadata value.
             character(len=*), intent(in), optional :: description !! optional free-text description.
         end subroutine schema_add_metadata_string
-
         !> int32 array specific of %add_metadata; see schema_add_metadata_int32.
         module subroutine schema_add_metadata_int32_array(this, key, value, description)
             class(parquet_schema), intent(inout) :: this !! schema whose %metadata gains one entry.
@@ -1681,7 +1105,6 @@ module parquet
             integer(int32), intent(in) :: value(:) !! metadata values.
             character(len=*), intent(in), optional :: description !! optional free-text description.
         end subroutine schema_add_metadata_int32_array
-
         !> int64 array specific of %add_metadata; see schema_add_metadata_int32.
         module subroutine schema_add_metadata_int64_array(this, key, value, description)
             class(parquet_schema), intent(inout) :: this !! schema whose %metadata gains one entry.
@@ -1689,7 +1112,6 @@ module parquet
             integer(int64), intent(in) :: value(:) !! metadata values.
             character(len=*), intent(in), optional :: description !! optional free-text description.
         end subroutine schema_add_metadata_int64_array
-
         !> float32 array specific of %add_metadata; see schema_add_metadata_int32.
         module subroutine schema_add_metadata_float32_array(this, key, value, description, fmt)
             class(parquet_schema), intent(inout) :: this !! schema whose %metadata gains one entry.
@@ -1698,7 +1120,6 @@ module parquet
             character(len=*), intent(in), optional :: description !! optional free-text description.
             character(len=*), intent(in), optional :: fmt !! optional Fortran edit descriptor for the stored text.
         end subroutine schema_add_metadata_float32_array
-
         !> float64 array specific of %add_metadata; see schema_add_metadata_int32.
         module subroutine schema_add_metadata_float64_array(this, key, value, description, fmt)
             class(parquet_schema), intent(inout) :: this !! schema whose %metadata gains one entry.
@@ -1707,7 +1128,6 @@ module parquet
             character(len=*), intent(in), optional :: description !! optional free-text description.
             character(len=*), intent(in), optional :: fmt !! optional Fortran edit descriptor for the stored text.
         end subroutine schema_add_metadata_float64_array
-
         !> logical array specific of %add_metadata; see schema_add_metadata_int32.
         module subroutine schema_add_metadata_logical_array(this, key, value, description)
             class(parquet_schema), intent(inout) :: this !! schema whose %metadata gains one entry.
@@ -1715,7 +1135,6 @@ module parquet
             logical, intent(in) :: value(:) !! metadata values.
             character(len=*), intent(in), optional :: description !! optional free-text description.
         end subroutine schema_add_metadata_logical_array
-
         !> string array specific of %add_metadata; see schema_add_metadata_int32.
         module subroutine schema_add_metadata_string_array(this, key, value, description)
             class(parquet_schema), intent(inout) :: this !! schema whose %metadata gains one entry.
@@ -1723,29 +1142,17 @@ module parquet
             character(len=*), intent(in) :: value(:) !! metadata values.
             character(len=*), intent(in), optional :: description !! optional free-text description.
         end subroutine schema_add_metadata_string_array
-
-        !> Parses raw MAML source `lines` into `cinfo` (per-field schema/QC)
-        !> and `metadata` (flat key-value table metadata); the shared worker
-        !> behind parquet_parse_maml's file/object specifics.
-        module subroutine parquet_parse_maml_lines(lines, cinfo, metadata)
-            character(len=*), intent(in) :: lines(:) !! raw MAML source, one array element per line.
-            type(parquet_column_info), intent(out) :: cinfo !! parsed per-field schema/QC state.
-            type(parquet_table_metadata), intent(out) :: metadata !! parsed flat key-value table metadata.
-        end subroutine parquet_parse_maml_lines
-
         !> 1-based index of `name` in this%col, or 0 if not found.
         module integer function get_column_index(this, name)
             class(parquet_column_info), intent(in) :: this !! column_info to search.
             character(len=*), intent(in) :: name !! column name to look up.
         end function get_column_index
-
         !> Total number of fields defined in this column_info, in maml source
         !> order, with no filtering by is_set/is_deactivated -- i.e. every
         !> field that was ever declared (via a fields: entry or %add_field).
         module integer function get_num_fields(this)
             class(parquet_column_info), intent(in) :: this !! column_info to query.
         end function get_num_fields
-
         !> Name of the field at the given 1-based position in maml source
         !> order (same order get_num_fields counts). index must be between 1
         !> and get_num_fields(this); anything outside that range fails with
@@ -1755,7 +1162,6 @@ module parquet
             integer, intent(in) :: index !! 1-based field position in MAML source order.
             character(len=:), allocatable, intent(out) :: name !! field name at that position.
         end subroutine get_field_name
-
         !> Backs parquet_schema%set_column_unavailable (see set_column_unavailable
         !> in the parquet_schema block above); disables `name`, or every
         !> non-deactivated column if `name` is absent. Error stops if `name`
@@ -1764,7 +1170,6 @@ module parquet
             class(parquet_column_info), intent(inout) :: this !! column_info being updated.
             character(len=*), intent(in), optional :: name !! column to disable; every column if absent.
         end subroutine set_unavailable
-
         !> Backs parquet_schema%set_column_available; enables `name`, or every
         !> non-deactivated column if `name` is absent. Error stops if `name`
         !> is a deactivated column.
@@ -1772,39 +1177,6 @@ module parquet
             class(parquet_column_info), intent(inout) :: this !! column_info being updated.
             character(len=*), intent(in), optional :: name !! column to enable; every column if absent.
         end subroutine set_available
-
-        !> Appends `line` to `lines` at 1-based position `n`, growing the
-        !> array if needed; internal MAML-source-lines plumbing.
-        module subroutine parquet_append_line(lines, n, line)
-            character(len=1024), allocatable, intent(inout) :: lines(:) !! line buffer being appended to.
-            integer, intent(in) :: n !! number of lines already in use before this call.
-            character(len=*), intent(in) :: line !! line text to store.
-        end subroutine parquet_append_line
-
-        !> Shared worker behind every add_metadata specific: appends one
-        !> already-stringified key/value/description to `metadata%items`.
-        module subroutine parquet_metadata_append_entry(metadata, key, value, description)
-            class(parquet_table_metadata), intent(inout) :: metadata !! table metadata gaining one entry.
-            character(len=*), intent(in) :: key !! metadata key.
-            character(len=*), intent(in) :: value !! metadata value, already converted to text.
-            character(len=*), intent(in), optional :: description !! optional free-text description.
-        end subroutine parquet_metadata_append_entry
-
-        !> Appends a `- key: / value: / comment:` entry to the `keyarray:` block
-        !> inside `lines` (the verbatim source MAML content kept in
-        !> metadata%source_maml_lines), so that metadata added at runtime via
-        !> add_metadata after parquet_read_maml is reflected in a later
-        !> write_maml sidecar. Always appends; does not update an existing entry
-        !> that has the same key. Inserted before `extra:` if present, else
-        !> before `fields:`; synthesizes the `keyarray:` header itself if the
-        !> source MAML did not already have one.
-        module subroutine parquet_append_keyarray_line(lines, key, value, desc)
-            character(len=:), allocatable, intent(inout) :: lines(:) !! verbatim source MAML lines being amended.
-            character(len=*), intent(in) :: key !! metadata key for the new entry.
-            character(len=*), intent(in) :: value !! metadata value for the new entry.
-            character(len=*), intent(in) :: desc !! metadata description for the new entry (may be "").
-        end subroutine parquet_append_keyarray_line
-
         !> int32 specific of parquet_table_metadata%add_metadata; stores
         !> `value` as plain text via parquet_metadata_append_entry.
         module subroutine add_metadata_int32(this, key, value, description)
@@ -1813,7 +1185,6 @@ module parquet
             integer(int32), intent(in) :: value !! metadata value.
             character(len=*), intent(in), optional :: description !! optional free-text description.
         end subroutine add_metadata_int32
-
         !> int64 specific of parquet_table_metadata%add_metadata; see add_metadata_int32.
         module subroutine add_metadata_int64(this, key, value, description)
             class(parquet_table_metadata), intent(inout) :: this !! table metadata gaining one entry.
@@ -1821,7 +1192,6 @@ module parquet
             integer(int64), intent(in) :: value !! metadata value.
             character(len=*), intent(in), optional :: description !! optional free-text description.
         end subroutine add_metadata_int64
-
         !> float32 specific of parquet_table_metadata%add_metadata; see add_metadata_int32.
         module subroutine add_metadata_float32(this, key, value, description, fmt)
             class(parquet_table_metadata), intent(inout) :: this !! table metadata gaining one entry.
@@ -1830,7 +1200,6 @@ module parquet
             character(len=*), intent(in), optional :: description !! optional free-text description.
             character(len=*), intent(in), optional :: fmt !! optional Fortran edit descriptor for the stored text.
         end subroutine add_metadata_float32
-
         !> float64 specific of parquet_table_metadata%add_metadata; see add_metadata_int32.
         module subroutine add_metadata_float64(this, key, value, description, fmt)
             class(parquet_table_metadata), intent(inout) :: this !! table metadata gaining one entry.
@@ -1839,7 +1208,6 @@ module parquet
             character(len=*), intent(in), optional :: description !! optional free-text description.
             character(len=*), intent(in), optional :: fmt !! optional Fortran edit descriptor for the stored text.
         end subroutine add_metadata_float64
-
         !> logical specific of parquet_table_metadata%add_metadata; see add_metadata_int32.
         module subroutine add_metadata_logical(this, key, value, description)
             class(parquet_table_metadata), intent(inout) :: this !! table metadata gaining one entry.
@@ -1847,7 +1215,6 @@ module parquet
             logical, intent(in) :: value !! metadata value.
             character(len=*), intent(in), optional :: description !! optional free-text description.
         end subroutine add_metadata_logical
-
         !> string specific of parquet_table_metadata%add_metadata; see add_metadata_int32.
         module subroutine add_metadata_string(this, key, value, description)
             class(parquet_table_metadata), intent(inout) :: this !! table metadata gaining one entry.
@@ -1855,7 +1222,6 @@ module parquet
             character(len=*), intent(in) :: value !! metadata value.
             character(len=*), intent(in), optional :: description !! optional free-text description.
         end subroutine add_metadata_string
-
         !> int32 array specific of parquet_table_metadata%add_metadata; see add_metadata_int32.
         module subroutine add_metadata_int32_array(this, key, value, description)
             class(parquet_table_metadata), intent(inout) :: this !! table metadata gaining one entry.
@@ -1863,7 +1229,6 @@ module parquet
             integer(int32), intent(in) :: value(:) !! metadata values.
             character(len=*), intent(in), optional :: description !! optional free-text description.
         end subroutine add_metadata_int32_array
-
         !> int64 array specific of parquet_table_metadata%add_metadata; see add_metadata_int32.
         module subroutine add_metadata_int64_array(this, key, value, description)
             class(parquet_table_metadata), intent(inout) :: this !! table metadata gaining one entry.
@@ -1871,7 +1236,6 @@ module parquet
             integer(int64), intent(in) :: value(:) !! metadata values.
             character(len=*), intent(in), optional :: description !! optional free-text description.
         end subroutine add_metadata_int64_array
-
         !> float32 array specific of parquet_table_metadata%add_metadata; see add_metadata_int32.
         module subroutine add_metadata_float32_array(this, key, value, description, fmt)
             class(parquet_table_metadata), intent(inout) :: this !! table metadata gaining one entry.
@@ -1880,7 +1244,6 @@ module parquet
             character(len=*), intent(in), optional :: description !! optional free-text description.
             character(len=*), intent(in), optional :: fmt !! optional Fortran edit descriptor for the stored text.
         end subroutine add_metadata_float32_array
-
         !> float64 array specific of parquet_table_metadata%add_metadata; see add_metadata_int32.
         module subroutine add_metadata_float64_array(this, key, value, description, fmt)
             class(parquet_table_metadata), intent(inout) :: this !! table metadata gaining one entry.
@@ -1889,7 +1252,6 @@ module parquet
             character(len=*), intent(in), optional :: description !! optional free-text description.
             character(len=*), intent(in), optional :: fmt !! optional Fortran edit descriptor for the stored text.
         end subroutine add_metadata_float64_array
-
         !> logical array specific of parquet_table_metadata%add_metadata; see add_metadata_int32.
         module subroutine add_metadata_logical_array(this, key, value, description)
             class(parquet_table_metadata), intent(inout) :: this !! table metadata gaining one entry.
@@ -1897,7 +1259,6 @@ module parquet
             logical, intent(in) :: value(:) !! metadata values.
             character(len=*), intent(in), optional :: description !! optional free-text description.
         end subroutine add_metadata_logical_array
-
         !> string array specific of parquet_table_metadata%add_metadata; see add_metadata_int32.
         module subroutine add_metadata_string_array(this, key, value, description)
             class(parquet_table_metadata), intent(inout) :: this !! table metadata gaining one entry.
@@ -1905,36 +1266,409 @@ module parquet
             character(len=*), intent(in) :: value(:) !! metadata values.
             character(len=*), intent(in), optional :: description !! optional free-text description.
         end subroutine add_metadata_string_array
+    end interface
 
-        !> Grows `columns` by one empty (default-initialized) entry and
-        !> increments `n` to match; internal fields: parsing plumbing.
-        module subroutine parquet_append_empty_cinfo(columns, n)
-            type(parquet_column_type), allocatable, intent(inout) :: columns(:) !! column array being grown.
-            integer, intent(inout) :: n !! number of entries in use before this call; incremented by 1.
-        end subroutine parquet_append_empty_cinfo
+    ! ---- Writer lifecycle & column management ----
+    interface
+        !> 1-based index of `name` in writer%enabled_columns (currently
+        !> enabled/set columns only), or 0 if not found among them.
+        module integer function parquet_get_enabled_column_index(writer, name)
+            type(parquet_writer), intent(in) :: writer !! open writer to search.
+            character(len=*), intent(in) :: name !! column name to look up.
+        end function parquet_get_enabled_column_index
+        !> 1-based index of `name` in writer%all_columns (every declared
+        !> column, enabled or not), or 0 if not found among them. Assumes
+        !> writer%all_columns is allocated -- every caller only calls this
+        !> when writer%is_schema_enforced is true, which is set exactly when
+        !> parquet_open_writer also allocates writer%all_columns.
+        module integer function parquet_get_defined_column_index(writer, name)
+            type(parquet_writer), intent(in) :: writer !! open writer to search.
+            character(len=*), intent(in) :: name !! column name to look up.
+        end function parquet_get_defined_column_index
+        !> True if a parquet_write_column call declaring `expected_type`
+        !> (the actual/declared Fortran type/kind of `values`) is compatible
+        !> with the schema's own `actual_type` for that column -- exact match,
+        !> or a numeric widening (e.g. int32/int64 values written into a
+        !> float32/float64 schema column).
+        module logical function parquet_is_type_compatible(actual_type, expected_type)
+            character(len=*), intent(in) :: actual_type !! schema-declared data_type for the column.
+            character(len=*), intent(in) :: expected_type !! data_type implied by the write call's own values.
+        end function parquet_is_type_compatible
+        !> Error stops if `name` is defined with a data_type incompatible with
+        !> `expected_type` (see parquet_is_type_compatible). Assumes `name` is
+        !> already known to be a defined column -- every caller checks that
+        !> itself (and error stops on a not-defined column) before calling this.
+        module subroutine parquet_assert_column_type(writer, name, expected_type)
+            type(parquet_writer), intent(in) :: writer !! open writer to check against.
+            character(len=*), intent(in) :: name !! column name being written.
+            character(len=*), intent(in) :: expected_type !! data_type implied by the write call's own values.
+        end subroutine parquet_assert_column_type
+        !> True if `name` is a currently enabled/set column of a schema-
+        !> enforced writer (see parquet_column_type%is_set); always .true.
+        !> for a schema-less writer once the column has been defined.
+        module logical function parquet_is_column_enabled(writer, name)
+            type(parquet_writer), intent(in) :: writer !! open writer to check.
+            character(len=*), intent(in) :: name !! column name to look up.
+        end function parquet_is_column_enabled
+        !> The declared col_size (vector-column element count) for `name`,
+        !> from the writer's schema; error stops if `name` is not defined.
+        module integer function parquet_get_column_col_size(writer, name)
+            type(parquet_writer), intent(in) :: writer !! open (schema-enforced) writer to check.
+            character(len=*), intent(in) :: name !! column name to look up.
+        end function parquet_get_column_col_size
+        !> Creates `filename` and opens `writer` for writing. Without `schema`,
+        !> the writer is schema-less: columns are inferred from the first
+        !> parquet_write_column call for each name, with no field metadata/QC.
+        !> With `schema`, every column/type/QC rule is fixed up front and
+        !> enforced on every write. By default (`overwrite=.true.`) an existing
+        !> file at `filename` is silently truncated; pass `overwrite=.false.`
+        !> to instead fail immediately with `error stop` if `filename` already
+        !> exists, rather than clobbering it.
+        module subroutine parquet_open_writer(writer, filename, schema, write_maml, qc, &
+                compression, compression_level, chunk_size, use_threads, overwrite)
+            type(parquet_writer), intent(out) :: writer !! writer to open.
+            character(len=*), intent(in) :: filename !! output .parquet path.
+            type(parquet_schema), intent(in), optional :: schema !! schema to enforce; schema-less writer if absent.
+            logical, intent(in), optional :: write_maml !! also save a sidecar .maml next to filename (needs schema).
+            logical, intent(in), optional :: qc !! enable qc: min/max WARNING checks on write (needs schema).
+            character(len=*), intent(in), optional :: compression !! Arrow compression codec name (e.g. "snappy", "zstd").
+            integer, intent(in), optional :: compression_level !! codec-specific compression level.
+            integer, intent(in), optional :: chunk_size !! Parquet row-group size.
+            logical, intent(in), optional :: use_threads !! use Arrow's multi-threaded writer.
+            logical, intent(in), optional :: overwrite !! allow truncating an existing file at filename; default .true.
+        end subroutine parquet_open_writer
+        !> Sole specific of parquet_write_row_mask -- see the generic interface above.
+        module subroutine parquet_write_row_mask_impl(writer, mask)
+            type(parquet_writer), intent(inout) :: writer !! open writer, before its first write/row group.
+            logical, intent(in) :: mask(:) !! .false. drops that row entirely; kept rows preserve order.
+        end subroutine parquet_write_row_mask_impl
+        !> Sole specific of parquet_write_chunk_row_mask -- see the generic interface above.
+        module subroutine parquet_write_chunk_row_mask_impl(writer, mask)
+            type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
+            logical, intent(in) :: mask(:) !! .false. drops that row entirely; must be this row group's own nrows long.
+        end subroutine parquet_write_chunk_row_mask_impl
+        !> int32 specific of parquet_new_row_group -- see the generic interface above.
+        module subroutine parquet_new_row_group_int32(writer, nrows)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            integer(int32), intent(in) :: nrows !! row count for the new row group; must be positive.
+        end subroutine parquet_new_row_group_int32
+        !> int64 specific of parquet_new_row_group -- see the generic interface above.
+        module subroutine parquet_new_row_group_int64(writer, nrows)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            integer(int64), intent(in) :: nrows !! row count for the new row group; must be positive.
+        end subroutine parquet_new_row_group_int64
+        !> Ends the currently-open row group -- see parquet_new_row_group above. Error stops if
+        !> any column known to `writer` has no data for this row group (either a chunk just
+        !> written, or an already-whole column with enough rows left to slice). On the very
+        !> first call for `writer`, also locks the file's schema (from every column established
+        !> by then) and opens it for writing -- no column can be introduced after this point.
+        module subroutine parquet_finish_row_group(writer)
+            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
+        end subroutine parquet_finish_row_group
+        !> Writer, int32 specific of parquet_get_chunk_size -- see the generic interface above.
+        module subroutine parquet_get_chunk_size_writer_int32(writer, chunk_size)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            integer(int32), intent(out) :: chunk_size !! writer's resolved/authoritative row-group size.
+        end subroutine parquet_get_chunk_size_writer_int32
+        !> Writer, int64 specific of parquet_get_chunk_size -- see the generic interface above.
+        module subroutine parquet_get_chunk_size_writer_int64(writer, chunk_size)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            integer(int64), intent(out) :: chunk_size !! writer's resolved/authoritative row-group size.
+        end subroutine parquet_get_chunk_size_writer_int64
+        !> Flushes and closes `writer`; error stops if any declared/enabled
+        !> column was never written (schema-enforced writer only).
+        module subroutine parquet_close_writer(writer)
+            type(parquet_writer), intent(inout) :: writer !! writer to close.
+        end subroutine parquet_close_writer
+        !> FINAL procedure: safety-net close for a writer whose variable goes
+        !> out of scope (or is overwritten) still open; see parquet_writer's
+        !> own doc comment for why this is not a substitute for %close.
+        module subroutine writer_finalize(this)
+            type(parquet_writer), intent(inout) :: this !! writer being finalized.
+        end subroutine writer_finalize
+    end interface
 
-        !> Splits a MAML "key: value" `line` on its first colon, trimming
-        !> and unquoting `value` (see parquet_unquote); `key` is trimmed but
-        !> never unquoted.
-        module subroutine parquet_split_key_value(line, key, value)
-            character(len=*), intent(in) :: line !! raw MAML line, "key: value" form.
-            character(len=:), allocatable, intent(out) :: key !! trimmed key text.
-            character(len=:), allocatable, intent(out) :: value !! trimmed, unquoted value text.
-        end subroutine parquet_split_key_value
+    ! ---- Write column specifics (numeric / string / temporal) ----
+    interface
+        !> Writes a scalar int32 column; see the parquet_write_column generic
+        !> interface above for the shared behavior of this whole family.
+        module subroutine parquet_write_int32_column(writer, name, values, is_valid)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            integer(int32), intent(in) :: values(:) !! one value per row.
+            logical, intent(in), optional :: is_valid(:) !! per-row validity mask (.false. => null).
+        end subroutine parquet_write_int32_column
+        !> Writes a vector (matrix) int32 column, one row per column of
+        !> `values`; see parquet_write_column above.
+        module subroutine parquet_write_int32_matrix_column(writer, name, values, is_valid)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            integer(int32), intent(in) :: values(:,:) !! (element, row) values.
+            logical, intent(in), optional :: is_valid(:,:) !! per-element validity mask (.false. => null).
+        end subroutine parquet_write_int32_matrix_column
+        !> Writes a scalar int64 column; see parquet_write_column above.
+        module subroutine parquet_write_int64_column(writer, name, values, is_valid)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            integer(int64), intent(in) :: values(:) !! one value per row.
+            logical, intent(in), optional :: is_valid(:) !! per-row validity mask (.false. => null).
+        end subroutine parquet_write_int64_column
+        !> Writes a vector (matrix) int64 column; see parquet_write_column above.
+        module subroutine parquet_write_int64_matrix_column(writer, name, values, is_valid)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            integer(int64), intent(in) :: values(:,:) !! (element, row) values.
+            logical, intent(in), optional :: is_valid(:,:) !! per-element validity mask (.false. => null).
+        end subroutine parquet_write_int64_matrix_column
+        !> Writes a scalar float32 column; see parquet_write_column above.
+        module subroutine parquet_write_float32_column(writer, name, values, is_valid)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            real(real32), intent(in) :: values(:) !! one value per row.
+            logical, intent(in), optional :: is_valid(:) !! per-row validity mask (.false. => null).
+        end subroutine parquet_write_float32_column
+        !> Writes a vector (matrix) float32 column; see parquet_write_column above.
+        module subroutine parquet_write_float32_matrix_column(writer, name, values, is_valid)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            real(real32), intent(in) :: values(:,:) !! (element, row) values.
+            logical, intent(in), optional :: is_valid(:,:) !! per-element validity mask (.false. => null).
+        end subroutine parquet_write_float32_matrix_column
+        !> Writes a scalar float64 column; see parquet_write_column above.
+        module subroutine parquet_write_float64_column(writer, name, values, is_valid)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            real(real64), intent(in) :: values(:) !! one value per row.
+            logical, intent(in), optional :: is_valid(:) !! per-row validity mask (.false. => null).
+        end subroutine parquet_write_float64_column
+        !> Writes a vector (matrix) float64 column; see parquet_write_column above.
+        module subroutine parquet_write_float64_matrix_column(writer, name, values, is_valid)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            real(real64), intent(in) :: values(:,:) !! (element, row) values.
+            logical, intent(in), optional :: is_valid(:,:) !! per-element validity mask (.false. => null).
+        end subroutine parquet_write_float64_matrix_column
+        !> Writes a scalar logical (boolean) column; see parquet_write_column above.
+        module subroutine parquet_write_logical_column(writer, name, values, is_valid)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            logical, intent(in) :: values(:) !! one value per row.
+            logical, intent(in), optional :: is_valid(:) !! per-row validity mask (.false. => null).
+        end subroutine parquet_write_logical_column
+        !> Writes a vector (matrix) logical (boolean) column; see parquet_write_column above.
+        module subroutine parquet_write_logical_matrix_column(writer, name, values, is_valid)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            logical, intent(in) :: values(:,:) !! (element, row) values.
+            logical, intent(in), optional :: is_valid(:,:) !! per-element validity mask (.false. => null).
+        end subroutine parquet_write_logical_matrix_column
+        !> Writes a scalar string column; see parquet_write_column above.
+        module subroutine parquet_write_string_column(writer, name, values, is_valid)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            character(len=*), intent(in) :: values(:) !! one value per row.
+            logical, intent(in), optional :: is_valid(:) !! per-row validity mask (.false. => null).
+        end subroutine parquet_write_string_column
+        !> Writes a vector (matrix) string column; see parquet_write_column above.
+        module subroutine parquet_write_string_matrix_column(writer, name, values, is_valid)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            character(len=*), intent(in) :: values(:,:) !! (element, row) values.
+            logical, intent(in), optional :: is_valid(:,:) !! per-element validity mask (.false. => null).
+        end subroutine parquet_write_string_matrix_column
+        !> Compact (parquet_string_column) specific of parquet_write_column; see the generic
+        !> interface's own doc comment above for the parquet_string_column notes.
+        module subroutine parquet_write_string_column_compact(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_string_column), intent(in), target :: values !! one value (or Null) per row;
+            !! target so raw_buffers can be called on it without copying.
+        end subroutine parquet_write_string_column_compact
+        !> Scalar date specific of parquet_write_column. Null elements (see parquet_date%is_null)
+        !> are written as genuine Parquet Nulls; there is no is_valid argument -- validity lives
+        !> in the elements themselves.
+        module subroutine parquet_write_date_column(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_date), intent(in) :: values(:) !! one date (or null element) per row.
+        end subroutine parquet_write_date_column
+        !> Vector (matrix) date specific of parquet_write_column, one row per column of `values`.
+        module subroutine parquet_write_date_matrix_column(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_date), intent(in) :: values(:,:) !! (element, row) dates.
+        end subroutine parquet_write_date_matrix_column
+        !> Scalar time specific of parquet_write_column; null elements become Parquet Nulls.
+        module subroutine parquet_write_time_column(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_time), intent(in) :: values(:) !! one time (or null element) per row.
+        end subroutine parquet_write_time_column
+        !> Vector (matrix) time specific of parquet_write_column.
+        module subroutine parquet_write_time_matrix_column(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_time), intent(in) :: values(:,:) !! (element, row) times.
+        end subroutine parquet_write_time_matrix_column
+        !> Scalar timestamp specific of parquet_write_column; null elements become Parquet Nulls.
+        module subroutine parquet_write_timestamp_column(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_timestamp), intent(in) :: values(:) !! one instant (or null element) per row.
+        end subroutine parquet_write_timestamp_column
+        !> Vector (matrix) timestamp specific of parquet_write_column.
+        module subroutine parquet_write_timestamp_matrix_column(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_timestamp), intent(in) :: values(:,:) !! (element, row) instants.
+        end subroutine parquet_write_timestamp_matrix_column
+        !> Scalar date specific of parquet_write_column_chunk (one row group's worth); nulls come
+        !> from the elements, so there is no is_valid argument.
+        module subroutine parquet_write_date_column_chunk(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_date), intent(in) :: values(:) !! this row group's dates.
+        end subroutine parquet_write_date_column_chunk
+        !> Vector date specific of parquet_write_column_chunk.
+        module subroutine parquet_write_date_matrix_column_chunk(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_date), intent(in) :: values(:,:) !! (element, row) dates for this row group.
+        end subroutine parquet_write_date_matrix_column_chunk
+        !> Scalar time specific of parquet_write_column_chunk.
+        module subroutine parquet_write_time_column_chunk(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_time), intent(in) :: values(:) !! this row group's times.
+        end subroutine parquet_write_time_column_chunk
+        !> Vector time specific of parquet_write_column_chunk.
+        module subroutine parquet_write_time_matrix_column_chunk(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_time), intent(in) :: values(:,:) !! (element, row) times for this row group.
+        end subroutine parquet_write_time_matrix_column_chunk
+        !> Scalar timestamp specific of parquet_write_column_chunk.
+        module subroutine parquet_write_timestamp_column_chunk(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_timestamp), intent(in) :: values(:) !! this row group's instants.
+        end subroutine parquet_write_timestamp_column_chunk
+        !> Vector timestamp specific of parquet_write_column_chunk.
+        module subroutine parquet_write_timestamp_matrix_column_chunk(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_timestamp), intent(in) :: values(:,:) !! (element, row) instants for this row group.
+        end subroutine parquet_write_timestamp_matrix_column_chunk
+        !> Writes a scalar int32 column's chunk for the currently-open row group; see
+        !> parquet_write_column_chunk above for the shared behavior of this whole family.
+        module subroutine parquet_write_int32_column_chunk(writer, name, values, is_valid)
+            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            integer(int32), intent(in) :: values(:) !! one value per row of the open row group.
+            logical, intent(in), optional :: is_valid(:) !! per-row validity mask (.false. => null).
+        end subroutine parquet_write_int32_column_chunk
+        !> Writes a vector (matrix) int32 column's chunk; see parquet_write_column_chunk above.
+        module subroutine parquet_write_int32_matrix_column_chunk(writer, name, values, is_valid)
+            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            integer(int32), intent(in) :: values(:,:) !! (element, row) values of the open row group.
+            logical, intent(in), optional :: is_valid(:,:) !! per-element validity mask (.false. => null).
+        end subroutine parquet_write_int32_matrix_column_chunk
+        !> Writes a scalar int64 column's chunk; see parquet_write_column_chunk above.
+        module subroutine parquet_write_int64_column_chunk(writer, name, values, is_valid)
+            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            integer(int64), intent(in) :: values(:) !! one value per row of the open row group.
+            logical, intent(in), optional :: is_valid(:) !! per-row validity mask (.false. => null).
+        end subroutine parquet_write_int64_column_chunk
+        !> Writes a vector (matrix) int64 column's chunk; see parquet_write_column_chunk above.
+        module subroutine parquet_write_int64_matrix_column_chunk(writer, name, values, is_valid)
+            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            integer(int64), intent(in) :: values(:,:) !! (element, row) values of the open row group.
+            logical, intent(in), optional :: is_valid(:,:) !! per-element validity mask (.false. => null).
+        end subroutine parquet_write_int64_matrix_column_chunk
+        !> Writes a scalar float32 column's chunk; see parquet_write_column_chunk above.
+        module subroutine parquet_write_float32_column_chunk(writer, name, values, is_valid)
+            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            real(real32), intent(in) :: values(:) !! one value per row of the open row group.
+            logical, intent(in), optional :: is_valid(:) !! per-row validity mask (.false. => null).
+        end subroutine parquet_write_float32_column_chunk
+        !> Writes a vector (matrix) float32 column's chunk; see parquet_write_column_chunk above.
+        module subroutine parquet_write_float32_matrix_column_chunk(writer, name, values, is_valid)
+            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            real(real32), intent(in) :: values(:,:) !! (element, row) values of the open row group.
+            logical, intent(in), optional :: is_valid(:,:) !! per-element validity mask (.false. => null).
+        end subroutine parquet_write_float32_matrix_column_chunk
+        !> Writes a scalar float64 column's chunk; see parquet_write_column_chunk above.
+        module subroutine parquet_write_float64_column_chunk(writer, name, values, is_valid)
+            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            real(real64), intent(in) :: values(:) !! one value per row of the open row group.
+            logical, intent(in), optional :: is_valid(:) !! per-row validity mask (.false. => null).
+        end subroutine parquet_write_float64_column_chunk
+        !> Writes a vector (matrix) float64 column's chunk; see parquet_write_column_chunk above.
+        module subroutine parquet_write_float64_matrix_column_chunk(writer, name, values, is_valid)
+            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            real(real64), intent(in) :: values(:,:) !! (element, row) values of the open row group.
+            logical, intent(in), optional :: is_valid(:,:) !! per-element validity mask (.false. => null).
+        end subroutine parquet_write_float64_matrix_column_chunk
+        !> Writes a scalar logical (boolean) column's chunk; see parquet_write_column_chunk above.
+        module subroutine parquet_write_logical_column_chunk(writer, name, values, is_valid)
+            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            logical, intent(in) :: values(:) !! one value per row of the open row group.
+            logical, intent(in), optional :: is_valid(:) !! per-row validity mask (.false. => null).
+        end subroutine parquet_write_logical_column_chunk
+        !> Writes a vector (matrix) logical (boolean) column's chunk; see
+        !> parquet_write_column_chunk above.
+        module subroutine parquet_write_logical_matrix_column_chunk(writer, name, values, is_valid)
+            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            logical, intent(in) :: values(:,:) !! (element, row) values of the open row group.
+            logical, intent(in), optional :: is_valid(:,:) !! per-element validity mask (.false. => null).
+        end subroutine parquet_write_logical_matrix_column_chunk
+        !> Writes a scalar string column's chunk; see parquet_write_column_chunk above.
+        module subroutine parquet_write_string_column_chunk(writer, name, values, is_valid)
+            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            character(len=*), intent(in) :: values(:) !! one value per row of the open row group.
+            logical, intent(in), optional :: is_valid(:) !! per-row validity mask (.false. => null).
+        end subroutine parquet_write_string_column_chunk
+        !> Writes a vector (matrix) string column's chunk; see parquet_write_column_chunk above.
+        module subroutine parquet_write_string_matrix_column_chunk(writer, name, values, is_valid)
+            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            character(len=*), intent(in) :: values(:,:) !! (element, row) values of the open row group.
+            logical, intent(in), optional :: is_valid(:,:) !! per-element validity mask (.false. => null).
+        end subroutine parquet_write_string_matrix_column_chunk
+        !> Compact (parquet_string_column) specific of parquet_write_column_chunk; see the generic
+        !> interface's own doc comment above for the parquet_string_column notes.
+        module subroutine parquet_write_string_column_chunk_compact(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_string_column), intent(in), target :: values !! one value (or Null) per row of the
+            !! open row group; target so raw_buffers can be called on it without copying.
+        end subroutine parquet_write_string_column_chunk_compact
+    end interface
 
-        !> Strips one matching pair of surrounding single or double quotes
-        !> from `s`, if present; returns `s` unchanged otherwise.
-        module subroutine parquet_unquote(s, out)
-            character(len=*), intent(in) :: s !! text to unquote.
-            character(len=:), allocatable, intent(out) :: out !! s with surrounding quotes removed, if any.
-        end subroutine parquet_unquote
-
-        !> Case-insensitive lowercase of ASCII letters.
-        module subroutine parquet_to_lower(s, out)
-            character(len=*), intent(in) :: s !! input string.
-            character(len=:), allocatable, intent(out) :: out !! s with every ASCII A-Z lowercased; other characters unchanged.
-        end subroutine parquet_to_lower
-
+    ! ---- Reader lifecycle & queries ----
+    interface
+        !> Reader, int32 specific of parquet_get_chunk_size -- see the generic interface above.
+        module subroutine parquet_get_chunk_size_reader_int32(reader, chunk_size, row_group)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            integer(int32), intent(out) :: chunk_size !! row group's own physical row count.
+            integer(int32), intent(in), optional :: row_group !! 1-based; omitted defaults to the first row group.
+        end subroutine parquet_get_chunk_size_reader_int32
+        !> Reader, int64 specific of parquet_get_chunk_size -- see the generic interface above.
+        module subroutine parquet_get_chunk_size_reader_int64(reader, chunk_size, row_group)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            integer(int64), intent(out) :: chunk_size !! row group's own physical row count.
+            integer(int64), intent(in), optional :: row_group !! 1-based; omitted defaults to the first row group.
+        end subroutine parquet_get_chunk_size_reader_int64
         !> The nrows-less form of parquet_open_reader (see the generic
         !> interface above): opens as usual, filling in none of the
         !> post-filter row count. Called directly by the two nrows= forms
@@ -1957,7 +1691,6 @@ module parquet
             logical, intent(in), optional :: qc_soft !! qc violations warn instead of error-stopping.
             logical, intent(in), optional :: prefetch !! read and cache every column immediately.
         end subroutine parquet_open_reader_base
-
         !> nrows (integer(int64)): filled in with the post-filter row count
         !> via parquet_get_nrows(reader, nrows, check_positive=.true.) -- so,
         !> exactly like that check_positive path, a file (or filter result)
@@ -1979,7 +1712,6 @@ module parquet
             integer(int64), intent(out) :: nrows !! post-filter row count; error stops if zero.
             logical, intent(in), optional :: prefetch !! read and cache every column immediately.
         end subroutine parquet_open_reader_nrows_int64
-
         !> Same as parquet_open_reader_nrows_int64, but for a caller-supplied
         !> integer(int32) nrows -- also fails with error stop (via
         !> parquet_get_nrows_int32) if the actual row count overflows int32,
@@ -1997,7 +1729,6 @@ module parquet
             integer(int32), intent(out) :: nrows !! post-filter row count; error stops if zero or if it overflows int32.
             logical, intent(in), optional :: prefetch !! read and cache every column immediately.
         end subroutine parquet_open_reader_nrows_int32
-
         !> Closes `reader`, freeing the underlying C++ handle. check_complete (optional,
         !> default .false.): verify every column read via parquet_read_column_chunk had every
         !> one of the file's row groups read by now (row-mode/whole-column reads are excluded --
@@ -2011,35 +1742,30 @@ module parquet
             logical, intent(in), optional :: check_complete !! verify every chunk-read column's row groups were all read.
             logical, intent(in), optional :: check_hard !! error stop (.true., default) vs WARNING (.false.) on incompleteness.
         end subroutine parquet_close_reader
-
         !> Array specific of parquet_prefetch_columns: one name per element,
         !> fixed-length (pad shorter names with blanks).
         module subroutine parquet_prefetch_columns_array(reader, names)
             type(parquet_reader), intent(in) :: reader !! open reader.
             character(len=*), intent(in) :: names(:) !! column names to prefetch.
         end subroutine parquet_prefetch_columns_array
-
         !> Scalar-string specific of parquet_prefetch_columns: `names` lists
         !> column names separated by commas and/or semicolons.
         module subroutine parquet_prefetch_columns_string(reader, names)
             type(parquet_reader), intent(in) :: reader !! open reader.
             character(len=*), intent(in) :: names !! comma/semicolon-separated column names.
         end subroutine parquet_prefetch_columns_string
-
         !> FINAL procedure: safety-net close for a reader whose variable goes
         !> out of scope (or is overwritten) still open; see parquet_writer's
         !> doc comment for why this is not a substitute for %close.
         module subroutine reader_finalize(this)
             type(parquet_reader), intent(inout) :: this !! reader being finalized.
         end subroutine reader_finalize
-
         !> int64 specific of parquet_get_nrows.
         module subroutine parquet_get_nrows_int64(reader, nrows, check_positive)
             type(parquet_reader), intent(in) :: reader !! open reader.
             integer(int64), intent(out) :: nrows !! post-filter row count.
             logical, intent(in), optional :: check_positive !! error stop instead of returning 0 rows.
         end subroutine parquet_get_nrows_int64
-
         !> int32 specific of parquet_get_nrows; also error stops if the
         !> actual row count overflows int32.
         module subroutine parquet_get_nrows_int32(reader, nrows, check_positive)
@@ -2047,20 +1773,17 @@ module parquet
             integer(int32), intent(out) :: nrows !! post-filter row count.
             logical, intent(in), optional :: check_positive !! error stop instead of returning 0 rows.
         end subroutine parquet_get_nrows_int32
-
         !> int64 specific of parquet_get_num_row_groups.
         module subroutine parquet_get_num_row_groups_int64(reader, num_row_groups)
             type(parquet_reader), intent(in) :: reader !! open reader.
             integer(int64), intent(out) :: num_row_groups !! file's row-group count.
         end subroutine parquet_get_num_row_groups_int64
-
         !> int32 specific of parquet_get_num_row_groups; also error stops
         !> if the actual row-group count overflows int32.
         module subroutine parquet_get_num_row_groups_int32(reader, num_row_groups)
             type(parquet_reader), intent(in) :: reader !! open reader.
             integer(int32), intent(out) :: num_row_groups !! file's row-group count.
         end subroutine parquet_get_num_row_groups_int32
-
         !> Returns `name`'s declared col_size (vector-column element count;
         !> 1 for a scalar column) in `col_size`. Reads no column data (a FIXED_SIZE_LIST column's
         !> width is a schema-level constant), so this is safe even on a column whose total
@@ -2071,35 +1794,18 @@ module parquet
             character(len=*), intent(in) :: name !! column name.
             integer, intent(out) :: col_size !! that column's declared element count.
         end subroutine parquet_get_col_size
-
-        !> Every parquet_read_column variant calls this with its own `values`
-        !> array's row count (size(values) for a scalar column, size(values, 2)
-        !> for a vector column) before reading any data. A mismatch against the
-        !> file's actual row count fails immediately with error stop, instead of
-        !> reaching the underlying C++ read call, whose own "nrows mismatch"
-        !> check reports a clean diagnostic but aborts the process rather than
-        !> returning control to Fortran (see report_fatal_error in
-        !> parquet_wrapper.cpp).
-        module subroutine parquet_check_read_row_count(reader, name, given_nrows)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: name !! column being read; named only in the error-stop message.
-            integer(c_long_long), intent(in) :: given_nrows !! row count of this read call's own `values` array.
-        end subroutine parquet_check_read_row_count
-
         !> int64 specific of parquet_get_column_total_elements.
         module subroutine parquet_get_column_total_elements_int64(reader, name, total_elements)
             type(parquet_reader), intent(in) :: reader !! open reader.
             character(len=*), intent(in) :: name !! column name.
             integer(int64), intent(out) :: total_elements !! total element count across every row.
         end subroutine parquet_get_column_total_elements_int64
-
         !> int32 specific of parquet_get_column_total_elements.
         module subroutine parquet_get_column_total_elements_int32(reader, name, total_elements)
             type(parquet_reader), intent(in) :: reader !! open reader.
             character(len=*), intent(in) :: name !! column name.
             integer(int32), intent(out) :: total_elements !! total element count across every row.
         end subroutine parquet_get_column_total_elements_int32
-
         !> Returns the longest actual string length among `name`'s values in
         !> `max_string_length`, so a caller can size a fixed-length
         !> character(len=...) buffer before reading a string column.
@@ -2108,279 +1814,6 @@ module parquet
             character(len=*), intent(in) :: name !! string column name.
             integer, intent(out) :: max_string_length !! longest value length actually present in the column.
         end subroutine parquet_get_string_length
-
-        !> int32 specific of parquet_get_metadata; see the generic interface
-        !> above for the full key-missing/conversion-failure behavior.
-        module subroutine parquet_get_metadata_int32(reader, key, value, default, warn)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: key !! metadata key to look up.
-            integer(int32), intent(out) :: value !! parsed value.
-            integer(int32), intent(in), optional :: default !! fallback if key is missing or unparsable.
-            logical, intent(in), optional :: warn !! print a WARNING on the missing-key/default-used path.
-        end subroutine parquet_get_metadata_int32
-
-        !> int64 specific of parquet_get_metadata; see parquet_get_metadata_int32.
-        module subroutine parquet_get_metadata_int64(reader, key, value, default, warn)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: key !! metadata key to look up.
-            integer(int64), intent(out) :: value !! parsed value.
-            integer(int64), intent(in), optional :: default !! fallback if key is missing or unparsable.
-            logical, intent(in), optional :: warn !! print a WARNING on the missing-key/default-used path.
-        end subroutine parquet_get_metadata_int64
-
-        !> float32 specific of parquet_get_metadata; see parquet_get_metadata_int32.
-        module subroutine parquet_get_metadata_float32(reader, key, value, default, warn)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: key !! metadata key to look up.
-            real(real32), intent(out) :: value !! parsed value.
-            real(real32), intent(in), optional :: default !! fallback if key is missing or unparsable.
-            logical, intent(in), optional :: warn !! print a WARNING on the missing-key/default-used path.
-        end subroutine parquet_get_metadata_float32
-
-        !> float64 specific of parquet_get_metadata; see parquet_get_metadata_int32.
-        module subroutine parquet_get_metadata_float64(reader, key, value, default, warn)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: key !! metadata key to look up.
-            real(real64), intent(out) :: value !! parsed value.
-            real(real64), intent(in), optional :: default !! fallback if key is missing or unparsable.
-            logical, intent(in), optional :: warn !! print a WARNING on the missing-key/default-used path.
-        end subroutine parquet_get_metadata_float64
-
-        !> logical specific of parquet_get_metadata; see parquet_get_metadata_int32.
-        module subroutine parquet_get_metadata_logical(reader, key, value, default, warn)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: key !! metadata key to look up.
-            logical, intent(out) :: value !! parsed value.
-            logical, intent(in), optional :: default !! fallback if key is missing or unparsable.
-            logical, intent(in), optional :: warn !! print a WARNING on the missing-key/default-used path.
-        end subroutine parquet_get_metadata_logical
-
-        !> string specific of parquet_get_metadata; see parquet_get_metadata_int32.
-        module subroutine parquet_get_metadata_string(reader, key, value, default, warn)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: key !! metadata key to look up.
-            character(len=:), allocatable, intent(out) :: value !! stored value, verbatim.
-            character(len=*), intent(in), optional :: default !! fallback if key is missing.
-            logical, intent(in), optional :: warn !! print a WARNING on the missing-key/default-used path.
-        end subroutine parquet_get_metadata_string
-
-        !> int32 array specific of parquet_get_metadata; see parquet_get_metadata_int32.
-        module subroutine parquet_get_metadata_int32_array(reader, key, value, default, warn)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: key !! metadata key to look up.
-            integer(int32), allocatable, intent(out) :: value(:) !! parsed values.
-            integer(int32), intent(in), optional :: default(:) !! fallback if key is missing or unparsable.
-            logical, intent(in), optional :: warn !! print a WARNING on the missing-key/default-used path.
-        end subroutine parquet_get_metadata_int32_array
-
-        !> int64 array specific of parquet_get_metadata; see parquet_get_metadata_int32.
-        module subroutine parquet_get_metadata_int64_array(reader, key, value, default, warn)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: key !! metadata key to look up.
-            integer(int64), allocatable, intent(out) :: value(:) !! parsed values.
-            integer(int64), intent(in), optional :: default(:) !! fallback if key is missing or unparsable.
-            logical, intent(in), optional :: warn !! print a WARNING on the missing-key/default-used path.
-        end subroutine parquet_get_metadata_int64_array
-
-        !> float32 array specific of parquet_get_metadata; see parquet_get_metadata_int32.
-        module subroutine parquet_get_metadata_float32_array(reader, key, value, default, warn)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: key !! metadata key to look up.
-            real(real32), allocatable, intent(out) :: value(:) !! parsed values.
-            real(real32), intent(in), optional :: default(:) !! fallback if key is missing or unparsable.
-            logical, intent(in), optional :: warn !! print a WARNING on the missing-key/default-used path.
-        end subroutine parquet_get_metadata_float32_array
-
-        !> float64 array specific of parquet_get_metadata; see parquet_get_metadata_int32.
-        module subroutine parquet_get_metadata_float64_array(reader, key, value, default, warn)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: key !! metadata key to look up.
-            real(real64), allocatable, intent(out) :: value(:) !! parsed values.
-            real(real64), intent(in), optional :: default(:) !! fallback if key is missing or unparsable.
-            logical, intent(in), optional :: warn !! print a WARNING on the missing-key/default-used path.
-        end subroutine parquet_get_metadata_float64_array
-
-        !> logical array specific of parquet_get_metadata; see parquet_get_metadata_int32.
-        module subroutine parquet_get_metadata_logical_array(reader, key, value, default, warn)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: key !! metadata key to look up.
-            logical, allocatable, intent(out) :: value(:) !! parsed values.
-            logical, intent(in), optional :: default(:) !! fallback if key is missing or unparsable.
-            logical, intent(in), optional :: warn !! print a WARNING on the missing-key/default-used path.
-        end subroutine parquet_get_metadata_logical_array
-
-        !> string array specific of parquet_get_metadata; see parquet_get_metadata_int32.
-        module subroutine parquet_get_metadata_string_array(reader, key, value, default, warn)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: key !! metadata key to look up.
-            character(len=:), allocatable, intent(out) :: value(:) !! stored values, verbatim.
-            character(len=*), intent(in), optional :: default(:) !! fallback if key is missing.
-            logical, intent(in), optional :: warn !! print a WARNING on the missing-key/default-used path.
-        end subroutine parquet_get_metadata_string_array
-
-        !> Scalar int32 specific of parquet_read_column; see the generic
-        !> interface above for the shared behavior of this whole family.
-        module subroutine parquet_read_int32_column_1d(reader, name, values, null_value, is_valid)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: name !! column name.
-            integer(int32), intent(out) :: values(:) !! one value per row.
-            integer(int32), intent(in), optional :: null_value !! fill value for missing entries.
-            logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
-        end subroutine parquet_read_int32_column_1d
-
-        !> Scalar int64 specific of parquet_read_column; see parquet_read_column above.
-        module subroutine parquet_read_int64_column_1d(reader, name, values, null_value, is_valid)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: name !! column name.
-            integer(int64), intent(out) :: values(:) !! one value per row.
-            integer(int64), intent(in), optional :: null_value !! fill value for missing entries.
-            logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
-        end subroutine parquet_read_int64_column_1d
-
-        !> Scalar float32 specific of parquet_read_column; see parquet_read_column above.
-        module subroutine parquet_read_float32_column_1d(reader, name, values, null_value, is_valid)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: name !! column name.
-            real(real32), intent(out) :: values(:) !! one value per row.
-            real(real32), intent(in), optional :: null_value !! fill value for missing entries.
-            logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
-        end subroutine parquet_read_float32_column_1d
-
-        !> Scalar float64 specific of parquet_read_column; see parquet_read_column above.
-        module subroutine parquet_read_float64_column_1d(reader, name, values, null_value, is_valid)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: name !! column name.
-            real(real64), intent(out) :: values(:) !! one value per row.
-            real(real64), intent(in), optional :: null_value !! fill value for missing entries.
-            logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
-        end subroutine parquet_read_float64_column_1d
-
-        !> Scalar logical (boolean) specific of parquet_read_column; see parquet_read_column above.
-        module subroutine parquet_read_logical_column_1d(reader, name, values, null_value, is_valid)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: name !! column name.
-            logical, intent(out) :: values(:) !! one value per row.
-            logical, intent(in), optional :: null_value !! fill value for missing entries.
-            logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
-        end subroutine parquet_read_logical_column_1d
-
-        !> Scalar string specific of parquet_read_column; see parquet_read_column above.
-        module subroutine parquet_read_string_column_1d(reader, name, values, null_value, is_valid)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: name !! column name.
-            character(len=*), intent(out) :: values(:) !! one value per row.
-            character(len=*), intent(in), optional :: null_value !! fill value for missing entries.
-            logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
-        end subroutine parquet_read_string_column_1d
-
-        !> Vector int32 specific of parquet_read_column: reads the whole
-        !> 2-D (element, row) array at once; see parquet_read_column above.
-        module subroutine parquet_read_int32_array_full(reader, name, values, null_value, is_valid)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: name !! vector column name.
-            integer(int32), intent(out) :: values(:, :) !! (element, row) values.
-            integer(int32), intent(in), optional :: null_value !! fill value for missing entries.
-            logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
-        end subroutine parquet_read_int32_array_full
-
-        !> Vector int64 specific of parquet_read_column; see parquet_read_int32_array_full.
-        module subroutine parquet_read_int64_array_full(reader, name, values, null_value, is_valid)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: name !! vector column name.
-            integer(int64), intent(out) :: values(:, :) !! (element, row) values.
-            integer(int64), intent(in), optional :: null_value !! fill value for missing entries.
-            logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
-        end subroutine parquet_read_int64_array_full
-
-        !> Vector float32 specific of parquet_read_column; see parquet_read_int32_array_full.
-        module subroutine parquet_read_float32_array_full(reader, name, values, null_value, is_valid)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: name !! vector column name.
-            real(real32), intent(out) :: values(:, :) !! (element, row) values.
-            real(real32), intent(in), optional :: null_value !! fill value for missing entries.
-            logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
-        end subroutine parquet_read_float32_array_full
-
-        !> Vector float64 specific of parquet_read_column; see parquet_read_int32_array_full.
-        module subroutine parquet_read_float64_array_full(reader, name, values, null_value, is_valid)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: name !! vector column name.
-            real(real64), intent(out) :: values(:, :) !! (element, row) values.
-            real(real64), intent(in), optional :: null_value !! fill value for missing entries.
-            logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
-        end subroutine parquet_read_float64_array_full
-
-        !> Vector logical (boolean) specific of parquet_read_column; see parquet_read_int32_array_full.
-        module subroutine parquet_read_logical_array_full(reader, name, values, null_value, is_valid)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: name !! vector column name.
-            logical, intent(out) :: values(:, :) !! (element, row) values.
-            logical, intent(in), optional :: null_value !! fill value for missing entries.
-            logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
-        end subroutine parquet_read_logical_array_full
-
-        !> Vector string specific of parquet_read_column; see parquet_read_int32_array_full.
-        module subroutine parquet_read_string_array_full(reader, name, values, null_value, is_valid)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: name !! vector column name.
-            character(len=*), intent(out) :: values(:, :) !! (element, row) values.
-            character(len=*), intent(in), optional :: null_value !! fill value for missing entries.
-            logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
-        end subroutine parquet_read_string_array_full
-
-        !> Compact (parquet_string_column) specific of parquet_read_column; see the generic
-        !> interface's own doc comment above for the parquet_string_column notes.
-        module subroutine parquet_read_string_column_compact(reader, name, values)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: name !! column name.
-            type(parquet_string_column), intent(inout) :: values !! cleared, then filled with the whole column.
-        end subroutine parquet_read_string_column_compact
-
-        !> Scalar date specific of parquet_read_column. A Parquet Null in the column becomes a
-        !> null `values` element (parquet_date%is_null); there is no null_value/is_valid argument
-        !> -- validity lives in the elements themselves, so a null-containing date column reads
-        !> without the error-on-Null that the numeric/string readers apply by default.
-        module subroutine parquet_read_date_column_1d(reader, name, values)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: name !! column name.
-            type(parquet_date), intent(out) :: values(:) !! one date (null where the column had a Null) per row.
-        end subroutine parquet_read_date_column_1d
-
-        !> Vector date specific of parquet_read_column; reads the whole (element, row) array.
-        module subroutine parquet_read_date_array_full(reader, name, values)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: name !! vector column name.
-            type(parquet_date), intent(out) :: values(:,:) !! (element, row) dates.
-        end subroutine parquet_read_date_array_full
-
-        !> Scalar time specific of parquet_read_column; see parquet_read_date_column_1d on nulls.
-        module subroutine parquet_read_time_column_1d(reader, name, values)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: name !! column name.
-            type(parquet_time), intent(out) :: values(:) !! one time per row.
-        end subroutine parquet_read_time_column_1d
-
-        !> Vector time specific of parquet_read_column.
-        module subroutine parquet_read_time_array_full(reader, name, values)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: name !! vector column name.
-            type(parquet_time), intent(out) :: values(:,:) !! (element, row) times.
-        end subroutine parquet_read_time_array_full
-
-        !> Scalar timestamp specific of parquet_read_column; see parquet_read_date_column_1d on nulls.
-        module subroutine parquet_read_timestamp_column_1d(reader, name, values)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: name !! column name.
-            type(parquet_timestamp), intent(out) :: values(:) !! one instant per row.
-        end subroutine parquet_read_timestamp_column_1d
-
-        !> Vector timestamp specific of parquet_read_column.
-        module subroutine parquet_read_timestamp_array_full(reader, name, values)
-            type(parquet_reader), intent(in) :: reader !! open reader.
-            character(len=*), intent(in) :: name !! vector column name.
-            type(parquet_timestamp), intent(out) :: values(:,:) !! (element, row) instants.
-        end subroutine parquet_read_timestamp_array_full
-
         !> Returns column `name`'s stored time unit and (for a timestamp) timezone. `unit`
         !> (optional) receives one of the parquet_unit_* selectors; `timezone` (optional,
         !> allocatable) receives the IANA timezone string ("" for a timezone-naive timestamp or
@@ -2393,7 +1826,154 @@ module parquet
             integer, intent(out), optional :: unit !! stored unit (a parquet_unit_* selector).
             character(len=:), allocatable, intent(out), optional :: timezone !! IANA tz, or "" if naive.
         end subroutine parquet_get_column_time_info
+    end interface
 
+    ! ---- Read column specifics (by type x access mode) ----
+    interface
+        !> Scalar int32 specific of parquet_read_column; see the generic
+        !> interface above for the shared behavior of this whole family.
+        module subroutine parquet_read_int32_column_1d(reader, name, values, null_value, is_valid)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            integer(int32), intent(out) :: values(:) !! one value per row.
+            integer(int32), intent(in), optional :: null_value !! fill value for missing entries.
+            logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
+        end subroutine parquet_read_int32_column_1d
+        !> Scalar int64 specific of parquet_read_column; see parquet_read_column above.
+        module subroutine parquet_read_int64_column_1d(reader, name, values, null_value, is_valid)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            integer(int64), intent(out) :: values(:) !! one value per row.
+            integer(int64), intent(in), optional :: null_value !! fill value for missing entries.
+            logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
+        end subroutine parquet_read_int64_column_1d
+        !> Scalar float32 specific of parquet_read_column; see parquet_read_column above.
+        module subroutine parquet_read_float32_column_1d(reader, name, values, null_value, is_valid)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            real(real32), intent(out) :: values(:) !! one value per row.
+            real(real32), intent(in), optional :: null_value !! fill value for missing entries.
+            logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
+        end subroutine parquet_read_float32_column_1d
+        !> Scalar float64 specific of parquet_read_column; see parquet_read_column above.
+        module subroutine parquet_read_float64_column_1d(reader, name, values, null_value, is_valid)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            real(real64), intent(out) :: values(:) !! one value per row.
+            real(real64), intent(in), optional :: null_value !! fill value for missing entries.
+            logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
+        end subroutine parquet_read_float64_column_1d
+        !> Scalar logical (boolean) specific of parquet_read_column; see parquet_read_column above.
+        module subroutine parquet_read_logical_column_1d(reader, name, values, null_value, is_valid)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            logical, intent(out) :: values(:) !! one value per row.
+            logical, intent(in), optional :: null_value !! fill value for missing entries.
+            logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
+        end subroutine parquet_read_logical_column_1d
+        !> Scalar string specific of parquet_read_column; see parquet_read_column above.
+        module subroutine parquet_read_string_column_1d(reader, name, values, null_value, is_valid)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            character(len=*), intent(out) :: values(:) !! one value per row.
+            character(len=*), intent(in), optional :: null_value !! fill value for missing entries.
+            logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
+        end subroutine parquet_read_string_column_1d
+        !> Vector int32 specific of parquet_read_column: reads the whole
+        !> 2-D (element, row) array at once; see parquet_read_column above.
+        module subroutine parquet_read_int32_array_full(reader, name, values, null_value, is_valid)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            integer(int32), intent(out) :: values(:, :) !! (element, row) values.
+            integer(int32), intent(in), optional :: null_value !! fill value for missing entries.
+            logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
+        end subroutine parquet_read_int32_array_full
+        !> Vector int64 specific of parquet_read_column; see parquet_read_int32_array_full.
+        module subroutine parquet_read_int64_array_full(reader, name, values, null_value, is_valid)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            integer(int64), intent(out) :: values(:, :) !! (element, row) values.
+            integer(int64), intent(in), optional :: null_value !! fill value for missing entries.
+            logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
+        end subroutine parquet_read_int64_array_full
+        !> Vector float32 specific of parquet_read_column; see parquet_read_int32_array_full.
+        module subroutine parquet_read_float32_array_full(reader, name, values, null_value, is_valid)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            real(real32), intent(out) :: values(:, :) !! (element, row) values.
+            real(real32), intent(in), optional :: null_value !! fill value for missing entries.
+            logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
+        end subroutine parquet_read_float32_array_full
+        !> Vector float64 specific of parquet_read_column; see parquet_read_int32_array_full.
+        module subroutine parquet_read_float64_array_full(reader, name, values, null_value, is_valid)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            real(real64), intent(out) :: values(:, :) !! (element, row) values.
+            real(real64), intent(in), optional :: null_value !! fill value for missing entries.
+            logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
+        end subroutine parquet_read_float64_array_full
+        !> Vector logical (boolean) specific of parquet_read_column; see parquet_read_int32_array_full.
+        module subroutine parquet_read_logical_array_full(reader, name, values, null_value, is_valid)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            logical, intent(out) :: values(:, :) !! (element, row) values.
+            logical, intent(in), optional :: null_value !! fill value for missing entries.
+            logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
+        end subroutine parquet_read_logical_array_full
+        !> Vector string specific of parquet_read_column; see parquet_read_int32_array_full.
+        module subroutine parquet_read_string_array_full(reader, name, values, null_value, is_valid)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            character(len=*), intent(out) :: values(:, :) !! (element, row) values.
+            character(len=*), intent(in), optional :: null_value !! fill value for missing entries.
+            logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
+        end subroutine parquet_read_string_array_full
+        !> Compact (parquet_string_column) specific of parquet_read_column; see the generic
+        !> interface's own doc comment above for the parquet_string_column notes.
+        module subroutine parquet_read_string_column_compact(reader, name, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_string_column), intent(inout) :: values !! cleared, then filled with the whole column.
+        end subroutine parquet_read_string_column_compact
+        !> Scalar date specific of parquet_read_column. A Parquet Null in the column becomes a
+        !> null `values` element (parquet_date%is_null); there is no null_value/is_valid argument
+        !> -- validity lives in the elements themselves, so a null-containing date column reads
+        !> without the error-on-Null that the numeric/string readers apply by default.
+        module subroutine parquet_read_date_column_1d(reader, name, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_date), intent(out) :: values(:) !! one date (null where the column had a Null) per row.
+        end subroutine parquet_read_date_column_1d
+        !> Vector date specific of parquet_read_column; reads the whole (element, row) array.
+        module subroutine parquet_read_date_array_full(reader, name, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            type(parquet_date), intent(out) :: values(:,:) !! (element, row) dates.
+        end subroutine parquet_read_date_array_full
+        !> Scalar time specific of parquet_read_column; see parquet_read_date_column_1d on nulls.
+        module subroutine parquet_read_time_column_1d(reader, name, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_time), intent(out) :: values(:) !! one time per row.
+        end subroutine parquet_read_time_column_1d
+        !> Vector time specific of parquet_read_column.
+        module subroutine parquet_read_time_array_full(reader, name, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            type(parquet_time), intent(out) :: values(:,:) !! (element, row) times.
+        end subroutine parquet_read_time_array_full
+        !> Scalar timestamp specific of parquet_read_column; see parquet_read_date_column_1d on nulls.
+        module subroutine parquet_read_timestamp_column_1d(reader, name, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_timestamp), intent(out) :: values(:) !! one instant per row.
+        end subroutine parquet_read_timestamp_column_1d
+        !> Vector timestamp specific of parquet_read_column.
+        module subroutine parquet_read_timestamp_array_full(reader, name, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! vector column name.
+            type(parquet_timestamp), intent(out) :: values(:,:) !! (element, row) instants.
+        end subroutine parquet_read_timestamp_array_full
         !> Scalar date, int32 row_group specific of parquet_read_column_chunk; a paired _rg64
         !> (int64 row_group) also exists. Nulls fill their elements (parquet_date%set_null).
         module subroutine parquet_read_date_column_chunk_rg32(reader, name, row_group, values)
@@ -2402,7 +1982,6 @@ module parquet
             integer(int32), intent(in) :: row_group !! 1-based row group.
             type(parquet_date), intent(out) :: values(:) !! that row group's dates.
         end subroutine parquet_read_date_column_chunk_rg32
-
         !> Scalar date, int64 row_group specific of parquet_read_column_chunk.
         module subroutine parquet_read_date_column_chunk_rg64(reader, name, row_group, values)
             type(parquet_reader), intent(in) :: reader !! open reader.
@@ -2410,7 +1989,6 @@ module parquet
             integer(int64), intent(in) :: row_group !! 1-based row group.
             type(parquet_date), intent(out) :: values(:) !! that row group's dates.
         end subroutine parquet_read_date_column_chunk_rg64
-
         !> Vector date, int32 row_group specific of parquet_read_column_chunk.
         module subroutine parquet_read_date_array_column_chunk_rg32(reader, name, row_group, values)
             type(parquet_reader), intent(in) :: reader !! open reader.
@@ -2418,7 +1996,6 @@ module parquet
             integer(int32), intent(in) :: row_group !! 1-based row group.
             type(parquet_date), intent(out) :: values(:,:) !! (element, row) dates for that row group.
         end subroutine parquet_read_date_array_column_chunk_rg32
-
         !> Vector date, int64 row_group specific of parquet_read_column_chunk.
         module subroutine parquet_read_date_array_column_chunk_rg64(reader, name, row_group, values)
             type(parquet_reader), intent(in) :: reader !! open reader.
@@ -2426,7 +2003,6 @@ module parquet
             integer(int64), intent(in) :: row_group !! 1-based row group.
             type(parquet_date), intent(out) :: values(:,:) !! (element, row) dates for that row group.
         end subroutine parquet_read_date_array_column_chunk_rg64
-
         !> Scalar time, int32 row_group specific of parquet_read_column_chunk.
         module subroutine parquet_read_time_column_chunk_rg32(reader, name, row_group, values)
             type(parquet_reader), intent(in) :: reader !! open reader.
@@ -2434,7 +2010,6 @@ module parquet
             integer(int32), intent(in) :: row_group !! 1-based row group.
             type(parquet_time), intent(out) :: values(:) !! that row group's times.
         end subroutine parquet_read_time_column_chunk_rg32
-
         !> Scalar time, int64 row_group specific of parquet_read_column_chunk.
         module subroutine parquet_read_time_column_chunk_rg64(reader, name, row_group, values)
             type(parquet_reader), intent(in) :: reader !! open reader.
@@ -2442,7 +2017,6 @@ module parquet
             integer(int64), intent(in) :: row_group !! 1-based row group.
             type(parquet_time), intent(out) :: values(:) !! that row group's times.
         end subroutine parquet_read_time_column_chunk_rg64
-
         !> Vector time, int32 row_group specific of parquet_read_column_chunk.
         module subroutine parquet_read_time_array_column_chunk_rg32(reader, name, row_group, values)
             type(parquet_reader), intent(in) :: reader !! open reader.
@@ -2450,7 +2024,6 @@ module parquet
             integer(int32), intent(in) :: row_group !! 1-based row group.
             type(parquet_time), intent(out) :: values(:,:) !! (element, row) times for that row group.
         end subroutine parquet_read_time_array_column_chunk_rg32
-
         !> Vector time, int64 row_group specific of parquet_read_column_chunk.
         module subroutine parquet_read_time_array_column_chunk_rg64(reader, name, row_group, values)
             type(parquet_reader), intent(in) :: reader !! open reader.
@@ -2458,7 +2031,6 @@ module parquet
             integer(int64), intent(in) :: row_group !! 1-based row group.
             type(parquet_time), intent(out) :: values(:,:) !! (element, row) times for that row group.
         end subroutine parquet_read_time_array_column_chunk_rg64
-
         !> Scalar timestamp, int32 row_group specific of parquet_read_column_chunk.
         module subroutine parquet_read_timestamp_column_chunk_rg32(reader, name, row_group, values)
             type(parquet_reader), intent(in) :: reader !! open reader.
@@ -2466,7 +2038,6 @@ module parquet
             integer(int32), intent(in) :: row_group !! 1-based row group.
             type(parquet_timestamp), intent(out) :: values(:) !! that row group's instants.
         end subroutine parquet_read_timestamp_column_chunk_rg32
-
         !> Scalar timestamp, int64 row_group specific of parquet_read_column_chunk.
         module subroutine parquet_read_timestamp_column_chunk_rg64(reader, name, row_group, values)
             type(parquet_reader), intent(in) :: reader !! open reader.
@@ -2474,7 +2045,6 @@ module parquet
             integer(int64), intent(in) :: row_group !! 1-based row group.
             type(parquet_timestamp), intent(out) :: values(:) !! that row group's instants.
         end subroutine parquet_read_timestamp_column_chunk_rg64
-
         !> Vector timestamp, int32 row_group specific of parquet_read_column_chunk.
         module subroutine parquet_read_timestamp_array_column_chunk_rg32(reader, name, row_group, values)
             type(parquet_reader), intent(in) :: reader !! open reader.
@@ -2482,7 +2052,6 @@ module parquet
             integer(int32), intent(in) :: row_group !! 1-based row group.
             type(parquet_timestamp), intent(out) :: values(:,:) !! (element, row) instants for that row group.
         end subroutine parquet_read_timestamp_array_column_chunk_rg32
-
         !> Vector timestamp, int64 row_group specific of parquet_read_column_chunk.
         module subroutine parquet_read_timestamp_array_column_chunk_rg64(reader, name, row_group, values)
             type(parquet_reader), intent(in) :: reader !! open reader.
@@ -2490,7 +2059,6 @@ module parquet
             integer(int64), intent(in) :: row_group !! 1-based row group.
             type(parquet_timestamp), intent(out) :: values(:,:) !! (element, row) instants for that row group.
         end subroutine parquet_read_timestamp_array_column_chunk_rg64
-
         !> Date row-mode read (one row's element vector), int32 row_index specific; a paired
         !> _row_index_int64 also exists. Nulls fill their elements (no is_valid argument).
         module subroutine parquet_read_date_array_row_mode(reader, name, values, row_index)
@@ -2499,7 +2067,6 @@ module parquet
             type(parquet_date), intent(out) :: values(:) !! that row's element vector.
             integer(int32), intent(in) :: row_index !! 1-based row to read.
         end subroutine parquet_read_date_array_row_mode
-
         !> Date row-mode read, int64 row_index specific.
         module subroutine parquet_read_date_array_row_mode_row_index_int64(reader, name, values, row_index)
             type(parquet_reader), intent(in) :: reader !! open reader.
@@ -2507,7 +2074,6 @@ module parquet
             type(parquet_date), intent(out) :: values(:) !! that row's element vector.
             integer(int64), intent(in) :: row_index !! 1-based row to read.
         end subroutine parquet_read_date_array_row_mode_row_index_int64
-
         !> Time row-mode read, int32 row_index specific.
         module subroutine parquet_read_time_array_row_mode(reader, name, values, row_index)
             type(parquet_reader), intent(in) :: reader !! open reader.
@@ -2515,7 +2081,6 @@ module parquet
             type(parquet_time), intent(out) :: values(:) !! that row's element vector.
             integer(int32), intent(in) :: row_index !! 1-based row to read.
         end subroutine parquet_read_time_array_row_mode
-
         !> Time row-mode read, int64 row_index specific.
         module subroutine parquet_read_time_array_row_mode_row_index_int64(reader, name, values, row_index)
             type(parquet_reader), intent(in) :: reader !! open reader.
@@ -2523,7 +2088,6 @@ module parquet
             type(parquet_time), intent(out) :: values(:) !! that row's element vector.
             integer(int64), intent(in) :: row_index !! 1-based row to read.
         end subroutine parquet_read_time_array_row_mode_row_index_int64
-
         !> Timestamp row-mode read, int32 row_index specific.
         module subroutine parquet_read_timestamp_array_row_mode(reader, name, values, row_index)
             type(parquet_reader), intent(in) :: reader !! open reader.
@@ -2531,7 +2095,6 @@ module parquet
             type(parquet_timestamp), intent(out) :: values(:) !! that row's element vector.
             integer(int32), intent(in) :: row_index !! 1-based row to read.
         end subroutine parquet_read_timestamp_array_row_mode
-
         !> Timestamp row-mode read, int64 row_index specific.
         module subroutine parquet_read_timestamp_array_row_mode_row_index_int64(reader, name, values, row_index)
             type(parquet_reader), intent(in) :: reader !! open reader.
@@ -2539,7 +2102,6 @@ module parquet
             type(parquet_timestamp), intent(out) :: values(:) !! that row's element vector.
             integer(int64), intent(in) :: row_index !! 1-based row to read.
         end subroutine parquet_read_timestamp_array_row_mode_row_index_int64
-
         !> Date element-mode read: element position `elem_index` from every row. Nulls fill their
         !> elements (no is_valid argument).
         module subroutine parquet_read_date_array_element_mode(reader, name, values, elem_index)
@@ -2548,7 +2110,6 @@ module parquet
             type(parquet_date), intent(out) :: values(:) !! that element position from every row.
             integer, intent(in) :: elem_index !! 1-based element position to read.
         end subroutine parquet_read_date_array_element_mode
-
         !> Time element-mode read.
         module subroutine parquet_read_time_array_element_mode(reader, name, values, elem_index)
             type(parquet_reader), intent(in) :: reader !! open reader.
@@ -2556,7 +2117,6 @@ module parquet
             type(parquet_time), intent(out) :: values(:) !! that element position from every row.
             integer, intent(in) :: elem_index !! 1-based element position to read.
         end subroutine parquet_read_time_array_element_mode
-
         !> Timestamp element-mode read.
         module subroutine parquet_read_timestamp_array_element_mode(reader, name, values, elem_index)
             type(parquet_reader), intent(in) :: reader !! open reader.
@@ -2564,7 +2124,6 @@ module parquet
             type(parquet_timestamp), intent(out) :: values(:) !! that element position from every row.
             integer, intent(in) :: elem_index !! 1-based element position to read.
         end subroutine parquet_read_timestamp_array_element_mode
-
         !> Scalar int32, int32 row_group specific of parquet_read_column_chunk; see the generic
         !> interface above. A paired _rg64 specific (same value type, int64 row_group) also
         !> exists for a file with more than 2,147,483,647 row groups.
@@ -2576,7 +2135,6 @@ module parquet
             integer(int32), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
         end subroutine parquet_read_int32_column_chunk_rg32
-
         !> Scalar int32, int64 row_group specific of parquet_read_column_chunk; see
         !> parquet_read_int32_column_chunk_rg32.
         module subroutine parquet_read_int32_column_chunk_rg64(reader, name, row_group, values, null_value, is_valid)
@@ -2587,7 +2145,6 @@ module parquet
             integer(int32), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
         end subroutine parquet_read_int32_column_chunk_rg64
-
         !> Vector int32, int32 row_group specific of parquet_read_column_chunk; see the generic
         !> interface above.
         module subroutine parquet_read_int32_array_column_chunk_rg32(reader, name, row_group, values, null_value, &
@@ -2599,7 +2156,6 @@ module parquet
             integer(int32), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
         end subroutine parquet_read_int32_array_column_chunk_rg32
-
         !> Vector int32, int64 row_group specific of parquet_read_column_chunk; see
         !> parquet_read_int32_array_column_chunk_rg32.
         module subroutine parquet_read_int32_array_column_chunk_rg64(reader, name, row_group, values, null_value, &
@@ -2611,7 +2167,6 @@ module parquet
             integer(int32), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
         end subroutine parquet_read_int32_array_column_chunk_rg64
-
         !> Scalar int64, int32 row_group specific of parquet_read_column_chunk; see
         !> parquet_read_int32_column_chunk_rg32.
         module subroutine parquet_read_int64_column_chunk_rg32(reader, name, row_group, values, null_value, is_valid)
@@ -2622,7 +2177,6 @@ module parquet
             integer(int64), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
         end subroutine parquet_read_int64_column_chunk_rg32
-
         !> Scalar int64, int64 row_group specific of parquet_read_column_chunk; see
         !> parquet_read_int32_column_chunk_rg32.
         module subroutine parquet_read_int64_column_chunk_rg64(reader, name, row_group, values, null_value, is_valid)
@@ -2633,7 +2187,6 @@ module parquet
             integer(int64), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
         end subroutine parquet_read_int64_column_chunk_rg64
-
         !> Vector int64, int32 row_group specific of parquet_read_column_chunk; see
         !> parquet_read_int32_array_column_chunk_rg32.
         module subroutine parquet_read_int64_array_column_chunk_rg32(reader, name, row_group, values, null_value, &
@@ -2645,7 +2198,6 @@ module parquet
             integer(int64), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
         end subroutine parquet_read_int64_array_column_chunk_rg32
-
         !> Vector int64, int64 row_group specific of parquet_read_column_chunk; see
         !> parquet_read_int32_array_column_chunk_rg32.
         module subroutine parquet_read_int64_array_column_chunk_rg64(reader, name, row_group, values, null_value, &
@@ -2657,7 +2209,6 @@ module parquet
             integer(int64), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
         end subroutine parquet_read_int64_array_column_chunk_rg64
-
         !> Scalar float32, int32 row_group specific of parquet_read_column_chunk; see
         !> parquet_read_int32_column_chunk_rg32.
         module subroutine parquet_read_float32_column_chunk_rg32(reader, name, row_group, values, null_value, is_valid)
@@ -2668,7 +2219,6 @@ module parquet
             real(real32), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
         end subroutine parquet_read_float32_column_chunk_rg32
-
         !> Scalar float32, int64 row_group specific of parquet_read_column_chunk; see
         !> parquet_read_int32_column_chunk_rg32.
         module subroutine parquet_read_float32_column_chunk_rg64(reader, name, row_group, values, null_value, is_valid)
@@ -2679,7 +2229,6 @@ module parquet
             real(real32), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
         end subroutine parquet_read_float32_column_chunk_rg64
-
         !> Vector float32, int32 row_group specific of parquet_read_column_chunk; see
         !> parquet_read_int32_array_column_chunk_rg32.
         module subroutine parquet_read_float32_array_column_chunk_rg32(reader, name, row_group, values, null_value, &
@@ -2691,7 +2240,6 @@ module parquet
             real(real32), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
         end subroutine parquet_read_float32_array_column_chunk_rg32
-
         !> Vector float32, int64 row_group specific of parquet_read_column_chunk; see
         !> parquet_read_int32_array_column_chunk_rg32.
         module subroutine parquet_read_float32_array_column_chunk_rg64(reader, name, row_group, values, null_value, &
@@ -2703,7 +2251,6 @@ module parquet
             real(real32), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
         end subroutine parquet_read_float32_array_column_chunk_rg64
-
         !> Scalar float64, int32 row_group specific of parquet_read_column_chunk; see
         !> parquet_read_int32_column_chunk_rg32.
         module subroutine parquet_read_float64_column_chunk_rg32(reader, name, row_group, values, null_value, is_valid)
@@ -2714,7 +2261,6 @@ module parquet
             real(real64), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
         end subroutine parquet_read_float64_column_chunk_rg32
-
         !> Scalar float64, int64 row_group specific of parquet_read_column_chunk; see
         !> parquet_read_int32_column_chunk_rg32.
         module subroutine parquet_read_float64_column_chunk_rg64(reader, name, row_group, values, null_value, is_valid)
@@ -2725,7 +2271,6 @@ module parquet
             real(real64), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
         end subroutine parquet_read_float64_column_chunk_rg64
-
         !> Vector float64, int32 row_group specific of parquet_read_column_chunk; see
         !> parquet_read_int32_array_column_chunk_rg32.
         module subroutine parquet_read_float64_array_column_chunk_rg32(reader, name, row_group, values, null_value, &
@@ -2737,7 +2282,6 @@ module parquet
             real(real64), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
         end subroutine parquet_read_float64_array_column_chunk_rg32
-
         !> Vector float64, int64 row_group specific of parquet_read_column_chunk; see
         !> parquet_read_int32_array_column_chunk_rg32.
         module subroutine parquet_read_float64_array_column_chunk_rg64(reader, name, row_group, values, null_value, &
@@ -2749,7 +2293,6 @@ module parquet
             real(real64), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
         end subroutine parquet_read_float64_array_column_chunk_rg64
-
         !> Scalar logical (boolean), int32 row_group specific of parquet_read_column_chunk; see
         !> parquet_read_int32_column_chunk_rg32.
         module subroutine parquet_read_logical_column_chunk_rg32(reader, name, row_group, values, null_value, is_valid)
@@ -2760,7 +2303,6 @@ module parquet
             logical, intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
         end subroutine parquet_read_logical_column_chunk_rg32
-
         !> Scalar logical (boolean), int64 row_group specific of parquet_read_column_chunk; see
         !> parquet_read_int32_column_chunk_rg32.
         module subroutine parquet_read_logical_column_chunk_rg64(reader, name, row_group, values, null_value, is_valid)
@@ -2771,7 +2313,6 @@ module parquet
             logical, intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
         end subroutine parquet_read_logical_column_chunk_rg64
-
         !> Vector logical (boolean), int32 row_group specific of parquet_read_column_chunk; see
         !> parquet_read_int32_array_column_chunk_rg32.
         module subroutine parquet_read_logical_array_column_chunk_rg32(reader, name, row_group, values, null_value, &
@@ -2783,7 +2324,6 @@ module parquet
             logical, intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
         end subroutine parquet_read_logical_array_column_chunk_rg32
-
         !> Vector logical (boolean), int64 row_group specific of parquet_read_column_chunk; see
         !> parquet_read_int32_array_column_chunk_rg32.
         module subroutine parquet_read_logical_array_column_chunk_rg64(reader, name, row_group, values, null_value, &
@@ -2795,7 +2335,6 @@ module parquet
             logical, intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
         end subroutine parquet_read_logical_array_column_chunk_rg64
-
         !> Scalar string, int32 row_group specific of parquet_read_column_chunk; see
         !> parquet_read_int32_column_chunk_rg32.
         module subroutine parquet_read_string_column_chunk_rg32(reader, name, row_group, values, null_value, is_valid)
@@ -2806,7 +2345,6 @@ module parquet
             character(len=*), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
         end subroutine parquet_read_string_column_chunk_rg32
-
         !> Scalar string, int64 row_group specific of parquet_read_column_chunk; see
         !> parquet_read_int32_column_chunk_rg32.
         module subroutine parquet_read_string_column_chunk_rg64(reader, name, row_group, values, null_value, is_valid)
@@ -2817,7 +2355,6 @@ module parquet
             character(len=*), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
         end subroutine parquet_read_string_column_chunk_rg64
-
         !> Vector string, int32 row_group specific of parquet_read_column_chunk; see
         !> parquet_read_int32_array_column_chunk_rg32.
         module subroutine parquet_read_string_array_column_chunk_rg32(reader, name, row_group, values, null_value, &
@@ -2829,7 +2366,6 @@ module parquet
             character(len=*), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
         end subroutine parquet_read_string_array_column_chunk_rg32
-
         !> Vector string, int64 row_group specific of parquet_read_column_chunk; see
         !> parquet_read_int32_array_column_chunk_rg32.
         module subroutine parquet_read_string_array_column_chunk_rg64(reader, name, row_group, values, null_value, &
@@ -2841,7 +2377,6 @@ module parquet
             character(len=*), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
         end subroutine parquet_read_string_array_column_chunk_rg64
-
         !> Compact (parquet_string_column), int32 row_group specific of parquet_read_column_chunk;
         !> see the generic interface's own doc comment above for the parquet_string_column notes.
         module subroutine parquet_read_string_column_chunk_compact_rg32(reader, name, row_group, values)
@@ -2850,7 +2385,6 @@ module parquet
             integer(int32), intent(in) :: row_group !! 1-based row group to read.
             type(parquet_string_column), intent(inout) :: values !! cleared, then filled with this row group's rows.
         end subroutine parquet_read_string_column_chunk_compact_rg32
-
         !> Compact (parquet_string_column), int64 row_group specific of parquet_read_column_chunk;
         !> see parquet_read_string_column_chunk_compact_rg32.
         module subroutine parquet_read_string_column_chunk_compact_rg64(reader, name, row_group, values)
@@ -2859,7 +2393,6 @@ module parquet
             integer(int64), intent(in) :: row_group !! 1-based row group to read.
             type(parquet_string_column), intent(inout) :: values !! cleared, then filled with this row group's rows.
         end subroutine parquet_read_string_column_chunk_compact_rg64
-
         !> int32 value / int32 row_index specific of parquet_read_array_row_mode; see the generic
         !> interface above for the shared "one row of a vector column" behavior. A paired
         !> _row_index_int64 specific (same value type, int64 row_index) also exists for files with
@@ -2872,7 +2405,6 @@ module parquet
             integer(int32), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-element validity mask.
         end subroutine parquet_read_int32_array_row_mode
-
         !> int32 value / int64 row_index specific of parquet_read_array_row_mode; see
         !> parquet_read_int32_array_row_mode. Only needed to address a row beyond
         !> huge(1_int32) (2,147,483,647) in a file that large.
@@ -2885,7 +2417,6 @@ module parquet
             integer(int32), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-element validity mask.
         end subroutine parquet_read_int32_array_row_mode_row_index_int64
-
         !> int64 value / int32 row_index specific of parquet_read_array_row_mode; see
         !> parquet_read_int32_array_row_mode.
         module subroutine parquet_read_int64_array_row_mode(reader, name, values, row_index, null_value, is_valid)
@@ -2896,7 +2427,6 @@ module parquet
             integer(int64), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-element validity mask.
         end subroutine parquet_read_int64_array_row_mode
-
         !> int64 value / int64 row_index specific of parquet_read_array_row_mode; see
         !> parquet_read_int32_array_row_mode_row_index_int64.
         module subroutine parquet_read_int64_array_row_mode_row_index_int64(reader, name, values, row_index, null_value, &
@@ -2908,7 +2438,6 @@ module parquet
             integer(int64), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-element validity mask.
         end subroutine parquet_read_int64_array_row_mode_row_index_int64
-
         !> float32 value / int32 row_index specific of parquet_read_array_row_mode; see
         !> parquet_read_int32_array_row_mode.
         module subroutine parquet_read_float32_array_row_mode(reader, name, values, row_index, null_value, is_valid)
@@ -2919,7 +2448,6 @@ module parquet
             real(real32), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-element validity mask.
         end subroutine parquet_read_float32_array_row_mode
-
         !> float32 value / int64 row_index specific of parquet_read_array_row_mode; see
         !> parquet_read_int32_array_row_mode_row_index_int64.
         module subroutine parquet_read_float32_array_row_mode_row_index_int64(reader, name, values, row_index, &
@@ -2931,7 +2459,6 @@ module parquet
             real(real32), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-element validity mask.
         end subroutine parquet_read_float32_array_row_mode_row_index_int64
-
         !> float64 value / int32 row_index specific of parquet_read_array_row_mode; see
         !> parquet_read_int32_array_row_mode.
         module subroutine parquet_read_float64_array_row_mode(reader, name, values, row_index, null_value, is_valid)
@@ -2942,7 +2469,6 @@ module parquet
             real(real64), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-element validity mask.
         end subroutine parquet_read_float64_array_row_mode
-
         !> float64 value / int64 row_index specific of parquet_read_array_row_mode; see
         !> parquet_read_int32_array_row_mode_row_index_int64.
         module subroutine parquet_read_float64_array_row_mode_row_index_int64(reader, name, values, row_index, &
@@ -2954,7 +2480,6 @@ module parquet
             real(real64), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-element validity mask.
         end subroutine parquet_read_float64_array_row_mode_row_index_int64
-
         !> logical (boolean) value / int32 row_index specific of parquet_read_array_row_mode; see
         !> parquet_read_int32_array_row_mode.
         module subroutine parquet_read_logical_array_row_mode(reader, name, values, row_index, null_value, is_valid)
@@ -2965,7 +2490,6 @@ module parquet
             logical, intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-element validity mask.
         end subroutine parquet_read_logical_array_row_mode
-
         !> logical (boolean) value / int64 row_index specific of parquet_read_array_row_mode; see
         !> parquet_read_int32_array_row_mode_row_index_int64.
         module subroutine parquet_read_logical_array_row_mode_row_index_int64(reader, name, values, row_index, &
@@ -2977,7 +2501,6 @@ module parquet
             logical, intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-element validity mask.
         end subroutine parquet_read_logical_array_row_mode_row_index_int64
-
         !> string value / int32 row_index specific of parquet_read_array_row_mode; see
         !> parquet_read_int32_array_row_mode.
         module subroutine parquet_read_string_array_row_mode(reader, name, values, row_index, null_value, is_valid)
@@ -2988,7 +2511,6 @@ module parquet
             character(len=*), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-element validity mask.
         end subroutine parquet_read_string_array_row_mode
-
         !> string value / int64 row_index specific of parquet_read_array_row_mode; see
         !> parquet_read_int32_array_row_mode_row_index_int64.
         module subroutine parquet_read_string_array_row_mode_row_index_int64(reader, name, values, row_index, &
@@ -3000,7 +2522,6 @@ module parquet
             character(len=*), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-element validity mask.
         end subroutine parquet_read_string_array_row_mode_row_index_int64
-
         !> int32 specific of parquet_read_array_element_mode; see the generic
         !> interface above for the shared "one element across all rows" behavior.
         module subroutine parquet_read_int32_array_element_mode(reader, name, values, elem_index, null_value, is_valid)
@@ -3011,7 +2532,6 @@ module parquet
             integer(int32), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
         end subroutine parquet_read_int32_array_element_mode
-
         !> int64 specific of parquet_read_array_element_mode; see parquet_read_int32_array_element_mode.
         module subroutine parquet_read_int64_array_element_mode(reader, name, values, elem_index, null_value, is_valid)
             type(parquet_reader), intent(in) :: reader !! open reader.
@@ -3021,7 +2541,6 @@ module parquet
             integer(int64), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
         end subroutine parquet_read_int64_array_element_mode
-
         !> float32 specific of parquet_read_array_element_mode; see parquet_read_int32_array_element_mode.
         module subroutine parquet_read_float32_array_element_mode(reader, name, values, elem_index, null_value, is_valid)
             type(parquet_reader), intent(in) :: reader !! open reader.
@@ -3031,7 +2550,6 @@ module parquet
             real(real32), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
         end subroutine parquet_read_float32_array_element_mode
-
         !> float64 specific of parquet_read_array_element_mode; see parquet_read_int32_array_element_mode.
         module subroutine parquet_read_float64_array_element_mode(reader, name, values, elem_index, null_value, is_valid)
             type(parquet_reader), intent(in) :: reader !! open reader.
@@ -3041,7 +2559,6 @@ module parquet
             real(real64), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
         end subroutine parquet_read_float64_array_element_mode
-
         !> logical (boolean) specific of parquet_read_array_element_mode; see parquet_read_int32_array_element_mode.
         module subroutine parquet_read_logical_array_element_mode(reader, name, values, elem_index, null_value, is_valid)
             type(parquet_reader), intent(in) :: reader !! open reader.
@@ -3051,7 +2568,6 @@ module parquet
             logical, intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
         end subroutine parquet_read_logical_array_element_mode
-
         !> string specific of parquet_read_array_element_mode; see parquet_read_int32_array_element_mode.
         module subroutine parquet_read_string_array_element_mode(reader, name, values, elem_index, null_value, is_valid)
             type(parquet_reader), intent(in) :: reader !! open reader.
@@ -3061,6 +2577,150 @@ module parquet
             character(len=*), intent(in), optional :: null_value !! fill value for missing entries.
             logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
         end subroutine parquet_read_string_array_element_mode
+    end interface
+
+    ! ---- get_metadata specifics ----
+    interface
+        !> int32 specific of parquet_get_metadata; see the generic interface
+        !> above for the full key-missing/conversion-failure behavior.
+        module subroutine parquet_get_metadata_int32(reader, key, value, default, warn)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: key !! metadata key to look up.
+            integer(int32), intent(out) :: value !! parsed value.
+            integer(int32), intent(in), optional :: default !! fallback if key is missing or unparsable.
+            logical, intent(in), optional :: warn !! print a WARNING on the missing-key/default-used path.
+        end subroutine parquet_get_metadata_int32
+        !> int64 specific of parquet_get_metadata; see parquet_get_metadata_int32.
+        module subroutine parquet_get_metadata_int64(reader, key, value, default, warn)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: key !! metadata key to look up.
+            integer(int64), intent(out) :: value !! parsed value.
+            integer(int64), intent(in), optional :: default !! fallback if key is missing or unparsable.
+            logical, intent(in), optional :: warn !! print a WARNING on the missing-key/default-used path.
+        end subroutine parquet_get_metadata_int64
+        !> float32 specific of parquet_get_metadata; see parquet_get_metadata_int32.
+        module subroutine parquet_get_metadata_float32(reader, key, value, default, warn)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: key !! metadata key to look up.
+            real(real32), intent(out) :: value !! parsed value.
+            real(real32), intent(in), optional :: default !! fallback if key is missing or unparsable.
+            logical, intent(in), optional :: warn !! print a WARNING on the missing-key/default-used path.
+        end subroutine parquet_get_metadata_float32
+        !> float64 specific of parquet_get_metadata; see parquet_get_metadata_int32.
+        module subroutine parquet_get_metadata_float64(reader, key, value, default, warn)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: key !! metadata key to look up.
+            real(real64), intent(out) :: value !! parsed value.
+            real(real64), intent(in), optional :: default !! fallback if key is missing or unparsable.
+            logical, intent(in), optional :: warn !! print a WARNING on the missing-key/default-used path.
+        end subroutine parquet_get_metadata_float64
+        !> logical specific of parquet_get_metadata; see parquet_get_metadata_int32.
+        module subroutine parquet_get_metadata_logical(reader, key, value, default, warn)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: key !! metadata key to look up.
+            logical, intent(out) :: value !! parsed value.
+            logical, intent(in), optional :: default !! fallback if key is missing or unparsable.
+            logical, intent(in), optional :: warn !! print a WARNING on the missing-key/default-used path.
+        end subroutine parquet_get_metadata_logical
+        !> string specific of parquet_get_metadata; see parquet_get_metadata_int32.
+        module subroutine parquet_get_metadata_string(reader, key, value, default, warn)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: key !! metadata key to look up.
+            character(len=:), allocatable, intent(out) :: value !! stored value, verbatim.
+            character(len=*), intent(in), optional :: default !! fallback if key is missing.
+            logical, intent(in), optional :: warn !! print a WARNING on the missing-key/default-used path.
+        end subroutine parquet_get_metadata_string
+        !> int32 array specific of parquet_get_metadata; see parquet_get_metadata_int32.
+        module subroutine parquet_get_metadata_int32_array(reader, key, value, default, warn)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: key !! metadata key to look up.
+            integer(int32), allocatable, intent(out) :: value(:) !! parsed values.
+            integer(int32), intent(in), optional :: default(:) !! fallback if key is missing or unparsable.
+            logical, intent(in), optional :: warn !! print a WARNING on the missing-key/default-used path.
+        end subroutine parquet_get_metadata_int32_array
+        !> int64 array specific of parquet_get_metadata; see parquet_get_metadata_int32.
+        module subroutine parquet_get_metadata_int64_array(reader, key, value, default, warn)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: key !! metadata key to look up.
+            integer(int64), allocatable, intent(out) :: value(:) !! parsed values.
+            integer(int64), intent(in), optional :: default(:) !! fallback if key is missing or unparsable.
+            logical, intent(in), optional :: warn !! print a WARNING on the missing-key/default-used path.
+        end subroutine parquet_get_metadata_int64_array
+        !> float32 array specific of parquet_get_metadata; see parquet_get_metadata_int32.
+        module subroutine parquet_get_metadata_float32_array(reader, key, value, default, warn)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: key !! metadata key to look up.
+            real(real32), allocatable, intent(out) :: value(:) !! parsed values.
+            real(real32), intent(in), optional :: default(:) !! fallback if key is missing or unparsable.
+            logical, intent(in), optional :: warn !! print a WARNING on the missing-key/default-used path.
+        end subroutine parquet_get_metadata_float32_array
+        !> float64 array specific of parquet_get_metadata; see parquet_get_metadata_int32.
+        module subroutine parquet_get_metadata_float64_array(reader, key, value, default, warn)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: key !! metadata key to look up.
+            real(real64), allocatable, intent(out) :: value(:) !! parsed values.
+            real(real64), intent(in), optional :: default(:) !! fallback if key is missing or unparsable.
+            logical, intent(in), optional :: warn !! print a WARNING on the missing-key/default-used path.
+        end subroutine parquet_get_metadata_float64_array
+        !> logical array specific of parquet_get_metadata; see parquet_get_metadata_int32.
+        module subroutine parquet_get_metadata_logical_array(reader, key, value, default, warn)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: key !! metadata key to look up.
+            logical, allocatable, intent(out) :: value(:) !! parsed values.
+            logical, intent(in), optional :: default(:) !! fallback if key is missing or unparsable.
+            logical, intent(in), optional :: warn !! print a WARNING on the missing-key/default-used path.
+        end subroutine parquet_get_metadata_logical_array
+        !> string array specific of parquet_get_metadata; see parquet_get_metadata_int32.
+        module subroutine parquet_get_metadata_string_array(reader, key, value, default, warn)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: key !! metadata key to look up.
+            character(len=:), allocatable, intent(out) :: value(:) !! stored values, verbatim.
+            character(len=*), intent(in), optional :: default(:) !! fallback if key is missing.
+            logical, intent(in), optional :: warn !! print a WARNING on the missing-key/default-used path.
+        end subroutine parquet_get_metadata_string_array
+    end interface
+
+    ! ---- Cross-subtree shared string/MAML helpers ----
+    interface
+        !> Parses a `protected_cols:` entry nested inside `extra:`, e.g.:
+        !>   extra:
+        !>     protected_cols: col1;col2; col3
+        !> or, equivalently:
+        !>   extra:
+        !>     protected_cols:
+        !>     - col1
+        !>     - col2
+        !>     - col3
+        !> `names` is a zero-size array if there is no extra:/protected_cols:
+        !> section. Names are trimmed and unquoted; empty tokens (e.g. a stray
+        !> ";;" or trailing ";") are skipped. Matching against declared field
+        !> names (by output_name) is done by the caller -- this subroutine only
+        !> extracts the raw name list. Subroutine (not a function returning
+        !> names) to sidestep a gfortran 15.2.0 ICE with a submodule-implemented
+        !> module function returning a deferred-length character array result.
+        module subroutine parquet_parse_protected_cols(lines, names)
+            character(len=*), intent(in) :: lines(:) !! raw MAML source lines to scan.
+            character(len=:), allocatable, intent(out) :: names(:) !! trimmed, unquoted protected column names.
+        end subroutine parquet_parse_protected_cols
+        !> Splits a MAML "key: value" `line` on its first colon, trimming
+        !> and unquoting `value` (see parquet_unquote); `key` is trimmed but
+        !> never unquoted.
+        module subroutine parquet_split_key_value(line, key, value)
+            character(len=*), intent(in) :: line !! raw MAML line, "key: value" form.
+            character(len=:), allocatable, intent(out) :: key !! trimmed key text.
+            character(len=:), allocatable, intent(out) :: value !! trimmed, unquoted value text.
+        end subroutine parquet_split_key_value
+        !> Strips one matching pair of surrounding single or double quotes
+        !> from `s`, if present; returns `s` unchanged otherwise.
+        module subroutine parquet_unquote(s, out)
+            character(len=*), intent(in) :: s !! text to unquote.
+            character(len=:), allocatable, intent(out) :: out !! s with surrounding quotes removed, if any.
+        end subroutine parquet_unquote
+        !> Case-insensitive lowercase of ASCII letters.
+        module subroutine parquet_to_lower(s, out)
+            character(len=*), intent(in) :: s !! input string.
+            character(len=:), allocatable, intent(out) :: out !! s with every ASCII A-Z lowercased; other characters unchanged.
+        end subroutine parquet_to_lower
     end interface
 
 contains

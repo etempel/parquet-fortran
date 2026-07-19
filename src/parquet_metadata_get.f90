@@ -8,7 +8,7 @@
 !> so every call here only scans that in-memory array -- it never touches
 !> the file. Messages follow the "<proc>: <message>" error stop convention
 !> used throughout this module.
-submodule (parquet) parquet_metadata_get
+submodule (parquet:parquet_metadata) parquet_metadata_get
     implicit none
 contains
 

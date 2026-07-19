@@ -9,6 +9,64 @@
 submodule (parquet) parquet_metadata
     implicit none
 
+    ! ---- MAML load/parse/validate helpers (metadata-subtree-only private interfaces,
+    ! relocated here from parquet.f90 -- see CLAUDE.md's private-helper relocation rule) ----
+    interface
+        !> Parses one qc: min:/max: value (already unquoted or not) into an
+        !> operator + bound-text pair: a leading ">=", "<=", ">", or "<" (checked
+        !> in that order, so the two-char operators are never mistaken for the
+        !> one-char ones) is stripped and used as the operator; otherwise
+        !> `default_op` applies (">=" for min:, "<=" for max:, matching the MAML
+        !> format's documented inclusive-by-default convention). The remaining
+        !> text is kept verbatim (not yet converted to a number) -- numeric
+        !> parsing/validity is deferred to parquet_validate_maml_internal and to
+        !> the write-time qc check, since it depends on the field's data_type,
+        !> which may not be known yet at this point in parsing.
+        module subroutine parquet_set_qc_bound(has_flag, op, raw, cvalue, default_op)
+            logical, intent(out) :: has_flag !! .true. once set (a qc: min:/max: value was present).
+            character(len=2), intent(out) :: op !! parsed operator (">=", "<=", "> ", or "< ").
+            character(len=:), allocatable, intent(out) :: raw !! bound text, verbatim, operator prefix stripped.
+            character(len=*), intent(in) :: cvalue !! raw qc: min:/max: value text (possibly quoted).
+            character(len=*), intent(in) :: default_op !! operator to use when cvalue has no explicit prefix.
+        end subroutine parquet_set_qc_bound
+
+        !> Checks every top-level section name (and, for map-list sections
+        !> like fields:/keyarray:, their items' sub-keys) in `lines` against
+        !> the allowed_maml_sections/allowed_maml_nested_sections schema
+        !> (src/parquet_metadata_maml.f90); appends one message per
+        !> violation to `errors` (key presence only, not semantic content).
+        !> Called by both parquet_validate_maml_internal (full schema mamls)
+        !> and parquet_parse_qc_maml (qc-mamls, a strict subset of the schema).
+        module subroutine parquet_validate_maml_sections(lines, errors)
+            character(len=*), intent(in) :: lines(:) !! raw MAML source lines to check.
+            character(len=:), allocatable, intent(inout) :: errors !! accumulated error messages; appended to, not reset.
+        end subroutine parquet_validate_maml_sections
+
+        !> Appends `line` to `lines` at 1-based position `n`, growing the
+        !> array if needed; internal MAML-source-lines plumbing.
+        module subroutine parquet_append_line(lines, n, line)
+            character(len=1024), allocatable, intent(inout) :: lines(:) !! line buffer being appended to.
+            integer, intent(in) :: n !! number of lines already in use before this call.
+            character(len=*), intent(in) :: line !! line text to store.
+        end subroutine parquet_append_line
+
+        !> Shared worker behind every add_metadata specific: appends one
+        !> already-stringified key/value/description to `metadata%items`.
+        module subroutine parquet_metadata_append_entry(metadata, key, value, description)
+            class(parquet_table_metadata), intent(inout) :: metadata !! table metadata gaining one entry.
+            character(len=*), intent(in) :: key !! metadata key.
+            character(len=*), intent(in) :: value !! metadata value, already converted to text.
+            character(len=*), intent(in), optional :: description !! optional free-text description.
+        end subroutine parquet_metadata_append_entry
+
+        !> Grows `columns` by one empty (default-initialized) entry and
+        !> increments `n` to match; internal fields: parsing plumbing.
+        module subroutine parquet_append_empty_cinfo(columns, n)
+            type(parquet_column_type), allocatable, intent(inout) :: columns(:) !! column array being grown.
+            integer, intent(inout) :: n !! number of entries in use before this call; incremented by 1.
+        end subroutine parquet_append_empty_cinfo
+    end interface
+
 contains
 
     module procedure parquet_parse_maml_from_file
@@ -568,7 +626,16 @@ contains
         call parquet_maml_unlock()
     end subroutine parquet_merge_missing_columns
 
-    module procedure parquet_parse_maml_lines
+    !> Parses raw MAML source `lines` into `cinfo` (per-field schema/QC)
+    !> and `metadata` (flat key-value table metadata); the shared worker
+    !> behind parquet_parse_maml's file/object specifics.
+    !> Plain contained subroutine (not a module procedure) for the same reason
+    !> as parquet_parse_col_map above -- its body already lived in this file,
+    !> the parquet_metadata parent, not a descendant submodule.
+    subroutine parquet_parse_maml_lines(lines, cinfo, metadata)
+        character(len=*), intent(in) :: lines(:) !! raw MAML source, one array element per line.
+        type(parquet_column_info), intent(out) :: cinfo !! parsed per-field schema/QC state.
+        type(parquet_table_metadata), intent(out) :: metadata !! parsed flat key-value table metadata.
         type(parquet_column_type), allocatable :: tmp(:)
         character(len=1024) :: line
         character(len=:), allocatable :: tline, key, cvalue
@@ -1018,9 +1085,24 @@ contains
 
         call move_alloc(tmp, cinfo%col)
         call parquet_maml_unlock()
-    end procedure parquet_parse_maml_lines
+    end subroutine parquet_parse_maml_lines
 
-    module procedure parquet_append_keyarray_line
+    !> Appends a `- key: / value: / comment:` entry to the `keyarray:` block
+    !> inside `lines` (the verbatim source MAML content kept in
+    !> metadata%source_maml_lines), so that metadata added at runtime via
+    !> add_metadata after parquet_read_maml is reflected in a later
+    !> write_maml sidecar. Always appends; does not update an existing entry
+    !> that has the same key. Inserted before `extra:` if present, else
+    !> before `fields:`; synthesizes the `keyarray:` header itself if the
+    !> source MAML did not already have one.
+    !> Plain contained subroutine (not a module procedure) for the same reason
+    !> as parquet_parse_col_map above -- its body already lived in this file,
+    !> the parquet_metadata parent, not a descendant submodule.
+    subroutine parquet_append_keyarray_line(lines, key, value, desc)
+        character(len=:), allocatable, intent(inout) :: lines(:) !! verbatim source MAML lines being amended.
+        character(len=*), intent(in) :: key !! metadata key for the new entry.
+        character(len=*), intent(in) :: value !! metadata value for the new entry.
+        character(len=*), intent(in) :: desc !! metadata description for the new entry (may be "").
         character(len=:), allocatable :: entries(:), new_lines(:)
         integer :: insert_pos, n_old, n_new, new_len
         logical :: need_header
@@ -1054,7 +1136,7 @@ contains
 
         call move_alloc(new_lines, lines)
         call parquet_maml_unlock()
-    end procedure parquet_append_keyarray_line
+    end subroutine parquet_append_keyarray_line
 
     !> Locates where a new keyarray entry should be inserted in `lines`.
     !> If a top-level `keyarray:` header already exists, `insert_pos` points
@@ -1164,7 +1246,30 @@ contains
         call metadata%add_metadata("keywords", trim(keywords_value))
     end subroutine parquet_flush_keywords
 
-    module procedure parquet_parse_col_map
+    !> Parses a `col_map:` block nested inside `extra:` (col_map: is NOT a
+    !> valid top-level MAML section) into (internal_name -> output_name)
+    !> entries. Each list item is a single "<internal_name>: <output_name>"
+    !> line (with its leading "- "), e.g.:
+    !>   extra:
+    !>     col_map:
+    !>     - col_internal: col_user
+    !> Unlike every other map-list section (fields:, keyarray:, ...), the key
+    !> here IS the data (an arbitrary internal column name) rather than a
+    !> fixed sub-key label, so this is a dedicated parser rather than a
+    !> generic one. extra:'s own content is otherwise entirely unvalidated
+    !> (see the "extra" entry in allowed_maml_sections), so this is a
+    !> narrow, specific lookup rather than a generically-validated section.
+    !> Returns a zero-size array if there is no extra:/col_map: section.
+    !> Plain contained function (not a module procedure): its interface used
+    !> to live in parquet.f90, but since its body already lived here in the
+    !> parquet_metadata parent (not a descendant submodule), keeping it a
+    !> module procedure after relocating the interface into this same file's
+    !> own spec would mean parquet_metadata implementing its own spec-declared
+    !> interface -- not the ancestor/descendant relationship module
+    !> procedures require. Descendants reach it by host association (fact 3.6).
+    function parquet_parse_col_map(lines) result(col_map)
+        character(len=*), intent(in) :: lines(:) !! raw MAML source lines to scan.
+        type(parquet_maml_col_map_entry), allocatable :: col_map(:) !! parsed (internal_name, output_name) entries.
         type(parquet_maml_col_map_entry), allocatable :: tmp(:)
         character(len=:), allocatable :: tline, key, cvalue
         integer :: i, n, idx_extra, extra_end, idx_col_map, n_entries
@@ -1229,7 +1334,7 @@ contains
             call move_alloc(tmp, col_map)
         end do
         call parquet_maml_unlock()
-    end procedure parquet_parse_col_map
+    end function parquet_parse_col_map
 
     module subroutine parquet_parse_protected_cols(lines, names)
         character(len=*), intent(in) :: lines(:) !! raw MAML source lines to scan.
@@ -1325,5 +1430,21 @@ contains
         end do
         call parquet_maml_unlock()
     end subroutine parquet_parse_protected_cols
+
+    !> gfortran 15.2.0 ICE workaround: a direct call to parquet_parse_protected_cols from a
+    !> submodule nested two levels under parquet (e.g. parquet:parquet_metadata:parquet_metadata_maml)
+    !> reproducibly crashes the compiler (confirmed: removing the call, or flattening the caller
+    !> back to one level of nesting, both avoid it -- isolated to this exact argument shape,
+    !> character(len=*), intent(in) :: lines(:) paired with character(len=:), allocatable,
+    !> intent(out) :: names(:), called from 2+ levels deep). Relaying through this ordinary
+    !> contained subroutine in the parent submodule (reached by any descendant via host
+    !> association, fact 3.6) sidesteps it: the grandchild calls this one-level-up wrapper
+    !> instead of reaching two levels up to parquet.f90's interface directly.
+    subroutine parquet_parse_protected_cols_relay(lines, names)
+        character(len=*), intent(in) :: lines(:) !! raw MAML source lines to scan.
+        character(len=:), allocatable, intent(out) :: names(:) !! trimmed, unquoted protected column names.
+
+        call parquet_parse_protected_cols(lines, names)
+    end subroutine parquet_parse_protected_cols_relay
 
 end submodule parquet_metadata

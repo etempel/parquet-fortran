@@ -6,7 +6,7 @@ maintainer = "elmo.tempel@ut.ee"
 copyright = "Copyright 2026, Elmo Tempel"
 description = "Parquet Fortran is a Fortran library for reading and writing Parquet files."
 homepage = "https://github.com/etempel/parquet-fortran"
-keywords = ["parquet", "arrow", "io", "columnar", "maml"]
+keywords = ["parquet", "arrow", "io", "columnar", "maml", "data"]
 categories = ["io"]
 
 [[executable]]

@@ -1,10 +1,12 @@
 !===========================================
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
 !===========================================
-!> Bodies of the read-path module procedures declared in parquet.f90's
-!> interface block (parquet_read_column's specifics, parquet_open_reader,
-!> parquet_get_metadata's specifics, ...), plus private helpers for row
-!> filtering, qc: enforcement on read, and validity-buffer plumbing.
+!> Reader lifecycle (open/close), filter/qc machinery, metadata population,
+!> row-group resolution, and the type-generic shared helpers every
+!> read-specifics child (parquet_read_numeric/_string/_temporal) reaches by
+!> host association: validity-buffer construction, reader/column/row-group
+!> existence checks, fixed-width text packing for the filter/qc C++ API, and
+!> the whole-column-read-avoidance row-group helpers.
 submodule (parquet) parquet_read
     implicit none
 contains
@@ -26,7 +28,6 @@ contains
             valid_ptr = c_null_ptr
         end if
     end subroutine make_valid_buf
-
     !> Every parquet_read_column variant calls this first: reader%handle is
     !> c_null_ptr until parquet_open_reader sets it, and every C++ entry point
     !> dereferences the handle immediately (see ConcurrencyGuard in
@@ -40,7 +41,6 @@ contains
             error stop trim(context) // ": reader has not been opened (call parquet_open_reader first)"
         end if
     end subroutine check_reader_open
-
     !> "" if reader%filename was never set; otherwise " (file: X)". Every
     !> caller of this is reached only once the reader is open, at which
     !> point parquet_open_reader has already set %filename, so this is
@@ -57,7 +57,6 @@ contains
             if (len_trim(reader%filename) > 0) suffix = " (file: " // trim(reader%filename) // ")"
         end if
     end subroutine reader_filename_suffix
-
     !> Every reader-taking procedure that also names a specific column calls
     !> this right after check_reader_open: an unrecognized column name used
     !> to reach the C++ side's own "Column not found" exception uncaught
@@ -77,7 +76,6 @@ contains
             error stop trim(context) // ": column not found in parquet file: " // trim(name) // name_suffix
         end if
     end subroutine check_column_exists
-
     !> parquet_read_column_chunk's own extra guard, called right after check_column_exists: a
     !> row-group-scoped read has no coherent way to apply reader%filter's own mask, which is a
     !> single flat mask sized to the whole unfiltered file with no row-group structure of its
@@ -93,7 +91,6 @@ contains
                 "active filter= -- open a second, unfiltered reader for chunked access" // name_suffix
         end if
     end subroutine check_reader_no_filter
-
     !> parquet_read_column_chunk's own extra guard, called right after check_reader_no_filter:
     !> row_group must be within [1, num_row_groups], checked here (Fortran-side) rather than
     !> relying on Arrow's own ReadRowGroup bounds check, which throws an uncaught
@@ -116,7 +113,6 @@ contains
                 trim(total_str) // " row group(s))" // name_suffix
         end if
     end subroutine check_row_group_valid
-
     !> Splits one parquet_filter%add rule ("<column> <op> [value]") into its
     !> three parts, purely by syntax -- no schema access here, so this cannot
     !> check that `name` is a real column or that `value` is well-formed for
@@ -202,7 +198,6 @@ contains
 
         ok = .true.
     end subroutine parquet_tokenize_filter_rule
-
     !> Packs a fixed-width character array into the same "n fixed-width items
     !> back to back" convention used for names_packed elsewhere in this file
     !> (see parquet_prefetch_columns) -- shared here since parquet_apply_filter
@@ -223,7 +218,6 @@ contains
             end do
         end do
     end subroutine pack_fixed_width_strings
-
     !> Validates+parses `maml` (parquet_parse_qc_maml) and hands the
     !> resulting per-column qc: rules to parquet_reader_set_qc -- called from
     !> parquet_open_reader BEFORE parquet_apply_filter, so that any column
@@ -275,7 +269,6 @@ contains
             max_texts_packed, int(len(max_texts), kind=c_long_long), &
             null_allowed_flags, int(n, kind=c_long_long), merge(1_c_int8_t, 0_c_int8_t, qc_soft))
     end subroutine parquet_apply_qc
-
     !> Batch-prefetches the distinct columns named by `filter` in a single
     !> (thread-parallel, with use_threads) ReadTable, so parquet_reader_set_filter
     !> later reads each from column_cache instead of issuing a separate
@@ -324,7 +317,6 @@ contains
 
         if (len(list) > 0) call parquet_prefetch_columns(reader, list)
     end subroutine prefetch_filter_columns
-
     !> Tokenizes and applies every rule in `filter` to `reader` -- called from
     !> parquet_open_reader right after the reader itself is created, so
     !> parquet_get_nrows and every column read afterward already reflect the
@@ -378,7 +370,6 @@ contains
         call reader_filename_suffix(reader, name_suffix)
         if (status /= 0) error stop "parquet_open_reader: " // trim(c_err) // name_suffix
     end subroutine parquet_apply_filter
-
     !> Called once by parquet_open_reader, right after the handle is created:
     !> copies the file's flat key-value table metadata (whatever add_metadata
     !> wrote on the write side) into reader%metadata, so every later
@@ -407,7 +398,6 @@ contains
             deallocate(kbuf, vbuf)
         end do
     end subroutine populate_reader_metadata
-
     module procedure parquet_open_reader_base
         logical :: use_threads_value, qc_effective, qc_soft_value
 
@@ -456,17 +446,14 @@ contains
             if (prefetch) call parquet_reader_prefetch_all_columns(reader%handle)
         end if
     end procedure parquet_open_reader_base
-
     module procedure parquet_open_reader_nrows_int64
         call parquet_open_reader_base(reader, filename, use_threads, filter, schema, qc, qc_soft, prefetch)
         call parquet_get_nrows(reader, nrows, check_positive=.true.)
     end procedure parquet_open_reader_nrows_int64
-
     module procedure parquet_open_reader_nrows_int32
         call parquet_open_reader_base(reader, filename, use_threads, filter, schema, qc, qc_soft, prefetch)
         call parquet_get_nrows(reader, nrows, check_positive=.true.)
     end procedure parquet_open_reader_nrows_int32
-
     module procedure parquet_close_reader
         logical :: do_check_complete, do_check_hard
         if (.not. c_associated(reader%handle)) then
@@ -485,7 +472,6 @@ contains
         call close_parquet_reader(reader%handle)
         reader%handle = c_null_ptr
     end procedure parquet_close_reader
-
     !> Warms the cache for every column in `names` with a single, parallelizable
     !> (use_threads is on -- see create_parquet_reader) Arrow read, instead of
     !> one lazy single-column read per name. Purely additive: parquet_read_column
@@ -522,7 +508,6 @@ contains
 
         call parquet_reader_prefetch_columns(reader%handle, packed, int(item_len, kind=c_long_long), int(n, kind=c_long_long))
     end procedure parquet_prefetch_columns_array
-
     !> Scalar-string form of parquet_prefetch_columns: splits `names` on commas
     !> and/or semicolons ("ra;dec, mag"), trims each token, drops empty tokens
     !> (so trailing/repeated delimiters are harmless), packs them into a
@@ -575,7 +560,6 @@ contains
 
         call parquet_prefetch_columns_array(reader, name_arr)
     end procedure parquet_prefetch_columns_string
-
     !> Safety net for a reader whose handle is still open when it goes out of
     !> scope or is overwritten -- frees the underlying C++ object so the
     !> process doesn't leak it. Always prefer calling parquet_close_reader
@@ -586,7 +570,6 @@ contains
             this%handle = c_null_ptr
         end if
     end procedure reader_finalize
-
     !> Shared by both parquet_get_nrows overloads' check_positive=.true. path.
     !> nrows64 is always <= 0 here (never negative in practice, but the check
     !> itself is written against <= 0 to also cover that impossible case).
@@ -610,7 +593,6 @@ contains
             error stop "parquet_get_nrows: file " // trim(reader%filename) // " has zero rows" ! GCOVR_EXCL_LINE
         end if
     end subroutine check_nrows_positive
-
     module procedure parquet_get_nrows_int64
         call check_reader_open(reader, "parquet_get_nrows")
         nrows = int(parquet_reader_get_nrows(reader%handle), kind=int64)
@@ -618,7 +600,6 @@ contains
             if (check_positive) call check_nrows_positive(reader, nrows)
         end if
     end procedure parquet_get_nrows_int64
-
     module procedure parquet_get_nrows_int32
         integer(int64) :: nrows64
         character(len=:), allocatable :: name_suffix !! scratch (reader_filename_suffix).
@@ -633,12 +614,10 @@ contains
         end if ! GCOVR_EXCL_STOP
         nrows = int(nrows64, kind=int32)
     end procedure parquet_get_nrows_int32
-
     module procedure parquet_get_num_row_groups_int64
         call check_reader_open(reader, "parquet_get_num_row_groups")
         num_row_groups = int(parquet_reader_get_num_row_groups(reader%handle), kind=int64)
     end procedure parquet_get_num_row_groups_int64
-
     module procedure parquet_get_num_row_groups_int32
         integer(int64) :: num_row_groups64
         character(len=:), allocatable :: name_suffix !! scratch (reader_filename_suffix).
@@ -651,7 +630,6 @@ contains
         end if ! GCOVR_EXCL_STOP
         num_row_groups = int(num_row_groups64, kind=int32)
     end procedure parquet_get_num_row_groups_int32
-
     !> Shared body of parquet_get_chunk_size_reader_int32/_int64 -- see the generic interface's
     !> own doc comment in parquet.f90. `row_group` is 0 if the caller omitted its own optional
     !> row_group argument (both kind-specifics translate "absent" to 0 before calling in),
@@ -677,7 +655,6 @@ contains
         end if
         chunk_size = int(parquet_reader_get_chunk_size_at(reader%handle, rg), kind=int64)
     end subroutine parquet_get_chunk_size_reader_impl
-
     module procedure parquet_get_chunk_size_reader_int32
         integer(int64) :: chunk_size64, row_group64
         row_group64 = 0_int64
@@ -685,26 +662,22 @@ contains
         call parquet_get_chunk_size_reader_impl(reader, chunk_size64, row_group64)
         chunk_size = int(chunk_size64, kind=int32)
     end procedure parquet_get_chunk_size_reader_int32
-
     module procedure parquet_get_chunk_size_reader_int64
         integer(int64) :: row_group64
         row_group64 = 0_int64
         if (present(row_group)) row_group64 = row_group
         call parquet_get_chunk_size_reader_impl(reader, chunk_size, row_group64)
     end procedure parquet_get_chunk_size_reader_int64
-
     module procedure parquet_get_col_size
         call check_reader_open(reader, "parquet_get_col_size")
         call check_column_exists(reader, name, "parquet_get_col_size")
         col_size = int(parquet_reader_get_column_col_size(reader%handle, trim(name)//char(0)))
     end procedure parquet_get_col_size
-
     module procedure parquet_get_column_total_elements_int64
         call check_reader_open(reader, "parquet_get_column_total_elements")
         call check_column_exists(reader, name, "parquet_get_column_total_elements")
         total_elements = int(parquet_reader_get_column_total_elements(reader%handle, trim(name)//char(0)), kind=int64)
     end procedure parquet_get_column_total_elements_int64
-
     module procedure parquet_get_column_total_elements_int32
         integer(int64) :: nelem64
         character(len=:), allocatable :: name_suffix !! scratch (reader_filename_suffix).
@@ -718,14 +691,31 @@ contains
         end if ! GCOVR_EXCL_STOP
         total_elements = int(nelem64, kind=int32)
     end procedure parquet_get_column_total_elements_int32
-
     module procedure parquet_get_string_length
         call check_reader_open(reader, "parquet_get_string_length")
         call check_column_exists(reader, name, "parquet_get_string_length")
         max_string_length = int(parquet_reader_get_string_length(reader%handle, trim(name)//char(0)))
     end procedure parquet_get_string_length
-
-    module procedure parquet_check_read_row_count
+    !> Every parquet_read_column variant calls this with its own `values`
+    !> array's row count (size(values) for a scalar column, size(values, 2)
+    !> for a vector column) before reading any data. A mismatch against the
+    !> file's actual row count fails immediately with error stop, instead of
+    !> reaching the underlying C++ read call, whose own "nrows mismatch"
+    !> check reports a clean diagnostic but aborts the process rather than
+    !> returning control to Fortran (see report_fatal_error in
+    !> parquet_wrapper.cpp).
+    !> Plain contained subroutine (not a module procedure): its body already
+    !> lived here in the parquet_read parent, not a descendant submodule, so
+    !> keeping it a module procedure after relocating the interface into this
+    !> same file's own spec would mean parquet_read implementing its own
+    !> spec-declared interface -- not the ancestor/descendant relationship
+    !> module procedures require (same reasoning as parquet_metadata's
+    !> parquet_parse_col_map, see Phase 2). Descendants reach it by host
+    !> association (fact 3.6).
+    subroutine parquet_check_read_row_count(reader, name, given_nrows)
+        type(parquet_reader), intent(in) :: reader !! open reader.
+        character(len=*), intent(in) :: name !! column being read; named only in the error-stop message.
+        integer(c_long_long), intent(in) :: given_nrows !! row count of this read call's own `values` array.
         integer(c_long_long) :: file_nrows
         character(len=32) :: expected_str, got_str
         character(len=:), allocatable :: name_suffix !! scratch (reader_filename_suffix).
@@ -739,1366 +729,7 @@ contains
                 ": file has " // trim(expected_str) // " rows but the values array implies " // trim(got_str) // &
                 name_suffix
         end if
-    end procedure parquet_check_read_row_count
-
-    module procedure parquet_read_int32_column_1d
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i
-
-        call check_reader_open(reader, "parquet_read_column")
-        call check_column_exists(reader, name, "parquet_read_column")
-        call parquet_check_read_row_count(reader, name, size(values, kind=c_long_long))
-        call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_int32_column(reader%handle, trim(name)//char(0), values, size(values, kind=c_long_long), valid_ptr)
-        if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
-        if (present(null_value)) then
-            do i = 1_int64, size(values, kind=int64)
-                if (valid_buf(i) == 0_c_int8_t) values(i) = null_value
-            end do
-        end if
-    end procedure parquet_read_int32_column_1d
-
-    module procedure parquet_read_int64_column_1d
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i
-
-        call check_reader_open(reader, "parquet_read_column")
-        call check_column_exists(reader, name, "parquet_read_column")
-        call parquet_check_read_row_count(reader, name, size(values, kind=c_long_long))
-        call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_int64_column(reader%handle, trim(name)//char(0), values, size(values, kind=c_long_long), valid_ptr)
-        if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
-        if (present(null_value)) then
-            do i = 1_int64, size(values, kind=int64)
-                if (valid_buf(i) == 0_c_int8_t) values(i) = null_value
-            end do
-        end if
-    end procedure parquet_read_int64_column_1d
-
-    module procedure parquet_read_float32_column_1d
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i
-
-        call check_reader_open(reader, "parquet_read_column")
-        call check_column_exists(reader, name, "parquet_read_column")
-        call parquet_check_read_row_count(reader, name, size(values, kind=c_long_long))
-        call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_float32_column(reader%handle, trim(name)//char(0), values, size(values, kind=c_long_long), valid_ptr)
-        if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
-        if (present(null_value)) then
-            do i = 1_int64, size(values, kind=int64)
-                if (valid_buf(i) == 0_c_int8_t) values(i) = null_value
-            end do
-        end if
-    end procedure parquet_read_float32_column_1d
-
-    module procedure parquet_read_float64_column_1d
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i
-
-        call check_reader_open(reader, "parquet_read_column")
-        call check_column_exists(reader, name, "parquet_read_column")
-        call parquet_check_read_row_count(reader, name, size(values, kind=c_long_long))
-        call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_float64_column(reader%handle, trim(name)//char(0), values, size(values, kind=c_long_long), valid_ptr)
-        if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
-        if (present(null_value)) then
-            do i = 1_int64, size(values, kind=int64)
-                if (valid_buf(i) == 0_c_int8_t) values(i) = null_value
-            end do
-        end if
-    end procedure parquet_read_float64_column_1d
-
-    module procedure parquet_read_logical_column_1d
-        integer(c_int8_t), allocatable :: tmp(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i
-
-        call check_reader_open(reader, "parquet_read_column")
-        call check_column_exists(reader, name, "parquet_read_column")
-        call parquet_check_read_row_count(reader, name, size(values, kind=c_long_long))
-        allocate(tmp(size(values, kind=int64)))
-        call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_bool8_column(reader%handle, trim(name)//char(0), tmp, size(tmp, kind=c_long_long), valid_ptr)
-        do i = 1_int64, size(values, kind=int64)
-            values(i) = tmp(i) /= 0_c_int8_t
-        end do
-        if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
-        if (present(null_value)) then
-            do i = 1_int64, size(values, kind=int64)
-                if (valid_buf(i) == 0_c_int8_t) values(i) = null_value
-            end do
-        end if
-    end procedure parquet_read_logical_column_1d
-
-    module procedure parquet_read_string_column_1d
-        character(kind=c_char), allocatable :: packed(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: nrows, i, k
-        integer :: item_len, j
-
-        nrows = size(values, kind=int64)
-        call check_reader_open(reader, "parquet_read_column")
-        call check_column_exists(reader, name, "parquet_read_column")
-        call parquet_check_read_row_count(reader, name, nrows)
-        item_len = len(values(1))
-        allocate(packed(item_len*nrows))
-        call make_valid_buf(present(null_value) .or. present(is_valid), nrows, valid_buf, valid_ptr)
-        call parquet_read_string_column(reader%handle, trim(name)//char(0), packed, int(item_len, kind=c_long_long), &
-            nrows, valid_ptr)
-
-        k = 0_int64
-        do i = 1_int64, nrows
-            values(i) = ''
-            do j = 1, item_len
-                k = k + 1_int64
-                values(i)(j:j) = achar(iachar(packed(k)))
-            end do
-        end do
-        if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
-        if (present(null_value)) then
-            do i = 1_int64, nrows
-                if (valid_buf(i) == 0_c_int8_t) values(i) = null_value
-            end do
-        end if
-    end procedure parquet_read_string_column_1d
-
-    module procedure parquet_read_int32_array_full
-        integer(c_int32_t), allocatable :: flat(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: asize, nrows, i, j, k
-
-        asize = size(values, 1, kind=int64)
-        nrows = size(values, 2, kind=int64)
-        call check_reader_open(reader, "parquet_read_column")
-        call check_column_exists(reader, name, "parquet_read_column")
-        call parquet_check_read_row_count(reader, name, nrows)
-        allocate(flat(asize*nrows))
-        call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)
-        call parquet_read_int32_array_column(reader%handle, trim(name)//char(0), flat, nrows, asize, valid_ptr)
-        do i = 1_int64, nrows
-            do j = 1_int64, asize
-                k = (i-1)*asize + j
-                values(j, i) = flat(k)
-                if (present(is_valid)) is_valid(j, i) = valid_buf(k) /= 0_c_int8_t
-                if (present(null_value)) then
-                    if (valid_buf(k) == 0_c_int8_t) values(j, i) = null_value
-                end if
-            end do
-        end do
-    end procedure parquet_read_int32_array_full
-
-    module procedure parquet_read_int64_array_full
-        integer(c_int64_t), allocatable :: flat(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: asize, nrows, i, j, k
-
-        asize = size(values, 1, kind=int64)
-        nrows = size(values, 2, kind=int64)
-        call check_reader_open(reader, "parquet_read_column")
-        call check_column_exists(reader, name, "parquet_read_column")
-        call parquet_check_read_row_count(reader, name, nrows)
-        allocate(flat(asize*nrows))
-        call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)
-        call parquet_read_int64_array_column(reader%handle, trim(name)//char(0), flat, nrows, asize, valid_ptr)
-        do i = 1_int64, nrows
-            do j = 1_int64, asize
-                k = (i-1)*asize + j
-                values(j, i) = flat(k)
-                if (present(is_valid)) is_valid(j, i) = valid_buf(k) /= 0_c_int8_t
-                if (present(null_value)) then
-                    if (valid_buf(k) == 0_c_int8_t) values(j, i) = null_value
-                end if
-            end do
-        end do
-    end procedure parquet_read_int64_array_full
-
-    module procedure parquet_read_float32_array_full
-        real(c_float), allocatable :: flat(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: asize, nrows, i, j, k
-
-        asize = size(values, 1, kind=int64)
-        nrows = size(values, 2, kind=int64)
-        call check_reader_open(reader, "parquet_read_column")
-        call check_column_exists(reader, name, "parquet_read_column")
-        call parquet_check_read_row_count(reader, name, nrows)
-        allocate(flat(asize*nrows))
-        call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)
-        call parquet_read_float32_array_column(reader%handle, trim(name)//char(0), flat, nrows, asize, valid_ptr)
-        do i = 1_int64, nrows
-            do j = 1_int64, asize
-                k = (i-1)*asize + j
-                values(j, i) = flat(k)
-                if (present(is_valid)) is_valid(j, i) = valid_buf(k) /= 0_c_int8_t
-                if (present(null_value)) then
-                    if (valid_buf(k) == 0_c_int8_t) values(j, i) = null_value
-                end if
-            end do
-        end do
-    end procedure parquet_read_float32_array_full
-
-    module procedure parquet_read_float64_array_full
-        real(c_double), allocatable :: flat(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: asize, nrows, i, j, k
-
-        asize = size(values, 1, kind=int64)
-        nrows = size(values, 2, kind=int64)
-        call check_reader_open(reader, "parquet_read_column")
-        call check_column_exists(reader, name, "parquet_read_column")
-        call parquet_check_read_row_count(reader, name, nrows)
-        allocate(flat(asize*nrows))
-        call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)
-        call parquet_read_float64_array_column(reader%handle, trim(name)//char(0), flat, nrows, asize, valid_ptr)
-        do i = 1_int64, nrows
-            do j = 1_int64, asize
-                k = (i-1)*asize + j
-                values(j, i) = flat(k)
-                if (present(is_valid)) is_valid(j, i) = valid_buf(k) /= 0_c_int8_t
-                if (present(null_value)) then
-                    if (valid_buf(k) == 0_c_int8_t) values(j, i) = null_value
-                end if
-            end do
-        end do
-    end procedure parquet_read_float64_array_full
-
-    module procedure parquet_read_logical_array_full
-        integer(c_int8_t), allocatable :: flat(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: asize, nrows, i, j, k
-
-        asize = size(values, 1, kind=int64)
-        nrows = size(values, 2, kind=int64)
-        call check_reader_open(reader, "parquet_read_column")
-        call check_column_exists(reader, name, "parquet_read_column")
-        call parquet_check_read_row_count(reader, name, nrows)
-        allocate(flat(asize*nrows))
-        call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)
-        call parquet_read_bool8_array_column(reader%handle, trim(name)//char(0), flat, nrows, asize, valid_ptr)
-        do i = 1_int64, nrows
-            do j = 1_int64, asize
-                k = (i-1)*asize + j
-                values(j, i) = flat(k) /= 0_c_int8_t
-                if (present(is_valid)) is_valid(j, i) = valid_buf(k) /= 0_c_int8_t
-                if (present(null_value)) then
-                    if (valid_buf(k) == 0_c_int8_t) values(j, i) = null_value
-                end if
-            end do
-        end do
-    end procedure parquet_read_logical_array_full
-
-    module procedure parquet_read_string_array_full
-        character(kind=c_char), allocatable :: packed(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: asize, nrows, i, j, k, p
-        integer :: item_len, m
-
-        asize = size(values, 1, kind=int64)
-        nrows = size(values, 2, kind=int64)
-        call check_reader_open(reader, "parquet_read_column")
-        call check_column_exists(reader, name, "parquet_read_column")
-        call parquet_check_read_row_count(reader, name, nrows)
-        item_len = len(values(1,1))
-        allocate(packed(item_len*asize*nrows))
-        call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)
-        call parquet_read_string_array_column(reader%handle, trim(name)//char(0), packed, int(item_len, kind=c_long_long), &
-            nrows, asize, valid_ptr)
-
-        p = 0_int64
-        do i = 1_int64, nrows
-            do j = 1_int64, asize
-                values(j, i) = ''
-                do m = 1, item_len
-                    p = p + 1_int64
-                    values(j, i)(m:m) = achar(iachar(packed(p)))
-                end do
-                k = (i-1)*asize + j
-                if (present(is_valid)) is_valid(j, i) = valid_buf(k) /= 0_c_int8_t
-                if (present(null_value)) then
-                    if (valid_buf(k) == 0_c_int8_t) values(j, i) = null_value
-                end if
-            end do
-        end do
-    end procedure parquet_read_string_array_full
-
-    !> Compact (parquet_string_column) specific of parquet_read_column: clears `values` then
-    !> bulk-appends the whole column straight from its own decoded offsets/data/validity buffers
-    !> (parquet_read_string_column_buffers), instead of copying one string at a time into a
-    !> fixed-width padded array. Every Null lands as values%append_null() -- there is no
-    !> null_value/is_valid to plumb through here, unlike every other parquet_read_column specific.
-    module procedure parquet_read_string_column_compact
-        integer(int64) :: nrows, nchars
-        type(c_ptr) :: offsets_ptr, data_ptr, validity_ptr
-        integer(c_int8_t) :: offsets_int32_flag
-
-        call check_reader_open(reader, "parquet_read_column")
-        call check_column_exists(reader, name, "parquet_read_column")
-        call values%clear()
-        call parquet_read_string_column_buffers(reader%handle, trim(name)//char(0), nrows, nchars, &
-            offsets_ptr, data_ptr, validity_ptr, offsets_int32_flag)
-        call values%append_buffers(nrows, nchars, offsets_ptr, data_ptr, validity_ptr, &
-            offsets_int32_flag /= 0_c_int8_t)
-    end procedure parquet_read_string_column_compact
-
-    !> Shared body of parquet_read_int32_array_row_mode/_row_index_int64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_index has two kind-specifics.
-    subroutine parquet_read_int32_array_row_mode_impl(reader, name, values, row_index, null_value, is_valid)
-        type(parquet_reader), intent(in) :: reader
-        character(len=*), intent(in) :: name
-        integer(int32), intent(out) :: values(:)
-        integer(int64), intent(in) :: row_index
-        integer(int32), intent(in), optional :: null_value
-        logical, intent(out), optional :: is_valid(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i
-
-        call check_reader_open(reader, "parquet_read_array_row_mode")
-        call check_column_exists(reader, name, "parquet_read_array_row_mode")
-        call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_int32_array_row(reader%handle, trim(name)//char(0), int(row_index, kind=c_long_long), values, &
-            size(values, kind=c_long_long), valid_ptr)
-        if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
-        if (present(null_value)) then
-            do i = 1_int64, size(values, kind=int64)
-                if (valid_buf(i) == 0_c_int8_t) values(i) = null_value
-            end do
-        end if
-    end subroutine parquet_read_int32_array_row_mode_impl
-
-    module procedure parquet_read_int32_array_row_mode
-        call parquet_read_int32_array_row_mode_impl(reader, name, values, int(row_index, kind=int64), null_value, is_valid)
-    end procedure parquet_read_int32_array_row_mode
-
-    module procedure parquet_read_int32_array_row_mode_row_index_int64
-        call parquet_read_int32_array_row_mode_impl(reader, name, values, row_index, null_value, is_valid)
-    end procedure parquet_read_int32_array_row_mode_row_index_int64
-
-    !> Shared body of parquet_read_int64_array_row_mode/_row_index_int64.
-    subroutine parquet_read_int64_array_row_mode_impl(reader, name, values, row_index, null_value, is_valid)
-        type(parquet_reader), intent(in) :: reader
-        character(len=*), intent(in) :: name
-        integer(int64), intent(out) :: values(:)
-        integer(int64), intent(in) :: row_index
-        integer(int64), intent(in), optional :: null_value
-        logical, intent(out), optional :: is_valid(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i
-
-        call check_reader_open(reader, "parquet_read_array_row_mode")
-        call check_column_exists(reader, name, "parquet_read_array_row_mode")
-        call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_int64_array_row(reader%handle, trim(name)//char(0), int(row_index, kind=c_long_long), values, &
-            size(values, kind=c_long_long), valid_ptr)
-        if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
-        if (present(null_value)) then
-            do i = 1_int64, size(values, kind=int64)
-                if (valid_buf(i) == 0_c_int8_t) values(i) = null_value
-            end do
-        end if
-    end subroutine parquet_read_int64_array_row_mode_impl
-
-    module procedure parquet_read_int64_array_row_mode
-        call parquet_read_int64_array_row_mode_impl(reader, name, values, int(row_index, kind=int64), null_value, is_valid)
-    end procedure parquet_read_int64_array_row_mode
-
-    module procedure parquet_read_int64_array_row_mode_row_index_int64
-        call parquet_read_int64_array_row_mode_impl(reader, name, values, row_index, null_value, is_valid)
-    end procedure parquet_read_int64_array_row_mode_row_index_int64
-
-    !> Shared body of parquet_read_float32_array_row_mode/_row_index_int64.
-    subroutine parquet_read_float32_array_row_mode_impl(reader, name, values, row_index, null_value, is_valid)
-        type(parquet_reader), intent(in) :: reader
-        character(len=*), intent(in) :: name
-        real(real32), intent(out) :: values(:)
-        integer(int64), intent(in) :: row_index
-        real(real32), intent(in), optional :: null_value
-        logical, intent(out), optional :: is_valid(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i
-
-        call check_reader_open(reader, "parquet_read_array_row_mode")
-        call check_column_exists(reader, name, "parquet_read_array_row_mode")
-        call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_float32_array_row(reader%handle, trim(name)//char(0), int(row_index, kind=c_long_long), values, &
-            size(values, kind=c_long_long), valid_ptr)
-        if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
-        if (present(null_value)) then
-            do i = 1_int64, size(values, kind=int64)
-                if (valid_buf(i) == 0_c_int8_t) values(i) = null_value
-            end do
-        end if
-    end subroutine parquet_read_float32_array_row_mode_impl
-
-    module procedure parquet_read_float32_array_row_mode
-        call parquet_read_float32_array_row_mode_impl(reader, name, values, int(row_index, kind=int64), null_value, &
-            is_valid)
-    end procedure parquet_read_float32_array_row_mode
-
-    module procedure parquet_read_float32_array_row_mode_row_index_int64
-        call parquet_read_float32_array_row_mode_impl(reader, name, values, row_index, null_value, is_valid)
-    end procedure parquet_read_float32_array_row_mode_row_index_int64
-
-    !> Shared body of parquet_read_float64_array_row_mode/_row_index_int64.
-    subroutine parquet_read_float64_array_row_mode_impl(reader, name, values, row_index, null_value, is_valid)
-        type(parquet_reader), intent(in) :: reader
-        character(len=*), intent(in) :: name
-        real(real64), intent(out) :: values(:)
-        integer(int64), intent(in) :: row_index
-        real(real64), intent(in), optional :: null_value
-        logical, intent(out), optional :: is_valid(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i
-
-        call check_reader_open(reader, "parquet_read_array_row_mode")
-        call check_column_exists(reader, name, "parquet_read_array_row_mode")
-        call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_float64_array_row(reader%handle, trim(name)//char(0), int(row_index, kind=c_long_long), values, &
-            size(values, kind=c_long_long), valid_ptr)
-        if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
-        if (present(null_value)) then
-            do i = 1_int64, size(values, kind=int64)
-                if (valid_buf(i) == 0_c_int8_t) values(i) = null_value
-            end do
-        end if
-    end subroutine parquet_read_float64_array_row_mode_impl
-
-    module procedure parquet_read_float64_array_row_mode
-        call parquet_read_float64_array_row_mode_impl(reader, name, values, int(row_index, kind=int64), null_value, &
-            is_valid)
-    end procedure parquet_read_float64_array_row_mode
-
-    module procedure parquet_read_float64_array_row_mode_row_index_int64
-        call parquet_read_float64_array_row_mode_impl(reader, name, values, row_index, null_value, is_valid)
-    end procedure parquet_read_float64_array_row_mode_row_index_int64
-
-    !> Shared body of parquet_read_logical_array_row_mode/_row_index_int64.
-    subroutine parquet_read_logical_array_row_mode_impl(reader, name, values, row_index, null_value, is_valid)
-        type(parquet_reader), intent(in) :: reader
-        character(len=*), intent(in) :: name
-        logical, intent(out) :: values(:)
-        integer(int64), intent(in) :: row_index
-        logical, intent(in), optional :: null_value
-        logical, intent(out), optional :: is_valid(:)
-        integer(c_int8_t), allocatable :: tmp(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i
-
-        call check_reader_open(reader, "parquet_read_array_row_mode")
-        call check_column_exists(reader, name, "parquet_read_array_row_mode")
-        allocate(tmp(size(values, kind=int64)))
-        call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_bool8_array_row(reader%handle, trim(name)//char(0), int(row_index, kind=c_long_long), tmp, &
-            size(values, kind=c_long_long), valid_ptr)
-        do i = 1_int64, size(values, kind=int64)
-            values(i) = tmp(i) /= 0_c_int8_t
-        end do
-        if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
-        if (present(null_value)) then
-            do i = 1_int64, size(values, kind=int64)
-                if (valid_buf(i) == 0_c_int8_t) values(i) = null_value
-            end do
-        end if
-    end subroutine parquet_read_logical_array_row_mode_impl
-
-    module procedure parquet_read_logical_array_row_mode
-        call parquet_read_logical_array_row_mode_impl(reader, name, values, int(row_index, kind=int64), null_value, &
-            is_valid)
-    end procedure parquet_read_logical_array_row_mode
-
-    module procedure parquet_read_logical_array_row_mode_row_index_int64
-        call parquet_read_logical_array_row_mode_impl(reader, name, values, row_index, null_value, is_valid)
-    end procedure parquet_read_logical_array_row_mode_row_index_int64
-
-    !> Shared body of parquet_read_string_array_row_mode/_row_index_int64.
-    subroutine parquet_read_string_array_row_mode_impl(reader, name, values, row_index, null_value, is_valid)
-        type(parquet_reader), intent(in) :: reader
-        character(len=*), intent(in) :: name
-        character(len=*), intent(out) :: values(:)
-        integer(int64), intent(in) :: row_index
-        character(len=*), intent(in), optional :: null_value
-        logical, intent(out), optional :: is_valid(:)
-        character(kind=c_char), allocatable :: packed(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i, p
-        integer :: item_len, j
-
-        call check_reader_open(reader, "parquet_read_array_row_mode")
-        call check_column_exists(reader, name, "parquet_read_array_row_mode")
-        item_len = len(values(1))
-        allocate(packed(item_len*size(values, kind=int64)))
-        call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_string_array_row(reader%handle, trim(name)//char(0), int(row_index, kind=c_long_long), packed, &
-            int(item_len, kind=c_long_long), size(values, kind=c_long_long), valid_ptr)
-        p = 0_int64
-        do i = 1_int64, size(values, kind=int64)
-            values(i) = ''
-            do j = 1, item_len
-                p = p + 1_int64
-                values(i)(j:j) = achar(iachar(packed(p)))
-            end do
-        end do
-        if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
-        if (present(null_value)) then
-            do i = 1_int64, size(values, kind=int64)
-                if (valid_buf(i) == 0_c_int8_t) values(i) = null_value
-            end do
-        end if
-    end subroutine parquet_read_string_array_row_mode_impl
-
-    module procedure parquet_read_string_array_row_mode
-        call parquet_read_string_array_row_mode_impl(reader, name, values, int(row_index, kind=int64), null_value, &
-            is_valid)
-    end procedure parquet_read_string_array_row_mode
-
-    module procedure parquet_read_string_array_row_mode_row_index_int64
-        call parquet_read_string_array_row_mode_impl(reader, name, values, row_index, null_value, is_valid)
-    end procedure parquet_read_string_array_row_mode_row_index_int64
-
-    module procedure parquet_read_int32_array_element_mode
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i
-
-        call check_reader_open(reader, "parquet_read_array_element_mode")
-        call check_column_exists(reader, name, "parquet_read_array_element_mode")
-        call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_int32_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), values, &
-            size(values, kind=c_long_long), 0_c_long_long, valid_ptr)
-        if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
-        if (present(null_value)) then
-            do i = 1_int64, size(values, kind=int64)
-                if (valid_buf(i) == 0_c_int8_t) values(i) = null_value
-            end do
-        end if
-    end procedure parquet_read_int32_array_element_mode
-
-    module procedure parquet_read_int64_array_element_mode
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i
-
-        call check_reader_open(reader, "parquet_read_array_element_mode")
-        call check_column_exists(reader, name, "parquet_read_array_element_mode")
-        call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_int64_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), values, &
-            size(values, kind=c_long_long), 0_c_long_long, valid_ptr)
-        if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
-        if (present(null_value)) then
-            do i = 1_int64, size(values, kind=int64)
-                if (valid_buf(i) == 0_c_int8_t) values(i) = null_value
-            end do
-        end if
-    end procedure parquet_read_int64_array_element_mode
-
-    module procedure parquet_read_float32_array_element_mode
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i
-
-        call check_reader_open(reader, "parquet_read_array_element_mode")
-        call check_column_exists(reader, name, "parquet_read_array_element_mode")
-        call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_float32_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), values, &
-            size(values, kind=c_long_long), 0_c_long_long, valid_ptr)
-        if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
-        if (present(null_value)) then
-            do i = 1_int64, size(values, kind=int64)
-                if (valid_buf(i) == 0_c_int8_t) values(i) = null_value
-            end do
-        end if
-    end procedure parquet_read_float32_array_element_mode
-
-    module procedure parquet_read_float64_array_element_mode
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i
-
-        call check_reader_open(reader, "parquet_read_array_element_mode")
-        call check_column_exists(reader, name, "parquet_read_array_element_mode")
-        call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_float64_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), values, &
-            size(values, kind=c_long_long), 0_c_long_long, valid_ptr)
-        if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
-        if (present(null_value)) then
-            do i = 1_int64, size(values, kind=int64)
-                if (valid_buf(i) == 0_c_int8_t) values(i) = null_value
-            end do
-        end if
-    end procedure parquet_read_float64_array_element_mode
-
-    module procedure parquet_read_logical_array_element_mode
-        integer(c_int8_t), allocatable :: tmp(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i
-
-        call check_reader_open(reader, "parquet_read_array_element_mode")
-        call check_column_exists(reader, name, "parquet_read_array_element_mode")
-        allocate(tmp(size(values, kind=int64)))
-        call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_bool8_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), tmp, &
-            size(values, kind=c_long_long), 0_c_long_long, valid_ptr)
-        do i = 1_int64, size(values, kind=int64)
-            values(i) = tmp(i) /= 0_c_int8_t
-        end do
-        if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
-        if (present(null_value)) then
-            do i = 1_int64, size(values, kind=int64)
-                if (valid_buf(i) == 0_c_int8_t) values(i) = null_value
-            end do
-        end if
-    end procedure parquet_read_logical_array_element_mode
-
-    module procedure parquet_read_string_array_element_mode
-        character(kind=c_char), allocatable :: packed(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i, p
-        integer :: item_len, j
-
-        call check_reader_open(reader, "parquet_read_array_element_mode")
-        call check_column_exists(reader, name, "parquet_read_array_element_mode")
-        item_len = len(values(1))
-        allocate(packed(item_len*size(values, kind=int64)))
-        call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_string_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), packed, &
-            int(item_len, kind=c_long_long), size(values, kind=c_long_long), 0_c_long_long, valid_ptr)
-        p = 0_int64
-        do i = 1_int64, size(values, kind=int64)
-            values(i) = ''
-            do j = 1, item_len
-                p = p + 1_int64
-                values(i)(j:j) = achar(iachar(packed(p)))
-            end do
-        end do
-        if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
-        if (present(null_value)) then
-            do i = 1_int64, size(values, kind=int64)
-                if (valid_buf(i) == 0_c_int8_t) values(i) = null_value
-            end do
-        end if
-    end procedure parquet_read_string_array_element_mode
-
-    !> Shared body of parquet_read_int32_column_chunk_rg32/_rg64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics.
-    subroutine parquet_read_int32_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
-        type(parquet_reader), intent(in) :: reader
-        character(len=*), intent(in) :: name
-        integer(int64), intent(in) :: row_group
-        integer(int32), intent(out) :: values(:)
-        integer(int32), intent(in), optional :: null_value
-        logical, intent(out), optional :: is_valid(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i
-
-        call check_reader_open(reader, "parquet_read_column_chunk")
-        call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
-        call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
-        call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_int32_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
-            size(values, kind=c_long_long), valid_ptr)
-        if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
-        if (present(null_value)) then
-            do i = 1_int64, size(values, kind=int64)
-                if (valid_buf(i) == 0_c_int8_t) values(i) = null_value
-            end do
-        end if
-    end subroutine parquet_read_int32_column_chunk_impl
-
-    !> Shared body of parquet_read_int32_array_column_chunk_rg32/_rg64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics.
-    subroutine parquet_read_int32_array_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
-        type(parquet_reader), intent(in) :: reader
-        character(len=*), intent(in) :: name
-        integer(int64), intent(in) :: row_group
-        integer(int32), intent(out) :: values(:, :)
-        integer(int32), intent(in), optional :: null_value
-        logical, intent(out), optional :: is_valid(:, :)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: asize, nrows, i, j, k
-
-        asize = size(values, 1, kind=int64)
-        nrows = size(values, 2, kind=int64)
-        call check_reader_open(reader, "parquet_read_column_chunk")
-        call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
-        call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
-        call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)
-        call parquet_read_int32_array_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
-            nrows, asize, valid_ptr)
-        if (present(is_valid) .or. present(null_value)) then
-            do i = 1_int64, nrows
-                do j = 1_int64, asize
-                    k = (i-1)*asize + j
-                    if (present(is_valid)) is_valid(j, i) = valid_buf(k) /= 0_c_int8_t
-                    if (present(null_value)) then
-                        if (valid_buf(k) == 0_c_int8_t) values(j, i) = null_value
-                    end if
-                end do
-            end do
-        end if
-    end subroutine parquet_read_int32_array_column_chunk_impl
-
-    !> Shared body of parquet_read_int64_column_chunk_rg32/_rg64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics.
-    subroutine parquet_read_int64_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
-        type(parquet_reader), intent(in) :: reader
-        character(len=*), intent(in) :: name
-        integer(int64), intent(in) :: row_group
-        integer(int64), intent(out) :: values(:)
-        integer(int64), intent(in), optional :: null_value
-        logical, intent(out), optional :: is_valid(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i
-
-        call check_reader_open(reader, "parquet_read_column_chunk")
-        call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
-        call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
-        call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_int64_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
-            size(values, kind=c_long_long), valid_ptr)
-        if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
-        if (present(null_value)) then
-            do i = 1_int64, size(values, kind=int64)
-                if (valid_buf(i) == 0_c_int8_t) values(i) = null_value
-            end do
-        end if
-    end subroutine parquet_read_int64_column_chunk_impl
-
-    !> Shared body of parquet_read_int64_array_column_chunk_rg32/_rg64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics.
-    subroutine parquet_read_int64_array_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
-        type(parquet_reader), intent(in) :: reader
-        character(len=*), intent(in) :: name
-        integer(int64), intent(in) :: row_group
-        integer(int64), intent(out) :: values(:, :)
-        integer(int64), intent(in), optional :: null_value
-        logical, intent(out), optional :: is_valid(:, :)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: asize, nrows, i, j, k
-
-        asize = size(values, 1, kind=int64)
-        nrows = size(values, 2, kind=int64)
-        call check_reader_open(reader, "parquet_read_column_chunk")
-        call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
-        call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
-        call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)
-        call parquet_read_int64_array_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
-            nrows, asize, valid_ptr)
-        if (present(is_valid) .or. present(null_value)) then
-            do i = 1_int64, nrows
-                do j = 1_int64, asize
-                    k = (i-1)*asize + j
-                    if (present(is_valid)) is_valid(j, i) = valid_buf(k) /= 0_c_int8_t
-                    if (present(null_value)) then
-                        if (valid_buf(k) == 0_c_int8_t) values(j, i) = null_value
-                    end if
-                end do
-            end do
-        end if
-    end subroutine parquet_read_int64_array_column_chunk_impl
-
-    !> Shared body of parquet_read_float32_column_chunk_rg32/_rg64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics.
-    subroutine parquet_read_float32_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
-        type(parquet_reader), intent(in) :: reader
-        character(len=*), intent(in) :: name
-        integer(int64), intent(in) :: row_group
-        real(real32), intent(out) :: values(:)
-        real(real32), intent(in), optional :: null_value
-        logical, intent(out), optional :: is_valid(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i
-
-        call check_reader_open(reader, "parquet_read_column_chunk")
-        call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
-        call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
-        call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_float32_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
-            size(values, kind=c_long_long), valid_ptr)
-        if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
-        if (present(null_value)) then
-            do i = 1_int64, size(values, kind=int64)
-                if (valid_buf(i) == 0_c_int8_t) values(i) = null_value
-            end do
-        end if
-    end subroutine parquet_read_float32_column_chunk_impl
-
-    !> Shared body of parquet_read_float32_array_column_chunk_rg32/_rg64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics.
-    subroutine parquet_read_float32_array_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
-        type(parquet_reader), intent(in) :: reader
-        character(len=*), intent(in) :: name
-        integer(int64), intent(in) :: row_group
-        real(real32), intent(out) :: values(:, :)
-        real(real32), intent(in), optional :: null_value
-        logical, intent(out), optional :: is_valid(:, :)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: asize, nrows, i, j, k
-
-        asize = size(values, 1, kind=int64)
-        nrows = size(values, 2, kind=int64)
-        call check_reader_open(reader, "parquet_read_column_chunk")
-        call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
-        call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
-        call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)
-        call parquet_read_float32_array_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
-            nrows, asize, valid_ptr)
-        if (present(is_valid) .or. present(null_value)) then
-            do i = 1_int64, nrows
-                do j = 1_int64, asize
-                    k = (i-1)*asize + j
-                    if (present(is_valid)) is_valid(j, i) = valid_buf(k) /= 0_c_int8_t
-                    if (present(null_value)) then
-                        if (valid_buf(k) == 0_c_int8_t) values(j, i) = null_value
-                    end if
-                end do
-            end do
-        end if
-    end subroutine parquet_read_float32_array_column_chunk_impl
-
-    !> Shared body of parquet_read_float64_column_chunk_rg32/_rg64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics.
-    subroutine parquet_read_float64_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
-        type(parquet_reader), intent(in) :: reader
-        character(len=*), intent(in) :: name
-        integer(int64), intent(in) :: row_group
-        real(real64), intent(out) :: values(:)
-        real(real64), intent(in), optional :: null_value
-        logical, intent(out), optional :: is_valid(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i
-
-        call check_reader_open(reader, "parquet_read_column_chunk")
-        call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
-        call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
-        call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_float64_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
-            size(values, kind=c_long_long), valid_ptr)
-        if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
-        if (present(null_value)) then
-            do i = 1_int64, size(values, kind=int64)
-                if (valid_buf(i) == 0_c_int8_t) values(i) = null_value
-            end do
-        end if
-    end subroutine parquet_read_float64_column_chunk_impl
-
-    !> Shared body of parquet_read_float64_array_column_chunk_rg32/_rg64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics.
-    subroutine parquet_read_float64_array_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
-        type(parquet_reader), intent(in) :: reader
-        character(len=*), intent(in) :: name
-        integer(int64), intent(in) :: row_group
-        real(real64), intent(out) :: values(:, :)
-        real(real64), intent(in), optional :: null_value
-        logical, intent(out), optional :: is_valid(:, :)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: asize, nrows, i, j, k
-
-        asize = size(values, 1, kind=int64)
-        nrows = size(values, 2, kind=int64)
-        call check_reader_open(reader, "parquet_read_column_chunk")
-        call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
-        call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
-        call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)
-        call parquet_read_float64_array_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
-            nrows, asize, valid_ptr)
-        if (present(is_valid) .or. present(null_value)) then
-            do i = 1_int64, nrows
-                do j = 1_int64, asize
-                    k = (i-1)*asize + j
-                    if (present(is_valid)) is_valid(j, i) = valid_buf(k) /= 0_c_int8_t
-                    if (present(null_value)) then
-                        if (valid_buf(k) == 0_c_int8_t) values(j, i) = null_value
-                    end if
-                end do
-            end do
-        end if
-    end subroutine parquet_read_float64_array_column_chunk_impl
-
-    !> Shared body of parquet_read_logical_column_chunk_rg32/_rg64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics.
-    subroutine parquet_read_logical_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
-        type(parquet_reader), intent(in) :: reader
-        character(len=*), intent(in) :: name
-        integer(int64), intent(in) :: row_group
-        logical, intent(out) :: values(:)
-        logical, intent(in), optional :: null_value
-        logical, intent(out), optional :: is_valid(:)
-        integer(c_int8_t), allocatable :: tmp(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i
-
-        call check_reader_open(reader, "parquet_read_column_chunk")
-        call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
-        call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
-        allocate(tmp(size(values, kind=int64)))
-        call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_bool8_column_chunk(reader%handle, trim(name)//char(0), row_group, tmp, &
-            size(tmp, kind=c_long_long), valid_ptr)
-        do i = 1_int64, size(values, kind=int64)
-            values(i) = tmp(i) /= 0_c_int8_t
-        end do
-        if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
-        if (present(null_value)) then
-            do i = 1_int64, size(values, kind=int64)
-                if (valid_buf(i) == 0_c_int8_t) values(i) = null_value
-            end do
-        end if
-    end subroutine parquet_read_logical_column_chunk_impl
-
-    !> Shared body of parquet_read_logical_array_column_chunk_rg32/_rg64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics.
-    subroutine parquet_read_logical_array_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
-        type(parquet_reader), intent(in) :: reader
-        character(len=*), intent(in) :: name
-        integer(int64), intent(in) :: row_group
-        logical, intent(out) :: values(:, :)
-        logical, intent(in), optional :: null_value
-        logical, intent(out), optional :: is_valid(:, :)
-        integer(c_int8_t), allocatable :: flat(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: asize, nrows, i, j, k
-
-        asize = size(values, 1, kind=int64)
-        nrows = size(values, 2, kind=int64)
-        call check_reader_open(reader, "parquet_read_column_chunk")
-        call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
-        call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
-        allocate(flat(asize*nrows))
-        call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)
-        call parquet_read_bool8_array_column_chunk(reader%handle, trim(name)//char(0), row_group, flat, &
-            nrows, asize, valid_ptr)
-        do i = 1_int64, nrows
-            do j = 1_int64, asize
-                k = (i-1)*asize + j
-                values(j, i) = flat(k) /= 0_c_int8_t
-                if (present(is_valid)) is_valid(j, i) = valid_buf(k) /= 0_c_int8_t
-                if (present(null_value)) then
-                    if (valid_buf(k) == 0_c_int8_t) values(j, i) = null_value
-                end if
-            end do
-        end do
-    end subroutine parquet_read_logical_array_column_chunk_impl
-
-    !> Shared body of parquet_read_string_column_chunk_rg32/_rg64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics.
-    subroutine parquet_read_string_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
-        type(parquet_reader), intent(in) :: reader
-        character(len=*), intent(in) :: name
-        integer(int64), intent(in) :: row_group
-        character(len=*), intent(out) :: values(:)
-        character(len=*), intent(in), optional :: null_value
-        logical, intent(out), optional :: is_valid(:)
-        character(kind=c_char), allocatable :: packed(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: nrows, i, k
-        integer :: item_len, j
-
-        nrows = size(values, kind=int64)
-        call check_reader_open(reader, "parquet_read_column_chunk")
-        call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
-        call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
-        item_len = len(values(1))
-        allocate(packed(item_len*nrows))
-        call make_valid_buf(present(null_value) .or. present(is_valid), nrows, valid_buf, valid_ptr)
-        call parquet_read_string_column_chunk(reader%handle, trim(name)//char(0), row_group, packed, &
-            int(item_len, kind=c_long_long), nrows, valid_ptr)
-
-        k = 0_int64
-        do i = 1_int64, nrows
-            values(i) = ''
-            do j = 1, item_len
-                k = k + 1_int64
-                values(i)(j:j) = achar(iachar(packed(k)))
-            end do
-        end do
-        if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
-        if (present(null_value)) then
-            do i = 1_int64, nrows
-                if (valid_buf(i) == 0_c_int8_t) values(i) = null_value
-            end do
-        end if
-    end subroutine parquet_read_string_column_chunk_impl
-
-    !> Shared body of parquet_read_string_array_column_chunk_rg32/_rg64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics.
-    subroutine parquet_read_string_array_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
-        type(parquet_reader), intent(in) :: reader
-        character(len=*), intent(in) :: name
-        integer(int64), intent(in) :: row_group
-        character(len=*), intent(out) :: values(:, :)
-        character(len=*), intent(in), optional :: null_value
-        logical, intent(out), optional :: is_valid(:, :)
-        character(kind=c_char), allocatable :: packed(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: asize, nrows, i, j, k, p
-        integer :: item_len, m
-
-        asize = size(values, 1, kind=int64)
-        nrows = size(values, 2, kind=int64)
-        call check_reader_open(reader, "parquet_read_column_chunk")
-        call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
-        call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
-        item_len = len(values(1,1))
-        allocate(packed(item_len*asize*nrows))
-        call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)
-        call parquet_read_string_array_column_chunk(reader%handle, trim(name)//char(0), row_group, packed, &
-            int(item_len, kind=c_long_long), nrows, asize, valid_ptr)
-
-        p = 0_int64
-        do i = 1_int64, nrows
-            do j = 1_int64, asize
-                values(j, i) = ''
-                do m = 1, item_len
-                    p = p + 1_int64
-                    values(j, i)(m:m) = achar(iachar(packed(p)))
-                end do
-                k = (i-1)*asize + j
-                if (present(is_valid)) is_valid(j, i) = valid_buf(k) /= 0_c_int8_t
-                if (present(null_value)) then
-                    if (valid_buf(k) == 0_c_int8_t) values(j, i) = null_value
-                end if
-            end do
-        end do
-    end subroutine parquet_read_string_array_column_chunk_impl
-
-    !> Shared body of parquet_read_string_column_chunk_compact_rg32/_rg64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics, and
-    !> parquet_read_string_column_compact's own doc comment for the parquet_string_column notes
-    !> shared with this chunked counterpart.
-    subroutine parquet_read_string_column_chunk_compact_impl(reader, name, row_group, values)
-        type(parquet_reader), intent(in) :: reader
-        character(len=*), intent(in) :: name
-        integer(int64), intent(in) :: row_group
-        type(parquet_string_column), intent(inout) :: values
-        integer(int64) :: nrows, nchars
-        type(c_ptr) :: offsets_ptr, data_ptr, validity_ptr
-        integer(c_int8_t) :: offsets_int32_flag
-
-        call check_reader_open(reader, "parquet_read_column_chunk")
-        call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
-        call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
-        call values%clear()
-        call parquet_read_string_column_chunk_buffers(reader%handle, trim(name)//char(0), row_group, nrows, nchars, &
-            offsets_ptr, data_ptr, validity_ptr, offsets_int32_flag)
-        call values%append_buffers(nrows, nchars, offsets_ptr, data_ptr, validity_ptr, &
-            offsets_int32_flag /= 0_c_int8_t)
-    end subroutine parquet_read_string_column_chunk_compact_impl
-
-    module procedure parquet_read_string_column_chunk_compact_rg32
-        call parquet_read_string_column_chunk_compact_impl(reader, name, int(row_group, kind=int64), values)
-    end procedure parquet_read_string_column_chunk_compact_rg32
-
-    module procedure parquet_read_string_column_chunk_compact_rg64
-        call parquet_read_string_column_chunk_compact_impl(reader, name, row_group, values)
-    end procedure parquet_read_string_column_chunk_compact_rg64
-
-    module procedure parquet_read_int32_column_chunk_rg32
-        call parquet_read_int32_column_chunk_impl(reader, name, int(row_group, kind=int64), values, null_value, &
-            is_valid)
-    end procedure parquet_read_int32_column_chunk_rg32
-
-    module procedure parquet_read_int32_column_chunk_rg64
-        call parquet_read_int32_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
-    end procedure parquet_read_int32_column_chunk_rg64
-
-    module procedure parquet_read_int32_array_column_chunk_rg32
-        call parquet_read_int32_array_column_chunk_impl(reader, name, int(row_group, kind=int64), values, &
-            null_value, is_valid)
-    end procedure parquet_read_int32_array_column_chunk_rg32
-
-    module procedure parquet_read_int32_array_column_chunk_rg64
-        call parquet_read_int32_array_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
-    end procedure parquet_read_int32_array_column_chunk_rg64
-
-    module procedure parquet_read_int64_column_chunk_rg32
-        call parquet_read_int64_column_chunk_impl(reader, name, int(row_group, kind=int64), values, null_value, &
-            is_valid)
-    end procedure parquet_read_int64_column_chunk_rg32
-
-    module procedure parquet_read_int64_column_chunk_rg64
-        call parquet_read_int64_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
-    end procedure parquet_read_int64_column_chunk_rg64
-
-    module procedure parquet_read_int64_array_column_chunk_rg32
-        call parquet_read_int64_array_column_chunk_impl(reader, name, int(row_group, kind=int64), values, &
-            null_value, is_valid)
-    end procedure parquet_read_int64_array_column_chunk_rg32
-
-    module procedure parquet_read_int64_array_column_chunk_rg64
-        call parquet_read_int64_array_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
-    end procedure parquet_read_int64_array_column_chunk_rg64
-
-    module procedure parquet_read_float32_column_chunk_rg32
-        call parquet_read_float32_column_chunk_impl(reader, name, int(row_group, kind=int64), values, null_value, &
-            is_valid)
-    end procedure parquet_read_float32_column_chunk_rg32
-
-    module procedure parquet_read_float32_column_chunk_rg64
-        call parquet_read_float32_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
-    end procedure parquet_read_float32_column_chunk_rg64
-
-    module procedure parquet_read_float32_array_column_chunk_rg32
-        call parquet_read_float32_array_column_chunk_impl(reader, name, int(row_group, kind=int64), values, &
-            null_value, is_valid)
-    end procedure parquet_read_float32_array_column_chunk_rg32
-
-    module procedure parquet_read_float32_array_column_chunk_rg64
-        call parquet_read_float32_array_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
-    end procedure parquet_read_float32_array_column_chunk_rg64
-
-    module procedure parquet_read_float64_column_chunk_rg32
-        call parquet_read_float64_column_chunk_impl(reader, name, int(row_group, kind=int64), values, null_value, &
-            is_valid)
-    end procedure parquet_read_float64_column_chunk_rg32
-
-    module procedure parquet_read_float64_column_chunk_rg64
-        call parquet_read_float64_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
-    end procedure parquet_read_float64_column_chunk_rg64
-
-    module procedure parquet_read_float64_array_column_chunk_rg32
-        call parquet_read_float64_array_column_chunk_impl(reader, name, int(row_group, kind=int64), values, &
-            null_value, is_valid)
-    end procedure parquet_read_float64_array_column_chunk_rg32
-
-    module procedure parquet_read_float64_array_column_chunk_rg64
-        call parquet_read_float64_array_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
-    end procedure parquet_read_float64_array_column_chunk_rg64
-
-    module procedure parquet_read_logical_column_chunk_rg32
-        call parquet_read_logical_column_chunk_impl(reader, name, int(row_group, kind=int64), values, null_value, &
-            is_valid)
-    end procedure parquet_read_logical_column_chunk_rg32
-
-    module procedure parquet_read_logical_column_chunk_rg64
-        call parquet_read_logical_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
-    end procedure parquet_read_logical_column_chunk_rg64
-
-    module procedure parquet_read_logical_array_column_chunk_rg32
-        call parquet_read_logical_array_column_chunk_impl(reader, name, int(row_group, kind=int64), values, &
-            null_value, is_valid)
-    end procedure parquet_read_logical_array_column_chunk_rg32
-
-    module procedure parquet_read_logical_array_column_chunk_rg64
-        call parquet_read_logical_array_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
-    end procedure parquet_read_logical_array_column_chunk_rg64
-
-    module procedure parquet_read_string_column_chunk_rg32
-        call parquet_read_string_column_chunk_impl(reader, name, int(row_group, kind=int64), values, null_value, &
-            is_valid)
-    end procedure parquet_read_string_column_chunk_rg32
-
-    module procedure parquet_read_string_column_chunk_rg64
-        call parquet_read_string_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
-    end procedure parquet_read_string_column_chunk_rg64
-
-    module procedure parquet_read_string_array_column_chunk_rg32
-        call parquet_read_string_array_column_chunk_impl(reader, name, int(row_group, kind=int64), values, &
-            null_value, is_valid)
-    end procedure parquet_read_string_array_column_chunk_rg32
-
-    module procedure parquet_read_string_array_column_chunk_rg64
-        call parquet_read_string_array_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
-    end procedure parquet_read_string_array_column_chunk_rg64
-
-    ! ==================================================================================
-    ! Temporal (date/time/timestamp) read path -- see parquet_temporal. A Parquet Null in the
-    ! column becomes a null element (parquet_*%set_null); there is no null_value/is_valid
-    ! argument, and a null-containing column reads without the error-on-Null the numeric/string
-    ! readers apply -- validity is always captured and reflected in the elements themselves.
-    ! ==================================================================================
-
-    module procedure parquet_read_date_column_1d
-        integer(c_int32_t), allocatable :: days(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i, n
-
-        call check_reader_open(reader, "parquet_read_column")
-        call check_column_exists(reader, name, "parquet_read_column")
-        n = size(values, kind=int64)
-        call parquet_check_read_row_count(reader, name, n)
-        allocate(days(n))
-        call make_valid_buf(.true., n, valid_buf, valid_ptr)
-        call parquet_read_date_column(reader%handle, trim(name)//char(0), days, n, valid_ptr)
-        do i = 1_int64, n
-            if (valid_buf(i) /= 0_c_int8_t) then
-                call values(i)%set_raw(days(i))
-            else
-                call values(i)%set_null()
-            end if
-        end do
-    end procedure parquet_read_date_column_1d
-
-    module procedure parquet_read_date_array_full
-        integer(c_int32_t), allocatable :: flat(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: asize, nrows, i, j, k
-
-        asize = size(values, 1, kind=int64)
-        nrows = size(values, 2, kind=int64)
-        call check_reader_open(reader, "parquet_read_column")
-        call check_column_exists(reader, name, "parquet_read_column")
-        call parquet_check_read_row_count(reader, name, nrows)
-        allocate(flat(asize*nrows))
-        call make_valid_buf(.true., asize*nrows, valid_buf, valid_ptr)
-        call parquet_read_date_array_column(reader%handle, trim(name)//char(0), flat, nrows, asize, valid_ptr)
-        do i = 1_int64, nrows
-            do j = 1_int64, asize
-                k = (i-1)*asize + j
-                if (valid_buf(k) /= 0_c_int8_t) then
-                    call values(j, i)%set_raw(flat(k))
-                else
-                    call values(j, i)%set_null()
-                end if
-            end do
-        end do
-    end procedure parquet_read_date_array_full
-
-    module procedure parquet_read_time_column_1d
-        integer(c_int64_t), allocatable :: ns(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i, n
-
-        call check_reader_open(reader, "parquet_read_column")
-        call check_column_exists(reader, name, "parquet_read_column")
-        n = size(values, kind=int64)
-        call parquet_check_read_row_count(reader, name, n)
-        allocate(ns(n))
-        call make_valid_buf(.true., n, valid_buf, valid_ptr)
-        call parquet_read_time_column(reader%handle, trim(name)//char(0), ns, n, valid_ptr)
-        do i = 1_int64, n
-            if (valid_buf(i) /= 0_c_int8_t) then
-                call values(i)%set_raw(ns(i))
-            else
-                call values(i)%set_null()
-            end if
-        end do
-    end procedure parquet_read_time_column_1d
-
-    module procedure parquet_read_time_array_full
-        integer(c_int64_t), allocatable :: flat(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: asize, nrows, i, j, k
-
-        asize = size(values, 1, kind=int64)
-        nrows = size(values, 2, kind=int64)
-        call check_reader_open(reader, "parquet_read_column")
-        call check_column_exists(reader, name, "parquet_read_column")
-        call parquet_check_read_row_count(reader, name, nrows)
-        allocate(flat(asize*nrows))
-        call make_valid_buf(.true., asize*nrows, valid_buf, valid_ptr)
-        call parquet_read_time_array_column(reader%handle, trim(name)//char(0), flat, nrows, asize, valid_ptr)
-        do i = 1_int64, nrows
-            do j = 1_int64, asize
-                k = (i-1)*asize + j
-                if (valid_buf(k) /= 0_c_int8_t) then
-                    call values(j, i)%set_raw(flat(k))
-                else
-                    call values(j, i)%set_null()
-                end if
-            end do
-        end do
-    end procedure parquet_read_time_array_full
-
-    module procedure parquet_read_timestamp_column_1d
-        integer(c_int64_t), allocatable :: vals(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(c_int32_t) :: unit_out
-        integer(int64) :: i, n
-
-        call check_reader_open(reader, "parquet_read_column")
-        call check_column_exists(reader, name, "parquet_read_column")
-        n = size(values, kind=int64)
-        call parquet_check_read_row_count(reader, name, n)
-        allocate(vals(n))
-        call make_valid_buf(.true., n, valid_buf, valid_ptr)
-        call parquet_read_timestamp_column(reader%handle, trim(name)//char(0), vals, n, unit_out, valid_ptr)
-        do i = 1_int64, n
-            if (valid_buf(i) /= 0_c_int8_t) then
-                call values(i)%set_unix(vals(i), int(unit_out))
-            else
-                call values(i)%set_null()
-            end if
-        end do
-    end procedure parquet_read_timestamp_column_1d
-
-    module procedure parquet_read_timestamp_array_full
-        integer(c_int64_t), allocatable :: flat(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(c_int32_t) :: unit_out
-        integer(int64) :: asize, nrows, i, j, k
-
-        asize = size(values, 1, kind=int64)
-        nrows = size(values, 2, kind=int64)
-        call check_reader_open(reader, "parquet_read_column")
-        call check_column_exists(reader, name, "parquet_read_column")
-        call parquet_check_read_row_count(reader, name, nrows)
-        allocate(flat(asize*nrows))
-        call make_valid_buf(.true., asize*nrows, valid_buf, valid_ptr)
-        call parquet_read_timestamp_array_column(reader%handle, trim(name)//char(0), flat, nrows, asize, &
-            unit_out, valid_ptr)
-        do i = 1_int64, nrows
-            do j = 1_int64, asize
-                k = (i-1)*asize + j
-                if (valid_buf(k) /= 0_c_int8_t) then
-                    call values(j, i)%set_unix(flat(k), int(unit_out))
-                else
-                    call values(j, i)%set_null()
-                end if
-            end do
-        end do
-    end procedure parquet_read_timestamp_array_full
-
+    end subroutine parquet_check_read_row_count
     module procedure parquet_get_column_time_info
         integer(c_long_long) :: tzlen
 
@@ -2113,388 +744,5 @@ contains
             if (tzlen > 0) call parquet_reader_get_column_timezone(reader%handle, trim(name)//char(0), timezone, tzlen)
         end if
     end procedure parquet_get_column_time_info
-
-    ! ---- Temporal streaming (row-group-chunked) reads. Each type has a scalar and a vector
-    !      _impl (row_group as int64) shared by its int32/int64 row_group rg32/rg64 specifics.
-    subroutine read_date_column_chunk_impl(reader, name, row_group, values)
-        type(parquet_reader), intent(in) :: reader !! open reader.
-        character(len=*), intent(in) :: name !! column name.
-        integer(int64), intent(in) :: row_group !! 1-based row group.
-        type(parquet_date), intent(out) :: values(:) !! that row group's dates.
-        integer(c_int32_t), allocatable :: days(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i, n
-
-        call check_reader_open(reader, "parquet_read_column_chunk")
-        call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
-        call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
-        n = size(values, kind=int64)
-        allocate(days(n))
-        call make_valid_buf(.true., n, valid_buf, valid_ptr)
-        call parquet_read_date_column_chunk(reader%handle, trim(name)//char(0), row_group, days, n, valid_ptr)
-        do i = 1_int64, n
-            if (valid_buf(i) /= 0_c_int8_t) then
-                call values(i)%set_raw(days(i))
-            else
-                call values(i)%set_null()
-            end if
-        end do
-    end subroutine read_date_column_chunk_impl
-
-    subroutine read_date_array_column_chunk_impl(reader, name, row_group, values)
-        type(parquet_reader), intent(in) :: reader !! open reader.
-        character(len=*), intent(in) :: name !! vector column name.
-        integer(int64), intent(in) :: row_group !! 1-based row group.
-        type(parquet_date), intent(out) :: values(:,:) !! (element, row) dates.
-        integer(c_int32_t), allocatable :: flat(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: asize, nrows, i, j, k
-
-        asize = size(values, 1, kind=int64)
-        nrows = size(values, 2, kind=int64)
-        call check_reader_open(reader, "parquet_read_column_chunk")
-        call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
-        call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
-        allocate(flat(asize*nrows))
-        call make_valid_buf(.true., asize*nrows, valid_buf, valid_ptr)
-        call parquet_read_date_array_column_chunk(reader%handle, trim(name)//char(0), row_group, flat, nrows, asize, valid_ptr)
-        do i = 1_int64, nrows
-            do j = 1_int64, asize
-                k = (i-1)*asize + j
-                if (valid_buf(k) /= 0_c_int8_t) then
-                    call values(j, i)%set_raw(flat(k))
-                else
-                    call values(j, i)%set_null()
-                end if
-            end do
-        end do
-    end subroutine read_date_array_column_chunk_impl
-
-    subroutine read_time_column_chunk_impl(reader, name, row_group, values)
-        type(parquet_reader), intent(in) :: reader !! open reader.
-        character(len=*), intent(in) :: name !! column name.
-        integer(int64), intent(in) :: row_group !! 1-based row group.
-        type(parquet_time), intent(out) :: values(:) !! that row group's times.
-        integer(c_int64_t), allocatable :: ns(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i, n
-
-        call check_reader_open(reader, "parquet_read_column_chunk")
-        call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
-        call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
-        n = size(values, kind=int64)
-        allocate(ns(n))
-        call make_valid_buf(.true., n, valid_buf, valid_ptr)
-        call parquet_read_time_column_chunk(reader%handle, trim(name)//char(0), row_group, ns, n, valid_ptr)
-        do i = 1_int64, n
-            if (valid_buf(i) /= 0_c_int8_t) then
-                call values(i)%set_raw(ns(i))
-            else
-                call values(i)%set_null()
-            end if
-        end do
-    end subroutine read_time_column_chunk_impl
-
-    subroutine read_time_array_column_chunk_impl(reader, name, row_group, values)
-        type(parquet_reader), intent(in) :: reader !! open reader.
-        character(len=*), intent(in) :: name !! vector column name.
-        integer(int64), intent(in) :: row_group !! 1-based row group.
-        type(parquet_time), intent(out) :: values(:,:) !! (element, row) times.
-        integer(c_int64_t), allocatable :: flat(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: asize, nrows, i, j, k
-
-        asize = size(values, 1, kind=int64)
-        nrows = size(values, 2, kind=int64)
-        call check_reader_open(reader, "parquet_read_column_chunk")
-        call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
-        call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
-        allocate(flat(asize*nrows))
-        call make_valid_buf(.true., asize*nrows, valid_buf, valid_ptr)
-        call parquet_read_time_array_column_chunk(reader%handle, trim(name)//char(0), row_group, flat, nrows, asize, valid_ptr)
-        do i = 1_int64, nrows
-            do j = 1_int64, asize
-                k = (i-1)*asize + j
-                if (valid_buf(k) /= 0_c_int8_t) then
-                    call values(j, i)%set_raw(flat(k))
-                else
-                    call values(j, i)%set_null()
-                end if
-            end do
-        end do
-    end subroutine read_time_array_column_chunk_impl
-
-    subroutine read_timestamp_column_chunk_impl(reader, name, row_group, values)
-        type(parquet_reader), intent(in) :: reader !! open reader.
-        character(len=*), intent(in) :: name !! column name.
-        integer(int64), intent(in) :: row_group !! 1-based row group.
-        type(parquet_timestamp), intent(out) :: values(:) !! that row group's instants.
-        integer(c_int64_t), allocatable :: vals(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(c_int32_t) :: unit_out
-        integer(int64) :: i, n
-
-        call check_reader_open(reader, "parquet_read_column_chunk")
-        call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
-        call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
-        n = size(values, kind=int64)
-        allocate(vals(n))
-        call make_valid_buf(.true., n, valid_buf, valid_ptr)
-        call parquet_read_timestamp_column_chunk(reader%handle, trim(name)//char(0), row_group, vals, n, unit_out, valid_ptr)
-        do i = 1_int64, n
-            if (valid_buf(i) /= 0_c_int8_t) then
-                call values(i)%set_unix(vals(i), int(unit_out))
-            else
-                call values(i)%set_null()
-            end if
-        end do
-    end subroutine read_timestamp_column_chunk_impl
-
-    subroutine read_timestamp_array_column_chunk_impl(reader, name, row_group, values)
-        type(parquet_reader), intent(in) :: reader !! open reader.
-        character(len=*), intent(in) :: name !! vector column name.
-        integer(int64), intent(in) :: row_group !! 1-based row group.
-        type(parquet_timestamp), intent(out) :: values(:,:) !! (element, row) instants.
-        integer(c_int64_t), allocatable :: flat(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(c_int32_t) :: unit_out
-        integer(int64) :: asize, nrows, i, j, k
-
-        asize = size(values, 1, kind=int64)
-        nrows = size(values, 2, kind=int64)
-        call check_reader_open(reader, "parquet_read_column_chunk")
-        call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
-        call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
-        allocate(flat(asize*nrows))
-        call make_valid_buf(.true., asize*nrows, valid_buf, valid_ptr)
-        call parquet_read_timestamp_array_column_chunk(reader%handle, trim(name)//char(0), row_group, flat, nrows, asize, &
-            unit_out, valid_ptr)
-        do i = 1_int64, nrows
-            do j = 1_int64, asize
-                k = (i-1)*asize + j
-                if (valid_buf(k) /= 0_c_int8_t) then
-                    call values(j, i)%set_unix(flat(k), int(unit_out))
-                else
-                    call values(j, i)%set_null()
-                end if
-            end do
-        end do
-    end subroutine read_timestamp_array_column_chunk_impl
-
-    module procedure parquet_read_date_column_chunk_rg32
-        call read_date_column_chunk_impl(reader, name, int(row_group, kind=int64), values)
-    end procedure parquet_read_date_column_chunk_rg32
-    module procedure parquet_read_date_column_chunk_rg64
-        call read_date_column_chunk_impl(reader, name, row_group, values)
-    end procedure parquet_read_date_column_chunk_rg64
-    module procedure parquet_read_date_array_column_chunk_rg32
-        call read_date_array_column_chunk_impl(reader, name, int(row_group, kind=int64), values)
-    end procedure parquet_read_date_array_column_chunk_rg32
-    module procedure parquet_read_date_array_column_chunk_rg64
-        call read_date_array_column_chunk_impl(reader, name, row_group, values)
-    end procedure parquet_read_date_array_column_chunk_rg64
-    module procedure parquet_read_time_column_chunk_rg32
-        call read_time_column_chunk_impl(reader, name, int(row_group, kind=int64), values)
-    end procedure parquet_read_time_column_chunk_rg32
-    module procedure parquet_read_time_column_chunk_rg64
-        call read_time_column_chunk_impl(reader, name, row_group, values)
-    end procedure parquet_read_time_column_chunk_rg64
-    module procedure parquet_read_time_array_column_chunk_rg32
-        call read_time_array_column_chunk_impl(reader, name, int(row_group, kind=int64), values)
-    end procedure parquet_read_time_array_column_chunk_rg32
-    module procedure parquet_read_time_array_column_chunk_rg64
-        call read_time_array_column_chunk_impl(reader, name, row_group, values)
-    end procedure parquet_read_time_array_column_chunk_rg64
-    module procedure parquet_read_timestamp_column_chunk_rg32
-        call read_timestamp_column_chunk_impl(reader, name, int(row_group, kind=int64), values)
-    end procedure parquet_read_timestamp_column_chunk_rg32
-    module procedure parquet_read_timestamp_column_chunk_rg64
-        call read_timestamp_column_chunk_impl(reader, name, row_group, values)
-    end procedure parquet_read_timestamp_column_chunk_rg64
-    module procedure parquet_read_timestamp_array_column_chunk_rg32
-        call read_timestamp_array_column_chunk_impl(reader, name, int(row_group, kind=int64), values)
-    end procedure parquet_read_timestamp_array_column_chunk_rg32
-    module procedure parquet_read_timestamp_array_column_chunk_rg64
-        call read_timestamp_array_column_chunk_impl(reader, name, row_group, values)
-    end procedure parquet_read_timestamp_array_column_chunk_rg64
-
-    ! ---- Temporal row-mode reads (one row's element vector). Each type has one _impl (int64
-    !      row_index) shared by its int32/int64 row_index specifics. Nulls fill their elements.
-    subroutine read_date_array_row_mode_impl(reader, name, values, row_index)
-        type(parquet_reader), intent(in) :: reader !! open reader.
-        character(len=*), intent(in) :: name !! vector column name.
-        type(parquet_date), intent(out) :: values(:) !! that row's element vector.
-        integer(int64), intent(in) :: row_index !! 1-based row.
-        integer(c_int32_t), allocatable :: buf(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i, n
-
-        call check_reader_open(reader, "parquet_read_array_row_mode")
-        call check_column_exists(reader, name, "parquet_read_array_row_mode")
-        n = size(values, kind=int64)
-        allocate(buf(n))
-        call make_valid_buf(.true., n, valid_buf, valid_ptr)
-        call parquet_read_date_array_row(reader%handle, trim(name)//char(0), int(row_index, c_long_long), buf, n, valid_ptr)
-        do i = 1_int64, n
-            if (valid_buf(i) /= 0_c_int8_t) then
-                call values(i)%set_raw(buf(i))
-            else
-                call values(i)%set_null()
-            end if
-        end do
-    end subroutine read_date_array_row_mode_impl
-
-    subroutine read_time_array_row_mode_impl(reader, name, values, row_index)
-        type(parquet_reader), intent(in) :: reader !! open reader.
-        character(len=*), intent(in) :: name !! vector column name.
-        type(parquet_time), intent(out) :: values(:) !! that row's element vector.
-        integer(int64), intent(in) :: row_index !! 1-based row.
-        integer(c_int64_t), allocatable :: buf(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i, n
-
-        call check_reader_open(reader, "parquet_read_array_row_mode")
-        call check_column_exists(reader, name, "parquet_read_array_row_mode")
-        n = size(values, kind=int64)
-        allocate(buf(n))
-        call make_valid_buf(.true., n, valid_buf, valid_ptr)
-        call parquet_read_time_array_row(reader%handle, trim(name)//char(0), int(row_index, c_long_long), buf, n, valid_ptr)
-        do i = 1_int64, n
-            if (valid_buf(i) /= 0_c_int8_t) then
-                call values(i)%set_raw(buf(i))
-            else
-                call values(i)%set_null()
-            end if
-        end do
-    end subroutine read_time_array_row_mode_impl
-
-    subroutine read_timestamp_array_row_mode_impl(reader, name, values, row_index)
-        type(parquet_reader), intent(in) :: reader !! open reader.
-        character(len=*), intent(in) :: name !! vector column name.
-        type(parquet_timestamp), intent(out) :: values(:) !! that row's element vector.
-        integer(int64), intent(in) :: row_index !! 1-based row.
-        integer(c_int64_t), allocatable :: buf(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(c_int32_t) :: unit_out
-        integer(int64) :: i, n
-
-        call check_reader_open(reader, "parquet_read_array_row_mode")
-        call check_column_exists(reader, name, "parquet_read_array_row_mode")
-        n = size(values, kind=int64)
-        allocate(buf(n))
-        call make_valid_buf(.true., n, valid_buf, valid_ptr)
-        call parquet_read_timestamp_array_row(reader%handle, trim(name)//char(0), int(row_index, c_long_long), buf, n, &
-            unit_out, valid_ptr)
-        do i = 1_int64, n
-            if (valid_buf(i) /= 0_c_int8_t) then
-                call values(i)%set_unix(buf(i), int(unit_out))
-            else
-                call values(i)%set_null()
-            end if
-        end do
-    end subroutine read_timestamp_array_row_mode_impl
-
-    module procedure parquet_read_date_array_row_mode
-        call read_date_array_row_mode_impl(reader, name, values, int(row_index, kind=int64))
-    end procedure parquet_read_date_array_row_mode
-    module procedure parquet_read_date_array_row_mode_row_index_int64
-        call read_date_array_row_mode_impl(reader, name, values, row_index)
-    end procedure parquet_read_date_array_row_mode_row_index_int64
-    module procedure parquet_read_time_array_row_mode
-        call read_time_array_row_mode_impl(reader, name, values, int(row_index, kind=int64))
-    end procedure parquet_read_time_array_row_mode
-    module procedure parquet_read_time_array_row_mode_row_index_int64
-        call read_time_array_row_mode_impl(reader, name, values, row_index)
-    end procedure parquet_read_time_array_row_mode_row_index_int64
-    module procedure parquet_read_timestamp_array_row_mode
-        call read_timestamp_array_row_mode_impl(reader, name, values, int(row_index, kind=int64))
-    end procedure parquet_read_timestamp_array_row_mode
-    module procedure parquet_read_timestamp_array_row_mode_row_index_int64
-        call read_timestamp_array_row_mode_impl(reader, name, values, row_index)
-    end procedure parquet_read_timestamp_array_row_mode_row_index_int64
-
-    ! ---- Temporal element-mode reads (one element position across all rows). Nulls fill their
-    !      elements. `col_size` is passed as 0 to C (ignored; element mode resolves it there).
-    module procedure parquet_read_date_array_element_mode
-        integer(c_int32_t), allocatable :: buf(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i, n
-
-        call check_reader_open(reader, "parquet_read_array_element_mode")
-        call check_column_exists(reader, name, "parquet_read_array_element_mode")
-        n = size(values, kind=int64)
-        allocate(buf(n))
-        call make_valid_buf(.true., n, valid_buf, valid_ptr)
-        call parquet_read_date_array_element(reader%handle, trim(name)//char(0), int(elem_index, c_long_long), buf, n, &
-            0_c_long_long, valid_ptr)
-        do i = 1_int64, n
-            if (valid_buf(i) /= 0_c_int8_t) then
-                call values(i)%set_raw(buf(i))
-            else
-                call values(i)%set_null()
-            end if
-        end do
-    end procedure parquet_read_date_array_element_mode
-
-    module procedure parquet_read_time_array_element_mode
-        integer(c_int64_t), allocatable :: buf(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(int64) :: i, n
-
-        call check_reader_open(reader, "parquet_read_array_element_mode")
-        call check_column_exists(reader, name, "parquet_read_array_element_mode")
-        n = size(values, kind=int64)
-        allocate(buf(n))
-        call make_valid_buf(.true., n, valid_buf, valid_ptr)
-        call parquet_read_time_array_element(reader%handle, trim(name)//char(0), int(elem_index, c_long_long), buf, n, &
-            0_c_long_long, valid_ptr)
-        do i = 1_int64, n
-            if (valid_buf(i) /= 0_c_int8_t) then
-                call values(i)%set_raw(buf(i))
-            else
-                call values(i)%set_null()
-            end if
-        end do
-    end procedure parquet_read_time_array_element_mode
-
-    module procedure parquet_read_timestamp_array_element_mode
-        integer(c_int64_t), allocatable :: buf(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        integer(c_int32_t) :: unit_out
-        integer(int64) :: i, n
-
-        call check_reader_open(reader, "parquet_read_array_element_mode")
-        call check_column_exists(reader, name, "parquet_read_array_element_mode")
-        n = size(values, kind=int64)
-        allocate(buf(n))
-        call make_valid_buf(.true., n, valid_buf, valid_ptr)
-        call parquet_read_timestamp_array_element(reader%handle, trim(name)//char(0), int(elem_index, c_long_long), buf, n, &
-            0_c_long_long, unit_out, valid_ptr)
-        do i = 1_int64, n
-            if (valid_buf(i) /= 0_c_int8_t) then
-                call values(i)%set_unix(buf(i), int(unit_out))
-            else
-                call values(i)%set_null()
-            end if
-        end do
-    end procedure parquet_read_timestamp_array_element_mode
 
 end submodule parquet_read

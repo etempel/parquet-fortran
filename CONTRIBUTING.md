@@ -275,7 +275,7 @@ The generated file carries a header stating it is auto-generated — do not hand
 
 ## Extending the MAML schema
 
-`parquet_validate_maml` checks that section names and known sub-keys are registered in [src/parquet_metadata_sections.f90](src/parquet_metadata_sections.f90) (`allowed_maml_sections`). This checks key presence, not semantic value meaning. To allow a new top-level section or map-list sub-key, add it there. Validation is strict for the known schema (`fields`, `keyarray`, `DOIs`, etc.), permissive for `extra:`, and intentionally shallow beyond the explicitly registered nested blocks — if you extend MAML structure in this library, update `allowed_maml_sections` and (where needed) `allowed_maml_nested_sections` in [src/parquet_metadata_sections.f90](src/parquet_metadata_sections.f90).
+`parquet_validate_maml` checks that section names and known sub-keys are registered in [src/parquet_metadata_maml.f90](src/parquet_metadata_maml.f90) (`allowed_maml_sections`). This checks key presence, not semantic value meaning. To allow a new top-level section or map-list sub-key, add it there. Validation is strict for the known schema (`fields`, `keyarray`, `DOIs`, etc.), permissive for `extra:`, and intentionally shallow beyond the explicitly registered nested blocks — if you extend MAML structure in this library, update `allowed_maml_sections` and (where needed) `allowed_maml_nested_sections` in [src/parquet_metadata_maml.f90](src/parquet_metadata_maml.f90).
 
 ## Error-handling conventions in `parquet_wrapper.cpp`
 

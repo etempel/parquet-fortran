@@ -124,6 +124,60 @@ validated end-to-end with `ford docs.md` — clean run besides the expected envi
 - Don't start a doc-comment's first line with a bare `word:` (e.g. "qc: min: ..."). FORD reads
   that as an attempted metadata key: it either warns (unrecognized key) or, worse, silently
   swallows the line if it happens to match a real key (`date:`, `author:`, `version:`, ...).
+- **A rationale/gotcha explanation written directly above a procedure header is still that
+  procedure's required doc-comment — it must use `!>`, not a plain `!` block.** The two look
+  interchangeable at a glance (both are multi-line comment blocks sitting just above code), but
+  only `!>` is picked up by FORD; a plain `!` block there silently leaves the procedure
+  undocumented even though a human reader sees an explanation right above it. This bit
+  `parquet_parse_protected_cols_relay` (`parquet_metadata.f90`) concretely: the ICE-workaround
+  rationale was written as a plain `!` block, which happened to satisfy the "explain why this
+  exists" instinct while leaving the FORD doc-comment itself missing. Plain `!` stays reserved
+  for the *interface-block group banners* described below (`! ---- ... ----`) — never for a
+  procedure's own doc, even a short one-off private helper.
+- **After a file split/relocation refactor, verify FORD coverage didn't regress with a
+  before/after diff, not just a clean `ford docs.md` run on the new state alone**: `git stash` the
+  changes, run `ford docs.md`, note the warning count (ideally 0), `git stash pop`, and re-run —
+  matching counts confirm the refactor didn't silently drop doc-comments FORD would have warned
+  about anyway. A relocated private helper legitimately disappearing from its old module's FORD
+  page (private procedures don't get individual page entries) is expected and not a regression by
+  itself — cross-check with `grep 'public ::'` in `parquet.f90` before treating an "not found on
+  page" result as a problem.
+
+## Group interface bodies into commented `interface` blocks
+
+Declare the `module subroutine`/`function` interface bodies in `parquet.f90` (and in any
+submodule spec that hosts relocated interfaces) as **several small `interface … end interface`
+blocks grouped by concern**, each introduced by a one-line plain-`!` banner (e.g.
+`! ---- Read column specifics (by type x access mode) ----`) — not one monolithic block.
+Fortran allows arbitrarily many interface blocks, so this costs nothing and keeps the
+declarations navigable. The banner **must be a single-bang `!` comment, never `!>`**: a `!>`
+immediately above the first `module subroutine` in a block is a predoc and FORD would attach it
+to that procedure. Keep each new interface body in the group that matches the submodule
+implementing it. Do not give the blocks `generic-spec` names (e.g. `interface foo`) purely for
+labeling purposes — that declares an actual named generic interface (a callable overloaded
+entry point requiring every member to be a distinguishable-argument-list overload of the
+others, and unable to mix `subroutine`/`function` specifics under one name), not a label. The
+plain-`!` banner is the only naming mechanism for these groups.
+
+## A module procedure cannot implement its own submodule's spec-declared interface
+
+A `module procedure`/full-restated `module subroutine` body must live in a **descendant** of
+whichever spec declared its interface — never in the same submodule that declares it. This
+matters when relocating a private helper's interface (per the relocation rule two sections
+below): if the helper's *body* already lives in the same file the interface is moving into
+(e.g. relocating an interface from `parquet.f90` into `parquet_metadata`'s own spec, when the
+body already lives in `parquet_metadata.f90` itself, not one of its children), keeping it a
+`module procedure` no longer works — gfortran reports errors like "Symbol ... has already been
+host associated" or, for a still-public name, a `public ::` failure. Convert that one procedure
+to a **plain contained procedure** instead (drop `module`, restate the full signature with its
+own `!>`/`!!` doc-comment, since there's no longer an interface to hold it): callers in the same
+file are unaffected, and descendants still reach it by host association (fact: confirmed on
+gfortran 15 for both a module→submodule and a submodule→sub-submodule chain). This is
+independent of, and does not need, the interface remaining declared anywhere — see
+`parquet_parse_col_map`, `parquet_parse_maml_lines`, `parquet_append_keyarray_line`
+(`parquet_metadata.f90`) and `parquet_check_read_row_count` (`parquet_read.f90`),
+`parquet_add_column_info`/`parquet_mark_column_written`/`parquet_check_row_count`
+(`parquet_write.f90`) for worked examples.
 
 ## FORD config gotchas
 
@@ -400,6 +454,75 @@ renames/changes that are low blast-radius (few call sites, no public API/doc imp
 For anything with wider knock-on effects (public API, many call sites, cross-file
 conventions), report it as a proposed change and wait for confirmation instead of applying
 it directly.
+
+## One program unit per file; filename == unit name
+
+Every `src/*.f90` file defines exactly one `module` or `submodule`, and the filename (sans
+`.f90`) equals that program unit's name — e.g. `parquet_read_numeric.f90` ⇒
+`submodule (parquet:parquet_read) parquet_read_numeric`. This is a near-universal fpm/Fortran
+convention and is load-bearing for navigation and for the publish tooling (which flips
+`module-naming` to `"parquet"`). Do not put two program units in one file, and do not name a
+file differently from the unit it defines. (fpm does not hard-fail on a mismatch by default —
+`module-naming = false` here — but treat it as a firm rule.)
+
+## Nested submodule tree
+
+`src/*.f90`'s `parquet`/`parquet_read`/`parquet_write`/`parquet_metadata` files form a nested
+submodule tree (not flat siblings under `parquet`), split by data-type family for read/write and
+by format for metadata:
+
+```
+parquet                         (module — public API + cross-subtree private-helper interfaces)
+├─ parquet_read                 (submodule — reader lifecycle, queries, shared read helpers)
+│   ├─ parquet_read_numeric     (int32/int64/float32/float64/logical, all access modes)
+│   ├─ parquet_read_string
+│   └─ parquet_read_temporal    (date/time/timestamp)
+├─ parquet_write                (submodule — writer lifecycle, shared write helpers)
+│   ├─ parquet_write_numeric
+│   ├─ parquet_write_string
+│   └─ parquet_write_temporal
+└─ parquet_metadata             (submodule — parse/build orchestration + shared metadata helpers)
+    ├─ parquet_metadata_base    (format-agnostic column_info/table_metadata plumbing)
+    ├─ parquet_metadata_get     (parquet_get_metadata queries)
+    └─ parquet_metadata_maml    (MAML-specific: section schema + all validation)
+
+parquet_bindings                (module — independent C++ interop)
+parquet_strings                 (module — independent element domain)
+parquet_temporal                (module — independent element domain)
+parquet_maml_base               (module — generated)
+└─ parquet_maml_base_add_col_qc (submodule)
+parquet_wrapper.cpp             (C++ TU)
+```
+
+Reserved for future element-domain work (not yet implemented): `parquet_map`/`parquet_list`/
+`parquet_struct` (independent modules, like `parquet_temporal`) plus their own
+`parquet_read_*`/`parquet_write_*` type-family children.
+
+**Placement rule for a new read/write specific or shared helper:** type-generic code (used by
+more than one of numeric/string/temporal) belongs in the parent (`parquet_read`/`parquet_write`)
+as an ordinary contained procedure — descendants reach it by host association, no interface
+needed. Type-specific code belongs in the matching child, also as an ordinary contained
+procedure. A new *public* generic's specifics, and any type-bound binding target, must keep
+their interface declared in `parquet.f90` itself regardless of family (see the private-helper
+relocation rule below) — never assume a helper is safe to relocate purely from its call sites
+without also checking those two disqualifiers, plus whether it's itself `public ::`-exported.
+
+**A known gfortran 15.2.0 ICE to watch for when adding a new cross-subtree call into this
+tree:** calling `parquet_parse_protected_cols` (declared in `parquet.f90`) directly from a
+submodule nested **two levels** under `parquet` (e.g. `parquet:parquet_metadata:
+parquet_metadata_maml`) reproducibly crashes the compiler with an internal compiler error —
+confirmed isolated to this one procedure's exact argument shape (an assumed-length `character`
+array paired with a deferred-length allocatable `character` array result, i.e.
+`character(len=*), intent(in) :: lines(:)` + `character(len=:), allocatable, intent(out) ::
+names(:)`) called from 2+ levels of nesting; removing the call, or flattening the caller back to
+one level, both avoid it. Worked around via a thin relay: `parquet_metadata.f90` (the level-1
+parent, where calling it already works) exposes a plain contained subroutine
+`parquet_parse_protected_cols_relay` that just forwards to it, and the grandchild calls that
+relay instead of reaching two levels up directly. If a *different* procedure with a similar
+deferred-length-character-array-result shape hits the same ICE from deep nesting in the future,
+use the same relay pattern rather than assuming the whole nested-submodule design is at fault —
+this bug is narrow (confirmed: only this one procedure's exact shape triggers it; several other
+similarly-shaped procedures called from the same nesting depth compile and run cleanly).
 
 ## Naming conventions
 

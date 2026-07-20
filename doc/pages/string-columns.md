@@ -9,9 +9,8 @@ multi-gigabyte payloads, with a minimal allocation count and good cache locality
 
 It is an **independent module** at its core — `use parquet_strings` depends only on
 `iso_fortran_env` and `iso_c_binding`, nothing else in this library — but its `parquet_string_column`
-type is also wired directly into [`parquet_read_column`/`parquet_write_column`/`parquet_read_column_chunk`/
-`parquet_write_column_chunk`](reading.html#streamingchunked-reads) as an alternative to a padded
-`character(len=...)` array; see
+type is also wired directly into `parquet_read_column`/`parquet_write_column`/`parquet_read_column_chunk`/
+`parquet_write_column_chunk` as an alternative to a padded `character(len=...)` array; see
 [Reading and writing compact string columns](#reading-and-writing-compact-string-columns) below.
 
 To use it, add parquet-fortran as an FPM dependency (see
@@ -602,8 +601,8 @@ ordinary users of `parquet_write_column`/`parquet_read_column` never need to cal
   must likewise be repacked by the caller before calling this.
 
 These reference only `iso_c_binding`, keeping the module independent of the rest of this
-library — `parquet_write.f90`/`parquet_read.f90` (the read/write integration layer) are the only
-callers.
+library — `parquet_write_string.f90`/`parquet_read_string.f90` (the string read/write integration
+layer) are the only callers.
 
 ## Example: word-frequency-style ingestion
 

@@ -239,8 +239,10 @@ GitHub Pages) are now confirmed working end-to-end. What's left, in order:
    not the separate `fpm publish` registry, still playground/testing status, skipped
    deliberately.
 2. Optional polish, no urgency: a `[[entity_name]]` auto-link pass over `doc/pages/*.md`'s
-   inline procedure-name mentions (plain backtick spans today); a favicon/logo for `doc/media/`
-   (exists, currently empty besides a `.gitkeep`).
+   inline procedure-name mentions (plain backtick spans today). The favicon/logo item that used
+   to be listed here shipped in commit `1eabced` ("Added project logo and brief changelog") —
+   `doc/media/logo.svg`/`logo.png`/`logo-192.png`/`favicon.png` all exist now, generated via
+   `tools/generate_logo_svg.py` (documented in CONTRIBUTING.md's "Other tools/ helpers").
 
 ## MAML fixture directory: `schemas/`
 

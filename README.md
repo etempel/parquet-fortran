@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="doc/media/logo.svg" alt="parquet-fortran logo" width="100">
+</p>
+
 # parquet-fortran
 
 [![CI results](https://gitlab.4most.eu/etempel/parquet-fortran/badges/main/pipeline.svg)](https://gitlab.4most.eu/etempel/parquet-fortran)
@@ -166,7 +170,7 @@ Hitting a build or link error? See [Troubleshooting](doc/pages/troubleshooting.m
 
 A quick index of the public `use parquet` API. For the full per-procedure reference, generate the API docs locally with FORD (see [Contributing](#contributing)); for usage, see the linked how-to sections in the [user guide](doc/pages/index.md).
 
-**Types:** `parquet_writer`, `parquet_reader`, `parquet_schema`, `parquet_filter`, `parquet_column_info`, `parquet_column_type`, `parquet_table_metadata`, `parquet_maml_file`, `parquet_string_column`, `parquet_date`, `parquet_time`, `parquet_timestamp`
+**Types:** `parquet_writer`, `parquet_reader`, `parquet_schema`, `parquet_filter`, `parquet_column_info`, `parquet_column_type`, `parquet_table_metadata`, `parquet_maml_file`, `parquet_string_column`, `parquet_string`, `parquet_date`, `parquet_time`, `parquet_timestamp`
 
 **Utility:** `parquet_get_version`, `parquet_set_max_threads`
 
@@ -184,7 +188,7 @@ A quick index of the public `use parquet` API. For the full per-procedure refere
 
 **Reader — streaming row groups:** `parquet_read_column_chunk`, `parquet_get_chunk_size` — an alternative to `parquet_read_column` for a column too large to hold as one complete array; see [Streaming/chunked reads](doc/pages/reading.md#streamingchunked-reads)
 
-**Compact string columns:** `parquet_string_column` — a scalar `string` column can be written/read via `parquet_write_column`/`parquet_read_column` (and their chunked counterparts) as a `parquet_string_column` instead of a padded `character(len=...)` array, with no pre-sizing needed; see [Reading and writing compact string columns](doc/pages/string-columns.md#reading-and-writing-compact-string-columns)
+**Compact string columns:** `parquet_string_column` — a scalar `string` column can be written/read via `parquet_write_column`/`parquet_read_column` (and their chunked counterparts) as a `parquet_string_column` instead of a padded `character(len=...)` array, with no pre-sizing needed; append/search/mutate with `append_string`/`append_null`/`find`/`set`/`erase`, and extract zero-copy `parquet_string` handles with `view`/`view_all`/`view_slice` or gather them back with `build_from`; see [Reading and writing compact string columns](doc/pages/string-columns.md#reading-and-writing-compact-string-columns)
 
 **Date/time/timestamp columns:** `parquet_date`, `parquet_time`, `parquet_timestamp` — read/written via `parquet_write_column`/`parquet_read_column` (and their chunked/row-mode/element-mode counterparts) exactly like any other type; `parquet_get_column_time_info` reads back a column's stored unit/timezone; `parquet_unit_seconds`/`parquet_unit_millis`/`parquet_unit_micros`/`parquet_unit_nanos` select a unit for `set_unix`/`to_unix`; see [Date, time and timestamp columns](doc/pages/date-time.md)
 

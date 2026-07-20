@@ -7,6 +7,7 @@ This file covers developing, testing, and extending this repository itself. If y
 - [AI assistance](#ai-assistance)
 - [Conventions](#conventions)
 - [Building and testing this repository](#building-and-testing-this-repository)
+  - [Running a single test suite/test](#running-a-single-test-suitetest)
   - [Running the error-path tests](#running-the-error-path-tests)
   - [Regenerating the test fixtures](#regenerating-the-test-fixtures)
   - [Other tools/ helpers](#other-tools-helpers)
@@ -54,6 +55,28 @@ To generate the executable:
     fpm install --prefix my_path
 
 The executable is placed in the `my_path/bin` directory. It only prints the parquet-fortran library version number — useful as a quick sanity check that a build/install actually picked up the version you expect.
+
+If `fpm test` behaves unexpectedly right after a source change (e.g. a test seems to still run old
+code, or `error_scenarios` reports a scenario name as unrecognized even though it's clearly in
+`test/error_scenarios.f90`), try `fpm clean --all` before spending time debugging further — fpm's
+build cache can serve a stale binary, and building with several different `FPM_FFLAGS` values
+creates multiple `build/gfortran_<hash>/` directories, one of which
+`test/test_errors.f90`'s `error_scenarios_bin` may pick up instead of the current one.
+
+### Running a single test suite/test
+
+While iterating on one area, prefer scoping `fpm test` to just the relevant suite (or a single
+named test within it) over running the full suite every time — the full suite, including the
+OpenMP and error-scenario subprocess tests, takes much longer:
+
+```bash
+fpm test run_tester -- reading                      # one suite
+fpm test run_tester -- reading "test name"           # one test within a suite
+```
+
+The full list of suite names is the `new_testsuite(...)` array in `test/run_tester.f90`: `writing`,
+`reading`, `maml`, `errors`, `examples`, `metadata`, `openmp_write`, `openmp`, `parquet_string`,
+`temporal`.
 
 ### Running the error-path tests
 
@@ -157,9 +180,16 @@ NROWS=3000000000 MAX_SIZE_GB=120 tools/test_large_scale.sh
 tools/check_doc_anchors.py
 ```
 
+`tools/generate_logo_svg.py` regenerates `doc/media/logo.svg`/`logo.png`/`logo-192.png`/
+`favicon.png` from an original raster source: it traces the raster into an editable SVG via
+`vtracer`, then a polish pass recolors/gradient-fills the traced badge shape and adds a shadowed
+outline to the letter glyph, and finally rasterizes PNGs back out at each needed size. Only needed
+if the logo itself changes — see the script's own header comment for the full pipeline and its
+tuning flags.
+
 ### Testing genuine OpenMP concurrency
 
-This repository's own OpenMP-dependent tests (the `openmp` test suite, plus the `concurrent_calls_into_shared_reader`/`writer` error scenarios) need a real OpenMP flag to actually exercise concurrency:
+This repository's own OpenMP-dependent tests (the `openmp`/`openmp_write` test suites, plus the `concurrent_calls_into_shared_reader`/`writer` error scenarios) need a real OpenMP flag to actually exercise concurrency:
 
 ```sh
 export FPM_FFLAGS="-fopenmp"

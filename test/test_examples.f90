@@ -2,13 +2,14 @@
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
 !===========================================
 !
-!> Compiles and runs the code examples shown in README.md, so that a change to
-!> the library's public API that silently breaks a documented example is
-!> caught here rather than by a user copy-pasting the README.
+!> Compiles and runs the code examples shown in README.md and the doc/pages
+!> user guide, so that a change to the library's public API that silently
+!> breaks a documented example is caught here rather than by a user
+!> copy-pasting the guide.
 !>
-!> Each subroutine below mirrors one README example as closely as possible
+!> Each subroutine below mirrors one documented example as closely as possible
 !> (same `use` clauses, same variable declarations, same calls), except that
-!> it writes to a path under test_run/ instead of the README's "data.parquet",
+!> it writes to a path under test_run/ instead of the doc's "data.parquet",
 !> and is wrapped as a subroutine instead of a standalone `program` so it can
 !> be driven by test-drive and checked with a round-trip read-back.
 module test_examples
@@ -28,9 +29,14 @@ contains
         testsuite = [ &
             new_unittest("README minimal writer/reader example", test_readme_minimal_example), &
             new_unittest("README MAML-schema writer example", test_readme_maml_schema_writer_example), &
-            new_unittest("README combined example", test_readme_combined_example), &
+            new_unittest("doc/pages/combined-example.md example", test_readme_combined_example), &
             new_unittest("maml_example2 writer produces a matching sidecar .maml", &
-                test_maml_example2_sidecar_keyarray) &
+                test_maml_example2_sidecar_keyarray), &
+            new_unittest("doc/pages/date-time.md datetime_quickstart example", test_datetime_quickstart_example), &
+            new_unittest("doc/pages/performance.md write_parquet_qc_example", test_performance_qc_example), &
+            new_unittest("doc/pages/string-columns.md strings_quickstart example", &
+                test_strings_quickstart_example), &
+            new_unittest("doc/pages/string-columns.md token_column example", test_token_column_example) &
             ]
     end subroutine collect_tests_parquet_examples
 
@@ -159,6 +165,189 @@ contains
         call check(error, nrows == 3_int64 .and. all(id0_read == id0) .and. all(idarr_read == idarr), &
             "README combined example did not round-trip the 'id0'/'idarr' columns correctly")
     end subroutine test_readme_combined_example
+    !
+    !> doc/pages/date-time.md's "datetime_quickstart" example: writes a
+    !> parquet_date column (with one null) and a parquet_timestamp column (set
+    !> from civil fields, an ISO-8601 string, and set_unix), reads them back,
+    !> and checks the round-tripped values/null state/to_string output.
+    subroutine test_datetime_quickstart_example(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: out_file = "test_run/readme_datetime_quickstart.parquet"
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_date) :: observed(3)
+        type(parquet_timestamp) :: taken_at(3)
+        character(len=:), allocatable :: s
+        integer(int32) :: y, mo, d, h, mi, sec
+
+        call observed(1)%set(2024, 7, 16)
+        call observed(2)%set(2024, 7, 17)
+        call observed(3)%set_null()                        ! a missing value
+
+        call taken_at(1)%set(2024, 7, 16, 12, 34, 56)
+        call taken_at(2)%parse("2024-07-17T08:00:00.5")     ! from an ISO-8601 string
+        call taken_at(3)%set_unix(1721260800_8, parquet_unit_seconds)
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "observed", observed)
+        call parquet_write_column(writer, "taken_at", taken_at)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "observed", observed)
+        call parquet_read_column(reader, "taken_at", taken_at)
+        call parquet_close_reader(reader)
+
+        call check(error, .not. observed(1)%is_null() .and. observed(1)%year() == 2024 .and. &
+            observed(1)%month() == 7 .and. observed(1)%day() == 16, &
+            "datetime_quickstart example: 'observed' row 1 did not round-trip correctly")
+        if (allocated(error)) return
+
+        call check(error, observed(3)%is_null(), &
+            "datetime_quickstart example: 'observed' row 3 should have round-tripped as null")
+        if (allocated(error)) return
+
+        call check(error, .not. taken_at(1)%is_null(), &
+            "datetime_quickstart example: 'taken_at' row 1 should not be null")
+        if (allocated(error)) return
+
+        call taken_at(1)%to_string(s)
+        call check(error, s == "2024-07-16T12:34:56", &
+            "datetime_quickstart example: 'taken_at' row 1 to_string mismatch, got: " // s)
+        if (allocated(error)) return
+
+        call taken_at(2)%get(y, mo, d, h, mi, sec)
+        call check(error, y == 2024 .and. mo == 7 .and. d == 17 .and. h == 8, &
+            "datetime_quickstart example: 'taken_at' row 2 (parsed from ISO-8601) did not round-trip correctly")
+        if (allocated(error)) return
+
+        call check(error, taken_at(3)%to_unix(parquet_unit_seconds) == 1721260800_8, &
+            "datetime_quickstart example: 'taken_at' row 3 (set_unix) did not round-trip correctly")
+    end subroutine test_datetime_quickstart_example
+    !
+    !> doc/pages/performance.md's "write_parquet_qc_example": builds a qc-maml
+    !> directly via schema%maml%name/schema%maml%lines (rather than a file or
+    !> add_col_qc), writes an out-of-range column with is_valid (one Null) and
+    !> qc=.true./compression="zstd", then reads it back and checks the
+    !> round-tripped values/nulls -- the WARNING itself is not asserted on
+    !> (test-drive can't capture stdout), only that the write/read still
+    !> succeeds and round-trips correctly despite the qc violation.
+    subroutine test_performance_qc_example(error)
+        use iso_fortran_env, only: int32
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: out_file = "test_run/readme_performance_qc_example.parquet"
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: ra(4) = [10_int32, 400_int32, 90_int32, 200_int32]  ! 400 is out of range
+        integer(int32) :: ra_read(4)
+        logical :: is_valid(4) = [.true., .true., .false., .true.]           ! row 3 will be written as Null
+        logical :: is_valid_read(4)
+
+        schema%maml%name = "qc_example.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: qc_example_table", &
+            "fields:", &
+            "- name: ra", &
+            "  data_type: int32", &
+            "  qc:", &
+            "    min: '>= 0'", &
+            "    max: '< 360'" ]
+
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema, qc=.true., compression="zstd")
+        call parquet_write_column(writer, "ra", ra, is_valid=is_valid)
+        ! prints: WARNING: qc violation for column 'ra': declared min >= 0, max < 360, ...
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "ra", ra_read, is_valid=is_valid_read)
+        call parquet_close_reader(reader)
+
+        ! Row 3 was written as a genuine Null (is_valid(3)=.false.); with no null_value=
+        ! passed on read, that slot comes back as the safe default (0), not the original
+        ! ra(3) -- see doc/pages/supported-data-types.md's "Null values" section.
+        call check(error, all(is_valid_read .eqv. is_valid), &
+            "performance.md qc example did not round-trip the 'ra' column's is_valid mask correctly")
+        if (allocated(error)) return
+        call check(error, ra_read(1) == ra(1) .and. ra_read(2) == ra(2) .and. ra_read(3) == 0_int32 .and. &
+            ra_read(4) == ra(4), &
+            "performance.md qc example did not round-trip the 'ra' column values correctly")
+    end subroutine test_performance_qc_example
+    !
+    !> doc/pages/string-columns.md's "strings_quickstart" example: appends two
+    !> strings, a null, and an empty string to a parquet_string_column, then
+    !> checks size/character_size/null_count and per-row is_null/get.
+    subroutine test_strings_quickstart_example(error)
+        use parquet_strings, only: parquet_string_column
+        use iso_fortran_env, only: int64
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: names
+        character(len=:), allocatable :: s
+
+        call names%append_string("Alice")
+        call names%append_string("Bob")
+        call names%append_null()             ! a missing value (not the same as "")
+        call names%append_string("")         ! an empty string
+
+        call check(error, names%size() == 4_int64, "strings_quickstart example: unexpected size()")
+        if (allocated(error)) return
+        call check(error, names%character_size() == 8_int64, &
+            "strings_quickstart example: unexpected character_size()")
+        if (allocated(error)) return
+        call check(error, names%null_count() == 1_int64, "strings_quickstart example: unexpected null_count()")
+        if (allocated(error)) return
+
+        call check(error, .not. names%is_null(1_int64), "strings_quickstart example: row 1 should not be null")
+        if (allocated(error)) return
+        call names%get(1_int64, s)
+        call check(error, s == "Alice", "strings_quickstart example: row 1 get() mismatch, got: " // s)
+        if (allocated(error)) return
+
+        call check(error, names%is_null(3_int64), "strings_quickstart example: row 3 should be null")
+        if (allocated(error)) return
+
+        call check(error, .not. names%is_null(4_int64), "strings_quickstart example: row 4 should not be null")
+        if (allocated(error)) return
+        call names%get(4_int64, s)
+        call check(error, s == "", "strings_quickstart example: row 4 get() should be an empty string")
+    end subroutine test_strings_quickstart_example
+    !
+    !> doc/pages/string-columns.md's "token_column" example: reserves capacity,
+    !> appends tokens (one stripped on append), and checks find/reverse-find
+    !> and the empty-token count.
+    subroutine test_token_column_example(error)
+        use parquet_strings, only: parquet_string_column
+        use iso_fortran_env, only: int64
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: tokens
+        integer(int64) :: i, first_the, n_empty
+
+        call tokens%reserve(1000_int64, 8000_int64)   ! rough estimate; avoids realloc churn
+        call tokens%append_string("the")
+        call tokens%append_string("quick")
+        call tokens%append_string("the")
+        call tokens%append_string("  fox  ", strip=.true.)   ! stored as "fox"
+
+        first_the = tokens%find("the")           ! 1
+        call check(error, first_the == 1_int64, "token_column example: first 'the' should be at row 1")
+        if (allocated(error)) return
+
+        call check(error, tokens%find("the", reverse=.true.) == 3_int64, &
+            "token_column example: last 'the' should be at row 3")
+        if (allocated(error)) return
+
+        call check(error, tokens%find("fox") > 0, &
+            "token_column example: 'fox' should be present (trimmed on append)")
+        if (allocated(error)) return
+
+        n_empty = 0
+        do i = 1, tokens%size()
+            if (.not. tokens%is_null(i) .and. tokens%is_empty(i)) n_empty = n_empty + 1
+        end do
+        call check(error, n_empty == 0_int64, "token_column example: no token should be empty")
+    end subroutine test_token_column_example
     !
     !> Writes a four-column ("id", "name", "RA", "Dec") table using
     !> schemas/maml_example2.maml's schema, with write_maml=.true. so a sidecar

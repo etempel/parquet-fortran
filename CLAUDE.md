@@ -230,10 +230,9 @@ independent of, and does not need, the interface remaining declared anywhere —
 
 ## Publishing: remaining outside-this-repo steps
 
-FORD docs, doc-comment coverage, and MANUAL.md retirement (superseded by `doc/pages/*.md` + the
-FORD-generated reference) are complete. The GitHub mirror (`github.com/etempel/parquet-fortran`)
-is pushed and GitHub Pages is live — both doc-publish paths (GitLab's readthedocs docserver and
-GitHub Pages) are now confirmed working end-to-end. What's left, in order:
+What's left, in order (everything else on this front — FORD docs, doc-comment coverage, the
+GitHub mirror, both CI doc-publish paths — is done; see `feature_release.md` for the fuller,
+currently-tracked release checklist):
 
 1. The fortran-lang.org **package index** PR (`fortran-lang/fortran-lang.org`'s `PACKAGES.md`) —
    not the separate `fpm publish` registry, still playground/testing status, skipped
@@ -382,9 +381,9 @@ counterpart. User guide: `doc/pages/date-time.md`.
 - **Test for NaN with `ieee_is_nan`, not `x /= x`.** Use `use ieee_arithmetic, only: ieee_is_nan`
   and `ieee_is_nan(x)` rather than the classic self-comparison idiom — the latter is correct
   (NaN is the only value never equal to itself) but triggers gfortran's `-Wcompare-reals`
-  warning. See `parquet_metadata_validate.f90`'s `parquet_qc_numeric_bound` for the pattern.
+  warning. See `parquet_metadata_maml.f90`'s `parquet_qc_numeric_bound` for the pattern.
   This does not apply to the *other* `-Wcompare-reals` sites in this codebase (e.g.
-  `value == anint(value)` in `parquet_write.f90`/`parquet_metadata_validate.f90`, testing
+  `value == anint(value)` in `parquet_write_numeric.f90`/`parquet_metadata_maml.f90`, testing
   whether a float is exactly integral) — those are exact-equality checks with no arithmetic
   drift and no equivalent NaN-style idiom, so their warning is left as an accepted false
   positive rather than "fixed" into something worse (e.g. an epsilon comparison).
@@ -417,33 +416,25 @@ counterpart. User guide: `doc/pages/date-time.md`.
   `summary` and `parquet_string`'s `to_string` (in `parquet_strings.f90`); `parquet_unquote`/
   `parquet_to_lower`/`schema_get_field_name`/`parquet_column_info%get_field_name` (`parquet.f90`
   + submodules); `schema_set_col_qc`/`parquet_maml_file%set_col_qc` (converted to a single
-  `intent(inout)` argument — see below; named `get_col_qc` at the time of this fix, renamed to
-  `set_col_qc` later — see the note further below); and the private helpers
+  `intent(inout)` argument — see below); and the private helpers
   `parquet_column_output_name`/`parquet_resolve_output_name`/`parquet_get_schema_type`/
-  `writer_context_suffix`/`parquet_qc_format_real`/`parquet_qc_format_int` (`parquet_write.f90`),
+  `writer_context_suffix`/`parquet_qc_format_int` (`parquet_write.f90`),
+  `parquet_qc_format_real` (`parquet_write_numeric.f90`),
   `maml_name_suffix` (`parquet_metadata.f90`), `reader_filename_suffix` (`parquet_read.f90`),
   `nth_field` (`parquet_maml_base_add_col_qc.f90`). `test/run_tester.f90`'s `parquet_string`
   suite runs fully parallel again (the exclusion that used to be here is gone) as this fix's own
   ongoing regression check — verified clean across 20 repeated runs under
   `-fcheck=bounds,do,mem,pointer` before being re-enabled.
 
-  **`set_col_qc` design note** (named `get_col_qc` at the time): converting a function whose whole
-  point was `col = schema%get_col_qc(col)` (assign the result back into the same variable used as
-  input) needed a real design change, not a mechanical swap — a subroutine can't alias the same
-  actual argument to separate `intent(in)`/`intent(out)` dummies. Fixed by making the single
-  argument `intent(inout)`: it holds the compact input string on entry and the parsed name on
-  exit, so `call schema%get_col_qc(col)` (now `set_col_qc`, see below) preserves the original
-  single-variable ergonomics. Same treatment for `parquet_maml_file%get_col_qc` underneath it.
-  `add_col_qc` (a genuinely separate two-argument subroutine, `qc_input` `intent(in)` + optional
-  `col_name` `intent(out)`) was already a subroutine and needed no change.
-
-  **Renamed `get_col_qc` → `set_col_qc`** (2026-07-16): `get_` read as a non-mutating query, but
-  the procedure always appends a `fields:` entry to the schema/maml, same as `add_col_qc` —
-  `set_` correctly signals the mutation while keeping the short, `add_col_qc`-paired name (see
-  [doc/pages/reading.md](doc/pages/reading.md)'s "Building a qc-maml in code" section for the
-  user-facing rationale). `add_col_qc` itself was deliberately left untouched — it's a separate,
-  heavily-used public entry point (see its own doc-comment), not a candidate for merging or
-  renaming.
+  **`set_col_qc` design note**: converting a function whose whole point was
+  `col = schema%get_col_qc(col)` (assign the result back into the same variable used as input)
+  needed a real design change, not a mechanical swap — a subroutine can't alias the same actual
+  argument to separate `intent(in)`/`intent(out)` dummies. Fixed by making the single argument
+  `intent(inout)`: it holds the compact input string on entry and the parsed name on exit, so
+  `call schema%set_col_qc(col)` preserves the original single-variable ergonomics. Same treatment
+  for `parquet_maml_file%set_col_qc` underneath it. If a future function-to-subroutine conversion
+  hits this same "assign result back into the input variable" pattern, this is the fix — an
+  `intent(inout)` single argument, not two separate `intent(in)`/`intent(out)` dummies.
 
   **Not affected, no action needed**: functions with no multi-allocatable-component "self" type
   at all (e.g. plain string/numeric helpers), and any function returning an allocatable
@@ -622,7 +613,7 @@ Two confirmed shapes:
   branch itself is never actually taken; only the `if` line's own hit count is misleading. Seen in
   every `check_*_fits_arrow_limit`-style int32-ceiling guard (e.g. `parquet_read.f90`'s
   `parquet_get_nrows_int32`), every defensive branch in `parquet_strings.f90`'s `validate()`, and
-  the col_map/duplicate-output-name/empty-name guards in `parquet_metadata_validate.f90`.
+  the col_map/duplicate-output-name/empty-name guards in `parquet_metadata_maml.f90`.
 - **A bare `return` statement mis-attributed to a different call site's execution count**, seen in
   `parquet_read.f90`'s `parquet_tokenize_filter_rule`, `case default` arm: the `return` on the line
   right after an `errmsg = ...` assignment shows positive hits while that `errmsg` line — the

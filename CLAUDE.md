@@ -1,6 +1,52 @@
 # Instructions for Claude
 
-## Only modify files inside this repository
+## Contents
+
+This file is a reference, not a start-to-finish read — jump to the note you need. Keep this ToC
+in sync when adding, removing, renaming, or reordering a heading (see "Documentation structure"'s
+working rules).
+
+- [Workflow & guardrails](#workflow--guardrails)
+  - [Only modify files inside this repository](#only-modify-files-inside-this-repository)
+  - [Report before implementing on analysis/audit requests](#report-before-implementing-on-analysisaudit-requests)
+  - [Only apply low-blast-radius renames/refactors](#only-apply-low-blast-radius-renamesrefactors)
+  - [`feature_*.md` planning documents](#feature_md-planning-documents)
+  - [Don't run the GitLab CI pipeline yourself](#dont-run-the-gitlab-ci-pipeline-yourself)
+  - [Don't commit or push on the main/default branch yourself](#dont-commit-or-push-on-the-maindefault-branch-yourself)
+- [Documentation conventions](#documentation-conventions)
+  - [New features require tests and docs](#new-features-require-tests-and-docs)
+  - [Documentation structure](#documentation-structure)
+  - [Checking documentation links](#checking-documentation-links)
+  - [FORD doc-comment conventions](#ford-doc-comment-conventions)
+  - [FORD config gotchas](#ford-config-gotchas)
+- [Source code structure & conventions](#source-code-structure--conventions)
+  - [One program unit per file; filename == unit name](#one-program-unit-per-file-filename--unit-name)
+  - [Nested submodule tree](#nested-submodule-tree)
+  - [Group interface bodies into commented `interface` blocks](#group-interface-bodies-into-commented-interface-blocks)
+  - [A module procedure cannot implement its own submodule's spec-declared interface](#a-module-procedure-cannot-implement-its-own-submodules-spec-declared-interface)
+  - [Naming conventions](#naming-conventions)
+  - [Public numeric arguments: provide both int32 and int64 kinds](#public-numeric-arguments-provide-both-int32-and-int64-kinds)
+  - [MAML fixture directory: `schemas/`](#maml-fixture-directory-schemas)
+  - [Error stop messages: include file/schema context](#error-stop-messages-include-fileschema-context)
+- [Element-domain modules (`parquet_strings`, `parquet_temporal`)](#element-domain-modules-parquet_strings-parquet_temporal)
+  - [The `parquet_strings` module](#the-parquet_strings-module)
+  - [The `parquet_temporal` module (date/time/timestamp)](#the-parquet_temporal-module-datetimetimestamp)
+- [Build & compiler notes](#build--compiler-notes)
+  - [Compiler & language gotchas](#compiler--language-gotchas)
+  - [Stale `fpm` build cache](#stale-fpm-build-cache)
+  - [Keeping `tools/prep_fpm_publish.sh` in sync](#keeping-toolsprep_fpm_publishsh-in-sync)
+  - [Manual (never-`fpm test`) large-scale/benchmark tools](#manual-never-fpm-test-large-scalebenchmark-tools)
+- [Testing & coverage](#testing--coverage)
+  - [Running a single test suite/test](#running-a-single-test-suitetest)
+  - [Measuring test coverage](#measuring-test-coverage)
+  - [Fortran gcov attribution artifacts](#fortran-gcov-attribution-artifacts)
+  - [`src/parquet_wrapper.cpp`: GCC vs Clang gcov attribution](#srcparquet_wrappercpp-gcc-vs-clang-gcov-attribution)
+  - [Regression tests for "sized/typed from the first element" bugs](#regression-tests-for-sizedtyped-from-the-first-element-bugs)
+  - [Guarding a hard Arrow int32-only ceiling](#guarding-a-hard-arrow-int32-only-ceiling)
+
+## Workflow & guardrails
+
+### Only modify files inside this repository
 
 Never edit, create, or delete files outside this library's own directory tree (e.g. files
 under a different project checkout, dotfiles like `~/.zprofile`, or other paths elsewhere on
@@ -8,7 +54,22 @@ the machine) — even when doing so would streamline a task (such as setting a c
 environment variable). If something outside this repository genuinely needs to change, tell
 the user what's needed and let them make that change themselves.
 
-## `feature_*.md` planning documents
+### Report before implementing on analysis/audit requests
+
+When asked to analyze, audit, or review something (naming conventions, documentation
+duplication/coverage, test coverage, etc.), report findings and a proposed plan first and
+wait for confirmation before editing any files. Only proceed straight to editing when
+explicitly asked to implement/fix/add something directly.
+
+### Only apply low-blast-radius renames/refactors
+
+When renaming or refactoring existing (non-new) code for consistency, only apply the
+renames/changes that are low blast-radius (few call sites, no public API/doc impact).
+For anything with wider knock-on effects (public API, many call sites, cross-file
+conventions), report it as a proposed change and wait for confirmation instead of applying
+it directly.
+
+### `feature_*.md` planning documents
 
 `feature_*.md` files in the repo root
 are design/planning documents for features not yet implemented — they are git-ignored
@@ -25,7 +86,25 @@ decisions/wording directly in the document rather than alluding to them. Cross-r
 other files in the repo (source, other `feature_*.md` docs, `CLAUDE.md` sections) are fine, since
 a future session can read those too.
 
-## New features require tests and docs
+### Don't run the GitLab CI pipeline yourself
+
+The user runs `.gitlab-ci.yml` on their own GitLab server — don't attempt to execute it
+(e.g. via `gitlab-runner`, docker, or otherwise) as part of verifying changes. Verify
+locally instead (`fpm build`/`fpm test` with the same `FPM_FFLAGS`/`FPM_CXXFLAGS`/
+`FPM_LDFLAGS` the CI job sets, minus anything CI-environment-specific like the apt installs).
+
+### Don't commit or push on the main/default branch yourself
+
+The user always commits and pushes their own changes on `main` — even after explicitly asking
+for a feature/fix to be implemented, do not run `git commit`/`git push` on `main` yourself
+unless they separately, explicitly ask for that specific commit. Leave finished work
+uncommitted in the working tree for them to review and commit. (This is specific to the
+main/default branch; it doesn't apply to work you've been asked to do inside your own
+throwaway branch/worktree, if any.)
+
+## Documentation conventions
+
+### New features require tests and docs
 
 Whenever asked to implement a new feature in this repository, always:
 
@@ -47,17 +126,7 @@ Do this without being asked separately each time — it applies by default to an
 maintained from the first public release (1.0) onward — do **not** add `CHANGELOG.md`
 `[Unreleased]` entries in the meantime.
 
-## Checking documentation links
-
-After editing headings or `#anchor` links in README.md/CONTRIBUTING.md/CHANGELOG.md/CLAUDE.md/docs.md/
-`doc/pages/*.md`, run `tools/check_doc_anchors.py` to verify every in-page and cross-file anchor
-link still resolves against GitHub's actual heading-slug rules. It exits nonzero and lists any
-broken link. It scans `doc/pages/*.md` too, resolving both the raw `other.md#anchor` form (used by
-README.md/CONTRIBUTING.md linking *into* `doc/pages/`) and the FORD-rendered `name.html#anchor` /
-`../index.html#anchor` form those pages use to link to each other / back to README.md (see
-`resolve_link_target` in the script).
-
-## Documentation structure
+### Documentation structure
 
 User- and contributor-facing docs are split across three layers — keep new content in the right one:
 
@@ -87,12 +156,12 @@ Working rules:
 - A new public procedure gets a `!>`(leading)/`!!`(trailing) doc-comment (see "FORD doc-comment conventions"
   below) **and**
   its name in **README.md**'s "API overview" index; keep the two in sync on any rename/removal.
-- Every section heading must appear in that file's own **Contents** ToC (README.md/CONTRIBUTING.md);
+- Every section heading must appear in that file's own **Contents** ToC (README.md/CONTRIBUTING.md/CLAUDE.md);
   `doc/pages/*.md` pages don't need one — FORD generates in-page navigation from headings itself.
 - Moving content between README.md and a `doc/pages/*.md` page turns in-page `#anchor` links
   into cross-file `doc/pages/<page>.md#…` / `README.md#…` links — repoint them, and fix
   now-stale relative wording ("above", "below", "this README"). Re-run `tools/check_doc_anchors.py`
-  afterward (see "Checking documentation links" above).
+  afterward (see "Checking documentation links" below).
 - **Diagrams: plain text, not Mermaid.** This project's GitLab does not reliably render Mermaid
   diagrams, so draw flows as plain-text/ASCII inside a normal code fence (renders identically
   everywhere) — see the MAML→header flow in `doc/pages/maml-format.md`'s "The MAML metadata format".
@@ -101,12 +170,22 @@ Working rules:
   GitLab-specific — `tools/prep_github_mirroring.sh` swaps them for a single GitHub Pages
   documentation badge when mirroring (see CONTRIBUTING.md's "Mirroring to GitHub").
 
-## FORD doc-comment conventions
+### Checking documentation links
+
+After editing headings or `#anchor` links in README.md/CONTRIBUTING.md/CHANGELOG.md/CLAUDE.md/docs.md/
+`doc/pages/*.md`, run `tools/check_doc_anchors.py` to verify every in-page and cross-file anchor
+link still resolves against GitHub's actual heading-slug rules. It exits nonzero and lists any
+broken link. It scans `doc/pages/*.md` too, resolving both the raw `other.md#anchor` form (used by
+README.md/CONTRIBUTING.md linking *into* `doc/pages/`) and the FORD-rendered `name.html#anchor` /
+`../index.html#anchor` form those pages use to link to each other / back to README.md (see
+`resolve_link_target` in the script).
+
+### FORD doc-comment conventions
 
 Every public/private procedure, type, dummy argument/function result, and type-bound procedure
-binding in `src/*.f90` carries a `!>`(leading)/`!!`(trailing) doc-comment (already true throughout `src/*.f90`,
-validated end-to-end with `ford docs.md` — clean run besides the expected environment-only
-"Graphviz not installed" warning). Keep new code to the same standard:
+binding in `src/*.f90` carries a `!>`(leading)/`!!`(trailing) doc-comment. `ford docs.md` should
+run clean (besides the expected environment-only "Graphviz not installed" warning) — keep new
+code to the same standard:
 
 - Leading `!>` = predoc (documents what follows); trailing `!!` = postdoc (documents what
   precedes). **`!<` is not a FORD marker at all** (that's Doxygen).
@@ -128,12 +207,9 @@ validated end-to-end with `ford docs.md` — clean run besides the expected envi
   procedure's required doc-comment — it must use `!>`, not a plain `!` block.** The two look
   interchangeable at a glance (both are multi-line comment blocks sitting just above code), but
   only `!>` is picked up by FORD; a plain `!` block there silently leaves the procedure
-  undocumented even though a human reader sees an explanation right above it. This bit
-  `parquet_parse_protected_cols_relay` (`parquet_metadata.f90`) concretely: the ICE-workaround
-  rationale was written as a plain `!` block, which happened to satisfy the "explain why this
-  exists" instinct while leaving the FORD doc-comment itself missing. Plain `!` stays reserved
-  for the *interface-block group banners* described below (`! ---- ... ----`) — never for a
-  procedure's own doc, even a short one-off private helper.
+  undocumented even though a human reader sees an explanation right above it. Plain `!` stays
+  reserved for the *interface-block group banners* described below (`! ---- ... ----`) — never
+  for a procedure's own doc, even a short one-off private helper.
 - **After a file split/relocation refactor, verify FORD coverage didn't regress with a
   before/after diff, not just a clean `ford docs.md` run on the new state alone**: `git stash` the
   changes, run `ford docs.md`, note the warning count (ideally 0), `git stash pop`, and re-run —
@@ -143,43 +219,7 @@ validated end-to-end with `ford docs.md` — clean run besides the expected envi
   itself — cross-check with `grep 'public ::'` in `parquet.f90` before treating an "not found on
   page" result as a problem.
 
-## Group interface bodies into commented `interface` blocks
-
-Declare the `module subroutine`/`function` interface bodies in `parquet.f90` (and in any
-submodule spec that hosts relocated interfaces) as **several small `interface … end interface`
-blocks grouped by concern**, each introduced by a one-line plain-`!` banner (e.g.
-`! ---- Read column specifics (by type x access mode) ----`) — not one monolithic block.
-Fortran allows arbitrarily many interface blocks, so this costs nothing and keeps the
-declarations navigable. The banner **must be a single-bang `!` comment, never `!>`**: a `!>`
-immediately above the first `module subroutine` in a block is a predoc and FORD would attach it
-to that procedure. Keep each new interface body in the group that matches the submodule
-implementing it. Do not give the blocks `generic-spec` names (e.g. `interface foo`) purely for
-labeling purposes — that declares an actual named generic interface (a callable overloaded
-entry point requiring every member to be a distinguishable-argument-list overload of the
-others, and unable to mix `subroutine`/`function` specifics under one name), not a label. The
-plain-`!` banner is the only naming mechanism for these groups.
-
-## A module procedure cannot implement its own submodule's spec-declared interface
-
-A `module procedure`/full-restated `module subroutine` body must live in a **descendant** of
-whichever spec declared its interface — never in the same submodule that declares it. This
-matters when relocating a private helper's interface (per the relocation rule two sections
-below): if the helper's *body* already lives in the same file the interface is moving into
-(e.g. relocating an interface from `parquet.f90` into `parquet_metadata`'s own spec, when the
-body already lives in `parquet_metadata.f90` itself, not one of its children), keeping it a
-`module procedure` no longer works — gfortran reports errors like "Symbol ... has already been
-host associated" or, for a still-public name, a `public ::` failure. Convert that one procedure
-to a **plain contained procedure** instead (drop `module`, restate the full signature with its
-own `!>`/`!!` doc-comment, since there's no longer an interface to hold it): callers in the same
-file are unaffected, and descendants still reach it by host association (fact: confirmed on
-gfortran 15 for both a module→submodule and a submodule→sub-submodule chain). This is
-independent of, and does not need, the interface remaining declared anywhere — see
-`parquet_parse_col_map`, `parquet_parse_maml_lines`, `parquet_append_keyarray_line`
-(`parquet_metadata.f90`) and `parquet_check_read_row_count` (`parquet_read.f90`),
-`parquet_add_column_info`/`parquet_mark_column_written`/`parquet_check_row_count`
-(`parquet_write.f90`) for worked examples.
-
-## FORD config gotchas
+### FORD config gotchas
 
 - `md_extensions = ["markdown.extensions.toc"]` in `fpm.toml`'s `[extra.ford]` is
   **load-bearing** — without it, no heading gets an `id`, silently breaking every anchor link
@@ -189,10 +229,9 @@ independent of, and does not need, the interface remaining declared anywhere —
 - `doc/pages/*.md` files deliberately have **no top-level heading in their body** (title comes
   from frontmatter only) — adding one back would reintroduce the duplicate-heading bug
   `doc/user.css` fixes on the front page.
-- Two working CI doc-publish paths, both confirmed working end-to-end: `.github/workflows/docs.yml`
-  (GitHub Actions → GitHub Pages) and `.gitlab-ci.yml`'s `readthedocs` job (GitLab CI →
-  gitlab.4most.eu's readthedocs-style docserver). GitLab Pages isn't available on
-  gitlab.4most.eu — the docserver replaces it.
+- Two working CI doc-publish paths: `.github/workflows/docs.yml` (GitHub Actions → GitHub Pages)
+  and `.gitlab-ci.yml`'s `readthedocs` job (GitLab CI → gitlab.4most.eu's readthedocs-style
+  docserver). GitLab Pages isn't available on gitlab.4most.eu — the docserver replaces it.
 - **FORD does not resolve `doc/pages/*.md` links written in README.md's body text** (`docs.md` is
   `{!README.md!}`, embedding README.md's raw markdown verbatim as the front page). FORD's own
   navbar correctly links to `page/index.html`, proving it knows the real mapping
@@ -210,83 +249,198 @@ independent of, and does not need, the interface remaining declared anywhere —
   downstream project's generated `parquet_maml` module).
 - **FORD 7.0.13 never renders per-argument docs for members of a named, multi-specific generic
   interface** (e.g. `parquet_get_metadata`'s 12 `module procedure` entries) — every member's card
-  under "Module Procedures" on the generic's page shows "Arguments: None", permanently. Root
-  cause (confirmed by reading `ford/sourceform.py`): `FortranInterface.correlate()` resolves each
-  generic member through `self.all_procs[name]`, which lands on the submodule's
-  `FortranModuleProcedureImplementation` object — and that class hardcodes `self.args: List[str]
-  = []` in `_initialize()`, unconditionally, regardless of what the submodule source actually
-  declares. This is **not fixable from source**: rewriting the submodule's abbreviated `module
-  procedure NAME` into a fully restated `module subroutine NAME(args)` (mirroring the spec in
-  `parquet.f90`, the pattern used for `parquet_maml_base_add_col_qc.f90`) was tried and verified
-  to have zero effect on the rendered output — confirmed by rebuilding `ford-doc/` before and
-  after. Solo public procedures that aren't generic members (e.g. `parquet_get_string_length`)
-  are unaffected — they render correctly via a different code path
-  (`FortranModuleProcedureInterface`, wrapping the spec's own parsed `FortranSubroutine`).
+  under "Module Procedures" on the generic's page permanently shows "Arguments: None". This is
+  **not fixable from source** — rewriting the submodule's abbreviated `module procedure NAME` into
+  a fully restated `module subroutine NAME(args)` has no effect on the rendered output. Solo public
+  procedures that aren't generic members (e.g. `parquet_get_string_length`) are unaffected.
   Workaround in place: each of the 12 public generics' own leading `!>` doc-comment (the block
   immediately above `interface <name>`) spells out every distinct argument name/role in prose,
-  since that comment (unlike the per-specific ones) does render on the generic's page. Do not
-  re-attempt the submodule-restatement approach without first re-verifying against a newer FORD
-  release that the upstream bug is actually fixed. See FORD Issue (https://github.com/Fortran-FOSS-Programmers/ford/issues/738).
+  since that comment does render on the generic's page. Do not re-attempt the submodule-restatement
+  fix without first checking a newer FORD release against upstream issue
+  (https://github.com/Fortran-FOSS-Programmers/ford/issues/738).
 
-## Publishing: remaining outside-this-repo steps
+## Source code structure & conventions
 
-What's left, in order (everything else on this front — FORD docs, doc-comment coverage, the
-GitHub mirror, both CI doc-publish paths — is done; see `feature_release.md` for the fuller,
-currently-tracked release checklist):
+### One program unit per file; filename == unit name
 
-1. The fortran-lang.org **package index** PR (`fortran-lang/fortran-lang.org`'s `PACKAGES.md`) —
-   not the separate `fpm publish` registry, still playground/testing status, skipped
-   deliberately.
-2. Optional polish, no urgency: a `[[entity_name]]` auto-link pass over `doc/pages/*.md`'s
-   inline procedure-name mentions (plain backtick spans today). The favicon/logo item that used
-   to be listed here shipped in commit `1eabced` ("Added project logo and brief changelog") —
-   `doc/media/logo.svg`/`logo.png`/`logo-192.png`/`favicon.png` all exist now, generated via
-   `tools/generate_logo_svg.py` (documented in CONTRIBUTING.md's "Other tools/ helpers").
+Every `src/*.f90` file defines exactly one `module` or `submodule`, and the filename (sans
+`.f90`) equals that program unit's name — e.g. `parquet_read_numeric.f90` ⇒
+`submodule (parquet:parquet_read) parquet_read_numeric`. This is a near-universal fpm/Fortran
+convention and is load-bearing for navigation and for the publish tooling (which flips
+`module-naming` to `"parquet"`). Do not put two program units in one file, and do not name a
+file differently from the unit it defines. (fpm does not hard-fail on a mismatch by default —
+`module-naming = false` here — but treat it as a firm rule.)
 
-## MAML fixture directory: `schemas/`
+### Nested submodule tree
+
+`src/*.f90`'s `parquet`/`parquet_read`/`parquet_write`/`parquet_metadata` files form a nested
+submodule tree (not flat siblings under `parquet`), split by data-type family for read/write and
+by format for metadata:
+
+```
+parquet                         (module — public API + cross-subtree private-helper interfaces)
+├─ parquet_read                 (submodule — reader lifecycle, queries, shared read helpers)
+│   ├─ parquet_read_numeric     (int32/int64/float32/float64/logical, all access modes)
+│   ├─ parquet_read_string
+│   └─ parquet_read_temporal    (date/time/timestamp)
+├─ parquet_write                (submodule — writer lifecycle, shared write helpers)
+│   ├─ parquet_write_numeric
+│   ├─ parquet_write_string
+│   └─ parquet_write_temporal
+└─ parquet_metadata             (submodule — parse/build orchestration + shared metadata helpers)
+    ├─ parquet_metadata_base    (format-agnostic column_info/table_metadata plumbing)
+    ├─ parquet_metadata_get     (parquet_get_metadata queries)
+    └─ parquet_metadata_maml    (MAML-specific: section schema + all validation)
+
+parquet_bindings                (module — independent C++ interop)
+parquet_strings                 (module — independent element domain)
+parquet_temporal                (module — independent element domain)
+parquet_maml_base               (module — generated)
+└─ parquet_maml_base_add_col_qc (submodule)
+parquet_wrapper.cpp             (C++ TU)
+```
+
+Reserved for future element-domain work (not yet implemented): `parquet_map`/`parquet_list`/
+`parquet_struct` (independent modules, like `parquet_temporal`) plus their own
+`parquet_read_*`/`parquet_write_*` type-family children — see CONTRIBUTING.md's "Features
+considered but not implemented" for scope/status.
+
+**Placement rule for a new read/write specific or shared helper:** type-generic code (used by
+more than one of numeric/string/temporal) belongs in the parent (`parquet_read`/`parquet_write`)
+as an ordinary contained procedure — descendants reach it by host association, no interface
+needed. Type-specific code belongs in the matching child, also as an ordinary contained
+procedure. A new *public* generic's specifics, and any type-bound binding target, must keep
+their interface declared in `parquet.f90` itself regardless of family (see "A module procedure
+cannot implement its own submodule's spec-declared interface" below for what breaks if you
+relocate one incorrectly) — never assume a helper is safe to relocate purely from its call sites
+without also checking those two disqualifiers, plus whether it's itself `public ::`-exported.
+
+**A known gfortran 15.2.0 ICE to watch for when adding a new cross-subtree call into this
+tree:** calling `parquet_parse_protected_cols` (declared in `parquet.f90`) directly from a
+submodule nested **two levels** under `parquet` (e.g. `parquet:parquet_metadata:
+parquet_metadata_maml`) crashes the compiler with an internal compiler error — isolated to this
+one procedure's exact argument shape (an assumed-length `character` array paired with a
+deferred-length allocatable `character` array result, i.e. `character(len=*), intent(in) ::
+lines(:)` + `character(len=:), allocatable, intent(out) :: names(:)`) called from 2+ levels of
+nesting. Worked around via a thin relay: `parquet_metadata.f90` (the level-1 parent, where
+calling it already works) exposes a plain contained subroutine
+`parquet_parse_protected_cols_relay` that just forwards to it, and the grandchild calls that
+relay instead of reaching two levels up directly. If a *different* procedure with a similar
+deferred-length-character-array-result shape hits the same ICE from deep nesting, use the same
+relay pattern — this bug is narrow (only this one procedure's exact shape is known to trigger
+it; other similarly-shaped procedures at the same nesting depth compile and run cleanly).
+
+### Group interface bodies into commented `interface` blocks
+
+Declare the `module subroutine`/`function` interface bodies in `parquet.f90` (and in any
+submodule spec that hosts relocated interfaces) as **several small `interface … end interface`
+blocks grouped by concern**, each introduced by a one-line plain-`!` banner (e.g.
+`! ---- Read column specifics (by type x access mode) ----`) — not one monolithic block.
+Fortran allows arbitrarily many interface blocks, so this costs nothing and keeps the
+declarations navigable. The banner **must be a single-bang `!` comment, never `!>`**: a `!>`
+immediately above the first `module subroutine` in a block is a predoc and FORD would attach it
+to that procedure. Keep each new interface body in the group that matches the submodule
+implementing it. Do not give the blocks `generic-spec` names (e.g. `interface foo`) purely for
+labeling purposes — that declares an actual named generic interface (a callable overloaded
+entry point requiring every member to be a distinguishable-argument-list overload of the
+others, and unable to mix `subroutine`/`function` specifics under one name), not a label. The
+plain-`!` banner is the only naming mechanism for these groups.
+
+### A module procedure cannot implement its own submodule's spec-declared interface
+
+A `module procedure`/full-restated `module subroutine` body must live in a **descendant** of
+whichever spec declared its interface — never in the same submodule that declares it. This
+matters when relocating a private helper's interface (per the Placement rule in "Nested
+submodule tree" above): if the helper's *body* already lives in the same file the interface is moving into
+(e.g. relocating an interface from `parquet.f90` into `parquet_metadata`'s own spec, when the
+body already lives in `parquet_metadata.f90` itself, not one of its children), keeping it a
+`module procedure` no longer works — gfortran reports errors like "Symbol ... has already been
+host associated" or, for a still-public name, a `public ::` failure. Convert that one procedure
+to a **plain contained procedure** instead (drop `module`, restate the full signature with its
+own `!>`/`!!` doc-comment, since there's no longer an interface to hold it): callers in the same
+file are unaffected, and descendants still reach it by host association (confirmed on gfortran 15
+for both a module→submodule and a submodule→sub-submodule chain). This is independent of, and
+does not need, the interface remaining declared anywhere — see `parquet_parse_col_map`
+(`parquet_metadata.f90`) and `parquet_check_read_row_count` (`parquet_read.f90`) for worked
+examples.
+
+### Naming conventions
+
+Follow these when adding new public API, types, or internal helpers:
+
+- **Public module-level API** (anything in `src/parquet.f90`'s `public ::` list — functions,
+  subroutines, types) always carries the `parquet_` prefix, e.g. `parquet_get_metadata`,
+  `parquet_open_reader`, `parquet_schema`.
+- **Type-bound procedures** (`schema%init`, `schema%add_field`, `reader%...`) do *not* need a
+  `parquet_` prefix — the type itself namespaces them. If the natural short name collides
+  with another type's backing implementation, keep the short name as the type-bound binding
+  target and give the private module procedure a distinguishing name (e.g.
+  `parquet_column_info`'s binding `set_column_available => set_available`, kept short only to
+  avoid colliding with `parquet_schema`'s own `set_column_available` impl).
+- **`maml_` prefix** is reserved specifically for MAML-parsing/building internal helpers
+  (e.g. `maml_push_line`, `maml_line_exists`) — don't reuse it for unrelated internal code.
+- **Other private module-level helpers** (in `parquet_metadata.f90`, `parquet_read.f90`,
+  `parquet_write.f90`) generally keep the `parquet_` prefix too, even though private —
+  matches the existing majority convention in those files; only give it a bare, unprefixed
+  name if it's a small, obviously-local helper (rare; check for existing precedent first).
+- **Private module-level types** (not part of the public API, e.g. `maml_section_schema`)
+  drop the `parquet_` prefix — this is intentional, not an inconsistency to "fix".
+- **C++ bindings** (`parquet_bindings.f90` interfaces, `parquet_wrapper.cpp`) mirror the C++
+  side's own naming (still generally `parquet_`-prefixed for the `extern "C"` surface) —
+  don't rename these to match Fortran-side conventions.
+
+- **A new module holding several related element/handle types** (as opposed to one module per
+  type) should be named after the *domain* those types belong to, not any single type inside
+  it — e.g. `parquet_temporal` for `parquet_date`/`parquet_time`/`parquet_timestamp`. See "The
+  `parquet_temporal` module" below for the reasoning and the sibling modules (`parquet_map`,
+  `parquet_list`) this leaves room for.
+
+When in doubt, grep for an existing analogous name before inventing a new convention.
+
+### Public numeric arguments: provide both int32 and int64 kinds
+
+When adding a public procedure argument that holds a row count / size / index (any integer a
+caller might naturally declare as a plain `INTEGER`), make it generic over **both**
+`integer(int32)` and `integer(int64)`, following the existing `parquet_get_nrows_int32`/
+`parquet_get_nrows_int64` overload pattern. An `integer(int64)`-only dummy forces callers
+with a default-kind `INTEGER` variable into a `Type mismatch ... passed INTEGER(4) to
+INTEGER(8)` compile error.
+
+Fortran constraint that shapes this: an *optional* dummy that differs only by kind cannot be
+the sole disambiguator between specific procedures in a generic interface (a call omitting it
+is ambiguous). So when such an argument is optional, carry the argument-absent case as its
+own separate specific rather than an optional dummy — see `parquet_open_reader`'s split into
+`parquet_open_reader_base` (no `nrows`) plus `parquet_open_reader_nrows_int32`/`_int64`
+(required `nrows`), all under one generic interface.
+
+For a *required* (non-optional) argument, this ambiguity constraint doesn't apply — Fortran can
+disambiguate two specifics differing only by a required argument's kind without any special
+handling, so just add the second kind-specific directly (no base/kind-suffixed split needed),
+sharing one private `_impl` worker between the two (mirrors `add_col_qc_impl`'s existing
+shared-worker pattern) — see `parquet_read_array_row_mode`'s `row_index` (12 specifics: 6 data
+types x `integer(int32)`/`integer(int64)` row_index, each pair delegating to one
+`parquet_read_<type>_array_row_mode_impl`).
+
+### MAML fixture directory: `schemas/`
 
 `.maml` example/fixture files live in `schemas/`. `tools/generate_parquet_maml.sh` accepts
 `--dir=<name>`/`--dir <name>` (default `schemas`) so downstream projects embedding their own
 MAML schemas aren't forced to match this project's convention — see
 `doc/pages/embedding-maml-schemas.md` for the user-facing how-to.
 
-## Report before implementing on analysis/audit requests
+### Error stop messages: include file/schema context
 
-When asked to analyze, audit, or review something (naming conventions, documentation
-duplication/coverage, test coverage, etc.), report findings and a proposed plan first and
-wait for confirmation before editing any files. Only proceed straight to editing when
-explicitly asked to implement/fix/add something directly.
+New `error stop` messages in the read/write/schema-building paths should append the relevant
+file and, where applicable, schema/maml name using the existing helpers — `writer_context_suffix`
+(`parquet_write.f90`), `reader_filename_suffix` (`parquet_read.f90`), `maml_name_suffix`
+(`parquet_metadata.f90`) — rather than naming only the offending column/field, so a failure is
+identifiable when several readers/writers/schemas are in play at once. These are only
+meaningful once the reader/writer/schema knows its file/name (i.e. post-open), so the
+guard-clause "…has not been opened" messages are exempt.
 
-## Stale `fpm` build cache
+## Element-domain modules (`parquet_strings`, `parquet_temporal`)
 
-If `fpm test` behaves unexpectedly after source changes (e.g. a test target seems to run
-old code), try `fpm clean --all` to force a clean rebuild before spending time debugging —
-fpm's build cache can serve a stale binary.
-
-This bit us concretely: building with several different `FPM_FFLAGS` creates multiple
-`build/gfortran_<hash>/` dirs, and `test/test_errors.f90`'s `error_scenarios_bin` does
-`find build -name error_scenarios | head -1` — which can then pick a *stale* binary and report
-"scenario name not recognized" (or run old code) even though the source is current. Symptom:
-tests that pass when run scoped but fail under a full `fpm test`. `tools/coverage.sh` now runs
-`fpm clean` up front to avoid this; for a plain `fpm test`, `fpm clean --all` fixes it.
-
-## Don't run the GitLab CI pipeline yourself
-
-The user runs `.gitlab-ci.yml` on their own GitLab server — don't attempt to execute it
-(e.g. via `gitlab-runner`, docker, or otherwise) as part of verifying changes. Verify
-locally instead (`fpm build`/`fpm test` with the same `FPM_FFLAGS`/`FPM_CXXFLAGS`/
-`FPM_LDFLAGS` the CI job sets, minus anything CI-environment-specific like the apt installs).
-
-## Don't commit or push on the main/default branch yourself
-
-The user always commits and pushes their own changes on `main` — even after explicitly asking
-for a feature/fix to be implemented, do not run `git commit`/`git push` on `main` yourself
-unless they separately, explicitly ask for that specific commit. Leave finished work
-uncommitted in the working tree for them to review and commit. (This is specific to the
-main/default branch; it doesn't apply to work you've been asked to do inside your own
-throwaway branch/worktree, if any.)
-
-## The `parquet_strings` module
+### The `parquet_strings` module
 
 `src/parquet_strings.f90` is an independent module (`use parquet_strings`; depends only on
 `iso_fortran_env`/`iso_c_binding`) providing `parquet_string_column` (Arrow-LargeUtf8-style
@@ -311,21 +465,21 @@ one element). User guide: `doc/pages/string-columns.md`.
   group from C buffers, int32/int64 offsets + validity merge) are what this integration is built
   on.
 - **`allow_null=.true.` on `get`/`to_string` returns an empty string, not unallocated** — see the
-  gfortran note in "Build and compiler notes" below.
+  gfortran note in "Compiler & language gotchas" below.
 
-## The `parquet_temporal` module (date/time/timestamp)
+### The `parquet_temporal` module (date/time/timestamp)
 
 `src/parquet_temporal.f90` provides `parquet_date`/`parquet_time`/`parquet_timestamp` — one
 element each (unlike `parquet_string_column` above, which owns a whole column) — fully wired
 into `parquet_read_column`/`parquet_write_column` and every chunked/row-mode/element-mode
 counterpart. User guide: `doc/pages/date-time.md`.
 
-- **Domain-grouped module naming, not one-module-per-type — this is now the precedent for
-  future sibling modules.** The module was renamed from `parquet_datatype` to `parquet_temporal`
-  specifically so a future `parquet_map`/`parquet_list` module (for Parquet `MAP`/variable-length
-  `LIST` support, currently unimplemented — see "Features considered but not implemented" in
-  CONTRIBUTING.md) has an obviously-parallel name to grow into, rather than this one module
-  accumulating every future element type. Follow the same pattern: one module per *domain* of
+- **Domain-grouped module naming, not one-module-per-type — `parquet_temporal` is the precedent
+  for future sibling modules.** The name groups `parquet_date`/`parquet_time`/`parquet_timestamp`
+  under their shared *domain* rather than any single type, leaving an obviously-parallel name for a
+  future `parquet_map`/`parquet_list` module (Parquet `MAP`/variable-length `LIST` support — see
+  CONTRIBUTING.md's "Features considered but not implemented") to grow into, so this one module
+  never accumulates every future element type. Follow the same pattern: one module per *domain* of
   related types, named after the domain (`temporal`, `map`, `list`), not after any single type
   inside it.
 - **These three types carry their own null state — no `is_valid=`/`null_value=` argument
@@ -355,17 +509,18 @@ counterpart. User guide: `doc/pages/date-time.md`.
   `parquet_debug_write_datetime_fixture` in `parquet_wrapper.cpp` for the working pattern if a
   future debug fixture needs another legacy/foreign Arrow encoding.
 
-## Build and compiler notes
+## Build & compiler notes
 
-- **132-column line limit is enforced — do not reintroduce `-ffree-line-length-none`.** As of
-  2026-07-12, `src/*.f90` and `test/*.f90` are held strictly within the standard 132-column
-  free-form limit, including comments (both whole-line and trailing end-of-line) — a comment
-  pushing a line past 132 columns is a violation just like code would be. `.gitlab-ci.yml`'s
-  `FPM_FFLAGS` no longer passes `-ffree-line-length-none`, so a line over 132 columns now fails
-  CI on older gfortran (and is a style violation regardless of compiler). When a line runs
-  long, wrap it with `&` continuations (code/strings) or split it across multiple `!`-prefixed
-  comment lines — don't reach for the compiler flag again, and don't add per-file/per-line
-  suppressions.
+### Compiler & language gotchas
+
+- **132-column line limit is enforced — do not reintroduce `-ffree-line-length-none`.**
+  `src/*.f90` and `test/*.f90` are held strictly within the standard 132-column free-form limit,
+  including comments (both whole-line and trailing end-of-line) — a comment pushing a line past
+  132 columns is a violation just like code would be. `.gitlab-ci.yml`'s `FPM_FFLAGS` does not
+  pass `-ffree-line-length-none`, so a line over 132 columns fails CI on older gfortran (and is a
+  style violation regardless of compiler). When a line runs long, wrap it with `&` continuations
+  (code/strings) or split it across multiple `!`-prefixed comment lines — don't reach for the
+  compiler flag again, and don't add per-file/per-line suppressions.
 - **Minimum gfortran is 13; don't work around compiler bugs in source.** gfortran ≤ 11
   miscompiles the optional allocatable-`character` argument in `schema%add_col_qc` /
   `schema%set_col_qc` (corrupted column name → a spurious "column not found" abort at
@@ -401,156 +556,84 @@ counterpart. User guide: `doc/pages/date-time.md`.
   blank-pads); reserve `transfer` for exact-size byte moves.
 - **Never write a function that returns `character(len=:), allocatable` — use a subroutine with
   an `intent(out)`/`intent(inout)` allocatable `character` argument instead.** This is a fixed
-  project-wide convention now, not just advice: gfortran has a confirmed, still-open compiler bug
+  project-wide convention, not just advice: gfortran has a confirmed, still-open compiler bug
   (GCC [PR113797](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=113797); related:
   [PR97977](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=97977)) where the codegen for *receiving*
   such a function's result uses a hidden length-tracking variable that isn't always properly
-  thread-local, silently corrupting memory when the function is called concurrently (confirmed
-  via a from-scratch, library-independent reproducer; needs a type with ≥2 allocatable
-  components — a type with only one, otherwise identical, does not reproduce it; not affected by
-  `class()` vs. plain `type()`, object lifetime, or construction/destruction; and not shared by
-  non-`character` allocatable results, e.g. `integer(int32), allocatable` reproduced zero
-  failures across 80,000 iterations under the identical harness).
+  thread-local, silently corrupting memory when the function is called concurrently. Plain
+  non-`character` allocatable function results (numeric scalars/arrays, allocatable arrays of a
+  derived type) are not affected and need no action.
 
-  Every such function in this codebase has been converted: `parquet_string_column`'s `get`/
-  `summary` and `parquet_string`'s `to_string` (in `parquet_strings.f90`); `parquet_unquote`/
-  `parquet_to_lower`/`schema_get_field_name`/`parquet_column_info%get_field_name` (`parquet.f90`
-  + submodules); `schema_set_col_qc`/`parquet_maml_file%set_col_qc` (converted to a single
-  `intent(inout)` argument — see below); and the private helpers
-  `parquet_column_output_name`/`parquet_resolve_output_name`/`parquet_get_schema_type`/
-  `writer_context_suffix`/`parquet_qc_format_int` (`parquet_write.f90`),
-  `parquet_qc_format_real` (`parquet_write_numeric.f90`),
-  `maml_name_suffix` (`parquet_metadata.f90`), `reader_filename_suffix` (`parquet_read.f90`),
-  `nth_field` (`parquet_maml_base_add_col_qc.f90`). `test/run_tester.f90`'s `parquet_string`
-  suite runs fully parallel again (the exclusion that used to be here is gone) as this fix's own
-  ongoing regression check — verified clean across 20 repeated runs under
-  `-fcheck=bounds,do,mem,pointer` before being re-enabled.
+  Already applied throughout `src/*.f90` — apply the same conversion to any new occurrence.
 
-  **`set_col_qc` design note**: converting a function whose whole point was
-  `col = schema%get_col_qc(col)` (assign the result back into the same variable used as input)
-  needed a real design change, not a mechanical swap — a subroutine can't alias the same actual
-  argument to separate `intent(in)`/`intent(out)` dummies. Fixed by making the single argument
-  `intent(inout)`: it holds the compact input string on entry and the parsed name on exit, so
-  `call schema%set_col_qc(col)` preserves the original single-variable ergonomics. Same treatment
-  for `parquet_maml_file%set_col_qc` underneath it. If a future function-to-subroutine conversion
-  hits this same "assign result back into the input variable" pattern, this is the fix — an
-  `intent(inout)` single argument, not two separate `intent(in)`/`intent(out)` dummies.
+  **Design note for the "assign result back into the input variable" pattern** (e.g.
+  `col = schema%get_col_qc(col)`): a subroutine can't alias the same actual argument to separate
+  `intent(in)`/`intent(out)` dummies, so make the single argument `intent(inout)` instead — it
+  holds the input on entry and the result on exit, preserving `call schema%set_col_qc(col)`'s
+  single-variable ergonomics (see `schema_set_col_qc`/`parquet_maml_file%set_col_qc`).
 
-  **Not affected, no action needed**: functions with no multi-allocatable-component "self" type
-  at all (e.g. plain string/numeric helpers), and any function returning an allocatable
-  non-`character` result (numeric scalars/arrays, allocatable arrays of a derived type).
+### Stale `fpm` build cache
 
-## Renames/refactors: only apply low-blast-radius changes
+If `fpm test` behaves unexpectedly after source changes (e.g. a test target seems to run old
+code), try `fpm clean --all` to force a clean rebuild before spending time debugging — fpm's
+build cache can serve a stale binary. Building with several different `FPM_FFLAGS` creates
+multiple `build/gfortran_<hash>/` dirs, and `test/test_errors.f90`'s `error_scenarios_bin` does
+`find build -name error_scenarios | head -1`, which can pick a *stale* binary from an old hash
+dir — symptom: tests pass when run scoped but fail under a full `fpm test`. `tools/coverage.sh`
+runs `fpm clean` up front to avoid this; for a plain `fpm test`, `fpm clean --all` fixes it.
 
-When renaming or refactoring existing (non-new) code for consistency, only apply the
-renames/changes that are low blast-radius (few call sites, no public API/doc impact).
-For anything with wider knock-on effects (public API, many call sites, cross-file
-conventions), report it as a proposed change and wait for confirmation instead of applying
-it directly.
+### Keeping `tools/prep_fpm_publish.sh` in sync
 
-## One program unit per file; filename == unit name
+`tools/prep_fpm_publish.sh` builds the tarball content for `fpm publish` (see CONTRIBUTING.md's
+"Publishing to the fpm registry") by committing a disposable local branch that strips
+maintainer/CI-only files (`REMOVE_PATHS`) and edits `fpm.toml` (comments out `test-drive`, flips
+`module-naming` to `"parquet"`). This list/logic silently goes stale unless updated alongside the
+change that invalidates it — watch for these triggers:
 
-Every `src/*.f90` file defines exactly one `module` or `submodule`, and the filename (sans
-`.f90`) equals that program unit's name — e.g. `parquet_read_numeric.f90` ⇒
-`submodule (parquet:parquet_read) parquet_read_numeric`. This is a near-universal fpm/Fortran
-convention and is load-bearing for navigation and for the publish tooling (which flips
-`module-naming` to `"parquet"`). Do not put two program units in one file, and do not name a
-file differently from the unit it defines. (fpm does not hard-fail on a mismatch by default —
-`module-naming = false` here — but treat it as a firm rule.)
+- **A new file lands under `tools/`.** Decide whether it's consumer-facing (like
+  `tools/generate_parquet_maml.sh`, documented in `doc/pages/embedding-maml-schemas.md`) or
+  maintainer/CI-only. If the latter, add it to `REMOVE_PATHS`. (A missing/renamed entry fails
+  loudly — the script pre-validates every path exists — so this is at least self-enforcing for
+  *existing* entries; it won't catch a *new* file that should have been added but wasn't.)
+- **A new maintainer/CI-only file lands at the repo root** (another CI config, another
+  AI-instructions-style file, etc.) — same call: add to `REMOVE_PATHS` if it's not
+  consumer-relevant.
+- **Any `REMOVE_PATHS` entry is renamed or moved.** Update the path string. The script's
+  pre-flight existence check turns a stale entry into an immediate, zero-side-effect failure
+  rather than a silently-wrong tarball — but only once you actually run it; nothing catches this
+  at edit time.
+- **A new dev-dependency is added to `fpm.toml`** — check whether its own modules comply with fpm's
+  [module-naming rules](https://fpm.fortran-lang.org/registry/naming.html) before adding it. If
+  not, it needs the same "comment out in the disposable branch" treatment as `test-drive`, or it
+  will reintroduce the build-breaking conflict documented in CONTRIBUTING.md.
+- **The exact literal text of the `test-drive.git = ...` or `module-naming = false` lines in
+  `fpm.toml` changes** for unrelated reasons — the script's own `SystemExit` checks already catch
+  this by failing loudly, but it's worth knowing why a future `fpm.toml` edit might break the
+  publish script.
+- **Upstream fpm or `test-drive` fixes the module-naming compliance gap** (fpm PR
+  [#828](https://github.com/fortran-lang/fpm/pull/828) / issue #883) — if fpm ever gains a
+  per-dependency naming exemption, or `test-drive` renames its modules to comply, revisit whether
+  the whole `test-drive`-comment-out workaround (and possibly `module-naming = false` on `main`)
+  is still needed at all.
 
-## Nested submodule tree
+### Manual (never-`fpm test`) large-scale/benchmark tools
 
-`src/*.f90`'s `parquet`/`parquet_read`/`parquet_write`/`parquet_metadata` files form a nested
-submodule tree (not flat siblings under `parquet`), split by data-type family for read/write and
-by format for metadata:
+A user/maintainer-runnable check that needs more memory/disk/time than `fpm test`/CI should ever
+attempt (e.g. genuinely exceeding `huge(1)` rows, or a multi-GB benchmark file) goes under `app/`
+(an `auto-executables` fpm target — never auto-picked-up by `fpm test`, unlike anything under
+`test/`) plus a thin `tools/*.sh` wrapper with env-var config (matching this repo's other
+`tools/*.sh` scripts), never under `test/`. See `app/benchmark_threads.f90`/
+`tools/benchmark_threads.sh` and `app/test_large_scale.f90`/`tools/test_large_scale.sh` for the
+established shape: CLI flags (`--key=value`) parsed via `get_command_argument` in the Fortran
+program; env vars read and forwarded as those flags by the shell wrapper
+(`NAME="${NAME:-default}"` then `fpm run <app> -- --key="$NAME"`); `set -euo pipefail`; `cd` to
+the repo root first. Document usage (parameters, defaults, example invocations) in
+CONTRIBUTING.md's "Other tools/ helpers" section, not README.md — this is a contributor/
+maintainer tool, not part of the public library API.
 
-```
-parquet                         (module — public API + cross-subtree private-helper interfaces)
-├─ parquet_read                 (submodule — reader lifecycle, queries, shared read helpers)
-│   ├─ parquet_read_numeric     (int32/int64/float32/float64/logical, all access modes)
-│   ├─ parquet_read_string
-│   └─ parquet_read_temporal    (date/time/timestamp)
-├─ parquet_write                (submodule — writer lifecycle, shared write helpers)
-│   ├─ parquet_write_numeric
-│   ├─ parquet_write_string
-│   └─ parquet_write_temporal
-└─ parquet_metadata             (submodule — parse/build orchestration + shared metadata helpers)
-    ├─ parquet_metadata_base    (format-agnostic column_info/table_metadata plumbing)
-    ├─ parquet_metadata_get     (parquet_get_metadata queries)
-    └─ parquet_metadata_maml    (MAML-specific: section schema + all validation)
+## Testing & coverage
 
-parquet_bindings                (module — independent C++ interop)
-parquet_strings                 (module — independent element domain)
-parquet_temporal                (module — independent element domain)
-parquet_maml_base               (module — generated)
-└─ parquet_maml_base_add_col_qc (submodule)
-parquet_wrapper.cpp             (C++ TU)
-```
-
-Reserved for future element-domain work (not yet implemented): `parquet_map`/`parquet_list`/
-`parquet_struct` (independent modules, like `parquet_temporal`) plus their own
-`parquet_read_*`/`parquet_write_*` type-family children.
-
-**Placement rule for a new read/write specific or shared helper:** type-generic code (used by
-more than one of numeric/string/temporal) belongs in the parent (`parquet_read`/`parquet_write`)
-as an ordinary contained procedure — descendants reach it by host association, no interface
-needed. Type-specific code belongs in the matching child, also as an ordinary contained
-procedure. A new *public* generic's specifics, and any type-bound binding target, must keep
-their interface declared in `parquet.f90` itself regardless of family (see the private-helper
-relocation rule below) — never assume a helper is safe to relocate purely from its call sites
-without also checking those two disqualifiers, plus whether it's itself `public ::`-exported.
-
-**A known gfortran 15.2.0 ICE to watch for when adding a new cross-subtree call into this
-tree:** calling `parquet_parse_protected_cols` (declared in `parquet.f90`) directly from a
-submodule nested **two levels** under `parquet` (e.g. `parquet:parquet_metadata:
-parquet_metadata_maml`) reproducibly crashes the compiler with an internal compiler error —
-confirmed isolated to this one procedure's exact argument shape (an assumed-length `character`
-array paired with a deferred-length allocatable `character` array result, i.e.
-`character(len=*), intent(in) :: lines(:)` + `character(len=:), allocatable, intent(out) ::
-names(:)`) called from 2+ levels of nesting; removing the call, or flattening the caller back to
-one level, both avoid it. Worked around via a thin relay: `parquet_metadata.f90` (the level-1
-parent, where calling it already works) exposes a plain contained subroutine
-`parquet_parse_protected_cols_relay` that just forwards to it, and the grandchild calls that
-relay instead of reaching two levels up directly. If a *different* procedure with a similar
-deferred-length-character-array-result shape hits the same ICE from deep nesting in the future,
-use the same relay pattern rather than assuming the whole nested-submodule design is at fault —
-this bug is narrow (confirmed: only this one procedure's exact shape triggers it; several other
-similarly-shaped procedures called from the same nesting depth compile and run cleanly).
-
-## Naming conventions
-
-Follow these when adding new public API, types, or internal helpers:
-
-- **Public module-level API** (anything in `src/parquet.f90`'s `public ::` list — functions,
-  subroutines, types) always carries the `parquet_` prefix, e.g. `parquet_get_metadata`,
-  `parquet_open_reader`, `parquet_schema`.
-- **Type-bound procedures** (`schema%init`, `schema%add_field`, `reader%...`) do *not* need a
-  `parquet_` prefix — the type itself namespaces them. If the natural short name collides
-  with another type's backing implementation, keep the short name as the type-bound binding
-  target and give the private module procedure a distinguishing name (e.g.
-  `parquet_column_info`'s binding `set_column_available => set_available`, kept short only to
-  avoid colliding with `parquet_schema`'s own `set_column_available` impl).
-- **`maml_` prefix** is reserved specifically for MAML-parsing/building internal helpers
-  (e.g. `maml_push_line`, `maml_line_exists`) — don't reuse it for unrelated internal code.
-- **Other private module-level helpers** (in `parquet_metadata.f90`, `parquet_read.f90`,
-  `parquet_write.f90`) generally keep the `parquet_` prefix too, even though private —
-  matches the existing majority convention in those files; only give it a bare, unprefixed
-  name if it's a small, obviously-local helper (rare; check for existing precedent first).
-- **Private module-level types** (not part of the public API, e.g. `maml_section_schema`)
-  drop the `parquet_` prefix — this is intentional, not an inconsistency to "fix".
-- **C++ bindings** (`parquet_bindings.f90` interfaces, `parquet_wrapper.cpp`) mirror the C++
-  side's own naming (still generally `parquet_`-prefixed for the `extern "C"` surface) —
-  don't rename these to match Fortran-side conventions.
-
-- **A new module holding several related element/handle types** (as opposed to one module per
-  type) should be named after the *domain* those types belong to, not any single type inside
-  it — e.g. `parquet_temporal` for `parquet_date`/`parquet_time`/`parquet_timestamp`. See "The
-  `parquet_temporal` module" above for the reasoning and the sibling modules (`parquet_map`,
-  `parquet_list`) this leaves room for.
-
-When in doubt, grep for an existing analogous name before inventing a new convention.
-
-## Running a single test suite/test
+### Running a single test suite/test
 
 Use `fpm test run_tester -- <suite>` to run just one test-drive suite (e.g. `fpm test
 run_tester -- reading`), or `fpm test run_tester -- <suite> "<test name>"` to run a single
@@ -558,7 +641,7 @@ named test within it. Prefer this over a full `fpm test` while iterating — the
 (including OpenMP/error-scenario subprocess tests) takes much longer than the one suite
 relevant to a given change.
 
-## Measuring test coverage
+### Measuring test coverage
 
 Run `tools/coverage.sh` for per-file and total `src/` line coverage plus the uncovered line
 ranges; pass one run_tester suite name to scope it (e.g. `tools/coverage.sh reading`), or no
@@ -580,11 +663,9 @@ so `gcovr` reads its gcov data cleanly alongside the Fortran sources) but delibe
 coverage on exactly that kind of machine, use the separate `tools/coverage_cpp.sh` instead
 (not a flag on `tools/coverage.sh` — Fortran and C++ coverage can't be instrumented/collected
 in the same local pass when the toolchains don't match); see CONTRIBUTING.md's CI section for
-what it does and why it's a standalone script. As of 2026-07-18, `src/parquet_wrapper.cpp` is
-at 100% line coverage confirmed under **both** toolchains (local `tools/coverage_cpp.sh` with
-Clang, and CI's real GCC/gcovr) — see "`src/parquet_wrapper.cpp`: GCC vs Clang gcov attribution"
-below for the mechanism that used to make these two disagree and the conventions that keep them
-in sync going forward.
+what it does and why it's a standalone script. See "`src/parquet_wrapper.cpp`: GCC vs Clang gcov
+attribution" below for why local and CI coverage can disagree and the conventions that keep them
+in sync.
 
 Both `tools/coverage.sh` and `tools/coverage_cpp.sh` report an extra section after the per-file
 summary and uncovered-line list: every `GCOVR_EXCL`'d line that actually had a positive local hit
@@ -596,7 +677,7 @@ hits (the stale-exclusion candidates). `tools/coverage.sh` only needs the latter
 since Fortran coverage uses the same `gfortran`/`gcov` toolchain locally and in CI — there's no
 GCC-vs-Clang split to make for `src/*.f90`.
 
-## Fortran gcov attribution artifacts
+### Fortran gcov attribution artifacts
 
 Confirmed by inspecting raw per-line gcov hit counts (not just `tools/coverage.sh`'s summary):
 gfortran/gcov sometimes marks an excluded, genuinely-dead line as "hit" even though it never
@@ -637,33 +718,34 @@ instead, not tagged as an artifact — see `parquet_strings.f90`'s `compact_all`
 was found to be exactly that case (a real, now-covered subroutine header, not this artifact) and
 had its `GCOVR_EXCL_LINE` removed rather than tagged.
 
-## `src/parquet_wrapper.cpp`: GCC vs Clang gcov attribution
+### `src/parquet_wrapper.cpp`: GCC vs Clang gcov attribution
 
-Confirmed (not just hypothesized) via a real GitLab CI run: GCC's actual gcov and Clang's
-`llvm-cov gcov` (the default backend `tools/coverage_cpp.sh` uses locally) attribute per-line hit
-counters differently for several C++ source shapes, even for code that unquestionably executes
-under both. This is why CI's coverage percentage used to diverge from a local
-`tools/coverage_cpp.sh` run on the identical commit, and why some `GCOVR_EXCL` markers exist on
-lines that are demonstrably, constantly covered — they aren't dead code, gcov just can't always
-see it. Divergent shapes found so far: switch `case`/`default:` labels (especially the first label
-of a fall-through group), a function's closing `}` immediately after its own `return`, a lambda's
-parameter-list line, and continuation lines of one multi-line chained statement (`xml << ... <<
-...`, a multi-line `fprintf`/function call). Before assuming a new CI-only-uncovered line is a real
-gap, check whether it's one of these shapes and whether the surrounding code is otherwise
-demonstrably covered (e.g. by a call-graph check, or the fact that a dependent test's assertions
-pass) — if so, it's this phenomenon, not a missing test.
+Confirmed via a real GitLab CI run: GCC's actual gcov and Clang's `llvm-cov gcov` (the default
+backend `tools/coverage_cpp.sh` uses locally) attribute per-line hit counters differently for
+several C++ source shapes, even for code that unquestionably executes under both. This is why
+CI's coverage percentage can diverge from a local `tools/coverage_cpp.sh` run on the identical
+commit, and why some `GCOVR_EXCL` markers sit on lines that are demonstrably, constantly
+covered — they aren't dead code, gcov just can't always see it, so don't strip those markers as
+if they were wrong. Divergent shapes found so far:
+switch `case`/`default:` labels (especially the first label of a fall-through group), a function's
+closing `}` immediately after its own `return`, a lambda's parameter-list line, and continuation
+lines of one multi-line chained statement (`xml << ... << ...`, a multi-line `fprintf`/function
+call). Before assuming a new CI-only-uncovered line is a real gap, check whether it's one of these
+shapes and whether the surrounding code is otherwise demonstrably covered (e.g. by a call-graph
+check, or the fact that a dependent test's assertions pass) — if so, it's this phenomenon, not a
+missing test.
 
 **Mechanical conventions to preserve when adding or moving a `GCOVR_EXCL` marker in this file**
 (violating any of these silently reintroduces a local/CI coverage mismatch or miscategorizes a
-report entry — confirmed the hard way, more than once, in the same session these were written):
+report entry):
 
 - **`GCOVR_EXCL_STOP` must be on its own dedicated comment-only line, never trailing real code**
   (`<code>; } // GCOVR_EXCL_STOP` is wrong). Real `gcovr` (CI) does not extend the exclusion to a
   `STOP` line that also carries code — only lines strictly between `START` and such a line are
   excluded, leaving that line's own code counted as an ordinary (uncovered) line. This is *not*
   what `tools/coverage_cpp.sh`'s own exclusion logic does locally (it always includes the `STOP`
-  line itself), which is exactly how this mismatch went unnoticed for a long time — the local tool
-  was more lenient than the tool CI actually runs.
+  line itself) — the local tool is more lenient than the tool CI actually runs, so a `STOP` line
+  that carries code can pass locally yet count as uncovered in CI.
 - **A `case`/`catch`/`default:` label sitting just outside its block's `START`/`STOP` (immediately
   before `START`, or immediately after a preceding `STOP`) needs the marker moved to include it.**
   GCC gives a label its own line-attribution, separate from the code that follows it — a marker
@@ -674,9 +756,7 @@ report entry — confirmed the hard way, more than once, in the same session the
   `tools/coverage_cpp.sh`'s reporting categorizes exclusions by searching for this exact substring
   on the marker's own line — wrapping the phrase onto a following, unmarked comment line silently
   drops it into the "other" (dead-code) bucket instead, and the new "zero hits" report won't catch
-  it either. This isn't a cosmetic nicety: it happened twice in the same editing pass (once caught
-  by re-reading the diff, once caught only by the new report itself on the next run) before every
-  site was fixed.
+  it either.
 
 **Confirmed root-cause mechanisms behind why so many lines in this file need `GCOVR_EXCL` at all**
 (general knowledge for any future coverage work here, not just the GCC/Clang split above):
@@ -703,9 +783,9 @@ report entry — confirmed the hard way, more than once, in the same session the
   `src/parquet_*.f90` call site for an equivalent pre-check first.
 - Parquet C++'s Arrow reader always materializes a decimal column as `Decimal128Array`/
   `Decimal256Array` on read, never `Decimal32Array`/`Decimal64Array`, regardless of the physical
-  `DECIMAL32`/`DECIMAL64` width actually written (confirmed via a temporary `type_id()` debug
-  print) — so those case arms in `decimal_value_at`/`decimal_to_int64_checked` are permanently
-  dead on the read path, not a testing gap, on any input.
+  `DECIMAL32`/`DECIMAL64` width actually written — so those case arms in `decimal_value_at`/
+  `decimal_to_int64_checked` are permanently dead on the read path, not a testing gap, on any
+  input.
 
 If you ever find a line marked `GCOVR_EXCL_LINE`/inside a `GCOVR_EXCL_START`/`GCOVR_EXCL_STOP`
 block that is actually reachable in normal (non-abort) operation — i.e. the exclusion looks
@@ -726,7 +806,7 @@ file (or a future sibling module) shows the same "0% but body covered" pattern, 
 way — confirm the body is fully covered first (that's the only way to tell it apart from a
 genuine gap), then exclude with a comment rather than spending more time chasing it.
 
-## Regression tests for "sized/typed from the first element" bugs
+### Regression tests for "sized/typed from the first element" bugs
 
 This bug class specifically affects **character vectors/arrays**: a fixed per-element length
 gets derived from the *first* element's own length instead of the true maximum, silently
@@ -742,56 +822,30 @@ shortest one, to actively try to trigger this bug rather than merely avoid it by
 A fixture where the first element happens to be the longest (or same-length) can pass even
 if the underlying bug is still present.
 
-## Public numeric arguments: provide both int32 and int64 kinds
-
-When adding a public procedure argument that holds a row count / size / index (any integer a
-caller might naturally declare as a plain `INTEGER`), make it generic over **both**
-`integer(int32)` and `integer(int64)`, following the existing `parquet_get_nrows_int32`/
-`parquet_get_nrows_int64` overload pattern. An `integer(int64)`-only dummy forces callers
-with a default-kind `INTEGER` variable into a `Type mismatch ... passed INTEGER(4) to
-INTEGER(8)` compile error (this shipped once for `parquet_open_reader`'s `nrows=` before
-being fixed).
-
-Fortran constraint that shapes this: an *optional* dummy that differs only by kind cannot be
-the sole disambiguator between specific procedures in a generic interface (a call omitting it
-is ambiguous). So when such an argument is optional, carry the argument-absent case as its
-own separate specific rather than an optional dummy — see `parquet_open_reader`'s split into
-`parquet_open_reader_base` (no `nrows`) plus `parquet_open_reader_nrows_int32`/`_int64`
-(required `nrows`), all under one generic interface.
-
-For a *required* (non-optional) argument, this ambiguity constraint doesn't apply — Fortran can
-disambiguate two specifics differing only by a required argument's kind without any special
-handling, so just add the second kind-specific directly (no base/kind-suffixed split needed),
-sharing one private `_impl` worker between the two (mirrors `add_col_qc_impl`'s existing
-shared-worker pattern) — see `parquet_read_array_row_mode`'s `row_index` (12 specifics: 6 data
-types x `integer(int32)`/`integer(int64)` row_index, each pair delegating to one
-`parquet_read_<type>_array_row_mode_impl`).
-
-## Guarding a hard Arrow int32-only ceiling
+### Guarding a hard Arrow int32-only ceiling
 
 Some Arrow/Parquet C++ APIs are hard-capped to a plain `int32_t`, with no int64/"large" fallback
 at all — found three times so far: `arrow::FixedSizeListBuilder`/`fixed_size_list()`'s `list_size`
 (a vector column's per-row width, `col_size`), `arrow::Schema::num_fields()`/`GetFieldIndex()` (a
 table's column count), and Parquet's own repetition/definition-level generation for list-typed
 columns (`level_conversion.cc`), which walks every flattened element of a row group with a plain
-`int32_t` counter (see apache/arrow#33188 / ARROW-17983, confirmed still open/unfixed upstream).
-Unlike the other two, this last one is scoped to one **row group**, not a column's total element
-count (`nrows * col_size`) — and `close_parquet_writer`'s row-group auto-sizing already keeps
-every row group under it by shrinking the row-group size, however large `nrows` gets, so a large
-total is never actually a problem (confirmed empirically: a multi-billion-element vector column
-writes successfully split across small-enough row groups). Only an *explicit* `chunk_size=`
-(`parquet_open_writer`/`parquet_set_writer_options`) that itself conflicts with a column's
-`col_size` still aborts, since that's a caller-forced value auto-sizing can't silently override —
-see `check_chunk_size_fits_limit_for_col_size`/`check_explicit_chunk_size_fits_arrow_limit`/
-`check_chunk_size_fits_metadata_limit` in `parquet_wrapper.cpp`, and the README's Limitations
-section. This differs from row count (`int64_t` throughout Arrow) or a string column's byte
-payload (which has an `arrow::large_utf8()` fallback) — for those two (`col_size` and column
-count), there is no workaround, only a clean failure instead of letting Arrow silently
-truncate/wrap internally. When a new int32-only ceiling is found, guard it with the pattern
-already used for `col_size`/column-count above (see `check_col_size_fits_arrow_limit`/
-`check_column_count_fits_arrow_limit` in `parquet_wrapper.cpp`) — only reach for the
-row-group-scoped auto-sizing approach instead if the new ceiling is similarly scoped per-row-group
-rather than per-column-total:
+`int32_t` counter (see apache/arrow#33188 / ARROW-17983, still open/unfixed upstream). Unlike the
+other two, this last one is scoped to one **row group**, not a column's total element count
+(`nrows * col_size`) — and `close_parquet_writer`'s row-group auto-sizing already keeps every row
+group under it by shrinking the row-group size, however large `nrows` gets, so a large total is
+never actually a problem (verified empirically with a multi-billion-element vector column). Only
+an *explicit* `chunk_size=` (`parquet_open_writer`/`parquet_set_writer_options`) that itself
+conflicts with a column's `col_size` still aborts, since that's a caller-forced value auto-sizing
+can't silently override — see `check_chunk_size_fits_limit_for_col_size`/
+`check_explicit_chunk_size_fits_arrow_limit`/`check_chunk_size_fits_metadata_limit` in
+`parquet_wrapper.cpp`, and the README's Limitations section. This differs from row count
+(`int64_t` throughout Arrow) or a string column's byte payload (which has an `arrow::large_utf8()`
+fallback) — for those two (`col_size` and column count), there is no workaround, only a clean
+failure instead of letting Arrow silently truncate/wrap internally. When a new int32-only ceiling
+is found, guard it with the pattern already used for `col_size`/column-count above (see
+`check_col_size_fits_arrow_limit`/`check_column_count_fits_arrow_limit` in `parquet_wrapper.cpp`)
+— only reach for the row-group-scoped auto-sizing approach instead if the new ceiling is similarly
+scoped per-row-group rather than per-column-total:
 
 1. A `static constexpr int64_t kArrowInt32...Limit = 2147483647;` named for what it bounds.
 2. A process-global `static int64_t g_debug_..._limit = -1;` test-only override plus a
@@ -811,14 +865,14 @@ rather than per-column-total:
 
 **Read side of the `nrows * col_size` ceiling: row-group-scoped, not a ceiling at all.** Unlike
 the write side above, `parquet_get_col_size`/`parquet_get_column_total_elements`/
-`parquet_read_array_row_mode`/`parquet_read_array_element_mode` on the *read* path used to hit
-this ceiling for a different reason: they materialized the *whole* column via
-`get_single_chunk_array`'s `ReadColumn` (Arrow's whole-file, all-row-groups-at-once convenience
-API) just to answer a size query, fetch one row, or fetch one element position across all rows,
-which trips Arrow's own internal int32 list-index/offset limit once `nrows * col_size` crosses
-int32 — even though the column was written perfectly safely (every row group under the limit, per
-the write-side guard above). Fixed by making all four genuinely row-group-scoped instead of
-adding a new guard: `parquet_get_col_size`/`parquet_get_column_total_elements` read `col_size`
+`parquet_read_array_row_mode`/`parquet_read_array_element_mode` on the *read* path must **not**
+materialize the *whole* column via `get_single_chunk_array`'s `ReadColumn` (Arrow's whole-file,
+all-row-groups-at-once convenience API) just to answer a size query, fetch one row, or fetch one
+element position across all rows: doing so trips Arrow's own internal int32 list-index/offset
+limit once `nrows * col_size` crosses int32, even though the column was written perfectly safely
+(every row group under the limit, per the write-side guard above). So all four are genuinely
+row-group-scoped rather than guarded — keep them that way, don't revert to a whole-column read:
+`parquet_get_col_size`/`parquet_get_column_total_elements` read `col_size`
 straight off the schema's `FixedSizeListType::list_size()` (no data read at all) for a
 FIXED_SIZE_LIST column, and `parquet_read_array_row_mode` resolves which row group a given
 `row_index` falls in (`resolve_row_group_for_row`, walking each row group's `num_rows()` from the
@@ -826,15 +880,15 @@ file footer) and reads only that one row group (`get_row_group_chunk_array`, the
 `_column_chunk` family already used) rather than the whole column.
 `parquet_read_array_element_mode` is different in kind from the other three: it inherently needs
 every row's value at the same fixed column position, i.e. data from *every* row group — it can't
-skip all but one the way row_mode does. So its fix is "stream row group by row group" rather than
-"read only one row group": `stream_element_mode_row_groups` walks every row group, reads each
+skip all but one the way row_mode does. So it streams row group by row group rather than reading
+only one: `stream_element_mode_row_groups` walks every row group, reads each
 one's own chunk via `get_row_group_chunk_array`, extracts just that row group's rows' values at
 the fixed offset, and writes them into the correct slice of the caller's already-allocated
 `nrows`-length output arrays — so no single Arrow call ever has to flatten more than one row
 group's worth of elements, even though the final output still spans the whole file.
 `resolve_element_mode_col_size` mirrors `parquet_get_col_size`'s own schema-only col_size lookup,
 so element mode doesn't need a whole-column read just to validate `col_index`/compute the stride
-offset either. The one case that still falls back to the old whole-column path (for all four) is
+offset either. The one case that falls back to the whole-column path (for all four) is
 an active row filter (`parquet_open_reader(..., filter=)`/`parquet_reader_set_filter`): a filter
 mask has no row-group structure of its own (see `get_row_group_chunk_array`'s own comment), so
 `row_index`/the per-row iteration there means "index into the filtered result", not a physical
@@ -844,62 +898,3 @@ file row. Regression-tested via `test/error_scenarios.f90`'s
 it would actually read a whole column, on a tiny fixture — the scenario finishing without
 aborting proves none of the four calls took that path) plus its negative control
 `scenario_whole_column_read_forced_error_control` (proves the hook itself actually fires).
-
-## Manual (never-`fpm test`) large-scale/benchmark tools
-
-A user/maintainer-runnable check that needs more memory/disk/time than `fpm test`/CI should ever
-attempt (e.g. genuinely exceeding `huge(1)` rows, or a multi-GB benchmark file) goes under `app/`
-(an `auto-executables` fpm target — never auto-picked-up by `fpm test`, unlike anything under
-`test/`) plus a thin `tools/*.sh` wrapper with env-var config (matching this repo's other
-`tools/*.sh` scripts), never under `test/`. See `app/benchmark_threads.f90`/
-`tools/benchmark_threads.sh` and `app/test_large_scale.f90`/`tools/test_large_scale.sh` for the
-established shape: CLI flags (`--key=value`) parsed via `get_command_argument` in the Fortran
-program; env vars read and forwarded as those flags by the shell wrapper
-(`NAME="${NAME:-default}"` then `fpm run <app> -- --key="$NAME"`); `set -euo pipefail`; `cd` to
-the repo root first. Document usage (parameters, defaults, example invocations) in
-CONTRIBUTING.md's "Other tools/ helpers" section, not README.md — this is a contributor/
-maintainer tool, not part of the public library API.
-
-## Keeping `tools/prep_fpm_publish.sh` in sync
-
-`tools/prep_fpm_publish.sh` builds the tarball content for `fpm publish` (see CONTRIBUTING.md's
-"Publishing to the fpm registry") by committing a disposable local branch that strips
-maintainer/CI-only files (`REMOVE_PATHS`) and edits `fpm.toml` (comments out `test-drive`, flips
-`module-naming` to `"parquet"`). This list/logic silently goes stale unless updated alongside the
-change that invalidates it — watch for these triggers:
-
-- **A new file lands under `tools/`.** Decide whether it's consumer-facing (like
-  `tools/generate_parquet_maml.sh`, documented in `doc/pages/embedding-maml-schemas.md`) or
-  maintainer/CI-only. If the latter, add it to `REMOVE_PATHS`. (A missing/renamed entry fails
-  loudly — the script pre-validates every path exists — so this is at least self-enforcing for
-  *existing* entries; it won't catch a *new* file that should have been added but wasn't.)
-- **A new maintainer/CI-only file lands at the repo root** (another CI config, another
-  AI-instructions-style file, etc.) — same call: add to `REMOVE_PATHS` if it's not
-  consumer-relevant.
-- **Any `REMOVE_PATHS` entry is renamed or moved.** Update the path string. The script's
-  pre-flight existence check turns a stale entry into an immediate, zero-side-effect failure
-  rather than a silently-wrong tarball — but only once you actually run it; nothing catches this
-  at edit time.
-- **A new dev-dependency is added to `fpm.toml`** — check whether its own modules comply with fpm's
-  [module-naming rules](https://fpm.fortran-lang.org/registry/naming.html) before adding it. If
-  not, it needs the same "comment out in the disposable branch" treatment as `test-drive`, or it
-  will reintroduce the build-breaking conflict documented in CONTRIBUTING.md.
-- **The exact literal text of the `test-drive.git = ...` or `module-naming = false` lines in
-  `fpm.toml` changes** for unrelated reasons — the script's own `SystemExit` checks already catch
-  this by failing loudly, but it's worth knowing why a future `fpm.toml` edit might break the
-  publish script.
-- **Upstream fpm or `test-drive` fixes the module-naming compliance gap** (fpm PR
-  [#828](https://github.com/fortran-lang/fpm/pull/828) / issue #883) — if fpm ever gains a
-  per-dependency naming exemption, or `test-drive` renames its modules to comply, revisit whether
-  the whole `test-drive`-comment-out workaround (and possibly `module-naming = false` on `main`)
-  is still needed at all.
-
-## Error stop messages: include file/schema context
-
-New `error stop` messages in the read/write/schema-building paths should append the relevant
-file and, where applicable, schema/maml name using the existing helpers — `writer_context_suffix`
-(`parquet_write.f90`), `reader_filename_suffix` (`parquet_read.f90`), `maml_name_suffix`
-(`parquet_metadata.f90`) — rather than naming only the offending column/field, so a failure is
-identifiable when several readers/writers/schemas are in play at once. These are only
-meaningful once the reader/writer/schema knows its file/name (i.e. post-open), so the
-guard-clause "…has not been opened" messages are exempt.

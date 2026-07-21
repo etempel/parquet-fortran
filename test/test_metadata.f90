@@ -80,7 +80,27 @@ contains
                 test_missing_string_array_no_default_aborts), &
             new_unittest("add_metadata with an empty key is a silent no-op", test_add_metadata_empty_key_noop), &
             new_unittest("VOTable XML sidecar escapes &, <, "", and ' in unit/description/ucd", &
-                test_votable_xml_escapes_special_chars) &
+                test_votable_xml_escapes_special_chars), &
+            new_unittest("print_schema_info: header/dash/field rows are aligned to computed widths", &
+                test_print_schema_info_alignment), &
+            new_unittest("print_schema_info: prefix, all three dash lines, and is_set filtering", &
+                test_print_schema_info_prefix_dashes_and_is_set), &
+            new_unittest("print_schema_info: repeated calls append to the same open unit", &
+                test_print_schema_info_multiple_schemas_same_unit), &
+            new_unittest("print_schema_info: filename= opens/appends/closes across repeated calls", &
+                test_print_schema_info_filename_append), &
+            new_unittest("print_schema_info: no enabled columns and header=.false. writes nothing", &
+                test_print_schema_info_no_cols_no_header), &
+            new_unittest("print_schema_info: table_name line, default position, prefix, and suppression", &
+                test_print_schema_info_table_name_line), &
+            new_unittest("print_schema_info: neither unit nor filename given aborts", &
+                test_print_schema_info_no_unit_no_filename_aborts), &
+            new_unittest("print_schema_info: unit not already open aborts", &
+                test_print_schema_info_unit_not_open_aborts), &
+            new_unittest("print_schema_info: unit open for reading only aborts", &
+                test_print_schema_info_unit_read_only_aborts), &
+            new_unittest("print_schema_info: unit/filename mismatch aborts", &
+                test_print_schema_info_unit_filename_mismatch_aborts) &
             ]
     end subroutine collect_tests_parquet_metadata
 
@@ -877,5 +897,307 @@ contains
         call check(error, .not. allocated(schema%metadata%items), &
             "add_metadata with an empty key should not append any metadata entry")
     end subroutine test_add_metadata_empty_key_noop
+
+    !> Reads every line of `filename` into `lines(1:n)`; n is the number of lines actually read
+    !! (0 if the file doesn't exist or is empty). `lines` must be pre-allocated large enough by
+    !! the caller -- these fixture files are always small.
+    subroutine read_text_lines(filename, lines, n)
+        character(len=*), intent(in) :: filename
+        character(len=*), intent(inout) :: lines(:)
+        integer, intent(out) :: n
+        integer :: unit, ios
+
+        n = 0
+        open(newunit=unit, file=filename, status="old", action="read", iostat=ios)
+        if (ios /= 0) return
+        do
+            if (n + 1 > size(lines)) exit
+            read(unit, '(a)', iostat=ios) lines(n + 1)
+            if (ios /= 0) exit
+            n = n + 1
+        end do
+        close(unit)
+    end subroutine read_text_lines
+
+    !> A hand-verified fixture (3 fields with deliberately different name/unit/type/col_size/
+    !! ucd/info lengths, including a field with an empty unit/ucd/info) whose exact expected
+    !! output (widths, padding, header labels) was computed independently offline -- this test
+    !! is the one place print_schema_info's column-alignment arithmetic itself is pinned down;
+    !! the other print_schema_info tests below check structural/behavioral properties instead.
+    subroutine test_print_schema_info_alignment(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        integer :: unit, n
+        character(len=*), parameter :: out_file = "test_run/print_schema_info_alignment.txt"
+        character(len=128) :: lines(10)
+
+        call schema%init(table="align_test")
+        call schema%add_field("id", "int32", info="ID field")
+        call schema%add_field("ra_deg", "float64", unit="deg", ucd="pos.eq.ra", info="Right ascension")
+        call schema%add_field("flags", "boolean", col_size=6)
+        call parquet_parse_maml(schema)
+
+        open(newunit=unit, file=out_file, status="replace", action="write", form="formatted")
+        call schema%print_schema_info(unit=unit, table_name=.false.)
+        close(unit)
+
+        call read_text_lines(out_file, lines, n)
+        call check(error, n == 5, "expected 5 output lines (header + dash-after-header + 3 field rows)")
+        if (allocated(error)) return
+
+        call check(error, trim(lines(1)) == "name   unit type    len ucd       info", &
+            "header line did not match the expected computed column widths")
+        if (allocated(error)) return
+        call check(error, trim(lines(2)) == repeat("-", 49), &
+            "default dash-after-header line had unexpected width")
+        if (allocated(error)) return
+        call check(error, trim(lines(3)) == "id          int32   1             ID field", &
+            "'id' field row did not match the expected alignment")
+        if (allocated(error)) return
+        call check(error, trim(lines(4)) == "ra_deg deg  float64 1   pos.eq.ra Right ascension", &
+            "'ra_deg' field row did not match the expected alignment")
+        if (allocated(error)) return
+        call check(error, trim(lines(5)) == "flags       boolean 6", &
+            "'flags' field row (empty info) did not match the expected alignment")
+    end subroutine test_print_schema_info_alignment
+
+    !> schemas/maml_example.maml has many fields -- disabling all but id0/value exercises that
+    !! only is_set columns are printed, together with a custom prefix and all three dash toggles.
+    subroutine test_print_schema_info_prefix_dashes_and_is_set(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        integer :: unit, n
+        character(len=*), parameter :: out_file = "test_run/print_schema_info_prefix_dashes.txt"
+        character(len=128) :: lines(10)
+
+        call parquet_parse_maml("schemas/maml_example.maml", schema)
+        call schema%set_column_unavailable()
+        call schema%set_column_available("id0")
+        call schema%set_column_available("value")
+
+        open(newunit=unit, file=out_file, status="replace", action="write", form="formatted")
+        call schema%print_schema_info(unit=unit, prefix="# ", table_name=.false., &
+            dash_before_header=.true., dash_after_fields=.true.)
+        close(unit)
+
+        call read_text_lines(out_file, lines, n)
+        call check(error, n == 6, "expected 6 lines: dash, header, dash, id0 row, value row, dash")
+        if (allocated(error)) return
+
+        call check(error, lines(1)(1:2) == "# " .and. lines(2)(1:2) == "# " .and. lines(4)(1:2) == "# ", &
+            "every emitted line should start with the given prefix")
+        if (allocated(error)) return
+        call check(error, trim(lines(1)) == trim(lines(3)) .and. trim(lines(3)) == trim(lines(6)), &
+            "all three dash lines (before header/after header/after fields) should be identical")
+        if (allocated(error)) return
+        call check(error, index(lines(2), "name") > 0 .and. index(lines(2), "info") > 0, &
+            "line 2 should be the header row")
+        if (allocated(error)) return
+        call check(error, index(lines(4), "id0") > 0, "line 4 should be the 'id0' field row")
+        if (allocated(error)) return
+        call check(error, index(lines(5), "value") > 0 .and. index(lines(5), "value_64") == 0, &
+            "line 5 should be the 'value' field row only -- no other (disabled) column should appear")
+    end subroutine test_print_schema_info_prefix_dashes_and_is_set
+
+    !> Calling print_schema_info repeatedly on the same already-open unit, for different
+    !! schemas, must append each call's block -- the primary use case the caller-owned unit=
+    !! argument exists for.
+    subroutine test_print_schema_info_multiple_schemas_same_unit(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema1, schema2
+        integer :: unit, n
+        character(len=*), parameter :: out_file = "test_run/print_schema_info_multi_schema.txt"
+        character(len=128) :: lines(10)
+
+        call schema1%init(table="multi_a")
+        call schema1%add_field("a", "int32")
+        call schema1%add_field("b", "float64")
+        call parquet_parse_maml(schema1)
+
+        call schema2%init(table="multi_b")
+        call schema2%add_field("c", "string", array_size=4)
+        call parquet_parse_maml(schema2)
+
+        open(newunit=unit, file=out_file, status="replace", action="write", form="formatted")
+        call schema1%print_schema_info(unit=unit, table_name=.false.)
+        call schema2%print_schema_info(unit=unit, header=.false., table_name=.false., dash_after_header=.false.)
+        close(unit)
+
+        call read_text_lines(out_file, lines, n)
+        ! schema1: header + dash + 2 rows = 4 lines; schema2 (headerless): 1 row.
+        call check(error, n == 5, "expected schema1's 4-line block plus schema2's single headerless row")
+        if (allocated(error)) return
+
+        call check(error, index(lines(1), "name") > 0 .and. index(lines(1), "info") > 0, &
+            "first block's header row is missing")
+        if (allocated(error)) return
+        call check(error, index(lines(3), "a") > 0 .and. index(lines(3), "int32") > 0, &
+            "schema1's 'a' row not found where expected")
+        if (allocated(error)) return
+        call check(error, index(lines(4), "b") > 0 .and. index(lines(4), "float64") > 0, &
+            "schema1's 'b' row not found where expected")
+        if (allocated(error)) return
+        call check(error, index(lines(5), "c") > 0 .and. index(lines(5), "string") > 0, &
+            "schema2's headerless 'c' row was not appended to the same unit")
+    end subroutine test_print_schema_info_multiple_schemas_same_unit
+
+    !> filename= (no caller-owned unit) must open-append-close on every call, so repeated calls
+    !! still accumulate into one file -- the convenience alternative to the unit= path above.
+    subroutine test_print_schema_info_filename_append(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema1, schema2
+        integer :: unit, n
+        character(len=*), parameter :: out_file = "test_run/print_schema_info_filename_append.txt"
+        character(len=128) :: lines(10)
+
+        ! Pre-clean: print_schema_info(filename=) always appends, so start from a known-empty file.
+        open(newunit=unit, file=out_file, status="replace", action="write", form="formatted")
+        close(unit)
+
+        call schema1%init(table="append_a")
+        call schema1%add_field("x", "int32")
+        call parquet_parse_maml(schema1)
+
+        call schema2%init(table="append_b")
+        call schema2%add_field("y", "float32")
+        call parquet_parse_maml(schema2)
+
+        call schema1%print_schema_info(filename=out_file, table_name=.false.)
+        call schema2%print_schema_info(filename=out_file, header=.false., table_name=.false., dash_after_header=.false.)
+
+        call read_text_lines(out_file, lines, n)
+        call check(error, n == 4, "expected schema1's header+dash+row (3 lines) plus schema2's single headerless row")
+        if (allocated(error)) return
+
+        call check(error, index(lines(3), "x") > 0 .and. index(lines(3), "int32") > 0, &
+            "schema1's 'x' row not found where expected")
+        if (allocated(error)) return
+        call check(error, index(lines(4), "y") > 0 .and. index(lines(4), "float32") > 0, &
+            "schema2's row was not appended to the file opened by filename=")
+    end subroutine test_print_schema_info_filename_append
+
+    !> With every column disabled and header=.false./all dash flags off, there is nothing to
+    !! print at all -- the call must not write any line (and must not abort).
+    subroutine test_print_schema_info_no_cols_no_header(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        integer :: unit, n
+        character(len=*), parameter :: out_file = "test_run/print_schema_info_empty.txt"
+        character(len=128) :: lines(10)
+
+        call schema%init(table="empty_test")
+        call schema%add_field("z", "int32")
+        call parquet_parse_maml(schema)
+        call schema%set_column_unavailable()
+
+        open(newunit=unit, file=out_file, status="replace", action="write", form="formatted")
+        call schema%print_schema_info(unit=unit, header=.false., table_name=.false., dash_after_header=.false.)
+        close(unit)
+
+        call read_text_lines(out_file, lines, n)
+        call check(error, n == 0, &
+            "expected zero lines with no enabled columns, header/table_name off, and dashes off")
+    end subroutine test_print_schema_info_no_cols_no_header
+
+    !> table_name=.true. (the default) prints "Table name: <table>" using this schema's required
+    !! MAML table: key, positioned after dash_before_header and before the header row -- checked
+    !! both for an in-code schema (schema%init(table=...)) and a MAML-loaded one, where table:
+    !! is not the first line in the source file (schemas/maml_example.maml declares dataset:
+    !! before table:), to confirm the value is found by key, not by assumed line position.
+    subroutine test_print_schema_info_table_name_line(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema, schema_maml
+        integer :: unit, n
+        character(len=*), parameter :: out_file = "test_run/print_schema_info_table_name.txt"
+        character(len=*), parameter :: out_file2 = "test_run/print_schema_info_table_name_maml.txt"
+        character(len=128) :: lines(10)
+
+        call schema%init(table="my_table_x")
+        call schema%add_field("x", "int32")
+        call parquet_parse_maml(schema)
+
+        ! Default: table_name=.true., dash_before_header=.false. -- "Table name:" is line 1.
+        open(newunit=unit, file=out_file, status="replace", action="write", form="formatted")
+        call schema%print_schema_info(unit=unit)
+        close(unit)
+
+        call read_text_lines(out_file, lines, n)
+        call check(error, n == 4, "expected Table name + header + dash-after-header + 1 field row")
+        if (allocated(error)) return
+        call check(error, trim(lines(1)) == "Table name: my_table_x", &
+            "line 1 should be the default-positioned Table name line")
+        if (allocated(error)) return
+        call check(error, index(lines(2), "name") > 0, "line 2 should be the header row")
+        if (allocated(error)) return
+
+        ! With dash_before_header=.true.: dash, then "Table name:", then header.
+        open(newunit=unit, file=out_file, status="replace", action="write", form="formatted")
+        call schema%print_schema_info(unit=unit, dash_before_header=.true., prefix="# ")
+        close(unit)
+
+        call read_text_lines(out_file, lines, n)
+        call check(error, n == 5, "expected dash + Table name + header + dash-after-header + 1 field row")
+        if (allocated(error)) return
+        call check(error, index(lines(1), "-") > 0 .and. index(lines(1), "Table") == 0, &
+            "line 1 should be the dash-before-header line, not the Table name line")
+        if (allocated(error)) return
+        call check(error, trim(lines(2)) == "# Table name: my_table_x", &
+            "line 2 should be the prefixed Table name line, positioned after the leading dash")
+        if (allocated(error)) return
+
+        ! table_name=.false. suppresses the line entirely.
+        open(newunit=unit, file=out_file, status="replace", action="write", form="formatted")
+        call schema%print_schema_info(unit=unit, table_name=.false.)
+        close(unit)
+
+        call read_text_lines(out_file, lines, n)
+        call check(error, n == 3, "expected header + dash-after-header + 1 field row, no Table name line")
+        if (allocated(error)) return
+        call check(error, index(lines(1), "Table") == 0, "table_name=.false. should suppress the Table name line")
+        if (allocated(error)) return
+
+        ! A MAML-loaded schema where table: is not the first source line must still resolve correctly.
+        call parquet_parse_maml("schemas/maml_example.maml", schema_maml)
+        call schema_maml%set_column_unavailable()
+        call schema_maml%set_column_available("id0")
+
+        open(newunit=unit, file=out_file2, status="replace", action="write", form="formatted")
+        call schema_maml%print_schema_info(unit=unit, header=.false., dash_after_header=.false.)
+        close(unit)
+
+        call read_text_lines(out_file2, lines, n)
+        call check(error, n == 2, "expected Table name line + 1 field row")
+        if (allocated(error)) return
+        call check(error, trim(lines(1)) == "Table name: input_table", &
+            "schemas/maml_example.maml's table: input_table was not resolved correctly")
+    end subroutine test_print_schema_info_table_name_line
+
+    subroutine test_print_schema_info_no_unit_no_filename_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "print_schema_info_no_unit_no_filename", expect_abort=.true., &
+            failure_message="print_schema_info with neither unit nor filename was expected to abort")
+    end subroutine test_print_schema_info_no_unit_no_filename_aborts
+
+    subroutine test_print_schema_info_unit_not_open_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "print_schema_info_unit_not_open", expect_abort=.true., &
+            failure_message="print_schema_info with an unopened unit was expected to abort")
+    end subroutine test_print_schema_info_unit_not_open_aborts
+
+    subroutine test_print_schema_info_unit_read_only_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "print_schema_info_unit_read_only", expect_abort=.true., &
+            failure_message="print_schema_info with a read-only unit was expected to abort")
+    end subroutine test_print_schema_info_unit_read_only_aborts
+
+    subroutine test_print_schema_info_unit_filename_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "print_schema_info_unit_filename_mismatch", expect_abort=.true., &
+            failure_message="print_schema_info with a unit/filename mismatch was expected to abort")
+    end subroutine test_print_schema_info_unit_filename_mismatch_aborts
 
 end module test_metadata

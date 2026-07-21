@@ -164,6 +164,8 @@ module parquet
         procedure :: get_column_index => schema_get_column_index !! 1-based index of a column by name, or 0 if not found.
         procedure :: get_num_fields => schema_get_num_fields !! Total number of declared fields.
         procedure :: get_field_name => schema_get_field_name !! Field name at a given 1-based MAML source position.
+        procedure :: print_schema_info => schema_print_schema_info !! Writes a "Table name:" line plus an aligned
+        !! name/unit/type/len/ucd/info listing of enabled (is_set) columns to a unit/file.
         ! add_col_qc/set_col_qc build a read-time qc-maml. Two intentional
         ! naming choices here: (1) "col_qc" is a deliberate domain abbreviation
         ! for "column quality-control" (the qc: block of a fields: entry) --
@@ -1042,6 +1044,35 @@ module parquet
             integer, intent(in) :: index !! 1-based field position in MAML source order.
             character(len=:), allocatable, intent(out) :: name !! field name at that position.
         end subroutine schema_get_field_name
+        !> Writes a fixed-width, aligned listing of this schema's enabled (is_set) columns, one
+        !> per output line, in the order name/unit/data_type/col_size/ucd/info -- the last (info)
+        !> column is left unpadded so no line carries trailing whitespace. Column widths are
+        !> derived from the longest value actually present across the enabled columns (and, when
+        !> header=.true., the header label itself), so each call produces its own self-contained,
+        !> internally-aligned block; two calls for different schemas are not aligned with each
+        !> other. Exactly one of unit/filename must identify the destination: unit (an
+        !> already-open unit, e.g. opened once by the caller and reused across several schemas'
+        !> worth of calls to build up one combined listing) or filename (opened here with
+        !> position="append", written, and closed again before returning). Giving neither, or an
+        !> unopened/read-only unit, or a unit+filename pair where filename does not match (exact,
+        !> trimmed string equality against inquire(unit=unit, name=)) the file unit is already
+        !> connected to, all error stop.
+        module subroutine schema_print_schema_info(this, unit, filename, prefix, header, table_name, &
+                dash_before_header, dash_after_header, dash_after_fields, dash_char)
+            class(parquet_schema), intent(in) :: this !! schema whose enabled (is_set) columns are listed.
+            integer, intent(in), optional :: unit !! already-open unit to write to (see filename for the alternative).
+            character(len=*), intent(in), optional :: filename !! output path; opened with position="append" if unit absent.
+            character(len=*), intent(in), optional :: prefix !! prepended to every emitted line (default: none).
+            logical, intent(in), optional :: header !! print a "name unit type len ucd info" header row (default .true.).
+            logical, intent(in), optional :: table_name !! print a "Table name: <table>" line, using this schema's
+            !! required MAML table: key, positioned after dash_before_header and before the header row
+            !! (default .true.).
+            logical, intent(in), optional :: dash_before_header !! dashed separator line before the header (default .false.).
+            logical, intent(in), optional :: dash_after_header !! dashed separator line after the header (default .true.).
+            logical, intent(in), optional :: dash_after_fields !! dashed separator line after the last field row
+            !! (default .false.).
+            character(len=1), intent(in), optional :: dash_char !! character used to draw dashed lines (default "-").
+        end subroutine schema_print_schema_info
         !> Subroutine form of %add_col_qc: forwards to %maml%add_col_qc. See
         !> parquet_maml_add_col_qc (parquet_maml_base_add_col_qc.f90) for the
         !> "col, min, max, miss" input syntax and validation rules.

@@ -524,6 +524,14 @@ program error_scenarios
         call scenario_schema_add_field_qc_max_operator_without_value()
     case ("schema_add_field_bad_qc_miss_value")
         call scenario_schema_add_field_bad_qc_miss_value()
+    case ("print_schema_info_no_unit_no_filename")
+        call scenario_print_schema_info_no_unit_no_filename()
+    case ("print_schema_info_unit_not_open")
+        call scenario_print_schema_info_unit_not_open()
+    case ("print_schema_info_unit_read_only")
+        call scenario_print_schema_info_unit_read_only()
+    case ("print_schema_info_unit_filename_mismatch")
+        call scenario_print_schema_info_unit_filename_mismatch()
     case ("string_column_index_out_of_range")
         call scenario_string_column_index_out_of_range()
     case ("string_column_view_all_size_mismatch")
@@ -5334,6 +5342,65 @@ contains
         call schema%add_field("ra", "float64", qc_miss="garbage")
         print '(a)', "unexpectedly accepted an invalid qc_miss value in schema%add_field"
     end subroutine scenario_schema_add_field_bad_qc_miss_value
+
+    !> schema%print_schema_info error stops if given neither unit nor filename -- there is
+    !> nowhere to write to.
+    subroutine scenario_print_schema_info_no_unit_no_filename()
+        type(parquet_schema) :: schema
+
+        call schema%init(table="t")
+        call schema%add_field("x", "int32")
+        call parquet_parse_maml(schema)
+        call schema%print_schema_info()
+        print '(a)', "unexpectedly printed schema info with neither unit nor filename given"
+    end subroutine scenario_print_schema_info_no_unit_no_filename
+
+    !> schema%print_schema_info error stops if the given unit is not already open.
+    subroutine scenario_print_schema_info_unit_not_open()
+        type(parquet_schema) :: schema
+        integer :: u
+
+        call schema%init(table="t")
+        call schema%add_field("x", "int32")
+        call parquet_parse_maml(schema)
+
+        ! Reserve a genuinely unused unit number by opening then closing it.
+        open(newunit=u, file="test_run/print_schema_info_unit_not_open_scratch.txt", status="replace")
+        close(u)
+
+        call schema%print_schema_info(unit=u)
+        print '(a)', "unexpectedly printed schema info to a unit that was not open"
+    end subroutine scenario_print_schema_info_unit_not_open
+
+    !> schema%print_schema_info error stops if the given unit is open for reading only.
+    subroutine scenario_print_schema_info_unit_read_only()
+        type(parquet_schema) :: schema
+        integer :: u
+
+        call schema%init(table="t")
+        call schema%add_field("x", "int32")
+        call parquet_parse_maml(schema)
+
+        open(newunit=u, file="schemas/maml_example.maml", status="old", action="read")
+        call schema%print_schema_info(unit=u)
+        print '(a)', "unexpectedly printed schema info to a unit open for reading only"
+    end subroutine scenario_print_schema_info_unit_read_only
+
+    !> schema%print_schema_info error stops if unit and filename are both given but filename
+    !> does not match the file the unit is actually connected to.
+    subroutine scenario_print_schema_info_unit_filename_mismatch()
+        type(parquet_schema) :: schema
+        integer :: u
+
+        call schema%init(table="t")
+        call schema%add_field("x", "int32")
+        call parquet_parse_maml(schema)
+
+        open(newunit=u, file="test_run/print_schema_info_mismatch_actual.txt", status="replace", &
+            action="write", form="formatted")
+        call schema%print_schema_info(unit=u, filename="test_run/print_schema_info_mismatch_other.txt")
+        print '(a)', "unexpectedly printed schema info despite a unit/filename mismatch"
+    end subroutine scenario_print_schema_info_unit_filename_mismatch
 
     !> parquet_string_column: indexing out of range aborts (check_index).
     subroutine scenario_string_column_index_out_of_range()

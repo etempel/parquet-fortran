@@ -7,6 +7,7 @@
 !> parquet_parse_maml_lines parser, plus the private MAML-section helpers
 !> (keyarray:/DOI/depends/keywords/col_map/protected_cols) it depends on.
 submodule (parquet) parquet_metadata
+    use iso_fortran_env, only: output_unit
     implicit none
 
     ! ---- MAML load/parse/validate helpers (metadata-subtree-only private interfaces,
@@ -213,6 +214,37 @@ contains
     !> parquet_schema(...) always give an in-memory schema a name
     !> ("internal:<table>"), so this is effectively always populated for
     !> every add_field error below it.
+    !> Extracts this MAML's required top-level table: value, by scanning its raw source lines
+    !> for the (unindented, scalar) "table:" key -- schema%init/schema_add_field's maml_push_line
+    !> always writes it as the first line, but a MAML loaded from disk (schemas/maml_example*.maml)
+    !> may declare it after other top-level keys, so every line is checked rather than assuming
+    !> position. Returns "" (not error stop) if genuinely absent, so the caller decides how to
+    !> report that -- in practice this never happens for a schema that reached schema_print_schema_info,
+    !> since table: presence is enforced at schema%init/parquet_validate_maml time already.
+    subroutine maml_table_name(maml, name)
+        type(parquet_maml_file), intent(in) :: maml !! schema whose %maml%lines are scanned.
+        character(len=:), allocatable, intent(out) :: name !! this MAML's table: value, or "" if not found.
+        character(len=:), allocatable :: tline, key, cvalue, klo
+        integer :: i
+
+        name = ""
+        if (.not. allocated(maml%lines)) return
+        do i = 1, size(maml%lines)
+            if (len_trim(maml%lines(i)) == 0) cycle
+            if (maml%lines(i)(1:1) == " ") cycle ! indented (nested) line, not a top-level key.
+            tline = trim(maml%lines(i))
+            if (tline(1:1) == "-") cycle ! list item, not a scalar key line.
+            if (index(tline, ":") == 0) cycle
+            call parquet_split_key_value(tline, key, cvalue)
+            if (len_trim(key) == 0) cycle
+            call parquet_to_lower(key, klo)
+            if (klo == "table") then
+                call parquet_unquote(cvalue, name)
+                return
+            end if
+        end do
+    end subroutine maml_table_name
+
     subroutine maml_name_suffix(maml, suffix)
         type(parquet_maml_file), intent(in) :: maml !! schema being built.
         character(len=:), allocatable, intent(out) :: suffix !! " (maml: X)"-style suffix, or "".
@@ -525,6 +557,161 @@ contains
     module procedure schema_get_field_name
         call this%cinfo%get_field_name(index, name)
     end procedure schema_get_field_name
+
+    module procedure schema_print_schema_info
+        integer :: u, i, k, n_enabled, ios
+        integer :: w_name, w_unit, w_type, w_len, w_ucd, w_info, w_total
+        logical :: do_header, do_table_name, do_dash_before, do_dash_after_header, do_dash_after_fields
+        logical :: opened_here, is_open
+        character(len=1) :: dchar
+        character(len=:), allocatable :: pfx, name_suffix, dashline, table_name_val
+        character(len=16) :: iq_action
+        character(len=1024) :: iq_name
+        character(len=32) :: lenbuf
+        integer, allocatable :: enabled_idx(:)
+        character(len=*), parameter :: hdr_name = "name", hdr_unit = "unit", hdr_type = "type", &
+            hdr_len = "len", hdr_ucd = "ucd", hdr_info = "info"
+
+        call maml_name_suffix(this%maml, name_suffix)
+
+        if (.not. present(unit) .and. .not. present(filename)) then
+            error stop "parquet_schema%print_schema_info: either unit or filename must be given" // name_suffix
+        end if
+
+        if (present(unit)) then
+            inquire(unit=unit, opened=is_open)
+            if (.not. is_open) then
+                error stop "parquet_schema%print_schema_info: unit is not open" // name_suffix
+            end if
+            inquire(unit=unit, action=iq_action)
+            if (trim(iq_action) == "READ") then
+                error stop "parquet_schema%print_schema_info: unit is open for reading only, not writable" &
+                    // name_suffix
+            end if
+            if (present(filename)) then
+                inquire(unit=unit, name=iq_name)
+                if (trim(iq_name) /= trim(filename)) then
+                    error stop "parquet_schema%print_schema_info: filename '" // trim(filename) // &
+                        "' does not match the file connected to unit (" // trim(iq_name) // ")" // name_suffix
+                end if
+            end if
+            u = unit
+            opened_here = .false.
+        else
+            open(newunit=u, file=filename, status="unknown", position="append", action="write", &
+                form="formatted", iostat=ios)
+            if (ios /= 0) then
+                error stop "parquet_schema%print_schema_info: failed to open '" // trim(filename) // &
+                    "' for writing" // name_suffix
+            end if
+            opened_here = .true.
+        end if
+
+        ! Enabled (is_set) column indices -- same filtering pattern used by
+        ! parquet_open_writer to build writer%enabled_columns.
+        n_enabled = 0
+        if (allocated(this%cinfo%col)) then
+            do i = 1, size(this%cinfo%col)
+                if (this%cinfo%col(i)%is_set) n_enabled = n_enabled + 1
+            end do
+        end if
+        allocate(enabled_idx(n_enabled))
+        k = 0
+        if (allocated(this%cinfo%col)) then
+            do i = 1, size(this%cinfo%col)
+                if (this%cinfo%col(i)%is_set) then
+                    k = k + 1
+                    enabled_idx(k) = i
+                end if
+            end do
+        end if
+
+        do_header = .true.
+        if (present(header)) do_header = header
+        do_table_name = .true.
+        if (present(table_name)) do_table_name = table_name
+        do_dash_before = .false.
+        if (present(dash_before_header)) do_dash_before = dash_before_header
+        do_dash_after_header = .true.
+        if (present(dash_after_header)) do_dash_after_header = dash_after_header
+        do_dash_after_fields = .false.
+        if (present(dash_after_fields)) do_dash_after_fields = dash_after_fields
+        dchar = "-"
+        if (present(dash_char)) dchar = dash_char
+        pfx = ""
+        if (present(prefix)) pfx = prefix
+
+        ! Column widths, derived from the longest value actually present (plus the header
+        ! label itself, when printed) -- so header and data rows always line up.
+        w_name = 0; w_unit = 0; w_type = 0; w_len = 0; w_ucd = 0; w_info = 0
+        do k = 1, n_enabled
+            i = enabled_idx(k)
+            w_name = max(w_name, len_trim(this%cinfo%col(i)%name))
+            w_unit = max(w_unit, len_trim(this%cinfo%col(i)%unit))
+            w_type = max(w_type, len_trim(this%cinfo%col(i)%data_type))
+            write(lenbuf, '(I0)') this%cinfo%col(i)%col_size
+            w_len = max(w_len, len_trim(lenbuf))
+            w_ucd = max(w_ucd, len_trim(this%cinfo%col(i)%ucd))
+            w_info = max(w_info, len_trim(this%cinfo%col(i)%info))
+        end do
+        if (do_header) then
+            w_name = max(w_name, len(hdr_name))
+            w_unit = max(w_unit, len(hdr_unit))
+            w_type = max(w_type, len(hdr_type))
+            w_len  = max(w_len,  len(hdr_len))
+            w_ucd  = max(w_ucd,  len(hdr_ucd))
+            w_info = max(w_info, len(hdr_info))
+        end if
+        w_name = max(w_name, 1); w_unit = max(w_unit, 1); w_type = max(w_type, 1)
+        w_len  = max(w_len, 1);  w_ucd  = max(w_ucd, 1);  w_info = max(w_info, 1)
+
+        ! 5 single-space separators between the 6 columns.
+        w_total = w_name + w_unit + w_type + w_len + w_ucd + w_info + 5
+        dashline = pfx // repeat(dchar, w_total)
+
+        if (do_dash_before) write(u, '(a)') dashline
+
+        if (do_table_name) then
+            call maml_table_name(this%maml, table_name_val)
+            write(u, '(a)') pfx // "Table name: " // trim(table_name_val)
+        end if
+
+        if (do_header) then
+            write(u, '(a)') pfx // pad(hdr_name, w_name) // " " // pad(hdr_unit, w_unit) // " " // &
+                pad(hdr_type, w_type) // " " // pad(hdr_len, w_len) // " " // pad(hdr_ucd, w_ucd) // " " // hdr_info
+        end if
+
+        if (do_dash_after_header) write(u, '(a)') dashline
+
+        do k = 1, n_enabled
+            i = enabled_idx(k)
+            write(lenbuf, '(I0)') this%cinfo%col(i)%col_size
+            write(u, '(a)') pfx // pad(this%cinfo%col(i)%name, w_name) // " " // &
+                pad(this%cinfo%col(i)%unit, w_unit) // " " // pad(this%cinfo%col(i)%data_type, w_type) // " " // &
+                pad(trim(lenbuf), w_len) // " " // pad(this%cinfo%col(i)%ucd, w_ucd) // " " // &
+                trim(this%cinfo%col(i)%info)
+        end do
+
+        if (do_dash_after_fields) write(u, '(a)') dashline
+
+        if (opened_here) close(u)
+
+    contains
+
+        !> Left-justified, blank-padded to width w (at least len_trim(s) wide, so content is
+        !> never truncated even if a caller-miscounted width somehow undershoots).
+        function pad(s, w) result(r)
+            character(len=*), intent(in) :: s
+            integer, intent(in) :: w
+            character(len=:), allocatable :: r
+            if (len_trim(s) >= w) then
+                r = trim(s)
+            else
+                r = trim(s) // repeat(" ", w - len_trim(s))
+            end if
+        end function pad
+
+    end procedure schema_print_schema_info
 
     module procedure schema_add_col_qc
         call this%maml%add_col_qc(qc_input, col_name)

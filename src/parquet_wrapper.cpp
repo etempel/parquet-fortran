@@ -6993,6 +6993,25 @@ extern "C"
 			throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 	}
 
+	// Frees a writer's handle without finalizing/writing the actual output -- used by the
+	// Fortran-side writer_finalize FINAL procedure (parquet_write.f90) as the safety net for a
+	// writer whose variable goes out of scope, is reassigned, or is re-opened while still open,
+	// instead of close_parquet_writer. Unlike close_parquet_writer (and close_streaming_writer),
+	// this never builds/writes the final table, never checks that every declared column was
+	// written, and never checks that every row group opened via parquet_new_row_group was
+	// finished -- all three of those checks throw a std::runtime_error on failure, and since an
+	// implicit finalizer has no Fortran-level error-stop message to attach it to, that exception
+	// crosses the extern "C" boundary uncaught, causing std::terminate()/process abort instead of
+	// a clean diagnostic. The underlying C++ object (and, via its own destructor, its output file
+	// handle) is simply released; the resulting output file is not guaranteed to be a complete or
+	// valid parquet file -- callers should always prefer an explicit parquet_close_writer call,
+	// which does perform those checks.
+	void abandon_parquet_writer(void *handle)
+	{
+		auto writer_handle = as_handle(handle);
+		delete writer_handle.release();
+	}
+
 	void close_parquet_writer(void *handle)
 	{
 		auto writer_handle = as_handle(handle);

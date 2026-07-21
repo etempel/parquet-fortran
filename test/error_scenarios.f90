@@ -102,6 +102,8 @@ program error_scenarios
         call scenario_row_group_new_column_after_first()
     case ("row_group_whole_column_after_streaming_started")
         call scenario_row_group_whole_column_after_streaming_started()
+    case ("row_group_started_while_open")
+        call scenario_row_group_started_while_open()
     case ("column_count_overflow")
         call scenario_column_count_overflow()
     case ("write_undeclared_column")
@@ -506,6 +508,10 @@ program error_scenarios
         call scenario_schema_add_field_before_init()
     case ("schema_init_twice")
         call scenario_schema_init_twice()
+    case ("schema_init_after_maml_parse")
+        call scenario_schema_init_after_maml_parse()
+    case ("parse_maml_file_after_init")
+        call scenario_parse_maml_file_after_init()
     case ("schema_init_empty_table")
         call scenario_schema_init_empty_table()
     case ("schema_add_field_empty_name")
@@ -532,6 +538,12 @@ program error_scenarios
         call scenario_print_schema_info_unit_read_only()
     case ("print_schema_info_unit_filename_mismatch")
         call scenario_print_schema_info_unit_filename_mismatch()
+    case ("print_schema_info_uninitialized_schema")
+        call scenario_print_schema_info_uninitialized_schema()
+    case ("print_schema_info_open_failure")
+        call scenario_print_schema_info_open_failure()
+    case ("schema_add_metadata_before_parse")
+        call scenario_schema_add_metadata_before_parse()
     case ("string_column_index_out_of_range")
         call scenario_string_column_index_out_of_range()
     case ("string_column_view_all_size_mismatch")
@@ -718,6 +730,8 @@ program error_scenarios
         call scenario_mask_row_mask_shape_mismatch()
     case ("mask_row_mask_zero_length")
         call scenario_mask_row_mask_zero_length()
+    case ("mask_row_mask_called_twice")
+        call scenario_mask_row_mask_called_twice()
     case ("mask_chunk_row_mask_after_row_mask")
         call scenario_mask_chunk_row_mask_after_row_mask()
     case ("mask_row_mask_after_chunk_row_mask")
@@ -728,6 +742,8 @@ program error_scenarios
         call scenario_mask_chunk_row_mask_not_used_every_group()
     case ("mask_chunk_row_mask_introduced_late")
         call scenario_mask_chunk_row_mask_introduced_late()
+    case ("mask_chunk_row_mask_called_twice")
+        call scenario_mask_chunk_row_mask_called_twice()
     case ("mask_chunk_row_mask_size_mismatch")
         call scenario_mask_chunk_row_mask_size_mismatch()
     case ("mask_row_mask_window_exhausted")
@@ -3516,6 +3532,20 @@ contains
         print '(a)', "unexpectedly wrote a whole column after the streaming row-group API already started"
     end subroutine scenario_row_group_whole_column_after_streaming_started
 
+    !> parquet_new_row_group must not be called again while a row group is already open (i.e.
+    !> without an intervening parquet_finish_row_group) -- see the writer%in_row_group guard in
+    !> parquet_new_row_group_impl.
+    subroutine scenario_row_group_started_while_open()
+        type(parquet_writer) :: writer
+        integer(int32) :: values(2) = [1_int32, 2_int32]
+
+        call parquet_open_writer(writer, "test_run/error_scenario_row_group_started_while_open.parquet", chunk_size=2)
+        call parquet_new_row_group(writer, 2_int64)
+        call parquet_write_column_chunk(writer, "id", values)
+        call parquet_new_row_group(writer, 2_int64)   ! -> aborts, previous row group never finished
+        print '(a)', "unexpectedly started a new row group while one was already open"
+    end subroutine scenario_row_group_started_while_open
+
     !> Arrow's arrow::Schema::num_fields()/GetFieldIndex() both return a plain int32_t internally
     !> -- unlike row count there is no "large" variant for column count at all, so
     !> check_column_count_fits_arrow_limit in parquet_wrapper.cpp (called from both the
@@ -5253,6 +5283,29 @@ contains
         print '(a)', "unexpectedly re-initialized an already-initialized schema without error"
     end subroutine scenario_schema_init_twice
 
+    !> schema%init error stops if called (without force=.true.) on a schema already populated
+    !> via a MAML parse -- schema%is_init() is .true. here even though %init was never called,
+    !> so the "already initialized" guard must catch this too, not just a literal second %init.
+    subroutine scenario_schema_init_after_maml_parse()
+        type(parquet_schema) :: schema
+
+        call parquet_parse_maml("schemas/maml_example.maml", schema)
+        call schema%init(table="t2")
+        print '(a)', "unexpectedly re-initialized a MAML-parsed schema without error"
+    end subroutine scenario_schema_init_after_maml_parse
+
+    !> The file form of parquet_parse_maml error stops if `schema` is already initialized
+    !> (via %init or an earlier parse) -- otherwise it would silently discard whatever the
+    !> schema held before, with no diagnostic.
+    subroutine scenario_parse_maml_file_after_init()
+        type(parquet_schema) :: schema
+
+        call schema%init(table="t1")
+        call schema%add_field("x", "int32")
+        call parquet_parse_maml("schemas/maml_example.maml", schema)
+        print '(a)', "unexpectedly loaded a .maml file into an already-initialized schema without error"
+    end subroutine scenario_parse_maml_file_after_init
+
     !> schema%init error stops on an empty table: value, the one top-level
     !> key parquet_validate_maml requires to be non-empty.
     subroutine scenario_schema_init_empty_table()
@@ -5401,6 +5454,43 @@ contains
         call schema%print_schema_info(unit=u, filename="test_run/print_schema_info_mismatch_other.txt")
         print '(a)', "unexpectedly printed schema info despite a unit/filename mismatch"
     end subroutine scenario_print_schema_info_unit_filename_mismatch
+
+    !> schema%print_schema_info error stops by default if the schema has not been parsed
+    !> (%cinfo not populated), unless allow_uninitialized=.true. is given.
+    subroutine scenario_print_schema_info_uninitialized_schema()
+        type(parquet_schema) :: schema
+        integer :: u
+
+        open(newunit=u, file="test_run/print_schema_info_uninitialized_scratch.txt", status="replace", &
+            action="write", form="formatted")
+        call schema%print_schema_info(unit=u)
+        print '(a)', "unexpectedly printed schema info for a never-initialized schema"
+    end subroutine scenario_print_schema_info_uninitialized_schema
+
+    !> schema%print_schema_info error stops if filename= cannot be opened for writing (here,
+    !! because its parent directory does not exist).
+    subroutine scenario_print_schema_info_open_failure()
+        type(parquet_schema) :: schema
+
+        call schema%init(table="t")
+        call schema%add_field("x", "int32")
+        call parquet_parse_maml(schema)
+
+        call schema%print_schema_info(filename="test_run/no_such_subdir/print_schema_info_open_failure.txt")
+        print '(a)', "unexpectedly printed schema info to a filename that could not be opened"
+    end subroutine scenario_print_schema_info_open_failure
+
+    !> schema%add_metadata error stops if called before the schema has been parsed --
+    !> right after %init/%add_field but before parquet_parse_maml has populated %cinfo/
+    !> %metadata%items, which would otherwise silently discard the entry once that parse runs.
+    subroutine scenario_schema_add_metadata_before_parse()
+        type(parquet_schema) :: schema
+
+        call schema%init(table="t")
+        call schema%add_field("x", "int32")
+        call schema%add_metadata("k", 1_int32)
+        print '(a)', "unexpectedly added metadata to a schema that has not been parsed yet"
+    end subroutine scenario_schema_add_metadata_before_parse
 
     !> parquet_string_column: indexing out of range aborts (check_index).
     subroutine scenario_string_column_index_out_of_range()
@@ -6417,6 +6507,19 @@ contains
         print '(a)', "unexpectedly accepted a zero-length parquet_write_row_mask mask"
     end subroutine scenario_mask_row_mask_zero_length
 
+    !> parquet_write_row_mask can only be set once per writer -- a second call, even before any
+    !> write has happened, must not silently overwrite the first mask.
+    subroutine scenario_mask_row_mask_called_twice()
+        type(parquet_writer) :: writer
+        logical :: mask_a(2) = [.true., .false.]
+        logical :: mask_b(2) = [.false., .true.]
+
+        call parquet_open_writer(writer, "test_run/error_scenario_mask_row_mask_called_twice.parquet")
+        call parquet_write_row_mask(writer, mask_a)
+        call parquet_write_row_mask(writer, mask_b)   ! -> aborts, already set
+        print '(a)', "unexpectedly accepted a second parquet_write_row_mask call for the same writer"
+    end subroutine scenario_mask_row_mask_called_twice
+
     !> parquet_write_chunk_row_mask is unavailable once parquet_write_row_mask has been used.
     subroutine scenario_mask_chunk_row_mask_after_row_mask()
         type(parquet_writer) :: writer
@@ -6488,6 +6591,20 @@ contains
         call parquet_write_chunk_row_mask(writer, chunk_mask)   ! -> aborts, too late for this group
         print '(a)', "unexpectedly accepted parquet_write_chunk_row_mask after this row group's first chunk write"
     end subroutine scenario_mask_chunk_row_mask_introduced_late
+
+    !> parquet_write_chunk_row_mask can only be set once per row group -- a second call for the
+    !> same still-open row group must not be silently accepted.
+    subroutine scenario_mask_chunk_row_mask_called_twice()
+        type(parquet_writer) :: writer
+        logical :: chunk_mask_a(2) = [.true., .true.]
+        logical :: chunk_mask_b(2) = [.true., .false.]
+
+        call parquet_open_writer(writer, "test_run/error_scenario_mask_chunk_row_mask_called_twice.parquet")
+        call parquet_new_row_group(writer, 2_int64)
+        call parquet_write_chunk_row_mask(writer, chunk_mask_a)
+        call parquet_write_chunk_row_mask(writer, chunk_mask_b)   ! -> aborts, already set for this row group
+        print '(a)', "unexpectedly accepted a second parquet_write_chunk_row_mask call for the same row group"
+    end subroutine scenario_mask_chunk_row_mask_called_twice
 
     !> parquet_write_chunk_row_mask's mask must be exactly the open row group's own nrows long.
     subroutine scenario_mask_chunk_row_mask_size_mismatch()

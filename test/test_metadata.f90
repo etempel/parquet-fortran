@@ -100,7 +100,23 @@ contains
             new_unittest("print_schema_info: unit open for reading only aborts", &
                 test_print_schema_info_unit_read_only_aborts), &
             new_unittest("print_schema_info: unit/filename mismatch aborts", &
-                test_print_schema_info_unit_filename_mismatch_aborts) &
+                test_print_schema_info_unit_filename_mismatch_aborts), &
+            new_unittest("print_schema_info: uninitialized schema aborts by default", &
+                test_print_schema_info_uninitialized_schema_aborts), &
+            new_unittest("print_schema_info: filename that cannot be opened for writing aborts", &
+                test_print_schema_info_open_failure_aborts), &
+            new_unittest("print_schema_info: allow_uninitialized=.true. is a complete no-op", &
+                test_print_schema_info_allow_uninitialized_is_noop), &
+            new_unittest("add_metadata before the schema has been parsed aborts", &
+                test_add_metadata_before_parse_aborts), &
+            new_unittest("clear_metadata keeps base (parsed) entries, discards user-added ones", &
+                test_clear_metadata_keeps_base_entries), &
+            new_unittest("clear_metadata with no user-added entries is a no-op", &
+                test_clear_metadata_noop_when_no_user_entries), &
+            new_unittest("clear_metadata works the same for an in-code-built schema", &
+                test_clear_metadata_in_code_schema), &
+            new_unittest("clear_metadata on a never-parsed table_metadata discards all items", &
+                test_clear_metadata_never_parsed) &
             ]
     end subroutine collect_tests_parquet_metadata
 
@@ -892,9 +908,11 @@ contains
         type(parquet_schema) :: schema
 
         call schema%init(table="empty_key_test")
+        call schema%add_field("x", "int32")
+        call parquet_parse_maml(schema)
         call schema%add_metadata("", 1_int32)
 
-        call check(error, .not. allocated(schema%metadata%items), &
+        call check(error, size(schema%metadata%items) == schema%metadata%n_base_items, &
             "add_metadata with an empty key should not append any metadata entry")
     end subroutine test_add_metadata_empty_key_noop
 
@@ -1199,5 +1217,155 @@ contains
         call check_scenario_exit_status(error, "print_schema_info_unit_filename_mismatch", expect_abort=.true., &
             failure_message="print_schema_info with a unit/filename mismatch was expected to abort")
     end subroutine test_print_schema_info_unit_filename_mismatch_aborts
+
+    subroutine test_print_schema_info_uninitialized_schema_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "print_schema_info_uninitialized_schema", expect_abort=.true., &
+            failure_message="print_schema_info on a never-initialized schema was expected to abort by default")
+    end subroutine test_print_schema_info_uninitialized_schema_aborts
+
+    subroutine test_print_schema_info_open_failure_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "print_schema_info_open_failure", expect_abort=.true., &
+            failure_message="print_schema_info with a filename that cannot be opened was expected to abort")
+    end subroutine test_print_schema_info_open_failure_aborts
+
+    !> allow_uninitialized=.true. must make print_schema_info on a never-initialized schema a
+    !! complete no-op: no error, and -- critically -- no file touched at all (not even an empty
+    !! file created via filename=), distinguishing it from "prints nothing but still opens/closes".
+    subroutine test_print_schema_info_allow_uninitialized_is_noop(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        integer :: unit, n
+        logical :: file_exists
+        character(len=*), parameter :: out_file = "test_run/print_schema_info_allow_uninitialized.txt"
+        character(len=128) :: lines(10)
+
+        ! unit= path: nothing should be written to the already-open unit.
+        open(newunit=unit, file=out_file, status="replace", action="write", form="formatted")
+        call schema%print_schema_info(unit=unit, allow_uninitialized=.true.)
+        close(unit)
+
+        call read_text_lines(out_file, lines, n)
+        call check(error, n == 0, "allow_uninitialized=.true. on an uninitialized schema should write no lines")
+        if (allocated(error)) return
+
+        ! filename= path: the file must not even be created/touched.
+        inquire(file="test_run/print_schema_info_allow_uninitialized_untouched.txt", exist=file_exists)
+        call check(error, .not. file_exists, "sanity check: fixture file should not exist yet")
+        if (allocated(error)) return
+
+        call schema%print_schema_info(filename="test_run/print_schema_info_allow_uninitialized_untouched.txt", &
+            allow_uninitialized=.true.)
+
+        inquire(file="test_run/print_schema_info_allow_uninitialized_untouched.txt", exist=file_exists)
+        call check(error, .not. file_exists, &
+            "allow_uninitialized=.true. on an uninitialized schema should not create/touch the filename= file")
+    end subroutine test_print_schema_info_allow_uninitialized_is_noop
+
+    subroutine test_add_metadata_before_parse_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "schema_add_metadata_before_parse", expect_abort=.true., &
+            failure_message="add_metadata before the schema has been parsed was expected to abort")
+    end subroutine test_add_metadata_before_parse_aborts
+
+    !> clear_metadata truncates %items back to %n_base_items (the count recorded right after
+    !! parsing), discarding only entries a later %add_metadata call added -- the base entries
+    !! (every top-level header key + any real keyarray: entry) survive intact.
+    subroutine test_clear_metadata_keeps_base_entries(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        integer :: n_base, i
+        logical :: found_table
+
+        call parquet_parse_maml("schemas/maml_example.maml", schema)
+        n_base = schema%metadata%n_base_items
+
+        call check(error, n_base > 0, &
+            "sanity check: parsing schemas/maml_example.maml should populate base metadata items")
+        if (allocated(error)) return
+
+        call schema%add_metadata("runtime_key1", 1_int32)
+        call schema%add_metadata("runtime_key2", "value2")
+
+        call check(error, size(schema%metadata%items) == n_base + 2, &
+            "sanity check: two add_metadata calls should have appended two entries")
+        if (allocated(error)) return
+
+        call schema%clear_metadata()
+
+        call check(error, size(schema%metadata%items) == n_base, &
+            "clear_metadata should discard the 2 user-added entries, keeping the n_base_items base entries")
+        if (allocated(error)) return
+
+        found_table = .false.
+        do i = 1, size(schema%metadata%items)
+            if (trim(schema%metadata%items(i)%key) == "table" .and. &
+                trim(schema%metadata%items(i)%value) == "input_table") found_table = .true.
+        end do
+        call check(error, found_table, "the 'table' base metadata entry should survive clear_metadata intact")
+    end subroutine test_clear_metadata_keeps_base_entries
+
+    subroutine test_clear_metadata_noop_when_no_user_entries(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        integer :: n_before
+
+        call parquet_parse_maml("schemas/maml_example.maml", schema)
+        n_before = size(schema%metadata%items)
+
+        call schema%clear_metadata()
+
+        call check(error, size(schema%metadata%items) == n_before, &
+            "clear_metadata with no user-added entries should be a no-op")
+    end subroutine test_clear_metadata_noop_when_no_user_entries
+
+    !> Same truncation behavior for a schema built in-code (%init/%add_field), not just one
+    !! loaded from a .maml file -- n_base_items is set the same way regardless of source.
+    subroutine test_clear_metadata_in_code_schema(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        integer :: n_base
+
+        call schema%init(table="clear_meta_test")
+        call schema%add_field("x", "int32")
+        call parquet_parse_maml(schema)
+        n_base = schema%metadata%n_base_items
+
+        call schema%add_metadata("extra", 5_int32)
+        call check(error, size(schema%metadata%items) == n_base + 1, &
+            "sanity check: one add_metadata call should have appended one entry")
+        if (allocated(error)) return
+
+        call schema%clear_metadata()
+        call check(error, size(schema%metadata%items) == n_base, &
+            "clear_metadata should work identically for an in-code-built schema")
+    end subroutine test_clear_metadata_in_code_schema
+
+    !> A never-parsed parquet_table_metadata (used standalone, not via a parsed
+    !! parquet_schema%metadata) has n_base_items == 0 by default -- clear_metadata on it
+    !! takes the "nothing to keep" path, discarding %items entirely rather than truncating.
+    subroutine test_clear_metadata_never_parsed(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table_metadata) :: md
+
+        call check(error, md%n_base_items == 0, &
+            "sanity check: a never-parsed table_metadata should have n_base_items == 0")
+        if (allocated(error)) return
+
+        call md%add_metadata("k1", 1_int32)
+        call md%add_metadata("k2", "v2")
+        call check(error, allocated(md%items), &
+            "sanity check: two add_metadata calls should have populated %items")
+        if (allocated(error)) return
+
+        call md%clear_metadata()
+
+        call check(error, .not. allocated(md%items), &
+            "clear_metadata on a never-parsed table_metadata should deallocate %items entirely")
+    end subroutine test_clear_metadata_never_parsed
 
 end module test_metadata

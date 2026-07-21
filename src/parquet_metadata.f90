@@ -71,6 +71,10 @@ submodule (parquet) parquet_metadata
 contains
 
     module procedure parquet_parse_maml_from_file
+        if (schema%is_init()) then
+            error stop "parquet_parse_maml: schema is already initialized -- call schema%clear() first " // &
+                "to load a different .maml file into it"
+        end if
         schema%maml = parquet_load_maml_file(filename)
         call parquet_parse_maml_lines(schema%maml%lines, schema%cinfo, schema%metadata)
         call parquet_merge_missing_columns(schema%maml, schema%cinfo)
@@ -179,11 +183,27 @@ contains
     end function maml_field_name_exists
 
     module procedure schema_init
-        if (this%is_initialized) then
+        logical :: do_force
+
+        do_force = .false.
+        if (present(force)) do_force = force
+
+        if (this%is_init() .and. .not. do_force) then
             error stop "parquet_schema%init: schema is already initialized"
         end if
         if (len_trim(table) == 0) then
             error stop "parquet_schema%init: table must not be empty"
+        end if
+
+        if (do_force) then
+            ! Full reset: this%init(..., force=.true.) behaves exactly like a
+            ! first-time %init, discarding any fields/qc/metadata accumulated
+            ! via %add_field/%add_col_qc/%add_metadata (and %cinfo/%metadata,
+            ! if parquet_parse_maml had already been run) since whichever
+            ! earlier %init call this one is overriding. %clear does exactly
+            ! this same reset (it's the same "back to pristine" operation),
+            ! just without immediately rebuilding afterward.
+            call this%clear()
         end if
 
         ! Gives an in-memory schema (no source .maml file) a name anyway, so
@@ -209,11 +229,38 @@ contains
                 author=author, description=description, license=license, maml_version=maml_version)
     end procedure parquet_schema_new
 
+    module procedure schema_is_init
+        schema_is_init = this%is_initialized .or. allocated(this%cinfo%col)
+    end procedure schema_is_init
+
+    module procedure schema_clear
+        if (allocated(this%maml%name)) deallocate(this%maml%name)
+        if (allocated(this%maml%lines)) deallocate(this%maml%lines)
+        if (allocated(this%maml%missing_columns)) deallocate(this%maml%missing_columns)
+        if (allocated(this%maml%col_map)) deallocate(this%maml%col_map)
+        this%maml%user_maml = .false.
+        if (allocated(this%cinfo%col)) deallocate(this%cinfo%col)
+        if (allocated(this%metadata%items)) deallocate(this%metadata%items)
+        if (allocated(this%metadata%source_maml_lines)) deallocate(this%metadata%source_maml_lines)
+        this%metadata%n_base_items = 0
+        this%is_initialized = .false.
+    end procedure schema_clear
+
     !> "" if maml%name was never set; otherwise " (maml: X)". schema%add_field
     !> can only be reached after schema%init (checked below), and %init/
     !> parquet_schema(...) always give an in-memory schema a name
     !> ("internal:<table>"), so this is effectively always populated for
     !> every add_field error below it.
+    subroutine maml_name_suffix(maml, suffix)
+        type(parquet_maml_file), intent(in) :: maml !! schema being built.
+        character(len=:), allocatable, intent(out) :: suffix !! " (maml: X)"-style suffix, or "".
+
+        suffix = ""
+        if (allocated(maml%name)) then
+            if (len_trim(maml%name) > 0) suffix = " (maml: " // trim(maml%name) // ")"
+        end if
+    end subroutine maml_name_suffix
+
     !> Extracts this MAML's required top-level table: value, by scanning its raw source lines
     !> for the (unindented, scalar) "table:" key -- schema%init/schema_add_field's maml_push_line
     !> always writes it as the first line, but a MAML loaded from disk (schemas/maml_example*.maml)
@@ -245,15 +292,23 @@ contains
         end do
     end subroutine maml_table_name
 
-    subroutine maml_name_suffix(maml, suffix)
-        type(parquet_maml_file), intent(in) :: maml !! schema being built.
-        character(len=:), allocatable, intent(out) :: suffix !! " (maml: X)"-style suffix, or "".
+    !> Guards every schema%add_metadata specific: the schema must already have been parsed
+    !> (%cinfo populated -- parquet_parse_maml has run, whether from a file/object or after an
+    !> in-code %init/%add_field build) before %add_metadata is called. Without this, an entry
+    !> added too early would be silently discarded the moment parquet_parse_maml (re)builds
+    !> %metadata%items from %maml%lines -- see parquet_parse_maml_lines's "metadata is
+    !> intent(out)" note. Not required before %init itself, nor before %add_field (which has
+    !> its own, separate "call schema%init(...) before adding fields" guard).
+    subroutine check_schema_metadata_ready(schema)
+        class(parquet_schema), intent(in) :: schema !! schema about to gain a %add_metadata entry.
+        character(len=:), allocatable :: name_suffix
 
-        suffix = ""
-        if (allocated(maml%name)) then
-            if (len_trim(maml%name) > 0) suffix = " (maml: " // trim(maml%name) // ")"
+        if (.not. allocated(schema%cinfo%col)) then
+            call maml_name_suffix(schema%maml, name_suffix)
+            error stop "parquet_schema%add_metadata: schema has not been parsed yet -- call " // &
+                "parquet_parse_maml on it before add_metadata, not after" // name_suffix
         end if
-    end subroutine maml_name_suffix
+    end subroutine check_schema_metadata_ready
 
     module procedure schema_add_field
         character(len=:), allocatable :: miss_low
@@ -562,7 +617,7 @@ contains
         integer :: u, i, k, n_enabled, ios
         integer :: w_name, w_unit, w_type, w_len, w_ucd, w_info, w_total
         logical :: do_header, do_table_name, do_dash_before, do_dash_after_header, do_dash_after_fields
-        logical :: opened_here, is_open
+        logical :: opened_here, is_open, do_allow_uninitialized
         character(len=1) :: dchar
         character(len=:), allocatable :: pfx, name_suffix, dashline, table_name_val
         character(len=16) :: iq_action
@@ -571,6 +626,15 @@ contains
         integer, allocatable :: enabled_idx(:)
         character(len=*), parameter :: hdr_name = "name", hdr_unit = "unit", hdr_type = "type", &
             hdr_len = "len", hdr_ucd = "ucd", hdr_info = "info"
+
+        do_allow_uninitialized = .false.
+        if (present(allow_uninitialized)) do_allow_uninitialized = allow_uninitialized
+
+        if (.not. allocated(this%cinfo%col)) then
+            if (do_allow_uninitialized) return
+            error stop "parquet_schema%print_schema_info: schema is not initialized (not parsed) -- call " // &
+                "parquet_parse_maml on it first, or pass allow_uninitialized=.true. to skip silently"
+        end if
 
         call maml_name_suffix(this%maml, name_suffix)
 
@@ -722,52 +786,68 @@ contains
     end procedure schema_set_col_qc
 
     module procedure schema_add_metadata_int32
+        call check_schema_metadata_ready(this)
         call this%metadata%add_metadata(key, value, description)
     end procedure schema_add_metadata_int32
 
     module procedure schema_add_metadata_int64
+        call check_schema_metadata_ready(this)
         call this%metadata%add_metadata(key, value, description)
     end procedure schema_add_metadata_int64
 
     module procedure schema_add_metadata_float32
+        call check_schema_metadata_ready(this)
         call this%metadata%add_metadata(key, value, description, fmt)
     end procedure schema_add_metadata_float32
 
     module procedure schema_add_metadata_float64
+        call check_schema_metadata_ready(this)
         call this%metadata%add_metadata(key, value, description, fmt)
     end procedure schema_add_metadata_float64
 
     module procedure schema_add_metadata_logical
+        call check_schema_metadata_ready(this)
         call this%metadata%add_metadata(key, value, description)
     end procedure schema_add_metadata_logical
 
     module procedure schema_add_metadata_string
+        call check_schema_metadata_ready(this)
         call this%metadata%add_metadata(key, value, description)
     end procedure schema_add_metadata_string
 
     module procedure schema_add_metadata_int32_array
+        call check_schema_metadata_ready(this)
         call this%metadata%add_metadata(key, value, description)
     end procedure schema_add_metadata_int32_array
 
     module procedure schema_add_metadata_int64_array
+        call check_schema_metadata_ready(this)
         call this%metadata%add_metadata(key, value, description)
     end procedure schema_add_metadata_int64_array
 
     module procedure schema_add_metadata_float32_array
+        call check_schema_metadata_ready(this)
         call this%metadata%add_metadata(key, value, description, fmt)
     end procedure schema_add_metadata_float32_array
 
     module procedure schema_add_metadata_float64_array
+        call check_schema_metadata_ready(this)
         call this%metadata%add_metadata(key, value, description, fmt)
     end procedure schema_add_metadata_float64_array
 
     module procedure schema_add_metadata_logical_array
+        call check_schema_metadata_ready(this)
         call this%metadata%add_metadata(key, value, description)
     end procedure schema_add_metadata_logical_array
 
     module procedure schema_add_metadata_string_array
+        call check_schema_metadata_ready(this)
         call this%metadata%add_metadata(key, value, description)
     end procedure schema_add_metadata_string_array
+
+    module procedure schema_clear_metadata
+        call this%metadata%clear_metadata()
+    end procedure schema_clear_metadata
 
     !> Restores every column in maml%missing_columns (populated by
     !> parquet_validate_user_maml for a user MAML that omits base-schema
@@ -1271,6 +1351,12 @@ contains
         end block
 
         call move_alloc(tmp, cinfo%col)
+
+        ! Marks how many %metadata%items exist as of this parse -- schema%clear_metadata
+        ! truncates back to this count, discarding only entries a later %add_metadata call adds.
+        metadata%n_base_items = 0
+        if (allocated(metadata%items)) metadata%n_base_items = size(metadata%items)
+
         call parquet_maml_unlock()
     end subroutine parquet_parse_maml_lines
 

@@ -215,6 +215,22 @@ contains
         call parquet_metadata_append_entry(this, key, joined, description)
     end procedure add_metadata_string_array
 
+    module procedure metadata_clear_metadata
+        type(parquet_metadata_entry), allocatable :: tmp(:)
+
+        if (.not. allocated(this%items)) return
+        if (size(this%items) <= this%n_base_items) return
+
+        if (this%n_base_items <= 0) then
+            deallocate(this%items)
+            return
+        end if
+
+        allocate(tmp(this%n_base_items))
+        tmp = this%items(1:this%n_base_items)
+        call move_alloc(tmp, this%items)
+    end procedure metadata_clear_metadata
+
     module procedure get_column_index
         integer :: i
 

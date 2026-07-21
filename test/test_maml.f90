@@ -70,6 +70,14 @@ contains
                 test_schema_add_field_bare_qc_bound), &
             new_unittest("schema%add_field before schema%init aborts", test_schema_add_field_before_init_aborts), &
             new_unittest("schema%init called twice aborts", test_schema_init_twice_aborts), &
+            new_unittest("schema%init after a MAML parse (no force) aborts", &
+                test_schema_init_after_maml_parse_aborts), &
+            new_unittest("loading a .maml file into an already-initialized schema aborts", &
+                test_parse_maml_file_after_init_aborts), &
+            new_unittest("schema%init(force=.true.) after a MAML parse gives a clean slate", &
+                test_schema_init_force_after_maml_parse_ok), &
+            new_unittest("loading a .maml file after schema%clear() succeeds", &
+                test_parse_maml_file_after_clear_ok), &
             new_unittest("schema%init with an empty table aborts", test_schema_init_empty_table_aborts), &
             new_unittest("schema%add_field with an empty name aborts", test_schema_add_field_empty_name_aborts), &
             new_unittest("schema%add_field with a duplicate name aborts", &
@@ -95,7 +103,20 @@ contains
             new_unittest("schema%add_field: a ,utc suffix on time (not timestamp) aborts", &
                 test_schema_add_field_time_utc_aborts), &
             new_unittest("schema%add_field: an unclosed unit bracket aborts", &
-                test_schema_add_field_unclosed_bracket_aborts) &
+                test_schema_add_field_unclosed_bracket_aborts), &
+            new_unittest("schema%is_init reflects state before/after schema%init", test_schema_is_init_reflects_state), &
+            new_unittest("schema%is_init is .true. after a MAML parse, even without %init", &
+                test_schema_is_init_true_after_maml_parse), &
+            new_unittest("schema%init(force=.true.) on a never-initialized schema behaves like a plain init", &
+                test_schema_init_force_never_initialized_ok), &
+            new_unittest("schema%init(force=.true.) fully resets fields/qc/metadata and can be reused", &
+                test_schema_init_force_resets_and_reuses), &
+            new_unittest("schema%clear resets the entire schema to its pristine state", &
+                test_schema_clear_resets_to_pristine), &
+            new_unittest("schema%clear on an already-blank schema is a no-op", &
+                test_schema_clear_noop_on_blank_schema), &
+            new_unittest("schema%clear then a plain %init makes the variable reusable", &
+                test_schema_clear_then_reinit_reusable) &
             ]
     end subroutine collect_tests_parquet_maml
 
@@ -868,6 +889,58 @@ contains
             failure_message="calling schema%init twice was expected to error stop")
     end subroutine test_schema_init_twice_aborts
 
+    subroutine test_schema_init_after_maml_parse_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "schema_init_after_maml_parse", expect_abort=.true., &
+            failure_message="schema%init on a MAML-parsed schema (without force) was expected to error stop")
+    end subroutine test_schema_init_after_maml_parse_aborts
+
+    subroutine test_parse_maml_file_after_init_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "parse_maml_file_after_init", expect_abort=.true., &
+            failure_message="loading a .maml file into an already-initialized schema was expected to error stop")
+    end subroutine test_parse_maml_file_after_init_aborts
+
+    !> schema%init(force=.true.) on a schema already populated via a MAML parse must still
+    !! give a genuine clean slate -- the same guarantee already covered for a schema previously
+    !! built via %init (test_schema_init_force_resets_and_reuses); this checks it also holds
+    !! when the earlier content came from parquet_parse_maml instead.
+    subroutine test_schema_init_force_after_maml_parse_ok(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+
+        call parquet_parse_maml("schemas/maml_example.maml", schema)
+        call check(error, size(schema%maml%lines) > 1, &
+            "sanity check: parsing schemas/maml_example.maml should populate many maml lines")
+        if (allocated(error)) return
+
+        call schema%init(table="after_force", force=.true.)
+
+        call check(error, size(schema%maml%lines) == 1 .and. trim(schema%maml%lines(1)) == "table: after_force", &
+            "force=.true. after a MAML parse should discard all prior content, keeping only the new table: line")
+        if (allocated(error)) return
+        call check(error, .not. allocated(schema%cinfo%col), &
+            "force=.true. after a MAML parse should deallocate %cinfo%col")
+    end subroutine test_schema_init_force_after_maml_parse_ok
+
+    !> schema%clear() is the documented workaround for reusing a schema variable across two
+    !! different parquet_parse_maml(filename, ...) calls, now that doing so directly aborts.
+    subroutine test_parse_maml_file_after_clear_ok(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+
+        call schema%init(table="t1")
+        call schema%add_field("x", "int32")
+        call schema%clear()
+
+        call parquet_parse_maml("schemas/maml_example.maml", schema)
+
+        call check(error, schema%is_init() .and. allocated(schema%cinfo%col), &
+            "loading a .maml file after schema%clear() should succeed normally")
+    end subroutine test_parse_maml_file_after_clear_ok
+
     subroutine test_schema_init_empty_table_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
@@ -1014,5 +1087,152 @@ contains
             failure_message="schema%add_field with an unclosed unit bracket ('time[ms') was expected to error stop", &
             required_stderr="invalid data_type 'time[ms'")
     end subroutine test_schema_add_field_unclosed_bracket_aborts
+
+    subroutine test_schema_is_init_reflects_state(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+
+        call check(error, .not. schema%is_init(), "a freshly declared schema should report is_init() == .false.")
+        if (allocated(error)) return
+
+        call schema%init(table="is_init_test")
+        call check(error, schema%is_init(), "schema%is_init() should be .true. immediately after %init")
+    end subroutine test_schema_is_init_reflects_state
+
+    !> A schema loaded via parquet_parse_maml (from a file or an already-populated object) never
+    !! calls %init at all, but is fully valid and ready to use -- is_init() must report .true. for
+    !! it too, not just for the in-code %init/%add_field builder path.
+    subroutine test_schema_is_init_true_after_maml_parse(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+
+        call parquet_parse_maml("schemas/maml_example.maml", schema)
+        call check(error, schema%is_init(), &
+            "schema%is_init() should be .true. for a schema loaded via parquet_parse_maml, " // &
+            "even though %init was never called on it")
+    end subroutine test_schema_is_init_true_after_maml_parse
+
+    !> force=.true. on a schema that was never initialized must behave exactly like a plain
+    !! %init -- there is nothing to reset, and it must not error stop just because force was given.
+    subroutine test_schema_init_force_never_initialized_ok(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+
+        call schema%init(table="force_fresh", force=.true.)
+        call check(error, schema%is_init(), &
+            "schema%init(force=.true.) on a fresh schema should succeed and initialize it")
+        if (allocated(error)) return
+
+        call check(error, size(schema%maml%lines) == 1 .and. trim(schema%maml%lines(1)) == "table: force_fresh", &
+            "schema%init(force=.true.) on a fresh schema should build the same single table: line as a plain init")
+    end subroutine test_schema_init_force_never_initialized_ok
+
+    !> force=.true. on an already-initialized schema with fields/metadata already added must
+    !! discard all of that (maml lines, cinfo) and rebuild from scratch with the new table/field
+    !! arguments -- verified both structurally (maml%lines/cinfo%col contents) and end-to-end
+    !! (the old field is genuinely gone, not just hidden, by writing/reading a real file).
+    subroutine test_schema_init_force_resets_and_reuses(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: new_col(2) = [10_int32, 20_int32]
+        integer(int32) :: new_col_back(2)
+        integer :: nrows
+        character(len=*), parameter :: out_file = "test_run/schema_init_force_reset.parquet"
+
+        call schema%init(table="before_reset")
+        call schema%add_field("old_field", "int32")
+        call parquet_parse_maml(schema)
+
+        call check(error, size(schema%cinfo%col) == 1, "sanity check: 'old_field' should be parsed before the reset")
+        if (allocated(error)) return
+
+        call schema%init(table="after_reset", force=.true.)
+
+        call check(error, schema%is_init(), "schema%init(force=.true.) should leave the schema initialized")
+        if (allocated(error)) return
+        call check(error, size(schema%maml%lines) == 1 .and. trim(schema%maml%lines(1)) == "table: after_reset", &
+            "force=.true. should discard the old table: line and any fields, keeping only the new table: line")
+        if (allocated(error)) return
+        call check(error, .not. allocated(schema%cinfo%col), &
+            "force=.true. should deallocate %cinfo%col from the previous parquet_parse_maml call")
+        if (allocated(error)) return
+
+        ! End-to-end: the old field must be genuinely gone -- a new field added after the
+        ! reset should be the only declared column, and should round-trip normally.
+        call schema%add_field("new_field", "int32")
+        call parquet_parse_maml(schema)
+
+        call check(error, size(schema%cinfo%col) == 1 .and. trim(schema%cinfo%col(1)%name) == "new_field", &
+            "after the reset, only 'new_field' should be a declared column")
+        if (allocated(error)) return
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "new_field", new_col)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 2, "expected 2 rows after writing through the force-reset schema")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+        call parquet_read_column(reader, "new_field", new_col_back)
+        call parquet_close_reader(reader)
+
+        call check(error, all(new_col_back == new_col), "'new_field' did not round-trip correctly after force reset")
+    end subroutine test_schema_init_force_resets_and_reuses
+
+    !> %clear resets the entire schema back to its pristine, just-declared state -- is_init()
+    !! becomes .false. again, and %maml/%cinfo/%metadata are all back to their defaults.
+    subroutine test_schema_clear_resets_to_pristine(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+
+        call schema%init(table="clear_test")
+        call schema%add_field("x", "int32")
+        call parquet_parse_maml(schema)
+        call schema%add_metadata("k", 1_int32)
+
+        call check(error, schema%is_init(), "sanity check: schema should be initialized before %clear")
+        if (allocated(error)) return
+
+        call schema%clear()
+
+        call check(error, .not. schema%is_init(), "%clear should leave the schema uninitialized (is_init() == .false.)")
+        if (allocated(error)) return
+        call check(error, .not. allocated(schema%cinfo%col), "%clear should deallocate %cinfo%col")
+        if (allocated(error)) return
+        call check(error, .not. allocated(schema%metadata%items), "%clear should deallocate %metadata%items")
+        if (allocated(error)) return
+        call check(error, .not. allocated(schema%maml%lines), "%clear should deallocate %maml%lines")
+    end subroutine test_schema_clear_resets_to_pristine
+
+    subroutine test_schema_clear_noop_on_blank_schema(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+
+        call schema%clear()
+        call check(error, .not. schema%is_init(), "%clear on a never-initialized schema should leave it uninitialized")
+    end subroutine test_schema_clear_noop_on_blank_schema
+
+    !> After %clear, the schema variable can be reused via a normal (non-force) %init call.
+    subroutine test_schema_clear_then_reinit_reusable(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+
+        call schema%init(table="before_clear")
+        call schema%add_field("old_field", "int32")
+        call schema%clear()
+
+        call schema%init(table="after_clear")
+        call schema%add_field("new_field", "int32")
+        call parquet_parse_maml(schema)
+
+        call check(error, size(schema%cinfo%col) == 1 .and. trim(schema%cinfo%col(1)%name) == "new_field", &
+            "after %clear + a plain %init, only 'new_field' should be a declared column")
+    end subroutine test_schema_clear_then_reinit_reusable
     !
 end module test_maml

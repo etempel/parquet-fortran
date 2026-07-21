@@ -17,6 +17,7 @@ module parquet_bindings
 
     public :: create_parquet_writer, create_parquet_reader
     public :: close_parquet_writer, close_parquet_reader
+    public :: abandon_parquet_writer
     public :: parquet_reader_print_stat
     public :: parquet_set_writer_options
     public :: parquet_set_thread_pool_capacity
@@ -412,6 +413,15 @@ module parquet_bindings
         !> Flushes and closes `writer`, freeing the underlying C++ object.
         subroutine close_parquet_writer(writer) &
                 bind(C, name="close_parquet_writer")
+            import
+            type(c_ptr), value :: writer
+        end subroutine
+
+        !> Frees `writer` without finalizing/writing its output -- see writer_finalize
+        !> (parquet_write.f90) for why the implicit-finalizer safety net uses this instead of
+        !> close_parquet_writer.
+        subroutine abandon_parquet_writer(writer) &
+                bind(C, name="abandon_parquet_writer")
             import
             type(c_ptr), value :: writer
         end subroutine

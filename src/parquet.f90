@@ -113,7 +113,14 @@ module parquet
         !> parquet_append_keyarray_line), so the sidecar reflects them; it is
         !> NOT kept in sync with which columns end up enabled/written, though.
         character(len=:), allocatable :: source_maml_lines(:)
+        !> Count of %items present immediately after the most recent parquet_parse_maml
+        !> (table:/survey:/... header keys plus any real MAML keyarray: entries) -- the
+        !> "base" metadata %clear_metadata preserves, discarding only entries appended by
+        !> %add_metadata calls made after that parse. 0 for a never-parsed table_metadata.
+        integer :: n_base_items = 0
     contains
+        procedure :: clear_metadata => metadata_clear_metadata !! Discards %add_metadata entries added
+        !! after the most recent parse, keeping the base (header keys + keyarray:) entries.
         procedure :: add_metadata_int32 !! int32 specific.
         procedure :: add_metadata_int64 !! int64 specific.
         procedure :: add_metadata_float32 !! float32 specific.
@@ -158,6 +165,9 @@ module parquet
         logical, private :: is_initialized = .false.
     contains
         procedure :: init => schema_init !! Initializes a from-scratch schema (table: key + optional metadata).
+        procedure :: is_init => schema_is_init !! Whether this schema is ready to use (via %init or a MAML parse).
+        procedure :: clear => schema_clear !! Resets the entire schema back to its pristine,
+        !! just-declared (never-initialized) state.
         procedure :: add_field => schema_add_field !! Appends one fields: entry to a from-scratch schema.
         procedure :: set_column_available !! Enables a column, or every column if no name is given.
         procedure :: set_column_unavailable !! Disables a column, or every column if no name is given.
@@ -200,6 +210,7 @@ module parquet
                                     schema_add_metadata_int32_array, schema_add_metadata_int64_array, &
                                     schema_add_metadata_float32_array, schema_add_metadata_float64_array, &
                                     schema_add_metadata_logical_array, schema_add_metadata_string_array
+        procedure :: clear_metadata => schema_clear_metadata !! Forwards to %metadata%clear_metadata.
     end type parquet_schema
 
     !> Overrides the default structure constructor so a schema can be built
@@ -219,7 +230,11 @@ module parquet
     !> parquet_close_writer/parquet_close_reader call; the FINAL procedures
     !> below are only a safety net for a handle that's still open when its
     !> variable goes out of scope or is overwritten (e.g. an early RETURN
-    !> between open and close), not a substitute for closing normally.
+    !> between open and close), not a substitute for closing normally -- for a
+    !> writer specifically, the safety net skips parquet_close_writer's
+    !> completeness checks (so an incomplete write never crashes an implicit
+    !> finalizer), meaning the resulting file is not guaranteed valid/complete
+    !> unless parquet_close_writer was actually called.
     !>
     !> Do not copy a parquet_writer/parquet_reader (`w2 = w1`, passing one as
     !> a function result, etc.): the handle is a plain c_ptr, so a copy
@@ -410,7 +425,9 @@ module parquet
     !> below. Every column already known to `writer` (whether schema-declared or already
     !> chunk-written for an earlier row group) must then receive exactly one
     !> parquet_write_column_chunk call for this row group (or already be a whole column from an
-    !> earlier parquet_write_column call) before parquet_finish_row_group.
+    !> earlier parquet_write_column call) before parquet_finish_row_group. Error stops if a row
+    !> group is already open (i.e. called again without an intervening parquet_finish_row_group)
+    !> rather than silently abandoning the still-open one.
     interface parquet_new_row_group
         module procedure parquet_new_row_group_int32
         module procedure parquet_new_row_group_int64
@@ -475,7 +492,8 @@ module parquet
     !> doc/pages/writing.md's "Filtering rows with a mask" for a worked example.
     !>
     !> Mutually exclusive with parquet_write_chunk_row_mask on the same writer -- once either has
-    !> been used, calling the other is an `error stop`.
+    !> been used, calling the other is an `error stop`. Callable at most once per writer -- a
+    !> second call is an `error stop` rather than silently replacing the first mask.
     interface parquet_write_row_mask
         module procedure parquet_write_row_mask_impl
     end interface parquet_write_row_mask
@@ -485,7 +503,8 @@ module parquet
     !> lifetime). Must be called once per row group, after that row group's parquet_new_row_group
     !> and before its first parquet_write_column_chunk call; `size(mask)` must equal that row
     !> group's own `nrows` (from parquet_new_row_group) exactly, and the row group's actual
-    !> written row count is `count(mask)`.
+    !> written row count is `count(mask)`. A second call for the same still-open row group is an
+    !> `error stop` rather than silently replacing the first mask.
     !>
     !> If used for a writer's first row group, it must be used for **every** row group of that
     !> writer (all-or-nothing per writer, not per row group) -- `error stop` otherwise. It is
@@ -872,10 +891,14 @@ module parquet
             real(real64), intent(out) :: value !! parsed bound value; only meaningful when the function returns .true.
         end function parquet_qc_numeric_bound
         !> File form of parquet_parse_maml: loads `filename` from disk, then
-        !> parses/validates it into `schema` (%maml, %cinfo, %metadata).
+        !> parses/validates it into `schema` (%maml, %cinfo, %metadata). Error
+        !> stops if `schema` is already initialized (schema%is_init() ==
+        !> .true., whether via %init or an earlier parse) -- call
+        !> schema%clear() first to reuse the same variable for a different
+        !> file, rather than silently discarding whatever it held before.
         module subroutine parquet_parse_maml_from_file(filename, schema)
             character(len=*), intent(in) :: filename !! .maml file path.
-            type(parquet_schema), intent(out) :: schema !! fully parsed schema.
+            type(parquet_schema), intent(inout) :: schema !! schema to populate (must not already be initialized).
         end subroutine parquet_parse_maml_from_file
         !> Loads `filename`'s raw lines from disk into a parquet_maml_file,
         !> running the full parquet_validate_maml checks (table:, at least
@@ -934,14 +957,17 @@ module parquet
         !> Initializes a from-scratch parquet_schema: sets the (required)
         !> table: key and any of the optional scalar top-level MAML keys
         !> given, and marks this schema ready for %add_field. Error stops if
-        !> called twice on the same schema. List-shaped top-level sections
-        !> (coauthors:, comments:, keywords:, DOIs:, depends:, keyarray:,
-        !> extra:) are out of scope here -- keyarray: already has its own
-        !> API (add_metadata); the others aren't supported by %init/%add_field
-        !> at all yet.
+        !> this schema is already initialized (this%is_init() == .true., whether
+        !> from an earlier %init call or a MAML parse -- e.g. calling %init on a
+        !> schema already loaded via parquet_parse_maml), unless force=.true. is
+        !> given (see below). List-shaped top-level sections (coauthors:,
+        !> comments:, keywords:, DOIs:, depends:, keyarray:, extra:) are out of
+        !> scope here -- keyarray: already has its own API (add_metadata); the
+        !> others aren't supported by %init/%add_field at all yet.
         module subroutine schema_init(this, table, survey, dataset, version, date, author, description, license, &
-                maml_version)
-            class(parquet_schema), intent(inout) :: this !! schema being initialized (must not already be initialized).
+                maml_version, force)
+            class(parquet_schema), intent(inout) :: this !! schema being initialized (must not already be initialized,
+            !! unless force=.true.).
             character(len=*), intent(in) :: table !! required table: key.
             character(len=*), intent(in), optional :: survey !! optional survey: key.
             character(len=*), intent(in), optional :: dataset !! optional dataset: key.
@@ -951,11 +977,37 @@ module parquet
             character(len=*), intent(in), optional :: description !! optional description: key.
             character(len=*), intent(in), optional :: license !! optional license: key.
             character(len=*), intent(in), optional :: maml_version !! optional MAML_version: key.
+            logical, intent(in), optional :: force !! if .true., bypass the "already initialized" error stop and
+            !! fully reset this schema (discarding any fields/qc/metadata already added, and %cinfo/%metadata if
+            !! %parquet_parse_maml had already run) before re-initializing, as if %init were being called for the
+            !! first time (default .false.).
         end subroutine schema_init
+        !> Whether this schema is ready to use -- .true. once either %init/parquet_schema(...) has
+        !> completed (the in-code builder path) or parquet_parse_maml has populated %cinfo (a
+        !> schema loaded from a .maml file/object, which never calls %init at all); .false. only
+        !> for a just-declared parquet_schema that has had neither happen yet. Note %add_field's
+        !> own "call schema%init(...) before adding fields" guard checks %init having been called
+        !> specifically, not this broader readiness -- %add_field only makes sense on a from-scratch
+        !> schema, so it is not satisfied merely by is_init() being .true. via a MAML parse.
+        module logical function schema_is_init(this)
+            class(parquet_schema), intent(in) :: this !! schema to query.
+        end function schema_is_init
+        !> Resets this schema to exactly the state a freshly declared, never-initialized
+        !> parquet_schema starts in: %maml/%cinfo/%metadata all back to their defaults (no
+        !> lines, no fields, no metadata items) and is_init() == .false. again. Unlike
+        !> %init(..., force=.true.) (which resets and immediately rebuilds with new header-key
+        !> arguments), %clear leaves the schema uninitialized -- call %init again afterward to
+        !> reuse the variable, or let it go out of scope. Always succeeds, even on an
+        !> already-blank schema (a no-op in that case).
+        module subroutine schema_clear(this)
+            class(parquet_schema), intent(inout) :: this !! schema being reset to its pristine state.
+        end subroutine schema_clear
         !> Structure-constructor form of %init: builds and returns an
         !> initialized parquet_schema in one expression instead of
         !> declaring the variable and calling %init separately. Same
-        !> arguments and error-stop conditions as schema_init.
+        !> header-key arguments and error-stop conditions as schema_init;
+        !> no force= here since `this` is always a brand-new result variable
+        !> (never already initialized), so there is nothing to reset.
         module function parquet_schema_new(table, survey, dataset, version, date, author, description, license, &
                 maml_version) result(this)
             character(len=*), intent(in) :: table !! required table: key.
@@ -1056,9 +1108,16 @@ module parquet
         !> position="append", written, and closed again before returning). Giving neither, or an
         !> unopened/read-only unit, or a unit+filename pair where filename does not match (exact,
         !> trimmed string equality against inquire(unit=unit, name=)) the file unit is already
-        !> connected to, all error stop.
+        !> connected to, all error stop. Calling this on a schema that has not been parsed yet
+        !> (schema%cinfo not populated -- neither parquet_parse_maml nor, for an in-code schema,
+        !> %init/%add_field followed by parquet_parse_maml, has run) also error stops by default,
+        !> with the message "schema is not initialized (not parsed)" -- pass
+        !> allow_uninitialized=.true. to silently print nothing instead (a complete no-op: no file
+        !> is opened/touched, even in filename= mode) rather than aborting. Note this is
+        !> independent of schema%is_init(): a schema loaded via parquet_parse_maml (from a file or
+        !> an already-populated object) is fully valid here even though it never calls %init.
         module subroutine schema_print_schema_info(this, unit, filename, prefix, header, table_name, &
-                dash_before_header, dash_after_header, dash_after_fields, dash_char)
+                dash_before_header, dash_after_header, dash_after_fields, dash_char, allow_uninitialized)
             class(parquet_schema), intent(in) :: this !! schema whose enabled (is_set) columns are listed.
             integer, intent(in), optional :: unit !! already-open unit to write to (see filename for the alternative).
             character(len=*), intent(in), optional :: filename !! output path; opened with position="append" if unit absent.
@@ -1072,6 +1131,8 @@ module parquet
             logical, intent(in), optional :: dash_after_fields !! dashed separator line after the last field row
             !! (default .false.).
             character(len=1), intent(in), optional :: dash_char !! character used to draw dashed lines (default "-").
+            logical, intent(in), optional :: allow_uninitialized !! if .true., an unparsed schema (%cinfo not
+            !! populated) is silently skipped (no output, no error) instead of error-stopping (default .false.).
         end subroutine schema_print_schema_info
         !> Subroutine form of %add_col_qc: forwards to %maml%add_col_qc. See
         !> parquet_maml_add_col_qc (parquet_maml_base_add_col_qc.f90) for the
@@ -1095,6 +1156,11 @@ module parquet
         !> int32 specific of %add_metadata; forwards to %metadata%add_metadata
         !> (see the parquet_get_metadata generic interface above for the
         !> read-side counterpart and its stored-representation semantics).
+        !> Error stops if the schema has not been parsed yet (%cinfo not
+        !> populated -- parquet_parse_maml must run before %add_metadata is
+        !> called, not after), since an entry added before that point would
+        !> otherwise be silently discarded when %cinfo%col/%metadata%items are
+        !> (re)built by the parse that follows.
         module subroutine schema_add_metadata_int32(this, key, value, description)
             class(parquet_schema), intent(inout) :: this !! schema whose %metadata gains one entry.
             character(len=*), intent(in) :: key !! metadata key.
@@ -1182,6 +1248,12 @@ module parquet
             character(len=*), intent(in) :: value(:) !! metadata values.
             character(len=*), intent(in), optional :: description !! optional free-text description.
         end subroutine schema_add_metadata_string_array
+        !> Forwards to %metadata%clear_metadata: discards every %add_metadata entry added
+        !> after the most recent parquet_parse_maml, keeping the base (header keys +
+        !> keyarray:) entries from the schema's %init/%add_field build or MAML source.
+        module subroutine schema_clear_metadata(this)
+            class(parquet_schema), intent(inout) :: this !! schema whose %metadata is truncated.
+        end subroutine schema_clear_metadata
         !> 1-based index of `name` in this%col, or 0 if not found.
         module integer function get_column_index(this, name)
             class(parquet_column_info), intent(in) :: this !! column_info to search.
@@ -1306,6 +1378,12 @@ module parquet
             character(len=*), intent(in) :: value(:) !! metadata values.
             character(len=*), intent(in), optional :: description !! optional free-text description.
         end subroutine add_metadata_string_array
+        !> Truncates %items back to %n_base_items, discarding every entry appended by an
+        !> %add_metadata call made since the most recent parquet_parse_maml -- a no-op if
+        !> %items currently holds %n_base_items entries or fewer (nothing to discard).
+        module subroutine metadata_clear_metadata(this)
+            class(parquet_table_metadata), intent(inout) :: this !! table metadata being truncated.
+        end subroutine metadata_clear_metadata
     end interface
 
     ! ---- Writer lifecycle & column management ----

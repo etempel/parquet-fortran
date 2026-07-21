@@ -277,6 +277,8 @@ contains
                 test_row_group_new_column_after_first_aborts), &
             new_unittest("a whole-column write after the streaming row-group API already started aborts", &
                 test_row_group_whole_column_after_streaming_started_aborts), &
+            new_unittest("starting a new row group while one is already open aborts", &
+                test_row_group_started_while_open_aborts), &
             new_unittest("writing a table with column count exceeding Arrow's Schema field-count limit aborts", &
                 test_write_column_count_overflow_aborts), &
             new_unittest("prefetching an unknown column aborts", &
@@ -560,6 +562,8 @@ contains
                 test_mask_row_mask_shape_mismatch_aborts), &
             new_unittest("parquet_write_row_mask with a zero-length mask aborts", &
                 test_mask_row_mask_zero_length_aborts), &
+            new_unittest("calling parquet_write_row_mask twice for the same writer aborts", &
+                test_mask_row_mask_called_twice_aborts), &
             new_unittest("parquet_write_chunk_row_mask after parquet_write_row_mask aborts", &
                 test_mask_chunk_row_mask_after_row_mask_aborts), &
             new_unittest("parquet_write_row_mask after the writer has started row groups aborts", &
@@ -570,6 +574,8 @@ contains
                 test_mask_chunk_row_mask_not_used_every_group_aborts), &
             new_unittest("parquet_write_chunk_row_mask introduced after the row group's first chunk write aborts", &
                 test_mask_chunk_row_mask_introduced_late_aborts), &
+            new_unittest("calling parquet_write_chunk_row_mask twice for the same row group aborts", &
+                test_mask_chunk_row_mask_called_twice_aborts), &
             new_unittest("parquet_write_chunk_row_mask with the wrong mask size aborts", &
                 test_mask_chunk_row_mask_size_mismatch_aborts), &
             new_unittest("a row group claiming more mask positions than parquet_write_row_mask provided aborts", &
@@ -1785,6 +1791,16 @@ contains
             required_stderr="Column written via parquet_write_column after the streaming row-group API " // &
                 "already started")
     end subroutine test_row_group_whole_column_after_streaming_started_aborts
+
+    !> parquet_new_row_group must not be called again while a row group is already open --
+    !> see the writer%in_row_group guard added to parquet_new_row_group_impl.
+    subroutine test_row_group_started_while_open_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_group_started_while_open", expect_abort=.true., &
+            failure_message="starting a new row group while one was already open was expected to abort", &
+            required_stderr="parquet_new_row_group: a row group is already open")
+    end subroutine test_row_group_started_while_open_aborts
 
     !> check_column_count_fits_arrow_limit in parquet_wrapper.cpp aborts via a C++-level
     !> report_fatal_error (not a Fortran error stop) the moment a table's column count would
@@ -3132,6 +3148,13 @@ contains
             required_stderr="parquet_write_row_mask: mask must not be zero-length")
     end subroutine test_mask_row_mask_zero_length_aborts
 
+    subroutine test_mask_row_mask_called_twice_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "mask_row_mask_called_twice", expect_abort=.true., &
+            failure_message="a second parquet_write_row_mask call for the same writer was expected to abort", &
+            required_stderr="parquet_write_row_mask: already called for this writer")
+    end subroutine test_mask_row_mask_called_twice_aborts
+
     subroutine test_mask_chunk_row_mask_after_row_mask_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "mask_chunk_row_mask_after_row_mask", expect_abort=.true., &
@@ -3170,6 +3193,13 @@ contains
                 "was expected to abort", &
             required_stderr="must be called before this row group's first")
     end subroutine test_mask_chunk_row_mask_introduced_late_aborts
+
+    subroutine test_mask_chunk_row_mask_called_twice_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "mask_chunk_row_mask_called_twice", expect_abort=.true., &
+            failure_message="a second parquet_write_chunk_row_mask call for the same row group was expected to abort", &
+            required_stderr="parquet_write_chunk_row_mask: already called for this row group")
+    end subroutine test_mask_chunk_row_mask_called_twice_aborts
 
     subroutine test_mask_chunk_row_mask_size_mismatch_aborts(error)
         type(error_type), allocatable, intent(out) :: error

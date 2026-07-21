@@ -160,6 +160,9 @@ contains
                 test_reopen_reader_without_closing_finalizes_old_handle), &
             new_unittest("re-opening an already-open writer without closing it finalizes the old handle", &
                 test_reopen_writer_without_closing_finalizes_old_handle), &
+            new_unittest("re-opening an already-open, incomplete schema-enforced writer finalizes the old " // &
+                "handle without crashing", &
+                test_reopen_writer_without_closing_finalizes_schema_enforced), &
             new_unittest("use_threads=.false. on writer and reader still round-trips", &
                 test_use_threads_false_still_round_trips), &
             new_unittest("parquet_set_max_threads with a valid value does not break a round-trip", &
@@ -2072,12 +2075,13 @@ contains
         call parquet_close_reader(reader)
     end subroutine test_reopen_reader_without_closing_finalizes_old_handle
 
-    !> Same as above, for the write side: re-opening an open parquet_writer
-    !> without closing it first must finalize (free) the old handle
-    !> automatically -- see writer_finalize, which deliberately skips
-    !> parquet_close_writer's "missing required column" check for exactly
-    !> this case (an incomplete write must not surprise-abort from an
-    !> implicit finalizer).
+    !> Same as above, for the write side: re-opening an open, schema-less parquet_writer without
+    !> closing it first must finalize (free) the old handle automatically -- see writer_finalize,
+    !> which uses abandon_parquet_writer (not close_parquet_writer) for exactly this case, so an
+    !> incomplete previous write never surprise-aborts an implicit finalizer. This writer has no
+    !> schema, so there's no "missing required column" check to skip in the first place -- see
+    !> test_reopen_writer_without_closing_finalizes_schema_enforced below for the case
+    !> where that check would otherwise fire.
     subroutine test_reopen_writer_without_closing_finalizes_old_handle(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_writer) :: writer
@@ -2104,6 +2108,52 @@ contains
             "file written after re-opening an already-open writer did not round-trip the expected row count")
         call parquet_close_reader(reader)
     end subroutine test_reopen_writer_without_closing_finalizes_old_handle
+
+    !> Same as test_reopen_writer_without_closing_finalizes_old_handle above, but for a
+    !> schema-enforced writer with an *unwritten* enabled column at the point it gets implicitly
+    !> finalized -- exactly the case parquet_close_writer's own "missing write for enabled
+    !> column" check would reject with a clean error stop if called explicitly. Before this was
+    !> fixed, writer_finalize routed through close_parquet_writer, whose C++-side completeness
+    !> check throws a std::runtime_error that crosses the extern "C" boundary uncaught, aborting
+    !> the whole process instead of the old handle being finalized cleanly -- so this test's mere
+    !> completion (without the harness reporting a crashed subprocess) is itself the main
+    !> assertion; the round-trip check on the second writer confirms the reused variable still
+    !> works correctly afterward. See writer_finalize/abandon_parquet_writer in parquet_write.f90.
+    subroutine test_reopen_writer_without_closing_finalizes_schema_enforced(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: id(3)
+        integer(int64) :: nrows
+        character(len=*), parameter :: out_file = "test_run/test_reopen_writer_schema_enforced.parquet"
+        integer :: i
+
+        id = [(i, i=1,3)]
+
+        call schema%init(table="reopen_writer_schema_enforced_table")
+        call schema%add_field("id", "int32")
+        call schema%add_field("other", "int32")
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "id", id)
+        ! "other" is deliberately never written -- writer is left incomplete (schema-enforced,
+        ! with an enabled column that has no data), the exact shape that used to crash
+        ! writer_finalize before the abandon_parquet_writer fix.
+
+        ! writer is intentionally NOT closed here -- re-opening it below must finalize (free) the
+        ! still-open, incomplete handle automatically, without crashing the process.
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file, nrows=nrows)
+        call check(error, nrows == 3_int64, &
+            "file written after re-opening an already-open, incomplete schema-enforced writer " // &
+                "did not round-trip the expected row count")
+        call parquet_close_reader(reader)
+    end subroutine test_reopen_writer_without_closing_finalizes_schema_enforced
 
     !> use_threads=.false. must still be a fully functional writer/reader --
     !> it only turns off Arrow's internal thread pool for that instance, it

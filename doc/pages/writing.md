@@ -121,7 +121,7 @@ call parquet_close_writer(writer)
 
 **Schema-less writers:** work the same way, inferring each column's type/`col_size` from its first chunk — but since that means `col_size` isn't known until the writer is already streaming, pass an explicit `chunk_size` to `parquet_open_writer` yourself rather than relying on the (schema-based) auto-estimate, which has nothing to estimate from without a schema.
 
-**Completeness checks:** `parquet_close_writer` fails with `error stop` if a row group was started (`parquet_new_row_group`) but never finished, or if a whole column's own row count doesn't match how many rows the row groups actually covered — the same "don't let a caller silently under/over-write a column" guarantee `parquet_write_column`'s own row-count check already gives you.
+**Completeness checks:** `parquet_close_writer` fails with `error stop` if a row group was started (`parquet_new_row_group`) but never finished, or if a whole column's own row count doesn't match how many rows the row groups actually covered — the same "don't let a caller silently under/over-write a column" guarantee `parquet_write_column`'s own row-count check already gives you. `parquet_new_row_group` itself also fails with `error stop` if called again while a row group is already open (i.e. without an intervening `parquet_finish_row_group`), rather than silently abandoning the still-open one.
 
 **Threading:** `parquet_new_row_group`/`parquet_write_column_chunk`/`parquet_finish_row_group` must all be called from a single thread, in row-group order, for a given writer — same rule as `parquet_write_column` (see [Thread safety](thread-safety.html)). If you want to parallelize the work that *produces* each row group's data, do that in an `!$omp parallel do` (or similar) around the compute step only, then make the `parquet_new_row_group`/`parquet_write_column_chunk`/`parquet_finish_row_group` calls afterward, serially, on one thread.
 
@@ -129,8 +129,8 @@ call parquet_close_writer(writer)
 
 `parquet_write_row_mask`/`parquet_write_chunk_row_mask` drop rows entirely from what gets written — a masked-out row leaves no trace at all in the output file (no offset, no validity bit). This is different from writing a Null: a Null still occupies a row (see `is_valid` above), while a masked-out row simply never appears. The two procedures are mutually exclusive on a given writer — pick whichever matches how you're writing:
 
-- **`parquet_write_row_mask(writer, mask)`** — a single, whole-file mask, for a writer using `parquet_write_column` (with or without row groups).
-- **`parquet_write_chunk_row_mask(writer, mask)`** — a mask scoped to one row group at a time, for a writer using **only** `parquet_write_column_chunk` (no whole-column writes at all).
+- **`parquet_write_row_mask(writer, mask)`** — a single, whole-file mask, for a writer using `parquet_write_column` (with or without row groups). Callable at most once per writer — a second call fails with `error stop` rather than silently replacing the first mask.
+- **`parquet_write_chunk_row_mask(writer, mask)`** — a mask scoped to one row group at a time, for a writer using **only** `parquet_write_column_chunk` (no whole-column writes at all). Callable at most once per row group — a second call for the same still-open row group fails with `error stop`.
 
 #### Whole-column writes
 

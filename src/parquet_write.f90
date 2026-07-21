@@ -322,6 +322,8 @@ contains
         if (writer%write_started) error stop &
             "parquet_write_row_mask: must be called before the writer's first parquet_write_column " // &
             "or parquet_new_row_group call" // ctx
+        if (allocated(writer%file_mask)) error stop &
+            "parquet_write_row_mask: already called for this writer -- it can only be set once" // ctx
         if (size(mask, kind=int64) <= 0_int64) error stop &
             "parquet_write_row_mask: mask must not be zero-length" // ctx
         writer%file_mask = mask
@@ -334,6 +336,8 @@ contains
         call writer_context_suffix(writer, ctx)
         if (.not. writer%in_row_group) error stop &
             "parquet_write_chunk_row_mask: no row group is open (call parquet_new_row_group first)" // ctx
+        if (writer%chunk_mask_set_this_group) error stop &
+            "parquet_write_chunk_row_mask: already called for this row group" // ctx
         if (allocated(writer%file_mask)) error stop &
             "parquet_write_chunk_row_mask: cannot be used together with parquet_write_row_mask on the same writer" // ctx
         if (writer%any_whole_column_write) error stop &
@@ -829,6 +833,8 @@ contains
 
         call check_writer_open(writer)
         call writer_context_suffix(writer, ctx)
+        if (writer%in_row_group) error stop &
+            "parquet_new_row_group: a row group is already open -- call parquet_finish_row_group first" // ctx
         if (nrows <= 0) error stop "parquet_new_row_group: nrows must be positive" // ctx
         writer%write_started = .true.
         writer%in_row_group = .true.
@@ -957,13 +963,16 @@ contains
     !> Safety net for a writer whose handle is still open when it goes out of
     !> scope or is overwritten (e.g. reassigned, or an early RETURN between
     !> parquet_open_writer and parquet_close_writer): frees the underlying
-    !> C++ object so the process doesn't leak it. This intentionally skips
-    !> parquet_close_writer's is_schema_enforced check (erroring from an implicit
-    !> finalizer on an incompletely-written file would be surprising) --
-    !> always prefer calling parquet_close_writer explicitly.
+    !> C++ object so the process doesn't leak it. Uses abandon_parquet_writer, not
+    !> close_parquet_writer: the latter builds/writes the final table and checks that every
+    !> declared column was written and every row group finished, and throws (an uncaught C++
+    !> exception that crosses the extern "C" boundary and aborts the process) if not -- erroring,
+    !> let alone crashing, from an implicit finalizer on an incompletely-written file would be
+    !> surprising. The resulting output file is therefore not guaranteed complete/valid when
+    !> reached this way -- always prefer calling parquet_close_writer explicitly.
     module procedure writer_finalize
         if (c_associated(this%handle)) then
-            call close_parquet_writer(this%handle)
+            call abandon_parquet_writer(this%handle)
             this%handle = c_null_ptr
         end if
     end procedure writer_finalize

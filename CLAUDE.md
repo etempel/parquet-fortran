@@ -1,5 +1,12 @@
 # Instructions for Claude
 
+This file is forward-looking: it captures durable conventions, gotchas, and guardrails to help
+maintain this library and develop new features going forward. It is not a changelog or session
+log — do not add entries describing how or when a specific feature was implemented, what a past
+session investigated, or a chronological record of development. Only add generalizable guidance
+that will still be correct and actionable for a future task, independent of which session
+produced it (git history/commit messages are the right place for "what happened when").
+
 ## Contents
 
 This file is a reference, not a start-to-finish read — jump to the note you need. Keep this ToC
@@ -28,6 +35,8 @@ working rules).
   - [Public numeric arguments: provide both int32 and int64 kinds](#public-numeric-arguments-provide-both-int32-and-int64-kinds)
   - [MAML fixture directory: `schemas/`](#maml-fixture-directory-schemas)
   - [Error stop messages: include file/schema context](#error-stop-messages-include-fileschema-context)
+  - [Guard mutating public procedures against being called twice](#guard-mutating-public-procedures-against-being-called-twice)
+  - [Implicit finalizers must never route through a path that can throw/abort](#implicit-finalizers-must-never-route-through-a-path-that-can-throwabort)
 - [Element-domain modules (`parquet_strings`, `parquet_temporal`)](#element-domain-modules-parquet_strings-parquet_temporal)
   - [The `parquet_strings` module](#the-parquet_strings-module)
   - [The `parquet_temporal` module (date/time/timestamp)](#the-parquet_temporal-module-datetimetimestamp)
@@ -438,6 +447,37 @@ identifiable when several readers/writers/schemas are in play at once. These are
 meaningful once the reader/writer/schema knows its file/name (i.e. post-open), so the
 guard-clause "…has not been opened" messages are exempt.
 
+### Guard mutating public procedures against being called twice
+
+When adding a new type-bound procedure or public subroutine that mutates a `parquet_writer`/
+`parquet_reader`/`parquet_schema`'s state, consider whether a caller reusing the same object
+across two calls (a loop, a copy-paste mistake, a refactor) could silently corrupt state, leak a
+resource, or crash instead of getting a clean error. Default to a check-before-mutate guard: test
+the relevant flag/allocated-component first and `error stop` with a message like
+`"<procedure>: already called for this <writer/row group/...>"` before any mutation happens,
+rather than silently overwriting state or leaving the object in an inconsistent, only-later-
+surfacing-as-a-crash condition. See `parquet_write_row_mask_impl`/`parquet_write_chunk_row_mask_impl`/
+`parquet_new_row_group_impl` (`parquet_write.f90`) for the established pattern. Not every mutating
+procedure needs this — e.g. a procedure whose second call is genuinely idempotent (rebuilds the
+same state from the same inputs, like `parquet_validate_user_maml`) doesn't need a guard — but
+default to adding one unless a call is provably idempotent.
+
+### Implicit finalizers must never route through a path that can throw/abort
+
+A `FINAL` procedure (e.g. `writer_finalize`/`reader_finalize`) can run at unpredictable points
+(variable reuse via an `intent(out)` re-open, scope exit, an early `RETURN`) with no way for a
+caller to see or handle a failure. Never have a finalizer call a close/cleanup path that performs
+completeness or validity checks capable of throwing a C++ exception across the `extern "C"`
+boundary (which crashes the whole process — see "`src/parquet_wrapper.cpp`: GCC vs Clang gcov
+attribution"'s notes on uncaught exceptions) or issuing an `error stop`: an implicit finalizer
+should always succeed silently, freeing/abandoning resources without validating the object's
+completeness. If the normal close path (e.g. `close_parquet_writer`) has such checks, give the
+finalizer its own dedicated "abandon" entry point that skips them entirely — see
+`abandon_parquet_writer`/`writer_finalize` (`parquet_wrapper.cpp`/`parquet_write.f90`) for the
+pattern — rather than trying to have the finalizer conditionally decide when it's "safe" to call
+the real close. Apply the same pattern to any future finalizable type (e.g. a `parquet_reader`-side
+completeness check, if one is ever added).
+
 ## Element-domain modules (`parquet_strings`, `parquet_temporal`)
 
 ### The `parquet_strings` module
@@ -571,6 +611,18 @@ counterpart. User guide: `doc/pages/date-time.md`.
   `intent(in)`/`intent(out)` dummies, so make the single argument `intent(inout)` instead — it
   holds the input on entry and the result on exit, preserving `call schema%set_col_qc(col)`'s
   single-variable ergonomics (see `schema_set_col_qc`/`parquet_maml_file%set_col_qc`).
+- **`intent(out)` on a finalizable type resets every component for free — don't convert one to
+  `intent(inout)` without auditing every component first.** `parquet_writer`/`parquet_reader` both
+  have a `FINAL` procedure, and Fortran resets *every* component of an `intent(out)` dummy to its
+  default initializer (deallocating every allocatable, zeroing every scalar) on procedure entry.
+  `parquet_open_writer`/`parquet_open_reader`'s own bodies only explicitly (re)initialize a
+  handful of fields (e.g. `handle`, `filename`) and lean on this implicit reset for the rest
+  (mask state, row-group tracking flags, `qc`, cached metadata, ...). If either is ever converted
+  to `intent(inout)` (e.g. to add a "not already open" guard), that implicit reset goes away, and
+  a caller reusing the same variable across two open calls would silently carry over stale state
+  from the previous use unless the open body is rewritten to unconditionally reset every single
+  component itself — a much larger, easier-to-get-subtly-wrong change than it first appears.
+  Prefer keeping `intent(out)` and solving misuse-prevention some other way.
 
 ### Stale `fpm` build cache
 

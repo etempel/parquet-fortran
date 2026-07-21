@@ -583,7 +583,13 @@ contains
             new_unittest("finishing a row group with no column ever written for it aborts", &
                 test_mask_row_group_no_writes_at_all_aborts), &
             new_unittest("parquet_get_version with an invalid mode aborts", &
-                test_get_version_invalid_mode_aborts) &
+                test_get_version_invalid_mode_aborts), &
+            new_unittest("parquet_column_exists with an unrecognized types= token aborts", &
+                test_column_exists_bad_type_token_aborts), &
+            new_unittest("parquet_column_exists with a blank types= filter aborts", &
+                test_column_exists_empty_type_filter_aborts), &
+            new_unittest("parquet_get_column_type on a column outside the 9 canonical types aborts", &
+                test_get_column_type_unsupported_aborts) &
             ]
     end subroutine collect_tests_parquet_errors
 
@@ -3083,6 +3089,27 @@ contains
             failure_message="parquet_get_version with an unrecognized mode was expected to abort", &
             required_stderr="parquet_get_version: invalid mode 'bogus'")
     end subroutine test_get_version_invalid_mode_aborts
+
+    subroutine test_column_exists_bad_type_token_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "column_exists_bad_type_token", expect_abort=.true., &
+            failure_message="parquet_column_exists with an unrecognized types= token was expected to abort", &
+            required_stderr="parquet_column_exists: unrecognized data type token 'itn32'")
+    end subroutine test_column_exists_bad_type_token_aborts
+
+    subroutine test_column_exists_empty_type_filter_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "column_exists_empty_type_filter", expect_abort=.true., &
+            failure_message="parquet_column_exists with a blank types= filter was expected to abort", &
+            required_stderr="parquet_column_exists: types= must not be empty")
+    end subroutine test_column_exists_empty_type_filter_aborts
+
+    subroutine test_get_column_type_unsupported_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "get_column_type_unsupported", expect_abort=.true., &
+            failure_message="parquet_get_column_type on a column outside the 9 canonical types was expected to abort", &
+            required_stderr="parquet_get_column_type: column 'v_uint32' has an unsupported data type for this query")
+    end subroutine test_get_column_type_unsupported_aborts
 
     subroutine test_mask_row_mask_after_write_started_aborts(error)
         type(error_type), allocatable, intent(out) :: error

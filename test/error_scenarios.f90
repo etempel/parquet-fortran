@@ -734,6 +734,12 @@ program error_scenarios
         call scenario_mask_row_group_no_writes_at_all()
     case ("get_version_invalid_mode")
         call scenario_get_version_invalid_mode()
+    case ("column_exists_bad_type_token")
+        call scenario_column_exists_bad_type_token()
+    case ("column_exists_empty_type_filter")
+        call scenario_column_exists_empty_type_filter()
+    case ("get_column_type_unsupported")
+        call scenario_get_column_type_unsupported()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -2658,6 +2664,7 @@ contains
         character(len=6) :: v_values(2, 6), v_back(2, 6)
         integer :: strlen_max
         integer(int64) :: nrows
+        character(len=:), allocatable :: type_name
 
         v_values = reshape([character(len=6) :: &
             "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12"], [2, 6])
@@ -2709,6 +2716,21 @@ contains
         if (nrows /= 1_int64) then
             error stop "row filter on a large_utf8 scalar string column did not match exactly one row"
         end if
+
+        ! parquet_column_exists/parquet_get_column_type report "s" (a LARGE_STRING column) the
+        ! same as an ordinary STRING column -- this library's own MAML vocabulary doesn't
+        ! distinguish string/large_string (see supported-data-types.md's "Large string columns"),
+        ! and this is the only place LARGE_STRING's own case in
+        ! parquet_reader_get_column_type_name's switch (parquet_wrapper.cpp) gets exercised.
+        call parquet_open_reader(reader, out_file)
+        if (.not. parquet_column_exists(reader, "s", types="string")) then
+            error stop "parquet_column_exists did not match 'string' for a large_utf8 scalar string column"
+        end if
+        call parquet_get_column_type(reader, "s", type_name)
+        if (trim(type_name) /= "string") then
+            error stop "parquet_get_column_type did not resolve 'string' for a large_utf8 scalar string column"
+        end if
+        call parquet_close_reader(reader)
     end subroutine scenario_large_string_roundtrip
 
     !> Proves the arrow::Type::STRING_VIEW read path (is_string_like_type/make_string_like_accessor's
@@ -6493,5 +6515,43 @@ contains
         call parquet_get_version(ver_string, mode="bogus")
         print '(a)', "unexpectedly returned a version string for an invalid mode"
     end subroutine scenario_get_version_invalid_mode
+
+    !> parquet_column_exists error stops on an unrecognized types= token (typo "itn32"), checked
+    !> up front before the existence check itself -- see parquet_read.f90's
+    !> type_filter_token_valid/split_type_filter_tokens.
+    subroutine scenario_column_exists_bad_type_token()
+        type(parquet_reader) :: reader
+        logical :: exists
+
+        call parquet_open_reader(reader, "test/fixtures/has_null.parquet")
+        exists = parquet_column_exists(reader, "id_with_null", types="itn32")
+        print '(a)', "unexpectedly accepted an unrecognized types= token without error"
+    end subroutine scenario_column_exists_bad_type_token
+
+    !> parquet_column_exists error stops if types= is given but blank/all-whitespace, rather than
+    !> silently matching nothing.
+    subroutine scenario_column_exists_empty_type_filter()
+        type(parquet_reader) :: reader
+        logical :: exists
+
+        call parquet_open_reader(reader, "test/fixtures/has_null.parquet")
+        exists = parquet_column_exists(reader, "id_with_null", types="   ")
+        print '(a)', "unexpectedly accepted a blank types= filter without error"
+    end subroutine scenario_column_exists_empty_type_filter
+
+    !> parquet_get_column_type error stops on a column whose physical type falls outside the nine
+    !> canonical tokens (valid_query_data_types) -- test/fixtures/extended_types.parquet's
+    !> v_uint32 is UINT32, not one of int32/int64/float32/float64/boolean/string/date/time/
+    !> timestamp. Unlike parquet_column_exists (which just reports .false. for this case, see
+    !> test_column_exists_and_get_column_type in test_reading.f90), this procedure's whole
+    !> contract is "give me the type", so it cannot return silently.
+    subroutine scenario_get_column_type_unsupported()
+        type(parquet_reader) :: reader
+        character(len=:), allocatable :: type_name
+
+        call parquet_open_reader(reader, "test/fixtures/extended_types.parquet")
+        call parquet_get_column_type(reader, "v_uint32", type_name)
+        print '(a)', "unexpectedly resolved a canonical type for a column outside the 9 recognized tokens"
+    end subroutine scenario_get_column_type_unsupported
 
 end program error_scenarios

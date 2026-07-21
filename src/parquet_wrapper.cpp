@@ -3087,6 +3087,50 @@ extern "C"
 		return struct_path_exists(reader_handle->schema, name) ? 1 : 0;
 	}
 
+	// Writes `name`'s canonical data-type token ("int32"/"int64"/"float32"/"float64"/"boolean"/
+	// "string"/"date"/"time"/"timestamp") into `buf` (space-padded to buf_len) and returns 1, if
+	// its physical Arrow type maps onto one of those nine tokens -- a FIXED_SIZE_LIST/LIST/
+	// LARGE_LIST vector column is unwrapped to its element type first, so an int32 vector column
+	// reports "int32" here too (col_size/vector-ness is a separate query, see
+	// parquet_reader_get_column_col_size). Otherwise writes the raw Arrow type description (e.g.
+	// "decimal128(10, 2)") into `buf` and returns 0, for a caller-side diagnostic message -- this
+	// project's own writer never produces such a column, but a column written by a different tool
+	// can (see test/fixtures/extended_types.parquet). Assumes `name` already resolves: callers
+	// (parquet_column_exists/parquet_get_column_type in parquet_read.f90) always probe existence
+	// via parquet_reader_has_column/check_column_exists first.
+	int64_t parquet_reader_get_column_type_name(void *handle, const char *name, char *buf, int64_t buf_len)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto resolved = resolve_struct_path(reader_handle->schema, name);
+		auto type = resolved.leaf_field->type();
+		if (type->id() == arrow::Type::FIXED_SIZE_LIST || type->id() == arrow::Type::LIST ||
+			type->id() == arrow::Type::LARGE_LIST)
+		{
+			type = type->field(0)->type();
+		}
+		std::string token;
+		switch (type->id())
+		{
+		case arrow::Type::INT32: token = "int32"; break;
+		case arrow::Type::INT64: token = "int64"; break;
+		case arrow::Type::FLOAT: token = "float32"; break;
+		case arrow::Type::DOUBLE: token = "float64"; break;
+		case arrow::Type::BOOL: token = "boolean"; break;
+		case arrow::Type::STRING: token = "string"; break;
+		case arrow::Type::LARGE_STRING: token = "string"; break;
+		case arrow::Type::DATE32: token = "date"; break;
+		case arrow::Type::DATE64: token = "date"; break; // GCOVR_EXCL_LINE -- DATE64 never actually produced (see CLAUDE.md's temporal notes).
+		case arrow::Type::TIME32: token = "time"; break;
+		case arrow::Type::TIME64: token = "time"; break;
+		case arrow::Type::TIMESTAMP: token = "timestamp"; break;
+		default:
+			copy_string_with_padding(buf, buf_len, type->ToString());
+			return 0;
+		}
+		copy_string_with_padding(buf, buf_len, token);
+		return 1;
+	}
+
 	// Returns the declared vector-column element count of `name` (0 for a scalar column),
 	// without reading any column data for the common FIXED_SIZE_LIST case. A FIXED_SIZE_LIST
 	// column's width is a schema-level constant (arrow::FixedSizeListType::list_size()), so it's

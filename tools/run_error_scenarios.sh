@@ -404,6 +404,9 @@ scenarios=(
     "mask_chunk_row_mask_scheme_declined:1"
     "mask_row_group_no_writes_at_all:1"
     "get_version_invalid_mode:1"
+    "column_exists_bad_type_token:1"
+    "column_exists_empty_type_filter:1"
+    "get_column_type_unsupported:1"
 )
 
 # concurrent_calls_into_shared_reader/writer are deliberately not in the list

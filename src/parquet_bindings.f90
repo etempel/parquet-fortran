@@ -46,6 +46,7 @@ module parquet_bindings
     public :: parquet_reader_get_table_metadata_key_length, parquet_reader_get_table_metadata_value_length
     public :: parquet_reader_get_table_metadata_key, parquet_reader_get_table_metadata_value
     public :: parquet_reader_prefetch_columns, parquet_reader_prefetch_all_columns, parquet_reader_has_column
+    public :: parquet_reader_get_column_type_name
     public :: parquet_reader_set_filter
     public :: parquet_reader_set_qc
     public :: parquet_read_int32_column, parquet_read_int64_column
@@ -469,6 +470,20 @@ module parquet_bindings
             type(c_ptr), value :: reader
             character(kind=c_char) :: name(*)
             integer(c_long_long) :: has_column
+        end function
+
+        !> Writes `name`'s canonical data-type token into `buf` (space-padded to buf_len) and
+        !> returns 1, if its physical type is one of int32/int64/float32/float64/boolean/string/
+        !> date/time/timestamp; otherwise writes a raw Arrow type description into `buf` and
+        !> returns 0.
+        function parquet_reader_get_column_type_name(reader, name, buf, buf_len) &
+                bind(C, name="parquet_reader_get_column_type_name") result(recognized)
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            character(kind=c_char) :: buf(*)
+            integer(c_long_long), value :: buf_len
+            integer(c_long_long) :: recognized
         end function
 
         !> Validates and applies a packed row filter to `reader`; returns

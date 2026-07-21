@@ -744,5 +744,139 @@ contains
             if (tzlen > 0) call parquet_reader_get_column_timezone(reader%handle, trim(name)//char(0), timezone, tzlen)
         end if
     end procedure parquet_get_column_time_info
+    !> Resolves `name`'s canonical physical data type (see valid_query_data_types in parquet.f90),
+    !> without checking that `name` exists first -- every caller (parquet_column_exists/
+    !> parquet_get_column_type) already validated existence via parquet_reader_has_column/
+    !> check_column_exists beforehand. `recognized` is .false. if the physical type falls outside
+    !> the nine canonical tokens, in which case `type_name` instead holds a raw Arrow type
+    !> description for a diagnostic message.
+    subroutine resolve_column_type(reader, name, type_name, recognized)
+        type(parquet_reader), intent(in) :: reader !! open reader whose column is queried.
+        character(len=*), intent(in) :: name !! existing column name.
+        character(len=:), allocatable, intent(out) :: type_name !! canonical token, or raw type description.
+        logical, intent(out) :: recognized !! .true. if type_name is one of the nine canonical tokens.
+        character(len=32) :: buf
+
+        recognized = parquet_reader_get_column_type_name(reader%handle, trim(name)//char(0), buf, &
+            int(len(buf), kind=c_long_long)) /= 0
+        type_name = trim(buf)
+    end subroutine resolve_column_type
+    !> Splits `types` (known non-blank) on commas into trimmed, lowercased tokens.
+    subroutine split_type_filter_tokens(types, tokens)
+        character(len=*), intent(in) :: types !! comma-separated filter string.
+        character(len=9), allocatable, intent(out) :: tokens(:) !! trimmed, lowercased tokens.
+        integer :: filter_len, start_pos, comma_pos, comma_count, i
+        character(len=:), allocatable :: token, token_lower
+
+        filter_len = len_trim(types)
+        comma_count = 0
+        do i = 1, filter_len
+            if (types(i:i) == ",") comma_count = comma_count + 1
+        end do
+        allocate(tokens(comma_count + 1))
+
+        start_pos = 1
+        i = 0
+        do
+            i = i + 1
+            comma_pos = index(types(start_pos:filter_len), ",")
+            if (comma_pos == 0) then
+                token = types(start_pos:filter_len)
+            else
+                token = types(start_pos:start_pos + comma_pos - 2)
+            end if
+            call parquet_to_lower(trim(adjustl(token)), token_lower)
+            tokens(i) = token_lower
+            if (comma_pos == 0) exit
+            start_pos = start_pos + comma_pos
+        end do
+    end subroutine split_type_filter_tokens
+    !> .true. if `token` (already trimmed/lowercased) is one of valid_query_data_types's nine
+    !> single tokens, or one of the group aliases "int"/"float"/"temporal".
+    pure function type_filter_token_valid(token) result(valid)
+        character(len=*), intent(in) :: token !! candidate token, already trimmed and lowercased.
+        logical :: valid !! .true. if recognized.
+        integer :: j
+
+        valid = trim(token) == "int" .or. trim(token) == "float" .or. trim(token) == "temporal"
+        if (valid) return
+        do j = 1, size(valid_query_data_types)
+            if (trim(token) == trim(valid_query_data_types(j))) then
+                valid = .true.
+                return
+            end if
+        end do
+    end function type_filter_token_valid
+    !> .true. if `resolved_type` (one of valid_query_data_types's nine tokens) satisfies `token`,
+    !> a single already-validated filter token (a canonical type name or a group alias).
+    pure function type_filter_token_matches(token, resolved_type) result(matches)
+        character(len=*), intent(in) :: token !! single filter token, already validated.
+        character(len=*), intent(in) :: resolved_type !! column's resolved canonical type.
+        logical :: matches !! .true. if resolved_type satisfies token.
+
+        select case (trim(token))
+        case ("int")
+            matches = trim(resolved_type) == "int32" .or. trim(resolved_type) == "int64"
+        case ("float")
+            matches = trim(resolved_type) == "float32" .or. trim(resolved_type) == "float64"
+        case ("temporal")
+            matches = trim(resolved_type) == "date" .or. trim(resolved_type) == "time" .or. &
+                trim(resolved_type) == "timestamp"
+        case default
+            matches = trim(token) == trim(resolved_type)
+        end select
+    end function type_filter_token_matches
+    module procedure parquet_column_exists
+        character(len=9), allocatable :: tokens(:)
+        character(len=:), allocatable :: resolved_type, name_suffix
+        logical :: recognized
+        integer :: i
+
+        call check_reader_open(reader, "parquet_column_exists")
+
+        if (present(types)) then
+            if (len_trim(types) == 0) then
+                call reader_filename_suffix(reader, name_suffix)
+                error stop "parquet_column_exists: types= must not be empty" // name_suffix
+            end if
+            call split_type_filter_tokens(types, tokens)
+            do i = 1, size(tokens)
+                if (.not. type_filter_token_valid(tokens(i))) then
+                    call reader_filename_suffix(reader, name_suffix)
+                    error stop "parquet_column_exists: unrecognized data type token '" // trim(tokens(i)) // &
+                        "' in types= (valid: int32, int64, float32, float64, boolean, string, date, time, " // &
+                        "timestamp, or the group aliases int/float/temporal)" // name_suffix
+                end if
+            end do
+        end if
+
+        exists = parquet_reader_has_column(reader%handle, trim(name)//char(0)) /= 0
+        if (.not. exists .or. .not. present(types)) return
+
+        call resolve_column_type(reader, name, resolved_type, recognized)
+        exists = .false.
+        if (.not. recognized) return
+
+        do i = 1, size(tokens)
+            if (type_filter_token_matches(tokens(i), resolved_type)) then
+                exists = .true.
+                return
+            end if
+        end do
+    end procedure parquet_column_exists
+    module procedure parquet_get_column_type
+        logical :: recognized
+        character(len=:), allocatable :: name_suffix
+
+        call check_reader_open(reader, "parquet_get_column_type")
+        call check_column_exists(reader, name, "parquet_get_column_type")
+        call resolve_column_type(reader, name, type_name, recognized)
+        if (.not. recognized) then
+            call reader_filename_suffix(reader, name_suffix)
+            error stop "parquet_get_column_type: column '" // trim(name) // "' has an unsupported data " // &
+                "type for this query (" // type_name // "); expected one of: int32, int64, float32, " // &
+                "float64, boolean, string, date, time, timestamp" // name_suffix
+        end if
+    end procedure parquet_get_column_type
 
 end submodule parquet_read

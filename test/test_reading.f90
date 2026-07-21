@@ -88,7 +88,10 @@ contains
             new_unittest("int32/boolean/string: row-mode and element-mode reads under an active row filter", &
                 test_array_row_element_mode_filtered), &
             new_unittest("plain LIST/LARGE_LIST columns from a foreign-written file (col_size, string length, print_stat)", &
-                test_list_type_foreign_fixture) &
+                test_list_type_foreign_fixture), &
+            new_unittest("parquet_column_exists/parquet_get_column_type: all 9 canonical types, group aliases, " // &
+                "case-insensitivity, missing columns, struct-leaf paths, and a foreign-typed column", &
+                test_column_exists_and_get_column_type) &
             ]
     end subroutine collect_tests_parquet_reading
 
@@ -2494,5 +2497,184 @@ contains
         call check_scenario_exit_status(error, "list_type_foreign_fixture", expect_abort=.false., &
             failure_message="LIST/LARGE_LIST foreign-fixture columns did not report the expected sizes/lengths")
     end subroutine test_list_type_foreign_fixture
+    !
+    !> Builds a small schema with all 9 canonical types (int32/int64/float32/float64/boolean/
+    !> string/date/time/timestamp), then exercises parquet_column_exists/parquet_get_column_type:
+    !> existence with/without a types= filter, every single canonical type, group aliases ("int"/
+    !> "float"/"temporal"), a comma-separated multi-token filter, case-insensitivity, a missing
+    !> column (with and without a filter), a dotted struct-leaf path
+    !> (test/fixtures/nested_struct.parquet), and a foreign-typed column
+    !> (test/fixtures/extended_types.parquet's v_uint32, outside the 9 canonical tokens) which
+    !> exists but never matches a types= filter. The error-path (unrecognized types= token,
+    !> parquet_get_column_type on a missing/unsupported-type column) is covered separately by
+    !> test_errors.f90/error_scenarios.f90, since those abort the process.
+    subroutine test_column_exists_and_get_column_type(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = "test_run/test_column_exists.parquet"
+        integer(int32) :: i32(2)
+        integer(int64) :: i64(2)
+        real(real32) :: f32(2)
+        real(real64) :: f64(2)
+        logical :: bools(2)
+        character(len=8) :: strs(2)
+        type(parquet_date) :: d(2)
+        type(parquet_time) :: t(2), t_ms(2)
+        type(parquet_timestamp) :: ts(2)
+        integer(int32) :: i32_vec(2, 2)
+        character(len=:), allocatable :: type_name
+
+        i32 = [1_int32, 2_int32]
+        i64 = [1_int64, 2_int64]
+        f32 = [1.0_real32, 2.0_real32]
+        f64 = [1.0_real64, 2.0_real64]
+        bools = [.true., .false.]
+        strs = ["abc     ", "de      "]
+        i32_vec = reshape([1_int32, 2_int32, 3_int32, 4_int32], [2, 2])
+        call d(1)%set(2024, 7, 16); call d(2)%set(1970, 1, 1)
+        call t(1)%set(6, 30, 15); call t(2)%set(23, 59, 59)
+        call t_ms(1)%set(6, 30, 15); call t_ms(2)%set(23, 59, 59)
+        call ts(1)%set(2024, 7, 16, 12, 0, 0); call ts(2)%set(1999, 1, 1, 0, 0, 0)
+
+        call schema%init(table="t")
+        call schema%add_field("c_i32", "int32")
+        call schema%add_field("c_i32_vec", "int32", col_size=2)
+        call schema%add_field("c_i64", "int64")
+        call schema%add_field("c_f32", "float32")
+        call schema%add_field("c_f64", "float64")
+        call schema%add_field("c_bool", "boolean")
+        call schema%add_field("c_str", "string", array_size=8)
+        call schema%add_field("c_date", "date")
+        call schema%add_field("c_time", "time")
+        call schema%add_field("c_time_ms", "time[ms]")
+        call schema%add_field("c_ts", "timestamp")
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "c_i32", i32)
+        call parquet_write_column(writer, "c_i32_vec", i32_vec)
+        call parquet_write_column(writer, "c_i64", i64)
+        call parquet_write_column(writer, "c_f32", f32)
+        call parquet_write_column(writer, "c_f64", f64)
+        call parquet_write_column(writer, "c_bool", bools)
+        call parquet_write_column(writer, "c_str", strs)
+        call parquet_write_column(writer, "c_date", d)
+        call parquet_write_column(writer, "c_time", t)
+        call parquet_write_column(writer, "c_time_ms", t_ms)
+        call parquet_write_column(writer, "c_ts", ts)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+
+        ! Plain existence, no filter.
+        call check(error, parquet_column_exists(reader, "c_i32"), "c_i32 should exist (no filter)")
+        if (allocated(error)) return
+        call check(error, .not. parquet_column_exists(reader, "does_not_exist"), &
+            "does_not_exist should not exist")
+        if (allocated(error)) return
+
+        ! Single canonical type match/mismatch, one per type, plus case-insensitivity on one.
+        call check(error, parquet_column_exists(reader, "c_i32", types="int32"), "c_i32 matches int32")
+        if (allocated(error)) return
+        call check(error, .not. parquet_column_exists(reader, "c_i32", types="int64"), &
+            "c_i32 should not match int64")
+        if (allocated(error)) return
+        call check(error, parquet_column_exists(reader, "c_i64", types="INT64"), &
+            "c_i64 matches INT64 (case-insensitive)")
+        if (allocated(error)) return
+        call check(error, parquet_column_exists(reader, "c_f32", types="float32"), "c_f32 matches float32")
+        if (allocated(error)) return
+        call check(error, parquet_column_exists(reader, "c_f64", types="float64"), "c_f64 matches float64")
+        if (allocated(error)) return
+        call check(error, parquet_column_exists(reader, "c_bool", types="boolean"), "c_bool matches boolean")
+        if (allocated(error)) return
+        call check(error, parquet_column_exists(reader, "c_str", types="string"), "c_str matches string")
+        if (allocated(error)) return
+        call check(error, parquet_column_exists(reader, "c_date", types="date"), "c_date matches date")
+        if (allocated(error)) return
+        call check(error, parquet_column_exists(reader, "c_time", types="time"), "c_time matches time")
+        if (allocated(error)) return
+        call check(error, parquet_column_exists(reader, "c_time_ms", types="time"), &
+            "c_time_ms (an explicit millisecond/TIME32 column) also matches time")
+        if (allocated(error)) return
+        call check(error, parquet_column_exists(reader, "c_ts", types="timestamp"), "c_ts matches timestamp")
+        if (allocated(error)) return
+
+        ! A vector (FIXED_SIZE_LIST) column reports its element type, not a distinct token.
+        call check(error, parquet_column_exists(reader, "c_i32_vec", types="int32"), &
+            "a vector int32 column should also match int32 (element type, not col_size)")
+        if (allocated(error)) return
+        call parquet_get_column_type(reader, "c_i32_vec", type_name)
+        call check(error, trim(type_name) == "int32", "c_i32_vec's resolved type should be int32")
+        if (allocated(error)) return
+
+        ! A missing column with a types= filter is still just .false. (no abort).
+        call check(error, .not. parquet_column_exists(reader, "does_not_exist", types="int"), &
+            "missing column with a types= filter should be .false., not an error")
+        if (allocated(error)) return
+
+        ! Group aliases.
+        call check(error, parquet_column_exists(reader, "c_i32", types="int") .and. &
+            parquet_column_exists(reader, "c_i64", types="int"), "int alias matches int32/int64")
+        if (allocated(error)) return
+        call check(error, .not. parquet_column_exists(reader, "c_f32", types="int"), &
+            "int alias should not match c_f32")
+        if (allocated(error)) return
+        call check(error, parquet_column_exists(reader, "c_f32", types="float") .and. &
+            parquet_column_exists(reader, "c_f64", types="float"), "float alias matches float32/float64")
+        if (allocated(error)) return
+        call check(error, parquet_column_exists(reader, "c_date", types="temporal") .and. &
+            parquet_column_exists(reader, "c_time", types="temporal") .and. &
+            parquet_column_exists(reader, "c_ts", types="temporal"), &
+            "temporal alias matches date/time/timestamp")
+        if (allocated(error)) return
+
+        ! Comma-separated multi-token filter (with whitespace).
+        call check(error, parquet_column_exists(reader, "c_bool", types="int, float, boolean"), &
+            "multi-token filter matches boolean via its own token")
+        if (allocated(error)) return
+        call check(error, .not. parquet_column_exists(reader, "c_str", types="int, float, boolean"), &
+            "multi-token filter should not match c_str")
+        if (allocated(error)) return
+
+        ! parquet_get_column_type resolves each column's canonical token.
+        call parquet_get_column_type(reader, "c_i32", type_name)
+        call check(error, trim(type_name) == "int32", "c_i32's resolved type should be int32")
+        if (allocated(error)) return
+        call parquet_get_column_type(reader, "c_ts", type_name)
+        call check(error, trim(type_name) == "timestamp", "c_ts's resolved type should be timestamp")
+        if (allocated(error)) return
+
+        call parquet_close_reader(reader)
+
+        ! A dotted struct-leaf path (test/fixtures/nested_struct.parquet) works the same way.
+        call parquet_open_reader(reader, "test/fixtures/nested_struct.parquet")
+        call check(error, parquet_column_exists(reader, "main.id", types="int32"), &
+            "struct-leaf path main.id should match int32")
+        if (allocated(error)) return
+        call check(error, parquet_column_exists(reader, "main.inner.name", types="string"), &
+            "struct-leaf path main.inner.name should match string")
+        if (allocated(error)) return
+        call check(error, .not. parquet_column_exists(reader, "main.nope"), &
+            "a nonexistent struct-leaf path should be .false.")
+        if (allocated(error)) return
+
+        call parquet_close_reader(reader)
+
+        ! A column of a physical type outside the 9 canonical tokens (test/fixtures/
+        ! extended_types.parquet's v_uint32) still exists (no filter), but never matches a
+        ! types= filter.
+        call parquet_open_reader(reader, "test/fixtures/extended_types.parquet")
+        call check(error, parquet_column_exists(reader, "v_uint32"), &
+            "v_uint32 should exist when checked with no types= filter")
+        if (allocated(error)) return
+        call check(error, .not. parquet_column_exists(reader, "v_uint32", types="int"), &
+            "v_uint32 (a foreign uint32 column) should never match a types= filter")
+        if (allocated(error)) return
+
+        call parquet_close_reader(reader)
+    end subroutine test_column_exists_and_get_column_type
     !
 end module test_reading

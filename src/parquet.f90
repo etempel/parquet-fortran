@@ -17,7 +17,7 @@ module parquet
     implicit none
     private
     !
-    character(len=*),parameter:: cversion = "v0.9.9 (2026-07-20)" !! version info
+    character(len=*),parameter:: cversion = "v0.9.9 (2026-07-21)" !! version info
 #ifndef RELEASE_VERSION
 #  define RELEASE_VERSION 0.1
 #endif
@@ -28,6 +28,13 @@ module parquet
     !> Declared here (rather than in either submodule) so both can see it.
     character(len=7), parameter :: valid_maml_data_types(6) = [character(len=7) :: &
         "int32", "int64", "string", "boolean", "float32", "float64"]
+
+    !> Canonical single data-type tokens parquet_column_exists/parquet_get_column_type recognize:
+    !> valid_maml_data_types plus the three temporal base tokens ("date"/"time"/"timestamp").
+    !> parquet_column_exists additionally accepts the group aliases "int" (int32/int64), "float"
+    !> (float32/float64), and "temporal" (date/time/timestamp).
+    character(len=9), parameter :: valid_query_data_types(9) = [character(len=9) :: &
+        "int32", "int64", "string", "boolean", "float32", "float64", "date", "time", "timestamp"]
 
     !> One schema field's write-time metadata and QC bounds, parsed from a
     !> MAML fields: entry (or built via schema%add_field); one array element
@@ -838,6 +845,8 @@ module parquet
     public :: parquet_get_col_size
     public :: parquet_get_column_total_elements
     public :: parquet_get_string_length
+    public :: parquet_column_exists
+    public :: parquet_get_column_type
     public :: parquet_get_metadata
     public :: parquet_read_column
     public :: parquet_read_column_chunk
@@ -1826,6 +1835,38 @@ module parquet
             integer, intent(out), optional :: unit !! stored unit (a parquet_unit_* selector).
             character(len=:), allocatable, intent(out), optional :: timezone !! IANA tz, or "" if naive.
         end subroutine parquet_get_column_time_info
+        !> Returns .true. if column `name` (a top-level or dotted struct-leaf path, same
+        !> convention as every other column-name argument) exists in `reader`'s schema,
+        !> optionally restricted to a set of allowed data types via `types`. `types` is a
+        !> comma-separated list of tokens: any of valid_query_data_types's nine single types
+        !> ("int32"/"int64"/"float32"/"float64"/"string"/"boolean"/"date"/"time"/"timestamp"),
+        !> and/or the group aliases "int" (int32 or int64), "float" (float32 or float64), and
+        !> "temporal" (date, time, or timestamp) -- e.g. types="int, float" matches any of the
+        !> four numeric types. Comparison is case-insensitive. Omit `types` to check existence
+        !> regardless of type. error stops if `types` contains an unrecognized token (checked
+        !> before the existence check, so a malformed filter is reported even for a column that
+        !> doesn't exist). A column whose physical type isn't one of the nine recognized tokens
+        !> (e.g. a foreign decimal/uint32 column -- see parquet_get_column_type) never matches
+        !> a `types` filter, but is still found by a plain (no `types`) existence check.
+        module function parquet_column_exists(reader, name, types) result(exists)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name (dotted struct-leaf path allowed).
+            character(len=*), intent(in), optional :: types !! comma-separated type tokens/group aliases.
+            logical :: exists !! .true. if the column exists and (if types given) matches one of its tokens.
+        end function parquet_column_exists
+        !> Returns existing column `name`'s canonical physical data type in `type_name`: one of
+        !> valid_query_data_types's nine tokens ("int32"/"int64"/"float32"/"float64"/"string"/
+        !> "boolean"/"date"/"time"/"timestamp"). A vector (FIXED_SIZE_LIST) column reports its
+        !> element type, e.g. an int32 vector column reports "int32" (see parquet_get_col_size
+        !> for its element count). error stops if `name` doesn't exist, or if its physical type
+        !> falls outside those nine tokens (e.g. a foreign decimal/uint32 column written by a
+        !> different tool -- use parquet_column_exists with no `types` filter to check existence
+        !> without requiring a recognized type).
+        module subroutine parquet_get_column_type(reader, name, type_name)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! existing column name (dotted struct-leaf path allowed).
+            character(len=:), allocatable, intent(out) :: type_name !! resolved canonical type token.
+        end subroutine parquet_get_column_type
     end interface
 
     ! ---- Read column specifics (by type x access mode) ----

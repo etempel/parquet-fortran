@@ -199,6 +199,46 @@ This library's own writer cannot produce `STRUCT` columns — like the extended 
 types in [Reading a column into a different numeric kind](#reading-a-column-into-a-different-numeric-kind)
 above, struct support is read-only, for files produced by some other tool.
 
+### Checking column existence and type
+
+`parquet_column_exists(reader, name, types)` returns `.true.`/`.false.` for whether `name` (a
+top-level or dotted [struct-leaf path](#reading-a-nested-struct-field), same as everywhere else)
+exists in an open reader's schema:
+```fortran
+if (parquet_column_exists(reader, "ra")) then
+    ...
+end if
+```
+Pass `types` (optional) to also require the column's physical type to match — a comma-separated
+list of tokens: any of the nine canonical single types (`int32`/`int64`/`float32`/`float64`/
+`boolean`/`string`/`date`/`time`/`timestamp`), and/or the group aliases `int` (`int32` or
+`int64`), `float` (`float32` or `float64`), and `temporal` (`date`, `time`, or `timestamp`).
+Matching is case-insensitive and tokens can be combined:
+```fortran
+if (parquet_column_exists(reader, "ra", types="float")) then      ! float32 or float64
+if (parquet_column_exists(reader, "flag", types="int, boolean")) ! int32, int64, or boolean
+```
+Omitting `types` checks existence regardless of type. An unrecognized token in `types` (e.g. a
+typo) fails immediately with `error stop`, naming the valid tokens — this check happens before the
+existence check itself, so a malformed filter is reported even for a column that doesn't exist. A
+column whose physical type isn't one of the nine canonical tokens (e.g. an `int8`/`uint32`/
+`decimal` column from another tool — see
+[Reading a column into a different numeric kind](#reading-a-column-into-a-different-numeric-kind))
+never matches a `types` filter, but is still found by a plain (no `types`) existence check.
+
+`parquet_get_column_type(reader, name, type_name)` resolves an *existing* column's canonical
+physical type directly into an allocatable `character`:
+```fortran
+character(len=:), allocatable :: type_name
+call parquet_get_column_type(reader, "ra", type_name)   ! e.g. "float64"
+```
+A vector (`FIXED_SIZE_LIST`) column reports its element type (an `int32` vector column reports
+`"int32"` — see `parquet_get_col_size` for its element count). Unlike `parquet_column_exists`,
+this procedure's whole contract is "give me the type", so it cannot answer silently: it fails with
+`error stop` if `name` doesn't exist, or if its physical type falls outside the nine canonical
+tokens — use `parquet_column_exists` with no `types` filter first if the column's existence or
+type isn't already guaranteed.
+
 ### Quality control (qc:) range checks on write
 
 A MAML field can declare a `qc:` block with `min:`/`max:` bounds:

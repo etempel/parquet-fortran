@@ -51,13 +51,16 @@ submodule (parquet) parquet_metadata
             character(len=*), intent(in) :: line !! line text to store.
         end subroutine parquet_append_line
 
-        !> Shared worker behind every add_metadata specific: appends one
-        !> already-stringified key/value/description to `metadata%items`.
-        module subroutine parquet_metadata_append_entry(metadata, key, value, description)
+        !> Shared worker behind every add_metadata specific: warns (see
+        !> parquet_metadata_warn_duplicate, unless warn=.false.) if `key` collides with a
+        !> writer-reserved key or an already-present key, then appends one
+        !> already-stringified key/value/description to `metadata%items` regardless.
+        module subroutine parquet_metadata_append_entry(metadata, key, value, description, warn)
             class(parquet_table_metadata), intent(inout) :: metadata !! table metadata gaining one entry.
             character(len=*), intent(in) :: key !! metadata key.
             character(len=*), intent(in) :: value !! metadata value, already converted to text.
             character(len=*), intent(in), optional :: description !! optional free-text description.
+            logical, intent(in), optional :: warn !! .false. suppresses the duplicate-key warning (default .true.).
         end subroutine parquet_metadata_append_entry
 
         !> Grows `columns` by one empty (default-initialized) entry and
@@ -127,6 +130,109 @@ contains
         tmp(n + 1) = s
         call move_alloc(tmp, maml%lines)
     end subroutine maml_push_line
+
+    ! ---- add_metadata duplicate-key warning (parquet_metadata_append_entry's shared
+    ! pre-append check) -- plain contained procedures here so both parquet_metadata_base
+    ! and parquet_metadata_get (siblings under this submodule) could reach them by host
+    ! association if ever needed; only parquet_metadata_base actually calls them today. ----
+
+    !> .true. if `key` already has an entry in metadata%items (exact,
+    !! case-sensitive match, mirroring parquet_metadata_find_index's own read-side lookup).
+    logical function parquet_metadata_key_exists(metadata, key) result(exists)
+        class(parquet_table_metadata), intent(in) :: metadata !! table metadata to search.
+        character(len=*), intent(in) :: key !! key to look for.
+        integer :: i
+
+        exists = .false.
+        if (.not. allocated(metadata%items)) return
+        do i = 1, size(metadata%items)
+            if (.not. allocated(metadata%items(i)%key)) cycle
+            if (trim(metadata%items(i)%key) == trim(key)) then
+                exists = .true.
+                return
+            end if
+        end do
+    end function parquet_metadata_key_exists
+
+    !> Looks up this table metadata's own "table" entry to name the table in a
+    !> duplicate-key warning message -- always present by the time %add_metadata is
+    !> reachable (schema%init requires table=, and a loaded MAML requires a top-level
+    !> table: key), so the "(unknown)" fallback is defensive only.
+    function parquet_metadata_table_name(metadata) result(name)
+        class(parquet_table_metadata), intent(in) :: metadata !! table metadata to search.
+        character(len=:), allocatable :: name !! this table's declared name, or "(unknown)" if absent.
+        integer :: i
+
+        name = "(unknown)"
+        if (.not. allocated(metadata%items)) return
+        do i = 1, size(metadata%items)
+            if (.not. allocated(metadata%items(i)%key)) cycle
+            if (trim(metadata%items(i)%key) == "table") then
+                name = trim(metadata%items(i)%value)
+                return
+            end if
+        end do
+    end function parquet_metadata_table_name
+
+    !> Warns (unless warn=.false.) when an %add_metadata call is about to write a key
+    !> that collides with one of three reserved categories, checked in this order so at
+    !> most one warning prints per call: (C) a key the parquet writer always injects
+    !> itself into the output file's key-value metadata (build_file_metadata in
+    !> parquet_wrapper.cpp) -- checked unconditionally, not as a duplicate; (A) a MAML
+    !> top-level scalar key from schema%init's own keyword list, but only if that key
+    !> already has an entry (i.e. the MAML source actually declared it -- calling
+    !> add_metadata("author", ...) on a schema whose MAML never declared author: does not
+    !> warn); (B) any other key that already has an entry, covering everything not
+    !> covered by A/C -- indexed keys (comment_1, DOI_1, ...), keyarray:-supplied keys,
+    !> and plain user duplicates alike. Called from parquet_metadata_append_entry before
+    !> the new entry is appended, so the existence checks see pre-append state. Applies
+    !> uniformly to every %add_metadata call, including the MAML parser's own internal
+    !> ones (see parquet_parse_maml_lines) -- the library itself should not silently
+    !> write a duplicate key any more than a caller should.
+    subroutine parquet_metadata_warn_duplicate(metadata, key, warn)
+        class(parquet_table_metadata), intent(in) :: metadata !! table metadata about to gain a new entry.
+        character(len=*), intent(in) :: key !! key about to be added.
+        logical, intent(in), optional :: warn !! .false. suppresses every warning below (default .true.).
+        !> Keys the writer always injects itself (build_file_metadata, parquet_wrapper.cpp) --
+        !! IVOA.VOTable-Parquet.content is deliberately excluded (only emitted when the
+        !! schema has columns, so it is not a fixed collision risk the way these three are).
+        character(len=29), parameter :: writer_keys(3) = &
+            [character(len=29) :: "IVOA.VOTable-Parquet.version", "DATE", "name"]
+        !> MAML top-level scalar keys settable via schema%init's own keyword arguments
+        !! (schema_init) -- deliberately excludes indexed/derived keys (comment_1, DOI_1,
+        !! ...) and keywords: (not an %init argument), which fall through to category B.
+        character(len=12), parameter :: maml_init_keys(9) = [character(len=12) :: &
+            "table", "survey", "dataset", "version", "date", "author", "description", "license", "maml_version"]
+        character(len=:), allocatable :: table_name
+        logical :: warn_value
+        integer :: i
+
+        warn_value = .true.
+        if (present(warn)) warn_value = warn
+        if (.not. warn_value) return
+
+        table_name = parquet_metadata_table_name(metadata)
+
+        do i = 1, size(writer_keys)
+            if (trim(writer_keys(i)) /= trim(key)) cycle
+            print '(a)', "WARNING: add_metadata: key '" // trim(key) // "' in table '" // table_name // &
+                "' is reserved for the parquet writer's own internal file metadata -- this entry " // &
+                "will be duplicated in the output file"
+            return
+        end do
+
+        if (.not. parquet_metadata_key_exists(metadata, key)) return
+
+        do i = 1, size(maml_init_keys)
+            if (trim(maml_init_keys(i)) /= trim(key)) cycle
+            print '(a)', "WARNING: add_metadata: key '" // trim(key) // "' in table '" // table_name // &
+                "' already exists from the MAML source -- this entry will be duplicated"
+            return
+        end do
+
+        print '(a)', "WARNING: add_metadata: key '" // trim(key) // "' in table '" // table_name // &
+            "' already exists -- this entry will be duplicated"
+    end subroutine parquet_metadata_warn_duplicate
 
     !> True if any line of maml%lines equals `target` after trimming leading
     !> and trailing blanks (used for the fields: header check). Only ever
@@ -787,62 +893,62 @@ contains
 
     module procedure schema_add_metadata_int32
         call check_schema_metadata_ready(this)
-        call this%metadata%add_metadata(key, value, description)
+        call this%metadata%add_metadata(key, value, description, warn=warn)
     end procedure schema_add_metadata_int32
 
     module procedure schema_add_metadata_int64
         call check_schema_metadata_ready(this)
-        call this%metadata%add_metadata(key, value, description)
+        call this%metadata%add_metadata(key, value, description, warn=warn)
     end procedure schema_add_metadata_int64
 
     module procedure schema_add_metadata_float32
         call check_schema_metadata_ready(this)
-        call this%metadata%add_metadata(key, value, description, fmt)
+        call this%metadata%add_metadata(key, value, description, fmt, warn)
     end procedure schema_add_metadata_float32
 
     module procedure schema_add_metadata_float64
         call check_schema_metadata_ready(this)
-        call this%metadata%add_metadata(key, value, description, fmt)
+        call this%metadata%add_metadata(key, value, description, fmt, warn)
     end procedure schema_add_metadata_float64
 
     module procedure schema_add_metadata_logical
         call check_schema_metadata_ready(this)
-        call this%metadata%add_metadata(key, value, description)
+        call this%metadata%add_metadata(key, value, description, warn=warn)
     end procedure schema_add_metadata_logical
 
     module procedure schema_add_metadata_string
         call check_schema_metadata_ready(this)
-        call this%metadata%add_metadata(key, value, description)
+        call this%metadata%add_metadata(key, value, description, warn=warn)
     end procedure schema_add_metadata_string
 
     module procedure schema_add_metadata_int32_array
         call check_schema_metadata_ready(this)
-        call this%metadata%add_metadata(key, value, description)
+        call this%metadata%add_metadata(key, value, description, warn=warn)
     end procedure schema_add_metadata_int32_array
 
     module procedure schema_add_metadata_int64_array
         call check_schema_metadata_ready(this)
-        call this%metadata%add_metadata(key, value, description)
+        call this%metadata%add_metadata(key, value, description, warn=warn)
     end procedure schema_add_metadata_int64_array
 
     module procedure schema_add_metadata_float32_array
         call check_schema_metadata_ready(this)
-        call this%metadata%add_metadata(key, value, description, fmt)
+        call this%metadata%add_metadata(key, value, description, fmt, warn)
     end procedure schema_add_metadata_float32_array
 
     module procedure schema_add_metadata_float64_array
         call check_schema_metadata_ready(this)
-        call this%metadata%add_metadata(key, value, description, fmt)
+        call this%metadata%add_metadata(key, value, description, fmt, warn)
     end procedure schema_add_metadata_float64_array
 
     module procedure schema_add_metadata_logical_array
         call check_schema_metadata_ready(this)
-        call this%metadata%add_metadata(key, value, description)
+        call this%metadata%add_metadata(key, value, description, warn=warn)
     end procedure schema_add_metadata_logical_array
 
     module procedure schema_add_metadata_string_array
         call check_schema_metadata_ready(this)
-        call this%metadata%add_metadata(key, value, description)
+        call this%metadata%add_metadata(key, value, description, warn=warn)
     end procedure schema_add_metadata_string_array
 
     module procedure schema_clear_metadata

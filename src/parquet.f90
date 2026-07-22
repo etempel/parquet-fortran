@@ -1184,92 +1184,104 @@ module parquet
         !> called, not after), since an entry added before that point would
         !> otherwise be silently discarded when %cinfo%col/%metadata%items are
         !> (re)built by the parse that follows.
-        module subroutine schema_add_metadata_int32(this, key, value, description)
+        module subroutine schema_add_metadata_int32(this, key, value, description, warn)
             class(parquet_schema), intent(inout) :: this !! schema whose %metadata gains one entry.
             character(len=*), intent(in) :: key !! metadata key.
             integer(int32), intent(in) :: value !! metadata value.
             character(len=*), intent(in), optional :: description !! optional free-text description.
+            logical, intent(in), optional :: warn !! .false. suppresses the duplicate-key warning (default .true.).
         end subroutine schema_add_metadata_int32
         !> int64 specific of %add_metadata; see schema_add_metadata_int32.
-        module subroutine schema_add_metadata_int64(this, key, value, description)
+        module subroutine schema_add_metadata_int64(this, key, value, description, warn)
             class(parquet_schema), intent(inout) :: this !! schema whose %metadata gains one entry.
             character(len=*), intent(in) :: key !! metadata key.
             integer(int64), intent(in) :: value !! metadata value.
             character(len=*), intent(in), optional :: description !! optional free-text description.
+            logical, intent(in), optional :: warn !! .false. suppresses the duplicate-key warning (default .true.).
         end subroutine schema_add_metadata_int64
         !> float32 specific of %add_metadata; see schema_add_metadata_int32.
-        module subroutine schema_add_metadata_float32(this, key, value, description, fmt)
+        module subroutine schema_add_metadata_float32(this, key, value, description, fmt, warn)
             class(parquet_schema), intent(inout) :: this !! schema whose %metadata gains one entry.
             character(len=*), intent(in) :: key !! metadata key.
             real(real32), intent(in) :: value !! metadata value.
             character(len=*), intent(in), optional :: description !! optional free-text description.
             character(len=*), intent(in), optional :: fmt !! optional Fortran edit descriptor for the stored text.
+            logical, intent(in), optional :: warn !! .false. suppresses the duplicate-key warning (default .true.).
         end subroutine schema_add_metadata_float32
         !> float64 specific of %add_metadata; see schema_add_metadata_int32.
-        module subroutine schema_add_metadata_float64(this, key, value, description, fmt)
+        module subroutine schema_add_metadata_float64(this, key, value, description, fmt, warn)
             class(parquet_schema), intent(inout) :: this !! schema whose %metadata gains one entry.
             character(len=*), intent(in) :: key !! metadata key.
             real(real64), intent(in) :: value !! metadata value.
             character(len=*), intent(in), optional :: description !! optional free-text description.
             character(len=*), intent(in), optional :: fmt !! optional Fortran edit descriptor for the stored text.
+            logical, intent(in), optional :: warn !! .false. suppresses the duplicate-key warning (default .true.).
         end subroutine schema_add_metadata_float64
         !> logical specific of %add_metadata; see schema_add_metadata_int32.
-        module subroutine schema_add_metadata_logical(this, key, value, description)
+        module subroutine schema_add_metadata_logical(this, key, value, description, warn)
             class(parquet_schema), intent(inout) :: this !! schema whose %metadata gains one entry.
             character(len=*), intent(in) :: key !! metadata key.
             logical, intent(in) :: value !! metadata value.
             character(len=*), intent(in), optional :: description !! optional free-text description.
+            logical, intent(in), optional :: warn !! .false. suppresses the duplicate-key warning (default .true.).
         end subroutine schema_add_metadata_logical
         !> string specific of %add_metadata; see schema_add_metadata_int32.
-        module subroutine schema_add_metadata_string(this, key, value, description)
+        module subroutine schema_add_metadata_string(this, key, value, description, warn)
             class(parquet_schema), intent(inout) :: this !! schema whose %metadata gains one entry.
             character(len=*), intent(in) :: key !! metadata key.
             character(len=*), intent(in) :: value !! metadata value.
             character(len=*), intent(in), optional :: description !! optional free-text description.
+            logical, intent(in), optional :: warn !! .false. suppresses the duplicate-key warning (default .true.).
         end subroutine schema_add_metadata_string
         !> int32 array specific of %add_metadata; see schema_add_metadata_int32.
-        module subroutine schema_add_metadata_int32_array(this, key, value, description)
+        module subroutine schema_add_metadata_int32_array(this, key, value, description, warn)
             class(parquet_schema), intent(inout) :: this !! schema whose %metadata gains one entry.
             character(len=*), intent(in) :: key !! metadata key.
             integer(int32), intent(in) :: value(:) !! metadata values.
             character(len=*), intent(in), optional :: description !! optional free-text description.
+            logical, intent(in), optional :: warn !! .false. suppresses the duplicate-key warning (default .true.).
         end subroutine schema_add_metadata_int32_array
         !> int64 array specific of %add_metadata; see schema_add_metadata_int32.
-        module subroutine schema_add_metadata_int64_array(this, key, value, description)
+        module subroutine schema_add_metadata_int64_array(this, key, value, description, warn)
             class(parquet_schema), intent(inout) :: this !! schema whose %metadata gains one entry.
             character(len=*), intent(in) :: key !! metadata key.
             integer(int64), intent(in) :: value(:) !! metadata values.
             character(len=*), intent(in), optional :: description !! optional free-text description.
+            logical, intent(in), optional :: warn !! .false. suppresses the duplicate-key warning (default .true.).
         end subroutine schema_add_metadata_int64_array
         !> float32 array specific of %add_metadata; see schema_add_metadata_int32.
-        module subroutine schema_add_metadata_float32_array(this, key, value, description, fmt)
+        module subroutine schema_add_metadata_float32_array(this, key, value, description, fmt, warn)
             class(parquet_schema), intent(inout) :: this !! schema whose %metadata gains one entry.
             character(len=*), intent(in) :: key !! metadata key.
             real(real32), intent(in) :: value(:) !! metadata values.
             character(len=*), intent(in), optional :: description !! optional free-text description.
             character(len=*), intent(in), optional :: fmt !! optional Fortran edit descriptor for the stored text.
+            logical, intent(in), optional :: warn !! .false. suppresses the duplicate-key warning (default .true.).
         end subroutine schema_add_metadata_float32_array
         !> float64 array specific of %add_metadata; see schema_add_metadata_int32.
-        module subroutine schema_add_metadata_float64_array(this, key, value, description, fmt)
+        module subroutine schema_add_metadata_float64_array(this, key, value, description, fmt, warn)
             class(parquet_schema), intent(inout) :: this !! schema whose %metadata gains one entry.
             character(len=*), intent(in) :: key !! metadata key.
             real(real64), intent(in) :: value(:) !! metadata values.
             character(len=*), intent(in), optional :: description !! optional free-text description.
             character(len=*), intent(in), optional :: fmt !! optional Fortran edit descriptor for the stored text.
+            logical, intent(in), optional :: warn !! .false. suppresses the duplicate-key warning (default .true.).
         end subroutine schema_add_metadata_float64_array
         !> logical array specific of %add_metadata; see schema_add_metadata_int32.
-        module subroutine schema_add_metadata_logical_array(this, key, value, description)
+        module subroutine schema_add_metadata_logical_array(this, key, value, description, warn)
             class(parquet_schema), intent(inout) :: this !! schema whose %metadata gains one entry.
             character(len=*), intent(in) :: key !! metadata key.
             logical, intent(in) :: value(:) !! metadata values.
             character(len=*), intent(in), optional :: description !! optional free-text description.
+            logical, intent(in), optional :: warn !! .false. suppresses the duplicate-key warning (default .true.).
         end subroutine schema_add_metadata_logical_array
         !> string array specific of %add_metadata; see schema_add_metadata_int32.
-        module subroutine schema_add_metadata_string_array(this, key, value, description)
+        module subroutine schema_add_metadata_string_array(this, key, value, description, warn)
             class(parquet_schema), intent(inout) :: this !! schema whose %metadata gains one entry.
             character(len=*), intent(in) :: key !! metadata key.
             character(len=*), intent(in) :: value(:) !! metadata values.
             character(len=*), intent(in), optional :: description !! optional free-text description.
+            logical, intent(in), optional :: warn !! .false. suppresses the duplicate-key warning (default .true.).
         end subroutine schema_add_metadata_string_array
         !> Forwards to %metadata%clear_metadata: discards every %add_metadata entry added
         !> after the most recent parquet_parse_maml, keeping the base (header keys +
@@ -1314,92 +1326,104 @@ module parquet
         end subroutine set_available
         !> int32 specific of parquet_table_metadata%add_metadata; stores
         !> `value` as plain text via parquet_metadata_append_entry.
-        module subroutine add_metadata_int32(this, key, value, description)
+        module subroutine add_metadata_int32(this, key, value, description, warn)
             class(parquet_table_metadata), intent(inout) :: this !! table metadata gaining one entry.
             character(len=*), intent(in) :: key !! metadata key.
             integer(int32), intent(in) :: value !! metadata value.
             character(len=*), intent(in), optional :: description !! optional free-text description.
+            logical, intent(in), optional :: warn !! .false. suppresses the duplicate-key warning (default .true.).
         end subroutine add_metadata_int32
         !> int64 specific of parquet_table_metadata%add_metadata; see add_metadata_int32.
-        module subroutine add_metadata_int64(this, key, value, description)
+        module subroutine add_metadata_int64(this, key, value, description, warn)
             class(parquet_table_metadata), intent(inout) :: this !! table metadata gaining one entry.
             character(len=*), intent(in) :: key !! metadata key.
             integer(int64), intent(in) :: value !! metadata value.
             character(len=*), intent(in), optional :: description !! optional free-text description.
+            logical, intent(in), optional :: warn !! .false. suppresses the duplicate-key warning (default .true.).
         end subroutine add_metadata_int64
         !> float32 specific of parquet_table_metadata%add_metadata; see add_metadata_int32.
-        module subroutine add_metadata_float32(this, key, value, description, fmt)
+        module subroutine add_metadata_float32(this, key, value, description, fmt, warn)
             class(parquet_table_metadata), intent(inout) :: this !! table metadata gaining one entry.
             character(len=*), intent(in) :: key !! metadata key.
             real(real32), intent(in) :: value !! metadata value.
             character(len=*), intent(in), optional :: description !! optional free-text description.
             character(len=*), intent(in), optional :: fmt !! optional Fortran edit descriptor for the stored text.
+            logical, intent(in), optional :: warn !! .false. suppresses the duplicate-key warning (default .true.).
         end subroutine add_metadata_float32
         !> float64 specific of parquet_table_metadata%add_metadata; see add_metadata_int32.
-        module subroutine add_metadata_float64(this, key, value, description, fmt)
+        module subroutine add_metadata_float64(this, key, value, description, fmt, warn)
             class(parquet_table_metadata), intent(inout) :: this !! table metadata gaining one entry.
             character(len=*), intent(in) :: key !! metadata key.
             real(real64), intent(in) :: value !! metadata value.
             character(len=*), intent(in), optional :: description !! optional free-text description.
             character(len=*), intent(in), optional :: fmt !! optional Fortran edit descriptor for the stored text.
+            logical, intent(in), optional :: warn !! .false. suppresses the duplicate-key warning (default .true.).
         end subroutine add_metadata_float64
         !> logical specific of parquet_table_metadata%add_metadata; see add_metadata_int32.
-        module subroutine add_metadata_logical(this, key, value, description)
+        module subroutine add_metadata_logical(this, key, value, description, warn)
             class(parquet_table_metadata), intent(inout) :: this !! table metadata gaining one entry.
             character(len=*), intent(in) :: key !! metadata key.
             logical, intent(in) :: value !! metadata value.
             character(len=*), intent(in), optional :: description !! optional free-text description.
+            logical, intent(in), optional :: warn !! .false. suppresses the duplicate-key warning (default .true.).
         end subroutine add_metadata_logical
         !> string specific of parquet_table_metadata%add_metadata; see add_metadata_int32.
-        module subroutine add_metadata_string(this, key, value, description)
+        module subroutine add_metadata_string(this, key, value, description, warn)
             class(parquet_table_metadata), intent(inout) :: this !! table metadata gaining one entry.
             character(len=*), intent(in) :: key !! metadata key.
             character(len=*), intent(in) :: value !! metadata value.
             character(len=*), intent(in), optional :: description !! optional free-text description.
+            logical, intent(in), optional :: warn !! .false. suppresses the duplicate-key warning (default .true.).
         end subroutine add_metadata_string
         !> int32 array specific of parquet_table_metadata%add_metadata; see add_metadata_int32.
-        module subroutine add_metadata_int32_array(this, key, value, description)
+        module subroutine add_metadata_int32_array(this, key, value, description, warn)
             class(parquet_table_metadata), intent(inout) :: this !! table metadata gaining one entry.
             character(len=*), intent(in) :: key !! metadata key.
             integer(int32), intent(in) :: value(:) !! metadata values.
             character(len=*), intent(in), optional :: description !! optional free-text description.
+            logical, intent(in), optional :: warn !! .false. suppresses the duplicate-key warning (default .true.).
         end subroutine add_metadata_int32_array
         !> int64 array specific of parquet_table_metadata%add_metadata; see add_metadata_int32.
-        module subroutine add_metadata_int64_array(this, key, value, description)
+        module subroutine add_metadata_int64_array(this, key, value, description, warn)
             class(parquet_table_metadata), intent(inout) :: this !! table metadata gaining one entry.
             character(len=*), intent(in) :: key !! metadata key.
             integer(int64), intent(in) :: value(:) !! metadata values.
             character(len=*), intent(in), optional :: description !! optional free-text description.
+            logical, intent(in), optional :: warn !! .false. suppresses the duplicate-key warning (default .true.).
         end subroutine add_metadata_int64_array
         !> float32 array specific of parquet_table_metadata%add_metadata; see add_metadata_int32.
-        module subroutine add_metadata_float32_array(this, key, value, description, fmt)
+        module subroutine add_metadata_float32_array(this, key, value, description, fmt, warn)
             class(parquet_table_metadata), intent(inout) :: this !! table metadata gaining one entry.
             character(len=*), intent(in) :: key !! metadata key.
             real(real32), intent(in) :: value(:) !! metadata values.
             character(len=*), intent(in), optional :: description !! optional free-text description.
             character(len=*), intent(in), optional :: fmt !! optional Fortran edit descriptor for the stored text.
+            logical, intent(in), optional :: warn !! .false. suppresses the duplicate-key warning (default .true.).
         end subroutine add_metadata_float32_array
         !> float64 array specific of parquet_table_metadata%add_metadata; see add_metadata_int32.
-        module subroutine add_metadata_float64_array(this, key, value, description, fmt)
+        module subroutine add_metadata_float64_array(this, key, value, description, fmt, warn)
             class(parquet_table_metadata), intent(inout) :: this !! table metadata gaining one entry.
             character(len=*), intent(in) :: key !! metadata key.
             real(real64), intent(in) :: value(:) !! metadata values.
             character(len=*), intent(in), optional :: description !! optional free-text description.
             character(len=*), intent(in), optional :: fmt !! optional Fortran edit descriptor for the stored text.
+            logical, intent(in), optional :: warn !! .false. suppresses the duplicate-key warning (default .true.).
         end subroutine add_metadata_float64_array
         !> logical array specific of parquet_table_metadata%add_metadata; see add_metadata_int32.
-        module subroutine add_metadata_logical_array(this, key, value, description)
+        module subroutine add_metadata_logical_array(this, key, value, description, warn)
             class(parquet_table_metadata), intent(inout) :: this !! table metadata gaining one entry.
             character(len=*), intent(in) :: key !! metadata key.
             logical, intent(in) :: value(:) !! metadata values.
             character(len=*), intent(in), optional :: description !! optional free-text description.
+            logical, intent(in), optional :: warn !! .false. suppresses the duplicate-key warning (default .true.).
         end subroutine add_metadata_logical_array
         !> string array specific of parquet_table_metadata%add_metadata; see add_metadata_int32.
-        module subroutine add_metadata_string_array(this, key, value, description)
+        module subroutine add_metadata_string_array(this, key, value, description, warn)
             class(parquet_table_metadata), intent(inout) :: this !! table metadata gaining one entry.
             character(len=*), intent(in) :: key !! metadata key.
             character(len=*), intent(in) :: value(:) !! metadata values.
             character(len=*), intent(in), optional :: description !! optional free-text description.
+            logical, intent(in), optional :: warn !! .false. suppresses the duplicate-key warning (default .true.).
         end subroutine add_metadata_string_array
         !> Truncates %items back to %n_base_items, discarding every entry appended by an
         !> %add_metadata call made since the most recent parquet_parse_maml -- a no-op if

@@ -116,7 +116,15 @@ contains
             new_unittest("clear_metadata works the same for an in-code-built schema", &
                 test_clear_metadata_in_code_schema), &
             new_unittest("clear_metadata on a never-parsed table_metadata discards all items", &
-                test_clear_metadata_never_parsed) &
+                test_clear_metadata_never_parsed), &
+            new_unittest("add_metadata duplicating a declared MAML top-level key still appends (category A)", &
+                test_add_metadata_duplicate_maml_init_key_still_appends), &
+            new_unittest("add_metadata duplicating a non-reserved key still appends (category B)", &
+                test_add_metadata_duplicate_generic_key_still_appends), &
+            new_unittest("add_metadata('DATE', ...) is shadowed by the writer's own DATE entry on read " // &
+                "(category C)", test_add_metadata_duplicate_writer_key_shadowed_on_read), &
+            new_unittest("add_metadata(warn=.false.) suppresses the warning but still appends the duplicate", &
+                test_add_metadata_warn_false_still_appends) &
             ]
     end subroutine collect_tests_parquet_metadata
 
@@ -1367,5 +1375,107 @@ contains
         call check(error, .not. allocated(md%items), &
             "clear_metadata on a never-parsed table_metadata should deallocate %items entirely")
     end subroutine test_clear_metadata_never_parsed
+
+    !> Category A: add_metadata("author", ...) duplicates a MAML top-level key the schema
+    !! actually declared (via schema%init's own author= keyword) -- warn=.true. (the default)
+    !! still appends the new entry rather than rejecting or overwriting it; only the printed
+    !! WARNING (not asserted here, matching this suite's existing convention of not capturing
+    !! stdout for other WARNING-printing paths, e.g. test_missing_key_default_warns) differs
+    !! from warn=.false.
+    subroutine test_add_metadata_duplicate_maml_init_key_still_appends(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        integer :: n_before
+
+        call schema%init(table="dup_a_test", author="Alice")
+        call schema%add_field("x", "int32")
+        call parquet_parse_maml(schema)
+        n_before = size(schema%metadata%items)
+
+        call schema%add_metadata("author", "Bob")
+
+        call check(error, size(schema%metadata%items) == n_before + 1, &
+            "add_metadata should still append even when the key duplicates a MAML-declared top-level key")
+        if (allocated(error)) return
+        call check(error, trim(schema%metadata%items(n_before + 1)%key) == "author")
+        if (allocated(error)) return
+        call check(error, trim(schema%metadata%items(n_before + 1)%value) == "Bob", &
+            "the newly-appended duplicate entry should still carry the caller's own value, not overwrite the original")
+    end subroutine test_add_metadata_duplicate_maml_init_key_still_appends
+
+    !> Category B: two add_metadata calls sharing a non-reserved key both append (in call
+    !! order), the same "duplicate, don't overwrite" behavior as category A but reached via
+    !! the generic fallback (key not in schema%init's own keyword list).
+    subroutine test_add_metadata_duplicate_generic_key_still_appends(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        integer :: n_before
+
+        call schema%init(table="dup_b_test")
+        call schema%add_field("x", "int32")
+        call parquet_parse_maml(schema)
+
+        call schema%add_metadata("custom_key", 1_int32)
+        n_before = size(schema%metadata%items)
+        call schema%add_metadata("custom_key", 2_int32)
+
+        call check(error, size(schema%metadata%items) == n_before + 1, &
+            "a duplicate non-reserved key should still append a new entry (category B), not overwrite")
+        if (allocated(error)) return
+        call check(error, trim(schema%metadata%items(n_before)%value) == "1")
+        if (allocated(error)) return
+        call check(error, trim(schema%metadata%items(n_before + 1)%value) == "2", &
+            "both the original and the duplicate entry should be preserved, in call order")
+    end subroutine test_add_metadata_duplicate_generic_key_still_appends
+
+    !> Category C, end-to-end: add_metadata("DATE", ...) collides with a key the writer
+    !! always injects itself (build_file_metadata in parquet_wrapper.cpp writes its own "DATE"
+    !! entry -- the file's real write timestamp -- before the schema's own table_metadata
+    !! entries are appended). On read, parquet_get_metadata("DATE") returns the first match,
+    !! so the writer's own entry silently shadows the caller's -- exactly the collision
+    !! category C's warning exists to flag.
+    subroutine test_add_metadata_duplicate_writer_key_shadowed_on_read(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_schema) :: schema
+        integer(int32) :: id0(1) = [1_int32]
+        character(len=:), allocatable :: dval
+
+        call schema%init(table="dup_c_test")
+        call schema%add_field("id0", "int32")
+        call parquet_parse_maml(schema)
+        call schema%add_metadata("DATE", "user-supplied-not-a-real-date")
+
+        call parquet_open_writer(writer, "test_run/metadata_dup_writer_key.parquet", schema)
+        call parquet_write_column(writer, "id0", id0)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, "test_run/metadata_dup_writer_key.parquet")
+        call parquet_get_metadata(reader, "DATE", dval)
+        call check(error, dval /= "user-supplied-not-a-real-date", &
+            "the writer's own auto-generated DATE entry should shadow a user add_metadata('DATE', ...) call " // &
+            "(first match wins on read) -- the exact collision category C's warning flags")
+        call parquet_close_reader(reader)
+    end subroutine test_add_metadata_duplicate_writer_key_shadowed_on_read
+
+    !> warn=.false. suppresses the printed WARNING but must not change what gets stored --
+    !! the duplicate entry is still appended, same as the warn=.true. default (see
+    !! test_add_metadata_duplicate_maml_init_key_still_appends).
+    subroutine test_add_metadata_warn_false_still_appends(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        integer :: n_before
+
+        call schema%init(table="dup_warn_false_test", author="Alice")
+        call schema%add_field("x", "int32")
+        call parquet_parse_maml(schema)
+        n_before = size(schema%metadata%items)
+
+        call schema%add_metadata("author", "Bob", warn=.false.)
+
+        call check(error, size(schema%metadata%items) == n_before + 1, &
+            "warn=.false. should suppress the warning print but not change append behavior")
+    end subroutine test_add_metadata_warn_false_still_appends
 
 end module test_metadata

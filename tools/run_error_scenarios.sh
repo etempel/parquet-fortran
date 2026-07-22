@@ -229,6 +229,7 @@ scenarios=(
     "sample_nan_fraction:1"
     "read_chunk_with_sample:1"
     "print_stat_sampled_rows:0"
+    "sample_mask_build_error:1"
     "string_length_on_non_string_column:1"
     "qc_range_violation_warns:0"
     "qc_range_violation_string_warns:0"

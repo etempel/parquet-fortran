@@ -318,6 +318,8 @@ program error_scenarios
         call scenario_read_chunk_with_sample()
     case ("print_stat_sampled_rows")
         call scenario_print_stat_sampled_rows()
+    case ("sample_mask_build_error")
+        call scenario_sample_mask_build_error()
     case ("string_length_on_non_string_column")
         call scenario_string_length_on_non_string_column()
     case ("qc_range_violation_warns")
@@ -3858,6 +3860,35 @@ contains
         call parquet_close_reader(reader, print_stat=.true.)
         print '(a)', "print_stat covered the sample: fraction=... summary line"
     end subroutine scenario_print_stat_sampled_rows
+
+    !> parquet_reader_set_sample's failure return (parquet_wrapper.cpp) -- and the Fortran-side
+    !> error stop that surfaces it (parquet_apply_sample, parquet_read.f90) -- forced via a
+    !> debug-only hook (g_debug_force_sample_mask_error, reachable only through the local bind(C)
+    !> interface declared below) rather than a genuine BooleanBuilder allocation failure, which
+    !> isn't fixture-triggerable in practice. Same process-global/subprocess-isolation reasoning as
+    !> scenario_col_size_and_row_mode_avoid_whole_column_read's own debug hook use, above.
+    subroutine scenario_sample_mask_build_error()
+        interface
+            subroutine parquet_debug_set_force_sample_mask_error(enable) &
+                bind(C, name="parquet_debug_set_force_sample_mask_error")
+                use iso_c_binding, only : c_int
+                integer(c_int), value :: enable !! nonzero forces the next sample mask build to fail; 0 restores normal behavior.
+            end subroutine parquet_debug_set_force_sample_mask_error
+        end interface
+
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: v(3) = [1, 2, 3]
+        character(len=*), parameter :: out_file = "test_run/error_scenario_sample_mask_build_error.parquet"
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+
+        call parquet_debug_set_force_sample_mask_error(1)
+        call parquet_open_reader(reader, out_file, sample_fraction=0.5_real64)
+        print '(a)', "unexpectedly opened a sampled reader despite the forced sample-mask-build error"
+    end subroutine scenario_sample_mask_build_error
 
     !> parquet_reader_get_string_length's `default:` fallback
     !> (parquet_wrapper.cpp) for a column that isn't string-like/LIST/LARGE_LIST/FIXED_SIZE_LIST

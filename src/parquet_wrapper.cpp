@@ -2782,13 +2782,24 @@ extern "C"
 	//
 	// has_sample/sample_fraction/sample_seed_used (for parquet_reader_print_stat) are always set
 	// immediately either way, regardless of deferral. Returns 0 on success; on the (not
-	// fixture-triggerable in practice) BooleanBuilder allocation failure below, returns 1 and writes
-	// a reason into err_out (truncated to err_cap), mirroring parquet_reader_set_filter's own
-	// defensive backstop for the identical construction.
+	// fixture-triggerable in practice on its own) BooleanBuilder allocation failure below, returns 1
+	// and writes a reason into err_out (truncated to err_cap), mirroring parquet_reader_set_filter's
+	// own defensive backstop for the identical construction. g_debug_force_sample_mask_error (see
+	// its own comment, near parquet_debug_set_force_sample_mask_error further down) lets
+	// test/error_scenarios.f90 exercise this failure return -- and the Fortran-side error stop that
+	// surfaces it (parquet_apply_sample, parquet_read.f90) -- without needing a genuine allocation
+	// failure.
+	static bool g_debug_force_sample_mask_error = false;
 	int64_t parquet_reader_set_sample(void *handle, double sample_fraction, int32_t seed, int8_t has_seed,
 		int8_t filter_will_follow, int32_t *actual_seed_out, char *err_out, int64_t err_cap)
 	{
 		auto reader_handle = as_reader_handle(handle);
+
+		if (g_debug_force_sample_mask_error)
+		{
+			std::snprintf(err_out, static_cast<size_t>(err_cap), "forced debug error: sample mask build failed");
+			return 1;
+		}
 
 		std::vector<uint8_t> combined(static_cast<size_t>(reader_handle->total_nrows), 0);
 		if (sample_fraction > 0.0)
@@ -3054,21 +3065,15 @@ extern "C"
 			// parquet_reader_set_sample ran first and deferred its draw here instead of installing
 			// it on filter_mask (see pending_sample_mask's own comment) -- seed from it now, so
 			// these clauses AND onto the sample draw. Every column read below (get_single_chunk_array)
-			// is still raw/unfiltered at this point, since filter_mask itself is still unset.
+			// is still raw/unfiltered at this point, since filter_mask itself is still unset. This is
+			// the only way combined can start non-all-true: parquet_reader_set_filter is only ever
+			// called once per reader (from parquet_open_reader_base), and parquet_reader_set_sample
+			// always defers via pending_sample_mask -- never installs filter_mask directly -- whenever
+			// a filter will follow, so filter_mask itself is never already set here.
 			combined = reader_handle->pending_sample_mask;
 			reader_handle->has_pending_sample = false;
 			reader_handle->pending_sample_mask.clear();
 			reader_handle->pending_sample_mask.shrink_to_fit();
-		}
-		else if (reader_handle->filter_mask)
-		{
-			// Not expected in the current parquet_open_reader flow (a sample always defers via
-			// pending_sample_mask above when a filter will follow), but seed from any pre-existing
-			// mask defensively rather than assuming this is always the first mask-setting call.
-			for (int64_t i = 0; i < reader_handle->total_nrows; ++i)
-			{
-				combined[static_cast<size_t>(i)] = reader_handle->filter_mask->Value(i) ? 1 : 0;
-			}
 		}
 		else
 		{
@@ -6803,6 +6808,16 @@ extern "C"
 	void parquet_debug_set_force_whole_column_read_error(int enable)
 	{
 		g_debug_force_whole_column_read_error = (enable != 0);
+	}
+
+	// Test-only: overrides g_debug_force_sample_mask_error (see its own comment, next to
+	// parquet_reader_set_sample) so test/error_scenarios.f90 can exercise parquet_reader_set_sample's
+	// failure return -- and the Fortran-side error stop that surfaces it (parquet_apply_sample,
+	// parquet_read.f90) -- on a tiny fixture, without needing a genuine BooleanBuilder allocation
+	// failure. Pass 0 to restore normal (non-forced-error) behavior.
+	void parquet_debug_set_force_sample_mask_error(int enable)
+	{
+		g_debug_force_sample_mask_error = (enable != 0);
 	}
 
 	// Test-only: returns g_debug_physical_column_read_count (see its own comment) -- lets

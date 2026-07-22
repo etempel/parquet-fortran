@@ -315,6 +315,8 @@ contains
                 test_read_chunk_with_sample_aborts), &
             new_unittest("print_stat reports the sample: fraction=.../seed=... line", &
                 test_print_stat_sampled_rows), &
+            new_unittest("a forced sample-mask-build failure aborts via a clean error stop", &
+                test_sample_mask_build_error_aborts), &
             new_unittest("string length query on a non-string column aborts", &
                 test_string_length_on_non_string_column_aborts), &
             new_unittest("qc-maml: unrecognized miss: value aborts", &
@@ -1993,6 +1995,17 @@ contains
             failure_message="print_stat was expected to run cleanly on a sampled reader", &
             required_stderr="sample: fraction=0.4 seed=42")
     end subroutine test_print_stat_sampled_rows
+
+    !> parquet_reader_set_sample's failure return (parquet_wrapper.cpp) surfaces as a clean
+    !> Fortran error stop from parquet_apply_sample (parquet_read.f90), forced here via a
+    !> debug-only hook since a genuine BooleanBuilder allocation failure isn't fixture-triggerable.
+    subroutine test_sample_mask_build_error_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sample_mask_build_error", expect_abort=.true., &
+            failure_message="a forced sample-mask-build failure was expected to abort", &
+            required_stderr="parquet_open_reader: forced debug error: sample mask build failed")
+    end subroutine test_sample_mask_build_error_aborts
 
     !> parquet_reader_get_string_length's `default:` fallback for a column that isn't
     !> string-like/LIST-typed at all -- reached via a plain `throw`, not report_fatal_error, but

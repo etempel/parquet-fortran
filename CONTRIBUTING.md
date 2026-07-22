@@ -187,6 +187,25 @@ outline to the letter glyph, and finally rasterizes PNGs back out at each needed
 if the logo itself changes — see the script's own header comment for the full pipeline and its
 tuning flags.
 
+`tools/convert_fits_to_parquet.py` converts a FITS binary table into a `.parquet` file carrying
+this library's own VOTable-style key-value metadata (`column.<name>.unit`/`description`/`ucd`/
+`data_type`/`array_size`/`col_size`, plus flat table-level keys), so `parquet_get_metadata` can
+read it back — a standalone Python dev tool (requires `astropy` and `pyarrow`, neither part of
+this repository's own Fortran toolchain), not part of the public library or the fpm-published
+package (see its own `REMOVE_PATHS` entry in `tools/prep_fpm_publish.sh`). Only
+int32/int64/float32/float64/boolean/string are ever written; unsigned integers/complex/bit-array
+FITS columns are converted on a best-effort basis (widened, split into `_re`/`_im`, or unpacked
+into a boolean vector column, respectively — see the script's own header comment for the full
+mapping), and variable-length array columns (FITS `P`/`Q` descriptors) or genuinely
+multi-dimensional per-row arrays (`TDIM` with more than one axis) are skipped with a warning and
+listed in the output file's `not_converted_columns` metadata entry, rather than converted:
+
+```bash
+tools/convert_fits_to_parquet.py data.fits                                  # -> data.parquet, snappy
+tools/convert_fits_to_parquet.py data.fits out.parquet --compression zstd
+tools/convert_fits_to_parquet.py multi_table.fits out.parquet --hdu SPECTRA --overwrite
+```
+
 ### Testing genuine OpenMP concurrency
 
 This repository's own OpenMP-dependent tests (the `openmp`/`openmp_write` test suites, plus the `concurrent_calls_into_shared_reader`/`writer` error scenarios) need a real OpenMP flag to actually exercise concurrency:

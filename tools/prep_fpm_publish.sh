@@ -74,14 +74,19 @@ REMOVE_PATHS=(
     app/benchmark_threads.f90
     tools/benchmark_threads.sh
     tools/check_doc_anchors.py
+    tools/convert_fits_to_parquet.py
     tools/count_lines.py
+    tools/count_tests.sh
     tools/coverage.sh
+    tools/coverage_cpp.sh
     tools/fix_ford_page_links.sh
     tools/generate_fixtures.cpp
+    tools/generate_logo_svg.py
     tools/mirror_to_github.sh
     tools/prep_github_mirroring.sh
     tools/run_error_scenarios.sh
     tools/run_generate_fixtures.sh
+    tools/test_large_scale.sh
 )
 
 # Files that must survive into the tarball -- a sanity check in the opposite direction from

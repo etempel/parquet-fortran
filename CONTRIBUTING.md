@@ -190,9 +190,10 @@ tuning flags.
 `tools/convert_fits_to_parquet.py` converts a FITS binary table into a `.parquet` file carrying
 this library's own VOTable-style key-value metadata (`column.<name>.unit`/`description`/`ucd`/
 `data_type`/`array_size`/`col_size`, plus flat table-level keys), so `parquet_get_metadata` can
-read it back — a standalone Python dev tool (requires `astropy` and `pyarrow`, neither part of
-this repository's own Fortran toolchain), not part of the public library or the fpm-published
-package (see its own `REMOVE_PATHS` entry in `tools/prep_fpm_publish.sh`). Only
+read it back — a standalone Python tool (requires `astropy` and `pyarrow`, neither part of this
+repository's own Fortran toolchain). Not part of the public Fortran library or its API, but
+consumer-facing rather than maintainer/CI-only, so it's kept in the fpm-published package (see
+its `KEEP_PATHS` entry in `tools/prep_fpm_publish.sh`). Only
 int32/int64/float32/float64/boolean/string are ever written; unsigned integers/complex/bit-array
 FITS columns are converted on a best-effort basis (widened, split into `_re`/`_im`, or unpacked
 into a boolean vector column, respectively — see the script's own header comment for the full

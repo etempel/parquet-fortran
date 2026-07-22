@@ -41,6 +41,7 @@
 #include <memory>
 #include <limits>
 #include <mutex>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -292,7 +293,8 @@ extern "C"
 		// needed this before). See resolve_single_leaf_index/collect_leaf_indices, below.
 		parquet::arrow::SchemaManifest manifest;
 		std::string filename;
-		int64_t nrows = 0; // effective row count: equal to total_nrows until a filter narrows it (see parquet_reader_set_filter).
+		int64_t nrows = 0; // effective row count: equal to total_nrows until a filter or sample narrows it (see
+		                   // parquet_reader_set_filter/parquet_reader_set_sample).
 		int64_t total_nrows = 0; // the file's true, unfiltered row count -- kept for parquet_reader_print_stat's "of N total".
 		std::unordered_map<int, std::shared_ptr<arrow::Array>> column_cache;
 		// Flat key-value table metadata (parquet_add_table_metadata's own
@@ -302,18 +304,41 @@ extern "C"
 		// (parquet_metadata.f90) never re-reads the file: every call just
 		// scans this in-memory copy.
 		std::vector<std::pair<std::string, std::string>> table_metadata_cache;
-		// Set once by parquet_reader_set_filter: a plain (never-null) boolean
-		// mask, one entry per row of the *unfiltered* file, true for rows that
-		// pass every filter clause. get_single_chunk_array and
-		// parquet_reader_prefetch_columns both apply this (via arrow::compute::Filter)
-		// to every column right after decoding it, so every column ever handed
-		// back to Fortran -- and every column_cache entry -- reflects only the
-		// matching rows, transparently, once a filter is set.
+		// Set by parquet_reader_set_sample and/or parquet_reader_set_filter: a plain (never-null)
+		// boolean mask, one entry per row of the *unfiltered* file, true for rows that pass random
+		// downsampling (parquet_open_reader's sample_fraction=, if given) AND every filter clause
+		// (filter=, if also given). When a filter= will also be applied, parquet_reader_set_sample
+		// deliberately does NOT install its own mask here -- it stashes it in pending_sample_mask
+		// instead (see that field's own comment for why) and lets parquet_reader_set_filter install
+		// the final, combined mask here once it has evaluated its own clauses. get_single_chunk_array
+		// and parquet_reader_prefetch_columns both apply this (via arrow::compute::Filter) to every
+		// column right after decoding it, so every column ever handed back to Fortran -- and every
+		// column_cache entry -- reflects only the matching rows, transparently, once this is set.
 		std::shared_ptr<arrow::BooleanArray> filter_mask;
 		// Per-column filter clauses retained solely for parquet_reader_print_stat's
 		// "filter" column: each entry is one clause's operator+value with the
 		// column name stripped (e.g. ">=0.0"), in the order set_filter saw them.
 		std::unordered_map<int, std::vector<std::string>> filter_clauses;
+		// Set once by parquet_reader_set_sample when parquet_open_reader's sample_fraction < 1.0 --
+		// retained solely for parquet_reader_print_stat's own "sample:" line. sample_seed_used is
+		// always the seed the draw actually used, whether caller-supplied (sample_seed > 0) or
+		// entropy-drawn, so a caller can read back a non-deterministic run's seed afterward and reuse
+		// it for a reproducible repeat.
+		bool has_sample = false;
+		double sample_fraction = 0.0;
+		int32_t sample_seed_used = 0;
+		// Holds the raw sample draw (see draw_sample_mask), one entry per row of the unfiltered
+		// file, whenever parquet_reader_set_sample was told a filter= will also be applied right
+		// after -- has_pending_sample distinguishes "nothing pending" from a genuine (possibly
+		// empty, on a zero-row file) pending mask. Installing a sample mask onto filter_mask
+		// immediately would make every subsequent column read -- including the filter's own
+		// referenced columns, read while parquet_reader_set_filter evaluates its clauses -- come
+		// back already sample-compacted, breaking the row-index alignment that clause evaluation's
+		// own per-row combined vector depends on (confirmed by a real Arrow "must all be the same
+		// length" crash when this wasn't deferred). parquet_reader_set_filter consumes and clears
+		// both fields once it folds this into the final filter_mask.
+		bool has_pending_sample = false;
+		std::vector<uint8_t> pending_sample_mask;
 		// Access bookkeeping for parquet_reader_print_stat only: was_prefetched
 		// is set for every column index named in a parquet_reader_prefetch_columns
 		// call (whether or not it actually triggered a read that time -- see
@@ -2709,6 +2734,108 @@ extern "C"
 		}
 	}
 
+	// Random-downsampling support for parquet_open_reader(..., sample_fraction=). Fills `combined`
+	// (already sized total_nrows, all zero) with a fresh Bernoulli(sample_fraction) draw per row --
+	// row i is kept iff a uniform [0,1) draw is <= sample_fraction. Seeds either deterministically
+	// from `seed` (when has_seed and seed > 0) or from entropy (std::random_device); either way,
+	// *actual_seed_out is filled with whichever seed the draw actually used, so a non-deterministic
+	// run's seed can be read back afterward (see parquet_reader_print_stat) and reused for a
+	// reproducible repeat. The entropy-drawn seed is deliberately kept in [1, INT32_MAX] -- a
+	// negative or zero seed_used would round-trip back through parquet_open_reader's own
+	// "sample_seed <= 0 means draw a fresh seed" convention as "no seed", breaking that promise.
+	// Uses a local (stack-scoped) engine -- no shared/global RNG state -- so this stays safe under
+	// this library's documented "many threads, each opening its own reader" concurrency pattern
+	// (see doc/pages/thread-safety.md); gfortran's own RANDOM_NUMBER/RANDOM_SEED state has no such
+	// guarantee, which is why this draw is done here rather than on the Fortran side.
+	static void draw_sample_mask(std::vector<uint8_t> &combined, double sample_fraction, int32_t seed, bool has_seed,
+		int32_t *actual_seed_out)
+	{
+		int32_t seed_used = seed;
+		if (!has_seed || seed <= 0)
+		{
+			std::random_device rd;
+			std::uniform_int_distribution<int32_t> seed_dist(1, std::numeric_limits<int32_t>::max());
+			seed_used = seed_dist(rd);
+		}
+		*actual_seed_out = seed_used;
+
+		std::mt19937_64 engine(static_cast<uint64_t>(seed_used));
+		std::uniform_real_distribution<double> dist(0.0, 1.0);
+		for (uint8_t &v : combined) v = (dist(engine) <= sample_fraction) ? 1 : 0;
+	}
+
+	// Validates nothing (sample_fraction/sample_seed are already fully validated Fortran-side --
+	// see parquet_open_reader_base's NaN/negative checks) and applies a Bernoulli(sample_fraction)
+	// row mask to `handle`, called from parquet_open_reader_base right after the reader is created
+	// and before any filter=/qc setup. sample_fraction is assumed already in [0.0, 1.0) by the
+	// caller; exactly 0.0 short-circuits to a guaranteed all-false mask (deterministic zero rows)
+	// rather than relying on a near-zero draw probability -- see draw_sample_mask for the >0.0 case.
+	//
+	// filter_will_follow (set by the Fortran caller from its own "will parquet_apply_filter run
+	// right after this" check, i.e. present(filter) .and. filter%n > 0): when true, the draw is
+	// stashed in pending_sample_mask instead of being installed on filter_mask -- see that field's
+	// own comment for why (installing it here would make the filter's own referenced columns come
+	// back already sample-compacted while parquet_reader_set_filter is still evaluating clauses
+	// against them, breaking its per-row alignment). nrows is left untouched in that case too;
+	// parquet_reader_set_filter finalizes both once it folds the pending mask into its own. When
+	// false, this installs filter_mask/nrows immediately, exactly as if no filter were ever coming.
+	//
+	// has_sample/sample_fraction/sample_seed_used (for parquet_reader_print_stat) are always set
+	// immediately either way, regardless of deferral. Returns 0 on success; on the (not
+	// fixture-triggerable in practice) BooleanBuilder allocation failure below, returns 1 and writes
+	// a reason into err_out (truncated to err_cap), mirroring parquet_reader_set_filter's own
+	// defensive backstop for the identical construction.
+	int64_t parquet_reader_set_sample(void *handle, double sample_fraction, int32_t seed, int8_t has_seed,
+		int8_t filter_will_follow, int32_t *actual_seed_out, char *err_out, int64_t err_cap)
+	{
+		auto reader_handle = as_reader_handle(handle);
+
+		std::vector<uint8_t> combined(static_cast<size_t>(reader_handle->total_nrows), 0);
+		if (sample_fraction > 0.0)
+		{
+			draw_sample_mask(combined, sample_fraction, seed, has_seed != 0, actual_seed_out);
+		}
+		else
+		{
+			*actual_seed_out = 0; // sample_fraction == 0.0: no draw at all, deterministic zero rows.
+		}
+
+		reader_handle->has_sample = true;
+		reader_handle->sample_fraction = sample_fraction;
+		reader_handle->sample_seed_used = *actual_seed_out;
+
+		if (filter_will_follow != 0)
+		{
+			reader_handle->has_pending_sample = true;
+			reader_handle->pending_sample_mask = std::move(combined);
+			return 0;
+		}
+
+		arrow::BooleanBuilder mask_builder;
+		auto append_status = mask_builder.AppendValues(combined.data(), static_cast<int64_t>(combined.size()));
+		if (!append_status.ok())
+		{ // GCOVR_EXCL_START -- BooleanBuilder allocation backstop, not fixture-triggerable
+			std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to build sample mask: %s", append_status.ToString().c_str());
+			return 1;
+		}
+		// GCOVR_EXCL_STOP
+		std::shared_ptr<arrow::Array> mask_array;
+		auto finish_status = mask_builder.Finish(&mask_array);
+		if (!finish_status.ok())
+		{ // GCOVR_EXCL_START -- BooleanBuilder allocation backstop, not fixture-triggerable
+			std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to build sample mask: %s", finish_status.ToString().c_str());
+			return 1;
+		}
+		// GCOVR_EXCL_STOP
+		reader_handle->filter_mask = std::static_pointer_cast<arrow::BooleanArray>(mask_array);
+
+		int64_t matched = 0;
+		for (uint8_t v : combined) matched += (v != 0);
+		reader_handle->nrows = matched;
+
+		return 0;
+	}
+
 	// Row-filtering support for parquet_open_reader(..., filter=). Every
 	// clause is a single "<column> <op> [value]" rule, already tokenized on
 	// the Fortran side (parquet_tokenize_filter_rule) -- this is deliberately
@@ -2900,7 +3027,9 @@ extern "C"
 	// Validates and applies a set of AND-combined filter clauses to this
 	// reader: every referenced column must exist and be a plain scalar
 	// column (col_size == 1; a vector/list column always fails, regardless
-	// of its size). On success, updates nrows to the filtered row count,
+	// of its size). If parquet_reader_set_sample already ran and deferred its
+	// draw (has_pending_sample), these clauses AND onto that draw instead of
+	// starting all-true. On success, updates nrows to the filtered row count,
 	// stores the resulting mask on the handle (so every column decoded from
 	// here on -- via get_single_chunk_array or parquet_reader_prefetch_columns
 	// -- is filtered to just the matching rows), and re-filters/updates
@@ -2919,7 +3048,32 @@ extern "C"
 		auto reader_handle = as_reader_handle(handle);
 		if (n <= 0) return 0;
 
-		std::vector<uint8_t> combined(static_cast<size_t>(reader_handle->total_nrows), 1);
+		std::vector<uint8_t> combined(static_cast<size_t>(reader_handle->total_nrows));
+		if (reader_handle->has_pending_sample)
+		{
+			// parquet_reader_set_sample ran first and deferred its draw here instead of installing
+			// it on filter_mask (see pending_sample_mask's own comment) -- seed from it now, so
+			// these clauses AND onto the sample draw. Every column read below (get_single_chunk_array)
+			// is still raw/unfiltered at this point, since filter_mask itself is still unset.
+			combined = reader_handle->pending_sample_mask;
+			reader_handle->has_pending_sample = false;
+			reader_handle->pending_sample_mask.clear();
+			reader_handle->pending_sample_mask.shrink_to_fit();
+		}
+		else if (reader_handle->filter_mask)
+		{
+			// Not expected in the current parquet_open_reader flow (a sample always defers via
+			// pending_sample_mask above when a filter will follow), but seed from any pre-existing
+			// mask defensively rather than assuming this is always the first mask-setting call.
+			for (int64_t i = 0; i < reader_handle->total_nrows; ++i)
+			{
+				combined[static_cast<size_t>(i)] = reader_handle->filter_mask->Value(i) ? 1 : 0;
+			}
+		}
+		else
+		{
+			std::fill(combined.begin(), combined.end(), 1);
+		}
 		std::vector<int> touched_indices;
 		std::vector<std::string> touched_names; // every filter clause's own (possibly dotted) name, deduplicated
 
@@ -3509,16 +3663,22 @@ extern "C"
 			// GCOVR_EXCL_START -- gcov attribution artifact under GCC: these continuation lines of a
 			// single fprintf call show uncovered even though this exact branch is directly exercised
 			// by error_scenarios.f90's print_stat_filtered_rows scenario.
-			std::fprintf(stdout, "columns: %d   shown: %zu   rows: %lld (of %lld total)\n\n",
+			std::fprintf(stdout, "columns: %d   shown: %zu   rows: %lld (of %lld total)\n",
 				reader_handle->schema->num_fields(), rows.size(),
 				static_cast<long long>(reader_handle->nrows), static_cast<long long>(reader_handle->total_nrows));
 			// GCOVR_EXCL_STOP
 		}
 		else
 		{
-			std::fprintf(stdout, "columns: %d   shown: %zu   rows: %lld\n\n",
+			std::fprintf(stdout, "columns: %d   shown: %zu   rows: %lld\n",
 				reader_handle->schema->num_fields(), rows.size(), static_cast<long long>(reader_handle->nrows));
 		}
+		if (reader_handle->has_sample)
+		{
+			std::fprintf(stdout, "sample: fraction=%.6g seed=%d\n", reader_handle->sample_fraction,
+				reader_handle->sample_seed_used);
+		}
+		std::fprintf(stdout, "\n");
 
 		print_row(headers);
 		std::vector<std::string> sep;

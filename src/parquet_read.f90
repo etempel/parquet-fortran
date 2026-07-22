@@ -8,6 +8,7 @@
 !> existence checks, fixed-width text packing for the filter/qc C++ API, and
 !> the whole-column-read-avoidance row-group helpers.
 submodule (parquet) parquet_read
+    use ieee_arithmetic, only: ieee_is_nan
     implicit none
 contains
 
@@ -80,7 +81,9 @@ contains
     !> row-group-scoped read has no coherent way to apply reader%filter's own mask, which is a
     !> single flat mask sized to the whole unfiltered file with no row-group structure of its
     !> own (see get_row_group_chunk_array's own comment in parquet_wrapper.cpp) -- so chunk reads
-    !> are disallowed outright on a reader opened with filter=, rather than silently ignoring it.
+    !> are disallowed outright on a reader opened with filter= and/or sample_fraction < 1.0 (the
+    !> two share this same mask -- see parquet_reader_has_filter's own doc-comment in
+    !> parquet_bindings.f90), rather than silently ignoring it.
     subroutine check_reader_no_filter(reader, context)
         type(parquet_reader), intent(in) :: reader !! open reader to check.
         character(len=*), intent(in) :: context !! calling procedure's name, used in the error-stop message.
@@ -88,7 +91,7 @@ contains
         if (parquet_reader_has_filter(reader%handle) /= 0) then
             call reader_filename_suffix(reader, name_suffix)
             error stop trim(context) // ": chunked reads are not supported on a reader opened with an " // &
-                "active filter= -- open a second, unfiltered reader for chunked access" // name_suffix
+                "active filter=/sample_fraction= -- open a second, unfiltered reader for chunked access" // name_suffix
         end if
     end subroutine check_reader_no_filter
     !> parquet_read_column_chunk's own extra guard, called right after check_reader_no_filter:
@@ -218,6 +221,49 @@ contains
             end do
         end do
     end subroutine pack_fixed_width_strings
+    !> Draws a Bernoulli(sample_fraction) row mask (see parquet_reader_set_sample in
+    !> parquet_wrapper.cpp) and applies it to `reader` -- called from parquet_open_reader right
+    !> after the reader itself is created and before any filter=/qc setup. sample_fraction must
+    !> already be validated by the caller (not negative, not NaN, < 1.0); sample_seed <= 0 (or
+    !> absent) draws a fresh entropy seed. The seed actually used is always reported back via
+    !> parquet_reader_print_stat, whether caller-supplied or entropy-drawn, so a non-deterministic
+    !> run's seed can be read back and reused later.
+    !>
+    !> filter_will_follow must be .true. iff parquet_open_reader_base is also about to call
+    !> parquet_apply_filter right after this (i.e. present(filter) .and. filter%n > 0) -- when it
+    !> is, the C++ side defers installing this draw as the reader's active mask until
+    !> parquet_reader_set_filter folds it in, so the filter's own clause evaluation still sees raw,
+    !> unmasked column data; installing it here immediately would otherwise make those columns come
+    !> back already sample-compacted mid-evaluation (see parquet_reader_set_sample's own comment in
+    !> parquet_wrapper.cpp for the crash this avoids).
+    subroutine parquet_apply_sample(reader, sample_fraction, sample_seed, filter_will_follow)
+        type(parquet_reader), intent(inout) :: reader !! open reader gaining the sample mask.
+        real(real64), intent(in) :: sample_fraction !! fraction of rows to keep, already validated to be in [0.0, 1.0).
+        integer(int32), intent(in), optional :: sample_seed !! >0 for a reproducible draw; absent/<=0 draws from entropy.
+        logical, intent(in) :: filter_will_follow !! .true. iff parquet_apply_filter also runs right after this.
+        integer(c_int32_t) :: seed_value, actual_seed
+        integer(c_int8_t) :: has_seed_flag
+        character(len=1024) :: c_err
+        integer(c_long_long) :: status
+        character(len=:), allocatable :: name_suffix !! scratch (reader_filename_suffix).
+
+        seed_value = 0_c_int32_t
+        has_seed_flag = 0_c_int8_t
+        if (present(sample_seed)) then
+            seed_value = int(sample_seed, kind=c_int32_t)
+            has_seed_flag = 1_c_int8_t
+        end if
+
+        c_err = ""
+        status = parquet_reader_set_sample(reader%handle, real(sample_fraction, kind=c_double), seed_value, &
+            has_seed_flag, merge(1_c_int8_t, 0_c_int8_t, filter_will_follow), actual_seed, c_err, &
+            int(len(c_err), kind=c_long_long))
+
+        if (status /= 0) then
+            call reader_filename_suffix(reader, name_suffix)
+            error stop "parquet_open_reader: " // trim(c_err) // name_suffix
+        end if
+    end subroutine parquet_apply_sample
     !> Validates+parses `maml` (parquet_parse_qc_maml) and hands the
     !> resulting per-column qc: rules to parquet_reader_set_qc -- called from
     !> parquet_open_reader BEFORE parquet_apply_filter, so that any column
@@ -399,7 +445,8 @@ contains
         end do
     end subroutine populate_reader_metadata
     module procedure parquet_open_reader_base
-        logical :: use_threads_value, qc_effective, qc_soft_value
+        logical :: use_threads_value, qc_effective, qc_soft_value, filter_will_apply
+        character(len=:), allocatable :: name_suffix !! scratch (reader_filename_suffix).
 
         use_threads_value = .true.
         if (present(use_threads)) use_threads_value = use_threads
@@ -408,15 +455,37 @@ contains
         reader%filename = trim(filename)
         call populate_reader_metadata(reader)
 
+        filter_will_apply = .false.
+        if (present(filter)) filter_will_apply = (filter%n > 0)
+
+        ! Random downsampling (sample_fraction=): applied first, before any filter=/qc setup.
+        ! filter_will_apply tells parquet_apply_sample whether prefetch_filter_columns/
+        ! parquet_apply_filter (below) are about to run right after this, so it can defer
+        ! installing the draw as the reader's active mask until parquet_reader_set_filter folds it
+        ! in -- see that subroutine's own doc-comment for why (installing it immediately here would
+        ! make the filter's own referenced columns come back already sample-compacted mid-evaluation).
+        ! NaN is checked first, before any relational comparison: NaN compares false against every
+        ! threshold, so checking "< 0.0"/"< 1.0" first would let a NaN silently fall through as a
+        ! no-op (same as >= 1.0) instead of reaching this error stop.
+        if (present(sample_fraction)) then
+            if (ieee_is_nan(sample_fraction)) then
+                call reader_filename_suffix(reader, name_suffix)
+                error stop "parquet_open_reader: sample_fraction must not be NaN" // name_suffix
+            else if (sample_fraction < 0.0_real64) then
+                call reader_filename_suffix(reader, name_suffix)
+                error stop "parquet_open_reader: sample_fraction must not be negative" // name_suffix
+            else if (sample_fraction < 1.0_real64) then
+                call parquet_apply_sample(reader, sample_fraction, sample_seed, filter_will_apply)
+            end if
+        end if
+
         ! Warm the filter's columns in one batched (thread-parallel) read
         ! BEFORE qc is enabled, so parquet_reader_set_filter reads them from
         ! cache instead of a serial ReadColumn per clause, and so this prefetch
         ! does not run read-time qc on the still-unfiltered data -- qc for those
         ! columns still runs later, in set_filter, on the filtered rows. See
         ! prefetch_filter_columns for the ordering/error-handling rationale.
-        if (present(filter)) then
-            if (filter%n > 0) call prefetch_filter_columns(reader, filter)
-        end if
+        if (filter_will_apply) call prefetch_filter_columns(reader, filter)
 
         ! qc setup must happen before the filter is applied: the filter's own
         ! clause evaluation already counts as "touching" a column (see
@@ -430,9 +499,7 @@ contains
         if (present(qc_soft)) qc_soft_value = qc_soft
         if (present(schema) .and. qc_effective) call parquet_apply_qc(reader, schema%maml, qc_soft_value)
 
-        if (present(filter)) then
-            if (filter%n > 0) call parquet_apply_filter(reader, filter)
-        end if
+        if (filter_will_apply) call parquet_apply_filter(reader, filter)
 
         ! Must run AFTER parquet_apply_filter: a column cached before the
         ! filter mask exists would stay raw/unfiltered forever, since
@@ -447,11 +514,13 @@ contains
         end if
     end procedure parquet_open_reader_base
     module procedure parquet_open_reader_nrows_int64
-        call parquet_open_reader_base(reader, filename, use_threads, filter, schema, qc, qc_soft, prefetch)
+        call parquet_open_reader_base(reader, filename, use_threads, filter, sample_fraction, sample_seed, schema, qc, &
+            qc_soft, prefetch)
         call parquet_get_nrows(reader, nrows, check_positive=.true.)
     end procedure parquet_open_reader_nrows_int64
     module procedure parquet_open_reader_nrows_int32
-        call parquet_open_reader_base(reader, filename, use_threads, filter, schema, qc, qc_soft, prefetch)
+        call parquet_open_reader_base(reader, filename, use_threads, filter, sample_fraction, sample_seed, schema, qc, &
+            qc_soft, prefetch)
         call parquet_get_nrows(reader, nrows, check_positive=.true.)
     end procedure parquet_open_reader_nrows_int32
     module procedure parquet_close_reader

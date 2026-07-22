@@ -743,27 +743,50 @@ module parquet
 
     !> Opens `filename` for reading into `reader`. use_threads (optional):
     !> use Arrow's multi-threaded reader. filter (optional): a parquet_filter
-    !> row filter to apply. schema (optional): a parquet_schema/qc-maml to
-    !> validate columns against. qc (optional): enable qc: min/max/miss
+    !> row filter to apply. sample_fraction (optional, real(real64)): keeps
+    !> each row independently with probability sample_fraction (Bernoulli
+    !> sampling, not an exact row count) -- omitted, or >= 1.0, reads every
+    !> row (the current/default behavior); must not be negative or NaN
+    !> (error stops); exactly 0.0 deterministically yields zero rows. Shares
+    !> its underlying mask with filter= (see "Row filtering with
+    !> parquet_filter" in the README): a filter, if also given, is applied
+    !> on top of the downsample, and sample_fraction < 1.0 alone (even with
+    !> no filter=) carries the same consequences filter= already has --
+    !> chunked reads (parquet_read_column_chunk) are disallowed, and array
+    !> row/element-mode reads fall back to a whole-column read. sample_seed
+    !> (optional, integer(int32)): omitted or <= 0 draws a fresh seed from
+    !> entropy (a different sample each call); > 0 makes the draw
+    !> reproducible. The seed actually used (caller-supplied or
+    !> entropy-drawn) is always reported by parquet_close_reader(...,
+    !> print_stat=.true.), so a non-deterministic run's seed can be read
+    !> back afterward and reused. schema (optional): a parquet_schema/qc-maml
+    !> to validate columns against. qc (optional): enable qc: min/max/miss
     !> enforcement (needs schema). qc_soft (optional): qc violations warn
     !> instead of error-stopping. prefetch (optional, default .false.): when
     !> .true., every column in the file is read and cached right away, after
-    !> any filter has been applied, instead of each column being read lazily
-    !> on first request -- equivalent to calling parquet_prefetch_columns for
-    !> every column immediately after opening; materializes the whole file
-    !> in memory up front, see doc/pages/performance.md.
+    !> any filter/sample has been applied, instead of each column being read
+    !> lazily on first request -- equivalent to calling
+    !> parquet_prefetch_columns for every column immediately after opening;
+    !> materializes the whole file in memory up front, see
+    !> doc/pages/performance.md.
     !>
     !> nrows= is generic over integer(int32)/integer(int64)
     !> (parquet_open_reader_nrows_int32/_int64: fills `nrows` with the
-    !> post-filter row count, error-stopping if it overflows the requested
-    !> kind), plus the original nrows-less form (parquet_open_reader_base)
+    !> post-filter/post-sample row count, error-stopping if it overflows the
+    !> requested kind), plus the original nrows-less form (parquet_open_reader_base)
     !> for when nrows isn't wanted at all. This mirrors parquet_get_nrows's
     !> own int32/int64 overload above; nrows is required (not optional) in
     !> the two typed specifics -- an optional dummy that may be absent can't
     !> be the sole thing distinguishing two specific procedures in a generic
     !> interface (a call omitting it would be ambiguous), so
     !> parquet_open_reader_base carries the nrows-absent case as a separate
-    !> specific instead.
+    !> specific instead. sample_fraction/sample_seed are each single-kind
+    !> (real64/int32) rather than dual-kind like nrows, specifically to avoid
+    !> that same ambiguity: a *second* independently-optional dual-kind
+    !> argument on this generic would force a 3x3 cross product of specifics
+    !> (absent/real32/real64 sample_fraction times the three nrows shapes) --
+    !> not worth it for a fraction/seed argument, which isn't the
+    !> row-count/size/index category that convention exists for.
     interface parquet_open_reader
         module procedure parquet_open_reader_base
         module procedure parquet_open_reader_nrows_int64
@@ -1799,35 +1822,46 @@ module parquet
         !> Equivalent to calling parquet_prefetch_columns for every column in
         !> the file immediately after opening. Materializes the whole file in
         !> memory up front -- see MANUAL.md's "Performance and memory" section.
-        module subroutine parquet_open_reader_base(reader, filename, use_threads, filter, schema, qc, qc_soft, prefetch)
+        module subroutine parquet_open_reader_base(reader, filename, use_threads, filter, sample_fraction, sample_seed, &
+                schema, qc, qc_soft, prefetch)
             type(parquet_reader), intent(out) :: reader !! reader to open.
             character(len=*), intent(in) :: filename !! .parquet file path.
             logical, intent(in), optional :: use_threads !! use Arrow's multi-threaded reader.
             type(parquet_filter), intent(in), optional :: filter !! row filter to apply.
+            real(real64), intent(in), optional :: sample_fraction !! Bernoulli row-keep probability in [0.0, 1.0);
+            !! omitted or >= 1.0 reads every row; must not be negative or NaN (error stops); exactly
+            !! 0.0 yields zero rows deterministically.
+            integer(int32), intent(in), optional :: sample_seed !! >0 for a reproducible sample draw;
+            !! omitted or <= 0 draws a fresh seed from entropy.
             type(parquet_schema), intent(in), optional :: schema !! schema/qc-maml to validate columns against.
             logical, intent(in), optional :: qc !! enable qc: min/max/miss enforcement (needs schema).
             logical, intent(in), optional :: qc_soft !! qc violations warn instead of error-stopping.
             logical, intent(in), optional :: prefetch !! read and cache every column immediately.
         end subroutine parquet_open_reader_base
-        !> nrows (integer(int64)): filled in with the post-filter row count
+        !> nrows (integer(int64)): filled in with the post-filter/post-sample row count
         !> via parquet_get_nrows(reader, nrows, check_positive=.true.) -- so,
-        !> exactly like that check_positive path, a file (or filter result)
+        !> exactly like that check_positive path, a file (or filter/sample result)
         !> with zero rows fails immediately with error stop instead of
         !> silently returning nrows=0. Omit nrows entirely (dispatches to
         !> parquet_open_reader_base above) if you want to open a reader that
         !> may legitimately have zero matching rows -- call parquet_get_nrows
         !> yourself afterwards, without check_positive, to get 0 back instead
         !> of aborting.
-        module subroutine parquet_open_reader_nrows_int64(reader, filename, use_threads, filter, schema, qc, qc_soft, &
-                nrows, prefetch)
+        module subroutine parquet_open_reader_nrows_int64(reader, filename, use_threads, filter, sample_fraction, &
+                sample_seed, schema, qc, qc_soft, nrows, prefetch)
             type(parquet_reader), intent(out) :: reader !! reader to open.
             character(len=*), intent(in) :: filename !! .parquet file path.
             logical, intent(in), optional :: use_threads !! use Arrow's multi-threaded reader.
             type(parquet_filter), intent(in), optional :: filter !! row filter to apply.
+            real(real64), intent(in), optional :: sample_fraction !! Bernoulli row-keep probability in [0.0, 1.0);
+            !! omitted or >= 1.0 reads every row; must not be negative or NaN (error stops); exactly
+            !! 0.0 yields zero rows deterministically.
+            integer(int32), intent(in), optional :: sample_seed !! >0 for a reproducible sample draw;
+            !! omitted or <= 0 draws a fresh seed from entropy.
             type(parquet_schema), intent(in), optional :: schema !! schema/qc-maml to validate columns against.
             logical, intent(in), optional :: qc !! enable qc: min/max/miss enforcement (needs schema).
             logical, intent(in), optional :: qc_soft !! qc violations warn instead of error-stopping.
-            integer(int64), intent(out) :: nrows !! post-filter row count; error stops if zero.
+            integer(int64), intent(out) :: nrows !! post-filter/post-sample row count; error stops if zero.
             logical, intent(in), optional :: prefetch !! read and cache every column immediately.
         end subroutine parquet_open_reader_nrows_int64
         !> Same as parquet_open_reader_nrows_int64, but for a caller-supplied
@@ -1835,16 +1869,21 @@ module parquet
         !> parquet_get_nrows_int32) if the actual row count overflows int32,
         !> exactly as a direct parquet_get_nrows(reader, nrows) call with an
         !> integer(int32) nrows would.
-        module subroutine parquet_open_reader_nrows_int32(reader, filename, use_threads, filter, schema, qc, qc_soft, &
-                nrows, prefetch)
+        module subroutine parquet_open_reader_nrows_int32(reader, filename, use_threads, filter, sample_fraction, &
+                sample_seed, schema, qc, qc_soft, nrows, prefetch)
             type(parquet_reader), intent(out) :: reader !! reader to open.
             character(len=*), intent(in) :: filename !! .parquet file path.
             logical, intent(in), optional :: use_threads !! use Arrow's multi-threaded reader.
             type(parquet_filter), intent(in), optional :: filter !! row filter to apply.
+            real(real64), intent(in), optional :: sample_fraction !! Bernoulli row-keep probability in [0.0, 1.0);
+            !! omitted or >= 1.0 reads every row; must not be negative or NaN (error stops); exactly
+            !! 0.0 yields zero rows deterministically.
+            integer(int32), intent(in), optional :: sample_seed !! >0 for a reproducible sample draw;
+            !! omitted or <= 0 draws a fresh seed from entropy.
             type(parquet_schema), intent(in), optional :: schema !! schema/qc-maml to validate columns against.
             logical, intent(in), optional :: qc !! enable qc: min/max/miss enforcement (needs schema).
             logical, intent(in), optional :: qc_soft !! qc violations warn instead of error-stopping.
-            integer(int32), intent(out) :: nrows !! post-filter row count; error stops if zero or if it overflows int32.
+            integer(int32), intent(out) :: nrows !! post-filter/post-sample row count; error stops if zero or if it overflows int32.
             logical, intent(in), optional :: prefetch !! read and cache every column immediately.
         end subroutine parquet_open_reader_nrows_int32
         !> Closes `reader`, freeing the underlying C++ handle. check_complete (optional,

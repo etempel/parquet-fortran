@@ -310,6 +310,14 @@ program error_scenarios
         call scenario_filter_bool_ordering_not_supported()
     case ("filter_unsupported_column_type")
         call scenario_filter_unsupported_column_type()
+    case ("sample_negative_fraction")
+        call scenario_sample_negative_fraction()
+    case ("sample_nan_fraction")
+        call scenario_sample_nan_fraction()
+    case ("read_chunk_with_sample")
+        call scenario_read_chunk_with_sample()
+    case ("print_stat_sampled_rows")
+        call scenario_print_stat_sampled_rows()
     case ("string_length_on_non_string_column")
         call scenario_string_length_on_non_string_column()
     case ("qc_range_violation_warns")
@@ -3773,6 +3781,83 @@ contains
         call parquet_open_reader(reader, out_file, filter=filt)
         print '(a)', "unexpectedly opened a reader with a filter clause against a temporal column"
     end subroutine scenario_filter_unsupported_column_type
+
+    !> parquet_open_reader's sample_fraction < 0.0 aborts immediately -- see
+    !> parquet_open_reader_base's NaN/negative checks (parquet_read.f90).
+    subroutine scenario_sample_negative_fraction()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: v(3) = [1, 2, 3]
+        character(len=*), parameter :: out_file = "test_run/error_scenario_sample_negative_fraction.parquet"
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file, sample_fraction=-0.1_real64)
+        print '(a)', "unexpectedly opened a reader with a negative sample_fraction"
+    end subroutine scenario_sample_negative_fraction
+
+    !> parquet_open_reader's sample_fraction NaN aborts immediately, checked before any relational
+    !> comparison (NaN < 0.0 and NaN < 1.0 are both false, so a NaN would otherwise silently fall
+    !> through as a no-op instead of reaching an error stop) -- see parquet_open_reader_base
+    !> (parquet_read.f90).
+    subroutine scenario_sample_nan_fraction()
+        use ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: v(3) = [1, 2, 3]
+        character(len=*), parameter :: out_file = "test_run/error_scenario_sample_nan_fraction.parquet"
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file, sample_fraction=ieee_value(1.0_real64, ieee_quiet_nan))
+        print '(a)', "unexpectedly opened a reader with a NaN sample_fraction"
+    end subroutine scenario_sample_nan_fraction
+
+    !> parquet_read_column_chunk is disallowed on a reader opened with sample_fraction < 1.0 alone
+    !> (no filter= at all) -- sampling shares filter_mask/parquet_reader_has_filter with filter=,
+    !> so check_reader_no_filter's guard fires the same way (parquet_read.f90).
+    subroutine scenario_read_chunk_with_sample()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: v(4), back(2)
+
+        v = [1, 2, 3, 4]
+        call parquet_open_writer(writer, "test_run/read_chunk_sample.parquet", chunk_size=2)
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, "test_run/read_chunk_sample.parquet", sample_fraction=0.5_real64)
+        call parquet_read_column_chunk(reader, "v", 1, back)
+        print '(a)', "unexpectedly read a chunk on a sampled reader without aborting"
+    end subroutine scenario_read_chunk_with_sample
+
+    !> parquet_reader_print_stat's "sample:" line (added alongside the pre-existing "rows: N (of M
+    !> total)" summary -- see scenario_print_stat_filtered_rows above for that one). sample_seed=42
+    !> (> 0) so the reported seed is the exact caller-supplied value, not an entropy-drawn one --
+    !> a fraction of exactly 0.0 would also be deterministic, but skips the draw entirely and
+    !> always reports seed=0 regardless of sample_seed (see parquet_reader_set_sample's own
+    !> comment), which wouldn't prove a caller-supplied seed round-trips into this line at all.
+    subroutine scenario_print_stat_sampled_rows()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: a_values(5)
+        integer :: i
+        character(len=*), parameter :: out_file = "test_run/error_scenario_print_stat_sampled_rows.parquet"
+
+        a_values = [(i, i=1,5)]
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "a", a_values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file, sample_fraction=0.4_real64, sample_seed=42)
+        call parquet_close_reader(reader, print_stat=.true.)
+        print '(a)', "print_stat covered the sample: fraction=... summary line"
+    end subroutine scenario_print_stat_sampled_rows
 
     !> parquet_reader_get_string_length's `default:` fallback
     !> (parquet_wrapper.cpp) for a column that isn't string-like/LIST/LARGE_LIST/FIXED_SIZE_LIST

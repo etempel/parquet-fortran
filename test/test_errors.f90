@@ -307,6 +307,14 @@ contains
                 test_filter_bool_ordering_not_supported_aborts), &
             new_unittest("filter: filtering an unsupported (temporal) column type aborts", &
                 test_filter_unsupported_column_type_aborts), &
+            new_unittest("sample_fraction: negative value aborts", &
+                test_sample_negative_fraction_aborts), &
+            new_unittest("sample_fraction: NaN value aborts", &
+                test_sample_nan_fraction_aborts), &
+            new_unittest("chunked read on a reader opened with sample_fraction (no filter=) aborts", &
+                test_read_chunk_with_sample_aborts), &
+            new_unittest("print_stat reports the sample: fraction=.../seed=... line", &
+                test_print_stat_sampled_rows), &
             new_unittest("string length query on a non-string column aborts", &
                 test_string_length_on_non_string_column_aborts), &
             new_unittest("qc-maml: unrecognized miss: value aborts", &
@@ -1945,6 +1953,46 @@ contains
             failure_message="filtering a temporal column was expected to abort", &
             required_stderr="has a type that filtering does not support")
     end subroutine test_filter_unsupported_column_type_aborts
+
+    !> parquet_open_reader's sample_fraction < 0.0 aborts immediately.
+    subroutine test_sample_negative_fraction_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sample_negative_fraction", expect_abort=.true., &
+            failure_message="a negative sample_fraction was expected to abort", &
+            required_stderr="sample_fraction must not be negative")
+    end subroutine test_sample_negative_fraction_aborts
+
+    !> parquet_open_reader's sample_fraction NaN aborts immediately -- checked before any relational
+    !> comparison, since NaN compares false against every threshold and would otherwise silently
+    !> fall through as a no-op (see parquet_open_reader_base's own comment, parquet_read.f90).
+    subroutine test_sample_nan_fraction_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sample_nan_fraction", expect_abort=.true., &
+            failure_message="a NaN sample_fraction was expected to abort", &
+            required_stderr="sample_fraction must not be NaN")
+    end subroutine test_sample_nan_fraction_aborts
+
+    !> Chunked reads are disallowed on a reader opened with sample_fraction < 1.0 alone (no
+    !> filter=) -- sampling shares filter_mask/parquet_reader_has_filter with filter=, so
+    !> check_reader_no_filter's guard fires the same way it does for an active filter=.
+    subroutine test_read_chunk_with_sample_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "read_chunk_with_sample", expect_abort=.true., &
+            failure_message="a chunked read on a sampled reader was expected to error stop", &
+            required_stderr="chunked reads are not supported on a reader opened with an active filter=/sample_fraction=")
+    end subroutine test_read_chunk_with_sample_aborts
+
+    !> parquet_reader_print_stat's "sample: fraction=... seed=..." line.
+    subroutine test_print_stat_sampled_rows(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "print_stat_sampled_rows", expect_abort=.false., &
+            failure_message="print_stat was expected to run cleanly on a sampled reader", &
+            required_stderr="sample: fraction=0.4 seed=42")
+    end subroutine test_print_stat_sampled_rows
 
     !> parquet_reader_get_string_length's `default:` fallback for a column that isn't
     !> string-like/LIST-typed at all -- reached via a plain `throw`, not report_fatal_error, but

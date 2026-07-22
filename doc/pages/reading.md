@@ -137,11 +137,34 @@ Each `filt%add(rule)` call adds one clause; multiple clauses always combine with
 - Supported operators: `>`, `>=`, `<`, `<=`, `==`, `/=`, `is_null`, `is_not_null`.
 - `<value>` is a bare number for a numeric column (`ra > 180`), `true`/`false` for a boolean column (`flag == true`), or a **double-quoted** string for a `string` column (`name == "abell_1"`) — quotes are required for strings and not used for anything else.
 - `is_null`/`is_not_null` take no value.
+- **Null values and ordinary comparison operators:** a row whose filtered column is Null never matches `>`, `>=`, `<`, `<=`, `==`, or `/=` — regardless of the value being compared against — the same three-valued-logic behavior SQL's `WHERE` clause has for `NULL`. So `filt%add("colx > 0")` silently excludes every row where `colx` is Null, the same as it would exclude a row that genuinely failed the `> 0` test; it does not raise an error and does not treat Null as satisfying the condition. Use an explicit `is_null`/`is_not_null` clause if you need to test for nullness itself, or to deliberately include/exclude Null rows alongside a comparison (e.g. `filt%add("colx > 0")` plus a separate `filt%add("colx is_not_null")` is redundant since Null already fails the comparison, but `"colx is_null"` combined with other AND'd clauses is how you'd select Null rows explicitly).
 - Only plain scalar columns can be filtered — naming a vector (`col_size > 1`) column in a rule fails immediately with `error stop` when `parquet_open_reader` is called. So does naming a column that doesn't exist in the file, or a rule with invalid syntax (unknown operator, unquoted string value, non-numeric value against a numeric column, etc.) — every rule is fully validated (column existence, type-compatibility, and value parsing) right there in `parquet_open_reader`, before any of your own code runs.
 
 Filtering is **not** predicate pushdown: every filter-referenced column, and every column you subsequently read, is still fully read and decoded from disk exactly as without a filter (Parquet row-group statistics are never used to skip I/O). The benefit is entirely downstream: `parquet_get_nrows` and every column you read only ever reflect the matching rows, so your own code loops over, allocates for, and processes far fewer rows when the filter is selective — at the cost of a small transient memory bump while a column's full decoded array and its filtered result briefly coexist, before the unfiltered one is discarded.
 
 `parquet_open_reader(..., nrows=nrows)` is a shortcut for the `parquet_open_reader` + `parquet_get_nrows` pair above: pass an `integer(int32)` or `integer(int64)` variable (a plain default `INTEGER` works too, on the vast majority of platforms where that's the same kind as `int32`) as `nrows` and it's filled in for you, equivalent to calling `parquet_get_nrows(reader, nrows, check_positive=.true.)` immediately after opening (post-filter, if a `filter` was also given). Because it implies `check_positive=.true.`, a file (or filter result) with **zero rows fails immediately with `error stop`** — it does not return `nrows=0`. This is the right choice when your code has no sensible zero-row behavior and would rather abort loudly than proceed with an empty read. If zero rows is a case you need to detect and handle (rather than treat as a hard error), don't pass `nrows=` to `parquet_open_reader` — open the reader as usual and call `parquet_get_nrows(reader, nrows)` yourself afterwards (without `check_positive`), which returns `nrows=0` instead of aborting, exactly like the code example above. As with a direct `parquet_get_nrows(reader, nrows)` call, an `integer(int32)` (or default-`INTEGER`) `nrows` also fails immediately with `error stop` if the actual row count overflows `int32`'s range, rather than silently wrapping or truncating.
+
+### Random downsampling with `sample_fraction`
+
+`parquet_open_reader(reader, filename, sample_fraction=0.1_real64)` keeps each row independently with probability `sample_fraction` (Bernoulli sampling) — like `filter=`, it narrows what every subsequent call sees (`parquet_get_nrows`, `parquet_read_column`, `parquet_close_reader(..., print_stat=.true.)`, ...), with no separate "sampled count" to track:
+
+```fortran
+type(parquet_reader) :: reader
+integer(int64) :: nrows
+integer(int32), allocatable :: id(:)
+
+call parquet_open_reader(reader, "data.parquet", sample_fraction=0.1_real64, sample_seed=42)
+call parquet_get_nrows(reader, nrows)      ! already the post-sample row count
+allocate(id(nrows))
+call parquet_read_column(reader, "id", id) ! already just the sampled rows
+call parquet_close_reader(reader)
+```
+
+- `sample_fraction` (`real(real64)`, optional): omitted, or `>= 1.0`, reads every row — the current/default behavior. Must not be negative or `NaN` — either aborts immediately with `error stop`. Exactly `0.0` deterministically yields zero rows (not just with overwhelming probability).
+- `sample_seed` (`integer(int32)`, optional): omitted, or `<= 0`, draws a fresh seed from entropy — a different sample each time you open the file. A positive value makes the draw reproducible: the same `sample_fraction`/`sample_seed` pair always selects the exact same rows. Whichever seed actually gets used (caller-supplied or entropy-drawn) is always reported by `parquet_close_reader(..., print_stat=.true.)` (a `sample: fraction=... seed=...` line) — read it back from there to reproduce a run you didn't originally seed yourself.
+- Bernoulli sampling means the matched row count fluctuates around `sample_fraction * nrows` rather than equaling it exactly (most noticeable on small files) — there is no "select exactly N rows" mode.
+- Sampling and `filter=` share the same underlying mechanism: give both, and the filter is applied on top of the downsample (a row must pass both to be kept). Consequently, `sample_fraction < 1.0` carries the exact same consequences `filter=` already has, even with no `filter=` given at all: `parquet_read_column_chunk` (chunked/row-group-scoped reads) is disallowed outright, and `parquet_read_array_row_mode`/`parquet_read_array_element_mode` fall back to a whole-column read instead of their row-group-scoped fast path.
+- Like `filter=`, sampling is **not** predicate pushdown — every column is still fully read and decoded from disk regardless of `sample_fraction`; the benefit is purely to your own code processing fewer rows afterward, not to file I/O.
 
 ### Read-time quality control with a qc-maml
 

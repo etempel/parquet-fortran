@@ -87,6 +87,16 @@ contains
                 test_datetime_array_filtered), &
             new_unittest("int32/boolean/string: row-mode and element-mode reads under an active row filter", &
                 test_array_row_element_mode_filtered), &
+            new_unittest("sample_fraction absent or >= 1.0 reads every row (current/default behavior)", &
+                test_sample_fraction_no_op), &
+            new_unittest("sample_fraction == 0.0 deterministically yields zero rows", &
+                test_sample_fraction_zero), &
+            new_unittest("sample_fraction with sample_seed > 0 is reproducible across two opens", &
+                test_sample_fraction_seed_reproducible), &
+            new_unittest("sample_fraction with sample_seed absent draws a fresh (differing) sample each open", &
+                test_sample_fraction_entropy_seed_differs), &
+            new_unittest("sample_fraction combined with filter= applies the filter on top of the downsample", &
+                test_sample_fraction_with_filter), &
             new_unittest("plain LIST/LARGE_LIST columns from a foreign-written file (col_size, string length, print_stat)", &
                 test_list_type_foreign_fixture), &
             new_unittest("parquet_column_exists/parquet_get_column_type: all 9 canonical types, group aliases, " // &
@@ -2483,6 +2493,184 @@ contains
         call check(error, trim(strvec_elem(1)) == trim(strvec(2, 3)) .and. trim(strvec_elem(2)) == trim(strvec(2, 4)), &
             "filtered element mode (string): element 2 across the 2 filtered rows")
     end subroutine test_array_row_element_mode_filtered
+    !
+    !> parquet_open_reader's sample_fraction=: omitted, exactly 1.0, and above 1.0 must all behave
+    !> identically to not passing sample_fraction at all -- every row is read, in original order.
+    subroutine test_sample_fraction_no_op(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: id(20), back(20)
+        integer(int64) :: nrows
+        integer :: i
+        character(len=*), parameter :: out_file = "test_run/test_sample_fraction_no_op.parquet"
+
+        id = [(i, i=1,20)]
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_close_writer(writer)
+
+        ! Absent.
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 20_int64, "sample_fraction absent should read every row")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+        call parquet_read_column(reader, "id", back)
+        call parquet_close_reader(reader)
+        call check(error, all(back == id), "sample_fraction absent should preserve every row's original order/content")
+        if (allocated(error)) return
+
+        ! Exactly 1.0.
+        call parquet_open_reader(reader, out_file, sample_fraction=1.0_real64)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 20_int64, "sample_fraction=1.0 should read every row")
+        call parquet_close_reader(reader)
+        if (allocated(error)) return
+
+        ! Above 1.0.
+        call parquet_open_reader(reader, out_file, sample_fraction=2.5_real64)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 20_int64, "sample_fraction > 1.0 should read every row")
+        call parquet_close_reader(reader)
+    end subroutine test_sample_fraction_no_op
+    !
+    !> sample_fraction == 0.0 is special-cased (see parquet_reader_set_sample in
+    !> parquet_wrapper.cpp) to a guaranteed all-false mask -- zero rows every time, not just with
+    !> overwhelming probability.
+    subroutine test_sample_fraction_zero(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: id(20)
+        integer(int64) :: nrows
+        integer :: i
+        character(len=*), parameter :: out_file = "test_run/test_sample_fraction_zero.parquet"
+
+        id = [(i, i=1,20)]
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file, sample_fraction=0.0_real64)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 0_int64, "sample_fraction=0.0 should deterministically yield zero rows")
+    end subroutine test_sample_fraction_zero
+    !
+    !> sample_seed > 0 makes the Bernoulli draw reproducible: opening the same file twice with the
+    !> same sample_fraction/sample_seed must select the exact same rows both times.
+    subroutine test_sample_fraction_seed_reproducible(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: id(200), back1(200), back2(200)
+        integer(int64) :: nrows1, nrows2
+        integer :: i
+        character(len=*), parameter :: out_file = "test_run/test_sample_fraction_seed_reproducible.parquet"
+
+        id = [(i, i=1,200)]
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file, sample_fraction=0.3_real64, sample_seed=1234)
+        call parquet_get_nrows(reader, nrows1)
+        call parquet_read_column(reader, "id", back1(1:nrows1))
+        call parquet_close_reader(reader)
+
+        call parquet_open_reader(reader, out_file, sample_fraction=0.3_real64, sample_seed=1234)
+        call parquet_get_nrows(reader, nrows2)
+        call parquet_read_column(reader, "id", back2(1:nrows2))
+        call parquet_close_reader(reader)
+
+        call check(error, nrows1 > 0_int64 .and. nrows1 < 200_int64, &
+            "sample_fraction=0.3 on 200 rows should select some but not all rows (extremely unlikely to fail by chance)")
+        if (allocated(error)) return
+        call check(error, nrows1 == nrows2, "the same sample_fraction/sample_seed should select the same row count")
+        if (allocated(error)) return
+        call check(error, all(back1(1:nrows1) == back2(1:nrows2)), &
+            "the same sample_fraction/sample_seed should select the exact same rows")
+    end subroutine test_sample_fraction_seed_reproducible
+    !
+    !> sample_seed absent (or <= 0) draws a fresh seed from entropy each time -- two opens of the
+    !> same file/sample_fraction should (overwhelmingly likely, for n=200/fraction=0.5) select
+    !> different row sets. Not a flaky test in practice: the chance of two independent draws over
+    !> 200 rows landing on the identical subset is astronomically small.
+    subroutine test_sample_fraction_entropy_seed_differs(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: id(200), back1(200), back2(200)
+        integer(int64) :: nrows1, nrows2
+        integer :: i
+        character(len=*), parameter :: out_file = "test_run/test_sample_fraction_entropy_seed_differs.parquet"
+
+        id = [(i, i=1,200)]
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file, sample_fraction=0.5_real64)
+        call parquet_get_nrows(reader, nrows1)
+        call parquet_read_column(reader, "id", back1(1:nrows1))
+        call parquet_close_reader(reader)
+
+        call parquet_open_reader(reader, out_file, sample_fraction=0.5_real64)
+        call parquet_get_nrows(reader, nrows2)
+        call parquet_read_column(reader, "id", back2(1:nrows2))
+        call parquet_close_reader(reader)
+
+        call check(error, nrows1 /= nrows2 .or. any(back1(1:nrows1) /= back2(1:nrows2)), &
+            "two entropy-seeded sample draws over 200 rows should not select the identical row set")
+    end subroutine test_sample_fraction_entropy_seed_differs
+    !
+    !> Regression test for a real bug found during development: applying the sample mask
+    !> immediately (before a filter='s own clause evaluation) made the filter's referenced column
+    !> come back already sample-compacted mid-evaluation, crashing Arrow's Filter kernel on a
+    !> length mismatch (see parquet_reader_set_sample's "pending_sample_mask" deferral in
+    !> parquet_wrapper.cpp, which fixes this). filter= must apply on top of the downsample: every
+    !> row in the final result must satisfy both the filter clause and have been selected by the
+    !> sample, and the combined result must never exceed what the filter alone would have kept.
+    subroutine test_sample_fraction_with_filter(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32) :: id(200), back(200), filter_only_nrows
+        integer(int64) :: nrows
+        integer :: i
+        character(len=*), parameter :: out_file = "test_run/test_sample_fraction_with_filter.parquet"
+
+        id = [(i, i=1,200)]
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_close_writer(writer)
+
+        call filt%add("id > 100")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+        filter_only_nrows = int(nrows, int32)
+
+        call parquet_open_reader(reader, out_file, filter=filt, sample_fraction=0.5_real64, sample_seed=99)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows > 0_int64, "sample_fraction=0.5 combined with a selective filter should still keep some rows")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+        call parquet_read_column(reader, "id", back(1:nrows))
+        call parquet_close_reader(reader)
+
+        call check(error, all(back(1:nrows) > 100), &
+            "every row of a sample_fraction+filter combined read must satisfy the filter clause")
+        if (allocated(error)) return
+        call check(error, nrows <= int(filter_only_nrows, int64), &
+            "sample_fraction+filter combined must never keep more rows than the filter alone would")
+    end subroutine test_sample_fraction_with_filter
     !
     !> get_col_size/flatten_for_stats/parquet_reader_get_string_length's
     !> plain LIST/LARGE_LIST branches -- this library's own writer only ever emits FIXED_SIZE_LIST,

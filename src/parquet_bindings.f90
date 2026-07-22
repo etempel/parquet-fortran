@@ -49,6 +49,7 @@ module parquet_bindings
     public :: parquet_reader_prefetch_columns, parquet_reader_prefetch_all_columns, parquet_reader_has_column
     public :: parquet_reader_get_column_type_name
     public :: parquet_reader_set_filter
+    public :: parquet_reader_set_sample
     public :: parquet_reader_set_qc
     public :: parquet_read_int32_column, parquet_read_int64_column
     public :: parquet_read_float32_column, parquet_read_float64_column
@@ -516,6 +517,29 @@ module parquet_bindings
             integer(c_long_long) :: status
         end function
 
+        !> Applies Bernoulli(sample_fraction) row sampling to `reader` (see parquet_reader_set_sample
+        !> in parquet_wrapper.cpp); returns non-zero and writes a message to `err_out` on failure.
+        !> actual_seed_out is always filled with the seed actually used (caller-supplied via seed/
+        !> has_seed, or, when has_seed is 0 or seed <= 0, freshly drawn from entropy). filter_will_follow
+        !> (non-zero when the caller's own filter= will also be applied right after this): defers
+        !> installing the draw as the reader's active mask (stashed in pending_sample_mask instead)
+        !> so the filter's own clause evaluation still sees raw, unmasked column data -- see
+        !> parquet_reader_set_sample's own comment in parquet_wrapper.cpp.
+        function parquet_reader_set_sample(reader, sample_fraction, seed, has_seed, filter_will_follow, &
+                actual_seed_out, err_out, err_cap) &
+                bind(C, name="parquet_reader_set_sample") result(status)
+            import
+            type(c_ptr), value :: reader
+            real(c_double), value :: sample_fraction
+            integer(c_int32_t), value :: seed
+            integer(c_int8_t), value :: has_seed
+            integer(c_int8_t), value :: filter_will_follow
+            integer(c_int32_t) :: actual_seed_out
+            character(kind=c_char) :: err_out(*)
+            integer(c_long_long), value :: err_cap
+            integer(c_long_long) :: status
+        end function
+
         !> Installs packed per-column qc: min/max/miss rules on `reader`.
         subroutine parquet_reader_set_qc(reader, names_packed, name_len, &
                 has_min_flags, min_ops_packed, min_op_len, min_values_packed, min_value_len, &
@@ -945,7 +969,9 @@ module parquet_bindings
             integer(c_long_long) :: num_row_groups
         end function
 
-        !> Returns non-zero if `reader` was opened with an active row filter.
+        !> Returns non-zero if `reader` was opened with an active row filter and/or random
+        !> downsample (sample_fraction < 1.0) -- both share the same underlying mask
+        !> (see filter_mask in parquet_wrapper.cpp), so this can't distinguish which was used.
         function parquet_reader_has_filter(reader) &
                 bind(C, name="parquet_reader_has_filter") result(has_filter)
             import

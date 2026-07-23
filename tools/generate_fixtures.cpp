@@ -1,8 +1,11 @@
 // Generates every hand-built Arrow/Parquet test fixture under test/fixtures/
-// that this library's own writer cannot produce itself. Kept as a single
-// file (one fixture-generating function per fixture, called from main())
-// rather than one .cpp per fixture, so there's exactly one program to build
-// and run regardless of how many fixtures exist -- see run_generate_fixtures.sh.
+// that this library's own writer cannot produce itself, plus any exploratory
+// fixture under test_run/ (gitignored, not consumed by any Fortran test --
+// see generate_map_list_types_fixture() below for the one example so far).
+// Kept as a single file (one fixture-generating function per fixture, called
+// from main()) rather than one .cpp per fixture, so there's exactly one
+// program to build and run regardless of how many fixtures exist -- see
+// run_generate_fixtures.sh.
 //
 // This file lives under tools/, not test/, so fpm's auto-test discovery
 // doesn't try to build it (and its own main()) into every test executable.
@@ -522,6 +525,362 @@ static bool generate_nested_struct_fixture()
     return status.ok();
 }
 
+// test_run/map_list_types.parquet: exercises Arrow's MAP and (variable-length)
+// LIST types -- neither is supported by this library yet (see CLAUDE.md's
+// "Reserved for future element-domain work": parquet_map/parquet_list), so
+// this fixture exists purely to feed tools/parquet_metadata_to_md.py while
+// that tool's nested-schema rendering is developed, not to be read by this
+// library or exercised by any Fortran test. Written to test_run/ (gitignored)
+// rather than test/fixtures/ (Git-LFS-tracked, and every file there is
+// consumed by a specific test/error scenario) for exactly that reason.
+//
+// Covers LIST and MAP both as independent (non-nested) columns and nested
+// inside every combination of list/struct/map one level deep, plus one
+// deliberately deeper example combining all three. 3 rows throughout; row 2
+// is deliberately the "smallest" case (empty containers, never a whole-row
+// null -- Parquet's LIST/MAP nesting has its own null-vs-empty subtleties
+// this fixture isn't trying to exercise) and row 3 the largest, so nothing
+// here is only ever exercised at length 1.
+//
+//   list_col:         list<int32>
+//   map_col:          map<string,int32>
+//   list_of_list:     list<list<int32>>
+//   list_of_struct:   list<struct<x:int32,y:string>>
+//   list_of_map:      list<map<string,int32>>
+//   struct_of_list:   struct<label:string, values:list<int32>>
+//   struct_of_struct: struct<label:string, inner:struct<a:int32,b:string>>
+//   struct_of_map:    struct<label:string, attrs:map<string,int32>>
+//   map_of_list:      map<string,list<int32>>
+//   map_of_struct:    map<string,struct<x:int32,y:string>>
+//   map_of_map:       map<string,map<string,int32>>
+//   deep_nested:      list<struct<name:string, tags:list<string>, meta:map<string,int32>>>
+static bool generate_map_list_types_fixture()
+{
+    arrow::Status st;
+
+    // list_col: list<int32> -- [1,2], [], [3,4,5]
+    auto list_col_values = std::make_shared<arrow::Int32Builder>();
+    arrow::ListBuilder list_col_builder(arrow::default_memory_pool(), list_col_values);
+    st = list_col_builder.Append();
+    st = list_col_values->Append(1);
+    st = list_col_values->Append(2);
+    st = list_col_builder.Append();
+    st = list_col_builder.Append();
+    st = list_col_values->Append(3);
+    st = list_col_values->Append(4);
+    st = list_col_values->Append(5);
+    std::shared_ptr<arrow::Array> list_col_arr;
+    st = list_col_builder.Finish(&list_col_arr);
+
+    // map_col: map<string,int32> -- {"a":1}, {}, {"b":2,"c":3}
+    auto map_col_keys = std::make_shared<arrow::StringBuilder>();
+    auto map_col_items = std::make_shared<arrow::Int32Builder>();
+    arrow::MapBuilder map_col_builder(arrow::default_memory_pool(), map_col_keys, map_col_items);
+    st = map_col_builder.Append();
+    st = map_col_keys->Append("a");
+    st = map_col_items->Append(1);
+    st = map_col_builder.Append();
+    st = map_col_builder.Append();
+    st = map_col_keys->Append("b");
+    st = map_col_items->Append(2);
+    st = map_col_keys->Append("c");
+    st = map_col_items->Append(3);
+    std::shared_ptr<arrow::Array> map_col_arr;
+    st = map_col_builder.Finish(&map_col_arr);
+
+    // list_of_list: list<list<int32>> -- [[1,2],[3]], [], [[4],[5,6],[]]
+    auto lol_inner_values = std::make_shared<arrow::Int32Builder>();
+    auto lol_inner_builder = std::make_shared<arrow::ListBuilder>(arrow::default_memory_pool(), lol_inner_values);
+    arrow::ListBuilder lol_builder(arrow::default_memory_pool(), lol_inner_builder);
+    st = lol_builder.Append();
+    st = lol_inner_builder->Append();
+    st = lol_inner_values->Append(1);
+    st = lol_inner_values->Append(2);
+    st = lol_inner_builder->Append();
+    st = lol_inner_values->Append(3);
+    st = lol_builder.Append();
+    st = lol_builder.Append();
+    st = lol_inner_builder->Append();
+    st = lol_inner_values->Append(4);
+    st = lol_inner_builder->Append();
+    st = lol_inner_values->Append(5);
+    st = lol_inner_values->Append(6);
+    st = lol_inner_builder->Append();
+    std::shared_ptr<arrow::Array> lol_arr;
+    st = lol_builder.Finish(&lol_arr);
+
+    // list_of_struct: list<struct<x:int32,y:string>> -- [{1,"a"}], [], [{2,"b"},{3,"c"}]
+    auto los_x = std::make_shared<arrow::Int32Builder>();
+    auto los_y = std::make_shared<arrow::StringBuilder>();
+    auto los_struct_type = arrow::struct_({arrow::field("x", arrow::int32()), arrow::field("y", arrow::utf8())});
+    auto los_struct_builder = std::make_shared<arrow::StructBuilder>(los_struct_type, arrow::default_memory_pool(),
+        std::vector<std::shared_ptr<arrow::ArrayBuilder>>{los_x, los_y});
+    arrow::ListBuilder los_builder(arrow::default_memory_pool(), los_struct_builder);
+    st = los_builder.Append();
+    st = los_struct_builder->Append();
+    st = los_x->Append(1);
+    st = los_y->Append("a");
+    st = los_builder.Append();
+    st = los_builder.Append();
+    st = los_struct_builder->Append();
+    st = los_x->Append(2);
+    st = los_y->Append("b");
+    st = los_struct_builder->Append();
+    st = los_x->Append(3);
+    st = los_y->Append("c");
+    std::shared_ptr<arrow::Array> los_arr;
+    st = los_builder.Finish(&los_arr);
+
+    // list_of_map: list<map<string,int32>> -- [{"k":1}], [], [{"k":2},{"m":3}]
+    auto lom_keys = std::make_shared<arrow::StringBuilder>();
+    auto lom_items = std::make_shared<arrow::Int32Builder>();
+    auto lom_map_builder = std::make_shared<arrow::MapBuilder>(arrow::default_memory_pool(), lom_keys, lom_items);
+    arrow::ListBuilder lom_builder(arrow::default_memory_pool(), lom_map_builder);
+    st = lom_builder.Append();
+    st = lom_map_builder->Append();
+    st = lom_keys->Append("k");
+    st = lom_items->Append(1);
+    st = lom_builder.Append();
+    st = lom_builder.Append();
+    st = lom_map_builder->Append();
+    st = lom_keys->Append("k");
+    st = lom_items->Append(2);
+    st = lom_map_builder->Append();
+    st = lom_keys->Append("m");
+    st = lom_items->Append(3);
+    std::shared_ptr<arrow::Array> lom_arr;
+    st = lom_builder.Finish(&lom_arr);
+
+    // struct_of_list: struct<label:string, values:list<int32>>
+    //   {"first",[1,2,3]}, {"second",[]}, {"third",[4,5]}
+    auto sol_label = std::make_shared<arrow::StringBuilder>();
+    auto sol_values_values = std::make_shared<arrow::Int32Builder>();
+    auto sol_values_builder = std::make_shared<arrow::ListBuilder>(arrow::default_memory_pool(), sol_values_values);
+    auto sol_type = arrow::struct_(
+        {arrow::field("label", arrow::utf8()), arrow::field("values", arrow::list(arrow::int32()))});
+    arrow::StructBuilder sol_builder(sol_type, arrow::default_memory_pool(),
+        std::vector<std::shared_ptr<arrow::ArrayBuilder>>{sol_label, sol_values_builder});
+    st = sol_builder.Append();
+    st = sol_label->Append("first");
+    st = sol_values_builder->Append();
+    st = sol_values_values->Append(1);
+    st = sol_values_values->Append(2);
+    st = sol_values_values->Append(3);
+    st = sol_builder.Append();
+    st = sol_label->Append("second");
+    st = sol_values_builder->Append();
+    st = sol_builder.Append();
+    st = sol_label->Append("third");
+    st = sol_values_builder->Append();
+    st = sol_values_values->Append(4);
+    st = sol_values_values->Append(5);
+    std::shared_ptr<arrow::Array> sol_arr;
+    st = sol_builder.Finish(&sol_arr);
+
+    // struct_of_struct: struct<label:string, inner:struct<a:int32,b:string>>
+    //   {"p",{1,"x"}}, {"q",{2,"y"}}, {"r",{3,"z"}}
+    auto sos_a = std::make_shared<arrow::Int32Builder>();
+    auto sos_b = std::make_shared<arrow::StringBuilder>();
+    auto sos_inner_type = arrow::struct_({arrow::field("a", arrow::int32()), arrow::field("b", arrow::utf8())});
+    auto sos_inner_builder = std::make_shared<arrow::StructBuilder>(sos_inner_type, arrow::default_memory_pool(),
+        std::vector<std::shared_ptr<arrow::ArrayBuilder>>{sos_a, sos_b});
+    auto sos_label = std::make_shared<arrow::StringBuilder>();
+    auto sos_type = arrow::struct_({arrow::field("label", arrow::utf8()), arrow::field("inner", sos_inner_type)});
+    arrow::StructBuilder sos_builder(sos_type, arrow::default_memory_pool(),
+        std::vector<std::shared_ptr<arrow::ArrayBuilder>>{sos_label, sos_inner_builder});
+    st = sos_builder.Append();
+    st = sos_label->Append("p");
+    st = sos_inner_builder->Append();
+    st = sos_a->Append(1);
+    st = sos_b->Append("x");
+    st = sos_builder.Append();
+    st = sos_label->Append("q");
+    st = sos_inner_builder->Append();
+    st = sos_a->Append(2);
+    st = sos_b->Append("y");
+    st = sos_builder.Append();
+    st = sos_label->Append("r");
+    st = sos_inner_builder->Append();
+    st = sos_a->Append(3);
+    st = sos_b->Append("z");
+    std::shared_ptr<arrow::Array> sos_arr;
+    st = sos_builder.Finish(&sos_arr);
+
+    // struct_of_map: struct<label:string, attrs:map<string,int32>>
+    //   {"m1",{"a":1}}, {"m2",{}}, {"m3",{"b":2,"c":3}}
+    auto som_label = std::make_shared<arrow::StringBuilder>();
+    auto som_attrs_keys = std::make_shared<arrow::StringBuilder>();
+    auto som_attrs_items = std::make_shared<arrow::Int32Builder>();
+    auto som_attrs_builder =
+        std::make_shared<arrow::MapBuilder>(arrow::default_memory_pool(), som_attrs_keys, som_attrs_items);
+    auto som_type = arrow::struct_(
+        {arrow::field("label", arrow::utf8()), arrow::field("attrs", arrow::map(arrow::utf8(), arrow::int32()))});
+    arrow::StructBuilder som_builder(som_type, arrow::default_memory_pool(),
+        std::vector<std::shared_ptr<arrow::ArrayBuilder>>{som_label, som_attrs_builder});
+    st = som_builder.Append();
+    st = som_label->Append("m1");
+    st = som_attrs_builder->Append();
+    st = som_attrs_keys->Append("a");
+    st = som_attrs_items->Append(1);
+    st = som_builder.Append();
+    st = som_label->Append("m2");
+    st = som_attrs_builder->Append();
+    st = som_builder.Append();
+    st = som_label->Append("m3");
+    st = som_attrs_builder->Append();
+    st = som_attrs_keys->Append("b");
+    st = som_attrs_items->Append(2);
+    st = som_attrs_keys->Append("c");
+    st = som_attrs_items->Append(3);
+    std::shared_ptr<arrow::Array> som_arr;
+    st = som_builder.Finish(&som_arr);
+
+    // map_of_list: map<string,list<int32>> -- {"a":[1,2]}, {}, {"b":[3],"c":[4,5]}
+    auto mol_keys = std::make_shared<arrow::StringBuilder>();
+    auto mol_inner_values = std::make_shared<arrow::Int32Builder>();
+    auto mol_inner_builder = std::make_shared<arrow::ListBuilder>(arrow::default_memory_pool(), mol_inner_values);
+    arrow::MapBuilder mol_builder(arrow::default_memory_pool(), mol_keys, mol_inner_builder);
+    st = mol_builder.Append();
+    st = mol_keys->Append("a");
+    st = mol_inner_builder->Append();
+    st = mol_inner_values->Append(1);
+    st = mol_inner_values->Append(2);
+    st = mol_builder.Append();
+    st = mol_builder.Append();
+    st = mol_keys->Append("b");
+    st = mol_inner_builder->Append();
+    st = mol_inner_values->Append(3);
+    st = mol_keys->Append("c");
+    st = mol_inner_builder->Append();
+    st = mol_inner_values->Append(4);
+    st = mol_inner_values->Append(5);
+    std::shared_ptr<arrow::Array> mol_arr;
+    st = mol_builder.Finish(&mol_arr);
+
+    // map_of_struct: map<string,struct<x:int32,y:string>>
+    //   {"a":{1,"foo"}}, {}, {"b":{2,"bar"},"c":{3,"baz"}}
+    auto mos_keys = std::make_shared<arrow::StringBuilder>();
+    auto mos_x = std::make_shared<arrow::Int32Builder>();
+    auto mos_y = std::make_shared<arrow::StringBuilder>();
+    auto mos_struct_type = arrow::struct_({arrow::field("x", arrow::int32()), arrow::field("y", arrow::utf8())});
+    auto mos_item_builder = std::make_shared<arrow::StructBuilder>(mos_struct_type, arrow::default_memory_pool(),
+        std::vector<std::shared_ptr<arrow::ArrayBuilder>>{mos_x, mos_y});
+    arrow::MapBuilder mos_builder(arrow::default_memory_pool(), mos_keys, mos_item_builder);
+    st = mos_builder.Append();
+    st = mos_keys->Append("a");
+    st = mos_item_builder->Append();
+    st = mos_x->Append(1);
+    st = mos_y->Append("foo");
+    st = mos_builder.Append();
+    st = mos_builder.Append();
+    st = mos_keys->Append("b");
+    st = mos_item_builder->Append();
+    st = mos_x->Append(2);
+    st = mos_y->Append("bar");
+    st = mos_keys->Append("c");
+    st = mos_item_builder->Append();
+    st = mos_x->Append(3);
+    st = mos_y->Append("baz");
+    std::shared_ptr<arrow::Array> mos_arr;
+    st = mos_builder.Finish(&mos_arr);
+
+    // map_of_map: map<string,map<string,int32>>
+    //   {"outer1":{"inner1":1}}, {}, {"outer2":{"inner2":2,"inner3":3}}
+    auto mom_outer_keys = std::make_shared<arrow::StringBuilder>();
+    auto mom_inner_keys = std::make_shared<arrow::StringBuilder>();
+    auto mom_inner_items = std::make_shared<arrow::Int32Builder>();
+    auto mom_inner_builder =
+        std::make_shared<arrow::MapBuilder>(arrow::default_memory_pool(), mom_inner_keys, mom_inner_items);
+    arrow::MapBuilder mom_builder(arrow::default_memory_pool(), mom_outer_keys, mom_inner_builder);
+    st = mom_builder.Append();
+    st = mom_outer_keys->Append("outer1");
+    st = mom_inner_builder->Append();
+    st = mom_inner_keys->Append("inner1");
+    st = mom_inner_items->Append(1);
+    st = mom_builder.Append();
+    st = mom_builder.Append();
+    st = mom_outer_keys->Append("outer2");
+    st = mom_inner_builder->Append();
+    st = mom_inner_keys->Append("inner2");
+    st = mom_inner_items->Append(2);
+    st = mom_inner_keys->Append("inner3");
+    st = mom_inner_items->Append(3);
+    std::shared_ptr<arrow::Array> mom_arr;
+    st = mom_builder.Finish(&mom_arr);
+
+    // deep_nested: list<struct<name:string, tags:list<string>, meta:map<string,int32>>>
+    //   [{"n1",["t1","t2"],{"k1":1}}], [], [{"n2",["t3"],{"k2":2,"k3":3}}, {"n3",[],{}}]
+    auto dn_name = std::make_shared<arrow::StringBuilder>();
+    auto dn_tags_values = std::make_shared<arrow::StringBuilder>();
+    auto dn_tags_builder = std::make_shared<arrow::ListBuilder>(arrow::default_memory_pool(), dn_tags_values);
+    auto dn_meta_keys = std::make_shared<arrow::StringBuilder>();
+    auto dn_meta_items = std::make_shared<arrow::Int32Builder>();
+    auto dn_meta_builder =
+        std::make_shared<arrow::MapBuilder>(arrow::default_memory_pool(), dn_meta_keys, dn_meta_items);
+    auto dn_struct_type = arrow::struct_({
+        arrow::field("name", arrow::utf8()),
+        arrow::field("tags", arrow::list(arrow::utf8())),
+        arrow::field("meta", arrow::map(arrow::utf8(), arrow::int32())),
+    });
+    auto dn_struct_builder = std::make_shared<arrow::StructBuilder>(dn_struct_type, arrow::default_memory_pool(),
+        std::vector<std::shared_ptr<arrow::ArrayBuilder>>{dn_name, dn_tags_builder, dn_meta_builder});
+    arrow::ListBuilder dn_builder(arrow::default_memory_pool(), dn_struct_builder);
+
+    st = dn_builder.Append();
+    st = dn_struct_builder->Append();
+    st = dn_name->Append("n1");
+    st = dn_tags_builder->Append();
+    st = dn_tags_values->Append("t1");
+    st = dn_tags_values->Append("t2");
+    st = dn_meta_builder->Append();
+    st = dn_meta_keys->Append("k1");
+    st = dn_meta_items->Append(1);
+
+    st = dn_builder.Append();  // row 2: []
+
+    st = dn_builder.Append();
+    st = dn_struct_builder->Append();
+    st = dn_name->Append("n2");
+    st = dn_tags_builder->Append();
+    st = dn_tags_values->Append("t3");
+    st = dn_meta_builder->Append();
+    st = dn_meta_keys->Append("k2");
+    st = dn_meta_items->Append(2);
+    st = dn_meta_keys->Append("k3");
+    st = dn_meta_items->Append(3);
+    st = dn_struct_builder->Append();
+    st = dn_name->Append("n3");
+    st = dn_tags_builder->Append();
+    st = dn_meta_builder->Append();
+
+    std::shared_ptr<arrow::Array> dn_arr;
+    st = dn_builder.Finish(&dn_arr);
+
+    auto schema = arrow::schema({
+        arrow::field("list_col", arrow::list(arrow::int32()), false),
+        arrow::field("map_col", arrow::map(arrow::utf8(), arrow::int32()), false),
+        arrow::field("list_of_list", arrow::list(arrow::list(arrow::int32())), false),
+        arrow::field("list_of_struct", arrow::list(los_struct_type), false),
+        arrow::field("list_of_map", arrow::list(arrow::map(arrow::utf8(), arrow::int32())), false),
+        arrow::field("struct_of_list", sol_type, false),
+        arrow::field("struct_of_struct", sos_type, false),
+        arrow::field("struct_of_map", som_type, false),
+        arrow::field("map_of_list", arrow::map(arrow::utf8(), arrow::list(arrow::int32())), false),
+        arrow::field("map_of_struct", arrow::map(arrow::utf8(), mos_struct_type), false),
+        arrow::field("map_of_map", arrow::map(arrow::utf8(), arrow::map(arrow::utf8(), arrow::int32())), false),
+        arrow::field("deep_nested", arrow::list(dn_struct_type), false),
+    });
+    auto table = arrow::Table::Make(schema, {
+        list_col_arr, map_col_arr, lol_arr, los_arr, lom_arr,
+        sol_arr, sos_arr, som_arr, mol_arr, mos_arr, mom_arr, dn_arr,
+    });
+
+    auto maybe_outfile = arrow::io::FileOutputStream::Open("test_run/map_list_types.parquet");
+    auto outfile = *maybe_outfile;
+    auto status = parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile, 3);
+    return status.ok();
+}
+
 int main()
 {
     struct Fixture
@@ -536,6 +895,7 @@ int main()
         {"test/fixtures/list_vector.parquet", generate_list_vector_fixture},
         {"test/fixtures/extended_types.parquet", generate_extended_types_fixture},
         {"test/fixtures/nested_struct.parquet", generate_nested_struct_fixture},
+        {"test_run/map_list_types.parquet", generate_map_list_types_fixture},
     };
 
     int failures = 0;

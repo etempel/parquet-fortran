@@ -207,6 +207,25 @@ tools/convert_fits_to_parquet.py data.fits out.parquet --compression zstd
 tools/convert_fits_to_parquet.py multi_table.fits out.parquet --hdu SPECTRA --overwrite
 ```
 
+`tools/parquet_metadata_to_md.py` reads a `.parquet` file's metadata (via `pyarrow`, without loading
+any column data) and writes a Markdown report: file-level info (format version, `created_by`,
+row/column counts, a row-group count/size summary), this library's own VOTable-style header if
+present (parsed and rendered human-readably, not just dumped as XML), every raw Parquet key-value
+metadata entry (long/opaque values like `ARROW:schema` collapsed to a byte-count note), per-column
+statistics aggregated across row groups (only for columns where they're actually populated), and a
+merged column-definitions table (type/nesting rendered from the file's Arrow schema, so nested
+`list`/`struct`/`map` columns show their real structure, plus compression codec(s)/encoding(s)
+actually used and any `unit`/`ucd`/description this library's own metadata provides). General-purpose
+— works on any Parquet file, not just this library's own output (a standalone Python tool, requires
+`pyarrow`, not part of this repository's own Fortran toolchain). Not part of the public Fortran
+library or its API, but consumer-facing rather than maintainer/CI-only, so it's kept in the
+fpm-published package (see its `KEEP_PATHS` entry in `tools/prep_fpm_publish.sh`):
+
+```bash
+tools/parquet_metadata_to_md.py data.parquet                 # -> data.md, overwritten if it exists
+tools/parquet_metadata_to_md.py data.parquet report.md
+```
+
 ### Testing genuine OpenMP concurrency
 
 This repository's own OpenMP-dependent tests (the `openmp`/`openmp_write` test suites, plus the `concurrent_calls_into_shared_reader`/`writer` error scenarios) need a real OpenMP flag to actually exercise concurrency:

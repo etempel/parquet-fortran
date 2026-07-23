@@ -18,10 +18,11 @@
 #      by testing) and switches `module-naming` from `false` to this project's
 #      registry-registered custom prefix, `"parquet"`.
 #   3. Removing maintainer/CI-only files that a downstream library consumer has no use for --
-#      see REMOVE_PATHS below. `tools/generate_parquet_maml.sh` and `tools/convert_fits_to_parquet.py`
-#      are deliberately kept: they're consumer-facing (see doc/pages/embedding-maml-schemas.md and
-#      tools/convert_fits_to_parquet.py's own docstring, respectively). This list must stay in
-#      sync by hand -- see CLAUDE.md's "Keeping tools/prep_fpm_publish.sh in sync" for the rule.
+#      see REMOVE_PATHS below. `tools/generate_parquet_maml.sh`, `tools/convert_fits_to_parquet.py`,
+#      and `tools/parquet_metadata_to_md.py` are deliberately kept: they're consumer-facing (see
+#      doc/pages/embedding-maml-schemas.md and each script's own docstring, respectively). This
+#      list must stay in sync by hand -- see CLAUDE.md's "Keeping tools/prep_fpm_publish.sh in
+#      sync" for the rule.
 #
 # After committing, this also runs fpm's own read-only preview commands -- none of them need a
 # token or touch the registry -- and self-checks the tarball they produce: extracts it and
@@ -99,6 +100,7 @@ KEEP_PATHS=(
     src/parquet.f90
     tools/generate_parquet_maml.sh
     tools/convert_fits_to_parquet.py
+    tools/parquet_metadata_to_md.py
 )
 
 for path in "${REMOVE_PATHS[@]}"; do

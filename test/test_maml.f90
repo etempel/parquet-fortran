@@ -131,7 +131,13 @@ contains
                 test_set_col_size_force_overrides), &
             new_unittest("set_array_size resolves an 'auto' string column", test_set_array_size_resolves_auto), &
             new_unittest("set_array_size on a non-string column aborts", &
-                test_set_array_size_non_string_column_aborts) &
+                test_set_array_size_non_string_column_aborts), &
+            new_unittest("set_array_size with a non-positive value aborts", &
+                test_set_array_size_non_positive_aborts), &
+            new_unittest("set_array_size on an already-resolved column aborts without force=.true.", &
+                test_set_array_size_already_resolved_no_force_aborts), &
+            new_unittest("set_array_size(force=.true.) overrides an already-resolved column", &
+                test_set_array_size_force_overrides) &
             ]
     end subroutine collect_tests_parquet_maml
 
@@ -1379,5 +1385,37 @@ contains
             failure_message="set_array_size on a non-string column should abort", &
             required_stderr="not a string column")
     end subroutine test_set_array_size_non_string_column_aborts
+
+    subroutine test_set_array_size_non_positive_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "set_array_size_non_positive", expect_abort=.true., &
+            failure_message="set_array_size with a non-positive value should abort", &
+            required_stderr="must be a positive integer")
+    end subroutine test_set_array_size_non_positive_aborts
+
+    subroutine test_set_array_size_already_resolved_no_force_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "set_array_size_already_resolved_no_force", &
+            expect_abort=.true., &
+            failure_message="set_array_size on an already-resolved column should abort without force=.true.", &
+            required_stderr="pass force=.true. to override")
+    end subroutine test_set_array_size_already_resolved_no_force_aborts
+
+    !> force=.true. is the one path that lets set_array_size override an already-resolved (not
+    !> "auto") array_size too -- in-process, since nothing here aborts.
+    subroutine test_set_array_size_force_overrides(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+
+        call schema%init(table="set_array_size_force_table")
+        call schema%add_field("txt", "string", array_size=8)
+        call parquet_parse_maml(schema)
+
+        call schema%set_array_size("txt", 12, force=.true.)
+        call check(error, schema%cinfo%col(1)%array_size == 12, &
+            "set_array_size(force=.true.) did not override the already-resolved array_size")
+    end subroutine test_set_array_size_force_overrides
     !
 end module test_maml

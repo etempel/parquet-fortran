@@ -430,6 +430,8 @@ scenarios=(
     "set_col_size_non_positive:1"
     "set_col_size_already_resolved_no_force:1"
     "set_array_size_non_string_column:1"
+    "set_array_size_non_positive:1"
+    "set_array_size_already_resolved_no_force:1"
     "flat_write_col_size_still_auto:1"
 )
 

@@ -237,6 +237,8 @@ contains
                 test_string_matrix_array_size_auto_resolves), &
             new_unittest("write_maml=.true. rewrites a resolved col_size: auto into the sidecar's actual value", &
                 test_write_maml_sidecar_resolves_auto_col_size), &
+            new_unittest("sidecar col_size rewrite handles short source lines and name: not first in its block", &
+                test_write_maml_sidecar_short_lines_name_not_first), &
             new_unittest("a flat (1-D) write on a still-'auto' col_size column aborts", &
                 test_flat_write_col_size_still_auto_aborts) &
             ]
@@ -4086,6 +4088,44 @@ contains
         call check(error, sidecar_schema%cinfo%col(1)%col_size == 3, &
             "expected the sidecar .maml's col_size: to reflect the resolved value (3), not 'auto'")
     end subroutine test_write_maml_sidecar_resolves_auto_col_size
+
+    !> Two parquet_rewrite_resolved_sizes edge cases in one fixture: (1) source MAML lines
+    !> shorter than 30 characters (this fixture's are all under 20), forcing the fixed element
+    !> length to actually grow before any col_size:/array_size: value gets rewritten in place --
+    !> every other sidecar test's inline MAML happens to use character(len=40) lines, which never
+    !> exercises this growth path; (2) the "vec" field's name: key is not its first attribute
+    !> (data_type: comes first on the "- ..." line), exercising the block-scan's continuation-line
+    !> branch when searching for name: (mirrors the equivalent edge case already covered for
+    !> parquet_prune_disabled_fields by test_write_maml_sidecar_prune_scan_edge_cases).
+    subroutine test_write_maml_sidecar_short_lines_name_not_first(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema, sidecar_schema
+        type(parquet_writer) :: writer
+        integer(int32) :: vec_values(4, 2)
+        character(len=*), parameter :: out_file = "test_run/test_col_size_auto_sidecar_short.parquet"
+        character(len=*), parameter :: sidecar_file = "test_run/test_col_size_auto_sidecar_short.maml"
+
+        vec_values = reshape([1,2,3,4,5,6,7,8], [4, 2])
+
+        schema%maml%name = "col_size_auto_sidecar_short.maml"
+        schema%maml%lines = [character(len=20) :: &
+            "table: t", &
+            "fields:", &
+            "- data_type: int32", &
+            "  name: vec", &
+            "  col_size: auto" ]
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema, write_maml=.true.)
+        call parquet_write_column(writer, "vec", vec_values)
+        call parquet_close_writer(writer)
+
+        call parquet_parse_maml(sidecar_file, sidecar_schema)
+        call check(error, trim(sidecar_schema%cinfo%col(1)%name) == "vec" .and. &
+            sidecar_schema%cinfo%col(1)%col_size == 4, &
+            "expected the sidecar .maml to find 'vec' (name: not the block's first key) and " // &
+            "reflect its resolved col_size (4)")
+    end subroutine test_write_maml_sidecar_short_lines_name_not_first
 
     subroutine test_flat_write_col_size_still_auto_aborts(error)
         type(error_type), allocatable, intent(out) :: error

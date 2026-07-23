@@ -786,6 +786,10 @@ program error_scenarios
         call scenario_set_col_size_already_resolved_no_force()
     case ("set_array_size_non_string_column")
         call scenario_set_array_size_non_string_column()
+    case ("set_array_size_non_positive")
+        call scenario_set_array_size_non_positive()
+    case ("set_array_size_already_resolved_no_force")
+        call scenario_set_array_size_already_resolved_no_force()
     case ("flat_write_col_size_still_auto")
         call scenario_flat_write_col_size_still_auto()
     case default
@@ -6958,6 +6962,33 @@ contains
         call schema%set_array_size("v", 10)
         print '(a)', "unexpectedly accepted set_array_size on a non-string column"
     end subroutine scenario_set_array_size_non_string_column
+
+    !> schema%set_array_size rejects a non-positive array_size outright, regardless of whether
+    !> the target column is currently "auto" (mirrors scenario_set_col_size_non_positive).
+    subroutine scenario_set_array_size_non_positive()
+        type(parquet_schema) :: schema
+
+        call schema%init(table="set_array_size_non_positive_table")
+        call schema%add_field("txt", "string")
+        call parquet_parse_maml(schema)
+
+        call schema%set_array_size("txt", 0)
+        print '(a)', "unexpectedly accepted a non-positive array_size"
+    end subroutine scenario_set_array_size_non_positive
+
+    !> schema%set_array_size refuses to override a column whose array_size is already
+    !> concretely resolved (not "auto") unless force=.true. is passed (mirrors
+    !> scenario_set_col_size_already_resolved_no_force).
+    subroutine scenario_set_array_size_already_resolved_no_force()
+        type(parquet_schema) :: schema
+
+        call schema%init(table="set_array_size_already_resolved_table")
+        call schema%add_field("txt", "string", array_size=8)
+        call parquet_parse_maml(schema)
+
+        call schema%set_array_size("txt", 12)
+        print '(a)', "unexpectedly overrode an already-resolved array_size without force=.true."
+    end subroutine scenario_set_array_size_already_resolved_no_force
 
     !> A flat (1-D) parquet_write_column call cannot resolve a col_size: auto placeholder itself
     !> (it needs col_size already known to divide its own flat array into rows) -- it must error

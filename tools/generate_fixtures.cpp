@@ -1,7 +1,5 @@
 // Generates every hand-built Arrow/Parquet test fixture under test/fixtures/
-// that this library's own writer cannot produce itself, plus any exploratory
-// fixture under test_run/ (gitignored, not consumed by any Fortran test --
-// see generate_map_list_types_fixture() below for the one example so far).
+// that this library's own writer cannot produce itself.
 // Kept as a single file (one fixture-generating function per fixture, called
 // from main()) rather than one .cpp per fixture, so there's exactly one
 // program to build and run regardless of how many fixtures exist -- see
@@ -525,14 +523,12 @@ static bool generate_nested_struct_fixture()
     return status.ok();
 }
 
-// test_run/map_list_types.parquet: exercises Arrow's MAP and (variable-length)
+// test/fixtures/map_list_types.parquet: exercises Arrow's MAP and (variable-length)
 // LIST types -- neither is supported by this library yet (see CLAUDE.md's
 // "Reserved for future element-domain work": parquet_map/parquet_list), so
 // this fixture exists purely to feed tools/parquet_metadata_to_md.py while
 // that tool's nested-schema rendering is developed, not to be read by this
-// library or exercised by any Fortran test. Written to test_run/ (gitignored)
-// rather than test/fixtures/ (Git-LFS-tracked, and every file there is
-// consumed by a specific test/error scenario) for exactly that reason.
+// library or exercised by any Fortran test.
 //
 // Covers LIST and MAP both as independent (non-nested) columns and nested
 // inside every combination of list/struct/map one level deep, plus one
@@ -875,7 +871,7 @@ static bool generate_map_list_types_fixture()
         sol_arr, sos_arr, som_arr, mol_arr, mos_arr, mom_arr, dn_arr,
     });
 
-    auto maybe_outfile = arrow::io::FileOutputStream::Open("test_run/map_list_types.parquet");
+    auto maybe_outfile = arrow::io::FileOutputStream::Open("test/fixtures/map_list_types.parquet");
     auto outfile = *maybe_outfile;
     auto status = parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile, 3);
     return status.ok();
@@ -895,7 +891,7 @@ int main()
         {"test/fixtures/list_vector.parquet", generate_list_vector_fixture},
         {"test/fixtures/extended_types.parquet", generate_extended_types_fixture},
         {"test/fixtures/nested_struct.parquet", generate_nested_struct_fixture},
-        {"test_run/map_list_types.parquet", generate_map_list_types_fixture},
+        {"test/fixtures/map_list_types.parquet", generate_map_list_types_fixture},
     };
 
     int failures = 0;

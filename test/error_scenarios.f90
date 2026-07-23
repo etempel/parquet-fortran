@@ -774,6 +774,20 @@ program error_scenarios
         call scenario_column_exists_empty_type_filter()
     case ("get_column_type_unsupported")
         call scenario_get_column_type_unsupported()
+    case ("col_size_malformed_value")
+        call scenario_col_size_malformed_value()
+    case ("array_size_malformed_value")
+        call scenario_array_size_malformed_value()
+    case ("array_size_auto_on_non_string")
+        call scenario_array_size_auto_on_non_string()
+    case ("set_col_size_non_positive")
+        call scenario_set_col_size_non_positive()
+    case ("set_col_size_already_resolved_no_force")
+        call scenario_set_col_size_already_resolved_no_force()
+    case ("set_array_size_non_string_column")
+        call scenario_set_array_size_non_string_column()
+    case ("flat_write_col_size_still_auto")
+        call scenario_flat_write_col_size_still_auto()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -6853,5 +6867,119 @@ contains
         call parquet_get_column_type(reader, "v_uint32", type_name)
         print '(a)', "unexpectedly resolved a canonical type for a column outside the 9 recognized tokens"
     end subroutine scenario_get_column_type_unsupported
+
+    !> A MAML col_size: value that is neither blank, "auto", nor a valid positive integer (a
+    !> typo like "5O", letter-O for zero) must be rejected by parquet_validate_maml with a clear
+    !> message, not silently coerced to a scalar column the way it used to be.
+    subroutine scenario_col_size_malformed_value()
+        type(parquet_schema) :: schema
+
+        schema%maml%name = "col_size_malformed.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: col_size_malformed_table", &
+            "fields:", &
+            "- name: v", &
+            "  data_type: int32", &
+            "  col_size: 5O" ]
+
+        call parquet_parse_maml(schema)
+        print '(a)', "unexpectedly accepted a malformed col_size value"
+    end subroutine scenario_col_size_malformed_value
+
+    !> Same as scenario_col_size_malformed_value, for array_size: -- an explicit non-positive
+    !> value is also rejected (not silently coerced to 1).
+    subroutine scenario_array_size_malformed_value()
+        type(parquet_schema) :: schema
+
+        schema%maml%name = "array_size_malformed.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: array_size_malformed_table", &
+            "fields:", &
+            "- name: v", &
+            "  data_type: string", &
+            "  array_size: -3" ]
+
+        call parquet_parse_maml(schema)
+        print '(a)', "unexpectedly accepted a malformed array_size value"
+    end subroutine scenario_array_size_malformed_value
+
+    !> array_size: auto only applies to string columns -- declaring it on a numeric field can
+    !> never be resolved (no write path for a non-string column ever touches array_size), so
+    !> parquet_validate_maml rejects it up front instead of silently leaving it unresolved.
+    subroutine scenario_array_size_auto_on_non_string()
+        type(parquet_schema) :: schema
+
+        schema%maml%name = "array_size_auto_on_non_string.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: array_size_auto_on_non_string", &
+            "fields:", &
+            "- name: v", &
+            "  data_type: int32", &
+            "  array_size: auto" ]
+
+        call parquet_parse_maml(schema)
+        print '(a)', "unexpectedly accepted array_size: auto on a non-string column"
+    end subroutine scenario_array_size_auto_on_non_string
+
+    !> schema%set_col_size rejects a non-positive col_size outright, regardless of whether the
+    !> target column is currently "auto".
+    subroutine scenario_set_col_size_non_positive()
+        type(parquet_schema) :: schema
+
+        call schema%init(table="set_col_size_non_positive_table")
+        call schema%add_field("v", "int32")
+        call parquet_parse_maml(schema)
+
+        call schema%set_col_size("v", 0)
+        print '(a)', "unexpectedly accepted a non-positive col_size"
+    end subroutine scenario_set_col_size_non_positive
+
+    !> schema%set_col_size refuses to override a column whose col_size is already concretely
+    !> resolved (not "auto") unless force=.true. is passed.
+    subroutine scenario_set_col_size_already_resolved_no_force()
+        type(parquet_schema) :: schema
+
+        call schema%init(table="set_col_size_already_resolved_table")
+        call schema%add_field("v", "int32", col_size=3)
+        call parquet_parse_maml(schema)
+
+        call schema%set_col_size("v", 5)
+        print '(a)', "unexpectedly overrode an already-resolved col_size without force=.true."
+    end subroutine scenario_set_col_size_already_resolved_no_force
+
+    !> schema%set_array_size only applies to string columns.
+    subroutine scenario_set_array_size_non_string_column()
+        type(parquet_schema) :: schema
+
+        call schema%init(table="set_array_size_non_string_table")
+        call schema%add_field("v", "int32")
+        call parquet_parse_maml(schema)
+
+        call schema%set_array_size("v", 10)
+        print '(a)', "unexpectedly accepted set_array_size on a non-string column"
+    end subroutine scenario_set_array_size_non_string_column
+
+    !> A flat (1-D) parquet_write_column call cannot resolve a col_size: auto placeholder itself
+    !> (it needs col_size already known to divide its own flat array into rows) -- it must error
+    !> stop with a clear message rather than silently misinterpreting the array's shape.
+    subroutine scenario_flat_write_col_size_still_auto()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int32) :: data(6) = [1_int32, 2_int32, 3_int32, 4_int32, 5_int32, 6_int32]
+
+        schema%maml%name = "flat_write_col_size_still_auto.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: flat_write_col_size_still_auto", &
+            "fields:", &
+            "- name: v", &
+            "  data_type: int32", &
+            "  col_size: auto" ]
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_flat_write_auto.parquet", schema)
+        call parquet_write_column(writer, "v", data)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote a flat column whose schema col_size is still 'auto'"
+    end subroutine scenario_flat_write_col_size_still_auto
 
 end program error_scenarios

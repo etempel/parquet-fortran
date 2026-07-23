@@ -424,6 +424,13 @@ scenarios=(
     "column_exists_bad_type_token:1"
     "column_exists_empty_type_filter:1"
     "get_column_type_unsupported:1"
+    "col_size_malformed_value:1"
+    "array_size_malformed_value:1"
+    "array_size_auto_on_non_string:1"
+    "set_col_size_non_positive:1"
+    "set_col_size_already_resolved_no_force:1"
+    "set_array_size_non_string_column:1"
+    "flat_write_col_size_still_auto:1"
 )
 
 # concurrent_calls_into_shared_reader/writer are deliberately not in the list

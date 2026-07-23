@@ -29,6 +29,17 @@ module parquet
     character(len=7), parameter :: valid_maml_data_types(6) = [character(len=7) :: &
         "int32", "int64", "string", "boolean", "float32", "float64"]
 
+    !> col_size/array_size sentinel for a MAML col_size: auto/array_size: auto declaration:
+    !> resolved later, either by schema%set_col_size/%set_array_size before parquet_open_writer,
+    !> or automatically from the actual data's own shape at the first matrix-form
+    !> parquet_write_column/parquet_write_column_chunk call for that column (never for the flat/
+    !> 1-D form, which needs col_size already known to interpret its own row count).
+    integer, parameter :: parquet_size_auto = -1
+    !> col_size/array_size sentinel for a malformed MAML col_size:/array_size: value (non-numeric,
+    !> or an explicit non-positive number) -- parquet_validate_maml_internal always rejects a
+    !> schema carrying this value before it becomes usable, so a caller never actually observes it.
+    integer, parameter :: size_invalid_sentinel = -2
+
     !> Canonical single data-type tokens parquet_column_exists/parquet_get_column_type recognize:
     !> valid_maml_data_types plus the three temporal base tokens ("date"/"time"/"timestamp").
     !> parquet_column_exists additionally accepts the group aliases "int" (int32/int64), "float"
@@ -67,8 +78,10 @@ module parquet
         integer :: time_unit = 0 !! For a time/timestamp field, its stored unit as a parquet_unit_* selector
         !! (0 = not a temporal column, or unset). A bare time/timestamp token resolves to parquet_unit_micros.
         logical :: is_utc = .false. !! For a timestamp field, .true. if declared UTC-adjusted (timestamp[...,utc]).
-        integer :: array_size = 1 !! Maximum length of character strings.
-        integer :: col_size = 1   !! The number of elements in the vector column.
+        integer :: array_size = 1 !! Maximum length of character strings; parquet_size_auto if declared
+        !! array_size: auto (not yet resolved -- see schema%set_array_size).
+        integer :: col_size = 1   !! The number of elements in the vector column; parquet_size_auto if
+        !! declared col_size: auto (not yet resolved -- see schema%set_col_size).
         character(len=:), allocatable :: output_name !! The name actually written to the parquet file/VOTable
         !! header. Equal to `name` unless a col_map: entry in the MAML that declared this field renamed it
         !! (col_map: maps internal_name -> output_name; `name` is then set to the internal_name and
@@ -91,6 +104,8 @@ module parquet
         ! names only to avoid colliding with parquet_schema's own impls.
         procedure :: set_column_unavailable => set_unavailable !! Disables a column, or every column if no name is given.
         procedure :: set_column_available => set_available !! Enables a column, or every column if no name is given.
+        procedure :: set_col_size !! Resolves a column's col_size (only if currently "auto" unless force=.true.).
+        procedure :: set_array_size !! Resolves a string column's array_size (only if currently "auto" unless force=.true.).
     end type parquet_column_info
 
     !> One flat key-value table-metadata entry (a keyarray: item on the write
@@ -171,6 +186,9 @@ module parquet
         procedure :: add_field => schema_add_field !! Appends one fields: entry to a from-scratch schema.
         procedure :: set_column_available !! Enables a column, or every column if no name is given.
         procedure :: set_column_unavailable !! Disables a column, or every column if no name is given.
+        procedure :: set_col_size => schema_set_col_size !! Resolves a column's col_size before parquet_open_writer.
+        procedure :: set_array_size => schema_set_array_size !! Resolves a string column's array_size before
+        !! parquet_open_writer.
         procedure :: get_column_index => schema_get_column_index !! 1-based index of a column by name, or 0 if not found.
         procedure :: get_num_fields => schema_get_num_fields !! Total number of declared fields.
         procedure :: get_field_name => schema_get_field_name !! Field name at a given 1-based MAML source position.
@@ -275,6 +293,15 @@ module parquet
         !> so parquet_close_writer's missing-write error can name the output
         !> file; not used for anything else.
         character(len=:), allocatable :: filename
+        !> true when parquet_open_writer(..., write_maml=.true.) was requested -- the sidecar
+        !> .maml itself is written by parquet_close_writer (not parquet_open_writer), once every
+        !> column's col_size/array_size is guaranteed resolved (no longer "auto"), so the sidecar
+        !> always reflects what was actually written to the .parquet file.
+        logical :: write_maml_requested = .false.
+        !> Pruned (disabled fields removed) working copy of schema%metadata%source_maml_lines,
+        !> saved by parquet_open_writer when write_maml_requested; parquet_close_writer rewrites
+        !> its col_size:/array_size: values to their final resolved state and writes it out.
+        character(len=:), allocatable :: sidecar_lines(:)
         !> True between parquet_new_row_group and its matching parquet_finish_row_group --
         !> mirrors the C++-side flag of the same purpose; kept here too so a
         !> parquet_write_column_chunk call can validate its own row count against
@@ -856,6 +883,7 @@ module parquet
     public :: parquet_filter
     public :: parquet_column_info
     public :: parquet_column_type
+    public :: parquet_size_auto
     public :: parquet_table_metadata
     public :: parquet_schema
     public :: parquet_maml_file
@@ -1104,6 +1132,22 @@ module parquet
             class(parquet_schema), intent(inout) :: this !! schema whose cinfo is updated.
             character(len=*), intent(in), optional :: name !! column to disable; every column if absent.
         end subroutine set_column_unavailable
+        !> Forwards to %cinfo%set_col_size.
+        module subroutine schema_set_col_size(this, name, col_size, force)
+            class(parquet_schema), intent(inout) :: this !! schema whose cinfo is updated.
+            character(len=*), intent(in) :: name !! column to resolve.
+            integer, intent(in) :: col_size !! new col_size (must be a positive integer).
+            logical, intent(in), optional :: force !! .true. allows overriding a col_size that isn't currently
+            !! "auto" (default .false.: only an "auto" col_size may be resolved this way).
+        end subroutine schema_set_col_size
+        !> Forwards to %cinfo%set_array_size.
+        module subroutine schema_set_array_size(this, name, array_size, force)
+            class(parquet_schema), intent(inout) :: this !! schema whose cinfo is updated.
+            character(len=*), intent(in) :: name !! string column to resolve.
+            integer, intent(in) :: array_size !! new array_size (must be a positive integer).
+            logical, intent(in), optional :: force !! .true. allows overriding an array_size that isn't currently
+            !! "auto" (default .false.: only an "auto" array_size may be resolved this way).
+        end subroutine schema_set_array_size
         !> Forwards to %cinfo%get_column_index.
         module integer function schema_get_column_index(this, name)
             class(parquet_schema), intent(in) :: this !! schema to search.
@@ -1324,6 +1368,24 @@ module parquet
             class(parquet_column_info), intent(inout) :: this !! column_info being updated.
             character(len=*), intent(in), optional :: name !! column to enable; every column if absent.
         end subroutine set_available
+        !> Resolves `name`'s col_size to `col_size`. Error stops if col_size < 1, if `name` is not
+        !> found (via get_column_index), or if `name`'s col_size is not currently "auto" and
+        !> force is absent/.false. (pass force=.true. to override an already-resolved col_size too).
+        module subroutine set_col_size(this, name, col_size, force)
+            class(parquet_column_info), intent(inout) :: this !! column_info being updated.
+            character(len=*), intent(in) :: name !! column to resolve.
+            integer, intent(in) :: col_size !! new col_size (must be a positive integer).
+            logical, intent(in), optional :: force !! .true. allows overriding a non-"auto" col_size (default .false.).
+        end subroutine set_col_size
+        !> Resolves `name`'s array_size to `array_size`. Error stops if array_size < 1, if `name`
+        !> is not found, if `name`'s data_type is not "string" (array_size only applies to string
+        !> columns), or if `name`'s array_size is not currently "auto" and force is absent/.false.
+        module subroutine set_array_size(this, name, array_size, force)
+            class(parquet_column_info), intent(inout) :: this !! column_info being updated.
+            character(len=*), intent(in) :: name !! string column to resolve.
+            integer, intent(in) :: array_size !! new array_size (must be a positive integer).
+            logical, intent(in), optional :: force !! .true. allows overriding a non-"auto" array_size (default .false.).
+        end subroutine set_array_size
         !> int32 specific of parquet_table_metadata%add_metadata; stores
         !> `value` as plain text via parquet_metadata_append_entry.
         module subroutine add_metadata_int32(this, key, value, description, warn)
@@ -1476,7 +1538,10 @@ module parquet
             character(len=*), intent(in) :: name !! column name to look up.
         end function parquet_is_column_enabled
         !> The declared col_size (vector-column element count) for `name`,
-        !> from the writer's schema; error stops if `name` is not defined.
+        !> from the writer's schema; error stops if `name` is not defined, or if
+        !> `name`'s col_size is still "auto" (unresolved -- the flat/1-D write
+        !> form cannot resolve it itself; call schema%set_col_size before
+        !> parquet_open_writer, or use the matrix write form instead).
         module integer function parquet_get_column_col_size(writer, name)
             type(parquet_writer), intent(in) :: writer !! open (schema-enforced) writer to check.
             character(len=*), intent(in) :: name !! column name to look up.

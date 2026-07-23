@@ -25,6 +25,7 @@ module parquet_bindings
     public :: parquet_maml_lock, parquet_maml_unlock
     public :: parquet_warmup_memory_pool
     public :: parquet_add_column_metadata, parquet_add_table_metadata
+    public :: parquet_update_column_metadata_size
     public :: parquet_append_int32_column, parquet_append_int64_column
     public :: parquet_append_float32_column, parquet_append_float64_column
     public :: parquet_append_bool8_column
@@ -169,6 +170,18 @@ module parquet_bindings
             character(kind=c_char) :: data_type(*)
             integer(c_long_long), value :: array_size
             integer(c_long_long), value :: col_size
+        end subroutine
+
+        !> Updates an already-declared column's col_size/array_size in place (a no-op if `name`
+        !> isn't found); used to resolve a col_size:/array_size: auto placeholder from the first
+        !> write call's own data shape.
+        subroutine parquet_update_column_metadata_size(writer, name, col_size, array_size) &
+                bind(C, name="parquet_update_column_metadata_size")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: col_size
+            integer(c_long_long), value :: array_size
         end subroutine
 
         !> Adds one flat key-value table metadata entry to `writer`.

@@ -306,6 +306,53 @@ contains
         end if
     end procedure set_available
 
+    module procedure set_col_size
+        integer :: idx
+        logical :: do_force
+
+        do_force = .false.
+        if (present(force)) do_force = force
+
+        if (col_size < 1) then
+            error stop "parquet_column_info%set_col_size: col_size must be a positive integer: " // trim(name)
+        end if
+
+        idx = this%get_column_index(name)
+
+        if (this%col(idx)%col_size /= parquet_size_auto .and. .not. do_force) then
+            error stop "parquet_column_info%set_col_size: col_size for column '" // trim(name) // &
+                "' is not 'auto' (already resolved); pass force=.true. to override"
+        end if
+
+        this%col(idx)%col_size = col_size
+    end procedure set_col_size
+
+    module procedure set_array_size
+        integer :: idx
+        logical :: do_force
+
+        do_force = .false.
+        if (present(force)) do_force = force
+
+        if (array_size < 1) then
+            error stop "parquet_column_info%set_array_size: array_size must be a positive integer: " // trim(name)
+        end if
+
+        idx = this%get_column_index(name)
+
+        if (trim(this%col(idx)%data_type) /= "string") then
+            error stop "parquet_column_info%set_array_size: column '" // trim(name) // &
+                "' is not a string column (array_size only applies to string fields)"
+        end if
+
+        if (this%col(idx)%array_size /= parquet_size_auto .and. .not. do_force) then
+            error stop "parquet_column_info%set_array_size: array_size for column '" // trim(name) // &
+                "' is not 'auto' (already resolved); pass force=.true. to override"
+        end if
+
+        this%col(idx)%array_size = array_size
+    end procedure set_array_size
+
     module procedure parquet_append_empty_cinfo
         type(parquet_column_type), allocatable :: tmp(:)
 

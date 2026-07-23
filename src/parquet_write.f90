@@ -233,11 +233,74 @@ contains
 
         do i = 1, size(writer%enabled_columns)
             if (trim(writer%enabled_columns(i)%name) == trim(name)) then
+                if (writer%enabled_columns(i)%col_size == parquet_size_auto) then
+                    error stop "parquet_write_column: col_size for column '" // trim(name) // "' is still " // &
+                        "'auto' -- call schema%set_col_size before parquet_open_writer, or use the matrix " // &
+                        "write form to resolve it automatically from the data"
+                end if
                 parquet_get_column_col_size = max(1, writer%enabled_columns(i)%col_size)
                 return
             end if
         end do
     end procedure parquet_get_column_col_size
+    !> Resolves writer%all_columns(idx)/enabled_columns(idx)'s col_size against a matrix-form
+    !> write call's own structural asize (size(values,1)): if col_size is still "auto" (a MAML
+    !> col_size: auto not yet resolved by schema%set_col_size), this is the write that resolves
+    !> it -- asize becomes the column's permanent col_size for the rest of this writer's lifetime,
+    !> kept in sync across all_columns/enabled_columns and the C++-side column_metadata (so
+    !> parquet_writer_get_chunk_size and a write_maml=.true. sidecar both see the resolved value).
+    !> Otherwise (already resolved, from the MAML/set_col_size, or a previous write to the same
+    !> column), asize must match exactly -- error stops (using `context`, e.g. "parquet_write_column"
+    !> or "parquet_write_column_chunk", and optional pre-formatted `ctx` suffix, to match each
+    !> call site's own existing message) on any mismatch.
+    subroutine parquet_resolve_or_check_col_size(writer, name, idx, asize, context, ctx)
+        type(parquet_writer), intent(inout) :: writer !! open (schema-enforced) writer.
+        character(len=*), intent(in) :: name !! column being written.
+        integer, intent(in) :: idx !! writer%all_columns index for this column.
+        integer(int64), intent(in) :: asize !! this write call's own structural col_size.
+        character(len=*), intent(in) :: context !! error message prefix ("parquet_write_column"/"parquet_write_column_chunk").
+        character(len=*), intent(in), optional :: ctx !! optional writer_context_suffix text appended to the error.
+        integer :: k
+        character(len=:), allocatable :: outname
+
+        if (writer%all_columns(idx)%col_size == parquet_size_auto) then
+            writer%all_columns(idx)%col_size = int(asize)
+            k = parquet_get_enabled_column_index(writer, name)
+            if (k > 0) writer%enabled_columns(k)%col_size = int(asize)
+            call parquet_resolve_output_name(writer, name, outname)
+            call parquet_update_column_metadata_size(writer%handle, trim(outname)//char(0), &
+                int(asize, kind=c_long_long), int(writer%all_columns(idx)%array_size, kind=c_long_long))
+        else if (writer%all_columns(idx)%col_size /= asize) then
+            if (present(ctx)) then
+                error stop trim(context) // ": array size mismatch for column " // trim(name) // ctx
+            else
+                error stop trim(context) // ": array size mismatch for column " // trim(name)
+            end if
+        end if
+    end subroutine parquet_resolve_or_check_col_size
+    !> String-only counterpart of parquet_resolve_or_check_col_size, for array_size (maximum
+    !> string length): if array_size is still "auto", this write resolves it to `item_len` (the
+    !> caller's own Fortran-declared character length for this call, i.e. len(values(1)) or
+    !> len(values(1,1)) -- a structural property of the call, not derived from actual string
+    !> content, mirroring col_size's own shape-derived resolution). Otherwise a no-op: the
+    !> existing max_item_len/array_size ceiling check at each call site runs unchanged afterward.
+    subroutine parquet_resolve_or_check_array_size(writer, name, idx, item_len)
+        type(parquet_writer), intent(inout) :: writer !! open (schema-enforced) writer.
+        character(len=*), intent(in) :: name !! string column being written.
+        integer, intent(in) :: idx !! writer%all_columns index for this column.
+        integer, intent(in) :: item_len !! this write call's own declared character length.
+        integer :: k
+        character(len=:), allocatable :: outname
+
+        if (writer%all_columns(idx)%array_size == parquet_size_auto) then
+            writer%all_columns(idx)%array_size = item_len
+            k = parquet_get_enabled_column_index(writer, name)
+            if (k > 0) writer%enabled_columns(k)%array_size = item_len
+            call parquet_resolve_output_name(writer, name, outname)
+            call parquet_update_column_metadata_size(writer%handle, trim(outname)//char(0), &
+                int(writer%all_columns(idx)%col_size, kind=c_long_long), int(item_len, kind=c_long_long))
+        end if
+    end subroutine parquet_resolve_or_check_array_size
     !> Every column in a file must have the same number of rows (Arrow/Parquet
     !> requirement). Called by every parquet_write_column variant with that
     !> call's own row count: the first call for a given writer fixes the
@@ -488,12 +551,15 @@ contains
                 ! is only ever populated by parquet_parse_maml (object or file form), and both of
                 ! those forms unconditionally also set schema%metadata%source_maml_lines -- so by the
                 ! time a schema safely reaches this point, source_maml_lines is already allocated.
-                block
-                    character(len=:), allocatable :: sidecar_lines(:)
-                    sidecar_lines = schema%metadata%source_maml_lines
-                    call parquet_prune_disabled_fields(sidecar_lines, schema%cinfo)
-                    call parquet_write_maml_sidecar(filename, sidecar_lines)
-                end block
+                !
+                ! The sidecar file itself is not written here: a col_size:/array_size: auto field
+                ! may still be unresolved at this point (resolved later, at first write, or via
+                ! schema%set_col_size/%set_array_size) -- writing now could bake in a stale "auto"
+                ! that no longer matches the .parquet file's actual columns. parquet_close_writer
+                ! writes it instead, once every column is guaranteed resolved.
+                writer%sidecar_lines = schema%metadata%source_maml_lines
+                call parquet_prune_disabled_fields(writer%sidecar_lines, schema%cinfo)
+                writer%write_maml_requested = .true.
             end if
         end if
     end procedure parquet_open_writer
@@ -609,6 +675,128 @@ contains
 
         call move_alloc(new_lines, lines)
     end subroutine parquet_prune_disabled_fields
+    !> Rewrites every surviving field block's col_size:/array_size: value (if present) in `lines`
+    !> (a working copy of a write_maml=.true. sidecar's source lines, already pruned of disabled
+    !> fields by parquet_prune_disabled_fields) to `all_columns`' own final, fully-resolved
+    !> value -- so a col_size: auto/array_size: auto placeholder in the original MAML source
+    !> becomes the concrete number actually written to the .parquet file, matched by output_name
+    !> the same way parquet_prune_disabled_fields matches field blocks to columns. Called by
+    !> parquet_close_writer, once every enabled column's col_size/array_size is guaranteed
+    !> resolved (parquet_close_writer's own missing-write check already ensures every enabled
+    !> column was written at least once). A no-op for a column whose source never declared
+    !> col_size:/array_size: at all (nothing to rewrite -- the implicit default of 1 already
+    !> matches). Reallocates `lines` to a longer fixed element length up front if needed, since a
+    !> resolved value's text (e.g. "col_size: 2000000000") can be longer than the original
+    !> "col_size: auto"/blank line.
+    subroutine parquet_rewrite_resolved_sizes(lines, all_columns)
+        character(len=:), allocatable, intent(inout) :: lines(:) !! working copy of sidecar MAML lines, rewritten in place.
+        type(parquet_column_type), intent(in) :: all_columns(:) !! writer's final, fully-resolved column state.
+        character(len=:), allocatable :: tline, key, cvalue, field_name, scratch_str, new_text
+        character(len=:), allocatable :: new_lines(:)
+        integer :: i, j, k, n, idx_fields, block_start, block_end, col_idx, newlen
+        character(len=32) :: numbuf
+
+        if (size(all_columns) == 0) return
+
+        n = size(lines)
+        idx_fields = 0
+        do i = 1, n
+            if (lines(i)(1:1) /= " " .and. trim(adjustl(lines(i))) == "fields:") then
+                idx_fields = i
+                exit
+            end if
+        end do
+        if (idx_fields == 0) return
+
+        ! Room for the longest possible "  array_size: <10-digit int>" replacement text, so no
+        ! rewritten line below is ever truncated by a too-short fixed element length.
+        newlen = max(len(lines), 30)
+        if (newlen > len(lines)) then
+            allocate(character(len=newlen) :: new_lines(n))
+            do i = 1, n
+                new_lines(i) = lines(i)
+            end do
+            call move_alloc(new_lines, lines)
+        end if
+
+        i = idx_fields + 1
+        do while (i <= n)
+            if (len_trim(lines(i)) == 0) then
+                i = i + 1
+                cycle
+            end if
+
+            if (lines(i)(1:1) /= " " .and. index(trim(adjustl(lines(i))), "-") /= 1) exit
+
+            if (lines(i)(1:1) /= " ") then
+                block_start = i
+                block_end = i
+                j = i + 1
+                do while (j <= n)
+                    if (len_trim(lines(j)) == 0) exit
+                    if (lines(j)(1:1) /= " ") exit
+                    block_end = j
+                    j = j + 1
+                end do
+
+                field_name = ""
+                do k = block_start, block_end
+                    if (k == block_start) then
+                        tline = trim(adjustl(lines(k)))
+                        tline = trim(adjustl(tline(2:)))
+                        if (len_trim(tline) == 0) cycle
+                    else
+                        tline = trim(adjustl(lines(k)))
+                    end if
+                    call parquet_split_key_value(tline, key, cvalue)
+                    if (len_trim(key) == 0) cycle
+                    call parquet_to_lower(trim(key), scratch_str)
+                    if (scratch_str == "name") then
+                        call parquet_unquote(cvalue, field_name)
+                        exit
+                    end if
+                end do
+
+                col_idx = 0
+                if (len_trim(field_name) > 0) then
+                    do k = 1, size(all_columns)
+                        call parquet_column_output_name(all_columns(k), scratch_str)
+                        if (trim(scratch_str) == trim(field_name)) then
+                            col_idx = k
+                            exit
+                        end if
+                    end do
+                end if
+
+                if (col_idx > 0) then
+                    do k = block_start, block_end
+                        tline = trim(adjustl(lines(k)))
+                        if (k == block_start) then
+                            tline = trim(adjustl(tline(2:)))
+                            if (len_trim(tline) == 0) cycle
+                        end if
+                        call parquet_split_key_value(tline, key, cvalue)
+                        if (len_trim(key) == 0) cycle
+                        call parquet_to_lower(trim(key), scratch_str)
+                        if (scratch_str == "col_size") then
+                            write(numbuf, '(I0)') all_columns(col_idx)%col_size
+                            new_text = "  col_size: " // trim(numbuf)
+                            lines(k) = new_text
+                        else if (scratch_str == "array_size") then
+                            write(numbuf, '(I0)') all_columns(col_idx)%array_size
+                            new_text = "  array_size: " // trim(numbuf)
+                            lines(k) = new_text
+                        end if
+                    end do
+                end if
+
+                i = block_end + 1
+                cycle
+            end if
+
+            i = i + 1
+        end do
+    end subroutine parquet_rewrite_resolved_sizes
     !> Writes `lines` to a sidecar .maml file next to `parquet_filename`: the same
     !> path with a trailing ".parquet" replaced by ".maml", or ".maml" appended if
     !> there is no ".parquet" suffix.
@@ -952,6 +1140,14 @@ contains
         end if
 
         call close_parquet_writer(writer%handle)
+
+        if (writer%write_maml_requested) then
+            call parquet_rewrite_resolved_sizes(writer%sidecar_lines, writer%all_columns)
+            call parquet_write_maml_sidecar(writer%filename, writer%sidecar_lines)
+            deallocate(writer%sidecar_lines)
+            writer%write_maml_requested = .false.
+        end if
+
         writer%handle = c_null_ptr
         if (allocated(writer%all_columns)) deallocate(writer%all_columns)
         if (allocated(writer%write_counts)) deallocate(writer%write_counts)

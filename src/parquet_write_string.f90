@@ -199,6 +199,7 @@ contains
             trim(name) // ctx
 
         if (writer%is_schema_enforced) then
+            call parquet_resolve_or_check_array_size(writer, name, idx, len(values(1)))
             max_string_len = max(1, writer%all_columns(idx)%array_size)
             max_item_len = maxval([(len_trim(values(i)), i=1_int64,nitems)])
             if (max_item_len > max_string_len) then
@@ -278,10 +279,9 @@ contains
             if (idx == 0) error stop &
                 "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // ctx
             if (.not. writer%all_columns(idx)%is_set) return
-            if (writer%all_columns(idx)%col_size /= asize) then
-                error stop "parquet_write_column: array size mismatch for column " // trim(name)
-            end if
+            call parquet_resolve_or_check_col_size(writer, name, idx, asize, "parquet_write_column")
 
+            call parquet_resolve_or_check_array_size(writer, name, idx, len(values(1, 1)))
             max_string_len = max(1, writer%all_columns(idx)%array_size)
             max_item_len = maxval(len_trim(values))
             if (max_item_len > max_string_len) then
@@ -443,6 +443,7 @@ contains
             trim(name) // ctx
 
         if (writer%is_schema_enforced) then
+            call parquet_resolve_or_check_array_size(writer, name, idx, len(values(1)))
             max_string_len = max(1, writer%all_columns(idx)%array_size)
             max_item_len = maxval([(len_trim(values(i)), i=1_int64,nitems)])
             if (max_item_len > max_string_len) then
@@ -523,10 +524,9 @@ contains
                 "parquet_write_column_chunk: column not defined in parquet_open_writer: " // &
                 trim(name) // ctx
             if (.not. writer%all_columns(idx)%is_set) return
-            if (writer%all_columns(idx)%col_size /= asize) then
-                error stop "parquet_write_column_chunk: array size mismatch for column " // trim(name)
-            end if
+            call parquet_resolve_or_check_col_size(writer, name, idx, asize, "parquet_write_column_chunk")
 
+            call parquet_resolve_or_check_array_size(writer, name, idx, len(values(1, 1)))
             max_string_len = max(1, writer%all_columns(idx)%array_size)
             max_item_len = maxval(len_trim(values))
             if (max_item_len > max_string_len) then

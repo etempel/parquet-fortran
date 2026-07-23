@@ -707,6 +707,14 @@ contains
         call this%cinfo%set_column_unavailable(name)
     end procedure set_column_unavailable
 
+    module procedure schema_set_col_size
+        call this%cinfo%set_col_size(name, col_size, force)
+    end procedure schema_set_col_size
+
+    module procedure schema_set_array_size
+        call this%cinfo%set_array_size(name, array_size, force)
+    end procedure schema_set_array_size
+
     module procedure schema_get_column_index
         schema_get_column_index = this%cinfo%get_column_index(name)
     end procedure schema_get_column_index
@@ -1023,7 +1031,7 @@ contains
         integer :: ios, n, i, j, list_item_idx, doi_idx, depends_idx
         character(len=32) :: idx_buf
         character(len=:), allocatable :: tlo2, tlo3, tlo8, tlo9, tlo12, tlo17, tlo27, tlo28, tlo29, tlo30, &
-            tlo33, tlo34, tlo37, tlo41 !! scratch (to_lower).
+            tlo33, tlo34, tlo37, tlo41, tlo42, tlo43 !! scratch (to_lower).
         character(len=:), allocatable :: tuq1, tuq4, tuq5, tuq6, tuq7, tuq10, tuq11, tuq13, tuq14, tuq15, &
             tuq16, tuq18, tuq19, tuq20, tuq21, tuq22, tuq23, tuq24, tuq25, tuq26, tuq31, tuq32, tuq35, tuq36, &
             tuq38, tuq39, tuq40 !! scratch (unquote).
@@ -1387,11 +1395,29 @@ contains
                     end if
                 end if
             case ("array_size")
-                read(cvalue, *, iostat=ios) tmp(n)%array_size
-                if (ios /= 0) tmp(n)%array_size = 1
+                if (len_trim(cvalue) == 0) then
+                    tmp(n)%array_size = 1
+                else
+                    call parquet_to_lower(trim(adjustl(cvalue)), tlo42)
+                    if (trim(tlo42) == "auto") then
+                        tmp(n)%array_size = parquet_size_auto
+                    else
+                        read(cvalue, *, iostat=ios) tmp(n)%array_size
+                        if (ios /= 0 .or. tmp(n)%array_size <= 0) tmp(n)%array_size = size_invalid_sentinel
+                    end if
+                end if
             case ("col_size")
-                read(cvalue, *, iostat=ios) tmp(n)%col_size
-                if (ios /= 0) tmp(n)%col_size = 1
+                if (len_trim(cvalue) == 0) then
+                    tmp(n)%col_size = 1
+                else
+                    call parquet_to_lower(trim(adjustl(cvalue)), tlo43)
+                    if (trim(tlo43) == "auto") then
+                        tmp(n)%col_size = parquet_size_auto
+                    else
+                        read(cvalue, *, iostat=ios) tmp(n)%col_size
+                        if (ios /= 0 .or. tmp(n)%col_size <= 0) tmp(n)%col_size = size_invalid_sentinel
+                    end if
+                end if
             case ("qc")
                 in_qc = .true.
             end select
@@ -1417,8 +1443,6 @@ contains
             if (.not. allocated(tmp(i)%unit)) tmp(i)%unit = ""
             if (.not. allocated(tmp(i)%info)) tmp(i)%info = ""
             if (.not. allocated(tmp(i)%ucd)) tmp(i)%ucd = ""
-            if (tmp(i)%array_size <= 0) tmp(i)%array_size = 1
-            if (tmp(i)%col_size <= 0) tmp(i)%col_size = 1
             tmp(i)%is_set = .true.
         end do
 

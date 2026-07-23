@@ -31,9 +31,7 @@ contains
             if (idx == 0) error stop &
                 "parquet_write_column: column not defined in parquet_open_writer: " // trim(name) // ctx
             if (.not. writer%all_columns(idx)%is_set) return
-            if (int(writer%all_columns(idx)%col_size, int64) /= asize) then
-                error stop "parquet_write_column: array size mismatch for column " // trim(name) // ctx
-            end if
+            call parquet_resolve_or_check_col_size(writer, name, idx, asize, "parquet_write_column", ctx)
             if (trim(writer%all_columns(idx)%data_type) /= expected_type) then
                 error stop "parquet_write_column: type mismatch for column " // trim(name) // &
                     " (expected " // expected_type // ", got " // trim(writer%all_columns(idx)%data_type) // ")" // ctx
@@ -229,9 +227,7 @@ contains
             if (idx == 0) error stop &
                 "parquet_write_column_chunk: column not defined in parquet_open_writer: " // trim(name) // ctx
             if (.not. writer%all_columns(idx)%is_set) return
-            if (int(writer%all_columns(idx)%col_size, int64) /= asize) then
-                error stop "parquet_write_column_chunk: array size mismatch for column " // trim(name) // ctx
-            end if
+            call parquet_resolve_or_check_col_size(writer, name, idx, asize, "parquet_write_column_chunk", ctx)
             if (trim(writer%all_columns(idx)%data_type) /= expected_type) then
                 error stop "parquet_write_column_chunk: type mismatch for column " // trim(name) // &
                     " (expected " // expected_type // ", got " // trim(writer%all_columns(idx)%data_type) // ")" // ctx

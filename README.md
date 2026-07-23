@@ -174,7 +174,7 @@ A quick index of the public `use parquet` API. For the full per-procedure refere
 
 **Utility:** `parquet_get_version`, `parquet_set_max_threads`
 
-**MAML and metadata:** `parquet_parse_maml`, `parquet_load_maml_file`, `parquet_load_qc_maml_file`, `parquet_validate_maml`, `parquet_validate_user_maml` — plus the `parquet_schema` type-bound builders `schema%init` / `schema%is_init` / `schema%clear`, `schema%add_field`, `schema%add_metadata` / `schema%clear_metadata`, `schema%add_col_qc` / `schema%set_col_qc`, `schema%set_column_available` / `set_column_unavailable`, `schema%get_column_index` / `get_num_fields` / `get_field_name`, `schema%print_schema_info`
+**MAML and metadata:** `parquet_parse_maml`, `parquet_load_maml_file`, `parquet_load_qc_maml_file`, `parquet_validate_maml`, `parquet_validate_user_maml`, `parquet_size_auto` — plus the `parquet_schema` type-bound builders `schema%init` / `schema%is_init` / `schema%clear`, `schema%add_field`, `schema%add_metadata` / `schema%clear_metadata`, `schema%add_col_qc` / `schema%set_col_qc`, `schema%set_column_available` / `set_column_unavailable`, `schema%set_col_size` / `set_array_size`, `schema%get_column_index` / `get_num_fields` / `get_field_name`, `schema%print_schema_info`
 
 **Writer:** `parquet_open_writer`, `parquet_write_column`, `parquet_close_writer`, `parquet_get_chunk_size`
 

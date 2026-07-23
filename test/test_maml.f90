@@ -116,7 +116,22 @@ contains
             new_unittest("schema%clear on an already-blank schema is a no-op", &
                 test_schema_clear_noop_on_blank_schema), &
             new_unittest("schema%clear then a plain %init makes the variable reusable", &
-                test_schema_clear_then_reinit_reusable) &
+                test_schema_clear_then_reinit_reusable), &
+            new_unittest("col_size: auto/array_size: auto parse to an unresolved, still-valid state", &
+                test_parse_col_size_array_size_auto_ok), &
+            new_unittest("a malformed col_size: value aborts", test_col_size_malformed_value_aborts), &
+            new_unittest("a malformed array_size: value aborts", test_array_size_malformed_value_aborts), &
+            new_unittest("array_size: auto on a non-string column aborts", &
+                test_array_size_auto_on_non_string_aborts), &
+            new_unittest("set_col_size resolves an 'auto' column", test_set_col_size_resolves_auto), &
+            new_unittest("set_col_size with a non-positive value aborts", test_set_col_size_non_positive_aborts), &
+            new_unittest("set_col_size on an already-resolved column aborts without force=.true.", &
+                test_set_col_size_already_resolved_no_force_aborts), &
+            new_unittest("set_col_size(force=.true.) overrides an already-resolved column", &
+                test_set_col_size_force_overrides), &
+            new_unittest("set_array_size resolves an 'auto' string column", test_set_array_size_resolves_auto), &
+            new_unittest("set_array_size on a non-string column aborts", &
+                test_set_array_size_non_string_column_aborts) &
             ]
     end subroutine collect_tests_parquet_maml
 
@@ -1234,5 +1249,135 @@ contains
         call check(error, size(schema%cinfo%col) == 1 .and. trim(schema%cinfo%col(1)%name) == "new_field", &
             "after %clear + a plain %init, only 'new_field' should be a declared column")
     end subroutine test_schema_clear_then_reinit_reusable
+
+    !> col_size: auto/array_size: auto (case-insensitive) parse cleanly (parquet_validate_maml
+    !> does not reject them) to parquet_size_auto -- a genuinely unresolved, not-yet-usable-for-
+    !> writing state, distinct from the "not specified" blank-value default of 1.
+    subroutine test_parse_col_size_array_size_auto_ok(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+
+        schema%maml%name = "col_size_array_size_auto.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: col_size_array_size_auto_table", &
+            "fields:", &
+            "- name: vec", &
+            "  data_type: int32", &
+            "  col_size: AUTO", &
+            "- name: txt", &
+            "  data_type: string", &
+            "  array_size: Auto" ]
+
+        call parquet_parse_maml(schema)
+
+        call check(error, schema%cinfo%col(1)%col_size == parquet_size_auto, &
+            "col_size: AUTO did not parse to parquet_size_auto")
+        if (allocated(error)) return
+        call check(error, schema%cinfo%col(2)%array_size == parquet_size_auto, &
+            "array_size: Auto did not parse to parquet_size_auto")
+    end subroutine test_parse_col_size_array_size_auto_ok
+
+    subroutine test_col_size_malformed_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "col_size_malformed_value", expect_abort=.true., &
+            failure_message="a malformed col_size value should abort", &
+            required_stderr="has an invalid col_size")
+    end subroutine test_col_size_malformed_value_aborts
+
+    subroutine test_array_size_malformed_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "array_size_malformed_value", expect_abort=.true., &
+            failure_message="a malformed array_size value should abort", &
+            required_stderr="has an invalid array_size")
+    end subroutine test_array_size_malformed_value_aborts
+
+    subroutine test_array_size_auto_on_non_string_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "array_size_auto_on_non_string", expect_abort=.true., &
+            failure_message="array_size: auto on a non-string column should abort", &
+            required_stderr="only applies to string columns")
+    end subroutine test_array_size_auto_on_non_string_aborts
+
+    !> schema%set_col_size resolves an "auto" column's col_size, and that resolution is a plain
+    !> in-memory schema mutation -- no write/parse involved, so this runs in-process.
+    subroutine test_set_col_size_resolves_auto(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+
+        schema%maml%name = "set_col_size_resolves_auto.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: set_col_size_resolves_auto_table", &
+            "fields:", &
+            "- name: vec", &
+            "  data_type: int32", &
+            "  col_size: auto" ]
+        call parquet_parse_maml(schema)
+
+        call schema%set_col_size("vec", 4)
+        call check(error, schema%cinfo%col(1)%col_size == 4, &
+            "set_col_size did not resolve the 'auto' col_size to the requested value")
+    end subroutine test_set_col_size_resolves_auto
+
+    subroutine test_set_col_size_non_positive_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "set_col_size_non_positive", expect_abort=.true., &
+            failure_message="set_col_size with a non-positive value should abort", &
+            required_stderr="must be a positive integer")
+    end subroutine test_set_col_size_non_positive_aborts
+
+    subroutine test_set_col_size_already_resolved_no_force_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "set_col_size_already_resolved_no_force", &
+            expect_abort=.true., &
+            failure_message="set_col_size on an already-resolved column should abort without force=.true.", &
+            required_stderr="pass force=.true. to override")
+    end subroutine test_set_col_size_already_resolved_no_force_aborts
+
+    !> force=.true. is the one path that lets set_col_size override an already-resolved (not
+    !> "auto") col_size -- in-process, since nothing here aborts.
+    subroutine test_set_col_size_force_overrides(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+
+        call schema%init(table="set_col_size_force_table")
+        call schema%add_field("vec", "int32", col_size=3)
+        call parquet_parse_maml(schema)
+
+        call schema%set_col_size("vec", 7, force=.true.)
+        call check(error, schema%cinfo%col(1)%col_size == 7, &
+            "set_col_size(force=.true.) did not override the already-resolved col_size")
+    end subroutine test_set_col_size_force_overrides
+
+    !> schema%set_array_size resolves an "auto" string column's array_size.
+    subroutine test_set_array_size_resolves_auto(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+
+        schema%maml%name = "set_array_size_resolves_auto.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: set_array_size_resolves_auto_table", &
+            "fields:", &
+            "- name: txt", &
+            "  data_type: string", &
+            "  array_size: auto" ]
+        call parquet_parse_maml(schema)
+
+        call schema%set_array_size("txt", 20)
+        call check(error, schema%cinfo%col(1)%array_size == 20, &
+            "set_array_size did not resolve the 'auto' array_size to the requested value")
+    end subroutine test_set_array_size_resolves_auto
+
+    subroutine test_set_array_size_non_string_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "set_array_size_non_string_column", expect_abort=.true., &
+            failure_message="set_array_size on a non-string column should abort", &
+            required_stderr="not a string column")
+    end subroutine test_set_array_size_non_string_column_aborts
     !
 end module test_maml

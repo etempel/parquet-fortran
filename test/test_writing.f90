@@ -228,7 +228,17 @@ contains
             new_unittest("parquet_write_row_mask compacts a masked parquet_date/time/timestamp write", &
                 test_mask_row_mask_temporal), &
             new_unittest("parquet_write_row_mask compacts a masked parquet_string_column (compact) write", &
-                test_mask_row_mask_string_column_compact) &
+                test_mask_row_mask_string_column_compact), &
+            new_unittest("a matrix write auto-resolves a col_size: auto column from the data's own shape", &
+                test_matrix_write_col_size_auto_resolves), &
+            new_unittest("a chunked matrix write auto-resolves col_size: auto on its first chunk", &
+                test_matrix_chunk_col_size_auto_resolves), &
+            new_unittest("a string matrix write auto-resolves an array_size: auto column", &
+                test_string_matrix_array_size_auto_resolves), &
+            new_unittest("write_maml=.true. rewrites a resolved col_size: auto into the sidecar's actual value", &
+                test_write_maml_sidecar_resolves_auto_col_size), &
+            new_unittest("a flat (1-D) write on a still-'auto' col_size column aborts", &
+                test_flat_write_col_size_still_auto_aborts) &
             ]
         !
     end subroutine collect_tests_parquet_writing
@@ -3912,5 +3922,177 @@ contains
         if (allocated(error)) return
         call check(error, back%is_null(2), "masked compact string write: row 2 should be the un-masked Null (was row 3)")
     end subroutine test_mask_row_mask_string_column_compact
+
+    !> A schema declaring col_size: auto leaves col_size unresolved until either
+    !> schema%set_col_size is called or a matrix-form write resolves it automatically from the
+    !> data's own shape (size(values,1)) -- this test exercises the latter: no set_col_size call
+    !> at all, just a plain matrix write, and the resulting file must still have the correct
+    !> (resolved) col_size and content.
+    subroutine test_matrix_write_col_size_auto_resolves(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: vec_values(3, 4), vec_back(3, 4)
+        integer :: col_size_back, i
+        character(len=*), parameter :: out_file = "test_run/test_col_size_auto_matrix.parquet"
+
+        vec_values = reshape([(i, i=1,12)], [3, 4])
+
+        schema%maml%name = "col_size_auto_matrix.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: col_size_auto_matrix_table", &
+            "fields:", &
+            "- name: vec", &
+            "  data_type: int32", &
+            "  col_size: auto" ]
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "vec", vec_values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_col_size(reader, "vec", col_size_back)
+        call parquet_read_column(reader, "vec", vec_back)
+        call parquet_close_reader(reader)
+
+        call check(error, col_size_back == 3, &
+            "expected col_size: auto to resolve to 3 (the matrix write's own first-dimension size)")
+        if (allocated(error)) return
+        call check(error, all(vec_back == vec_values), &
+            "auto-resolved matrix column did not round-trip its written values correctly")
+    end subroutine test_matrix_write_col_size_auto_resolves
+
+    !> Same as test_matrix_write_col_size_auto_resolves, but via the streaming row-group API:
+    !> col_size resolves on the first chunk, and the second chunk (a different call, same
+    !> column) must still be accepted since it shares the same first-dimension size.
+    subroutine test_matrix_chunk_col_size_auto_resolves(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: vec_values(2, 5), vec_back(2, 5)
+        integer :: col_size_back, i
+        character(len=*), parameter :: out_file = "test_run/test_col_size_auto_chunk.parquet"
+
+        vec_values = reshape([(i, i=1,10)], [2, 5])
+
+        schema%maml%name = "col_size_auto_chunk.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: col_size_auto_chunk_table", &
+            "fields:", &
+            "- name: vec", &
+            "  data_type: int32", &
+            "  col_size: auto" ]
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+
+        call parquet_new_row_group(writer, 3)
+        call parquet_write_column_chunk(writer, "vec", vec_values(:, 1:3))
+        call parquet_finish_row_group(writer)
+
+        call parquet_new_row_group(writer, 2)
+        call parquet_write_column_chunk(writer, "vec", vec_values(:, 4:5))
+        call parquet_finish_row_group(writer)
+
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_col_size(reader, "vec", col_size_back)
+        call parquet_read_column(reader, "vec", vec_back)
+        call parquet_close_reader(reader)
+
+        call check(error, col_size_back == 2, &
+            "expected col_size: auto to resolve to 2 (the first chunk's own first-dimension size)")
+        if (allocated(error)) return
+        call check(error, all(vec_back == vec_values), &
+            "auto-resolved chunked matrix column did not round-trip its written values correctly")
+    end subroutine test_matrix_chunk_col_size_auto_resolves
+
+    !> array_size: auto resolves to the caller's own declared Fortran character length
+    !> (len(values(1,1))) at the first string matrix write -- a structural property of the call,
+    !> not derived from actual string content, mirroring col_size's own shape-derived resolution.
+    !> The proof this resolved correctly (rather than silently truncating to some smaller
+    !> default): "ghijkl", the longest value at exactly 6 characters (len(txt_values(1,1))),
+    !> round-trips without truncation.
+    subroutine test_string_matrix_array_size_auto_resolves(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=6) :: txt_values(2, 3), txt_back(2, 3)
+        character(len=*), parameter :: out_file = "test_run/test_array_size_auto_matrix.parquet"
+
+        txt_values = reshape(["ab    ", "cde   ", "f     ", "ghijkl", "m     ", "no    "], [2, 3])
+
+        schema%maml%name = "array_size_auto_matrix.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: array_size_auto_matrix_table", &
+            "fields:", &
+            "- name: txt", &
+            "  data_type: string", &
+            "  col_size: 2", &
+            "  array_size: auto" ]
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "txt", txt_values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "txt", txt_back)
+        call parquet_close_reader(reader)
+
+        call check(error, all(txt_back == txt_values), &
+            "auto-resolved array_size did not round-trip its written values correctly " // &
+            "(the longest value, 'ghijkl', would be the first to show truncation)")
+    end subroutine test_string_matrix_array_size_auto_resolves
+
+    !> Same schema as test_matrix_write_col_size_auto_resolves, but with write_maml=.true.: the
+    !> sidecar .maml written at parquet_close_writer time must show the RESOLVED col_size (3),
+    !> not the original "col_size: auto" placeholder text, since the sidecar is meant to describe
+    !> what was actually written to the .parquet file.
+    subroutine test_write_maml_sidecar_resolves_auto_col_size(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema, sidecar_schema
+        type(parquet_writer) :: writer
+        integer(int32) :: vec_values(3, 2)
+        logical :: exists
+        character(len=*), parameter :: out_file = "test_run/test_col_size_auto_sidecar.parquet"
+        character(len=*), parameter :: sidecar_file = "test_run/test_col_size_auto_sidecar.maml"
+
+        vec_values = reshape([1,2,3,4,5,6], [3, 2])
+
+        schema%maml%name = "col_size_auto_sidecar.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: col_size_auto_sidecar_table", &
+            "fields:", &
+            "- name: vec", &
+            "  data_type: int32", &
+            "  col_size: auto" ]
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema, write_maml=.true.)
+        call parquet_write_column(writer, "vec", vec_values)
+        call parquet_close_writer(writer)
+
+        inquire(file=sidecar_file, exist=exists)
+        call check(error, exists, "write_maml=.true. did not create the expected sidecar .maml file")
+        if (allocated(error)) return
+
+        call parquet_parse_maml(sidecar_file, sidecar_schema)
+        call check(error, sidecar_schema%cinfo%col(1)%col_size == 3, &
+            "expected the sidecar .maml's col_size: to reflect the resolved value (3), not 'auto'")
+    end subroutine test_write_maml_sidecar_resolves_auto_col_size
+
+    subroutine test_flat_write_col_size_still_auto_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "flat_write_col_size_still_auto", expect_abort=.true., &
+            failure_message="a flat write on a still-'auto' col_size column should abort", &
+            required_stderr="is still 'auto'")
+    end subroutine test_flat_write_col_size_still_auto_aborts
     !
 end module test_writing

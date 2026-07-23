@@ -561,6 +561,19 @@ contains
                         trim(cinfo%col(i)%data_type) // "'; "
                 end if
 
+                if (cinfo%col(i)%col_size == size_invalid_sentinel) then
+                    errors = errors // "field '" // cur_name // &
+                        "' has an invalid col_size (must be a positive integer or 'auto'); "
+                end if
+                if (cinfo%col(i)%array_size == size_invalid_sentinel) then
+                    errors = errors // "field '" // cur_name // &
+                        "' has an invalid array_size (must be a positive integer or 'auto'); "
+                end if
+                if (cinfo%col(i)%array_size == parquet_size_auto .and. trim(cinfo%col(i)%data_type) /= "string") then
+                    errors = errors // "field '" // cur_name // &
+                        "' declares array_size: auto, which only applies to string columns; "
+                end if
+
                 ! qc: is not supported for temporal (date/time/timestamp) columns yet -- reject
                 ! it with a clear message rather than silently ignoring a declared bound.
                 select case (trim(cinfo%col(i)%data_type))

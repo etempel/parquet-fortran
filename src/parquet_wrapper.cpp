@@ -5979,6 +5979,28 @@ extern "C"
 		}
 	}
 
+	// Updates an already-declared column's col_size/array_size in place -- called by the Fortran
+	// write path the first time a MAML col_size: auto/array_size: auto placeholder is resolved
+	// from an actual write call's own data shape (see parquet_resolve_or_check_col_size/
+	// parquet_resolve_or_check_array_size, parquet_write.f90), so every later consumer of
+	// column_metadata (estimate_chunk_size_from_schema, build_file_metadata's VOTable/KV
+	// column.*.col_size/array_size text) sees the resolved value rather than the placeholder.
+	// A no-op if `name` isn't found -- should never happen for a schema-enforced writer's own
+	// declared column.
+	void parquet_update_column_metadata_size(void *handle, const char *name, int64_t col_size, int64_t array_size)
+	{
+		auto writer_handle = as_handle(handle);
+		for (auto &col : writer_handle->column_metadata)
+		{
+			if (col.name == name)
+			{
+				col.col_size = col_size;
+				col.array_size = array_size;
+				return;
+			}
+		}
+	}
+
 	// Adds one flat key-value table metadata entry to `handle`.
 	void parquet_add_table_metadata(void *handle, const char *key, const char *value, const char *description)
 	{

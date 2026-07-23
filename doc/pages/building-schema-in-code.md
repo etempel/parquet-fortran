@@ -12,6 +12,8 @@ A `parquet_schema` normally comes from a MAML file (via `parquet_parse_maml`), b
 
 Both `%init` and `%add_field` build the schema's underlying MAML text, so you still call `parquet_parse_maml(schema)` afterwards to populate `schema%cinfo`/`schema%metadata` before writing, exactly as for a schema loaded from disk. List-shaped top-level sections (`coauthors:`, `comments:`, `keyarray:`, `extra:`, ...) are out of scope for `%init`: use `%add_metadata` for `keyarray:`-style entries, or author a `.maml` file for the rest.
 
+`%add_field`'s `col_size`/`array_size` arguments always take a concrete positive integer — there's no in-code equivalent of MAML's `col_size: auto`/`array_size: auto` for a from-scratch schema. If a column's width is only known later, resolve it after `parquet_parse_maml` with `schema%set_col_size(name, col_size)`/`schema%set_array_size(name, array_size)` (both also work on a schema loaded from a `.maml` file that *does* declare `auto` — see [Deferring col_size/array_size until write time with `auto`](maml-format.html#deferring-col_sizearray_size-until-write-time-with-auto) for the full picture, including automatic resolution from a matrix write's own data shape).
+
 The file form, `parquet_parse_maml(filename, schema)`, has the same "not already initialized" requirement as `%init` (and no `force=` option): loading a `.maml` file into a `schema` that is already initialized — via `%init` or an earlier parse — fails with `error stop`, rather than silently discarding whatever `schema` held before. Call `schema%clear()` first to reuse the same variable for a different file.
 
 ## Runtime table metadata: schema%add_metadata and schema%clear_metadata

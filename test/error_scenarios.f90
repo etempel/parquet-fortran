@@ -722,6 +722,42 @@ program error_scenarios
         call scenario_temporal_ts_to_string_null()
     case ("temporal_ts_lt_null")
         call scenario_temporal_ts_lt_null()
+    case ("temporal_date_diff_null")
+        call scenario_temporal_date_diff_null()
+    case ("temporal_date_offset_null")
+        call scenario_temporal_date_offset_null()
+    case ("temporal_date_offset_out_of_range")
+        call scenario_temporal_date_offset_out_of_range()
+    case ("temporal_date_offset_int64_overflow_positive")
+        call scenario_temporal_date_offset_int64_overflow_positive()
+    case ("temporal_date_offset_int64_overflow_negative")
+        call scenario_temporal_date_offset_int64_overflow_negative()
+    case ("temporal_date_sub_int64_min")
+        call scenario_temporal_date_sub_int64_min()
+    case ("temporal_time_diff_null")
+        call scenario_temporal_time_diff_null()
+    case ("temporal_time_offset_null")
+        call scenario_temporal_time_offset_null()
+    case ("temporal_time_offset_magnitude_add")
+        call scenario_temporal_time_offset_magnitude_add()
+    case ("temporal_time_offset_magnitude_sub")
+        call scenario_temporal_time_offset_magnitude_sub()
+    case ("temporal_ts_diff_ns_null")
+        call scenario_temporal_ts_diff_ns_null()
+    case ("temporal_ts_diff_ns_overflow")
+        call scenario_temporal_ts_diff_ns_overflow()
+    case ("temporal_ts_diff_seconds_null")
+        call scenario_temporal_ts_diff_seconds_null()
+    case ("temporal_ts_offset_null")
+        call scenario_temporal_ts_offset_null()
+    case ("temporal_ts_offset_ns_overflow")
+        call scenario_temporal_ts_offset_ns_overflow()
+    case ("temporal_ts_offset_seconds_overflow_positive")
+        call scenario_temporal_ts_offset_seconds_overflow_positive()
+    case ("temporal_ts_offset_seconds_overflow_negative")
+        call scenario_temporal_ts_offset_seconds_overflow_negative()
+    case ("temporal_ts_sub_int64_min")
+        call scenario_temporal_ts_sub_int64_min()
     case ("temporal_write_column_not_defined")
         call scenario_temporal_write_column_not_defined()
     case ("temporal_write_array_size_mismatch")
@@ -6493,6 +6529,168 @@ contains
         res = a < b   ! null operand -> aborts
         print '(a,l1)', "unexpectedly compared against a null timestamp: ", res
     end subroutine scenario_temporal_ts_lt_null
+
+    !> parquet_date: operator(-) between two dates with a null operand aborts.
+    subroutine scenario_temporal_date_diff_null()
+        type(parquet_date) :: a, b
+        integer(int64) :: n
+        call a%set(2024, 7, 16)   ! b stays null
+        n = a - b   ! null operand -> aborts
+        print '(a,i0)', "unexpectedly diffed against a null date: ", n
+    end subroutine scenario_temporal_date_diff_null
+
+    !> parquet_date: day-offset operator(+) with a null operand aborts.
+    subroutine scenario_temporal_date_offset_null()
+        type(parquet_date) :: d, c   ! d stays null
+        c = d + 1_int32   ! null operand -> aborts
+        print '(a,i0)', "unexpectedly shifted a null date, raw = ", c%raw()
+    end subroutine scenario_temporal_date_offset_null
+
+    !> parquet_date: day-offset arithmetic whose result falls outside the representable
+    !> +-5.8 million year range aborts (the domain range check, not the int64-safety guards).
+    subroutine scenario_temporal_date_offset_out_of_range()
+        type(parquet_date) :: d, c
+        call d%set_raw(0_int32)
+        c = d + (int(huge(0_int32), int64) + 1_int64)   ! one day beyond DATE_DAYS_MAX -> aborts
+        print '(a,i0)', "unexpectedly produced an out-of-range date, raw = ", c%raw()
+    end subroutine scenario_temporal_date_offset_out_of_range
+
+    !> parquet_date: a day offset whose magnitude would overflow the int64 addition itself
+    !> (self%days + delta), positive branch, aborts before the domain range check ever runs.
+    subroutine scenario_temporal_date_offset_int64_overflow_positive()
+        type(parquet_date) :: d, c
+        call d%set_raw(100_int32)
+        c = d + huge(0_int64)   ! self%days + delta would overflow int64 -> aborts
+        print '(a,i0)', "unexpectedly survived an int64-overflowing date offset, raw = ", c%raw()
+    end subroutine scenario_temporal_date_offset_int64_overflow_positive
+
+    !> parquet_date: same as above, negative branch (a large negative offset).
+    subroutine scenario_temporal_date_offset_int64_overflow_negative()
+        type(parquet_date) :: d, c
+        call d%set_raw(-100_int32)
+        c = d + (-huge(0_int64) - 1_int64)   ! self%days + delta would underflow int64 -> aborts
+        print '(a,i0)', "unexpectedly survived an int64-underflowing date offset, raw = ", c%raw()
+    end subroutine scenario_temporal_date_offset_int64_overflow_negative
+
+    !> parquet_date: operator(-) with an int64 offset of exactly INT64_MIN aborts up front
+    !> (negating it to reuse operator(+) would itself overflow int64).
+    subroutine scenario_temporal_date_sub_int64_min()
+        type(parquet_date) :: d, c
+        call d%set(2024, 7, 16)
+        c = d - (-huge(0_int64) - 1_int64)   ! n == INT64_MIN -> aborts
+        print '(a,i0)', "unexpectedly survived subtracting INT64_MIN from a date, raw = ", c%raw()
+    end subroutine scenario_temporal_date_sub_int64_min
+
+    !> parquet_time: operator(-) between two times with a null operand aborts.
+    subroutine scenario_temporal_time_diff_null()
+        type(parquet_time) :: a, b
+        integer(int64) :: n
+        call a%set(12, 0, 0)   ! b stays null
+        n = a - b   ! null operand -> aborts
+        print '(a,i0)', "unexpectedly diffed against a null time: ", n
+    end subroutine scenario_temporal_time_diff_null
+
+    !> parquet_time: ns-offset operator(+) with a null operand aborts.
+    subroutine scenario_temporal_time_offset_null()
+        type(parquet_time) :: t, c   ! t stays null
+        c = t + 1_int32   ! null operand -> aborts
+        print '(a,i0)', "unexpectedly shifted a null time, raw = ", c%raw()
+    end subroutine scenario_temporal_time_offset_null
+
+    !> parquet_time: operator(+) with an offset exceeding 24h of nanoseconds aborts.
+    subroutine scenario_temporal_time_offset_magnitude_add()
+        type(parquet_time) :: t, c
+        call t%set(12, 0, 0)
+        c = t + 86400000000001_int64   ! > 86400e9 ns -> aborts
+        print '(a,i0)', "unexpectedly survived a >24h time offset (+), raw = ", c%raw()
+    end subroutine scenario_temporal_time_offset_magnitude_add
+
+    !> parquet_time: operator(-) with an offset exceeding 24h of nanoseconds aborts (the guard
+    !> is checked on the raw, not-yet-negated input, so this is a distinct source line from the
+    !> operator(+) case above).
+    subroutine scenario_temporal_time_offset_magnitude_sub()
+        type(parquet_time) :: t, c
+        call t%set(12, 0, 0)
+        c = t - 86400000000001_int64   ! > 86400e9 ns -> aborts
+        print '(a,i0)', "unexpectedly survived a >24h time offset (-), raw = ", c%raw()
+    end subroutine scenario_temporal_time_offset_magnitude_sub
+
+    !> parquet_timestamp: operator(-) between two timestamps with a null operand aborts.
+    subroutine scenario_temporal_ts_diff_ns_null()
+        type(parquet_timestamp) :: a, b
+        integer(int64) :: n
+        call a%set(2024, 7, 16, 0, 0, 0)   ! b stays null
+        n = a - b   ! null operand -> aborts
+        print '(a,i0)', "unexpectedly diffed against a null timestamp: ", n
+    end subroutine scenario_temporal_ts_diff_ns_null
+
+    !> parquet_timestamp: operator(-) between two instants more than ~292.3 years apart aborts
+    !> (the elapsed time cannot be represented as an int64 nanosecond count).
+    subroutine scenario_temporal_ts_diff_ns_overflow()
+        type(parquet_timestamp) :: a, b
+        integer(int64) :: n
+        call a%set_raw(9223372036_int64, 0)
+        call b%set_raw(0_int64, 0)
+        n = a - b   ! elapsed time beyond ~292.3 years -> aborts
+        print '(a,i0)', "unexpectedly diffed two far-apart timestamps as ns: ", n
+    end subroutine scenario_temporal_ts_diff_ns_overflow
+
+    !> parquet_timestamp: diff_seconds with a null operand aborts (unlike operator(-), it never
+    !> aborts on magnitude -- only on a null operand).
+    subroutine scenario_temporal_ts_diff_seconds_null()
+        type(parquet_timestamp) :: a, b
+        real(real64) :: v
+        call a%set(2024, 7, 16, 0, 0, 0)   ! b stays null
+        v = a%diff_seconds(b)   ! null operand -> aborts
+        print '(a,f0.3)', "unexpectedly diffed against a null timestamp (seconds): ", v
+    end subroutine scenario_temporal_ts_diff_seconds_null
+
+    !> parquet_timestamp: ns-offset operator(+) with a null operand aborts.
+    subroutine scenario_temporal_ts_offset_null()
+        type(parquet_timestamp) :: ts, c   ! ts stays null
+        c = ts + 1_int32   ! null operand -> aborts
+        print '(a,i0)', "unexpectedly shifted a null timestamp, raw seconds = ", c%to_unix(parquet_unit_seconds)
+    end subroutine scenario_temporal_ts_offset_null
+
+    !> parquet_timestamp: an ns offset so large it would overflow the int64 addition of
+    !> self%nanoseconds + offset itself (before any carry into seconds) aborts.
+    subroutine scenario_temporal_ts_offset_ns_overflow()
+        type(parquet_timestamp) :: ts, c
+        call ts%set(2024, 7, 16, 0, 0, 0, 999999999)
+        c = ts + (huge(0_int64) - 500000000_int64)   ! nanoseconds + offset would overflow int64 -> aborts
+        print '(a,i0)', "unexpectedly survived an int64-overflowing ts ns offset, raw seconds = ", &
+            c%to_unix(parquet_unit_seconds)
+    end subroutine scenario_temporal_ts_offset_ns_overflow
+
+    !> parquet_timestamp: an ns offset that carries into a seconds value beyond int64 range
+    !> aborts (positive branch: self%seconds is near huge(int64) and the carry pushes it over).
+    subroutine scenario_temporal_ts_offset_seconds_overflow_positive()
+        type(parquet_timestamp) :: ts, c
+        call ts%set_raw(huge(0_int64) - 100_int64, 0)
+        c = ts + (huge(0_int64) - 500000000_int64)   ! seconds carry would overflow int64 -> aborts
+        print '(a,i0)', "unexpectedly survived an int64-overflowing ts seconds carry, raw seconds = ", &
+            c%to_unix(parquet_unit_seconds)
+    end subroutine scenario_temporal_ts_offset_seconds_overflow_positive
+
+    !> parquet_timestamp: same as above, negative branch (self%seconds is near INT64_MIN and a
+    !> large negative offset carries it under).
+    subroutine scenario_temporal_ts_offset_seconds_overflow_negative()
+        type(parquet_timestamp) :: ts, c
+        call ts%set_raw(-huge(0_int64) - 1_int64 + 100_int64, 0)
+        c = ts - (huge(0_int64) - 500000000_int64)   ! seconds carry would underflow int64 -> aborts
+        print '(a,i0)', "unexpectedly survived an int64-underflowing ts seconds carry, raw seconds = ", &
+            c%to_unix(parquet_unit_seconds)
+    end subroutine scenario_temporal_ts_offset_seconds_overflow_negative
+
+    !> parquet_timestamp: operator(-) with an int64 offset of exactly INT64_MIN aborts up front
+    !> (negating it to reuse the shared offset worker would itself overflow int64).
+    subroutine scenario_temporal_ts_sub_int64_min()
+        type(parquet_timestamp) :: ts, c
+        call ts%set(2024, 7, 16, 0, 0, 0)
+        c = ts - (-huge(0_int64) - 1_int64)   ! n == INT64_MIN -> aborts
+        print '(a,i0)', "unexpectedly survived subtracting INT64_MIN from a timestamp, raw seconds = ", &
+            c%to_unix(parquet_unit_seconds)
+    end subroutine scenario_temporal_ts_sub_int64_min
 
     !> Writing a temporal column not declared in the schema aborts (parquet_write_column's
     !> schema-enforcement preamble, temporal_write_preamble in parquet_write.f90).

@@ -157,6 +157,65 @@ mask = dates(1:n-1) < dates(2:n)   ! whole-array comparison
 Comparing against a null element aborts (there is no non-arbitrary answer, and silently
 ordering nulls could corrupt a filter/sort) — guard with `%is_null()` first.
 
+## Difference and offset arithmetic
+
+All three types support `operator(-)` between two values of the *same* type (never across
+types — there is no `parquet_date - parquet_time`), giving the elapsed time as a plain integer,
+and `operator(+)`/`operator(-)` between a value and a plain integer offset (`integer(int32)` or
+`integer(int64)`), shifting it by a count of the type's own natural unit and returning a new
+value of the same type:
+
+```fortran
+integer(8) :: days_between, ns_between
+type(parquet_date) :: tomorrow
+type(parquet_time) :: wrapped
+type(parquet_timestamp) :: later
+
+days_between = observed(2) - observed(1)          ! whole days, exact
+ns_between = taken_at(2) - taken_at(1)              ! nanoseconds, exact (aborts past ~292 years apart)
+
+tomorrow = observed(1) + 1                          ! one day forward
+wrapped = t + 3600_8*parquet_ns_per_sec             ! one hour forward, wraps at midnight
+later = taken_at(1) + parquet_ns_per_sec            ! one second forward
+```
+
+| Type | `a - b` | `a ± n` |
+|---|---|---|
+| `parquet_date` | `integer(int64)` whole days | `parquet_date`, whole days; aborts if the result falls outside the +-5.8 million year range |
+| `parquet_time` | `integer(int64)` nanoseconds | `parquet_time`, nanoseconds; **wraps** to a valid time-of-day rather than aborting on the result, but aborts if `abs(n)` exceeds 24h of nanoseconds |
+| `parquet_timestamp` | `integer(int64)` nanoseconds; aborts if the two instants are more than ~292.3 years apart | `parquet_timestamp`, nanoseconds; aborts only on int64 overflow (a single instant already has far more range than a nanosecond offset could safely add to it) |
+
+`parquet_timestamp` additionally has `%diff_seconds`, a type-bound function (not an operator —
+`operator(-)`'s one same-type slot is already `ts_diff_ns`) returning the difference as
+`real(real64)` seconds: unlike `operator(-)`, it never aborts on magnitude, only losing precision
+at extreme elapsed times:
+
+```fortran
+secs = taken_at(2)%diff_seconds(taken_at(1))   ! real64 seconds; never aborts on magnitude
+```
+
+All difference/offset operators abort on a null operand (guard with `%is_null()` first), matching
+the comparison operators above. Every operator is elemental, so it applies directly to whole
+arrays (`gap = dates(2:n) - dates(1:n-1)`).
+
+Four public constants convert between a raw nanosecond count and human-scale units, without a
+hand-typed magic number at the call site:
+
+```fortran
+integer(int64), parameter :: parquet_ns_per_sec = 1000000000_int64      !! exact; ns in one second.
+integer(int64), parameter :: parquet_ns_per_day = 86400000000000_int64  !! exact; ns in one day.
+real(real64),   parameter :: parquet_ns_to_sec  = 1.0e-9_real64         !! convenience; ns -> fractional seconds.
+real(real64),   parameter :: parquet_ns_to_day  = 1.0_real64/86400.0e9_real64 !! convenience; ns -> fractional days.
+```
+
+`_per_X` names an exact `integer(int64)` divisor, for a whole-unit result
+(`ns_value/parquet_ns_per_day` gives an exact whole day count, discarding any remainder — the
+same tradeoff `operator(-)` on two dates already makes); `_to_X` names a `real(real64)`
+multiplicative factor, for a fractional result (`real(ns_value, real64)*parquet_ns_to_day` gives
+a fractional day count instead). There are no millisecond or minute constants — Parquet's own
+`TIME`/`TIMESTAMP` units are only ever milliseconds/microseconds/nanoseconds, and "minutes" isn't
+a unit this module (or Parquet itself) otherwise models anywhere.
+
 ## Interop: Unix time, Modified Julian Date, Julian Date
 
 `set_unix`/`to_unix` convert a `parquet_timestamp` to/from a single Unix-time integer in a
@@ -288,8 +347,13 @@ above.
 - `qc:` range checks and `parquet_filter` rules on `date`/`time`/`timestamp` columns (deferred;
   rejected at validation rather than silently ignored — see
   [Units and schema-declared columns](#units-and-schema-declared-columns) above).
-- `INTERVAL`/duration values, and timestamp arithmetic (`ts2 - ts1`) — there is no duration type
-  yet.
+- `INTERVAL`/duration values — a deliberately dropped non-goal, not a pending gap: Parquet's
+  legacy `INTERVAL` converted type was never migrated to Parquet's modern `LogicalType` union and
+  has no mainstream write path in Arrow/pyarrow/Hive/Trino either, and Arrow's separate
+  `DURATION` type only round-trips through Parquet as a semantically-untyped plain `INT64`
+  column readable through the existing numeric path — neither needs a dedicated type here. (See
+  [Difference and offset arithmetic](#difference-and-offset-arithmetic) above for the timestamp
+  arithmetic this bullet used to mention as missing — that is now implemented.)
 - `LIST`/`MAP` element types are unrelated to this page; see
   [Supported data types](supported-data-types.html) for the library's current struct/list/map
   coverage.

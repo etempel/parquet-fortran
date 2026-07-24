@@ -361,8 +361,12 @@ These were looked at (during an audit comparing this library against Arrow C++'s
 - `date`/`timestamp` scalar types (plus `time`) — done via three new **dedicated** element-level
   types (`parquet_date`/`parquet_time`/`parquet_timestamp`, module `parquet_temporal`), not by
   widening into the existing six `data_type`s the way the read-side numeric/string widening below
-  does — see [Date, time and timestamp columns](doc/pages/date-time.md). `qc:`/`parquet_filter`
-  support for these three, and an `INTERVAL`/duration type, remain unimplemented.
+  does — see [Date, time and timestamp columns](doc/pages/date-time.md). Same-type difference and
+  integer-offset arithmetic (`operator(-)`/`operator(+)`, `%diff_seconds`) is also implemented —
+  see [Difference and offset arithmetic](doc/pages/date-time.md#difference-and-offset-arithmetic).
+  `qc:`/`parquet_filter` support for these three remains unimplemented; an `INTERVAL`/duration
+  type is a deliberately dropped non-goal rather than a pending gap — see
+  [Not yet supported](doc/pages/date-time.md#not-yet-supported) for why.
 
 **Bigger lifts, worth being cautious about:**
 - Predicate pushdown (statistics-based I/O skipping) — *not to be confused with row filtering, which is already implemented* (`parquet_filter` / `parquet_open_reader(..., filter=)`, see the [Row filtering section](doc/pages/reading.md#row-filtering-with-parquet_filter)). That existing filter is post-decode: it narrows the rows your code sees but still reads and decodes every referenced column in full. Genuine predicate pushdown — using per-row-group statistics (or Arrow's expression/compute-filter machinery) to skip reading matching row groups off disk entirely — is the unimplemented part, and the README's "No predicate pushdown" limitation treats it as an intentional non-goal for now.
@@ -387,7 +391,8 @@ These were looked at (during an audit comparing this library against Arrow C++'s
     `FIXED_SIZE_BINARY`/etc. — no scalar target at all). `DATE32`/`DATE64`/`TIME32`/`TIME64`/
     `TIMESTAMP` are no longer unsupported overall, though — see the "Implemented since this list
     was last reviewed" bullet above: they now read/write via their own dedicated types instead of
-    widening into an existing one. `INTERVAL_*`/`DURATION` remain unimplemented either way.
+    widening into an existing one. `INTERVAL_*`/`DURATION` remain a deliberate non-goal rather
+    than a pending gap (see that bullet's own note).
 
 **Probably out of scope for this library's design:**
 - Arrow's `dataset` module (multi-file/partitioned scanning), encryption, and Flight — these serve a different usage pattern (distributed/partitioned datasets, secure transport) than this library's "one file, one reader/writer" design, and adding them would cut against the intentional minimalism this codebase aims for.

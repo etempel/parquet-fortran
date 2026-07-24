@@ -45,6 +45,10 @@ module parquet_temporal
     public :: parquet_unit_millis
     public :: parquet_unit_micros
     public :: parquet_unit_nanos
+    public :: parquet_ns_per_sec
+    public :: parquet_ns_per_day
+    public :: parquet_ns_to_sec
+    public :: parquet_ns_to_day
     !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_temporal: "
@@ -63,6 +67,17 @@ module parquet_temporal
     integer(int64), parameter :: NS_PER_SECOND = 1000000000_int64
     integer(int64), parameter :: SECONDS_PER_DAY = 86400_int64
     integer(int64), parameter :: NS_PER_DAY = SECONDS_PER_DAY*NS_PER_SECOND
+    !
+    !> Public unit-conversion convenience constants for the raw nanosecond values the
+    !! difference/offset operators traffic in. The `_per_X` pair are exact integer(int64)
+    !! divisors (for a whole-unit result, e.g. `ns_value/parquet_ns_per_day` for a whole day
+    !! count); the `_to_X` pair are real(real64) multiplicative factors (for a fractional
+    !! result, e.g. a fractional day count) -- see feature_temporal.md's "Design: unit-conversion
+    !! convenience constants" for the naming rationale.
+    integer(int64), parameter :: parquet_ns_per_sec = NS_PER_SECOND !! exact; ns in one second.
+    integer(int64), parameter :: parquet_ns_per_day = NS_PER_DAY   !! exact; ns in one day.
+    real(real64), parameter :: parquet_ns_to_sec = 1.0e-9_real64   !! convenience; ns -> fractional seconds.
+    real(real64), parameter :: parquet_ns_to_day = 1.0_real64/86400.0e9_real64 !! convenience; ns -> fractional days.
     !
     !> Days from 1858-11-17 (MJD epoch) to 1970-01-01 (Unix epoch): MJD = unix days + 40587.
     integer(int64), parameter :: MJD_UNIX_EPOCH = 40587_int64
@@ -87,6 +102,11 @@ module parquet_temporal
     !> `abs(MJD)` bound for parquet_timestamp%set_mjd/set_jd, keeping `seconds` within int64
     !! (the exact limit is huge(int64)/86400 ~ 1.0675e14; slightly conservative on purpose).
     real(real64), parameter :: MJD_ABS_BOUND = 1.0e14_real64
+    !> Elapsed-seconds magnitude bound for ts_diff_ns's result: huge(int64)/NS_PER_SECOND,
+    !! minus 1 second of headroom so the largest nanosecond-of-second component (up to
+    !! 999999999) can still be added/subtracted afterwards without itself overflowing int64.
+    !! ~292.3 years (huge(int64)/1e9 seconds), matching pandas.Timestamp's own 1677-2262 range.
+    integer(int64), parameter :: TS_DIFF_NS_BOUND_SECONDS = huge(0_int64)/NS_PER_SECOND - 1_int64
     !
     !> A calendar date (proleptic Gregorian), stored as days since 1970-01-01 -- identical to
     !! the physical value of a Parquet DATE / Arrow date32 column. A default-initialized
@@ -123,6 +143,13 @@ module parquet_temporal
         generic :: operator(<=) => date_le        !! Ordering (aborts on a null operand).
         generic :: operator(>) => date_gt         !! Ordering (aborts on a null operand).
         generic :: operator(>=) => date_ge        !! Ordering (aborts on a null operand).
+        procedure, private :: date_diff           !! (date, date) specific of operator(-): whole-day difference.
+        procedure, private :: date_sub_days_i32   !! (date, integer(int32)) specific of operator(-).
+        procedure, private :: date_sub_days_i64   !! (date, integer(int64)) specific of operator(-).
+        procedure, private :: date_add_days_i32   !! (date, integer(int32)) specific of operator(+).
+        procedure, private :: date_add_days_i64   !! (date, integer(int64)) specific of operator(+).
+        generic :: operator(-) => date_diff, date_sub_days_i32, date_sub_days_i64 !! Difference or day offset (aborts on a null operand / out-of-range result).
+        generic :: operator(+) => date_add_days_i32, date_add_days_i64 !! Day offset (aborts on a null operand / out-of-range result).
     end type parquet_date
     !
     !> A time of day, stored as nanoseconds since midnight, [0, 86400e9 - 1]. Holds any
@@ -157,6 +184,13 @@ module parquet_temporal
         generic :: operator(<=) => time_le        !! Ordering (aborts on a null operand).
         generic :: operator(>) => time_gt         !! Ordering (aborts on a null operand).
         generic :: operator(>=) => time_ge        !! Ordering (aborts on a null operand).
+        procedure, private :: time_diff           !! (time, time) specific of operator(-): ns difference.
+        procedure, private :: time_sub_ns_i32     !! (time, integer(int32)) specific of operator(-).
+        procedure, private :: time_sub_ns_i64     !! (time, integer(int64)) specific of operator(-).
+        procedure, private :: time_add_ns_i32     !! (time, integer(int32)) specific of operator(+).
+        procedure, private :: time_add_ns_i64     !! (time, integer(int64)) specific of operator(+).
+        generic :: operator(-) => time_diff, time_sub_ns_i32, time_sub_ns_i64 !! Difference or ns offset (wraps; aborts on a null operand or a >24h offset magnitude).
+        generic :: operator(+) => time_add_ns_i32, time_add_ns_i64 !! Ns offset (wraps; aborts on a null operand or a >24h offset magnitude).
     end type parquet_time
     !
     !> An instant, stored losslessly as whole seconds since 1970-01-01T00:00:00 plus a
@@ -202,6 +236,14 @@ module parquet_temporal
         generic :: operator(<=) => ts_le          !! Ordering (aborts on a null operand).
         generic :: operator(>) => ts_gt           !! Ordering (aborts on a null operand).
         generic :: operator(>=) => ts_ge          !! Ordering (aborts on a null operand).
+        procedure, private :: ts_diff_ns          !! (ts, ts) specific of operator(-): ns difference.
+        procedure :: diff_seconds => ts_diff_seconds !! Real64-seconds difference (ts, ts); never aborts on magnitude.
+        procedure, private :: ts_sub_ns_i32       !! (ts, integer(int32)) specific of operator(-).
+        procedure, private :: ts_sub_ns_i64       !! (ts, integer(int64)) specific of operator(-).
+        procedure, private :: ts_add_ns_i32       !! (ts, integer(int32)) specific of operator(+).
+        procedure, private :: ts_add_ns_i64       !! (ts, integer(int64)) specific of operator(+).
+        generic :: operator(-) => ts_diff_ns, ts_sub_ns_i32, ts_sub_ns_i64 !! Difference or ns offset (aborts on a null operand or int64 overflow).
+        generic :: operator(+) => ts_add_ns_i32, ts_add_ns_i64 !! Ns offset (aborts on a null operand or int64 overflow).
     end type parquet_timestamp
     !
     !> Constructs a valid parquet_date from (year, month, day); aborts on an invalid civil date
@@ -772,6 +814,80 @@ contains
         call date_set(res, year, month, day)
     end function date_new
     !
+    !> Difference specific; see the operator(-) generic. Whole days, exact; aborts on a null
+    !! operand.
+    elemental integer(int64) function date_diff(a, b) result(res)
+        class(parquet_date), intent(in) :: a !! left (later) operand.
+        class(parquet_date), intent(in) :: b !! right (earlier) operand.
+        if (.not. (a%valid .and. b%valid)) then
+            error stop EP//"difference with a null parquet_date element (guard with is_null)"
+        end if
+        res = int(a%days, int64) - int(b%days, int64)
+    end function date_diff
+    !
+    !> Shared worker for the day-offset operator(+)/operator(-) specifics: shifts self by
+    !! `delta` whole days, aborting on a null operand or an out-of-range result (reusing
+    !! date_set's own +-5.8 million year bound).
+    impure elemental function date_offset_days_impl(self, delta) result(res)
+        class(parquet_date), intent(in) :: self !! the element to shift.
+        integer(int64), intent(in) :: delta     !! signed day offset (+ forward, - backward).
+        type(parquet_date) :: res               !! self shifted by delta days.
+        integer(int64) :: new_days
+        if (.not. self%valid) then
+            error stop EP//"null parquet_date element accessed in operator(+)/operator(-) (guard with is_null)"
+        end if
+        if (delta >= 0_int64) then
+            if (int(self%days, int64) > huge(0_int64) - delta) then
+                error stop EP//"date out of range in parquet_date operator(+)/operator(-) (beyond +-5.8 million years)"
+            end if
+        else
+            if (int(self%days, int64) < INT64_MIN - delta) then
+                error stop EP//"date out of range in parquet_date operator(+)/operator(-) (beyond +-5.8 million years)"
+            end if
+        end if
+        new_days = int(self%days, int64) + delta
+        if (new_days > DATE_DAYS_MAX .or. new_days < DATE_DAYS_MIN) then
+            error stop EP//"date out of range in parquet_date operator(+)/operator(-) (beyond +-5.8 million years)"
+        end if
+        res%days = int(new_days, int32)
+        res%valid = .true.
+    end function date_offset_days_impl
+    !
+    !> int32 specific of operator(-); see date_offset_days_impl.
+    impure elemental function date_sub_days_i32(self, n) result(res)
+        class(parquet_date), intent(in) :: self !! the element to shift.
+        integer(int32), intent(in) :: n         !! days to subtract.
+        type(parquet_date) :: res               !! self shifted back by n days.
+        res = date_offset_days_impl(self, -int(n, int64))
+    end function date_sub_days_i32
+    !
+    !> int64 specific of operator(-); see date_offset_days_impl.
+    impure elemental function date_sub_days_i64(self, n) result(res)
+        class(parquet_date), intent(in) :: self !! the element to shift.
+        integer(int64), intent(in) :: n         !! days to subtract.
+        type(parquet_date) :: res               !! self shifted back by n days.
+        if (n == INT64_MIN) then
+            error stop EP//"date out of range in parquet_date operator(-) (beyond +-5.8 million years)"
+        end if
+        res = date_offset_days_impl(self, -n)
+    end function date_sub_days_i64
+    !
+    !> int32 specific of operator(+); see date_offset_days_impl.
+    impure elemental function date_add_days_i32(self, n) result(res)
+        class(parquet_date), intent(in) :: self !! the element to shift.
+        integer(int32), intent(in) :: n         !! days to add.
+        type(parquet_date) :: res               !! self shifted forward by n days.
+        res = date_offset_days_impl(self, int(n, int64))
+    end function date_add_days_i32
+    !
+    !> int64 specific of operator(+); see date_offset_days_impl.
+    impure elemental function date_add_days_i64(self, n) result(res)
+        class(parquet_date), intent(in) :: self !! the element to shift.
+        integer(int64), intent(in) :: n         !! days to add.
+        type(parquet_date) :: res               !! self shifted forward by n days.
+        res = date_offset_days_impl(self, n)
+    end function date_add_days_i64
+    !
     ! ==================================================================================
     ! parquet_time
     ! ==================================================================================
@@ -984,6 +1100,81 @@ contains
         type(parquet_time) :: res                          !! the constructed element (valid).
         call time_set(res, hour, minute, second, nanosecond)
     end function time_new
+    !
+    !> Difference specific; see the operator(-) generic. Nanoseconds, exact (bounded to +-1 day
+    !! of ns since both operands lie in [0, 86400e9 - 1]); aborts on a null operand.
+    elemental integer(int64) function time_diff(a, b) result(res)
+        class(parquet_time), intent(in) :: a !! left (later) operand.
+        class(parquet_time), intent(in) :: b !! right (earlier) operand.
+        if (.not. (a%valid .and. b%valid)) then
+            error stop EP//"difference with a null parquet_time element (guard with is_null)"
+        end if
+        res = a%nanoseconds - b%nanoseconds
+    end function time_diff
+    !
+    !> Shared worker for the ns-offset operator(+)/operator(-) specifics: shifts self by
+    !! `offset` nanoseconds and always wraps into a valid time-of-day, [0, 86400e9 - 1] --
+    !! `offset` itself must already be validated to fit in [-86400e9, 86400e9] by the caller
+    !! (the 24h magnitude guard), so this worker never aborts once entered. Uses floor_div-style
+    !! floored modulo, not the intrinsic MOD, so a negative offset wraps correctly (see
+    !! CLAUDE.md's "Implementation notes" for feature_temporal.md).
+    impure elemental function time_offset_ns_impl(self, offset) result(res)
+        class(parquet_time), intent(in) :: self !! the element to shift.
+        integer(int64), intent(in) :: offset    !! signed ns offset, already within [-86400e9, 86400e9].
+        type(parquet_time) :: res               !! self shifted by offset ns, wrapped to a valid time-of-day.
+        integer(int64) :: raw
+        if (.not. self%valid) then
+            error stop EP//"null parquet_time element accessed in operator(+)/operator(-) (guard with is_null)"
+        end if
+        raw = self%nanoseconds + offset
+        res%nanoseconds = raw - floor_div(raw, NS_PER_DAY)*NS_PER_DAY
+        res%valid = .true.
+    end function time_offset_ns_impl
+    !
+    !> int32 specific of operator(-); see time_offset_ns_impl. The 24h magnitude guard is moot
+    !! for this kind (int32's own range never reaches 86400e9 ns), kept only for symmetry with
+    !! the int64 specific.
+    impure elemental function time_sub_ns_i32(self, n) result(res)
+        class(parquet_time), intent(in) :: self !! the element to shift.
+        integer(int32), intent(in) :: n         !! ns to subtract.
+        type(parquet_time) :: res               !! self shifted back by n ns, wrapped.
+        res = time_offset_ns_impl(self, -int(n, int64))
+    end function time_sub_ns_i32
+    !
+    !> int64 specific of operator(-); see time_offset_ns_impl. Aborts if abs(n) exceeds 24h of
+    !! nanoseconds (checked on the raw, not-yet-negated input, so negating it afterwards can
+    !! never overflow).
+    impure elemental function time_sub_ns_i64(self, n) result(res)
+        class(parquet_time), intent(in) :: self !! the element to shift.
+        integer(int64), intent(in) :: n         !! ns to subtract.
+        type(parquet_time) :: res               !! self shifted back by n ns, wrapped.
+        if (n > NS_PER_DAY .or. n < -NS_PER_DAY) then
+            error stop EP//"offset magnitude exceeds 24 hours in parquet_time operator(-)"
+        end if
+        res = time_offset_ns_impl(self, -n)
+    end function time_sub_ns_i64
+    !
+    !> int32 specific of operator(+); see time_offset_ns_impl. The 24h magnitude guard is moot
+    !! for this kind (int32's own range never reaches 86400e9 ns), kept only for symmetry with
+    !! the int64 specific.
+    impure elemental function time_add_ns_i32(self, n) result(res)
+        class(parquet_time), intent(in) :: self !! the element to shift.
+        integer(int32), intent(in) :: n         !! ns to add.
+        type(parquet_time) :: res               !! self shifted forward by n ns, wrapped.
+        res = time_offset_ns_impl(self, int(n, int64))
+    end function time_add_ns_i32
+    !
+    !> int64 specific of operator(+); see time_offset_ns_impl. Aborts if abs(n) exceeds 24h of
+    !! nanoseconds.
+    impure elemental function time_add_ns_i64(self, n) result(res)
+        class(parquet_time), intent(in) :: self !! the element to shift.
+        integer(int64), intent(in) :: n         !! ns to add.
+        type(parquet_time) :: res               !! self shifted forward by n ns, wrapped.
+        if (n > NS_PER_DAY .or. n < -NS_PER_DAY) then
+            error stop EP//"offset magnitude exceeds 24 hours in parquet_time operator(+)"
+        end if
+        res = time_offset_ns_impl(self, n)
+    end function time_add_ns_i64
     !
     ! ==================================================================================
     ! parquet_timestamp
@@ -1411,5 +1602,123 @@ contains
         type(parquet_timestamp) :: res         !! the constructed element (null if an input is null).
         call ts_set_date_time(res, date, time)
     end function ts_new_date_time
+    !
+    !> Difference specific; see the operator(-) generic. Nanoseconds, exact; aborts on a null
+    !! operand and when the elapsed time exceeds ~292.3 years (TS_DIFF_NS_BOUND_SECONDS) -- the
+    !! bound is checked on the seconds component alone, without ever forming an intermediate
+    !! value that could itself overflow int64, so the "too far apart to represent" case is
+    !! detected before any arithmetic that could silently wrap.
+    elemental integer(int64) function ts_diff_ns(a, b) result(res)
+        class(parquet_timestamp), intent(in) :: a !! left (later) operand.
+        class(parquet_timestamp), intent(in) :: b !! right (earlier) operand.
+        integer(int64) :: hi, lo, sec_diff
+        if (.not. (a%valid .and. b%valid)) then
+            error stop EP//"difference with a null parquet_timestamp element (guard with is_null)"
+        end if
+        if (b%seconds > huge(0_int64) - TS_DIFF_NS_BOUND_SECONDS) then
+            hi = huge(0_int64)
+        else
+            hi = b%seconds + TS_DIFF_NS_BOUND_SECONDS
+        end if
+        if (b%seconds < INT64_MIN + TS_DIFF_NS_BOUND_SECONDS) then
+            lo = INT64_MIN
+        else
+            lo = b%seconds - TS_DIFF_NS_BOUND_SECONDS
+        end if
+        if (a%seconds > hi .or. a%seconds < lo) then
+            error stop EP//"parquet_timestamp difference exceeds the representable nanosecond range"// &
+                " (elapsed time beyond ~292.3 years)"
+        end if
+        sec_diff = a%seconds - b%seconds
+        res = sec_diff*NS_PER_SECOND + (int(a%nanoseconds, int64) - int(b%nanoseconds, int64))
+    end function ts_diff_ns
+    !
+    !> Type-bound diff_seconds: real64-seconds difference between two instants. Unlike
+    !! operator(-) (ts_diff_ns), this never aborts on magnitude -- only precision is lost at
+    !! extreme elapsed times, matching real64's own resolution. Aborts on a null operand.
+    !! Each operand's seconds component is converted to real64 *before* subtracting (rather
+    !! than subtracting as int64 first) -- two instants near opposite ends of the int64 range
+    !! would overflow an int64 subtraction, whereas real64 subtraction only loses precision,
+    !! matching this function's own "never aborts on magnitude" contract.
+    elemental real(real64) function ts_diff_seconds(a, b) result(res)
+        class(parquet_timestamp), intent(in) :: a !! left (later) operand.
+        class(parquet_timestamp), intent(in) :: b !! right (earlier) operand.
+        if (.not. (a%valid .and. b%valid)) then
+            error stop EP//"difference with a null parquet_timestamp element (guard with is_null)"
+        end if
+        res = (real(a%seconds, real64) - real(b%seconds, real64)) &
+            + (real(a%nanoseconds, real64) - real(b%nanoseconds, real64))*parquet_ns_to_sec
+    end function ts_diff_seconds
+    !
+    !> Shared worker for the ns-offset operator(+)/operator(-) specifics: shifts self by
+    !! `n` nanoseconds, carrying the normalized nanosecond-of-second component back into
+    !! [0, 999999999] via floor_div (see CLAUDE.md's "Implementation notes" for
+    !! feature_temporal.md). Aborts on a null operand or if the shifted result overflows int64
+    !! seconds -- unlike parquet_date/parquet_time, there is no smaller domain-specific range to
+    !! enforce, only int64 itself.
+    impure elemental function ts_offset_ns_impl(self, n) result(res)
+        class(parquet_timestamp), intent(in) :: self !! the instant to shift.
+        integer(int64), intent(in) :: n              !! signed ns offset (+ forward, - backward).
+        type(parquet_timestamp) :: res                !! self shifted by n ns.
+        integer(int64) :: ns_self, total_ns, carry_sec
+        if (.not. self%valid) then
+            error stop EP//"null parquet_timestamp element accessed in operator(+)/operator(-) (guard with is_null)"
+        end if
+        ns_self = int(self%nanoseconds, int64)
+        if (n >= 0_int64) then
+            if (ns_self > huge(0_int64) - n) then
+                error stop EP//"parquet_timestamp offset arithmetic overflows int64"
+            end if
+        end if
+        total_ns = ns_self + n
+        carry_sec = floor_div(total_ns, NS_PER_SECOND)
+        if (carry_sec >= 0_int64) then
+            if (self%seconds > huge(0_int64) - carry_sec) then
+                error stop EP//"parquet_timestamp offset arithmetic overflows int64 seconds"
+            end if
+        else
+            if (self%seconds < INT64_MIN - carry_sec) then
+                error stop EP//"parquet_timestamp offset arithmetic overflows int64 seconds"
+            end if
+        end if
+        res%seconds = self%seconds + carry_sec
+        res%nanoseconds = int(total_ns - carry_sec*NS_PER_SECOND, int32)
+        res%valid = .true.
+    end function ts_offset_ns_impl
+    !
+    !> int32 specific of operator(-); see ts_offset_ns_impl.
+    impure elemental function ts_sub_ns_i32(self, n) result(res)
+        class(parquet_timestamp), intent(in) :: self !! the instant to shift.
+        integer(int32), intent(in) :: n              !! ns to subtract.
+        type(parquet_timestamp) :: res                !! self shifted back by n ns.
+        res = ts_offset_ns_impl(self, -int(n, int64))
+    end function ts_sub_ns_i32
+    !
+    !> int64 specific of operator(-); see ts_offset_ns_impl.
+    impure elemental function ts_sub_ns_i64(self, n) result(res)
+        class(parquet_timestamp), intent(in) :: self !! the instant to shift.
+        integer(int64), intent(in) :: n              !! ns to subtract.
+        type(parquet_timestamp) :: res                !! self shifted back by n ns.
+        if (n == INT64_MIN) then
+            error stop EP//"parquet_timestamp offset arithmetic overflows int64"
+        end if
+        res = ts_offset_ns_impl(self, -n)
+    end function ts_sub_ns_i64
+    !
+    !> int32 specific of operator(+); see ts_offset_ns_impl.
+    impure elemental function ts_add_ns_i32(self, n) result(res)
+        class(parquet_timestamp), intent(in) :: self !! the instant to shift.
+        integer(int32), intent(in) :: n              !! ns to add.
+        type(parquet_timestamp) :: res                !! self shifted forward by n ns.
+        res = ts_offset_ns_impl(self, int(n, int64))
+    end function ts_add_ns_i32
+    !
+    !> int64 specific of operator(+); see ts_offset_ns_impl.
+    impure elemental function ts_add_ns_i64(self, n) result(res)
+        class(parquet_timestamp), intent(in) :: self !! the instant to shift.
+        integer(int64), intent(in) :: n              !! ns to add.
+        type(parquet_timestamp) :: res                !! self shifted forward by n ns.
+        res = ts_offset_ns_impl(self, n)
+    end function ts_add_ns_i64
     !
 end module parquet_temporal ! GCOVR_EXCL_LINE

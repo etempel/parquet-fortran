@@ -13,7 +13,8 @@ module parquet
     use parquet_maml_base, only: parquet_maml_file, parquet_maml_missing_column, parquet_maml_col_map_entry
     use parquet_strings, only: parquet_string_column, parquet_string
     use parquet_temporal, only: parquet_date, parquet_time, parquet_timestamp, &
-        parquet_unit_seconds, parquet_unit_millis, parquet_unit_micros, parquet_unit_nanos
+        parquet_unit_seconds, parquet_unit_millis, parquet_unit_micros, parquet_unit_nanos, &
+        parquet_ns_per_sec, parquet_ns_per_day, parquet_ns_to_sec, parquet_ns_to_day
     implicit none
     private
     !
@@ -891,9 +892,11 @@ module parquet
     public :: parquet_string_column
     public :: parquet_string
     ! Re-exported from parquet_temporal so users need only `use parquet` to get the date/time
-    ! element types and the unit selectors used by their set_unix/to_unix and MAML units.
+    ! element types, the unit selectors used by their set_unix/to_unix and MAML units, and the
+    ! nanosecond unit-conversion constants used by their difference/offset operators.
     public :: parquet_date, parquet_time, parquet_timestamp
     public :: parquet_unit_seconds, parquet_unit_millis, parquet_unit_micros, parquet_unit_nanos
+    public :: parquet_ns_per_sec, parquet_ns_per_day, parquet_ns_to_sec, parquet_ns_to_day
     public :: parquet_get_column_time_info
     public :: parquet_open_writer
     public :: parquet_write_column

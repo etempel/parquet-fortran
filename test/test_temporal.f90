@@ -27,10 +27,12 @@ contains
             new_unittest("date to_string/parse round-trips", test_date_strings), &
             new_unittest("date null semantics", test_date_null), &
             new_unittest("date comparison operators", test_date_operators), &
+            new_unittest("date difference and day-offset arithmetic", test_date_arithmetic), &
             new_unittest("time set/get fields and boundaries", test_time_fields), &
             new_unittest("time to_string fraction groups and parse", test_time_strings), &
             new_unittest("time raw accessors and null semantics", test_time_raw_null), &
             new_unittest("time comparison operators", test_time_operators), &
+            new_unittest("time difference and wrapping ns-offset arithmetic", test_time_arithmetic), &
             new_unittest("timestamp civil set/get round-trips", test_ts_civil), &
             new_unittest("timestamp epoch anchors (J2000, Unix)", test_ts_anchors), &
             new_unittest("timestamp set_unix/to_unix all units", test_ts_unix), &
@@ -38,6 +40,8 @@ contains
             new_unittest("timestamp to_string/parse round-trips", test_ts_strings), &
             new_unittest("timestamp date/time parts and null propagation", test_ts_parts_null), &
             new_unittest("timestamp comparison operators", test_ts_operators), &
+            new_unittest("timestamp difference (diff_ns/diff_seconds) and ns-offset arithmetic", test_ts_arithmetic), &
+            new_unittest("unit-conversion convenience constants", test_unit_constants), &
             new_unittest("whole-array elemental operations", test_elemental_arrays), &
             new_unittest("Arrow cross-validation of civil<->days math", test_arrow_cross_validation) &
             ]
@@ -222,6 +226,49 @@ contains
         call check(error, b < a, "pre-epoch date orders before")
     end subroutine test_date_operators
     !
+    subroutine test_date_arithmetic(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_date) :: a, b, c
+        type(parquet_date) :: dates(3)
+        call a%set(2024, 7, 16)
+        call b%set(2024, 7, 20)
+        call check(error, (b - a) == 4_int64, "b - a must be 4 whole days")
+        if (allocated(error)) return
+        call check(error, (a - b) == -4_int64, "a - b must be -4 whole days")
+        if (allocated(error)) return
+        ! int32 offset kind
+        c = a + 4_int32
+        call check(error, c == b, "a + 4 (int32) must equal b")
+        if (allocated(error)) return
+        c = b - 4_int32
+        call check(error, c == a, "b - 4 (int32) must equal a")
+        if (allocated(error)) return
+        ! int64 offset kind
+        c = a + 4_int64
+        call check(error, c == b, "a + 4 (int64) must equal b")
+        if (allocated(error)) return
+        c = b - 4_int64
+        call check(error, c == a, "b - 4 (int64) must equal a")
+        if (allocated(error)) return
+        ! negative offsets go the other direction
+        c = b + (-4_int32)
+        call check(error, c == a, "b + (-4) must equal a")
+        if (allocated(error)) return
+        ! crosses a month/year boundary
+        call a%set(2024, 12, 31)
+        c = a + 1_int32
+        call check(error, c == parquet_date(2025, 1, 1), "2024-12-31 + 1 day must roll into 2025-01-01")
+        if (allocated(error)) return
+        c = c - 1_int32
+        call check(error, c == a, "2025-01-01 - 1 day must roll back to 2024-12-31")
+        if (allocated(error)) return
+        ! whole-array elemental usage
+        call dates%set([2024_int32, 2024_int32, 2024_int32], 7_int32, [10_int32, 15_int32, 20_int32])
+        call check(error, all((dates + [10_int32, 5_int32, 0_int32]) == dates(3)), "whole-array operator(+)")
+        if (allocated(error)) return
+        call check(error, all((dates(3) - dates) == [10_int64, 5_int64, 0_int64]), "whole-array operator(-) diff")
+    end subroutine test_date_arithmetic
+    !
     ! ------------------------------------------------------------------------------
     !
     subroutine test_time_fields(error)
@@ -338,6 +385,44 @@ contains
         call b%set(12, 0, 0)
         call check(error, a == b .and. .not. (a /= b), "equality")
     end subroutine test_time_operators
+    !
+    subroutine test_time_arithmetic(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_time) :: a, b, c
+        integer(int64), parameter :: ONE_HOUR_NS = 3600_int64*1000000000_int64
+        ! plain difference, no wrap involved
+        call a%set(12, 0, 0)
+        call b%set(13, 0, 0)
+        call check(error, (b - a) == ONE_HOUR_NS, "13:00 - 12:00 must be one hour of ns")
+        if (allocated(error)) return
+        call check(error, (a - b) == -ONE_HOUR_NS, "12:00 - 13:00 must be minus one hour of ns")
+        if (allocated(error)) return
+        ! wraparound crossing midnight forward: 23:30 + 1h -> 00:30
+        call a%set(23, 30, 0)
+        c = a + ONE_HOUR_NS
+        call check(error, c == parquet_time(0, 30, 0), "23:30 + 1h must wrap to 00:30")
+        if (allocated(error)) return
+        ! wraparound crossing midnight backward: 00:30 - 1h -> 23:30
+        call a%set(0, 30, 0)
+        c = a - ONE_HOUR_NS
+        call check(error, c == parquet_time(23, 30, 0), "00:30 - 1h must wrap to 23:30")
+        if (allocated(error)) return
+        ! offset of exactly 24h is allowed (guard is a strict >, not >=) and wraps back to self
+        call a%set(6, 0, 0)
+        c = a + 86400000000000_int64
+        call check(error, c == a, "a full 24h offset must wrap back to the same time")
+        if (allocated(error)) return
+        c = a - 86400000000000_int64
+        call check(error, c == a, "a full-24h negative offset must wrap back to the same time")
+        if (allocated(error)) return
+        ! int32 offset kind (necessarily small: int32 ns only reaches ~2.1 seconds)
+        call a%set(12, 0, 0)
+        c = a + 500000000_int32
+        call check(error, c == parquet_time(12, 0, 0, 500000000), "int32 ns offset (+)")
+        if (allocated(error)) return
+        c = c - 500000000_int32
+        call check(error, c == a, "int32 ns offset (-) back to start")
+    end subroutine test_time_arithmetic
     !
     ! ------------------------------------------------------------------------------
     !
@@ -609,6 +694,79 @@ contains
         call a%set(1970, 1, 1, 0, 0, 0)
         call check(error, a == b .and. a >= b .and. a <= b, "equality at the epoch")
     end subroutine test_ts_operators
+    !
+    subroutine test_ts_arithmetic(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_timestamp) :: a, b, c
+        ! diff_ns: exact nanosecond difference
+        call a%set(2024, 7, 16, 12, 0, 0)
+        call b%set(2024, 7, 16, 12, 0, 1)
+        call check(error, (b - a) == parquet_ns_per_sec, "1 s later must diff by parquet_ns_per_sec")
+        if (allocated(error)) return
+        call check(error, (a - b) == -parquet_ns_per_sec, "reverse diff must be negative")
+        if (allocated(error)) return
+        ! diff_seconds: real64 seconds, never aborts on magnitude
+        call check(error, abs(b%diff_seconds(a) - 1.0_real64) < 1.0e-9_real64, "diff_seconds must be 1.0")
+        if (allocated(error)) return
+        call a%set_raw(-huge(0_int64), 0)
+        call b%set_raw(huge(0_int64), 999999999)
+        call check(error, b%diff_seconds(a) > 0.0_real64, &
+            "diff_seconds must not abort even for a huge (unrepresentable-as-ns) span")
+        if (allocated(error)) return
+        ! offset arithmetic: int64 kind
+        call a%set(2024, 7, 16, 12, 0, 0)
+        c = a + parquet_ns_per_sec
+        call b%set(2024, 7, 16, 12, 0, 1)
+        call check(error, c == b, "a + 1s (ns, int64) must equal b")
+        if (allocated(error)) return
+        c = b - parquet_ns_per_sec
+        call check(error, c == a, "b - 1s (ns, int64) must equal a")
+        if (allocated(error)) return
+        ! offset arithmetic: int32 kind
+        c = a + 500000000_int32
+        call check(error, c == parquet_timestamp(2024, 7, 16, 12, 0, 0, 500000000), "int32 ns offset (+)")
+        if (allocated(error)) return
+        c = c - 500000000_int32
+        call check(error, c == a, "int32 ns offset (-) back to start")
+        if (allocated(error)) return
+        ! offset crossing a second boundary, including pre-epoch
+        call a%set_raw(0_int64, 0)
+        c = a - 1_int32
+        call check(error, c == parquet_timestamp(1969, 12, 31, 23, 59, 59, 999999999), &
+            "subtracting 1 ns across the epoch must borrow correctly")
+        if (allocated(error)) return
+        ! diff_ns's internal bound clamp: when the right (earlier) operand's own seconds
+        ! component sits within TS_DIFF_NS_BOUND_SECONDS of huge(int64)/INT64_MIN, the
+        ! internal hi/lo bound must be clamped (rather than itself overflowing int64) --
+        ! still computing the (here: zero) difference exactly.
+        call a%set_raw(huge(0_int64) - 10_int64, 0)
+        call b%set_raw(huge(0_int64) - 10_int64, 0)
+        call check(error, (a - b) == 0_int64, "diff_ns near the extreme positive end of int64 must stay exact")
+        if (allocated(error)) return
+        call a%set_raw(-huge(0_int64) - 1_int64 + 10_int64, 0)
+        call b%set_raw(-huge(0_int64) - 1_int64 + 10_int64, 0)
+        call check(error, (a - b) == 0_int64, "diff_ns near the extreme negative end of int64 must stay exact")
+    end subroutine test_ts_arithmetic
+    !
+    subroutine test_unit_constants(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check(error, parquet_ns_per_sec == 1000000000_int64, "parquet_ns_per_sec must be 1e9")
+        if (allocated(error)) return
+        call check(error, parquet_ns_per_day == 86400000000000_int64, "parquet_ns_per_day must be 86400e9")
+        if (allocated(error)) return
+        call check(error, abs(real(parquet_ns_per_sec, real64)*parquet_ns_to_sec - 1.0_real64) < 1.0e-12_real64, &
+            "parquet_ns_to_sec must invert parquet_ns_per_sec")
+        if (allocated(error)) return
+        call check(error, abs(real(parquet_ns_per_day, real64)*parquet_ns_to_day - 1.0_real64) < 1.0e-12_real64, &
+            "parquet_ns_to_day must invert parquet_ns_per_day")
+        if (allocated(error)) return
+        ! exact-integer vs fractional duality: half a day of ns
+        call check(error, (43200000000000_int64/parquet_ns_per_day) == 0_int64, &
+            "half a day floors to 0 whole days via parquet_ns_per_day")
+        if (allocated(error)) return
+        call check(error, abs(real(43200000000000_int64, real64)*parquet_ns_to_day - 0.5_real64) < 1.0e-9_real64, &
+            "half a day is exactly 0.5 fractional days via parquet_ns_to_day")
+    end subroutine test_unit_constants
     !
     ! ------------------------------------------------------------------------------
     !

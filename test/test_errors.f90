@@ -554,6 +554,40 @@ contains
             new_unittest("parquet_timestamp to_string on a null element aborts", &
                 test_temporal_ts_to_string_null_aborts), &
             new_unittest("parquet_timestamp operator(<) with a null operand aborts", test_temporal_ts_lt_null_aborts), &
+            new_unittest("parquet_date operator(-) diff with a null operand aborts", test_temporal_date_diff_null_aborts), &
+            new_unittest("parquet_date day-offset operator(+) with a null operand aborts", &
+                test_temporal_date_offset_null_aborts), &
+            new_unittest("parquet_date day-offset arithmetic out of the +-5.8M year range aborts", &
+                test_temporal_date_offset_out_of_range_aborts), &
+            new_unittest("parquet_date day-offset int64-overflow guard (positive branch) aborts", &
+                test_temporal_date_offset_int64_overflow_positive_aborts), &
+            new_unittest("parquet_date day-offset int64-overflow guard (negative branch) aborts", &
+                test_temporal_date_offset_int64_overflow_negative_aborts), &
+            new_unittest("parquet_date operator(-) with an INT64_MIN offset aborts", &
+                test_temporal_date_sub_int64_min_aborts), &
+            new_unittest("parquet_time operator(-) diff with a null operand aborts", test_temporal_time_diff_null_aborts), &
+            new_unittest("parquet_time ns-offset operator(+) with a null operand aborts", &
+                test_temporal_time_offset_null_aborts), &
+            new_unittest("parquet_time operator(+) offset exceeding 24h aborts", &
+                test_temporal_time_offset_magnitude_add_aborts), &
+            new_unittest("parquet_time operator(-) offset exceeding 24h aborts", &
+                test_temporal_time_offset_magnitude_sub_aborts), &
+            new_unittest("parquet_timestamp operator(-) diff with a null operand aborts", &
+                test_temporal_ts_diff_ns_null_aborts), &
+            new_unittest("parquet_timestamp operator(-) diff beyond ~292.3 years aborts", &
+                test_temporal_ts_diff_ns_overflow_aborts), &
+            new_unittest("parquet_timestamp diff_seconds with a null operand aborts", &
+                test_temporal_ts_diff_seconds_null_aborts), &
+            new_unittest("parquet_timestamp ns-offset operator(+) with a null operand aborts", &
+                test_temporal_ts_offset_null_aborts), &
+            new_unittest("parquet_timestamp ns-offset int64 nanosecond-addition overflow aborts", &
+                test_temporal_ts_offset_ns_overflow_aborts), &
+            new_unittest("parquet_timestamp ns-offset int64 seconds-carry overflow (positive) aborts", &
+                test_temporal_ts_offset_seconds_overflow_positive_aborts), &
+            new_unittest("parquet_timestamp ns-offset int64 seconds-carry overflow (negative) aborts", &
+                test_temporal_ts_offset_seconds_overflow_negative_aborts), &
+            new_unittest("parquet_timestamp operator(-) with an INT64_MIN offset aborts", &
+                test_temporal_ts_sub_int64_min_aborts), &
             new_unittest("writing an undeclared temporal column aborts", &
                 test_temporal_write_column_not_defined_aborts), &
             new_unittest("writing a temporal vector column with the wrong col_size aborts", &
@@ -3115,6 +3149,136 @@ contains
             failure_message="parquet_timestamp operator(<) with a null operand was expected to abort", &
             required_stderr="comparison with a null parquet_timestamp element")
     end subroutine test_temporal_ts_lt_null_aborts
+
+    subroutine test_temporal_date_diff_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_date_diff_null", expect_abort=.true., &
+            failure_message="parquet_date operator(-) diff with a null operand was expected to abort", &
+            required_stderr="difference with a null parquet_date element")
+    end subroutine test_temporal_date_diff_null_aborts
+
+    subroutine test_temporal_date_offset_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_date_offset_null", expect_abort=.true., &
+            failure_message="parquet_date day-offset operator(+) with a null operand was expected to abort", &
+            required_stderr="null parquet_date element accessed in operator(+)/operator(-)")
+    end subroutine test_temporal_date_offset_null_aborts
+
+    subroutine test_temporal_date_offset_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_date_offset_out_of_range", expect_abort=.true., &
+            failure_message="parquet_date day-offset arithmetic beyond the +-5.8M year range was expected to abort", &
+            required_stderr="date out of range in parquet_date operator(+)/operator(-)")
+    end subroutine test_temporal_date_offset_out_of_range_aborts
+
+    subroutine test_temporal_date_offset_int64_overflow_positive_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_date_offset_int64_overflow_positive", &
+            expect_abort=.true., &
+            failure_message="parquet_date day-offset int64-overflow guard (positive) was expected to abort", &
+            required_stderr="date out of range in parquet_date operator(+)/operator(-)")
+    end subroutine test_temporal_date_offset_int64_overflow_positive_aborts
+
+    subroutine test_temporal_date_offset_int64_overflow_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_date_offset_int64_overflow_negative", &
+            expect_abort=.true., &
+            failure_message="parquet_date day-offset int64-overflow guard (negative) was expected to abort", &
+            required_stderr="date out of range in parquet_date operator(+)/operator(-)")
+    end subroutine test_temporal_date_offset_int64_overflow_negative_aborts
+
+    subroutine test_temporal_date_sub_int64_min_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_date_sub_int64_min", expect_abort=.true., &
+            failure_message="parquet_date operator(-) with an INT64_MIN offset was expected to abort", &
+            required_stderr="date out of range in parquet_date operator(-)")
+    end subroutine test_temporal_date_sub_int64_min_aborts
+
+    subroutine test_temporal_time_diff_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_time_diff_null", expect_abort=.true., &
+            failure_message="parquet_time operator(-) diff with a null operand was expected to abort", &
+            required_stderr="difference with a null parquet_time element")
+    end subroutine test_temporal_time_diff_null_aborts
+
+    subroutine test_temporal_time_offset_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_time_offset_null", expect_abort=.true., &
+            failure_message="parquet_time ns-offset operator(+) with a null operand was expected to abort", &
+            required_stderr="null parquet_time element accessed in operator(+)/operator(-)")
+    end subroutine test_temporal_time_offset_null_aborts
+
+    subroutine test_temporal_time_offset_magnitude_add_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_time_offset_magnitude_add", expect_abort=.true., &
+            failure_message="parquet_time operator(+) offset exceeding 24h was expected to abort", &
+            required_stderr="offset magnitude exceeds 24 hours in parquet_time operator(+)")
+    end subroutine test_temporal_time_offset_magnitude_add_aborts
+
+    subroutine test_temporal_time_offset_magnitude_sub_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_time_offset_magnitude_sub", expect_abort=.true., &
+            failure_message="parquet_time operator(-) offset exceeding 24h was expected to abort", &
+            required_stderr="offset magnitude exceeds 24 hours in parquet_time operator(-)")
+    end subroutine test_temporal_time_offset_magnitude_sub_aborts
+
+    subroutine test_temporal_ts_diff_ns_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_ts_diff_ns_null", expect_abort=.true., &
+            failure_message="parquet_timestamp operator(-) diff with a null operand was expected to abort", &
+            required_stderr="difference with a null parquet_timestamp element")
+    end subroutine test_temporal_ts_diff_ns_null_aborts
+
+    subroutine test_temporal_ts_diff_ns_overflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_ts_diff_ns_overflow", expect_abort=.true., &
+            failure_message="parquet_timestamp operator(-) diff beyond ~292.3 years was expected to abort", &
+            required_stderr="parquet_timestamp difference exceeds the representable nanosecond range")
+    end subroutine test_temporal_ts_diff_ns_overflow_aborts
+
+    subroutine test_temporal_ts_diff_seconds_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_ts_diff_seconds_null", expect_abort=.true., &
+            failure_message="parquet_timestamp diff_seconds with a null operand was expected to abort", &
+            required_stderr="difference with a null parquet_timestamp element")
+    end subroutine test_temporal_ts_diff_seconds_null_aborts
+
+    subroutine test_temporal_ts_offset_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_ts_offset_null", expect_abort=.true., &
+            failure_message="parquet_timestamp ns-offset operator(+) with a null operand was expected to abort", &
+            required_stderr="null parquet_timestamp element accessed in operator(+)/operator(-)")
+    end subroutine test_temporal_ts_offset_null_aborts
+
+    subroutine test_temporal_ts_offset_ns_overflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_ts_offset_ns_overflow", expect_abort=.true., &
+            failure_message="parquet_timestamp ns-offset nanosecond-addition int64 overflow was expected to abort", &
+            required_stderr="parquet_timestamp offset arithmetic overflows int64")
+    end subroutine test_temporal_ts_offset_ns_overflow_aborts
+
+    subroutine test_temporal_ts_offset_seconds_overflow_positive_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_ts_offset_seconds_overflow_positive", &
+            expect_abort=.true., &
+            failure_message="parquet_timestamp ns-offset seconds-carry int64 overflow (positive) was expected to abort", &
+            required_stderr="parquet_timestamp offset arithmetic overflows int64 seconds")
+    end subroutine test_temporal_ts_offset_seconds_overflow_positive_aborts
+
+    subroutine test_temporal_ts_offset_seconds_overflow_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_ts_offset_seconds_overflow_negative", &
+            expect_abort=.true., &
+            failure_message="parquet_timestamp ns-offset seconds-carry int64 overflow (negative) was expected to abort", &
+            required_stderr="parquet_timestamp offset arithmetic overflows int64 seconds")
+    end subroutine test_temporal_ts_offset_seconds_overflow_negative_aborts
+
+    subroutine test_temporal_ts_sub_int64_min_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "temporal_ts_sub_int64_min", expect_abort=.true., &
+            failure_message="parquet_timestamp operator(-) with an INT64_MIN offset was expected to abort", &
+            required_stderr="parquet_timestamp offset arithmetic overflows int64")
+    end subroutine test_temporal_ts_sub_int64_min_aborts
 
     subroutine test_temporal_write_column_not_defined_aborts(error)
         type(error_type), allocatable, intent(out) :: error

@@ -53,6 +53,8 @@ contains
             new_unittest("get_num_fields on a freshly declared (uninitialized) schema is 0", &
                 test_get_num_fields_uninitialized), &
             new_unittest("set_unavailable/set_available toggle is_set", test_set_available_unavailable), &
+            new_unittest("schema_new = schema_old deep-copies independently, even overwriting an " // &
+                "already-initialized schema_new", test_schema_deep_copy_independence), &
             new_unittest("add_col_qc builds a qc-maml from compact strings", test_add_col_qc_builds_maml), &
             new_unittest("add_col_qc result reads back through parquet_open_reader", test_add_col_qc_roundtrip), &
             new_unittest("add_col_qc with an empty input is a no-op", test_add_col_qc_empty_input_is_noop), &
@@ -541,6 +543,75 @@ contains
         call check(error, all(schema%cinfo%col(:)%is_set), &
             "set_column_available() (no name) did not set is_set for every column")
     end subroutine test_set_available_unavailable
+
+    !> `schema_new = schema_old` (plain intrinsic assignment) is the supported way to duplicate an
+    !> already-initialized schema: parquet_schema has no custom assignment(=) and no FINAL, unlike
+    !> parquet_writer/parquet_reader, so gfortran's default structure assignment deep-copies every
+    !> allocatable component (including nested ones in %maml/%cinfo/%metadata) instead of aliasing
+    !> them. This is a safeguard for future schema extensions: if a new component is ever added
+    !> that breaks value semantics (e.g. a pointer/handle needing an explicit deep-copy routine
+    !> instead of relying on default assignment), mutating one copy leaking into the other -- or
+    !> stale state surviving a copy into an already-initialized variable -- should start failing
+    !> here.
+    subroutine test_schema_deep_copy_independence(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema_old, schema_new
+        integer :: idx_id0, idx_idlong, n_items_before, i
+        logical :: found_ra
+
+        call parquet_parse_maml("schemas/maml_example.maml", schema_old)
+        idx_id0 = schema_old%get_column_index("id0")
+        idx_idlong = schema_old%get_column_index("idlong")
+        n_items_before = size(schema_old%metadata%items)
+
+        ! schema_new starts out already initialized with a *different* schema -- the assignment
+        ! below must fully replace this state, not merge with or leak from it.
+        call parquet_parse_maml("schemas/maml_example2.maml", schema_new)
+        call check(error, schema_new%get_num_fields() /= schema_old%get_num_fields(), &
+            "test setup: maml_example.maml and maml_example2.maml unexpectedly have the same field count")
+        if (allocated(error)) return
+
+        schema_new = schema_old
+
+        call check(error, schema_new%get_num_fields() == schema_old%get_num_fields(), &
+            "schema_new = schema_old did not fully replace an already-initialized schema_new (field count)")
+        if (allocated(error)) return
+        call check(error, schema_new%get_column_index("id0") == idx_id0, &
+            "schema_new = schema_old did not copy schema_old's fields (id0 not found)")
+        if (allocated(error)) return
+        ! get_column_index itself error stops on a not-found name, so check absence with a plain
+        ! scan instead of relying on it to report "not found".
+        found_ra = .false.
+        do i = 1, size(schema_new%cinfo%col)
+            if (allocated(schema_new%cinfo%col(i)%name)) then
+                if (trim(schema_new%cinfo%col(i)%name) == "RA") found_ra = .true.
+            end if
+        end do
+        call check(error, .not. found_ra, &
+            "schema_new = schema_old left a stale field (RA) behind from schema_new's previous schema")
+        if (allocated(error)) return
+        call check(error, size(schema_new%metadata%items) == n_items_before, &
+            "schema_new = schema_old did not copy metadata items")
+        if (allocated(error)) return
+        call check(error, schema_new%cinfo%col(idx_id0)%is_set .eqv. schema_old%cinfo%col(idx_id0)%is_set, &
+            "schema_new = schema_old did not copy is_set state")
+        if (allocated(error)) return
+
+        ! Mutating the new copy must not leak back into the old one.
+        call schema_new%set_column_unavailable("id0")
+        call schema_new%add_metadata("copy_only_key", 99_int32)
+        call check(error, schema_old%cinfo%col(idx_id0)%is_set, &
+            "mutating schema_new leaked into schema_old (is_set)")
+        if (allocated(error)) return
+        call check(error, size(schema_old%metadata%items) == n_items_before, &
+            "mutating schema_new (add_metadata) leaked into schema_old (item count)")
+        if (allocated(error)) return
+
+        ! And the reverse: mutating the original after the copy must not leak into schema_new.
+        call schema_old%set_column_unavailable("idlong")
+        call check(error, schema_new%cinfo%col(idx_idlong)%is_set, &
+            "mutating schema_old after the copy leaked into schema_new (is_set)")
+    end subroutine test_schema_deep_copy_independence
 
     !> maml%add_col_qc builds a read-time qc-maml incrementally from compact
     !> "col, min, max, miss" strings: positional fields, empty tokens skipped,

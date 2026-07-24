@@ -95,7 +95,7 @@ module parquet
     type parquet_column_info
         type(parquet_column_type), allocatable :: col(:) !! One entry per declared field, in MAML source order.
     contains
-        procedure :: get_column_index !! 1-based index of a column by name, or 0 if not found.
+        procedure :: get_column_index !! 1-based index of a column by name; error stops if not found.
         procedure :: get_num_fields !! Total number of declared fields.
         procedure :: get_field_name !! Field name at a given 1-based MAML source position.
         ! Exposed as set_column_available/set_column_unavailable to match the
@@ -189,7 +189,8 @@ module parquet
         procedure :: set_col_size => schema_set_col_size !! Resolves a column's col_size before parquet_open_writer.
         procedure :: set_array_size => schema_set_array_size !! Resolves a string column's array_size before
         !! parquet_open_writer.
-        procedure :: get_column_index => schema_get_column_index !! 1-based index of a column by name, or 0 if not found.
+        procedure :: get_column_index => schema_get_column_index !! 1-based index of a column by
+        !! name; error stops if not found.
         procedure :: get_num_fields => schema_get_num_fields !! Total number of declared fields.
         procedure :: get_field_name => schema_get_field_name !! Field name at a given 1-based MAML source position.
         procedure :: print_schema_info => schema_print_schema_info !! Writes a "Table name:" line plus an aligned
@@ -1333,7 +1334,7 @@ module parquet
         module subroutine schema_clear_metadata(this)
             class(parquet_schema), intent(inout) :: this !! schema whose %metadata is truncated.
         end subroutine schema_clear_metadata
-        !> 1-based index of `name` in this%col, or 0 if not found.
+        !> 1-based index of `name` in this%col; error stops if `name` is not found.
         module integer function get_column_index(this, name)
             class(parquet_column_info), intent(in) :: this !! column_info to search.
             character(len=*), intent(in) :: name !! column name to look up.

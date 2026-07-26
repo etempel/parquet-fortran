@@ -627,12 +627,14 @@ counterpart. User guide: `doc/pages/date-time.md`.
 ### Stale `fpm` build cache
 
 If `fpm test` behaves unexpectedly after source changes (e.g. a test target seems to run old
-code), try `fpm clean --all` to force a clean rebuild before spending time debugging — fpm's
-build cache can serve a stale binary. Building with several different `FPM_FFLAGS` creates
-multiple `build/gfortran_<hash>/` dirs, and `test/test_errors.f90`'s `error_scenarios_bin` does
-`find build -name error_scenarios | head -1`, which can pick a *stale* binary from an old hash
-dir — symptom: tests pass when run scoped but fail under a full `fpm test`. `tools/coverage.sh`
-runs `fpm clean` up front to avoid this; for a plain `fpm test`, `fpm clean --all` fixes it.
+code), try `fpm clean --skip` to force a clean rebuild before spending time debugging — fpm's
+build cache can serve a stale binary. `--skip` avoids rebuilding external (non-project)
+dependencies, which are never the source of this problem, so it's faster than `--all` here.
+Building with several different `FPM_FFLAGS` creates multiple `build/gfortran_<hash>/` dirs, and
+`test/test_errors.f90`'s `error_scenarios_bin` does `find build -name error_scenarios | head -1`,
+which can pick a *stale* binary from an old hash dir — symptom: tests pass when run scoped but
+fail under a full `fpm test`. `tools/coverage.sh` runs `fpm clean` up front to avoid this; for a
+plain `fpm test`, `fpm clean --skip` fixes it.
 
 ### Keeping `tools/prep_fpm_publish.sh` in sync
 

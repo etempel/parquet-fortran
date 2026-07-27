@@ -53,6 +53,7 @@ contains
             new_unittest("get_num_fields on a freshly declared (uninitialized) schema is 0", &
                 test_get_num_fields_uninitialized), &
             new_unittest("set_unavailable/set_available toggle is_set", test_set_available_unavailable), &
+            new_unittest("is_column_set reports a column's current is_set state", test_is_column_set), &
             new_unittest("schema_new = schema_old deep-copies independently, even overwriting an " // &
                 "already-initialized schema_new", test_schema_deep_copy_independence), &
             new_unittest("add_col_qc builds a qc-maml from compact strings", test_add_col_qc_builds_maml), &
@@ -555,6 +556,27 @@ contains
         call check(error, all(schema%cinfo%col(:)%is_set), &
             "set_column_available() (no name) did not set is_set for every column")
     end subroutine test_set_available_unavailable
+
+    subroutine test_is_column_set(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+
+        schema%maml = get_parquet_maml("maml_example.maml")
+        call parquet_parse_maml(schema)
+
+        call check(error, schema%is_column_set("id0"), &
+            "expected id0 to be reported as set by default after parquet_parse_maml")
+        if (allocated(error)) return
+
+        call schema%set_column_unavailable("id0")
+        call check(error, .not. schema%is_column_set("id0"), &
+            "is_column_set('id0') did not reflect set_column_unavailable")
+        if (allocated(error)) return
+
+        call schema%set_column_available("id0")
+        call check(error, schema%is_column_set("id0"), &
+            "is_column_set('id0') did not reflect set_column_available")
+    end subroutine test_is_column_set
 
     !> `schema_new = schema_old` (plain intrinsic assignment) is the supported way to duplicate an
     !> already-initialized schema: parquet_schema has no custom assignment(=) and no FINAL, unlike

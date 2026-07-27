@@ -719,6 +719,10 @@ contains
         schema_get_column_index = this%cinfo%get_column_index(name)
     end procedure schema_get_column_index
 
+    module procedure schema_is_column_set
+        schema_is_column_set = this%cinfo%is_column_set(name)
+    end procedure schema_is_column_set
+
     module procedure schema_get_num_fields
         schema_get_num_fields = this%cinfo%get_num_fields()
     end procedure schema_get_num_fields

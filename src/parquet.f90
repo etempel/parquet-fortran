@@ -103,6 +103,7 @@ module parquet
         type(parquet_column_type), allocatable :: col(:) !! One entry per declared field, in MAML source order.
     contains
         procedure :: get_column_index !! 1-based index of a column by name; error stops if not found.
+        procedure :: is_column_set !! Whether a column is currently enabled to be written; error stops if not found.
         procedure :: get_num_fields !! Total number of declared fields.
         procedure :: get_field_name !! Field name at a given 1-based MAML source position.
         procedure :: get_field_by_name !! Full field definition by name; error stops if not found.
@@ -204,6 +205,8 @@ module parquet
         !! parquet_open_writer.
         procedure :: get_column_index => schema_get_column_index !! 1-based index of a column by
         !! name; error stops if not found.
+        procedure :: is_column_set => schema_is_column_set !! Whether a column is currently enabled to be
+        !! written; error stops if not found.
         procedure :: get_num_fields => schema_get_num_fields !! Total number of declared fields.
         procedure :: get_field_name => schema_get_field_name !! Field name at a given 1-based MAML source position.
         procedure :: get_field_by_name => schema_get_field_by_name !! Full field definition by name; error
@@ -1178,6 +1181,11 @@ module parquet
             class(parquet_schema), intent(in) :: this !! schema to search.
             character(len=*), intent(in) :: name !! column name to look up.
         end function schema_get_column_index
+        !> Forwards to %cinfo%is_column_set.
+        module logical function schema_is_column_set(this, name)
+            class(parquet_schema), intent(in) :: this !! schema to search.
+            character(len=*), intent(in) :: name !! column name to look up.
+        end function schema_is_column_set
         !> Forwards to %cinfo%get_num_fields.
         module integer function schema_get_num_fields(this)
             class(parquet_schema), intent(in) :: this !! schema to query.
@@ -1419,6 +1427,12 @@ module parquet
             class(parquet_column_info), intent(in) :: this !! column_info to search.
             character(len=*), intent(in) :: name !! column name to look up.
         end function get_column_index
+        !> Whether `name` is currently enabled to be written (its col(:)%is_set); error stops if
+        !> `name` is not found (via get_column_index).
+        module logical function is_column_set(this, name)
+            class(parquet_column_info), intent(in) :: this !! column_info to search.
+            character(len=*), intent(in) :: name !! column name to look up.
+        end function is_column_set
         !> Total number of fields defined in this column_info, in maml source
         !> order, with no filtering by is_set/is_deactivated -- i.e. every
         !> field that was ever declared (via a fields: entry or %add_field).

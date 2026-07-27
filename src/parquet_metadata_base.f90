@@ -253,6 +253,13 @@ contains
         end if
     end procedure get_column_index
 
+    module procedure is_column_set
+        integer :: idx
+
+        idx = this%get_column_index(name)
+        is_column_set = this%col(idx)%is_set
+    end procedure is_column_set
+
     module procedure get_num_fields
         if (allocated(this%col)) then
             get_num_fields = size(this%col)

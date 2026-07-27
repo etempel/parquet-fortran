@@ -157,10 +157,12 @@ contains
     !> Looks up this table metadata's own "table" entry to name the table in a
     !> duplicate-key warning message -- always present by the time %add_metadata is
     !> reachable (schema%init requires table=, and a loaded MAML requires a top-level
-    !> table: key), so the "(unknown)" fallback is defensive only.
-    function parquet_metadata_table_name(metadata) result(name)
+    !> table: key), so the "(unknown)" fallback is defensive only. A subroutine rather
+    !> than a character(len=:), allocatable function (see CLAUDE.md's "Compiler & language
+    !> gotchas" -- GCC PR113797), since add_metadata is a public, per-thread-callable binding.
+    subroutine parquet_metadata_table_name(metadata, name)
         class(parquet_table_metadata), intent(in) :: metadata !! table metadata to search.
-        character(len=:), allocatable :: name !! this table's declared name, or "(unknown)" if absent.
+        character(len=:), allocatable, intent(out) :: name !! this table's declared name, or "(unknown)" if absent.
         integer :: i
 
         name = "(unknown)"
@@ -172,7 +174,7 @@ contains
                 return
             end if
         end do
-    end function parquet_metadata_table_name
+    end subroutine parquet_metadata_table_name
 
     !> Warns (unless warn=.false.) when an %add_metadata call is about to write a key
     !> that collides with one of three reserved categories, checked in this order so at
@@ -211,7 +213,7 @@ contains
         if (present(warn)) warn_value = warn
         if (.not. warn_value) return
 
-        table_name = parquet_metadata_table_name(metadata)
+        call parquet_metadata_table_name(metadata, table_name)
 
         do i = 1, size(writer_keys)
             if (trim(writer_keys(i)) /= trim(key)) cycle
@@ -767,6 +769,7 @@ contains
         logical :: opened_here, is_open, do_allow_uninitialized
         character(len=1) :: dchar
         character(len=:), allocatable :: pfx, name_suffix, dashline, table_name_val
+        character(len=:), allocatable :: pad_name, pad_unit, pad_type, pad_len, pad_ucd !! scratch (pad).
         character(len=16) :: iq_action
         character(len=1024) :: iq_name
         character(len=32) :: lenbuf
@@ -888,8 +891,13 @@ contains
         end if
 
         if (do_header) then
-            write(u, '(a)') pfx // pad(hdr_name, w_name) // " " // pad(hdr_unit, w_unit) // " " // &
-                pad(hdr_type, w_type) // " " // pad(hdr_len, w_len) // " " // pad(hdr_ucd, w_ucd) // " " // hdr_info
+            call pad(hdr_name, w_name, pad_name)
+            call pad(hdr_unit, w_unit, pad_unit)
+            call pad(hdr_type, w_type, pad_type)
+            call pad(hdr_len, w_len, pad_len)
+            call pad(hdr_ucd, w_ucd, pad_ucd)
+            write(u, '(a)') pfx // pad_name // " " // pad_unit // " " // &
+                pad_type // " " // pad_len // " " // pad_ucd // " " // hdr_info
         end if
 
         if (do_dash_after_header) write(u, '(a)') dashline
@@ -897,10 +905,13 @@ contains
         do k = 1, n_enabled
             i = enabled_idx(k)
             write(lenbuf, '(I0)') this%cinfo%col(i)%col_size
-            write(u, '(a)') pfx // pad(this%cinfo%col(i)%name, w_name) // " " // &
-                pad(this%cinfo%col(i)%unit, w_unit) // " " // pad(this%cinfo%col(i)%data_type, w_type) // " " // &
-                pad(trim(lenbuf), w_len) // " " // pad(this%cinfo%col(i)%ucd, w_ucd) // " " // &
-                trim(this%cinfo%col(i)%info)
+            call pad(this%cinfo%col(i)%name, w_name, pad_name)
+            call pad(this%cinfo%col(i)%unit, w_unit, pad_unit)
+            call pad(this%cinfo%col(i)%data_type, w_type, pad_type)
+            call pad(trim(lenbuf), w_len, pad_len)
+            call pad(this%cinfo%col(i)%ucd, w_ucd, pad_ucd)
+            write(u, '(a)') pfx // pad_name // " " // pad_unit // " " // pad_type // " " // &
+                pad_len // " " // pad_ucd // " " // trim(this%cinfo%col(i)%info)
         end do
 
         if (do_dash_after_fields) write(u, '(a)') dashline
@@ -910,17 +921,20 @@ contains
     contains
 
         !> Left-justified, blank-padded to width w (at least len_trim(s) wide, so content is
-        !> never truncated even if a caller-miscounted width somehow undershoots).
-        function pad(s, w) result(r)
-            character(len=*), intent(in) :: s
-            integer, intent(in) :: w
-            character(len=:), allocatable :: r
+        !> never truncated even if a caller-miscounted width somehow undershoots). A subroutine
+        !> rather than a character(len=:), allocatable function (see CLAUDE.md's "Compiler &
+        !> language gotchas" -- GCC PR113797), since print_schema_info is a public,
+        !> per-thread-callable binding.
+        subroutine pad(s, w, r)
+            character(len=*), intent(in) :: s !! text to pad.
+            integer, intent(in) :: w !! target width.
+            character(len=:), allocatable, intent(out) :: r !! s, left-justified and blank-padded to width w.
             if (len_trim(s) >= w) then
                 r = trim(s)
             else
                 r = trim(s) // repeat(" ", w - len_trim(s))
             end if
-        end function pad
+        end subroutine pad
 
     end procedure schema_print_schema_info
 

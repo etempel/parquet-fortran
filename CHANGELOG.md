@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Toolchain floor:** gfortran ≥ 13 (13 on CI; 15.2.0 the primary development target), Intel
+Fortran (ifx) 2026.1.0 (confirmed manually; not exercised by CI), a C++20-capable C++ compiler,
+and Arrow/Parquet C++ ≥ 24.0.0 (validated locally against 25.0.0). See
+[Prerequisites](README.md#prerequisites) for the full detail.
+
+**SemVer scope:** the stability promise covers the whole `use parquet` surface documented under
+README's [API overview](README.md#api-overview) — every public type/procedure/constant reachable
+that way, including a public type's own type-bound procedures and operators; anything not
+reachable via `use parquet` (private module internals, the C++ surface, file/module layout) can
+change in a minor or patch release.
+
 ### Added
 
 - Read and write parquet columns for `int32`/`int64`/`float32`/`float64`/`logical`/`character`

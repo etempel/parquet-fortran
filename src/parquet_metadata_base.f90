@@ -322,32 +322,38 @@ contains
         character(len=:), allocatable, intent(out), optional :: qc_max !! qc: max: bound, operator-prefixed.
         character(len=:), allocatable, intent(out), optional :: qc_miss !! "Null" or "".
 
+        ! The four "else" branches below (data_type/unit/info/ucd) are unreachable through the
+        ! public API: parquet_parse_maml_lines (parquet_metadata.f90) error-stops if a parsed
+        ! field lacks data_type, and unconditionally backfills unit/info/ucd to "" for every
+        ! field before cinfo%col is ever populated -- the only place col entries reaching
+        ! get_field come from. Kept as a defensive fallback rather than an assumed invariant;
+        ! GCOVR_EXCL_LINE tags below reflect that these are confirmed-dead, not a coverage gap.
         if (present(data_type)) then
             if (allocated(col%data_type)) then
                 data_type = col%data_type
             else
-                data_type = ""
+                data_type = "" ! GCOVR_EXCL_LINE
             end if
         end if
         if (present(unit)) then
             if (allocated(col%unit)) then
                 unit = col%unit
             else
-                unit = ""
+                unit = "" ! GCOVR_EXCL_LINE
             end if
         end if
         if (present(info)) then
             if (allocated(col%info)) then
                 info = col%info
             else
-                info = ""
+                info = "" ! GCOVR_EXCL_LINE
             end if
         end if
         if (present(ucd)) then
             if (allocated(col%ucd)) then
                 ucd = col%ucd
             else
-                ucd = ""
+                ucd = "" ! GCOVR_EXCL_LINE
             end if
         end if
         if (present(array_size)) array_size = col%array_size

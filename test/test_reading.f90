@@ -2623,8 +2623,13 @@ contains
         call parquet_read_column(reader, "id", back2(1:nrows2))
         call parquet_close_reader(reader)
 
-        call check(error, nrows1 /= nrows2 .or. any(back1(1:nrows1) /= back2(1:nrows2)), &
-            "two entropy-seeded sample draws over 200 rows should not select the identical row set")
+        if (nrows1 /= nrows2) then
+            call check(error, .true., &
+                "two entropy-seeded sample draws over 200 rows should not select the identical row set")
+        else
+            call check(error, any(back1(1:nrows1) /= back2(1:nrows2)), &
+                "two entropy-seeded sample draws over 200 rows should not select the identical row set")
+        end if
     end subroutine test_sample_fraction_entropy_seed_differs
     !
     !> Regression test for a real bug found during development: applying the sample mask

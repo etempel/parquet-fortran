@@ -175,9 +175,13 @@ deleted when the script exits — set `TEST_FILE` to give it a path of your own 
 which also keeps the file around afterward for inspection or reuse:
 
 ```bash
+# Defaults: MAX_STEPS thread-count steps, a small TARGET_FILE_SIZE_GB, in a fresh mktemp -d file:
 tools/benchmark_threads.sh
+# Fewer thread-count steps, against a larger synthetic file:
 MAX_STEPS=6 TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads.sh
+# More replicated columns (5*NMULT total), against a larger synthetic file:
 NMULT=20 TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads.sh
+# Keep the synthetic file at a path of your own choosing instead of a temp dir that gets deleted:
 TEST_FILE=/tmp/benchmark.parquet TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads.sh
 ```
 

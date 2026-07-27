@@ -1615,7 +1615,7 @@ contains
         self%nchars = self%nchars + nchars_in
     end subroutine append_buffers
     !
-    !> Finalizer: deallocates all owned buffers.
+    !> Finalizer -- deallocates all owned buffers.
     subroutine finalize_column(self)
         type(parquet_string_column), intent(inout) :: self !! the column being finalized.
         if (allocated(self%offsets)) deallocate(self%offsets)
@@ -1734,7 +1734,7 @@ contains
         end if
     end subroutine psv_print
     !
-    !> Finalizer: nullifies the reference. Never deallocates the referenced column (non-owning).
+    !> Finalizer -- nullifies the reference. Never deallocates the referenced column (non-owning).
     subroutine finalize_handle(self)
         type(parquet_string), intent(inout) :: self !! the handle being finalized.
         self%col => null()

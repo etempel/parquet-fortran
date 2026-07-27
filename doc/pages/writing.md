@@ -35,11 +35,11 @@ call parquet_open_writer(writer, "data.parquet", schema)
 
 You can also build a `parquet_schema` entirely in memory, without a `.maml` file — see [Building a schema in code](building-schema-in-code.html).
 
-A `parquet_schema` bundles the parsed MAML source (`schema%maml`), the column definitions (`schema%cinfo`) and the table-level metadata (`schema%metadata`) into one value; `parquet_parse_maml` populates all three. If `schema` is omitted, `parquet_open_writer` does not enforce a fixed schema: each column's type, string length and array size are inferred from the first `parquet_write_column` call that writes it. If `schema` is given, only columns marked `is_set = .true.` (see `set_column_available`/`set_column_unavailable` below, and `schema%is_column_set` to query a column's current state) are written, and calling `parquet_write_column` with a name that is not in the schema fails immediately with `error stop`. `parquet_close_writer` also checks, for a schema-enforced writer, that every `is_set = .true.` column actually received a write — if one didn't, it prints the output filename and the schema's name before failing with `error stop`. A schema built via `schema%init`/`parquet_schema(...)` (no `.maml` file) is named `internal:<table>` for this purpose (e.g. `internal:my_table`), rather than a `.maml` filename.
+A `parquet_schema` bundles the parsed MAML source (`schema%maml`), the column definitions (`schema%cinfo`, of type `parquet_column_info`) and the table-level metadata (`schema%metadata`, of type `parquet_table_metadata`) into one value; `parquet_parse_maml` populates all three. If `schema` is omitted, `parquet_open_writer` does not enforce a fixed schema: each column's type, string length and array size are inferred from the first `parquet_write_column` call that writes it. If `schema` is given, only columns marked `is_set = .true.` (see `set_column_available`/`set_column_unavailable` below, and `schema%is_column_set` to query a column's current state) are written, and calling `parquet_write_column` with a name that is not in the schema fails immediately with `error stop`. `parquet_close_writer` also checks, for a schema-enforced writer, that every `is_set = .true.` column actually received a write — if one didn't, it prints the output filename and the schema's name before failing with `error stop`. A schema built via `schema%init`/`parquet_schema(...)` (no `.maml` file) is named `internal:<table>` for this purpose (e.g. `internal:my_table`), rather than a `.maml` filename.
 
 Passing `schema` writes both parts of the parquet file's VOTable-style header at once: `schema%cinfo` supplies each column's own `unit`/`info`/`ucd` attributes, while `schema%metadata` supplies table-level entries (author, description, `keyarray:`, etc. — see [The MAML metadata format](maml-format.html)).
 
-### Saving the source MAML alongside the parquet file
+## Saving the source MAML alongside the parquet file
 
 Pass `write_maml=.true.` to `parquet_open_writer` to also save a sidecar `.maml` file next to the parquet output — same path, with a trailing `.parquet` replaced by `.maml` (or `.maml` appended if there is none):
 
@@ -71,7 +71,19 @@ Notes:
   ! aborts if data.parquet already exists, instead of silently truncating it
   ```
 
-### Writing a large scalar string column with parquet_string_column
+## Writer options
+
+`parquet_open_writer` also accepts:
+```fortran
+call parquet_open_writer(writer, "data.parquet", compression="zstd", compression_level=9, chunk_size=100000)
+```
+- `compression` — one of `"uncompressed"`, `"snappy"` (the default), `"gzip"`, `"zstd"`, `"brotli"`, `"lz4"` (case-insensitive); an unrecognized name fails immediately with `error stop`. The default is `"snappy"`, following the ecosystem convention (pyarrow, Spark, ...) rather than Parquet's own unset-by-default `"uncompressed"`. Rough guidance: `snappy`/`lz4` for fastest read/write at a modest size reduction; `gzip`/`brotli` for the smallest files at slower speed; `zstd` for the best balance (and the only one here with a meaningfully tunable `compression_level`, roughly 1–22).
+- `compression_level` — optional integer tuning the chosen codec's compression level (mainly meaningful for `zstd`/`gzip`/`brotli`); omitted means "use that codec's own default level".
+- `chunk_size` — **advanced/optional: most callers never need to set this.** It's the maximum number of rows per Parquet row group. If omitted (the default, recommended for normal use), it is auto-sized — from the table's actual in-memory byte size once `parquet_close_writer` runs, for a writer that only ever uses `parquet_write_column`, or from the schema's declared types/`col_size` right away for a writer that uses the [streaming row-group API](#streamingchunked-writes) instead — targeting ~256 MiB per row group, not a flat row count, so both narrow `int32` columns and wide vector columns (large `col_size`) end up sensibly sized without tuning, up to very large files (hundreds of millions of rows). The auto-sized value is clamped between 1,000 and 10,000,000 rows, and further clamped down if needed so no vector column's per-row-group element count can exceed Arrow's own limit (see [Vector-column per-row-group element count limit](supported-data-types.html#vector-column-per-row-group-element-count-limit)). Pass an explicit value only to override this — e.g. to force multiple row groups in a small file (as some of this library's own tests do), or to hand-tune the memory-vs-overhead trade-off for a workload you've measured: larger values reduce per-row-group overhead and can improve compression, at the cost of more per-row-group encoder state (dictionaries, statistics) held in memory while writing (see [Performance and memory](performance.html)). `parquet_get_chunk_size` returns the writer's resolved value (or, for a `parquet_reader`, an existing row group's actual size) at any point after opening.
+
+Quality control (`qc:` range/miss checks run automatically against what's being written, when a schema is given) is its own topic — see [Quality control](quality-control.html).
+
+## Writing a large scalar string column with parquet_string_column
 
 A scalar `string` column can also be written from a `type(parquet_string_column)` (`call
 parquet_write_column(writer, "name", names)`) instead of a padded `character(len=...)` array —
@@ -80,7 +92,7 @@ writing compact string columns](string-columns.html#reading-and-writing-compact-
 for the details and a full example; this is purely an alternative to the `character(len=...)`
 form above, not a different file format.
 
-### Streaming/chunked writes
+## Streaming/chunked writes
 
 `parquet_write_column` needs the whole column as one complete array — fine for most data, but not for a column too large to hold in memory that way (e.g. hundreds of millions of rows of a wide vector column). `parquet_new_row_group`/`parquet_write_column_chunk`/`parquet_finish_row_group` write such a column incrementally instead, one Parquet row group at a time, so peak memory is bounded by a row group's worth of data rather than the whole column (see [Streaming/chunked reads](reading.html#streamingchunked-reads) for the read-side mirror):
 
@@ -113,7 +125,7 @@ call parquet_close_writer(writer)
 
 `parquet_new_row_group(writer, nrows)` opens a row group of `nrows` rows; every column already known to the writer must then receive exactly one `parquet_write_column_chunk` call with exactly `nrows` rows (dispatched by type/kind exactly like `parquet_write_column` — scalar `values(:)` or matrix `values(:,:)`) before `parquet_finish_row_group` closes it out. Repeat for as many row groups as needed, then `parquet_close_writer` as usual.
 
-**Picking `rows_per_group`:** `parquet_get_chunk_size(writer, chunk_size)` returns a usable row-group size at any point after `parquet_open_writer` — a schema-based estimate before any data exists, or (once streaming starts) the value actually locked in by the first `parquet_new_row_group` call. Most callers can just use this rather than picking a size by hand; see [Compression and row group size](supported-data-types.html#compression-and-row-group-size) for how it's computed and how to override it with an explicit `chunk_size`.
+**Picking `rows_per_group`:** `parquet_get_chunk_size(writer, chunk_size)` returns a usable row-group size at any point after `parquet_open_writer` — a schema-based estimate before any data exists, or (once streaming starts) the value actually locked in by the first `parquet_new_row_group` call. Most callers can just use this rather than picking a size by hand; see [Writer options](#writer-options) above for how it's computed and how to override it with an explicit `chunk_size`.
 
 **Mixing whole and chunked columns:** a small column can still be written the ordinary way with `parquet_write_column` — but only *before* the first `parquet_new_row_group` call. The writer slices it internally, one row-group's worth at a time, using each row group's own `nrows`. A column written once via `parquet_write_column` can never also receive `parquet_write_column_chunk` calls, or vice versa, and every column that will ever appear in the file — whole or chunked — must appear in the *first* row group written: Parquet's file-level schema is fixed once that row group is written, so a column introduced later fails immediately with `error stop`.
 
@@ -125,14 +137,14 @@ call parquet_close_writer(writer)
 
 **Threading:** `parquet_new_row_group`/`parquet_write_column_chunk`/`parquet_finish_row_group` must all be called from a single thread, in row-group order, for a given writer — same rule as `parquet_write_column` (see [Thread safety](thread-safety.html)). If you want to parallelize the work that *produces* each row group's data, do that in an `!$omp parallel do` (or similar) around the compute step only, then make the `parquet_new_row_group`/`parquet_write_column_chunk`/`parquet_finish_row_group` calls afterward, serially, on one thread.
 
-### Filtering rows with a mask
+## Filtering rows with a mask
 
 `parquet_write_row_mask`/`parquet_write_chunk_row_mask` drop rows entirely from what gets written — a masked-out row leaves no trace at all in the output file (no offset, no validity bit). This is different from writing a Null: a Null still occupies a row (see `is_valid` above), while a masked-out row simply never appears. The two procedures are mutually exclusive on a given writer — pick whichever matches how you're writing:
 
 - **`parquet_write_row_mask(writer, mask)`** — a single, whole-file mask, for a writer using `parquet_write_column` (with or without row groups). Callable at most once per writer — a second call fails with `error stop` rather than silently replacing the first mask.
 - **`parquet_write_chunk_row_mask(writer, mask)`** — a mask scoped to one row group at a time, for a writer using **only** `parquet_write_column_chunk` (no whole-column writes at all). Callable at most once per row group — a second call for the same still-open row group fails with `error stop`.
 
-#### Whole-column writes
+## Whole-column writes
 
 Call `parquet_write_row_mask` right after `parquet_open_writer`, before any `parquet_write_column` call. Every subsequent `parquet_write_column` call's `values` (or the row dimension of `values(:,:)`) must then have length `size(mask)` exactly — the writer applies `mask` itself, so the column ends up with `count(mask)` rows:
 
@@ -149,7 +161,7 @@ call parquet_close_writer(writer)
 
 A mask that is entirely `.false.` is allowed and produces a genuine, valid zero-row file (Parquet supports a schema-only, zero-row file).
 
-#### Row groups
+## Row groups
 
 `parquet_write_row_mask` also works with `parquet_new_row_group`/`parquet_write_column_chunk`: call it once, up front, before the first `parquet_new_row_group`. Each `parquet_new_row_group(writer, nrows)` call then automatically claims the *next* `nrows` positions of the stored mask, in file order, as that row group's window — `nrows` keeps its ordinary meaning (the width of the buffer every column's `parquet_write_column_chunk` call for that row group must supply), and the row group's actual row count on disk is `count()` of its window's slice of the mask, which can be anywhere from `0` up to `nrows`:
 
@@ -198,10 +210,10 @@ call parquet_close_writer(writer)
 
 If `parquet_write_chunk_row_mask` is used for a writer's first row group, it must be used for **every** row group of that writer (all-or-nothing per writer, not per row group) — and it is unavailable entirely on a writer that has any whole-column (`parquet_write_column`) write anywhere in its lifetime, since that combination can only use the shared `parquet_write_row_mask` scheme above instead.
 
-#### Interaction with `is_valid` and `protected_cols:`
+## Interaction with `is_valid` and `protected_cols:`
 
 `is_valid` keeps its own, separate, pre-mask-indexed meaning: for a given call, `is_valid(i)` still refers to the same `values(i)`/`mask(i)` position, and only decides Null-vs-value among rows that survive the mask. A protected column (MAML `extra: protected_cols:`) only rejects a Null among *surviving* rows — a Null at a masked-out row is irrelevant, since it leaves no trace in the output at all.
 
-#### Interaction with other types
+## Interaction with other types
 
 Every column type/shape honors whichever mask is active, including `parquet_string_column` and `parquet_date`/`parquet_time`/`parquet_timestamp` — a masked-out row's own null state (these three carry their null state internally; see [Date, time and timestamp columns](date-time.html)) is simply irrelevant, exactly as for `is_valid` above.

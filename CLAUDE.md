@@ -194,7 +194,24 @@ README.md/CONTRIBUTING.md linking *into* `doc/pages/`) and the FORD-rendered `na
 Every public/private procedure, type, dummy argument/function result, and type-bound procedure
 binding in `src/*.f90` carries a `!>`(leading)/`!!`(trailing) doc-comment. `ford docs.md` should
 run clean (besides the expected environment-only "Graphviz not installed" warning) — keep new
-code to the same standard:
+code to the same standard.
+
+**A clean `ford docs.md` run does not by itself verify doc-comment coverage.** FORD's
+undocumented-entity warnings are opt-in (`-w`/`--warn` on the command line, or a `warn:` key in
+`fpm.toml`'s `[extra.ford]`) and are **not** enabled in this project's `fpm.toml` — a plain
+`ford docs.md` only proves nothing is *broken* (bad cross-references, malformed metadata, parse
+failures), not that everything is documented. A completely undocumented new procedure can be added
+and `ford docs.md` will still "run clean." To actually check coverage, run `ford --warn docs.md`
+instead — expect it to be noisy (on the order of 2,700 warnings as of this writing), dominated by
+two categories that are *not* required by this project's conventions and can be ignored:
+`Undocumented variable` for local variables (`i`, `idx`, `res`, ...), and
+`Undocumented moduleprocedure` for the abbreviated `module procedure NAME ... end procedure NAME`
+form (exempted by the bullet below). Everything else in that output is a real gap worth acting on.
+The "before/after regression" check two bullets down needs `ford --warn docs.md`'s count for the
+same reason — comparing two plain `ford docs.md` runs compares two counts that are both
+structurally 0 (Graphviz-only) and cannot detect a coverage regression.
+
+Keep new code to the same standard:
 
 - Leading `!>` = predoc (documents what follows); trailing `!!` = postdoc (documents what
   precedes). **`!<` is not a FORD marker at all** (that's Doxygen).
@@ -209,6 +226,12 @@ code to the same standard:
   procedure it binds to (easy to forget since the bound procedure's own doc feels like it
   "covers" the binding), e.g.
   `procedure :: add => parquet_filter_add !! Appends one AND-combined rule clause.`.
+  **Accepted exception:** the two `generic :: add_metadata => ...`/`generic :: add_metadata =>
+  schema_add_metadata_...` bindings (`parquet.f90`'s `parquet_column_info`/`parquet_schema` type
+  bodies) document with a leading `!>` above the binding instead, since both are long multi-line
+  continuation lists where a trailing `!!` would be awkward. Every other binding in both type
+  bodies still uses the trailing form — don't extend this exception to a new binding without a
+  similar multi-line-continuation reason.
 - Don't start a doc-comment's first line with a bare `word:` (e.g. "qc: min: ..."). FORD reads
   that as an attempted metadata key: it either warns (unrecognized key) or, worse, silently
   swallows the line if it happens to match a real key (`date:`, `author:`, `version:`, ...).
@@ -221,9 +244,11 @@ code to the same standard:
   for a procedure's own doc, even a short one-off private helper.
 - **After a file split/relocation refactor, verify FORD coverage didn't regress with a
   before/after diff, not just a clean `ford docs.md` run on the new state alone**: `git stash` the
-  changes, run `ford docs.md`, note the warning count (ideally 0), `git stash pop`, and re-run —
-  matching counts confirm the refactor didn't silently drop doc-comments FORD would have warned
-  about anyway. A relocated private helper legitimately disappearing from its old module's FORD
+  changes, run `ford --warn docs.md` (not plain `ford docs.md` — its warning count is always 0
+  regardless of coverage, see above, so it cannot detect a regression this way), note the warning
+  count, `git stash pop`, and re-run — matching counts confirm the refactor didn't silently drop
+  doc-comments FORD would have warned about anyway. A relocated private helper legitimately
+  disappearing from its old module's FORD
   page (private procedures don't get individual page entries) is expected and not a regression by
   itself — cross-check with `grep 'public ::'` in `parquet.f90` before treating an "not found on
   page" result as a problem.
@@ -267,6 +292,42 @@ code to the same standard:
   since that comment does render on the generic's page. Do not re-attempt the submodule-restatement
   fix without first checking a newer FORD release against upstream issue
   (https://github.com/Fortran-FOSS-Programmers/ford/issues/738).
+- **FORD 7.0.13 cannot resolve a `public ::` re-export chain** — `parquet.f90` re-exports 14 names
+  from sibling modules (`parquet_date`/`parquet_time`/`parquet_timestamp` and the eight
+  `parquet_unit_*`/`parquet_ns_*` constants from `parquet_temporal`; `parquet_string`/
+  `parquet_string_column` from `parquet_strings`; `parquet_maml_file` from `parquet_maml_base`),
+  and `ford --warn docs.md` reports all 14 as `Unknown entity ... with attribute 'public'`,
+  silently dropping them from the generated `parquet` module page. **Confirmed not fixable from
+  source**: neither adding a `!>` doc-comment directly on the `public ::` line, nor using an
+  explicit `use ..., only: name1, name2` import list (already how these modules are imported), nor
+  a bare unrestricted `use` with no `only:` at all, changes this — all three were tried against
+  FORD 7.0.13 and the warning count stayed at 14 every time. The underlying symbols are not lost
+  from the generated site — the three temporal types get their own `type/parquet_date.html`-style
+  pages and the constants render on `module/parquet_temporal.html`/`module/parquet_strings.html`/
+  `module/parquet_maml_base.html` — they just don't appear as belonging to `parquet` on that
+  module's own generated page. No `doc/pages/*.md` or README text currently links a reader
+  specifically to `module/parquet.html` expecting to find these symbols there (the guide's own
+  pointers go to the site-wide `lists/procedures.html`/`lists/types.html`, where they do appear),
+  so this is a cosmetic gap in the generated reference, not a broken link — left undocumented
+  further and accepted as a FORD limitation. Re-test against a newer FORD release before
+  attempting either source-side fix again.
+- **FORD 7.0.13 cannot extract a "Source Code" section for a `module procedure NAME ... end
+  procedure NAME` implementation** (the abbreviated form; `fpm.toml` sets `source = true`), which
+  is why `ford --warn docs.md` reports roughly 240 "Could not extract source code for proc ..."
+  warnings, including for a large share of the public surface (`parquet_get_nrows_int32`/`_int64`,
+  every `parquet_write_<type>_column`, every `parquet_get_metadata_<type>`, ...). **Confirmed
+  fixable in principle, but not worth doing**: rewriting one such procedure
+  (`parquet_get_string_length` in `parquet_read.f90`) from the abbreviated form into a fully
+  restated `module subroutine NAME(args) ... end subroutine NAME` does make FORD extract its
+  source correctly — but it also makes FORD start requiring that submodule body to carry its own
+  doc-comments (it otherwise reports a new `Undocumented interface` warning), which directly
+  conflicts with this project's own deliberate convention (see "FORD doc-comment conventions"
+  above) that the abbreviated form is *exempt* from restating docs precisely so they aren't
+  duplicated between `parquet.f90`'s spec and every submodule body. Applying this fix across all
+  ~240 affected procedures would mean restating and re-documenting most of
+  `parquet_read.f90`/`parquet_write.f90`/`parquet_metadata*.f90` — a large, high-blast-radius
+  rewrite for a convenience feature (an auto-generated source listing on each procedure's page),
+  and it was left undone; the maintainer should decide before anyone attempts it project-wide.
 
 ## Source code structure & conventions
 

@@ -17,9 +17,13 @@ Library to read/write parquet files and handle MAML files. The parquet file meta
 
 - Read and write parquet columns for `int32`/`int64`/`float32`/`float64`/`logical`/`character` (MAML: `boolean`/`string`) — as plain 1D columns or fixed-length vector columns (a vector column is read back whether it was stored on disk as a `fixed_size_list` or a variable-length `list`).
 - Read and write `DATE`/`TIME`/`TIMESTAMP` columns via `parquet_date`/`parquet_time`/`parquet_timestamp` (nanosecond-precision, ISO-8601 parse/format, Unix-time/MJD/JD interop) — see [Date, time and timestamp columns](doc/pages/date-time.md).
-- Define and validate a table's schema and metadata from a [MAML](https://github.com/asgr/MAML-Format) file, including column renaming (`col_map:`), quality-control range checks (`qc:`), and protecting specific columns from ever containing a Null (`protected_cols:`). This is relevant only when *writing* — reading a parquet file never involves MAML.
+- Define and validate a table's schema and metadata from a [MAML](https://github.com/asgr/MAML-Format) file, including column renaming (`col_map:`), quality-control range checks (`qc:`), and protecting specific columns from ever containing a Null (`protected_cols:`). MAML also drives *read-time* quality control (a qc-maml checked against an existing file) — see [Quality control](doc/pages/quality-control.md).
 - Read and write genuine Parquet Null values, with either substitution (`null_value=`) or a validity mask (`is_valid=`).
 - Control output compression codec, compression level, and row group size.
+- Streaming/chunked reads and writes for a column too large to hold as one complete array — see [Streaming/chunked writes](doc/pages/writing.md#streamingchunked-writes) and [Streaming/chunked reads](doc/pages/reading.md#streamingchunked-reads).
+- Row filtering on read (`parquet_filter`) and random downsampling (`sample_fraction`/`sample_seed`) — see [Row filtering](doc/pages/reading.md#row-filtering-with-parquet_filter) and [Random downsampling](doc/pages/reading.md#random-downsampling-with-sample_fraction).
+- Compact string columns (`parquet_string_column`) — append/search/mutate a scalar string column without pre-sizing a fixed-width buffer — see [Reading and writing compact string columns](doc/pages/string-columns.md#reading-and-writing-compact-string-columns).
+- Read a file's own stored table metadata back (`parquet_get_metadata`), and prefetch specific columns before reading (`parquet_prefetch_columns`).
 - Safe to use concurrently (e.g. from OpenMP) — see [Thread safety](doc/pages/thread-safety.md) for the exact rule.
 
 > 📖 **Full user guide:** [doc/pages/](doc/pages/index.md) — reading, writing, the MAML metadata format, thread safety, performance, and troubleshooting. The complete per-procedure API reference is generated from source via [FORD](https://forddocs.readthedocs.io/) — see [Contributing](#contributing). This page is the quick-start overview.
@@ -71,28 +75,33 @@ Quickstart outline — see [Prerequisites](#prerequisites) and [Environment vari
 
 1. Install the Arrow/Parquet C++ library (e.g. macOS Homebrew: `brew install apache-arrow`).
 2. Set `LIBRARY_PATH`, `FPM_FFLAGS`, `FPM_CXXFLAGS`, `FPM_LDFLAGS` to point at Arrow's `include`/`lib` — see [Environment variables](#environment-variables).
-3. Add `parquet-fortran` to your own `fpm.toml`, with `link = ["arrow", "parquet", "c++"]`:
+3. Add `parquet-fortran` to your own `fpm.toml`, with `link = ["arrow", "parquet"]`:
 
 ```toml
 [dependencies]
-parquet-fortran = { path = "/path/to/parquet-fortran" }
-# or provide a relative path to the parquet-fortran git repository, e.g.
-parquet-fortran.git = "../parquet-fortran"
+# Depend on a released version (recommended) -- pin to a tag:
+parquet-fortran = { git = "https://github.com/etempel/parquet-fortran.git", tag = "v1.0.0" }
+
+# Or, once published, from the fpm registry:
+# parquet-fortran = "1.0.0"
+
+# Or, for local development against a working copy on disk instead of a released version:
+# parquet-fortran = { path = "/path/to/parquet-fortran" }
 
 [build]
-link = ["arrow", "parquet", "c++"]
+link = ["arrow", "parquet"]
 ```
 
 4. Build/test your project with `fpm test`.
 
-> **On the link list:** your project lists `link = ["arrow", "parquet", "c++"]`, whereas `parquet-fortran`'s own `fpm.toml` lists `["arrow", "arrow_compute", "parquet"]`. The two differ intentionally — `arrow_compute` (used for read-side statistics and qc min/max) is propagated to you automatically by fpm, and the C++ runtime (`-lc++`/`-lstdc++`) comes in through `FPM_LDFLAGS` rather than the `link` list. See [Environment variables](#environment-variables) and the guide's [Troubleshooting](doc/pages/troubleshooting.md).
+> **On the link list:** your project lists `link = ["arrow", "parquet"]`, whereas `parquet-fortran`'s own `fpm.toml` lists `["arrow", "arrow_compute", "parquet"]`. The two differ intentionally — `arrow_compute` (used for read-side statistics and qc min/max) is propagated to you automatically by fpm, and the C++ runtime (`-lstdc++` on Linux/GCC, `-lc++` on macOS/Clang) comes in through `FPM_LDFLAGS` rather than the `link` list, not through a `"c++"` entry here. See [Environment variables](#environment-variables) and the guide's [Troubleshooting](doc/pages/troubleshooting.md).
 
 ## Important behavior
 
 - Most failures are reported via Fortran `error stop` and abort the process immediately. There are no status/`ierr` return codes in the public API. Some lower-level Arrow/Parquet failures may abort via C++ rather than `error stop`.
 - Reading and writing a *scalar* column (`col_size = 1`) with more than 2,147,483,647 (2^31-1, Fortran's default-integer `huge(1)`) rows is fully supported for every data type — including addressing an individual row past that count via `parquet_read_array_row_mode`. A *vector* column (`col_size > 1`) is capped at that same limit for its own per-row width (`col_size`); its total element count (`nrows * col_size`) has no such cap — row-group sizing handles Parquet's per-row-group element-count ceiling automatically; see [Limitations](#limitations).
-- **`qc:` (`min:`/`max:`/`miss:`) enforcement defaults to *on*, on both `parquet_open_writer` and `parquet_open_reader`, whenever a `schema=` is given** (pass `qc=.false.` to opt out; a no-op without a schema). A violation never aborts on write, and only aborts on read if you haven't passed `qc_soft=.true.`; see [Quality control (qc:) range/miss checks on write](doc/pages/supported-data-types.md#quality-control-qc-rangemiss-checks-on-write) and [Read-time quality control with a qc-maml](doc/pages/reading.md#read-time-quality-control-with-a-qc-maml).
-- **API stability:** this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The stability promise covers exactly the public symbols in `src/parquet.f90`'s `public ::` list (the types/procedures documented under [API overview](#api-overview) below) — a breaking change to any of those requires a major version bump. Anything not in that list (private module internals, `src/parquet_wrapper.cpp`'s C++ surface, file/module layout) can change in a minor or patch release.
+- **`qc:` (`min:`/`max:`/`miss:`) enforcement defaults to *on*, on both `parquet_open_writer` and `parquet_open_reader`, whenever a `schema=` is given** (pass `qc=.false.` to opt out; a no-op without a schema). A violation never aborts on write, and only aborts on read if you haven't passed `qc_soft=.true.`; see [Quality control](doc/pages/quality-control.md) for both sides.
+- **API stability:** this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The stability promise covers the whole `use parquet` surface documented under [API overview](#api-overview) below: every public type/procedure/constant reachable that way, including a public type's own type-bound procedures and operators (e.g. `schema%add_field`, `col%append_string`, `operator(-)` on the temporal types) — a breaking change to any of those requires a major version bump. Anything not reachable via `use parquet` (private module internals, `src/parquet_wrapper.cpp`'s C++ surface, file/module layout) can change in a minor or patch release.
 
 See [Error handling](doc/pages/error-handling.md) and [Limitations](#limitations) for full details.
 
@@ -101,7 +110,7 @@ See [Error handling](doc/pages/error-handling.md) and [Limitations](#limitations
 The code compiles successfully with the following compilers and libraries. It might compile with previous or later versions as well but this is not tested.
 
 - Fortran compiler:
-    - Intel Fortran (ifx) v2025.3.0
+    - Intel Fortran (ifx) v2026.1.0 — confirmed manually outside CI; not exercised by the GitLab CI pipeline itself (gfortran only, see below).
     - Gfortran v15.2.0 (development), v13 (CI)
     - **Minimum gfortran: 13.** Older versions (e.g. Ubuntu 22.04's default compiler)
       miscompile part of the schema-building API — see
@@ -111,7 +120,7 @@ The code compiles successfully with the following compilers and libraries. It mi
 - A C++20-capable C++ compiler (Arrow/Parquet headers use `std::span`
   unconditionally): e.g. GCC ≥ 11 / a recent Clang. `-std=c++20` must be set
   (see [Environment variables](#environment-variables)).
-- [apache-arrow](https://arrow.apache.org) (C++ library for parquet) v24.0.0
+- [apache-arrow](https://arrow.apache.org) (C++ library for parquet) ≥ v24.0.0 — CI installs whatever is currently latest from Arrow's own apt repository, not a pinned version, so treat this as a floor rather than an exact match.
 
 Installing the Arrow/Parquet C++ library itself (not a Fortran package, so it isn't installed by FPM):
 
@@ -153,7 +162,7 @@ export LIBRARY_PATH=path_arrow/lib:$LIBRARY_PATH
 export FPM_FFLAGS="-Ipath_arrow/include"
 export FPM_CXXFLAGS="-std=c++20 -Ipath_arrow/include"
 export FPM_LDFLAGS="-Lpath_arrow/lib -lstdc++"
-export FPM_FC=ifx
+export FPM_FC=gfortran
 ```
 
 Note: `-std=c++20` is required on every platform (Arrow/Parquet headers use `std::span` unconditionally).
@@ -161,11 +170,13 @@ Note: `-std=c++20` is required on every platform (Arrow/Parquet headers use `std
 
 Note: the exact variable set can vary by operating system and compiler toolchain.
 
-For genuine multi-threaded (OpenMP) use, your compiler's OpenMP flag must also be supplied via `FPM_FFLAGS` — see [Thread safety](doc/pages/thread-safety.md) for the per-compiler flags and why.
+For genuine multi-threaded (OpenMP) use: `parquet-fortran`'s own `fpm.toml` already declares fpm's built-in `openmp` metapackage dependency, which supplies the right compiler-specific OpenMP flag automatically for the whole build — no manual `FPM_FFLAGS` addition needed. See [Thread safety](doc/pages/thread-safety.md) for the exact rule and how to also cover your own `!$omp parallel` regions.
 
 To build/test this repository itself (as opposed to depending on it from your own project), see [CONTRIBUTING.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CONTRIBUTING.md).
 
-Hitting a build or link error? See [Troubleshooting](doc/pages/troubleshooting.md) in the user guide for the common symptoms and their fixes.
+Only fpm is a supported way to consume this library (`[install] library = false` in `fpm.toml` means there's no installed `.mod`/library artifact for a non-fpm build system to link against directly).
+
+Hitting a build or link error? See [Troubleshooting](doc/pages/troubleshooting.md) in the user guide for the common symptoms and their fixes. Hitting a *runtime* "library not found" error instead (`dyld: Library not loaded` / `error while loading shared libraries`) after a successful build? The same page's Troubleshooting guide covers `DYLD_LIBRARY_PATH`/`LD_LIBRARY_PATH` too.
 
 ## API overview
 
@@ -173,7 +184,7 @@ A quick index of the public `use parquet` API. For the full per-procedure refere
 
 **Types:** `parquet_writer`, `parquet_reader`, `parquet_schema`, `parquet_filter`, `parquet_column_info`, `parquet_column_type`, `parquet_table_metadata`, `parquet_maml_file`, `parquet_string_column`, `parquet_string`, `parquet_date`, `parquet_time`, `parquet_timestamp`
 
-**Utility:** `parquet_get_version`, `parquet_set_max_threads`
+**Utility:** `parquet_get_version` (bare call reports this library's own version; `mode="internal"`/`"arrow"`/`"parquet"` instead report the linked Arrow/Parquet C++ library's own version — useful to include when filing a bug report), `parquet_set_max_threads`
 
 **MAML and metadata:** `parquet_parse_maml`, `parquet_load_maml_file`, `parquet_load_qc_maml_file`, `parquet_validate_maml`, `parquet_validate_user_maml`, `parquet_size_auto` — plus the `parquet_schema` type-bound builders `schema%init` / `schema%is_init` / `schema%is_parsed` / `schema%clear`, `schema%add_field`, `schema%add_field_from`, `schema%add_metadata` / `schema%clear_metadata`, `schema%add_col_qc` / `schema%set_col_qc`, `schema%set_column_available` / `set_column_unavailable`, `schema%set_col_size` / `set_array_size`, `schema%get_column_index` / `is_column_set` / `get_num_fields` / `get_field_name` / `get_field`, `schema%print_schema_info`
 
@@ -200,7 +211,7 @@ Worth knowing up front before relying on this library:
 - **Writing** is limited to the six plain types in [Supported data types](doc/pages/supported-data-types.md) plus `date`/`time`/`timestamp` (see [Date, time and timestamp columns](doc/pages/date-time.md)) — there is no arbitrary nested/struct/map support, and no `INTERVAL`/duration type (a deliberately dropped non-goal, not a pending gap — see [Not yet supported](doc/pages/date-time.md#not-yet-supported) for why). **Reading** additionally accepts a column physically stored as `int8`/`int16`/unsigned integers/`half_float`/`decimal` (widened into `integer(int32)`/`integer(int64)`/`real(real32)`/`real(real64)` as appropriate; see [Reading a column into a different numeric kind](doc/pages/supported-data-types.md#reading-a-column-into-a-different-numeric-kind)) — this only ever arises from a file written by some other tool, since this library's own writer never produces those physical types. A `STRUCT` column's individual fields, at any nesting depth, can also be read directly via a dot-separated path (e.g. `"main.inner.age"`) passed as `name`, as long as the path resolves down to a scalar or vector (`FIXED_SIZE_LIST`) leaf — see [Reading a nested struct field](doc/pages/supported-data-types.md#reading-a-nested-struct-field); naming an intermediate struct directly is not readable, and `MAP` columns, and variable-length `LIST` columns nested inside a struct path, remain unsupported. `MAP`/`INTERVAL` columns remain unsupported on both sides; `qc:`/`parquet_filter` are not yet supported for `date`/`time`/`timestamp` columns. Vector columns are fixed-length (`col_size`) only: every row must hold the same number of elements. Such a column can be *read back* whether it was stored on disk as a `fixed_size_list` or as a variable-length `list<element>` (see the [reading notes](doc/pages/reading.md)), but a genuinely ragged list (rows of differing length) is not supported — it is rejected on read — and this library's own writer only ever emits `fixed_size_list`.
 - **Reading a column whose physical Parquet type doesn't match what you asked for aborts the process, but not via a clean `error stop`** — it's a C++-level abort with a diagnostic printed to stderr (e.g. `parquet-fortran: parquet_read_column: type mismatch for column: d (expected int32/int64, got timestamp[us])`), not a Fortran `error stop`. This covers the physical type being outside the supported [data types](doc/pages/supported-data-types.md) as well as a declared vector column's shape not matching what was requested, across every read function (`parquet_read_column`, `parquet_read_array_row_mode`, `parquet_read_array_element_mode`, and vector-column reads).
 - **A vector column's per-row width (`col_size`) is capped at 2,147,483,647 elements** — a hard limit of Arrow's `FixedSizeListType` itself (its `list_size` is a plain `int32_t`, with no "large" variant to fall back to, unlike Arrow's string type). Writing a column that would exceed it aborts the same way as the physical-type-mismatch case above (a C++-level abort via a stderr diagnostic, not a clean `error stop`), rather than silently truncating/corrupting the written column.
-- **A vector column's flattened element count is capped at 2,147,483,647 elements *per row group*, not per file** — Parquet's own repetition/definition-level generation for list-typed columns walks every flattened element of a row group with a plain `int32_t` counter. This is handled automatically: `parquet_close_writer`'s row-group auto-sizing already accounts for each column's `col_size` and picks a smaller row-group size whenever a wide vector column needs it, so a column's *total* `nrows * col_size` — a real, hittable case (e.g. 2.5 billion rows at `col_size=2`) — can exceed 2,147,483,647 without any special handling, transparently split across multiple row groups. Only an *explicitly*-chosen `chunk_size` (`parquet_open_writer`/`parquet_set_writer_options`) that conflicts with a vector column's `col_size` aborts (a C++-level abort via a stderr diagnostic, not a clean `error stop`) rather than silently overriding the caller's request; see [Important behavior](#important-behavior).
+- **A vector column's flattened element count is capped at 2,147,483,647 elements *per row group*, not per file** — Parquet's own repetition/definition-level generation for list-typed columns walks every flattened element of a row group with a plain `int32_t` counter. This is handled automatically: `parquet_close_writer`'s row-group auto-sizing already accounts for each column's `col_size` and picks a smaller row-group size whenever a wide vector column needs it, so a column's *total* `nrows * col_size` — a real, hittable case (e.g. 2.5 billion rows at `col_size=2`) — can exceed 2,147,483,647 without any special handling, transparently split across multiple row groups. Only an *explicitly*-chosen `chunk_size` (`parquet_open_writer(..., chunk_size=)`) that conflicts with a vector column's `col_size` aborts (a C++-level abort via a stderr diagnostic, not a clean `error stop`) rather than silently overriding the caller's request; see [Important behavior](#important-behavior).
 - **A table is capped at 2,147,483,647 columns** — another hard limit of Arrow's own C++ API (`Schema::num_fields()`/`GetFieldIndex()` return a plain `int32_t` internally, with no int64/"large" variant for column count at all, unlike row count). Writing a column that would push the table's column count past this aborts the same way as the two cases above (a C++-level abort via a stderr diagnostic, not a clean `error stop`), rather than risking Arrow's own field-count bookkeeping silently wrapping/corrupting. Reaching this in practice would first require an enormous amount of memory and time for per-column bookkeeping (each column needs its own name/type/metadata), so it is not a limit expected to be hit by accident.
 - A column can only be written once per `parquet_writer` via `parquet_write_column` — there's no way to append rows to an already-closed `.parquet` file. Writing the same column name twice this way fails immediately with `error stop`, naming the column, whether or not the writer has a MAML-derived schema. If a column is too large to hold as one complete array, see [Streaming/chunked writes](doc/pages/writing.md#streamingchunked-writes) for the incremental, row-group-at-a-time alternative (`parquet_new_row_group`/`parquet_write_column_chunk`/`parquet_finish_row_group`).
 - By default, `parquet_open_writer` silently overwrites/truncates an existing file at that path. Pass `overwrite=.false.` to instead fail immediately with `error stop`, naming the file, if it already exists.

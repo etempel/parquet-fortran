@@ -148,8 +148,10 @@ module parquet_temporal
         procedure, private :: date_sub_days_i64   !! (date, integer(int64)) specific of operator(-).
         procedure, private :: date_add_days_i32   !! (date, integer(int32)) specific of operator(+).
         procedure, private :: date_add_days_i64   !! (date, integer(int64)) specific of operator(+).
-        generic :: operator(-) => date_diff, date_sub_days_i32, date_sub_days_i64 !! Difference or day offset (aborts on a null operand / out-of-range result).
-        generic :: operator(+) => date_add_days_i32, date_add_days_i64 !! Day offset (aborts on a null operand / out-of-range result).
+        generic :: operator(-) => date_diff, date_sub_days_i32, date_sub_days_i64
+        !! Difference or day offset (aborts on a null operand / out-of-range result).
+        generic :: operator(+) => date_add_days_i32, date_add_days_i64
+        !! Day offset (aborts on a null operand / out-of-range result).
     end type parquet_date
     !
     !> A time of day, stored as nanoseconds since midnight, [0, 86400e9 - 1]. Holds any
@@ -189,8 +191,10 @@ module parquet_temporal
         procedure, private :: time_sub_ns_i64     !! (time, integer(int64)) specific of operator(-).
         procedure, private :: time_add_ns_i32     !! (time, integer(int32)) specific of operator(+).
         procedure, private :: time_add_ns_i64     !! (time, integer(int64)) specific of operator(+).
-        generic :: operator(-) => time_diff, time_sub_ns_i32, time_sub_ns_i64 !! Difference or ns offset (wraps; aborts on a null operand or a >24h offset magnitude).
-        generic :: operator(+) => time_add_ns_i32, time_add_ns_i64 !! Ns offset (wraps; aborts on a null operand or a >24h offset magnitude).
+        generic :: operator(-) => time_diff, time_sub_ns_i32, time_sub_ns_i64
+        !! Difference or ns offset (wraps; aborts on a null operand or a >24h offset magnitude).
+        generic :: operator(+) => time_add_ns_i32, time_add_ns_i64
+        !! Ns offset (wraps; aborts on a null operand or a >24h offset magnitude).
     end type parquet_time
     !
     !> An instant, stored losslessly as whole seconds since 1970-01-01T00:00:00 plus a
@@ -242,7 +246,8 @@ module parquet_temporal
         procedure, private :: ts_sub_ns_i64       !! (ts, integer(int64)) specific of operator(-).
         procedure, private :: ts_add_ns_i32       !! (ts, integer(int32)) specific of operator(+).
         procedure, private :: ts_add_ns_i64       !! (ts, integer(int64)) specific of operator(+).
-        generic :: operator(-) => ts_diff_ns, ts_sub_ns_i32, ts_sub_ns_i64 !! Difference or ns offset (aborts on a null operand or int64 overflow).
+        generic :: operator(-) => ts_diff_ns, ts_sub_ns_i32, ts_sub_ns_i64
+        !! Difference or ns offset (aborts on a null operand or int64 overflow).
         generic :: operator(+) => ts_add_ns_i32, ts_add_ns_i64 !! Ns offset (aborts on a null operand or int64 overflow).
     end type parquet_timestamp
     !

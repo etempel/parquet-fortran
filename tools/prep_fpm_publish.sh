@@ -23,6 +23,19 @@
 #      doc/pages/embedding-maml-schemas.md and each script's own docstring, respectively). This
 #      list must stay in sync by hand -- see CLAUDE.md's "Keeping tools/prep_fpm_publish.sh in
 #      sync" for the rule.
+#   4. `app/` is an *allow-list*, not a strip-list: only `app/program.f90` (the `run_parquet_fortran`
+#      executable) ships in the published tarball. Every other `app/*.f90` file is a maintainer-only
+#      dev/benchmark/scratch tool (see CONTRIBUTING.md's "Other tools/ helpers"), and a *new* file
+#      dropped into `app/` is excluded by default without needing a REMOVE_PATHS edit -- unlike the
+#      strip-list model this replaced, where a forgotten entry silently shipped in the tarball
+#      (this is exactly what happened to app/playground.f90 and app/demo_print_schema_info.f90
+#      before this script tracked them).
+#   5. `test/fixtures/` is removed entirely -- a downstream consumer of the library has no use for
+#      this project's own test fixtures, and it sidesteps a Git-LFS pointer-file hazard: if the
+#      fixtures were ever pulled as ~128-byte LFS pointer files instead of the real binary content
+#      (e.g. a checkout with `git lfs` not installed -- `.lfsconfig` sets `skipdownloaderrors = true`,
+#      so this fails *silently*), packaging them would ship broken files in a permanent,
+#      undeletable published version.
 #
 # After committing, this also runs fpm's own read-only preview commands -- none of them need a
 # token or touch the registry -- and self-checks the tarball they produce: extracts it and
@@ -73,7 +86,7 @@ REMOVE_PATHS=(
     .gitlab-ci.yml
     .github
     docs.md
-    app/benchmark_threads.f90
+    test/fixtures
     tools/benchmark_threads.sh
     tools/check_doc_anchors.py
     tools/count_lines.py
@@ -90,6 +103,23 @@ REMOVE_PATHS=(
     tools/test_large_scale.sh
 )
 
+# app/ is an allow-list: only APP_KEEP survives; every other app/*.f90 file found on disk is
+# appended to REMOVE_PATHS below, so a new maintainer-only file dropped into app/ is excluded by
+# default instead of silently shipping until someone remembers to list it.
+APP_KEEP=(app/program.f90)
+for app_file in app/*.f90; do
+    keep=0
+    for allowed in "${APP_KEEP[@]}"; do
+        if [ "$app_file" = "$allowed" ]; then
+            keep=1
+            break
+        fi
+    done
+    if [ "$keep" -eq 0 ]; then
+        REMOVE_PATHS+=("$app_file")
+    fi
+done
+
 # Files that must survive into the tarball -- a sanity check in the opposite direction from
 # REMOVE_PATHS, catching an over-broad future edit that strips something it shouldn't.
 KEEP_PATHS=(
@@ -98,6 +128,7 @@ KEEP_PATHS=(
     README.md
     VERSION.txt
     src/parquet.f90
+    app/program.f90
     tools/generate_parquet_maml.sh
     tools/convert_fits_to_parquet.py
     tools/parquet_metadata_to_md.py

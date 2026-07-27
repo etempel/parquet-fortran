@@ -84,6 +84,11 @@ test:
     # coverage/OpenMP flags fpm test itself needs. Note it still replaces
     # fpm's default profile flags, same as before.
     - FPM_FFLAGS="--coverage -fopenmp" fpm test --verbose
+    # Runs tools/run_error_scenarios.sh's own scenario list too, so it can't silently drift out
+    # of parity with test/error_scenarios.f90's `select case` (see run_error_scenarios.sh's own
+    # header comment) -- fpm test above already exercises every scenario via test_errors.f90, but
+    # only this script checks that its independently-maintained list still names every one of them.
+    - tools/run_error_scenarios.sh
     # --exclude-lines-by-pattern auto-excludes every standalone report_fatal_error(...) call
     # site in src/parquet_wrapper.cpp (present and future -- no per-call-site source comment
     # needed) without needing GCOVR_EXCL_LINE comments at each one: std::abort() there discards

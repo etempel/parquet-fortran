@@ -2,6 +2,8 @@
 title: Combined example: MAML schema, vector columns and metadata
 ---
 
+## MAML schema, vector columns and metadata
+
 This example ties together MAML-driven column definitions, a vector column, dropping an optional column at runtime, and adding extra table metadata not present in the MAML file.
 
 ```fortran
@@ -35,4 +37,45 @@ program write_parquet_combined_example
     call parquet_write_column(writer, "idarr", idarr)
     call parquet_close_writer(writer)
 end program write_parquet_combined_example
+```
+
+## Nulls, quality control and compression together
+
+This ties together `is_valid` (writing a genuine Null), `qc=.true.` (range-check warnings), and a non-default compression codec in one small program:
+
+```fortran
+program write_parquet_qc_example
+    use parquet
+    use iso_fortran_env, only: int32
+    implicit none
+
+    type(parquet_schema) :: schema
+    type(parquet_writer) :: writer
+    type(parquet_reader) :: reader
+    integer(int32) :: ra(4) = [10_int32, 400_int32, 90_int32, 200_int32]  ! 400 is out of range
+    integer(int32) :: ra_read(4)
+    logical :: is_valid(4) = [.true., .true., .false., .true.]           ! row 3 will be written as Null
+    logical :: is_valid_read(4)
+
+    schema%maml%name = "qc_example.maml"
+    schema%maml%lines = [character(len=40) :: &
+        "table: qc_example_table", &
+        "fields:", &
+        "- name: ra", &
+        "  data_type: int32", &
+        "  qc:", &
+        "    min: '>= 0'", &
+        "    max: '< 360'" ]
+
+    call parquet_parse_maml(schema)
+
+    call parquet_open_writer(writer, "data.parquet", schema, qc=.true., compression="zstd")
+    call parquet_write_column(writer, "ra", ra, is_valid=is_valid)
+    ! prints: WARNING: qc violation for column 'ra': declared min >= 0, max < 360, ...
+    call parquet_close_writer(writer)
+
+    call parquet_open_reader(reader, "data.parquet")
+    call parquet_read_column(reader, "ra", ra_read, is_valid=is_valid_read)
+    call parquet_close_reader(reader)
+end program write_parquet_qc_example
 ```

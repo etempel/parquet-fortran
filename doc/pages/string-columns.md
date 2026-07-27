@@ -461,35 +461,10 @@ read-only operations (`get`, `view`, `length`, the comparisons, `find`, the size
 long as no thread mutates the column concurrently. Any mutation must be externally
 synchronized, and a handle must not be used across a mutation on any thread.
 
-**Past gfortran/OpenMP runtime caveat — now worked around in this module's source.** The rule
-above is about *sharing one column* across threads; for a while this project also had to warn
-about something else: each thread having its own, fully independent `parquet_string_column`
-could still silently corrupt memory under concurrent execution on some gfortran/OpenMP builds.
-Root-caused to a specific, still-open gfortran bug
-([PR113797](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=113797); related:
-[PR97977](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=97977)): the compiler's codegen for
-*receiving* a `character(len=:), allocatable` function result uses a hidden length-tracking
-variable that isn't always properly thread-local. Confirmed with a minimal reproducer using no
-code from this library — the hazard needed nothing more than a `character(len=:), allocatable`
-function called concurrently on a type with two or more allocatable components (this type has
-three: `offsets`, `data`, `validity`); it did not depend on construction/destruction, `class()`
-dispatch, or sharing, and did not affect non-`character` allocatable results.
-
-The fix: **every accessor that used to return `character(len=:), allocatable` as a function
-result is now a subroutine** that writes into an `intent(out)`/`intent(inout)` allocatable
-`character` argument instead — `get`, `summary`, and the `parquet_string` handle's `to_string`
-(the three that were directly exposed), which sidesteps the defective codegen path entirely
-rather than working around a symptom. This was independently verified: the identical reproducer
-converted from a function to a subroutine reproduced **zero** failures across tens of thousands
-of iterations, vs. hundreds of failures per 8000 for the function form. `to_character`, `print`,
-and the handle's `print` were already subroutines and needed no signature change, only an
-internal update to call the now-subroutine `get`. `find`, `contains`, `startswith`, `endswith`,
-`equals` were never exposed in the first place — they compare bytes directly against the stored
-buffer and never returned an allocatable `character` result.
-
-No special precaution is needed for concurrent, independent `parquet_string_column` use as a
-result — the "many-readers xor single-writer" rule at the top of this section remains the only
-thread-safety rule that applies.
+This is the only thread-safety rule specific to this type. A separate, library-wide compiler
+caveat around functions returning `character(len=:), allocatable` — found and root-caused via this
+same type's accessors, but not specific to it — is covered in the main
+[Thread safety](thread-safety.html#a-note-on-functions-returning-characterlen-allocatable) guide.
 
 ## Complexity at a glance
 
@@ -560,7 +535,7 @@ Differences from the padded `character(len=...)` path:
 
 ```fortran
 ! streaming write, one row group at a time -- names is a larger, already-populated column;
-! slice (see "Extracting a row range: slice" below) carves out one row group at a time
+! slice (see "Extracting a row range: slice" above) carves out one row group at a time
 type(parquet_string_column) :: chunk
 integer(int64) :: chunk_start
 

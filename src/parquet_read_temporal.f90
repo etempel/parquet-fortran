@@ -153,6 +153,7 @@ contains
     end procedure parquet_read_timestamp_array_full
     ! ---- Temporal streaming (row-group-chunked) reads. Each type has a scalar and a vector
     !      _impl (row_group as int64) shared by its int32/int64 row_group rg32/rg64 specifics.
+    !> Shared body of parquet_read_date_column_chunk_rg32/_rg64.
     subroutine read_date_column_chunk_impl(reader, name, row_group, values)
         type(parquet_reader), intent(in) :: reader !! open reader.
         character(len=*), intent(in) :: name !! column name.
@@ -179,6 +180,7 @@ contains
             end if
         end do
     end subroutine read_date_column_chunk_impl
+    !> Shared body of parquet_read_date_array_column_chunk_rg32/_rg64.
     subroutine read_date_array_column_chunk_impl(reader, name, row_group, values)
         type(parquet_reader), intent(in) :: reader !! open reader.
         character(len=*), intent(in) :: name !! vector column name.
@@ -209,6 +211,7 @@ contains
             end do
         end do
     end subroutine read_date_array_column_chunk_impl
+    !> Shared body of parquet_read_time_column_chunk_rg32/_rg64.
     subroutine read_time_column_chunk_impl(reader, name, row_group, values)
         type(parquet_reader), intent(in) :: reader !! open reader.
         character(len=*), intent(in) :: name !! column name.
@@ -235,6 +238,7 @@ contains
             end if
         end do
     end subroutine read_time_column_chunk_impl
+    !> Shared body of parquet_read_time_array_column_chunk_rg32/_rg64.
     subroutine read_time_array_column_chunk_impl(reader, name, row_group, values)
         type(parquet_reader), intent(in) :: reader !! open reader.
         character(len=*), intent(in) :: name !! vector column name.
@@ -265,6 +269,7 @@ contains
             end do
         end do
     end subroutine read_time_array_column_chunk_impl
+    !> Shared body of parquet_read_timestamp_column_chunk_rg32/_rg64.
     subroutine read_timestamp_column_chunk_impl(reader, name, row_group, values)
         type(parquet_reader), intent(in) :: reader !! open reader.
         character(len=*), intent(in) :: name !! column name.
@@ -292,6 +297,7 @@ contains
             end if
         end do
     end subroutine read_timestamp_column_chunk_impl
+    !> Shared body of parquet_read_timestamp_array_column_chunk_rg32/_rg64.
     subroutine read_timestamp_array_column_chunk_impl(reader, name, row_group, values)
         type(parquet_reader), intent(in) :: reader !! open reader.
         character(len=*), intent(in) :: name !! vector column name.
@@ -362,6 +368,7 @@ contains
     end procedure parquet_read_timestamp_array_column_chunk_rg64
     ! ---- Temporal row-mode reads (one row's element vector). Each type has one _impl (int64
     !      row_index) shared by its int32/int64 row_index specifics. Nulls fill their elements.
+    !> Shared body of parquet_read_date_array_row_mode's int32/int64 row_index specifics.
     subroutine read_date_array_row_mode_impl(reader, name, values, row_index)
         type(parquet_reader), intent(in) :: reader !! open reader.
         character(len=*), intent(in) :: name !! vector column name.
@@ -386,6 +393,7 @@ contains
             end if
         end do
     end subroutine read_date_array_row_mode_impl
+    !> Shared body of parquet_read_time_array_row_mode's int32/int64 row_index specifics.
     subroutine read_time_array_row_mode_impl(reader, name, values, row_index)
         type(parquet_reader), intent(in) :: reader !! open reader.
         character(len=*), intent(in) :: name !! vector column name.
@@ -410,6 +418,7 @@ contains
             end if
         end do
     end subroutine read_time_array_row_mode_impl
+    !> Shared body of parquet_read_timestamp_array_row_mode's int32/int64 row_index specifics.
     subroutine read_timestamp_array_row_mode_impl(reader, name, values, row_index)
         type(parquet_reader), intent(in) :: reader !! open reader.
         character(len=*), intent(in) :: name !! vector column name.

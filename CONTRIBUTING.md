@@ -32,11 +32,21 @@ Three project conventions worth knowing before contributing (all are applied in 
 
 **Line length.** Every line in `src/*.f90` and `test/*.f90` — code and comments alike, including trailing end-of-line comments — must stay at or under 132 columns, the standard Fortran free-form limit. Wrap long expressions/strings with `&` continuations and long comments across multiple `!`-prefixed lines rather than letting a line run past 132 columns; don't reach for a compiler flag to paper over it (see `.gitlab-ci.yml`'s `FPM_FFLAGS`, which no longer passes `-ffree-line-length-none`).
 
-**New features need tests and docs.** A new feature should land together with (1) unit-test coverage in the relevant `test/*.f90` suite — plus error-path coverage via `test/error_scenarios.f90` + `test/test_errors.f90` + `tools/run_error_scenarios.sh` if it has failure modes that `error stop` — and (2) documentation updates: a `!>`/`!!` doc-comment on the new public API (picked up automatically by the [FORD-generated reference](https://www.4most.eu/readthedocs/etempel/parquet-fortran/main)), the relevant [user guide page](doc/pages/index.md) for any new behavior/how-to, the [README](README.md) if the landing-page story changes, and this file if it affects contributor workflow. (`CHANGELOG.md` updates are paused pre-1.0 — see CLAUDE.md.)
+**New features need tests and docs.** A new feature should land together with (1) unit-test coverage in the relevant `test/*.f90` suite — plus error-path coverage via `test/error_scenarios.f90` + `test/test_errors.f90` + `tools/run_error_scenarios.sh` if it has failure modes that `error stop` — and (2) documentation updates: a `!>`/`!!` doc-comment on the new public API (picked up automatically by the FORD-generated reference — build it locally with `ford docs.md`, or see whichever published copy your checkout links to: `https://www.4most.eu/readthedocs/etempel/parquet-fortran/main` on canonical GitLab, `https://etempel.github.io/parquet-fortran/` on the GitHub mirror), the relevant [user guide page](doc/pages/index.md) for any new behavior/how-to, the [README](README.md) if the landing-page story changes, and this file if it affects contributor workflow. (`CHANGELOG.md` updates are paused pre-1.0 — see CLAUDE.md.)
+
+A plain `ford docs.md` run does **not** verify that a new doc-comment was actually added — its undocumented-entity warnings are opt-in and off by default in this project. To actually check coverage before committing, run `ford --warn docs.md` instead; see CLAUDE.md's "FORD doc-comment conventions" for what to expect in its (noisy) output and which warning categories are already-accepted noise.
 
 ## Building and testing this repository
 
 The commands below assume Arrow/Parquet and the environment variables from [README.md's Prerequisites](README.md#prerequisites) / [Environment variables](README.md#environment-variables) sections are already set up — they're needed here too, since this repository builds itself the same way a consuming project would.
+
+**Git LFS is also required locally**, not just in CI: `test/fixtures/*.parquet` (see [Regenerating the test fixtures](#regenerating-the-test-fixtures)) are Git-LFS-tracked, and `.lfsconfig` sets `skipdownloaderrors = true` — so cloning without `git lfs` installed **succeeds silently**, leaving ~128-byte pointer files in place of the real Parquet fixtures, and the reader/error-scenario tests that depend on them then fail with confusing errors that have nothing to do with the code you're testing. Before building for the first time:
+
+```bash
+git lfs install
+git lfs pull
+ls -l test/fixtures/*.parquet   # each file should be well over 128 bytes
+```
 
 To test the code:
 
@@ -50,18 +60,29 @@ To clean the build directory and all dependencies:
 
     fpm clean --all
 
-To generate the executable:
+To generate the executables:
 
     fpm install --prefix my_path
 
-The executable is placed in the `my_path/bin` directory. It only prints the parquet-fortran library version number — useful as a quick sanity check that a build/install actually picked up the version you expect.
+`fpm.toml` sets `auto-executables = true`, so **five** executables are built from `app/*.f90` and placed in `my_path/bin`:
+
+| Executable | Source | Purpose |
+|---|---|---|
+| `run_parquet_fortran` | `app/program.f90` | Prints the parquet-fortran library version number — a quick sanity check that a build/install actually picked up the version you expect. The only one of the five that ships in the fpm-published package (see `tools/prep_fpm_publish.sh`) — the other four are maintainer/CI-only dev tools kept in this repository but stripped from what a consumer installs. |
+| `benchmark_threads` | `app/benchmark_threads.f90` | Driven by `tools/benchmark_threads.sh` — see [Other tools/ helpers](#other-tools-helpers). |
+| `test_large_scale` | `app/test_large_scale.f90` | Driven by `tools/test_large_scale.sh` — see [Other tools/ helpers](#other-tools-helpers). |
+| `playground` | `app/playground.f90` | Maintainer scratch file for trying out Fortran code; no fixed purpose. |
+| `demo_print_schema_info` | `app/demo_print_schema_info.f90` | Maintainer demo for reviewing `schema%print_schema_info`'s output. |
 
 If `fpm test` behaves unexpectedly right after a source change (e.g. a test seems to still run old
 code, or `error_scenarios` reports a scenario name as unrecognized even though it's clearly in
-`test/error_scenarios.f90`), try `fpm clean --all` before spending time debugging further — fpm's
+`test/error_scenarios.f90`), try `fpm clean --skip` before spending time debugging further — fpm's
 build cache can serve a stale binary, and building with several different `FPM_FFLAGS` values
 creates multiple `build/gfortran_<hash>/` directories, one of which
-`test/test_errors.f90`'s `error_scenarios_bin` may pick up instead of the current one.
+`test/test_errors.f90`'s `error_scenarios_bin` may pick up instead of the current one. Prefer
+`--skip` over the heavier `fpm clean --all`: `--all` also discards external dependencies, forcing a
+`test-drive` re-download that's never the cause of this particular symptom, whereas `--skip` fixes
+the same stale-binary problem without that extra cost.
 
 ### Running a single test suite/test
 
@@ -122,6 +143,7 @@ A handful of tests read pre-built Parquet files committed under `test/fixtures/`
 - `list_vector.parquet` — a vector column stored as Parquet `LIST` rather than the fixed-size layout this library writes.
 - `extended_types.parquet` — columns of the extended read-only source types (`int8`/`int16`/unsigned integers/`half_float`/`decimal`).
 - `nested_struct.parquet` — a `STRUCT` column, nested 3 levels deep, with a `FIXED_SIZE_LIST` vector-column leaf in a sibling `STRUCT` column, and rows covering every independent null-combination source (see [Reading a nested struct field](doc/pages/supported-data-types.md#reading-a-nested-struct-field)).
+- `map_list_types.parquet` — exercises Arrow's `MAP` and (variable-length) `LIST` types, generated by `generate_map_list_types_fixture` in `tools/generate_fixtures.cpp`. Currently **reserved/unused**: no Fortran test reads it, since `MAP` columns and struct-nested variable-length `LIST` columns remain unsupported (see [Features considered but not implemented](#features-considered-but-not-implemented)) — kept as groundwork for if that support is ever added.
 
 Because these files are committed, a normal `fpm test` never needs to regenerate them. Rebuild them only when you change `generate_fixtures.cpp` or otherwise need a fixture recreated, via:
 
@@ -131,11 +153,15 @@ tools/run_generate_fixtures.sh
 
 This compiles `generate_fixtures.cpp` with `clang++` and runs it from the repository root, rewriting every fixture under `test/fixtures/`. It needs the same `FPM_CXXFLAGS`/`FPM_LDFLAGS` (Arrow/Parquet include/link flags) used to build the project itself — see [README.md's Environment variables section](README.md#environment-variables); the script errors out early if they are unset.
 
+The `clang++` invocation is unconditional, with no `FPM_CXX`/`CXX` override — so fixture regeneration is not possible as-is on a GCC-only Linux box (the same platform this project's own CI uses) without editing the script first.
+
 ### Other tools/ helpers
 
 A few more `tools/` scripts, unrelated to fixtures and not part of the build or test flow:
 
 `tools/count_lines.py` reports code/comment/blank line counts for `src/` and `test/`, a convenience for repository metrics.
+
+`tools/count_tests.sh` counts test-drive unit tests per suite directly from source (no build or run required): it reads `test/run_tester.f90`'s `new_testsuite(...)` registrations, locates each suite's `collect_tests_parquet_*` subroutine, and counts the `new_unittest(...)` entries inside it — cross-checked against an actual `fpm test run_tester` run's PASSED/FAILED line count. Maintainer-only (stripped from the fpm-published package, see `tools/prep_fpm_publish.sh`).
 
 `tools/benchmark_threads.sh` measures how write and read throughput scale with Arrow's internal
 thread-pool size (`parquet_set_max_threads`), sweeping a log-spaced set of thread counts and
@@ -159,13 +185,16 @@ TEST_FILE=/tmp/benchmark.parquet TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads
 library genuinely reads/writes columns correctly beyond `huge(1_int32)` (2,147,483,647) rows — the
 scale no automated test in this repository ever attempts, since doing so needs a machine with
 substantial memory and disk. It drives `app/test_large_scale.f90` (a maintainer/user-only fpm
-executable, not part of the public library) through 12 cases, one at a time, each checking
-`parquet_get_nrows` and a full read-back against the true data. `NROWS`, `NELEM`, and `MAX_SIZE_GB`
-are its env-overridable config — `NROWS` sets the row count for every case (default a small, cheap
-`1000`), `NELEM` sets the vector cases' `col_size` (default `2`), and `MAX_SIZE_GB` (default `8`)
-skips any case whose estimated uncompressed size would exceed it instead of letting an oversized
-value exhaust memory/disk. Progress is printed per case (`Running test X of 12: ...` / `Finished
-test X of 12: ... -- PASSED (12.345s)` / `Skipped test X of 12: ...`):
+executable, not part of the public library) through 13 cases (7 scalar types plus 6 vector-column cases, one per type), one at a time,
+each checking `parquet_get_nrows` and a full read-back against the true data. Set the
+`RUN_VECTOR_CASES` compile-time parameter at the top of `app/test_large_scale.f90` to `.false.` and
+rebuild to skip the 6 vector cases and run only the 7 scalar ones. `NROWS`, `NELEM`, and
+`MAX_SIZE_GB` are its env-overridable config — `NROWS` sets the row count for every case (default a
+small, cheap `1000`), `NELEM` sets the vector cases' `col_size` (default `2`), and `MAX_SIZE_GB`
+(default `8`) skips any case whose estimated uncompressed size would exceed it instead of letting an
+oversized value exhaust memory/disk. Progress is printed per case (`Running test X of 13: ...` /
+`Finished test X of 13: ... -- PASSED (12.345s)` / `Skipped test X of 13: ...`, or `of 7` when
+`RUN_VECTOR_CASES = .false.`):
 
 ```bash
 tools/test_large_scale.sh
@@ -228,14 +257,13 @@ tools/parquet_metadata_to_md.py data.parquet report.md
 
 ### Testing genuine OpenMP concurrency
 
-This repository's own OpenMP-dependent tests (the `openmp`/`openmp_write` test suites, plus the `concurrent_calls_into_shared_reader`/`writer` error scenarios) need a real OpenMP flag to actually exercise concurrency:
+This repository's own OpenMP-dependent tests (the `openmp`/`openmp_write` test suites, plus the `concurrent_calls_into_shared_reader`/`writer` error scenarios) need OpenMP to actually be active to exercise concurrency:
 
 ```sh
-export FPM_FFLAGS="-fopenmp"
 fpm test
 ```
 
-The OpenMP flag is compiler-dependent (see the [Thread safety guide](doc/pages/thread-safety.md) for the per-compiler flags), so it can't be hardcoded in `fpm.toml` and must come from `FPM_FFLAGS` as shown. The two concurrency error-scenario tests are **self-adapting**: they check `omp_get_max_threads()` and, when it's `1` (no OpenMP flag, or `OMP_NUM_THREADS=1`), the shared-reader/writer race cannot occur, so they skip and pass trivially. So plain `fpm test` (no `FPM_FFLAGS`) is still green — it just doesn't meaningfully exercise these specific concurrency checks; set `FPM_FFLAGS="-fopenmp"` to actually verify the guard fires.
+`fpm.toml`'s `openmp = "*"` dependency (fpm's built-in OpenMP metapackage) already supplies the compiler-appropriate flag (`-fopenmp` for gfortran, `-qopenmp` for ifx, ...) automatically — there is no need to pass one manually via `FPM_FFLAGS`. The two concurrency error-scenario tests are **self-adapting**: they check `omp_get_max_threads()` and, when it's `1` (OpenMP genuinely inactive, or `OMP_NUM_THREADS=1`), the shared-reader/writer race cannot occur, so they skip and pass trivially — so a green `fpm test` alone doesn't *prove* these specific concurrency checks ran for real; if you want to double-check that OpenMP is active in your environment, print `omp_get_max_threads()` from a small program or check the test suite's own thread-count assertions.
 
 ### Continuous integration (GitLab CI)
 
@@ -246,7 +274,7 @@ A few choices in that file are load-bearing — each one cost a debugging round 
 - **Base image `ubuntu:24.04`** (pinned with `image:`, since the runner's own default image is older). 24.04 is the oldest Ubuntu that satisfies *every* toolchain requirement at once: gfortran 13 (gfortran ≤ 11 miscompiles the optional allocatable-character argument in `schema%add_col_qc` — see [README's Prerequisites](README.md#prerequisites)), a g++ new enough for C++20 / `std::span`, `pipx` in the repos (used to install `fpm`), and current Arrow apt packages. Its default `gcov` also matches its default compiler, so `gcovr` needs no `--gcov-executable` override.
 - **`git lfs pull`** before running tests. The `test/fixtures/*.parquet` files are Git-LFS-tracked (see `.gitattributes`); without pulling them the reader tests read LFS *pointer* files and fail. `git lfs install --skip-repo` sets up only the global filter config (CI never pushes, so the repo-local hooks are deliberately skipped — installing them fails if the checkout already has one).
 - **`libarrow-compute-dev`** installed alongside `libarrow-dev` / `libparquet-dev`: Arrow ships its compute kernels in a separate package, and `fpm.toml` links `arrow_compute` (see the [Troubleshooting guide](doc/pages/troubleshooting.md)). Omitting it fails the C++ compile on `arrow/compute/*.h`.
-- **`FPM_FFLAGS="--coverage -fopenmp"`.** Source is kept within the standard 132-column free-form limit (see [Conventions](#conventions)), so no `-ffree-line-length-none` override is needed. Setting `FPM_FFLAGS` still *replaces* fpm's default profile flags, so the coverage/OpenMP flags this job needs must be passed explicitly here regardless. `FPM_CXXFLAGS="-std=c++20 --coverage"` and `FPM_LDFLAGS="-lstdc++ --coverage"` follow [README's Environment variables](README.md#environment-variables), with `--coverage` added on both so `src/parquet_wrapper.cpp` is instrumented too, not just the Fortran sources.
+- **`FPM_FFLAGS="--coverage -fopenmp"`.** Source is kept within the standard 132-column free-form limit (see [Conventions](#conventions)), so no `-ffree-line-length-none` override is needed. `--coverage` genuinely must be passed explicitly here — gcov instrumentation isn't something any fpm metapackage supplies. The `-fopenmp` alongside it is no longer strictly necessary — `fpm.toml`'s `openmp = "*"` dependency already supplies it for the whole build regardless of whatever else `FPM_FFLAGS` is set to (confirmed: setting `FPM_FFLAGS` to unrelated flags, e.g. just an include path, does not disable the metapackage's own flag injection) — but it's harmless to keep explicit here too. `FPM_CXXFLAGS="-std=c++20 --coverage"` and `FPM_LDFLAGS="-lstdc++ --coverage"` follow [README's Environment variables](README.md#environment-variables), with `--coverage` added on both so `src/parquet_wrapper.cpp` is instrumented too, not just the Fortran sources.
 
 Coverage is computed by `gcovr` over `src/` and surfaced through GitLab's `coverage:` regex — this now includes `src/parquet_wrapper.cpp`'s line coverage alongside every `src/*.f90` file, since this job's `gfortran`/`gcc`/`g++` all come from the same apt GCC install (one matched GNU toolchain), so the `.cpp`'s gcov data reads back cleanly in the same `gcovr` pass. **This is CI-only** — `tools/coverage.sh` deliberately does *not* attempt the same for `src/parquet_wrapper.cpp`, since it can't assume a matched toolchain on an arbitrary dev machine (e.g. a Mac with `gfortran` from one distribution and a default `clang++` `FPM_CXX` would produce gcov data in Clang's own format, which plain GNU `gcov`/`gcovr` doesn't reliably parse — confirmed to be exactly this project's setup on at least one contributor's machine). `tools/coverage.sh` still builds with `--coverage`, runs the suite plus every error scenario, and prints per-file and total `src/*.f90` coverage only (resolving the `gcov` that matches your `gfortran` automatically).
 
@@ -356,16 +384,10 @@ These were looked at (during an audit comparing this library against Arrow C++'s
 
 **Plausible future candidates, if needed:**
 - Per-column writer properties (e.g. `disable_statistics()` for write-heavy/throwaway files, explicit dictionary-encoding toggles) — small, additive, doesn't touch the type system.
-
-**Implemented since this list was last reviewed:**
-- `date`/`timestamp` scalar types (plus `time`) — done via three new **dedicated** element-level
-  types (`parquet_date`/`parquet_time`/`parquet_timestamp`, module `parquet_temporal`), not by
-  widening into the existing six `data_type`s the way the read-side numeric/string widening below
-  does — see [Date, time and timestamp columns](doc/pages/date-time.md). Same-type difference and
-  integer-offset arithmetic (`operator(-)`/`operator(+)`, `%diff_seconds`) is also implemented —
-  see [Difference and offset arithmetic](doc/pages/date-time.md#difference-and-offset-arithmetic).
-  `qc:`/`parquet_filter` support for these three remains unimplemented; an `INTERVAL`/duration
-  type is a deliberately dropped non-goal rather than a pending gap — see
+- `qc:`/`parquet_filter` support for the `date`/`time`/`timestamp` types (`parquet_date`/
+  `parquet_time`/`parquet_timestamp`) — neither quality-control range/miss checks nor row filtering
+  is implemented for these three yet, unlike every other supported type. An `INTERVAL`/duration
+  type is a separate, deliberately dropped non-goal rather than a pending gap — see
   [Not yet supported](doc/pages/date-time.md#not-yet-supported) for why.
 
 **Bigger lifts, worth being cautious about:**

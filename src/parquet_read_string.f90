@@ -96,12 +96,12 @@ contains
     end procedure parquet_read_string_column_compact
     !> Shared body of parquet_read_string_array_row_mode/_row_index_int64.
     subroutine parquet_read_string_array_row_mode_impl(reader, name, values, row_index, null_value, is_valid)
-        type(parquet_reader), intent(in) :: reader
-        character(len=*), intent(in) :: name
-        character(len=*), intent(out) :: values(:)
-        integer(int64), intent(in) :: row_index
-        character(len=*), intent(in), optional :: null_value
-        logical, intent(out), optional :: is_valid(:)
+        type(parquet_reader), intent(in) :: reader !! open reader.
+        character(len=*), intent(in) :: name !! vector column name.
+        character(len=*), intent(out) :: values(:) !! that row's element vector.
+        integer(int64), intent(in) :: row_index !! 1-based row.
+        character(len=*), intent(in), optional :: null_value !! fill value for missing entries.
+        logical, intent(out), optional :: is_valid(:) !! per-element validity mask.
         character(kind=c_char), allocatable :: packed(:)
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
@@ -169,12 +169,12 @@ contains
     !> Shared body of parquet_read_string_column_chunk_rg32/_rg64 -- see the generic
     !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics.
     subroutine parquet_read_string_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
-        type(parquet_reader), intent(in) :: reader
-        character(len=*), intent(in) :: name
-        integer(int64), intent(in) :: row_group
-        character(len=*), intent(out) :: values(:)
-        character(len=*), intent(in), optional :: null_value
-        logical, intent(out), optional :: is_valid(:)
+        type(parquet_reader), intent(in) :: reader !! open reader.
+        character(len=*), intent(in) :: name !! column name.
+        integer(int64), intent(in) :: row_group !! 1-based row group.
+        character(len=*), intent(out) :: values(:) !! one value per row of the selected row group.
+        character(len=*), intent(in), optional :: null_value !! fill value for missing entries.
+        logical, intent(out), optional :: is_valid(:) !! per-row validity mask.
         character(kind=c_char), allocatable :: packed(:)
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
@@ -210,12 +210,12 @@ contains
     !> Shared body of parquet_read_string_array_column_chunk_rg32/_rg64 -- see the generic
     !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics.
     subroutine parquet_read_string_array_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
-        type(parquet_reader), intent(in) :: reader
-        character(len=*), intent(in) :: name
-        integer(int64), intent(in) :: row_group
-        character(len=*), intent(out) :: values(:, :)
-        character(len=*), intent(in), optional :: null_value
-        logical, intent(out), optional :: is_valid(:, :)
+        type(parquet_reader), intent(in) :: reader !! open reader.
+        character(len=*), intent(in) :: name !! vector column name.
+        integer(int64), intent(in) :: row_group !! 1-based row group.
+        character(len=*), intent(out) :: values(:, :) !! (element, row) values of the selected row group.
+        character(len=*), intent(in), optional :: null_value !! fill value for missing entries.
+        logical, intent(out), optional :: is_valid(:, :) !! per-element validity mask.
         character(kind=c_char), allocatable :: packed(:)
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
@@ -255,10 +255,10 @@ contains
     !> parquet_read_string_column_compact's own doc comment for the parquet_string_column notes
     !> shared with this chunked counterpart.
     subroutine parquet_read_string_column_chunk_compact_impl(reader, name, row_group, values)
-        type(parquet_reader), intent(in) :: reader
-        character(len=*), intent(in) :: name
-        integer(int64), intent(in) :: row_group
-        type(parquet_string_column), intent(inout) :: values
+        type(parquet_reader), intent(in) :: reader !! open reader.
+        character(len=*), intent(in) :: name !! column name.
+        integer(int64), intent(in) :: row_group !! 1-based row group.
+        type(parquet_string_column), intent(inout) :: values !! cleared, then filled with this row group's rows.
         integer(int64) :: nrows, nchars
         type(c_ptr) :: offsets_ptr, data_ptr, validity_ptr
         integer(c_int8_t) :: offsets_int32_flag

@@ -3184,7 +3184,8 @@ contains
     subroutine parquet_get_version(ver_string, mode)
         implicit none
         character(len=:), allocatable, intent(out) :: ver_string !! resulting version string.
-        character(len=*), intent(in), optional :: mode !! "internal" | "arrow" | "parquet"; absent = default RELEASE_VERSION behavior.
+        character(len=*), intent(in), optional :: mode
+        !! "internal" | "arrow" | "parquet"; absent = default RELEASE_VERSION behavior.
         integer :: i
         integer(c_int) :: major, minor, patch
         character(len=32) :: buf

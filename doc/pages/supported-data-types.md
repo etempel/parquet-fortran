@@ -15,7 +15,7 @@ The following intrinsic Fortran kinds (from `iso_fortran_env`) are supported thr
 
 Vector column entries use the shape convention `(col_size, nrows)` for arrays passed to `parquet_write_column` or produced by `parquet_read_column`.
 
-### Date, time and timestamp columns
+## Date, time and timestamp columns
 
 Three additional element-level types — `parquet_date`, `parquet_time`, `parquet_timestamp` (module
 `parquet_temporal`, re-exported from `use parquet`) — read and write Parquet `DATE`/`TIME`/
@@ -30,11 +30,11 @@ default) and their write-time unit/timezone is declared via a MAML token
 units, Unix-time/MJD/JD interop, and reading files from other tools (legacy `INT96`, arbitrary
 timezones). `qc:`/`parquet_filter` are not yet supported for these three types.
 
-### Large string columns
+## Large string columns
 
 A `string` (scalar or vector-of-strings) column's underlying Arrow representation is chosen automatically based on size. Normally it's Arrow's default `utf8` type, which caps a single column's total string byte payload at 2^31-1 bytes (~2 GiB) — but if writing a column would exceed that, this library transparently switches that column to `large_utf8` (64-bit offsets, no such limit) instead. This is fully automatic and requires no action from either the writer or reader side: `parquet_write_column`/`parquet_read_column` and every other read function behave identically either way, including row filtering (`parquet_filter`) and `qc:` range checks. The only place the difference is visible is `parquet_close_reader(print_stat=.true.)`'s `parquet_type` column, which shows `large_string`/`list<large_string>` instead of `string`/`list<string>` for a column that was promoted.
 
-### Reading `string_view` columns from other tools
+## Reading `string_view` columns from other tools
 
 This library's own writer never produces Arrow's `string_view` representation — it only ever
 appears when reading a Parquet file written by another Arrow-based tool whose stored Arrow schema
@@ -51,7 +51,7 @@ diagnostic column. The one exception is the compact `parquet_string_column` (see
 `string`/`large_string`'s offset-based layout, so reading a `string_view` column that way aborts
 with a clear error — read it through a fixed-width `character` array instead.
 
-### Vector-column width (`col_size`) limit
+## Vector-column width (`col_size`) limit
 
 Unlike a *scalar* column's row count, which this library supports beyond Fortran's default-integer
 `huge(1)` (2,147,483,647) for every data type, a single row's own vector width (`col_size`) is
@@ -63,25 +63,25 @@ C++-level abort with a diagnostic on stderr, the same class of failure as the ph
 case in [Limitations](../index.html#limitations)) rather than silently truncating `col_size` and
 corrupting the written column.
 
-### Vector-column per-row-group element count limit
+## Vector-column per-row-group element count limit
 
 Parquet's own repetition/definition-level generation for list-typed columns walks every flattened
 element *of a single row group* with a plain `int32_t` counter, so a row group's own
 `row_group_rows * col_size` is capped at 2,147,483,647 — but this is scoped to one row group, not
-the whole file. `parquet_close_writer`'s row-group auto-sizing (see `chunk_size` in
-[Writing parquet files](writing.html)) already knows each column's `col_size` and silently picks a
+the whole file. `parquet_close_writer`'s row-group auto-sizing (see [Writer options](writing.html#writer-options))
+already knows each column's `col_size` and silently picks a
 smaller row-group size whenever a wide vector column needs it, so a column's *total*
 `nrows * col_size` can exceed 2,147,483,647 — a real, hittable case (e.g. 2.5 billion rows at
 `col_size=2`) — without any special handling: it is transparently split across multiple row groups
-and round-trips normally. The only case that still aborts is an *explicitly* chosen `chunk_size`
-(`parquet_open_writer`/`parquet_set_writer_options`) that conflicts with a vector column's
+and round-trips normally. The only case that still aborts is an *explicitly* chosen
+`chunk_size` (`parquet_open_writer(..., chunk_size=)`) that conflicts with a vector column's
 `col_size` — silently shrinking a caller's explicit request would be a surprising, hard-to-notice
 performance change, so this aborts the process instead (a C++-level abort with a diagnostic on
 stderr, the same class of failure as the `col_size` case above) rather than either silently
 overriding the request or letting Arrow itself throw an uncaught `IOError: List index overflow`
 mid-write.
 
-### Reading a column into a different numeric kind
+## Reading a column into a different numeric kind
 
 `parquet_read_column` (and `parquet_read_array_row_mode`/`parquet_read_array_element_mode`) dispatch on the *declared type/kind of the `values` array you pass in*, not the column's own stored type — so `values`' kind doesn't have to match the file's `data_type` exactly, as long as the conversion is one of the following:
 
@@ -107,7 +107,7 @@ A `float32`/`float64`/`half_float`/`decimal` value read into an `integer(int32)`
 
 `qc: min:`/`max:` range checks and row filtering (`parquet_filter`) cover every type in the table above the same way they already cover `int32`/`int64`/`float32`/`float64` — both compare against the column's raw physical value regardless of its stored type, so no MAML/filter-side change is needed to use them against one of these extended types.
 
-### Null values
+## Null values
 
 > `date`/`time`/`timestamp` columns are the exception to this whole section: `parquet_date`/
 > `parquet_time`/`parquet_timestamp` carry their own null state per element, so there is no
@@ -145,7 +145,7 @@ extra:
 ```
 Every name listed must be one of this same MAML file's own declared `fields:` (checked by `parquet_validate_maml`; unknown names fail validation). If a user MAML overrides a base MAML, `protected_cols:` is taken from whichever MAML is actually used to build the writer's schema (the user MAML if one is provided, otherwise the base MAML) — not merged across both. Writing an `is_valid` mask with any `.false.` entry for a protected column fails immediately with `error stop`. This only applies when writing against a MAML-derived schema (`parquet_open_writer(..., schema, ...)`); a schema-less writer has no `protected_cols:` to enforce.
 
-### Reading a nested struct field
+## Reading a nested struct field
 
 A Parquet `STRUCT` column's individual fields — at any nesting depth — can be read directly by
 passing a dot-separated path as the `name` argument to `parquet_read_column`,
@@ -199,101 +199,3 @@ This library's own writer cannot produce `STRUCT` columns — like the extended 
 types in [Reading a column into a different numeric kind](#reading-a-column-into-a-different-numeric-kind)
 above, struct support is read-only, for files produced by some other tool.
 
-### Checking column existence and type
-
-`parquet_column_exists(reader, name, types)` returns `.true.`/`.false.` for whether `name` (a
-top-level or dotted [struct-leaf path](#reading-a-nested-struct-field), same as everywhere else)
-exists in an open reader's schema:
-```fortran
-if (parquet_column_exists(reader, "ra")) then
-    ...
-end if
-```
-Pass `types` (optional) to also require the column's physical type to match — a comma-separated
-list of tokens: any of the nine canonical single types (`int32`/`int64`/`float32`/`float64`/
-`boolean`/`string`/`date`/`time`/`timestamp`), and/or the group aliases `int` (`int32` or
-`int64`), `float` (`float32` or `float64`), and `temporal` (`date`, `time`, or `timestamp`).
-Matching is case-insensitive and tokens can be combined:
-```fortran
-if (parquet_column_exists(reader, "ra", types="float")) then      ! float32 or float64
-if (parquet_column_exists(reader, "flag", types="int, boolean")) ! int32, int64, or boolean
-```
-Omitting `types` checks existence regardless of type. An unrecognized token in `types` (e.g. a
-typo) fails immediately with `error stop`, naming the valid tokens — this check happens before the
-existence check itself, so a malformed filter is reported even for a column that doesn't exist. A
-column whose physical type isn't one of the nine canonical tokens (e.g. an `int8`/`uint32`/
-`decimal` column from another tool — see
-[Reading a column into a different numeric kind](#reading-a-column-into-a-different-numeric-kind))
-never matches a `types` filter, but is still found by a plain (no `types`) existence check.
-
-`parquet_get_column_type(reader, name, type_name)` resolves an *existing* column's canonical
-physical type directly into an allocatable `character`:
-```fortran
-character(len=:), allocatable :: type_name
-call parquet_get_column_type(reader, "ra", type_name)   ! e.g. "float64"
-```
-A vector (`FIXED_SIZE_LIST`) column reports its element type (an `int32` vector column reports
-`"int32"` — see `parquet_get_col_size` for its element count). Unlike `parquet_column_exists`,
-this procedure's whole contract is "give me the type", so it cannot answer silently: it fails with
-`error stop` if `name` doesn't exist, or if its physical type falls outside the nine canonical
-tokens — use `parquet_column_exists` with no `types` filter first if the column's existence or
-type isn't already guaranteed.
-
-### Quality control (qc:) range/miss checks on write
-
-A MAML field can declare a `qc:` block with `min:`/`max:` bounds and/or a `miss:` Null-expectation flag:
-```
-- name: ra
-  data_type: float64
-  qc:
-    min: '>= 0'
-    max: '< 360'
-    miss: Null
-```
-A plain number (`min: 1`) is treated as inclusive (`>=` for `min:`, `<=` for `max:`); a quoted value with an explicit leading operator uses that comparison instead. The operator must match the bound's direction: `min:` accepts only `>=` or `>` (a lower bound) and `max:` accepts only `<=` or `<` (an upper bound); a reversed operator (e.g. `min: '< 5'`) is a nonsensical bound and fails `parquet_validate_maml`. Either bound may be omitted (only `min:` or only `max:` is fine). `parquet_validate_maml` also checks that every declared bound actually converts to a value usable for that field's `data_type`: for `int32`/`int64` it must be an exact integer within that type's range; for `float32`/`float64` it must be finite (not `NaN`/`Infinity`); a `string` field's bound is used as a literal string (nothing to convert, so nothing can fail there); `qc:` on a `boolean` field is accepted but never enforced (silently ignored, and so exempt from the operator-direction check too). `miss:` is `Null`/`NA` (case-insensitive) or empty; anything else fails `parquet_validate_maml`.
-
-`qc` defaults to `.true.` whenever `parquet_open_writer` is given a `schema=` (pass `qc=.false.` to opt out); it's a no-op without a schema:
-```fortran
-call parquet_open_writer(writer, "data.parquet", schema)          ! qc active by default (schema given)
-call parquet_open_writer(writer, "data.parquet", schema, qc=.false.) ! explicitly disabled
-```
-With qc active, every `parquet_write_column` call runs two independent checks per column:
-
-- **Range** — if `min:`/`max:` is declared, every element for which `is_valid` is `.true.` (or every element, if `is_valid` wasn't passed at all — see [Null values](#null-values)) is checked against the bound(s). String columns are compared lexicographically using Fortran's native string comparison. Vector columns are checked element-wise.
-- **Miss (Null expectation)** — applies to any column written with an `is_valid=`/null-carrying mask (numeric/logical `is_valid=`, a `parquet_string_column`'s own null tracking, or a `parquet_date`/`time`/`timestamp` element's null state). If `miss:` is `Null`/`NA`, Nulls are expected and never warned about. If `miss:` is absent or empty (**the default**), Nulls are NOT expected: finding any is a violation. `min:`/`max:` always run only over non-null elements regardless of `miss:`.
-
-Neither check ever stops the write — each prints its own one-line `WARNING` to stdout naming the column, e.g.:
-```
-WARNING: qc violation for column 'ra': declared min >= 0, max < 360, data range [-1.5, 359.9], 3 of 1000 valid element(s) out of range
-WARNING: qc violation for column 'ra': 2 of 1000 element(s) are Null (qc: miss: not declared)
-```
-This only applies when writing against a MAML-derived schema (`parquet_open_writer(..., schema, ...)`); the range check only fires for columns that actually declare `qc: min:`/`max:`, and the miss check only fires for a column actually written with a null-carrying mask. `qc=.false.` skips both checks entirely. The read side (`parquet_open_reader`) enforces the identical `min:`/`max:`/`miss:` rules against the values actually read back — see [Read-time quality control with a qc-maml](reading.html#read-time-quality-control-with-a-qc-maml).
-
-### Compression and row group size
-
-`parquet_open_writer` also accepts:
-```fortran
-call parquet_open_writer(writer, "data.parquet", compression="zstd", compression_level=9, chunk_size=100000)
-```
-- `compression` — one of `"uncompressed"`, `"snappy"` (the default), `"gzip"`, `"zstd"`, `"brotli"`, `"lz4"` (case-insensitive); an unrecognized name fails immediately with `error stop`. The default is `"snappy"`, following the ecosystem convention (pyarrow, Spark, ...) rather than Parquet's own unset-by-default `"uncompressed"`. Rough guidance: `snappy`/`lz4` for fastest read/write at a modest size reduction; `gzip`/`brotli` for the smallest files at slower speed; `zstd` for the best balance (and the only one here with a meaningfully tunable `compression_level`, roughly 1–22).
-- `compression_level` — optional integer tuning the chosen codec's compression level (mainly meaningful for `zstd`/`gzip`/`brotli`); omitted means "use that codec's own default level".
-- `chunk_size` — **advanced/optional: most callers never need to set this.** It's the maximum number of rows per Parquet row group. If omitted (the default, recommended for normal use), it is auto-sized — from the table's actual in-memory byte size once `parquet_close_writer` runs, for a writer that only ever uses `parquet_write_column`, or from the schema's declared types/`col_size` right away for a writer that uses the [streaming row-group API](writing.html#streamingchunked-writes) instead — targeting ~256 MiB per row group, not a flat row count, so both narrow `int32` columns and wide vector columns (large `col_size`) end up sensibly sized without tuning, up to very large files (hundreds of millions of rows). The auto-sized value is clamped between 1,000 and 10,000,000 rows, and further clamped down if needed so no vector column's per-row-group element count can exceed Arrow's own limit (see [Vector-column per-row-group element count limit](#vector-column-per-row-group-element-count-limit)). Pass an explicit value only to override this — e.g. to force multiple row groups in a small file (as some of this library's own tests do), or to hand-tune the memory-vs-overhead trade-off for a workload you've measured: larger values reduce per-row-group overhead and can improve compression, at the cost of more per-row-group encoder state (dictionaries, statistics) held in memory while writing (see [Performance and memory](performance.html)). `parquet_get_chunk_size` returns the writer's resolved value (or, for a `parquet_reader`, an existing row group's actual size) at any point after opening.
-
-### Multi-threaded decoding/encoding (`use_threads`) and thread pool size
-
-Both `parquet_open_reader` and `parquet_open_writer` accept an optional `use_threads` (`logical`, default `.true.`):
-```fortran
-call parquet_open_reader(reader, "data.parquet", use_threads=.true.)
-call parquet_open_writer(writer, "data.parquet", use_threads=.true.)
-```
-When `.true.` (the default), that reader/writer decodes or encodes column data across Arrow's internal CPU thread pool instead of a single thread — Arrow's own library default is actually `.false.`, so this library turns it on by default since the extra parallelism is normally a pure win. This is on a per-reader/per-writer basis: it costs nothing to leave it on, and there's no shared state to worry about between independent readers/writers.
-
-The most common reason to pass `use_threads=.false.` is to avoid **oversubscription** when you're already parallelizing at a coarser level — e.g. many OpenMP threads (see [Thread safety](thread-safety.html)) each opening their own reader/writer: without this, every one of those threads would *also* fan out across Arrow's thread pool, so N OpenMP threads times Arrow's pool size threads end up competing for the same cores. It's also useful for deterministic single-threaded benchmarking/profiling.
-
-`parquet_set_max_threads(n)` caps the size of Arrow's thread pool itself:
-```fortran
-call parquet_set_max_threads(4)
-```
-Unlike `use_threads`, this is **not** a per-reader/per-writer setting — Arrow's CPU thread pool is a single, process-global resource shared by every reader/writer (in every thread) that has `use_threads` enabled. Call it once, e.g. near the start of your program, before opening readers/writers on other threads; calling it repeatedly with different values from multiple concurrent threads is a race, since each call resizes a pool everyone else is using at that same moment. `n` must be `>= 1`; values below that fail immediately with `error stop`.
-
-(If you're developing `parquet-fortran` itself and want to measure how these two knobs actually affect write/read throughput on your own hardware, see [CONTRIBUTING.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CONTRIBUTING.md#other-tools-helpers)'s `tools/benchmark_threads.sh` entry.)

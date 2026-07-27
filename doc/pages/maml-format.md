@@ -68,9 +68,11 @@ Notes on the `fields:` entries:
 
 A second MAML file may be validated against a "base" MAML with `parquet_validate_user_maml`, to check it only reuses column names that already exist in the base schema — useful when different pipeline stages should write a subset of a shared schema.
 
-### Deferring col_size/array_size until write time with `auto`
+## Deferring col_size/array_size until write time with `auto`
 
 Sometimes a vector column's width, or a string column's maximum length, is only known to the calling Fortran code — not in advance, when the MAML file is written. Declaring `col_size: auto` (vector columns) or `array_size: auto` (`string` columns only) defers that value instead of requiring a concrete number up front. `parquet_validate_maml` accepts `auto` as well-formed; it is resolved to a concrete positive integer before any data for that column is actually written, in one of two ways:
+
+On the Fortran side, an unresolved `auto` column's `%cinfo%col(:)%col_size`/`%array_size` holds the public `parquet_size_auto` constant (`integer, parameter :: parquet_size_auto = -1`) until it's resolved — compare against this constant (rather than a hardcoded `-1`) if your own code needs to check whether a column is still unresolved.
 
 - **Explicitly**, any time between `parquet_parse_maml` and `parquet_open_writer`, by calling `schema%set_col_size(name, col_size)` / `schema%set_array_size(name, array_size)`. Each error stops if `name` isn't a declared column, if the given value isn't a positive integer, or — for `set_array_size` — if `name` isn't a `string` column. By default, either setter only accepts a column that is currently `auto` (error stops otherwise); pass `force=.true.` to override an already-resolved value too.
 - **Automatically**, the first time a *matrix* (2D array) `parquet_write_column`/`parquet_write_column_chunk` call for that column runs — `col_size` resolves to `size(values, 1)`, `array_size` to the caller's own declared Fortran character length (`len(values(1,1))`), taken directly from that call's own data shape, not its content. Once resolved (either way), every later write to that column is checked against the resolved value exactly like an explicitly-declared `col_size`/`array_size` always was.
@@ -79,7 +81,7 @@ This automatic path only works for a *matrix*-shaped write — the flat (1-D) `p
 
 If the schema was opened with `parquet_open_writer(..., write_maml=.true.)`, the sidecar `.maml` file is written at `parquet_close_writer` time (not at `parquet_open_writer` time), once every column's `col_size`/`array_size` is guaranteed resolved — so the sidecar always shows the actual resolved value, never a leftover `auto` placeholder, matching what was actually written to the `.parquet` file.
 
-### Renaming columns for output with `col_map:`
+## Renaming columns for output with `col_map:`
 
 A user MAML's `fields:` names are normally required to match the base schema's column names exactly. `col_map:` relaxes that: it lets a user MAML give a column an arbitrary name of its own choosing for the `fields:` section (and the resulting `.parquet`/sidecar `.maml`), while Fortran code continues to call `parquet_write_column`/`set_column_available`/`get_column_index`/etc. with the stable, well-known internal name from the base schema. `col_map:` is **not** a top-level MAML section — it is only recognized nested inside `extra:` (a bare top-level `col_map:` is rejected as an unknown section):
 

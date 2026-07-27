@@ -765,13 +765,13 @@ contains
         do_allow_uninitialized = .false.
         if (present(allow_uninitialized)) do_allow_uninitialized = allow_uninitialized
 
+        call maml_name_suffix(this%maml, name_suffix)
+
         if (.not. allocated(this%cinfo%col)) then
             if (do_allow_uninitialized) return
             error stop "parquet_schema%print_schema_info: schema is not initialized (not parsed) -- call " // &
-                "parquet_parse_maml on it first, or pass allow_uninitialized=.true. to skip silently"
+                "parquet_parse_maml on it first, or pass allow_uninitialized=.true. to skip silently" // name_suffix
         end if
-
-        call maml_name_suffix(this%maml, name_suffix)
 
         if (.not. present(unit) .and. .not. present(filename)) then
             error stop "parquet_schema%print_schema_info: either unit or filename must be given" // name_suffix

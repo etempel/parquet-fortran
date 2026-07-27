@@ -339,6 +339,10 @@ contains
         schema_is_init = this%is_initialized .or. allocated(this%cinfo%col)
     end procedure schema_is_init
 
+    module procedure schema_is_parsed
+        schema_is_parsed = allocated(this%cinfo%col)
+    end procedure schema_is_parsed
+
     module procedure schema_clear
         if (allocated(this%maml%name)) deallocate(this%maml%name)
         if (allocated(this%maml%lines)) deallocate(this%maml%lines)

@@ -122,6 +122,10 @@ contains
             new_unittest("schema%is_init reflects state before/after schema%init", test_schema_is_init_reflects_state), &
             new_unittest("schema%is_init is .true. after a MAML parse, even without %init", &
                 test_schema_is_init_true_after_maml_parse), &
+            new_unittest("schema%is_parsed is .false. after %init alone, even though %is_init is .true.", &
+                test_schema_is_parsed_false_after_init_alone), &
+            new_unittest("schema%is_parsed is .true. after a MAML parse", &
+                test_schema_is_parsed_true_after_maml_parse), &
             new_unittest("schema%init(force=.true.) on a never-initialized schema behaves like a plain init", &
                 test_schema_init_force_never_initialized_ok), &
             new_unittest("schema%init(force=.true.) fully resets fields/qc/metadata and can be reused", &
@@ -1335,6 +1339,42 @@ contains
             "schema%is_init() should be .true. for a schema loaded via parquet_parse_maml, " // &
             "even though %init was never called on it")
     end subroutine test_schema_is_init_true_after_maml_parse
+
+    !> %is_init() alone is not a sufficient readiness check for %print_schema_info -- a
+    !! from-scratch schema that has only had %init/%add_field called (never parsed) reports
+    !! is_init() == .true. but is_parsed() == .false., since %cinfo%col is only populated by
+    !! parquet_parse_maml. Also confirms a freshly declared schema reports is_parsed() == .false.
+    !! (matching is_init() == .false. for the same schema).
+    subroutine test_schema_is_parsed_false_after_init_alone(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+
+        call check(error, .not. schema%is_parsed(), &
+            "a freshly declared schema should report is_parsed() == .false.")
+        if (allocated(error)) return
+        call check(error, schema%is_init() .eqv. schema%is_parsed(), &
+            "a freshly declared schema should have is_init() == is_parsed() (both .false.)")
+        if (allocated(error)) return
+
+        call schema%init(table="is_parsed_test")
+        call check(error, schema%is_init(), "sanity check: schema%is_init() should be .true. after %init")
+        if (allocated(error)) return
+        call check(error, .not. schema%is_parsed(), &
+            "schema%is_parsed() should still be .false. after %init alone (never parsed)")
+    end subroutine test_schema_is_parsed_false_after_init_alone
+
+    !> A schema loaded via parquet_parse_maml (from a file or an already-populated object) never
+    !! calls %init at all, but %cinfo%col is populated by the parse -- is_parsed() must report
+    !! .true. for it, which is exactly the readiness %print_schema_info itself requires.
+    subroutine test_schema_is_parsed_true_after_maml_parse(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+
+        call parquet_parse_maml("schemas/maml_example.maml", schema)
+        call check(error, schema%is_parsed(), &
+            "schema%is_parsed() should be .true. for a schema loaded via parquet_parse_maml, " // &
+            "even though %init was never called on it")
+    end subroutine test_schema_is_parsed_true_after_maml_parse
 
     !> force=.true. on a schema that was never initialized must behave exactly like a plain
     !! %init -- there is nothing to reset, and it must not error stop just because force was given.

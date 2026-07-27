@@ -193,6 +193,7 @@ module parquet
     contains
         procedure :: init => schema_init !! Initializes a from-scratch schema (table: key + optional metadata).
         procedure :: is_init => schema_is_init !! Whether this schema is ready to use (via %init or a MAML parse).
+        procedure :: is_parsed => schema_is_parsed !! Whether %cinfo has actually been populated by parquet_parse_maml.
         procedure :: clear => schema_clear !! Resets the entire schema back to its pristine,
         !! just-declared (never-initialized) state.
         procedure :: add_field => schema_add_field !! Appends one fields: entry to a from-scratch schema.
@@ -1070,6 +1071,18 @@ module parquet
         module logical function schema_is_init(this)
             class(parquet_schema), intent(in) :: this !! schema to query.
         end function schema_is_init
+        !> Whether %cinfo has actually been populated by parquet_parse_maml -- .true. only once a
+        !> parse has run (from a .maml file/object, or via %init/%add_field followed by
+        !> parquet_parse_maml on the same schema), .false. otherwise, including for a from-scratch
+        !> schema that has only had %init/%add_field called and never been parsed. This is the
+        !> readiness check %print_schema_info itself requires (it error stops if %cinfo is
+        !> unpopulated, unless allow_uninitialized=.true. is given) -- %is_init() is not equivalent
+        !> here, since %is_init() is already .true. after %init alone, before any parse. Since
+        !> %is_parsed() == .true. implies %cinfo%col is allocated, which itself already implies
+        !> %is_init() == .true., %is_parsed() is always .false. whenever %is_init() is .false.
+        module logical function schema_is_parsed(this)
+            class(parquet_schema), intent(in) :: this !! schema to query.
+        end function schema_is_parsed
         !> Resets this schema to exactly the state a freshly declared, never-initialized
         !> parquet_schema starts in: %maml/%cinfo/%metadata all back to their defaults (no
         !> lines, no fields, no metadata items) and is_init() == .false. again. Unlike
@@ -1269,9 +1282,12 @@ module parquet
         !> %init/%add_field followed by parquet_parse_maml, has run) also error stops by default,
         !> with the message "schema is not initialized (not parsed)" -- pass
         !> allow_uninitialized=.true. to silently print nothing instead (a complete no-op: no file
-        !> is opened/touched, even in filename= mode) rather than aborting. Note this is
-        !> independent of schema%is_init(): a schema loaded via parquet_parse_maml (from a file or
-        !> an already-populated object) is fully valid here even though it never calls %init.
+        !> is opened/touched, even in filename= mode) rather than aborting. Use schema%is_parsed()
+        !> to check readiness before calling, rather than schema%is_init(): a from-scratch schema
+        !> that has only had %init/%add_field called (never parsed) has is_init() == .true. but
+        !> is_parsed() == .false., and would still error stop here. Conversely, a schema loaded via
+        !> parquet_parse_maml (from a file or an already-populated object) is fully valid here even
+        !> though it never calls %init -- is_parsed() == .true. covers that case too.
         module subroutine schema_print_schema_info(this, unit, filename, prefix, header, table_name, &
                 dash_before_header, dash_after_header, dash_after_fields, dash_char, allow_uninitialized)
             class(parquet_schema), intent(in) :: this !! schema whose enabled (is_set) columns are listed.

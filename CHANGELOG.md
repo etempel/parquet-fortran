@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0] - 2026-07-27
 
 **Toolchain floor:** gfortran ≥ 13 (13 on CI; 15.2.0 the primary development target), Intel
 Fortran (ifx) 2026.1.0 (confirmed manually; not exercised by CI), a C++20-capable C++ compiler,
@@ -17,6 +17,10 @@ README's [API overview](README.md#api-overview) — every public type/procedure/
 that way, including a public type's own type-bound procedures and operators; anything not
 reachable via `use parquet` (private module internals, the C++ surface, file/module layout) can
 change in a minor or patch release.
+
+**Compatibility:** 1.0.0 is the first published release (no prior `0.9.x` version was ever
+tagged or published to the fpm registry), so there is no prior-release file format to remain
+compatible with.
 
 ### Added
 
@@ -63,8 +67,4 @@ change in a minor or patch release.
   size (`parquet_set_max_threads`).
 - Support for embedding your own MAML schemas into a downstream project.
 
-### Changed
-### Deprecated
-### Removed
-### Fixed
-### Security
+[1.0.0]: https://github.com/etempel/parquet-fortran/releases/tag/v1.0.0

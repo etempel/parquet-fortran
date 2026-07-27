@@ -448,6 +448,16 @@ program error_scenarios
         call scenario_qc_warning_string()
     case ("qc_silently_ignored_for_boolean")
         call scenario_qc_silently_ignored_for_boolean()
+    case ("qc_miss_default_active_numeric_warns")
+        call scenario_qc_miss_default_active_numeric_warns()
+    case ("qc_miss_declared_null_no_warning")
+        call scenario_qc_miss_declared_null_no_warning()
+    case ("qc_miss_string_warns")
+        call scenario_qc_miss_string_warns()
+    case ("qc_miss_temporal_warns")
+        call scenario_qc_miss_temporal_warns()
+    case ("add_field_qc_drives_reader_enforcement")
+        call scenario_add_field_qc_drives_reader_enforcement()
     case ("write_unknown_compression")
         call scenario_write_unknown_compression()
     case ("write_overwrite_false_existing_file")
@@ -540,6 +550,12 @@ program error_scenarios
         call scenario_schema_add_field_qc_max_operator_without_value()
     case ("schema_add_field_bad_qc_miss_value")
         call scenario_schema_add_field_bad_qc_miss_value()
+    case ("get_field_by_name_not_found")
+        call scenario_get_field_by_name_not_found()
+    case ("get_field_by_index_out_of_range")
+        call scenario_get_field_by_index_out_of_range()
+    case ("add_field_from_source_not_found")
+        call scenario_add_field_from_source_not_found()
     case ("print_schema_info_no_unit_no_filename")
         call scenario_print_schema_info_no_unit_no_filename()
     case ("print_schema_info_unit_not_open")
@@ -4900,6 +4916,110 @@ contains
         call parquet_close_writer(writer)
     end subroutine scenario_qc_silently_ignored_for_boolean
 
+    !> qc: miss: not declared (the default) means Nulls are NOT expected: writing a Null through
+    !! an is_valid= mask must print a WARNING naming the column -- checked here with NO explicit
+    !! qc= passed to parquet_open_writer at all, to prove qc now defaults to present(schema)
+    !! rather than needing an explicit qc=.true. (see parquet_open_writer's qc doc comment).
+    subroutine scenario_qc_miss_default_active_numeric_warns()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int32) :: values(3) = [1_int32, 2_int32, 3_int32]
+        logical :: is_valid(3) = [.true., .false., .true.]
+
+        call schema%init(table="qc_miss_table")
+        call schema%add_field("id", "int32")
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_qc_miss_default.parquet", schema)
+        call parquet_write_column(writer, "id", values, is_valid=is_valid)
+        call parquet_close_writer(writer)
+    end subroutine scenario_qc_miss_default_active_numeric_warns
+
+    !> Same as scenario_qc_miss_default_active_numeric_warns, but the field declares
+    !! qc: miss: Null -- Nulls are expected here, so no WARNING should print.
+    subroutine scenario_qc_miss_declared_null_no_warning()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int32) :: values(3) = [1_int32, 2_int32, 3_int32]
+        logical :: is_valid(3) = [.true., .false., .true.]
+
+        call schema%init(table="qc_miss_table")
+        call schema%add_field("id", "int32", qc_miss="Null")
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_qc_miss_allowed.parquet", schema)
+        call parquet_write_column(writer, "id", values, is_valid=is_valid)
+        call parquet_close_writer(writer)
+    end subroutine scenario_qc_miss_declared_null_no_warning
+
+    !> Same miss-not-declared-warns shape as scenario_qc_miss_default_active_numeric_warns, but
+    !! for a compact (parquet_string_column) string write -- the write path that reaches
+    !! parquet_check_qc_miss via parquet_write_string.f90's is_null()-derived is_valid_flat rather
+    !! than a caller-supplied is_valid= mask.
+    subroutine scenario_qc_miss_string_warns()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_string_column) :: values
+
+        call schema%init(table="qc_miss_table")
+        call schema%add_field("s", "string")
+        call parquet_parse_maml(schema)
+
+        call values%append_string("apple")
+        call values%append_null()
+        call values%append_string("cherry")
+
+        call parquet_open_writer(writer, "test_run/error_scenario_qc_miss_string.parquet", schema)
+        call parquet_write_column(writer, "s", values)
+        call parquet_close_writer(writer)
+    end subroutine scenario_qc_miss_string_warns
+
+    !> Same miss-not-declared-warns shape, for a parquet_date column -- the write path that
+    !! reaches parquet_check_qc_miss via parquet_write_temporal.f90's temporal_valid_ptr.
+    subroutine scenario_qc_miss_temporal_warns()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_date) :: values(3)
+
+        call values(1)%set(2024, 1, 1)
+        ! values(2) left default-initialized -- a null date.
+        call values(3)%set(2024, 1, 3)
+
+        call schema%init(table="qc_miss_table")
+        call schema%add_field("d", "date")
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_qc_miss_temporal.parquet", schema)
+        call parquet_write_column(writer, "d", values)
+        call parquet_close_writer(writer)
+    end subroutine scenario_qc_miss_temporal_warns
+
+    !> A schema built entirely via %init/%add_field (qc_min/qc_max, no separate add_col_qc
+    !! qc-maml) must drive real read-time qc enforcement when passed as schema= to
+    !! parquet_open_reader -- not just write-time enforcement. Exercises the same
+    !! parquet_parse_qc_maml/run_qc_range_check path add_col_qc already had full coverage for,
+    !! but sourced from an add_field-embedded qc: block instead of a hand-written qc-maml.
+    subroutine scenario_add_field_qc_drives_reader_enforcement()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: ra(3) = [10_int32, 400_int32, 300_int32] ! 400 is outside [0, 360]
+        integer(int32) :: ra_back(3)
+
+        call schema%init(table="add_field_qc_table")
+        call schema%add_field("ra", "int32", qc_min="0", qc_max="360")
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_add_field_qc_reader.parquet", schema, qc=.false.)
+        call parquet_write_column(writer, "ra", ra)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, "test_run/error_scenario_add_field_qc_reader.parquet", schema=schema, &
+            qc_soft=.true.)
+        call parquet_read_column(reader, "ra", ra_back)
+        call parquet_close_reader(reader)
+    end subroutine scenario_add_field_qc_drives_reader_enforcement
+
     subroutine scenario_write_unknown_compression()
         type(parquet_writer) :: writer
         integer(int32) :: values(1) = [1_int32]
@@ -5565,6 +5685,44 @@ contains
         call schema%add_field("ra", "float64", qc_miss="garbage")
         print '(a)', "unexpectedly accepted an invalid qc_miss value in schema%add_field"
     end subroutine scenario_schema_add_field_bad_qc_miss_value
+
+    !> schema%get_field(name=) error stops if the field doesn't exist.
+    subroutine scenario_get_field_by_name_not_found()
+        type(parquet_schema) :: schema
+        character(len=:), allocatable :: data_type
+
+        call schema%init(table="t")
+        call schema%add_field("ra", "float64")
+        call parquet_parse_maml(schema)
+        call schema%get_field("does_not_exist", data_type=data_type)
+        print '(a)', "unexpectedly found a non-existent field via schema%get_field(name=)"
+    end subroutine scenario_get_field_by_name_not_found
+
+    !> schema%get_field(index=) error stops if index is out of range.
+    subroutine scenario_get_field_by_index_out_of_range()
+        type(parquet_schema) :: schema
+        character(len=:), allocatable :: name
+
+        call schema%init(table="t")
+        call schema%add_field("ra", "float64")
+        call parquet_parse_maml(schema)
+        call schema%get_field(5, name)
+        print '(a)', "unexpectedly resolved an out-of-range index via schema%get_field(index=)"
+    end subroutine scenario_get_field_by_index_out_of_range
+
+    !> schema%add_field_from error stops if the named field doesn't exist on source_schema
+    !> (via %get_field's own not-found error).
+    subroutine scenario_add_field_from_source_not_found()
+        type(parquet_schema) :: source, target
+
+        call source%init(table="src")
+        call source%add_field("ra", "float64")
+        call parquet_parse_maml(source)
+
+        call target%init(table="dst")
+        call target%add_field_from(source, "does_not_exist")
+        print '(a)', "unexpectedly copied a non-existent field via schema%add_field_from"
+    end subroutine scenario_add_field_from_source_not_found
 
     !> schema%print_schema_info error stops if given neither unit nor filename -- there is
     !> nowhere to write to.

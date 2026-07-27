@@ -274,6 +274,101 @@ contains
         name = this%col(index)%name
     end procedure get_field_name
 
+    module procedure get_field_by_name
+        integer :: idx
+
+        idx = this%get_column_index(name)
+        call fill_field_definition_outputs(this%col(idx), data_type, unit, info, ucd, array_size, col_size, &
+            qc_min, qc_max, qc_miss)
+    end procedure get_field_by_name
+
+    module procedure get_field_by_index
+        character(len=16) :: index_str, count_str
+
+        if (index < 1 .or. index > this%get_num_fields()) then
+            write(index_str, '(I0)') index
+            write(count_str, '(I0)') this%get_num_fields()
+            error stop "parquet_column_info%get_field: index " // trim(index_str) // &
+                " out of range (1.." // trim(count_str) // ")"
+        end if
+
+        name = this%col(index)%name
+        call fill_field_definition_outputs(this%col(index), data_type, unit, info, ucd, array_size, col_size, &
+            qc_min, qc_max, qc_miss)
+    end procedure get_field_by_index
+
+    !> Shared output-filling worker for get_field_by_name/get_field_by_index: copies col's
+    !! stored definition into whichever optional outputs the caller actually requested,
+    !! reconstructing qc_min/qc_max into the same operator-prefixed string form %add_field
+    !! accepts, and qc_miss into "Null"/"" (see get_field_by_name's own doc comment for the
+    !! round-trip caveats on both).
+    subroutine fill_field_definition_outputs(col, data_type, unit, info, ucd, array_size, col_size, &
+            qc_min, qc_max, qc_miss)
+        type(parquet_column_type), intent(in) :: col !! source field definition.
+        character(len=:), allocatable, intent(out), optional :: data_type !! field's data type.
+        character(len=:), allocatable, intent(out), optional :: unit !! unit of measurement, if declared.
+        character(len=:), allocatable, intent(out), optional :: info !! short description, if declared.
+        character(len=:), allocatable, intent(out), optional :: ucd !! IVOA Unified Content Descriptor, if declared.
+        integer, intent(out), optional :: array_size !! maximum string length (string fields only).
+        integer, intent(out), optional :: col_size !! vector-column element count.
+        character(len=:), allocatable, intent(out), optional :: qc_min !! qc: min: bound, operator-prefixed.
+        character(len=:), allocatable, intent(out), optional :: qc_max !! qc: max: bound, operator-prefixed.
+        character(len=:), allocatable, intent(out), optional :: qc_miss !! "Null" or "".
+
+        if (present(data_type)) then
+            if (allocated(col%data_type)) then
+                data_type = col%data_type
+            else
+                data_type = ""
+            end if
+        end if
+        if (present(unit)) then
+            if (allocated(col%unit)) then
+                unit = col%unit
+            else
+                unit = ""
+            end if
+        end if
+        if (present(info)) then
+            if (allocated(col%info)) then
+                info = col%info
+            else
+                info = ""
+            end if
+        end if
+        if (present(ucd)) then
+            if (allocated(col%ucd)) then
+                ucd = col%ucd
+            else
+                ucd = ""
+            end if
+        end if
+        if (present(array_size)) array_size = col%array_size
+        if (present(col_size)) col_size = col%col_size
+
+        if (present(qc_min)) then
+            if (col%has_qc_min) then
+                qc_min = trim(col%qc_min_op) // " " // trim(col%qc_min_raw)
+            else
+                qc_min = ""
+            end if
+        end if
+        if (present(qc_max)) then
+            if (col%has_qc_max) then
+                qc_max = trim(col%qc_max_op) // " " // trim(col%qc_max_raw)
+            else
+                qc_max = ""
+            end if
+        end if
+        if (present(qc_miss)) then
+            if (col%qc_allow_null) then
+                qc_miss = "Null"
+            else
+                qc_miss = ""
+            end if
+        end if
+    end subroutine fill_field_definition_outputs
+
     module procedure set_unavailable
         integer :: idx, i
 

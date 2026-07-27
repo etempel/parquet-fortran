@@ -239,27 +239,35 @@ this procedure's whole contract is "give me the type", so it cannot answer silen
 tokens — use `parquet_column_exists` with no `types` filter first if the column's existence or
 type isn't already guaranteed.
 
-### Quality control (qc:) range checks on write
+### Quality control (qc:) range/miss checks on write
 
-A MAML field can declare a `qc:` block with `min:`/`max:` bounds:
+A MAML field can declare a `qc:` block with `min:`/`max:` bounds and/or a `miss:` Null-expectation flag:
 ```
 - name: ra
   data_type: float64
   qc:
     min: '>= 0'
     max: '< 360'
+    miss: Null
 ```
-A plain number (`min: 1`) is treated as inclusive (`>=` for `min:`, `<=` for `max:`); a quoted value with an explicit leading operator uses that comparison instead. The operator must match the bound's direction: `min:` accepts only `>=` or `>` (a lower bound) and `max:` accepts only `<=` or `<` (an upper bound); a reversed operator (e.g. `min: '< 5'`) is a nonsensical bound and fails `parquet_validate_maml`. Either bound may be omitted (only `min:` or only `max:` is fine). `parquet_validate_maml` also checks that every declared bound actually converts to a value usable for that field's `data_type`: for `int32`/`int64` it must be an exact integer within that type's range; for `float32`/`float64` it must be finite (not `NaN`/`Infinity`); a `string` field's bound is used as a literal string (nothing to convert, so nothing can fail there); `qc:` on a `boolean` field is accepted but never enforced (silently ignored, and so exempt from the operator-direction check too).
+A plain number (`min: 1`) is treated as inclusive (`>=` for `min:`, `<=` for `max:`); a quoted value with an explicit leading operator uses that comparison instead. The operator must match the bound's direction: `min:` accepts only `>=` or `>` (a lower bound) and `max:` accepts only `<=` or `<` (an upper bound); a reversed operator (e.g. `min: '< 5'`) is a nonsensical bound and fails `parquet_validate_maml`. Either bound may be omitted (only `min:` or only `max:` is fine). `parquet_validate_maml` also checks that every declared bound actually converts to a value usable for that field's `data_type`: for `int32`/`int64` it must be an exact integer within that type's range; for `float32`/`float64` it must be finite (not `NaN`/`Infinity`); a `string` field's bound is used as a literal string (nothing to convert, so nothing can fail there); `qc:` on a `boolean` field is accepted but never enforced (silently ignored, and so exempt from the operator-direction check too). `miss:` is `Null`/`NA` (case-insensitive) or empty; anything else fails `parquet_validate_maml`.
 
-Pass `qc=.true.` to `parquet_open_writer` to turn on the actual range check during writing:
+`qc` defaults to `.true.` whenever `parquet_open_writer` is given a `schema=` (pass `qc=.false.` to opt out); it's a no-op without a schema:
 ```fortran
-call parquet_open_writer(writer, "data.parquet", schema, qc=.true.)
+call parquet_open_writer(writer, "data.parquet", schema)          ! qc active by default (schema given)
+call parquet_open_writer(writer, "data.parquet", schema, qc=.false.) ! explicitly disabled
 ```
-With `qc=.true.`, every `parquet_write_column` call checks its column's declared bound(s) (if any) against every element for which `is_valid` is `.true.` (or every element, if `is_valid` wasn't passed at all — see [Null values](#null-values)). String columns are compared lexicographically using Fortran's native string comparison. Vector columns are checked element-wise. A violation **never stops the write** — it prints one `WARNING` line to stdout naming the column, its declared bound(s), the observed data range among the checked elements, and how many of them are out of range, e.g.:
+With qc active, every `parquet_write_column` call runs two independent checks per column:
+
+- **Range** — if `min:`/`max:` is declared, every element for which `is_valid` is `.true.` (or every element, if `is_valid` wasn't passed at all — see [Null values](#null-values)) is checked against the bound(s). String columns are compared lexicographically using Fortran's native string comparison. Vector columns are checked element-wise.
+- **Miss (Null expectation)** — applies to any column written with an `is_valid=`/null-carrying mask (numeric/logical `is_valid=`, a `parquet_string_column`'s own null tracking, or a `parquet_date`/`time`/`timestamp` element's null state). If `miss:` is `Null`/`NA`, Nulls are expected and never warned about. If `miss:` is absent or empty (**the default**), Nulls are NOT expected: finding any is a violation. `min:`/`max:` always run only over non-null elements regardless of `miss:`.
+
+Neither check ever stops the write — each prints its own one-line `WARNING` to stdout naming the column, e.g.:
 ```
 WARNING: qc violation for column 'ra': declared min >= 0, max < 360, data range [-1.5, 359.9], 3 of 1000 valid element(s) out of range
+WARNING: qc violation for column 'ra': 2 of 1000 element(s) are Null (qc: miss: not declared)
 ```
-This only applies when writing against a MAML-derived schema (`parquet_open_writer(..., schema, ...)`) and only for columns that actually declare `qc: min:`/`max:`; omitting `qc=.true.` (the default) skips the check entirely, same as before this feature existed.
+This only applies when writing against a MAML-derived schema (`parquet_open_writer(..., schema, ...)`); the range check only fires for columns that actually declare `qc: min:`/`max:`, and the miss check only fires for a column actually written with a null-carrying mask. `qc=.false.` skips both checks entirely. The read side (`parquet_open_reader`) enforces the identical `min:`/`max:`/`miss:` rules against the values actually read back — see [Read-time quality control with a qc-maml](reading.html#read-time-quality-control-with-a-qc-maml).
 
 ### Compression and row group size
 

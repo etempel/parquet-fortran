@@ -230,6 +230,7 @@ contains
         if (present(is_valid)) then
             is_valid_c = pack(is_valid, elem_mask)
             call parquet_check_protected(writer, name, is_valid_c)
+            call parquet_check_qc_miss(writer, name, is_valid_c)
             call parquet_check_qc_string(writer, name, values_c, is_valid_c)
         else
             call parquet_check_qc_string(writer, name, values_c, spread(.true., 1, size(values_c, kind=int64)))
@@ -321,6 +322,7 @@ contains
         if (present(is_valid)) then
             valid_flat = pack(reshape(is_valid, [size(is_valid, kind=int64)]), elem_mask)
             call parquet_check_protected(writer, name, valid_flat)
+            call parquet_check_qc_miss(writer, name, valid_flat)
             call parquet_check_qc_string(writer, name, reshape(values_c, [size(values_c, kind=int64)]), valid_flat)
             call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
         else
@@ -395,6 +397,7 @@ contains
                 is_valid_flat(i) = .not. values_c%is_null(i)
             end do
             call parquet_check_protected(writer, name, is_valid_flat)
+            call parquet_check_qc_miss(writer, name, is_valid_flat)
         end if
         call parquet_check_qc_string_compact(writer, name, values_c)
 
@@ -473,6 +476,7 @@ contains
         if (present(is_valid)) then
             is_valid_c = pack(is_valid, elem_mask)
             call parquet_check_protected(writer, name, is_valid_c)
+            call parquet_check_qc_miss(writer, name, is_valid_c)
             call parquet_check_qc_string(writer, name, values_c, is_valid_c)
         else
             call parquet_check_qc_string(writer, name, values_c, spread(.true., 1, size(values_c, kind=int64)))
@@ -563,6 +567,7 @@ contains
         if (present(is_valid)) then
             valid_flat = pack(reshape(is_valid, [size(is_valid, kind=int64)]), elem_mask)
             call parquet_check_protected(writer, name, valid_flat)
+            call parquet_check_qc_miss(writer, name, valid_flat)
             call parquet_check_qc_string(writer, name, reshape(values_c, [size(values_c, kind=int64)]), valid_flat)
             call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
         else
@@ -636,6 +641,7 @@ contains
                 is_valid_flat(i) = .not. values_c%is_null(i)
             end do
             call parquet_check_protected(writer, name, is_valid_flat)
+            call parquet_check_qc_miss(writer, name, is_valid_flat)
         end if
         call parquet_check_qc_string_compact(writer, name, values_c)
         call parquet_chunk_mark_written_if_first(writer, name)

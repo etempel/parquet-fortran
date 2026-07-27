@@ -18,7 +18,7 @@ module parquet
     implicit none
     private
     !
-    character(len=*),parameter:: cversion = "v0.9.11 (2026-07-24)" !! version info
+    character(len=*),parameter:: cversion = "v0.9.12 (2026-07-27)" !! version info
 #ifndef RELEASE_VERSION
 #  define RELEASE_VERSION 0.1
 #endif
@@ -67,6 +67,12 @@ module parquet
         character(len=:), allocatable :: qc_min_raw !! The qc: min: bound text, operator prefix already stripped/
         !! trimmed; numeric for int32/int64/float32/float64, literal for string.
         character(len=:), allocatable :: qc_max_raw !! qc: max: bound text, same convention as qc_min_raw.
+        logical :: qc_allow_null = .false. !! true if qc: miss: Null/NA was declared for this field (Nulls are
+        !! an expected part of the output, so parquet_write_column/parquet_open_reader's qc: enforcement never
+        !! warns/errors about them); .false. (the default, including when no qc: block was declared at all)
+        !! means Nulls are NOT expected -- finding any at write or read time triggers a qc: violation. May be
+        !! set on any data_type, including one that cannot itself carry a Null today (e.g. int32/float64) --
+        !! harmless now, kept for forward compatibility with a future null-aware column type.
         character(len=:), allocatable :: name      !! The name of the field [required]; always the internal/
         !! canonical name, i.e. what parquet_write_column/set_column_available/etc. use -- never affected by a
         !! col_map: rename (see output_name).
@@ -99,6 +105,10 @@ module parquet
         procedure :: get_column_index !! 1-based index of a column by name; error stops if not found.
         procedure :: get_num_fields !! Total number of declared fields.
         procedure :: get_field_name !! Field name at a given 1-based MAML source position.
+        procedure :: get_field_by_name !! Full field definition by name; error stops if not found.
+        procedure :: get_field_by_index !! Full field definition by 1-based MAML source position.
+        generic :: get_field => get_field_by_name, get_field_by_index !! Reads back a field's full,
+        !! add_field-equivalent definition, by name or by 1-based source position.
         ! Exposed as set_column_available/set_column_unavailable to match the
         ! same-named methods on parquet_schema (the primary public API); the
         ! backing module procedures keep the shorter set_available/set_unavailable
@@ -185,6 +195,8 @@ module parquet
         procedure :: clear => schema_clear !! Resets the entire schema back to its pristine,
         !! just-declared (never-initialized) state.
         procedure :: add_field => schema_add_field !! Appends one fields: entry to a from-scratch schema.
+        procedure :: add_field_from => schema_add_field_from !! Copies one field's definition from another
+        !! (already-parsed) schema and appends it here via %add_field.
         procedure :: set_column_available !! Enables a column, or every column if no name is given.
         procedure :: set_column_unavailable !! Disables a column, or every column if no name is given.
         procedure :: set_col_size => schema_set_col_size !! Resolves a column's col_size before parquet_open_writer.
@@ -194,6 +206,12 @@ module parquet
         !! name; error stops if not found.
         procedure :: get_num_fields => schema_get_num_fields !! Total number of declared fields.
         procedure :: get_field_name => schema_get_field_name !! Field name at a given 1-based MAML source position.
+        procedure :: get_field_by_name => schema_get_field_by_name !! Full field definition by name; error
+        !! stops if not found.
+        procedure :: get_field_by_index => schema_get_field_by_index !! Full field definition by 1-based
+        !! MAML source position.
+        generic :: get_field => get_field_by_name, get_field_by_index !! Reads back a field's full,
+        !! add_field-equivalent definition, by name or by 1-based source position; forwards to %cinfo%get_field.
         procedure :: print_schema_info => schema_print_schema_info !! Writes a "Table name:" line plus an aligned
         !! name/unit/type/len/ucd/info listing of enabled (is_set) columns to a unit/file.
         ! add_col_qc/set_col_qc build a read-time qc-maml. Two intentional
@@ -276,9 +294,11 @@ module parquet
         type(parquet_column_type), allocatable :: enabled_columns(:) !! Subset of all_columns currently enabled (is_set).
         integer, allocatable :: write_counts(:) !! Per-enabled-column count of parquet_write_column calls so far.
         logical :: is_schema_enforced = .false. !! true when opened with a schema (vs. a schema-less writer).
-        logical :: qc = .false. !! set from parquet_open_writer(..., qc=); when true, parquet_write_column checks
-        !! each column's qc: min/max (if declared) against its valid (is_valid) elements
-        !! and prints a WARNING (never an error) on violation. No-op without a schema.
+        logical :: qc = .false. !! defaults to present(schema) (i.e. on whenever a schema is given), overridable
+        !! via parquet_open_writer(..., qc=); when true, parquet_write_column checks each column's qc: min/max
+        !! (if declared) against its valid (is_valid) elements, and its qc: miss: (Null expectation, default
+        !! "not expected") against any Null elements, printing a WARNING (never an error) on violation.
+        !! No-op without a schema.
         integer(c_long_long) :: expected_nrows = -1 !! set by the first parquet_write_column call; every later
         !! call must supply this same row count (see parquet_check_row_count), since
         !! Arrow/Parquet requires every column in a table to have equal length.
@@ -1100,7 +1120,8 @@ module parquet
             integer, intent(in), optional :: col_size !! vector-column element count.
             character(len=*), intent(in), optional :: qc_min !! qc: min: bound (operator prefix allowed).
             character(len=*), intent(in), optional :: qc_max !! qc: max: bound (operator prefix allowed).
-            character(len=*), intent(in), optional :: qc_miss !! qc: miss: value (Null/NA, case-insensitive).
+            character(len=*), intent(in), optional :: qc_miss !! Sets qc: miss: (Null/NA, case-insensitive; absent or
+            !! empty means Nulls are NOT expected in this field's output -- see parquet_column_type%qc_allow_null).
         end subroutine schema_add_field
         !> Parses a (already lowercased) MAML data_type `token` into its temporal base type and
         !> unit/utc: recognizes `date`, `time[unit]`, `timestamp[unit(,utc)]` where unit is one
@@ -1167,6 +1188,62 @@ module parquet
             integer, intent(in) :: index !! 1-based field position in MAML source order.
             character(len=:), allocatable, intent(out) :: name !! field name at that position.
         end subroutine schema_get_field_name
+        !> Forwards to %cinfo%get_field_by_name -- see that procedure's own doc comment
+        !> (parquet_column_info's spec, above) for the full contract, including the qc_min/
+        !> qc_max/qc_miss round-trip caveats and the "schema must already be parsed" precondition.
+        module subroutine schema_get_field_by_name(this, name, data_type, unit, info, ucd, array_size, col_size, &
+                qc_min, qc_max, qc_miss)
+            class(parquet_schema), intent(in) :: this !! schema to query.
+            character(len=*), intent(in) :: name !! field name to look up.
+            character(len=:), allocatable, intent(out), optional :: data_type !! field's data type.
+            character(len=:), allocatable, intent(out), optional :: unit !! unit of measurement, if declared.
+            character(len=:), allocatable, intent(out), optional :: info !! short description, if declared.
+            character(len=:), allocatable, intent(out), optional :: ucd !! IVOA Unified Content Descriptor, if declared.
+            integer, intent(out), optional :: array_size !! maximum string length (string fields only).
+            integer, intent(out), optional :: col_size !! vector-column element count.
+            character(len=:), allocatable, intent(out), optional :: qc_min !! Reconstructed qc: min: bound, operator-prefixed;
+            !! empty if none was declared.
+            character(len=:), allocatable, intent(out), optional :: qc_max !! Reconstructed qc: max: bound, operator-prefixed;
+            !! empty if none was declared.
+            character(len=:), allocatable, intent(out), optional :: qc_miss !! Reconstructed as "Null" if qc: miss: allows Null,
+            !! else "".
+        end subroutine schema_get_field_by_name
+        !> Forwards to %cinfo%get_field_by_index -- see get_field_by_name above for the full
+        !> per-argument contract; the only difference is the lookup key (1-based MAML source
+        !> position instead of name) and that `name` itself is returned (not optional, since the
+        !> caller doesn't already know it).
+        module subroutine schema_get_field_by_index(this, index, name, data_type, unit, info, ucd, array_size, &
+                col_size, qc_min, qc_max, qc_miss)
+            class(parquet_schema), intent(in) :: this !! schema to query.
+            integer, intent(in) :: index !! 1-based field position in MAML source order.
+            character(len=:), allocatable, intent(out) :: name !! field name at that position.
+            character(len=:), allocatable, intent(out), optional :: data_type !! field's data type.
+            character(len=:), allocatable, intent(out), optional :: unit !! unit of measurement, if declared.
+            character(len=:), allocatable, intent(out), optional :: info !! short description, if declared.
+            character(len=:), allocatable, intent(out), optional :: ucd !! IVOA Unified Content Descriptor, if declared.
+            integer, intent(out), optional :: array_size !! maximum string length (string fields only).
+            integer, intent(out), optional :: col_size !! vector-column element count.
+            character(len=:), allocatable, intent(out), optional :: qc_min !! Reconstructed qc: min: bound, operator-prefixed;
+            !! empty if none was declared.
+            character(len=:), allocatable, intent(out), optional :: qc_max !! Reconstructed qc: max: bound, operator-prefixed;
+            !! empty if none was declared.
+            character(len=:), allocatable, intent(out), optional :: qc_miss !! Reconstructed as "Null" if qc: miss: allows Null,
+            !! else "".
+        end subroutine schema_get_field_by_index
+        !> Copies `name`'s full field definition from `source_schema` (via %get_field) and
+        !> appends an equivalent field here via %add_field -- so two schemas can share a column
+        !> definition (e.g. a handful of "identity" columns common to several output tables)
+        !> without the caller re-typing its type/unit/info/qc by hand and risking drift between
+        !> the copies. `source_schema` must already be parsed (see %get_field); `this` must
+        !> already have %init called, exactly like a direct %add_field call would require.
+        !> Subject to the same qc_min/qc_max/qc_miss round-trip caveats as %get_field: the copy
+        !> is semantically equivalent to the source field, not necessarily a byte-identical MAML
+        !> re-declaration.
+        module subroutine schema_add_field_from(this, source_schema, name)
+            class(parquet_schema), intent(inout) :: this !! schema gaining the copied field (%init already called).
+            type(parquet_schema), intent(in) :: source_schema !! already-parsed schema to copy `name` from.
+            character(len=*), intent(in) :: name !! name of the field to copy (looked up in source_schema).
+        end subroutine schema_add_field_from
         !> Writes a fixed-width, aligned listing of this schema's enabled (is_set) columns, one
         !> per output line, in the order name/unit/data_type/col_size/ucd/info -- the last (info)
         !> column is left unpadded so no line carries trailing whitespace. Column widths are
@@ -1357,6 +1434,60 @@ module parquet
             integer, intent(in) :: index !! 1-based field position in MAML source order.
             character(len=:), allocatable, intent(out) :: name !! field name at that position.
         end subroutine get_field_name
+        !> Reads back `name`'s full field definition -- the same shape of values %add_field
+        !> accepts, so a caller can inspect an already-parsed schema's columns or feed the result
+        !> straight into another schema's %add_field (see %add_field_from, parquet_schema's own
+        !> convenience wrapper built on top of this). Every output is optional/intent(out); pass
+        !> only the ones you need. qc_min/qc_max are reconstructed as a single operator-prefixed
+        !> string (e.g. ">= 5.0"), re-feedable into %add_field's own qc_min/qc_max arguments --
+        !> note this always carries an explicit operator, even if the original %add_field call
+        !> left it implicit (">=" for min, "<=" for max), which is semantically identical but not
+        !> necessarily byte-identical to the original input. qc_miss comes back as "Null" or ""
+        !> (never "NA", even if that's what was originally declared -- both are equivalent
+        !> aliases and the distinction isn't preserved in storage). Error stops if `name` is not
+        !> found. Assumes this column_info reflects the schema's current fields: parquet_parse_maml
+        !> (or, for a from-scratch schema, %init/%add_field followed by parquet_parse_maml) must
+        !> already have run; any %add_field call since the last parse is not yet visible here.
+        module subroutine get_field_by_name(this, name, data_type, unit, info, ucd, array_size, col_size, &
+                qc_min, qc_max, qc_miss)
+            class(parquet_column_info), intent(in) :: this !! column_info to query.
+            character(len=*), intent(in) :: name !! field name to look up.
+            character(len=:), allocatable, intent(out), optional :: data_type !! field's data type.
+            character(len=:), allocatable, intent(out), optional :: unit !! unit of measurement, if declared.
+            character(len=:), allocatable, intent(out), optional :: info !! short description, if declared.
+            character(len=:), allocatable, intent(out), optional :: ucd !! IVOA Unified Content Descriptor, if declared.
+            integer, intent(out), optional :: array_size !! maximum string length (string fields only).
+            integer, intent(out), optional :: col_size !! vector-column element count.
+            character(len=:), allocatable, intent(out), optional :: qc_min !! Reconstructed qc: min: bound, operator-prefixed;
+            !! empty if none was declared.
+            character(len=:), allocatable, intent(out), optional :: qc_max !! Reconstructed qc: max: bound, operator-prefixed;
+            !! empty if none was declared.
+            character(len=:), allocatable, intent(out), optional :: qc_miss !! Reconstructed as "Null" if qc: miss: allows Null,
+            !! else "" (Nulls not expected -- see parquet_column_type%qc_allow_null).
+        end subroutine get_field_by_name
+        !> Same as get_field_by_name, but looks the field up by its 1-based MAML source position
+        !> (same order get_num_fields counts) instead of by name, additionally returning that
+        !> field's name (always populated, not optional, since the caller doesn't already know
+        !> it). index must be between 1 and get_num_fields(this); anything outside that range
+        !> fails with error stop.
+        module subroutine get_field_by_index(this, index, name, data_type, unit, info, ucd, array_size, col_size, &
+                qc_min, qc_max, qc_miss)
+            class(parquet_column_info), intent(in) :: this !! column_info to query.
+            integer, intent(in) :: index !! 1-based field position in MAML source order.
+            character(len=:), allocatable, intent(out) :: name !! field name at that position.
+            character(len=:), allocatable, intent(out), optional :: data_type !! field's data type.
+            character(len=:), allocatable, intent(out), optional :: unit !! unit of measurement, if declared.
+            character(len=:), allocatable, intent(out), optional :: info !! short description, if declared.
+            character(len=:), allocatable, intent(out), optional :: ucd !! IVOA Unified Content Descriptor, if declared.
+            integer, intent(out), optional :: array_size !! maximum string length (string fields only).
+            integer, intent(out), optional :: col_size !! vector-column element count.
+            character(len=:), allocatable, intent(out), optional :: qc_min !! Reconstructed qc: min: bound, operator-prefixed;
+            !! empty if none was declared.
+            character(len=:), allocatable, intent(out), optional :: qc_max !! Reconstructed qc: max: bound, operator-prefixed;
+            !! empty if none was declared.
+            character(len=:), allocatable, intent(out), optional :: qc_miss !! Reconstructed as "Null" if qc: miss: allows Null,
+            !! else "" (Nulls not expected -- see parquet_column_type%qc_allow_null).
+        end subroutine get_field_by_index
         !> Backs parquet_schema%set_column_unavailable (see set_column_unavailable
         !> in the parquet_schema block above); disables `name`, or every
         !> non-deactivated column if `name` is absent. Error stops if `name`
@@ -1564,7 +1695,8 @@ module parquet
             character(len=*), intent(in) :: filename !! output .parquet path.
             type(parquet_schema), intent(in), optional :: schema !! schema to enforce; schema-less writer if absent.
             logical, intent(in), optional :: write_maml !! also save a sidecar .maml next to filename (needs schema).
-            logical, intent(in), optional :: qc !! enable qc: min/max WARNING checks on write (needs schema).
+            logical, intent(in), optional :: qc !! enable qc: min/max/miss WARNING checks on write; defaults to
+            !! present(schema) (on whenever a schema is given), pass .false. to opt out; no-op without a schema.
             character(len=*), intent(in), optional :: compression !! Arrow compression codec name (e.g. "snappy", "zstd").
             integer, intent(in), optional :: compression_level !! codec-specific compression level.
             integer, intent(in), optional :: chunk_size !! Parquet row-group size.
@@ -1927,7 +2059,8 @@ module parquet
             integer(int32), intent(in), optional :: sample_seed !! >0 for a reproducible sample draw;
             !! omitted or <= 0 draws a fresh seed from entropy.
             type(parquet_schema), intent(in), optional :: schema !! schema/qc-maml to validate columns against.
-            logical, intent(in), optional :: qc !! enable qc: min/max/miss enforcement (needs schema).
+            logical, intent(in), optional :: qc !! enable qc: min/max/miss enforcement; defaults to present(schema)
+            !! (on whenever a schema is given), pass .false. to opt out; no-op without a schema.
             logical, intent(in), optional :: qc_soft !! qc violations warn instead of error-stopping.
             logical, intent(in), optional :: prefetch !! read and cache every column immediately.
         end subroutine parquet_open_reader_base
@@ -1952,7 +2085,8 @@ module parquet
             integer(int32), intent(in), optional :: sample_seed !! >0 for a reproducible sample draw;
             !! omitted or <= 0 draws a fresh seed from entropy.
             type(parquet_schema), intent(in), optional :: schema !! schema/qc-maml to validate columns against.
-            logical, intent(in), optional :: qc !! enable qc: min/max/miss enforcement (needs schema).
+            logical, intent(in), optional :: qc !! enable qc: min/max/miss enforcement; defaults to present(schema)
+            !! (on whenever a schema is given), pass .false. to opt out; no-op without a schema.
             logical, intent(in), optional :: qc_soft !! qc violations warn instead of error-stopping.
             integer(int64), intent(out) :: nrows !! post-filter/post-sample row count; error stops if zero.
             logical, intent(in), optional :: prefetch !! read and cache every column immediately.
@@ -1974,7 +2108,8 @@ module parquet
             integer(int32), intent(in), optional :: sample_seed !! >0 for a reproducible sample draw;
             !! omitted or <= 0 draws a fresh seed from entropy.
             type(parquet_schema), intent(in), optional :: schema !! schema/qc-maml to validate columns against.
-            logical, intent(in), optional :: qc !! enable qc: min/max/miss enforcement (needs schema).
+            logical, intent(in), optional :: qc !! enable qc: min/max/miss enforcement; defaults to present(schema)
+            !! (on whenever a schema is given), pass .false. to opt out; no-op without a schema.
             logical, intent(in), optional :: qc_soft !! qc violations warn instead of error-stopping.
             integer(int32), intent(out) :: nrows !! post-filter/post-sample row count; error stops if zero or if it overflows int32.
             logical, intent(in), optional :: prefetch !! read and cache every column immediately.

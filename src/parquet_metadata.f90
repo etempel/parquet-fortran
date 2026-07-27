@@ -727,6 +727,23 @@ contains
         call this%cinfo%get_field_name(index, name)
     end procedure schema_get_field_name
 
+    module procedure schema_get_field_by_name
+        call this%cinfo%get_field(name, data_type, unit, info, ucd, array_size, col_size, qc_min, qc_max, qc_miss)
+    end procedure schema_get_field_by_name
+
+    module procedure schema_get_field_by_index
+        call this%cinfo%get_field(index, name, data_type, unit, info, ucd, array_size, col_size, qc_min, qc_max, qc_miss)
+    end procedure schema_get_field_by_index
+
+    module procedure schema_add_field_from
+        character(len=:), allocatable :: data_type, unit, info, ucd, qc_min, qc_max, qc_miss
+        integer :: array_size, col_size
+
+        call source_schema%get_field(name, data_type, unit, info, ucd, array_size, col_size, qc_min, qc_max, qc_miss)
+        call this%add_field(name, data_type, unit=unit, info=info, ucd=ucd, array_size=array_size, &
+            col_size=col_size, qc_min=qc_min, qc_max=qc_max, qc_miss=qc_miss)
+    end procedure schema_add_field_from
+
     module procedure schema_print_schema_info
         integer :: u, i, k, n_enabled, ios
         integer :: w_name, w_unit, w_type, w_len, w_ucd, w_info, w_total
@@ -1031,10 +1048,10 @@ contains
         integer :: ios, n, i, j, list_item_idx, doi_idx, depends_idx
         character(len=32) :: idx_buf
         character(len=:), allocatable :: tlo2, tlo3, tlo8, tlo9, tlo12, tlo17, tlo27, tlo28, tlo29, tlo30, &
-            tlo33, tlo34, tlo37, tlo41, tlo42, tlo43 !! scratch (to_lower).
+            tlo33, tlo34, tlo37, tlo41, tlo42, tlo43, tlo44 !! scratch (to_lower).
         character(len=:), allocatable :: tuq1, tuq4, tuq5, tuq6, tuq7, tuq10, tuq11, tuq13, tuq14, tuq15, &
             tuq16, tuq18, tuq19, tuq20, tuq21, tuq22, tuq23, tuq24, tuq25, tuq26, tuq31, tuq32, tuq35, tuq36, &
-            tuq38, tuq39, tuq40 !! scratch (unquote).
+            tuq38, tuq39, tuq40, tuq44 !! scratch (unquote).
         character(len=:), allocatable :: dt_base !! temporal base type scratch (parquet_parse_temporal_type).
         integer :: dt_unit !! temporal unit selector scratch.
         logical :: dt_utc, dt_is_temporal, dt_valid !! temporal utc/is-temporal/well-formed scratch.
@@ -1344,6 +1361,9 @@ contains
                     call parquet_set_qc_bound(tmp(n)%has_qc_max, tmp(n)%qc_max_op, tmp(n)%qc_max_raw, cvalue, "<=")
                     cycle
                 case ("miss")
+                    call parquet_unquote(cvalue, tuq44)
+                    call parquet_to_lower(tuq44, tlo44)
+                    tmp(n)%qc_allow_null = (trim(tlo44) == "null" .or. trim(tlo44) == "na")
                     cycle
                 case default
                     in_qc = .false.

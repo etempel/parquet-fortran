@@ -402,6 +402,7 @@ contains
         if (present(is_valid)) then
             is_valid_c = pack(is_valid, elem_mask)
             call parquet_check_protected(writer, name, is_valid_c)
+            call parquet_check_qc_miss(writer, name, is_valid_c)
             if (writer%qc .and. writer%is_schema_enforced) then
                 call parquet_check_qc_numeric(writer, name, real(values_c, kind=real64), is_valid_c)
             end if
@@ -455,6 +456,7 @@ contains
         if (present(is_valid)) then
             valid_flat = pack(reshape(is_valid, [size(is_valid, kind=int64)]), elem_mask)
             call parquet_check_protected(writer, name, valid_flat)
+            call parquet_check_qc_miss(writer, name, valid_flat)
             if (writer%qc .and. writer%is_schema_enforced) then
                 call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), valid_flat)
             end if
@@ -508,6 +510,7 @@ contains
         if (present(is_valid)) then
             is_valid_c = pack(is_valid, elem_mask)
             call parquet_check_protected(writer, name, is_valid_c)
+            call parquet_check_qc_miss(writer, name, is_valid_c)
             if (writer%qc .and. writer%is_schema_enforced) then
                 call parquet_check_qc_numeric(writer, name, real(values_c, kind=real64), is_valid_c)
             end if
@@ -561,6 +564,7 @@ contains
         if (present(is_valid)) then
             valid_flat = pack(reshape(is_valid, [size(is_valid, kind=int64)]), elem_mask)
             call parquet_check_protected(writer, name, valid_flat)
+            call parquet_check_qc_miss(writer, name, valid_flat)
             if (writer%qc .and. writer%is_schema_enforced) then
                 call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), valid_flat)
             end if
@@ -614,6 +618,7 @@ contains
         if (present(is_valid)) then
             is_valid_c = pack(is_valid, elem_mask)
             call parquet_check_protected(writer, name, is_valid_c)
+            call parquet_check_qc_miss(writer, name, is_valid_c)
             if (writer%qc .and. writer%is_schema_enforced) then
                 call parquet_check_qc_numeric(writer, name, real(values_c, kind=real64), is_valid_c)
             end if
@@ -667,6 +672,7 @@ contains
         if (present(is_valid)) then
             valid_flat = pack(reshape(is_valid, [size(is_valid, kind=int64)]), elem_mask)
             call parquet_check_protected(writer, name, valid_flat)
+            call parquet_check_qc_miss(writer, name, valid_flat)
             if (writer%qc .and. writer%is_schema_enforced) then
                 call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), valid_flat)
             end if
@@ -720,6 +726,7 @@ contains
         if (present(is_valid)) then
             is_valid_c = pack(is_valid, elem_mask)
             call parquet_check_protected(writer, name, is_valid_c)
+            call parquet_check_qc_miss(writer, name, is_valid_c)
             if (writer%qc .and. writer%is_schema_enforced) then
                 call parquet_check_qc_numeric(writer, name, real(values_c, kind=real64), is_valid_c)
             end if
@@ -773,6 +780,7 @@ contains
         if (present(is_valid)) then
             valid_flat = pack(reshape(is_valid, [size(is_valid, kind=int64)]), elem_mask)
             call parquet_check_protected(writer, name, valid_flat)
+            call parquet_check_qc_miss(writer, name, valid_flat)
             if (writer%qc .and. writer%is_schema_enforced) then
                 call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), valid_flat)
             end if
@@ -836,6 +844,7 @@ contains
         if (present(is_valid)) then
             is_valid_c = pack(is_valid, elem_mask)
             call parquet_check_protected(writer, name, is_valid_c)
+            call parquet_check_qc_miss(writer, name, is_valid_c)
         end if
         call parquet_make_valid_buf_write(is_valid_c, valid_buf, valid_ptr)
         call parquet_check_row_count(writer, name, nrows)
@@ -889,6 +898,7 @@ contains
         if (present(is_valid)) then
             valid_flat = pack(reshape(is_valid, [size(is_valid, kind=int64)]), elem_mask)
             call parquet_check_protected(writer, name, valid_flat)
+            call parquet_check_qc_miss(writer, name, valid_flat)
             call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
         else
             call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
@@ -942,6 +952,7 @@ contains
         if (present(is_valid)) then
             is_valid_c = pack(is_valid, elem_mask)
             call parquet_check_protected(writer, name, is_valid_c)
+            call parquet_check_qc_miss(writer, name, is_valid_c)
             if (writer%qc .and. writer%is_schema_enforced) then
                 call parquet_check_qc_numeric(writer, name, real(values_c, kind=real64), is_valid_c)
             end if
@@ -997,6 +1008,7 @@ contains
         if (present(is_valid)) then
             valid_flat = pack(reshape(is_valid, [size(is_valid, kind=int64)]), elem_mask)
             call parquet_check_protected(writer, name, valid_flat)
+            call parquet_check_qc_miss(writer, name, valid_flat)
             if (writer%qc .and. writer%is_schema_enforced) then
                 call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), valid_flat)
             end if
@@ -1052,6 +1064,7 @@ contains
         if (present(is_valid)) then
             is_valid_c = pack(is_valid, elem_mask)
             call parquet_check_protected(writer, name, is_valid_c)
+            call parquet_check_qc_miss(writer, name, is_valid_c)
             if (writer%qc .and. writer%is_schema_enforced) then
                 call parquet_check_qc_numeric(writer, name, real(values_c, kind=real64), is_valid_c)
             end if
@@ -1107,6 +1120,7 @@ contains
         if (present(is_valid)) then
             valid_flat = pack(reshape(is_valid, [size(is_valid, kind=int64)]), elem_mask)
             call parquet_check_protected(writer, name, valid_flat)
+            call parquet_check_qc_miss(writer, name, valid_flat)
             if (writer%qc .and. writer%is_schema_enforced) then
                 call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), valid_flat)
             end if
@@ -1162,6 +1176,7 @@ contains
         if (present(is_valid)) then
             is_valid_c = pack(is_valid, elem_mask)
             call parquet_check_protected(writer, name, is_valid_c)
+            call parquet_check_qc_miss(writer, name, is_valid_c)
             if (writer%qc .and. writer%is_schema_enforced) then
                 call parquet_check_qc_numeric(writer, name, real(values_c, kind=real64), is_valid_c)
             end if
@@ -1217,6 +1232,7 @@ contains
         if (present(is_valid)) then
             valid_flat = pack(reshape(is_valid, [size(is_valid, kind=int64)]), elem_mask)
             call parquet_check_protected(writer, name, valid_flat)
+            call parquet_check_qc_miss(writer, name, valid_flat)
             if (writer%qc .and. writer%is_schema_enforced) then
                 call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), valid_flat)
             end if
@@ -1272,6 +1288,7 @@ contains
         if (present(is_valid)) then
             is_valid_c = pack(is_valid, elem_mask)
             call parquet_check_protected(writer, name, is_valid_c)
+            call parquet_check_qc_miss(writer, name, is_valid_c)
             if (writer%qc .and. writer%is_schema_enforced) then
                 call parquet_check_qc_numeric(writer, name, real(values_c, kind=real64), is_valid_c)
             end if
@@ -1327,6 +1344,7 @@ contains
         if (present(is_valid)) then
             valid_flat = pack(reshape(is_valid, [size(is_valid, kind=int64)]), elem_mask)
             call parquet_check_protected(writer, name, valid_flat)
+            call parquet_check_qc_miss(writer, name, valid_flat)
             if (writer%qc .and. writer%is_schema_enforced) then
                 call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), valid_flat)
             end if
@@ -1391,6 +1409,7 @@ contains
         if (present(is_valid)) then
             is_valid_c = pack(is_valid, elem_mask)
             call parquet_check_protected(writer, name, is_valid_c)
+            call parquet_check_qc_miss(writer, name, is_valid_c)
         end if
         call parquet_make_valid_buf_write(is_valid_c, valid_buf, valid_ptr)
         call parquet_chunk_mark_written_if_first(writer, name)
@@ -1442,6 +1461,7 @@ contains
         if (present(is_valid)) then
             valid_flat = pack(reshape(is_valid, [size(is_valid, kind=int64)]), elem_mask)
             call parquet_check_protected(writer, name, valid_flat)
+            call parquet_check_qc_miss(writer, name, valid_flat)
             call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
         else
             call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)

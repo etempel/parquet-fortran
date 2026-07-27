@@ -454,6 +454,7 @@ contains
         writer%handle = create_parquet_writer(trim(filename)//char(0))
         writer%filename = trim(filename)
         writer%is_schema_enforced = present(schema)
+        writer%qc = present(schema)
         if (present(qc)) writer%qc = qc
 
         ! Defaults to "snappy" -- Parquet-the-library's own built-in default is
@@ -877,6 +878,35 @@ contains
                 "' is protected (extra: protected_cols:) and cannot contain Null values"
         end if
     end subroutine parquet_check_protected
+    !> If writer%qc is set and the column's declared qc: miss: does NOT allow Null (the default,
+    !! including when no qc: block at all was declared -- see parquet_column_type%qc_allow_null),
+    !! prints a WARNING naming the column and how many of its elements are Null in this write
+    !! call. Never errors -- writing proceeds regardless, and qc_min/qc_max are unaffected (they
+    !! already only ever look at valid elements). No-op for a schema-less writer, an undeclared
+    !! column, or a column whose qc: miss: allows Null.
+    subroutine parquet_check_qc_miss(writer, name, is_valid_flat)
+        type(parquet_writer), intent(in) :: writer !! open (schema-enforced) writer.
+        character(len=*), intent(in) :: name !! column name.
+        logical, intent(in) :: is_valid_flat(:) !! flattened validity mask for this write call (.true. => valid).
+        integer :: idx
+        integer(int64) :: n_null, n_total
+        character(len=:), allocatable :: fmt_int, fmt_int2
+
+        if (.not. writer%qc) return
+        if (.not. writer%is_schema_enforced) return
+        idx = parquet_get_defined_column_index(writer, name)
+        if (idx == 0) return
+        if (writer%all_columns(idx)%qc_allow_null) return
+
+        n_total = size(is_valid_flat, kind=int64)
+        n_null = count(.not. is_valid_flat, kind=int64)
+        if (n_null == 0) return
+
+        call parquet_qc_format_int(n_null, fmt_int)
+        call parquet_qc_format_int(n_total, fmt_int2)
+        print '(a)', "WARNING: qc violation for column '" // trim(name) // "': " // fmt_int // " of " // &
+            fmt_int2 // " element(s) are Null (qc: miss: not declared)"
+    end subroutine parquet_check_qc_miss
     !> Builds the int8 validity buffer and c_ptr passed down to the C++
     !> append_* functions from a caller's flattened `is_valid` mask (1 =
     !> valid, 0 = Null); `valid_ptr` stays c_null_ptr (no validity buffer

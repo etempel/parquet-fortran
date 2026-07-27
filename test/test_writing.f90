@@ -78,6 +78,16 @@ contains
                 test_qc_warning_printed_for_string_violation), &
             new_unittest("qc: on a boolean field is accepted but never enforced", &
                 test_qc_silently_ignored_for_boolean), &
+            new_unittest("qc defaults to active whenever a schema is given (no explicit qc=), " // &
+                "warning on an unexpected Null", test_qc_miss_default_active_numeric_warns), &
+            new_unittest("qc: miss: Null allows Nulls -- no WARNING printed", &
+                test_qc_miss_declared_null_no_warning), &
+            new_unittest("qc: miss: not declared warns on a Null in a compact string write", &
+                test_qc_miss_string_warns), &
+            new_unittest("qc: miss: not declared warns on a Null in a parquet_date write", &
+                test_qc_miss_temporal_warns), &
+            new_unittest("schema%add_field's own qc_min/qc_max drives real read-time enforcement", &
+                test_add_field_qc_drives_reader_enforcement), &
             new_unittest("compression=gzip round-trips and shrinks a compressible file", &
                 test_compression_gzip_round_trip), &
             new_unittest("compression=zstd/brotli/lz4 round-trip", &
@@ -987,6 +997,49 @@ contains
         call file_contains(out_file, "WARNING", found_warning)
         call check(error, .not. found_warning, "qc: on a boolean field must never print a WARNING")
     end subroutine test_qc_silently_ignored_for_boolean
+
+    subroutine test_qc_miss_default_active_numeric_warns(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "qc_miss_default_active_numeric_warns", &
+            expect_abort=.false., &
+            failure_message="a Null with qc: miss: not declared must warn, not abort, even with no explicit qc=", &
+            required_stderr="WARNING: qc violation for column 'id'")
+    end subroutine test_qc_miss_default_active_numeric_warns
+
+    subroutine test_qc_miss_declared_null_no_warning(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_no_output(error, "qc_miss_declared_null_no_warning", &
+            expect_abort=.false., &
+            failure_message="qc: miss: Null scenario was expected to exit cleanly", &
+            forbidden_text="WARNING: qc violation")
+    end subroutine test_qc_miss_declared_null_no_warning
+
+    subroutine test_qc_miss_string_warns(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "qc_miss_string_warns", expect_abort=.false., &
+            failure_message="a Null in a compact string write with qc: miss: not declared must warn, not abort", &
+            required_stderr="WARNING: qc violation for column 's'")
+    end subroutine test_qc_miss_string_warns
+
+    subroutine test_qc_miss_temporal_warns(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "qc_miss_temporal_warns", expect_abort=.false., &
+            failure_message="a Null parquet_date with qc: miss: not declared must warn, not abort", &
+            required_stderr="WARNING: qc violation for column 'd'")
+    end subroutine test_qc_miss_temporal_warns
+
+    subroutine test_add_field_qc_drives_reader_enforcement(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "add_field_qc_drives_reader_enforcement", &
+            expect_abort=.false., &
+            failure_message="an add_field-declared qc: min/max should enforce (warn) at read time too", &
+            required_stderr="WARNING: qc violation for column 'ra'")
+    end subroutine test_add_field_qc_drives_reader_enforcement
 
     !> Runs error_scenarios' `scenario_name` as a subprocess (its stdout
     !> captured to test_run/<scenario_name>_output.txt) and asserts the

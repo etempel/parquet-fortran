@@ -71,7 +71,10 @@ contains
         type(c_ptr), intent(out) :: valid_ptr !! c_loc(valid_buf), or c_null_ptr if no nulls.
 
         if (any(is_null_mask)) then
-            if (writer%is_schema_enforced) call parquet_check_protected(writer, name, .not. is_null_mask)
+            if (writer%is_schema_enforced) then
+                call parquet_check_protected(writer, name, .not. is_null_mask)
+                call parquet_check_qc_miss(writer, name, .not. is_null_mask)
+            end if
             call parquet_make_valid_buf_write(.not. is_null_mask, valid_buf, valid_ptr)
         else
             call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)

@@ -94,6 +94,18 @@ contains
                 test_schema_add_field_qc_operator_without_value_aborts), &
             new_unittest("schema%add_field: invalid qc_miss value aborts", &
                 test_schema_add_field_bad_qc_miss_value_aborts), &
+            new_unittest("schema%get_field(name=) reads back a full field definition, incl. qc", &
+                test_get_field_by_name), &
+            new_unittest("schema%get_field(index=) reads back a full field definition by position", &
+                test_get_field_by_index), &
+            new_unittest("schema%get_field(name=) on a non-existent field aborts", &
+                test_get_field_by_name_not_found_aborts), &
+            new_unittest("schema%get_field(index=) out of range aborts", &
+                test_get_field_by_index_out_of_range_aborts), &
+            new_unittest("schema%add_field_from copies a field's full definition, incl. qc", &
+                test_add_field_from_copies_field), &
+            new_unittest("schema%add_field_from on a non-existent source field aborts", &
+                test_add_field_from_source_not_found_aborts), &
             new_unittest("schema%add_field accepts date/time[unit]/timestamp[unit,utc] tokens", &
                 test_schema_add_field_temporal_tokens_ok), &
             new_unittest("schema%add_field: a unit suffix on date aborts", &
@@ -1092,6 +1104,104 @@ contains
         call check_scenario_exit_status(error, "schema_add_field_bad_qc_miss_value", expect_abort=.true., &
             failure_message="schema%add_field with an invalid qc_miss value was expected to error stop")
     end subroutine test_schema_add_field_bad_qc_miss_value_aborts
+
+    !> schema%get_field(name=) reads back every attribute add_field accepted, including the
+    !> qc_min/qc_max/qc_miss round trip (reconstructed as an operator-prefixed string / "Null").
+    !> Also checks a field with no qc: block at all reports empty qc_min/qc_max/qc_miss, and that
+    !> requesting only a subset of the optional outputs (a bare data_type query) works.
+    subroutine test_get_field_by_name(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        character(len=:), allocatable :: data_type, unit, info, ucd, qc_min, qc_max, qc_miss
+        integer :: array_size, col_size
+
+        call schema%init(table="t")
+        call schema%add_field("ra", "float64", unit="deg", info="Right ascension.", ucd="pos.eq.ra", &
+            qc_min=">=0", qc_max="<360", qc_miss="Null")
+        call schema%add_field("flag", "boolean")
+        call parquet_parse_maml(schema)
+
+        call schema%get_field("ra", data_type=data_type, unit=unit, info=info, ucd=ucd, array_size=array_size, &
+            col_size=col_size, qc_min=qc_min, qc_max=qc_max, qc_miss=qc_miss)
+        call check(error, data_type == "float64" .and. unit == "deg" .and. info == "Right ascension." .and. &
+            ucd == "pos.eq.ra" .and. array_size == 1 .and. col_size == 1 .and. &
+            trim(qc_min) == ">= 0" .and. trim(qc_max) == "< 360" .and. qc_miss == "Null", &
+            "get_field(name='ra') did not return the expected field definition")
+        if (allocated(error)) return
+
+        call schema%get_field("flag", qc_min=qc_min, qc_max=qc_max, qc_miss=qc_miss)
+        call check(error, qc_min == "" .and. qc_max == "" .and. qc_miss == "", &
+            "get_field(name='flag') was expected to report no qc: at all")
+        if (allocated(error)) return
+
+        data_type = "unset"
+        call schema%get_field("flag", data_type=data_type)
+        call check(error, data_type == "boolean", "get_field with only data_type requested did not populate it")
+    end subroutine test_get_field_by_name
+
+    !> schema%get_field(index=) is the same lookup as by-name, keyed by 1-based MAML source
+    !> position instead, and additionally returns the field's own name.
+    subroutine test_get_field_by_index(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        character(len=:), allocatable :: name, data_type
+
+        call schema%init(table="t")
+        call schema%add_field("id0", "int32")
+        call schema%add_field("ra", "float64")
+        call parquet_parse_maml(schema)
+
+        call schema%get_field(2, name, data_type=data_type)
+        call check(error, name == "ra" .and. data_type == "float64", &
+            "get_field(index=2) did not return the expected field")
+    end subroutine test_get_field_by_index
+
+    subroutine test_get_field_by_name_not_found_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "get_field_by_name_not_found", expect_abort=.true., &
+            failure_message="schema%get_field(name=) on a non-existent field was expected to error stop")
+    end subroutine test_get_field_by_name_not_found_aborts
+
+    subroutine test_get_field_by_index_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "get_field_by_index_out_of_range", expect_abort=.true., &
+            failure_message="schema%get_field(index=) out of range was expected to error stop")
+    end subroutine test_get_field_by_index_out_of_range_aborts
+
+    !> schema%add_field_from copies a field's full definition (incl. qc) from one schema into
+    !> another, without the caller re-typing type/unit/qc by hand -- the motivating "shared
+    !> identity columns across several output tables" use case.
+    subroutine test_add_field_from_copies_field(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: source, target
+        character(len=:), allocatable :: data_type, unit, qc_min, qc_max, qc_miss
+
+        call source%init(table="catalog")
+        call source%add_field("obj_id", "int64", unit="count", qc_min=">=0")
+        call parquet_parse_maml(source)
+
+        call target%init(table="derived")
+        call target%add_field_from(source, "obj_id")
+        call parquet_parse_maml(target)
+
+        call check(error, size(target%cinfo%col) == 1 .and. trim(target%cinfo%col(1)%name) == "obj_id", &
+            "add_field_from did not append the copied field to the target schema")
+        if (allocated(error)) return
+
+        call target%get_field("obj_id", data_type=data_type, unit=unit, qc_min=qc_min, qc_max=qc_max, qc_miss=qc_miss)
+        call check(error, data_type == "int64" .and. unit == "count" .and. trim(qc_min) == ">= 0" .and. &
+            qc_max == "" .and. qc_miss == "", &
+            "add_field_from's copied field did not match the source field's definition")
+    end subroutine test_add_field_from_copies_field
+
+    subroutine test_add_field_from_source_not_found_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "add_field_from_source_not_found", expect_abort=.true., &
+            failure_message="schema%add_field_from with a non-existent source field was expected to error stop")
+    end subroutine test_add_field_from_source_not_found_aborts
     !
     ! ------------------------------------------------------------------------------
     ! date/time/timestamp (parquet_temporal) MAML token validation

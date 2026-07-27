@@ -471,12 +471,20 @@ contains
         call maml_push_line(this%maml, "  data_type: " // trim(data_type))
 
         if (present(array_size)) then
-            write(buf, '(I0)') array_size
-            call maml_push_line(this%maml, "  array_size: " // trim(buf))
+            if (array_size == parquet_size_auto) then
+                call maml_push_line(this%maml, "  array_size: auto")
+            else
+                write(buf, '(I0)') array_size
+                call maml_push_line(this%maml, "  array_size: " // trim(buf))
+            end if
         end if
         if (present(col_size)) then
-            write(buf, '(I0)') col_size
-            call maml_push_line(this%maml, "  col_size: " // trim(buf))
+            if (col_size == parquet_size_auto) then
+                call maml_push_line(this%maml, "  col_size: auto")
+            else
+                write(buf, '(I0)') col_size
+                call maml_push_line(this%maml, "  col_size: " // trim(buf))
+            end if
         end if
 
         have_qc_min = .false.

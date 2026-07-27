@@ -138,6 +138,10 @@ contains
                 test_schema_clear_then_reinit_reusable), &
             new_unittest("col_size: auto/array_size: auto parse to an unresolved, still-valid state", &
                 test_parse_col_size_array_size_auto_ok), &
+            new_unittest("schema%add_field(col_size=parquet_size_auto) writes 'col_size: auto', not a raw -1", &
+                test_add_field_col_size_auto_writes_auto_token), &
+            new_unittest("schema%add_field(array_size=parquet_size_auto) writes 'array_size: auto', not a raw -1", &
+                test_add_field_array_size_auto_writes_auto_token), &
             new_unittest("a malformed col_size: value aborts", test_col_size_malformed_value_aborts), &
             new_unittest("a malformed array_size: value aborts", test_array_size_malformed_value_aborts), &
             new_unittest("array_size: auto on a non-string column aborts", &
@@ -1525,6 +1529,39 @@ contains
         call check(error, schema%cinfo%col(2)%array_size == parquet_size_auto, &
             "array_size: Auto did not parse to parquet_size_auto")
     end subroutine test_parse_col_size_array_size_auto_ok
+
+    !> Regression test: %add_field used to format col_size=parquet_size_auto as a raw integer
+    !! ("col_size: -1") instead of the "auto" token the parser actually recognizes, so it would
+    !! silently come back as an invalid col_size once (re)parsed/validated. %add_field must emit
+    !! the literal "col_size: auto" line for this sentinel, just like hand-written MAML text would.
+    !! parquet_parse_maml (object form) runs parquet_validate_maml internally before parsing, so
+    !! simply reaching the check below without aborting already proves validation accepted it.
+    subroutine test_add_field_col_size_auto_writes_auto_token(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+
+        call schema%init(table="col_size_auto_add_field_table")
+        call schema%add_field("vec", "float32", col_size=parquet_size_auto)
+        call parquet_parse_maml(schema)
+
+        call check(error, schema%cinfo%col(1)%col_size == parquet_size_auto, &
+            "schema%add_field(col_size=parquet_size_auto) should parse back to parquet_size_auto, " // &
+            "not size_invalid_sentinel")
+    end subroutine test_add_field_col_size_auto_writes_auto_token
+
+    !> Same regression as above, for array_size=parquet_size_auto (only valid on a string column).
+    subroutine test_add_field_array_size_auto_writes_auto_token(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+
+        call schema%init(table="array_size_auto_add_field_table")
+        call schema%add_field("txt", "string", array_size=parquet_size_auto)
+        call parquet_parse_maml(schema)
+
+        call check(error, schema%cinfo%col(1)%array_size == parquet_size_auto, &
+            "schema%add_field(array_size=parquet_size_auto) should parse back to parquet_size_auto, " // &
+            "not size_invalid_sentinel")
+    end subroutine test_add_field_array_size_auto_writes_auto_token
 
     subroutine test_col_size_malformed_value_aborts(error)
         type(error_type), allocatable, intent(out) :: error

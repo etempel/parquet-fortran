@@ -5661,15 +5661,14 @@ extern "C"
 		auto resolved = resolve_struct_path(reader_handle->schema, name);
 		auto idx = get_column_index(reader_handle, resolved.top_level_name.c_str());
 		auto leaf_idx = resolve_single_leaf_index(reader_handle, static_cast<int>(idx), resolved.child_path);
-		std::shared_ptr<arrow::Table> table;
-		auto status =
-			reader_handle->reader->ReadRowGroup(static_cast<int>(row_group - 1), {static_cast<int>(leaf_idx)}, &table);
-		if (!status.ok())
+		auto result = reader_handle->reader->ReadRowGroup(static_cast<int>(row_group - 1), {static_cast<int>(leaf_idx)});
+		if (!result.ok())
 		{ // GCOVR_EXCL_START -- I/O backstop: row_group is already validated by
 		  // resolve_row_group_for_row before this is ever called.
-			throw std::runtime_error(status.ToString());
+			throw std::runtime_error(result.status().ToString());
 		}
 		// GCOVR_EXCL_STOP
+		std::shared_ptr<arrow::Table> table = result.ValueOrDie();
 		auto array = combine_column_chunks(table->column(0), resolved.top_level_name);
 		if (!resolved.child_path.empty())
 		{

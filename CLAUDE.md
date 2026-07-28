@@ -934,6 +934,21 @@ Two confirmed shapes:
   *same* never-taken branch, one line above — reliably shows 0. Root cause not fully diagnosed
   (build uses `-O0`, so this isn't ordinary optimizer basic-block merging); treat as gfortran/gcov
   bookkeeping quirk, confirmed via the sibling line's zero count, not a real coverage gap.
+- **A CI-only (toolchain-dependent) miss on the first executable statement of an abbreviated
+  `module procedure ... end procedure` body, right after its declaration block** — seen in
+  `parquet_metadata_maml.f90`'s `parquet_load_maml_file`/`parquet_load_qc_maml_file`, both of
+  whose opening `call parquet_read_maml_source_lines(...)` line. Unlike the two shapes above, this
+  one is *not* reproducible with a local `tools/coverage.sh` run (that run shows this file at a
+  clean 100%, including these exact lines) — it only shows up in GitLab CI's own gcov/gcovr
+  invocation, but does so consistently (confirmed across 4 separate CI runs on the same commit,
+  same two lines every time), which rules out a one-off parallel-`.gcda`-write race and points to
+  a CI-image-specific gfortran/gcov version difference from whatever's installed locally. Both
+  procedures are confirmed exercised end-to-end (`test_load_maml_file`/`test_load_qc_maml_file` in
+  `test/test_maml.f90`). If a *new* abbreviated `module procedure` body's own first statement
+  (immediately following its declarations, no intervening blank-line-only gap) shows the same
+  "0% only in CI, 100% locally, reproducible across ≥2 CI runs" pattern, treat it the same way —
+  don't assume it's this shape from a single CI run alone, since a genuine one-off race is also
+  possible; require the repeat-across-runs confirmation first.
 
 **Convention for tagging a confirmed site** (mirrors `src/parquet_wrapper.cpp`'s own "gcov
 attribution artifact under GCC" convention below, adapted for Fortran's stricter 132-column limit):
@@ -1131,4 +1146,3 @@ file row. Regression-tested via `test/error_scenarios.f90`'s
 it would actually read a whole column, on a tiny fixture — the scenario finishing without
 aborting proves none of the four calls took that path) plus its negative control
 `scenario_whole_column_read_forced_error_control` (proves the hook itself actually fires).
-

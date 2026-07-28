@@ -160,6 +160,8 @@ The `clang++` invocation is unconditional, with no `FPM_CXX`/`CXX` override — 
 
 A few more `tools/` scripts, unrelated to fixtures and not part of the build or test flow:
 
+`tools/generate_parquet_columns.py` regenerates the per-kind blocks of the `parquet_columns` foundation module: `src/parquet_columns.f90` (the module spec), `src/parquet_columns_access.f90` and `src/parquet_columns_mutate.f90`. Its output is **committed**, exactly like `tools/generate_parquet_maml.sh`'s, so nothing is generated at build time and the fpm build stays dependency-free. Re-run it after editing the kind table at the top of the script — for example when a new column kind is added — and commit the regenerated files; `tools/generate_parquet_columns.py --check` re-derives the output and fails if the committed files have drifted, which is the cheap way to catch a forgotten regeneration. The other four `parquet_columns_*.f90` files (`util`, `validity`, `structural`, `string`) are hand-written and the script never touches them. Maintainer-only (stripped from the fpm-published package, see `tools/prep_fpm_publish.sh`).
+
 `tools/count_lines.py` reports code/comment/blank line counts for `src/` and `test/`, a convenience for repository metrics.
 
 `tools/count_tests.sh` counts test-drive unit tests per suite directly from source (no build or run required): it reads `test/run_tester.f90`'s `new_testsuite(...)` registrations, locates each suite's `collect_tests_parquet_*` subroutine, and counts the `new_unittest(...)` entries inside it — cross-checked against an actual `fpm test run_tester` run's PASSED/FAILED line count. Maintainer-only (stripped from the fpm-published package, see `tools/prep_fpm_publish.sh`).

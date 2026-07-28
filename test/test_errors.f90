@@ -439,6 +439,42 @@ contains
                 test_concurrent_calls_into_shared_reader_aborts), &
             new_unittest("concurrent calls into a shared parquet_writer abort", &
                 test_concurrent_calls_into_shared_writer_aborts), &
+            new_unittest("parquet_column data_ptr with a mismatched pointer kind aborts", &
+                test_columns_data_ptr_kind_mismatch_aborts), &
+            new_unittest("parquet_column structural mutation on a kindless column aborts", &
+                test_columns_uninitialized_append_nulls_aborts), &
+            new_unittest("parquet_column get_at past the last row aborts", &
+                test_columns_get_at_index_out_of_range_aborts), &
+            new_unittest("parquet_column append of a different kind aborts", &
+                test_columns_append_kind_mismatch_aborts), &
+            new_unittest("parquet_column append of a different vector width aborts", &
+                test_columns_append_width_mismatch_aborts), &
+            new_unittest("parquet_column reindex with a duplicated index aborts", &
+                test_columns_reindex_duplicate_index_aborts), &
+            new_unittest("parquet_column clear_null on a temporal kind aborts", &
+                test_columns_clear_null_temporal_aborts), &
+            new_unittest("parquet_string_column reindex with a short permutation aborts", &
+                test_string_column_reindex_length_mismatch_aborts), &
+            new_unittest("parquet_string_column reindex with an out-of-range entry aborts", &
+                test_string_column_reindex_out_of_range_aborts), &
+            new_unittest("parquet_string_column delete_by_mask with a short mask aborts", &
+                test_string_column_delete_by_mask_length_mismatch_aborts), &
+            new_unittest("parquet_string_column append_nulls with a negative count aborts", &
+                test_string_column_append_nulls_negative_aborts), &
+            new_unittest("parquet_column string_column on a non-string kind aborts", &
+                test_columns_string_column_wrong_kind_aborts), &
+            new_unittest("parquet_column init of a reserved container kind aborts", &
+                test_columns_init_container_kind_aborts), &
+            new_unittest("parquet_column init with a width on a scalar kind aborts", &
+                test_columns_init_width_on_scalar_kind_aborts), &
+            new_unittest("parquet_column set_all with a mismatched value count aborts", &
+                test_columns_set_all_length_mismatch_aborts), &
+            new_unittest("parquet_column get_at with a mismatched row width aborts", &
+                test_columns_get_at_width_mismatch_aborts), &
+            new_unittest("parquet_column delete_by_mask with a short mask aborts", &
+                test_columns_delete_by_mask_length_mismatch_aborts), &
+            new_unittest("parquet_column reindex with a short permutation aborts", &
+                test_columns_reindex_length_mismatch_aborts), &
             new_unittest("parquet_string_column indexing out of range aborts", &
                 test_string_column_index_out_of_range_aborts), &
             new_unittest("parquet_string_column view_all with a mismatched-size array aborts", &
@@ -644,6 +680,140 @@ contains
                 test_get_column_type_unsupported_aborts) &
             ]
     end subroutine collect_tests_parquet_errors
+
+    !
+    ! ---- parquet_columns foundation abort paths ----
+    !
+    subroutine test_columns_data_ptr_kind_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_data_ptr_kind_mismatch", expect_abort=.true., &
+            failure_message="aliasing an int32 column through an int64 pointer was expected to abort", &
+            required_stderr="parquet_columns: data_ptr: column kind is PK_INT32")
+    end subroutine test_columns_data_ptr_kind_mismatch_aborts
+
+    subroutine test_columns_uninitialized_append_nulls_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_uninitialized_append_nulls", expect_abort=.true., &
+            failure_message="appending null rows to a column with no kind was expected to abort", &
+            required_stderr="parquet_columns: append_nulls: column has no kind assigned")
+    end subroutine test_columns_uninitialized_append_nulls_aborts
+
+    subroutine test_columns_get_at_index_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_get_at_index_out_of_range", expect_abort=.true., &
+            failure_message="reading past the last row was expected to abort", &
+            required_stderr="parquet_columns: get_at: row index out of range")
+    end subroutine test_columns_get_at_index_out_of_range_aborts
+
+    subroutine test_columns_append_kind_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_append_kind_mismatch", expect_abort=.true., &
+            failure_message="appending a column of a different kind was expected to abort", &
+            required_stderr="parquet_columns: append: column kinds differ")
+    end subroutine test_columns_append_kind_mismatch_aborts
+
+    subroutine test_columns_append_width_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_append_width_mismatch", expect_abort=.true., &
+            failure_message="appending a vector column of a different width was expected to abort", &
+            required_stderr="parquet_columns: append: column widths differ")
+    end subroutine test_columns_append_width_mismatch_aborts
+
+    subroutine test_columns_reindex_duplicate_index_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_reindex_duplicate_index", expect_abort=.true., &
+            failure_message="reindex with a duplicated permutation index was expected to abort", &
+            required_stderr="parquet_columns: reindex: permutation contains a duplicate index")
+    end subroutine test_columns_reindex_duplicate_index_aborts
+
+    subroutine test_string_column_reindex_length_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_column_reindex_length_mismatch", &
+            expect_abort=.true., &
+            failure_message="reindex with a short permutation was expected to abort", &
+            required_stderr="parquet_strings: reindex: permutation length does not match the row count")
+    end subroutine test_string_column_reindex_length_mismatch_aborts
+
+    subroutine test_string_column_reindex_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_column_reindex_out_of_range", &
+            expect_abort=.true., &
+            failure_message="reindex with an out-of-range permutation entry was expected to abort", &
+            required_stderr="parquet_strings: reindex: permutation entry out of range")
+    end subroutine test_string_column_reindex_out_of_range_aborts
+
+    subroutine test_string_column_delete_by_mask_length_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_column_delete_by_mask_length_mismatch", &
+            expect_abort=.true., &
+            failure_message="delete_by_mask with a short mask was expected to abort", &
+            required_stderr="parquet_strings: delete_by_mask: mask length does not match the row count")
+    end subroutine test_string_column_delete_by_mask_length_mismatch_aborts
+
+    subroutine test_string_column_append_nulls_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_column_append_nulls_negative", &
+            expect_abort=.true., &
+            failure_message="append_nulls with a negative count was expected to abort", &
+            required_stderr="parquet_strings: append_nulls: negative element count")
+    end subroutine test_string_column_append_nulls_negative_aborts
+
+    subroutine test_columns_string_column_wrong_kind_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_string_column_wrong_kind", expect_abort=.true., &
+            failure_message="asking a float64 column for its string store was expected to abort", &
+            required_stderr="parquet_columns: string_column: column kind is PK_FLOAT64")
+    end subroutine test_columns_string_column_wrong_kind_aborts
+
+    subroutine test_columns_init_container_kind_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_init_container_kind", expect_abort=.true., &
+            failure_message="initializing a reserved container kind was expected to abort", &
+            required_stderr="parquet_columns: init: container kinds are reserved and not implemented yet")
+    end subroutine test_columns_init_container_kind_aborts
+
+    subroutine test_columns_init_width_on_scalar_kind_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_init_width_on_scalar_kind", expect_abort=.true., &
+            failure_message="giving a scalar kind a width > 1 was expected to abort", &
+            required_stderr="parquet_columns: init: width > 1 requires a vector (*_VEC) kind")
+    end subroutine test_columns_init_width_on_scalar_kind_aborts
+
+    subroutine test_columns_set_all_length_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_set_all_length_mismatch", expect_abort=.true., &
+            failure_message="set_all with the wrong number of values was expected to abort", &
+            required_stderr="parquet_columns: set_all: value count does not match the column's row count")
+    end subroutine test_columns_set_all_length_mismatch_aborts
+
+    subroutine test_columns_get_at_width_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_get_at_width_mismatch", expect_abort=.true., &
+            failure_message="reading a vector row into a mismatched buffer was expected to abort", &
+            required_stderr="parquet_columns: get_at: value count per row does not match the column width")
+    end subroutine test_columns_get_at_width_mismatch_aborts
+
+    subroutine test_columns_delete_by_mask_length_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_delete_by_mask_length_mismatch", &
+            expect_abort=.true., &
+            failure_message="delete_by_mask with a short mask was expected to abort", &
+            required_stderr="parquet_columns: delete_by_mask: mask length does not match the column's row count")
+    end subroutine test_columns_delete_by_mask_length_mismatch_aborts
+
+    subroutine test_columns_reindex_length_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_reindex_length_mismatch", expect_abort=.true., &
+            failure_message="reindex with a short permutation was expected to abort", &
+            required_stderr="parquet_columns: reindex: permutation length does not match the column's row count")
+    end subroutine test_columns_reindex_length_mismatch_aborts
+
+    subroutine test_columns_clear_null_temporal_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_clear_null_temporal", expect_abort=.true., &
+            failure_message="clear_null on a temporal column was expected to abort", &
+            required_stderr="parquet_columns: clear_null: a temporal element becomes valid by writing a value")
+    end subroutine test_columns_clear_null_temporal_aborts
 
     subroutine test_string_column_index_out_of_range_aborts(error)
         type(error_type), allocatable, intent(out) :: error

@@ -96,6 +96,7 @@ REMOVE_PATHS=(
     tools/coverage_cpp.sh
     tools/fix_ford_page_links.sh
     tools/generate_fixtures.cpp
+    tools/generate_parquet_columns.py
     tools/generate_logo_svg.py
     tools/mirror_to_github.sh
     tools/prep_github_mirroring.sh

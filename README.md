@@ -184,7 +184,7 @@ Hitting a build or link error? See [Troubleshooting](doc/pages/troubleshooting.m
 
 A quick index of the public `use parquet` API. For the full per-procedure reference, generate the API docs locally with FORD (see [Contributing](#contributing)); for usage, see the linked how-to sections in the [user guide](doc/pages/index.md).
 
-**Types:** `parquet_writer`, `parquet_reader`, `parquet_schema`, `parquet_filter`, `parquet_column_info`, `parquet_column_type`, `parquet_table_metadata`, `parquet_maml_file`, `parquet_string_column`, `parquet_string`, `parquet_date`, `parquet_time`, `parquet_timestamp`
+**Types:** `parquet_writer`, `parquet_reader`, `parquet_schema`, `parquet_filter`, `parquet_column_info`, `parquet_column_type`, `parquet_table_metadata`, `parquet_maml_file`, `parquet_string_column`, `parquet_string`, `parquet_date`, `parquet_time`, `parquet_timestamp`, `parquet_column`
 
 **Utility:** `parquet_get_version` (bare call reports this library's own version; `mode="internal"`/`"arrow"`/`"parquet"` instead report the linked Arrow/Parquet C++ library's own version — useful to include when filing a bug report), `parquet_set_max_threads`
 
@@ -203,6 +203,8 @@ A quick index of the public `use parquet` API. For the full per-procedure refere
 **Reader — streaming row groups:** `parquet_read_column_chunk`, `parquet_get_chunk_size` — an alternative to `parquet_read_column` for a column too large to hold as one complete array; see [Streaming/chunked reads](doc/pages/reading.md#streamingchunked-reads)
 
 **Compact string columns:** `parquet_string_column` — a scalar `string` column can be written/read via `parquet_write_column`/`parquet_read_column` (and their chunked counterparts) as a `parquet_string_column` instead of a padded `character(len=...)` array, with no pre-sizing needed; append/search/mutate with `append_string`/`append_null`/`find`/`set`/`erase`, and extract zero-copy `parquet_string` handles with `view`/`view_all`/`view_slice` or gather them back with `build_from`; see [Reading and writing compact string columns](doc/pages/string-columns.md#reading-and-writing-compact-string-columns)
+
+**Type-erased column storage:** `parquet_column` (module `parquet_columns`) — holds one whole column's values for any of 18 scalar/vector kinds behind a single `PK_*` kind discriminator, with sparse null tracking (a null-free column allocates no validity bitmap at all), an optional unit string, and the full value/structural instruction set: `init`/`clear`/`deep_copy`, `get_at`/`set_at`/`set_all`/`data_ptr`/`append_values`, `is_null`/`any_null`/`set_null`/`clear_null`/`compact_validity`, and `append`/`append_nulls`/`delete_by_mask`/`reindex`; the shared foundation for the forthcoming table and container column types
 
 **Date/time/timestamp columns:** `parquet_date`, `parquet_time`, `parquet_timestamp` — read/written via `parquet_write_column`/`parquet_read_column` (and their chunked/row-mode/element-mode counterparts) exactly like any other type; `parquet_get_column_time_info` reads back a column's stored unit/timezone; `parquet_unit_seconds`/`parquet_unit_millis`/`parquet_unit_micros`/`parquet_unit_nanos` select a unit for `set_unix`/`to_unix`; `operator(-)`/`operator(+)` give same-type difference and integer-offset arithmetic, `%diff_seconds` a never-aborting real64-seconds difference, and `parquet_ns_per_sec`/`parquet_ns_per_day`/`parquet_ns_to_sec`/`parquet_ns_to_day` convert the raw nanosecond values they traffic in; see [Date, time and timestamp columns](doc/pages/date-time.md)
 

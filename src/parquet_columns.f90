@@ -1,0 +1,1066 @@
+!===========================================
+! Author: Elmo Tempel (elmo.tempel@ut.ee)
+!===========================================
+!
+! GENERATED FILE -- DO NOT EDIT BY HAND.
+! Regenerate with:  tools/generate_parquet_columns.py
+! The kind table lives in that script; edit it there, not here.
+!
+!> Type-erased, whole-column value storage shared by `parquet_table` and (later) the
+!! list/map/struct container column types.
+!!
+!! `parquet_column` holds the values of ONE column of ONE table: a `PK_*` kind discriminator
+!! plus exactly one allocated storage array (the active kind's), a sparse null bitmap, an
+!! optional unit string, and the row count. Only the active kind's array is ever allocated, so
+!! a column costs one array plus a handful of scalars regardless of how many kinds exist.
+!!
+!! Three things are worth knowing before using it:
+!!
+!! * **Validity is kind-dispatched, not uniform.** Numeric and logical kinds carry a
+!!   column-level null bitmap; the string kinds delegate to the embedded
+!!   `parquet_string_column`'s own validity; the temporal kinds carry their null state INSIDE
+!!   each element (matching `parquet_temporal`'s deliberate design). `is_null`/`set_null`/
+!!   `any_null` hide this, and there is no public `has_nulls`.
+!! * **Validity is sparse.** A column with no nulls allocates NO bitmap at all -- only a
+!!   logical scalar. The bitmap appears on the first `set_null`/`append_nulls` and disappears
+!!   again on a whole-column `set_all` (or an explicit `compact_validity`).
+!! * **Row indices are `integer(int64)` throughout.** This type is internal to the library and
+!!   never sees a caller's default-kind `INTEGER`, so it deliberately does not carry the
+!!   int32/int64 specific pairs the public API uses.
+!!
+!! Depends only on `iso_fortran_env` plus the two element-domain modules (`parquet_strings`,
+!! `parquet_temporal`) -- never on `parquet` itself, so the container column types can consume
+!! it symmetrically without a circular dependency.
+module parquet_columns
+    use, intrinsic :: iso_fortran_env, only : int8, int32, int64, real32, real64
+    use parquet_strings, only : parquet_string_column
+    use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp
+    !
+    implicit none
+    private
+    !
+    public :: parquet_column
+    public :: parquet_kind_name
+    public :: PK_NONE
+    public :: PK_INT32
+    public :: PK_INT64
+    public :: PK_FLOAT32
+    public :: PK_FLOAT64
+    public :: PK_LOGICAL
+    public :: PK_STRING
+    public :: PK_DATE
+    public :: PK_TIME
+    public :: PK_TIMESTAMP
+    public :: PK_INT32_VEC
+    public :: PK_INT64_VEC
+    public :: PK_FLOAT32_VEC
+    public :: PK_FLOAT64_VEC
+    public :: PK_LOGICAL_VEC
+    public :: PK_STRING_VEC
+    public :: PK_DATE_VEC
+    public :: PK_TIME_VEC
+    public :: PK_TIMESTAMP_VEC
+    public :: PK_LIST
+    public :: PK_MAP
+    public :: PK_STRUCT
+    !
+    !> Error-message prefix for every `error stop` raised by this module.
+    character(len=*), parameter :: EP = "parquet_columns: "
+    !
+    !> Bits per validity-bitmap block. The bitmap is a hand-rolled `integer(int64)` array
+    !! (1 = null, 0 = valid): measured 1.6-2x faster than stdlib's `bitset_large` on random
+    !! set/test and on the reindex rebuild, at identical memory, with no int32 bit-index
+    !! ceiling -- see feature_table_stage1_columns.md "Spike results".
+    integer(int64), parameter :: BITS_PER_BLOCK = 64_int64
+    !
+    ! ---- Column kind discriminators ----
+    integer, parameter :: PK_NONE = 0 !! no kind assigned yet (a default-initialized column)
+    integer, parameter :: PK_INT32 = 1 !! 32-bit integer scalar column
+    integer, parameter :: PK_INT64 = 2 !! 64-bit integer scalar column
+    integer, parameter :: PK_FLOAT32 = 3 !! 32-bit real scalar column
+    integer, parameter :: PK_FLOAT64 = 4 !! 64-bit real scalar column
+    integer, parameter :: PK_LOGICAL = 5 !! logical scalar column
+    integer, parameter :: PK_STRING = 6 !! variable-length string scalar column
+    integer, parameter :: PK_DATE = 7 !! date scalar column
+    integer, parameter :: PK_TIME = 8 !! time scalar column
+    integer, parameter :: PK_TIMESTAMP = 9 !! timestamp scalar column
+    integer, parameter :: PK_INT32_VEC = 11 !! 32-bit integer vector column (width values per row)
+    integer, parameter :: PK_INT64_VEC = 12 !! 64-bit integer vector column
+    integer, parameter :: PK_FLOAT32_VEC = 13 !! 32-bit real vector column
+    integer, parameter :: PK_FLOAT64_VEC = 14 !! 64-bit real vector column
+    integer, parameter :: PK_LOGICAL_VEC = 15 !! logical vector column
+    integer, parameter :: PK_STRING_VEC = 16 !! string vector column (one flat string store, stride width)
+    integer, parameter :: PK_DATE_VEC = 17 !! date vector column
+    integer, parameter :: PK_TIME_VEC = 18 !! time vector column
+    integer, parameter :: PK_TIMESTAMP_VEC = 19 !! timestamp vector column
+    integer, parameter :: PK_LIST = 21 !! reserved for a variable-length list column (feature_map_list_struct.md)
+    integer, parameter :: PK_MAP = 22 !! reserved for a map column (feature_map_list_struct.md)
+    integer, parameter :: PK_STRUCT = 23 !! reserved for a struct column (feature_map_list_struct.md)
+    !
+    !> One column's values: a kind discriminator, one active storage array, sparse validity,
+    !! an optional unit, and the row/width geometry.
+    type :: parquet_column
+        private
+        integer :: kind = PK_NONE                      !! active PK_* discriminator.
+        integer(int64) :: nrows = 0                    !! number of rows stored.
+        integer(int32) :: width = 1                    !! values per row; > 1 only for *_VEC kinds.
+        logical :: has_nulls = .false.                 !! .true. while the bitmap is materialized.
+        logical :: nulls_dirty = .true.                !! temporal kinds: the null cache needs a rescan.
+        logical :: nulls_cached = .false.              !! temporal kinds: cached "column has >= 1 null".
+        integer(int64), allocatable :: validity(:)     !! null bitmap (1 = null); allocated iff has_nulls.
+        character(len=:), allocatable :: unit          !! unit string from the MAML `unit:` key (D10).
+        type(parquet_string_column), allocatable :: str !! PK_STRING / PK_STRING_VEC storage (DD1).
+        integer(int32), allocatable :: i32(:)   !! PK_INT32 storage, scalar.
+        integer(int64), allocatable :: i64(:)   !! PK_INT64 storage, scalar.
+        real(real32), allocatable :: f32(:)   !! PK_FLOAT32 storage, scalar.
+        real(real64), allocatable :: f64(:)   !! PK_FLOAT64 storage, scalar.
+        logical, allocatable :: bool(:)   !! PK_LOGICAL storage, scalar.
+        type(parquet_date), allocatable :: dt(:)   !! PK_DATE storage, scalar.
+        type(parquet_time), allocatable :: tm(:)   !! PK_TIME storage, scalar.
+        type(parquet_timestamp), allocatable :: ts(:)   !! PK_TIMESTAMP storage, scalar.
+        integer(int32), allocatable :: i32v(:,:)   !! PK_INT32_VEC storage, vector (width, nrows).
+        integer(int64), allocatable :: i64v(:,:)   !! PK_INT64_VEC storage, vector (width, nrows).
+        real(real32), allocatable :: f32v(:,:)   !! PK_FLOAT32_VEC storage, vector (width, nrows).
+        real(real64), allocatable :: f64v(:,:)   !! PK_FLOAT64_VEC storage, vector (width, nrows).
+        logical, allocatable :: boolv(:,:)   !! PK_LOGICAL_VEC storage, vector (width, nrows).
+        type(parquet_date), allocatable :: dtv(:,:)   !! PK_DATE_VEC storage, vector (width, nrows).
+        type(parquet_time), allocatable :: tmv(:,:)   !! PK_TIME_VEC storage, vector (width, nrows).
+        type(parquet_timestamp), allocatable :: tsv(:,:)   !! PK_TIMESTAMP_VEC storage, vector (width, nrows).
+        class(*), allocatable :: container(:)          !! reserved payload for PK_LIST/PK_MAP/PK_STRUCT.
+    contains
+        ! --- lifecycle ---
+        procedure :: init                              !! Set kind/geometry and allocate empty storage.
+        procedure :: clear                             !! Release all storage and reset to PK_NONE.
+        procedure :: deep_copy                         !! Independent copy of values, validity and unit.
+        ! --- queries ---
+        procedure :: kindof                            !! The active PK_* discriminator.
+        procedure :: length                            !! Number of rows stored.
+        procedure :: colwidth                          !! Values per row (1 for scalar kinds).
+        procedure :: validity_bytes                    !! Bytes the null bitmap occupies (0 when sparse).
+        procedure :: unit_string                       !! Copy out the unit string ("" when unset).
+        procedure :: set_unit                          !! Set (or clear) the unit string.
+        procedure :: any_null                          !! Whether the column holds at least one null.
+        procedure :: is_null                           !! Whether element i is null.
+        ! --- validity mutation (sparse: see the module doc) ---
+        procedure :: set_null                          !! Mark element i null.
+        procedure :: clear_null                        !! Mark element i valid (value left unspecified).
+        procedure :: compact_validity                  !! Drop the bitmap when no nulls remain.
+        ! --- structural mutation ---
+        procedure :: append                            !! Append another column of identical kind/width.
+        procedure :: append_nulls                      !! Append n all-null rows.
+        procedure :: delete_by_mask                    !! Keep only rows whose mask entry is .true.
+        procedure :: reindex                           !! Reorder rows by a permutation.
+        ! --- string-kind storage access (PK_STRING / PK_STRING_VEC) ---
+        procedure :: string_column                     !! Pointer to the embedded string store.
+        ! --- get_at ---
+        procedure, private :: get_at_i32   !! get_at specific for the i32 kind.
+        procedure, private :: get_at_i64   !! get_at specific for the i64 kind.
+        procedure, private :: get_at_f32   !! get_at specific for the f32 kind.
+        procedure, private :: get_at_f64   !! get_at specific for the f64 kind.
+        procedure, private :: get_at_bool   !! get_at specific for the bool kind.
+        procedure, private :: get_at_str   !! get_at specific for the str kind.
+        procedure, private :: get_at_date   !! get_at specific for the date kind.
+        procedure, private :: get_at_time   !! get_at specific for the time kind.
+        procedure, private :: get_at_ts   !! get_at specific for the ts kind.
+        procedure, private :: get_at_i32v   !! get_at specific for the i32v kind.
+        procedure, private :: get_at_i64v   !! get_at specific for the i64v kind.
+        procedure, private :: get_at_f32v   !! get_at specific for the f32v kind.
+        procedure, private :: get_at_f64v   !! get_at specific for the f64v kind.
+        procedure, private :: get_at_boolv   !! get_at specific for the boolv kind.
+        procedure, private :: get_at_strv   !! get_at specific for the strv kind.
+        procedure, private :: get_at_datev   !! get_at specific for the datev kind.
+        procedure, private :: get_at_timev   !! get_at specific for the timev kind.
+        procedure, private :: get_at_tsv   !! get_at specific for the tsv kind.
+        !> Read element i (or row i's vector) out.
+        generic :: get_at => get_at_i32, get_at_i64, get_at_f32, get_at_f64, get_at_bool, get_at_str, &
+            get_at_date, get_at_time, get_at_ts, get_at_i32v, get_at_i64v, get_at_f32v, get_at_f64v, &
+            get_at_boolv, get_at_strv, get_at_datev, get_at_timev, get_at_tsv
+        ! --- set_at ---
+        procedure, private :: set_at_i32   !! set_at specific for the i32 kind.
+        procedure, private :: set_at_i64   !! set_at specific for the i64 kind.
+        procedure, private :: set_at_f32   !! set_at specific for the f32 kind.
+        procedure, private :: set_at_f64   !! set_at specific for the f64 kind.
+        procedure, private :: set_at_bool   !! set_at specific for the bool kind.
+        procedure, private :: set_at_str   !! set_at specific for the str kind.
+        procedure, private :: set_at_date   !! set_at specific for the date kind.
+        procedure, private :: set_at_time   !! set_at specific for the time kind.
+        procedure, private :: set_at_ts   !! set_at specific for the ts kind.
+        procedure, private :: set_at_i32v   !! set_at specific for the i32v kind.
+        procedure, private :: set_at_i64v   !! set_at specific for the i64v kind.
+        procedure, private :: set_at_f32v   !! set_at specific for the f32v kind.
+        procedure, private :: set_at_f64v   !! set_at specific for the f64v kind.
+        procedure, private :: set_at_boolv   !! set_at specific for the boolv kind.
+        procedure, private :: set_at_strv   !! set_at specific for the strv kind.
+        procedure, private :: set_at_datev   !! set_at specific for the datev kind.
+        procedure, private :: set_at_timev   !! set_at specific for the timev kind.
+        procedure, private :: set_at_tsv   !! set_at specific for the tsv kind.
+        !> Write element i (or row i's vector).
+        generic :: set_at => set_at_i32, set_at_i64, set_at_f32, set_at_f64, set_at_bool, set_at_str, &
+            set_at_date, set_at_time, set_at_ts, set_at_i32v, set_at_i64v, set_at_f32v, set_at_f64v, &
+            set_at_boolv, set_at_strv, set_at_datev, set_at_timev, set_at_tsv
+        ! --- set_all ---
+        procedure, private :: set_all_i32   !! set_all specific for the i32 kind.
+        procedure, private :: set_all_i64   !! set_all specific for the i64 kind.
+        procedure, private :: set_all_f32   !! set_all specific for the f32 kind.
+        procedure, private :: set_all_f64   !! set_all specific for the f64 kind.
+        procedure, private :: set_all_bool   !! set_all specific for the bool kind.
+        procedure, private :: set_all_str   !! set_all specific for the str kind.
+        procedure, private :: set_all_date   !! set_all specific for the date kind.
+        procedure, private :: set_all_time   !! set_all specific for the time kind.
+        procedure, private :: set_all_ts   !! set_all specific for the ts kind.
+        procedure, private :: set_all_i32v   !! set_all specific for the i32v kind.
+        procedure, private :: set_all_i64v   !! set_all specific for the i64v kind.
+        procedure, private :: set_all_f32v   !! set_all specific for the f32v kind.
+        procedure, private :: set_all_f64v   !! set_all specific for the f64v kind.
+        procedure, private :: set_all_boolv   !! set_all specific for the boolv kind.
+        procedure, private :: set_all_strv   !! set_all specific for the strv kind.
+        procedure, private :: set_all_datev   !! set_all specific for the datev kind.
+        procedure, private :: set_all_timev   !! set_all specific for the timev kind.
+        procedure, private :: set_all_tsv   !! set_all specific for the tsv kind.
+        !> Replace every value in the column.
+        generic :: set_all => set_all_i32, set_all_i64, set_all_f32, set_all_f64, set_all_bool, set_all_str, &
+            set_all_date, set_all_time, set_all_ts, set_all_i32v, set_all_i64v, set_all_f32v, set_all_f64v, &
+            set_all_boolv, set_all_strv, set_all_datev, set_all_timev, set_all_tsv
+        ! --- data_ptr ---
+        procedure, private :: data_ptr_i32   !! data_ptr specific for the i32 kind.
+        procedure, private :: data_ptr_i64   !! data_ptr specific for the i64 kind.
+        procedure, private :: data_ptr_f32   !! data_ptr specific for the f32 kind.
+        procedure, private :: data_ptr_f64   !! data_ptr specific for the f64 kind.
+        procedure, private :: data_ptr_bool   !! data_ptr specific for the bool kind.
+        procedure, private :: data_ptr_date   !! data_ptr specific for the date kind.
+        procedure, private :: data_ptr_time   !! data_ptr specific for the time kind.
+        procedure, private :: data_ptr_ts   !! data_ptr specific for the ts kind.
+        procedure, private :: data_ptr_i32v   !! data_ptr specific for the i32v kind.
+        procedure, private :: data_ptr_i64v   !! data_ptr specific for the i64v kind.
+        procedure, private :: data_ptr_f32v   !! data_ptr specific for the f32v kind.
+        procedure, private :: data_ptr_f64v   !! data_ptr specific for the f64v kind.
+        procedure, private :: data_ptr_boolv   !! data_ptr specific for the boolv kind.
+        procedure, private :: data_ptr_datev   !! data_ptr specific for the datev kind.
+        procedure, private :: data_ptr_timev   !! data_ptr specific for the timev kind.
+        procedure, private :: data_ptr_tsv   !! data_ptr specific for the tsv kind.
+        !> Zero-copy typed pointer to the active storage.
+        generic :: data_ptr => data_ptr_i32, data_ptr_i64, data_ptr_f32, data_ptr_f64, data_ptr_bool, &
+            data_ptr_date, data_ptr_time, data_ptr_ts, data_ptr_i32v, data_ptr_i64v, data_ptr_f32v, &
+            data_ptr_f64v, data_ptr_boolv, data_ptr_datev, data_ptr_timev, data_ptr_tsv
+        ! --- append_values ---
+        procedure, private :: append_values_i32   !! append_values specific for the i32 kind.
+        procedure, private :: append_values_i64   !! append_values specific for the i64 kind.
+        procedure, private :: append_values_f32   !! append_values specific for the f32 kind.
+        procedure, private :: append_values_f64   !! append_values specific for the f64 kind.
+        procedure, private :: append_values_bool   !! append_values specific for the bool kind.
+        procedure, private :: append_values_str   !! append_values specific for the str kind.
+        procedure, private :: append_values_date   !! append_values specific for the date kind.
+        procedure, private :: append_values_time   !! append_values specific for the time kind.
+        procedure, private :: append_values_ts   !! append_values specific for the ts kind.
+        procedure, private :: append_values_i32v   !! append_values specific for the i32v kind.
+        procedure, private :: append_values_i64v   !! append_values specific for the i64v kind.
+        procedure, private :: append_values_f32v   !! append_values specific for the f32v kind.
+        procedure, private :: append_values_f64v   !! append_values specific for the f64v kind.
+        procedure, private :: append_values_boolv   !! append_values specific for the boolv kind.
+        procedure, private :: append_values_strv   !! append_values specific for the strv kind.
+        procedure, private :: append_values_datev   !! append_values specific for the datev kind.
+        procedure, private :: append_values_timev   !! append_values specific for the timev kind.
+        procedure, private :: append_values_tsv   !! append_values specific for the tsv kind.
+        !> Append values, growing the column.
+        generic :: append_values => append_values_i32, append_values_i64, append_values_f32, &
+            append_values_f64, append_values_bool, append_values_str, append_values_date, append_values_time, &
+            append_values_ts, append_values_i32v, append_values_i64v, append_values_f32v, append_values_f64v, &
+            append_values_boolv, append_values_strv, append_values_datev, append_values_timev, &
+            append_values_tsv
+    end type parquet_column
+    !
+    ! ---- Lifecycle, queries and unit (parquet_columns_structural) ----
+    interface
+        !> Sets the column's kind and geometry and allocates empty storage for that kind.
+        !! Any previous contents are released first. `width` is required (and must be > 1) for a
+        !! *_VEC kind and must be 1 (or absent) otherwise. `nrows` rows are allocated; their values
+        !! are unspecified for numeric kinds and null for temporal/string kinds.
+        module subroutine init(self, kind, nrows, width, unit)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer, intent(in) :: kind                  !! PK_* discriminator to activate.
+            integer(int64), intent(in) :: nrows          !! initial row count (>= 0).
+            integer(int32), intent(in), optional :: width !! values per row for a *_VEC kind.
+            character(len=*), intent(in), optional :: unit !! unit string to store (D10).
+        end subroutine init
+        !> Releases every storage array and resets the column to PK_NONE with zero rows.
+        module subroutine clear(self)
+            class(parquet_column), intent(inout) :: self !! the column.
+        end subroutine clear
+        !> Produces an independent copy: values, validity, unit and geometry. Mutating either
+        !! column afterwards leaves the other unchanged.
+        module subroutine deep_copy(self, out)
+            class(parquet_column), intent(in) :: self       !! the source column.
+            type(parquet_column), intent(out) :: out        !! the copy.
+        end subroutine deep_copy
+        !> Copies the unit string out ("" when no unit is set).
+        module subroutine unit_string(self, u)
+            class(parquet_column), intent(in) :: self          !! the column.
+            character(len=:), allocatable, intent(out) :: u    !! the unit string, or "".
+        end subroutine unit_string
+        !> Sets the unit string; passing "" clears it.
+        module subroutine set_unit(self, u)
+            class(parquet_column), intent(inout) :: self !! the column.
+            character(len=*), intent(in) :: u            !! the unit string ("" clears).
+        end subroutine set_unit
+        !> Appends every row of `other`, which must have identical kind and width.
+        module subroutine append(self, other)
+            class(parquet_column), intent(inout) :: self !! the destination column.
+            type(parquet_column), intent(in) :: other    !! the source column (unchanged).
+        end subroutine append
+        !> Appends `n` all-null rows (allocating the bitmap if this is the first null).
+        module subroutine append_nulls(self, n)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: n              !! number of null rows to append (>= 0).
+        end subroutine append_nulls
+        !> Keeps only the rows whose `keep` entry is .true., preserving order.
+        module subroutine delete_by_mask(self, keep)
+            class(parquet_column), intent(inout) :: self !! the column.
+            logical, intent(in) :: keep(:)               !! .true. for every row to retain.
+        end subroutine delete_by_mask
+        !> Reorders rows so row k of the result is the row that was at `perm(k)`. `perm` must be
+        !! a true permutation of 1..nrows and is fully validated before anything is modified.
+        module subroutine reindex(self, perm)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: perm(:)        !! 1-based permutation of 1..nrows.
+        end subroutine reindex
+    end interface
+    !
+    ! ---- Validity, kind-dispatched (parquet_columns_validity) ----
+    interface
+        !> Whether the column holds at least one null. Cheap for bitmap-backed and string kinds;
+        !! for temporal kinds (whose null state lives inside each element) the answer is cached,
+        !! and a rescan is needed after a mutation -- which is why `self` is `intent(inout)`
+        !! despite this being a query. The column is reached through the table's `cache` pointer,
+        !! so this does not stop a table read-accessor from staying `intent(in)`.
+        module function any_null(self) result(res)
+            class(parquet_column), intent(inout) :: self !! the column (null cache may be refreshed).
+            logical :: res                               !! .true. when at least one row is null.
+        end function any_null
+        !> Whether element `i` is null. For a *_VEC kind this is row `i`'s FIRST element; use
+        !! `is_null_element` semantics via the bitmap when per-element nulls matter.
+        module function is_null(self, i) result(res)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            logical :: res                            !! .true. when the row is null.
+        end function is_null
+        !> Marks row `i` null, allocating the bitmap on first use (R2).
+        module subroutine set_null(self, i)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+        end subroutine set_null
+        !> Marks row `i` valid. The value behind it is unspecified until written.
+        module subroutine clear_null(self, i)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+        end subroutine clear_null
+        !> Scans for remaining nulls and releases the bitmap when none are found (R2 iv).
+        module subroutine compact_validity(self)
+            class(parquet_column), intent(inout) :: self !! the column.
+        end subroutine compact_validity
+    end interface
+    !
+    ! ---- String kinds, delegating to parquet_string_column (parquet_columns_string) ----
+    interface
+        !> Pointer to the embedded string store (PK_STRING / PK_STRING_VEC only). The column must
+        !! outlive the pointer; any structural mutation invalidates it.
+        module subroutine string_column(self, p)
+            class(parquet_column), intent(in), target :: self       !! the column.
+            type(parquet_string_column), pointer, intent(out) :: p  !! alias to the string store.
+        end subroutine string_column
+        !> Reads string element `i` into an allocatable string (PK_STRING).
+        module subroutine get_at_str(self, i, value)
+            class(parquet_column), intent(in) :: self             !! the column.
+            integer(int64), intent(in) :: i                       !! 1-based row index.
+            character(len=:), allocatable, intent(out) :: value    !! the element's value.
+        end subroutine get_at_str
+        !> Reads row `i`'s whole string vector (PK_STRING_VEC), one array element per position.
+        module subroutine get_at_strv(self, i, value)
+            class(parquet_column), intent(in) :: self  !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            character(len=*), intent(out) :: value(:)  !! receives width values, blank-padded.
+        end subroutine get_at_strv
+        !> Writes string element `i` (PK_STRING).
+        module subroutine set_at_str(self, i, value, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            character(len=*), intent(in) :: value        !! the new value.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_at_str
+        !> Writes row `i`'s whole string vector (PK_STRING_VEC).
+        module subroutine set_at_strv(self, i, value, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            character(len=*), intent(in) :: value(:)     !! width values for row i.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_at_strv
+        !> Replaces every value in a PK_STRING column.
+        module subroutine set_all_str(self, values, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            character(len=*), intent(in) :: values(:)    !! exactly nrows values.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_all_str
+        !> Replaces every value in a PK_STRING_VEC column, shaped (width, nrows).
+        module subroutine set_all_strv(self, values, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            character(len=*), intent(in) :: values(:,:)  !! (width, nrows) values.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_all_strv
+        !> Appends string rows to a PK_STRING column.
+        module subroutine append_values_str(self, values)
+            class(parquet_column), intent(inout) :: self !! the column.
+            character(len=*), intent(in) :: values(:)    !! rows to append.
+        end subroutine append_values_str
+        !> Appends string vector rows to a PK_STRING_VEC column, shaped (width, n).
+        module subroutine append_values_strv(self, values)
+            class(parquet_column), intent(inout) :: self !! the column.
+            character(len=*), intent(in) :: values(:,:)  !! (width, n) rows to append.
+        end subroutine append_values_strv
+    end interface
+    !
+    ! ---- Value access per kind (parquet_columns_access, GENERATED) ----
+    interface
+        !> Reads row `i`'s element from a PK_INT32 column.
+        module subroutine get_at_i32(self, i, value)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            integer(int32), intent(out) :: value   !! receives the value.
+        end subroutine get_at_i32
+        !> Writes row `i`'s element in a PK_INT32 column.
+        module subroutine set_at_i32(self, i, value, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int32), intent(in) :: value       !! the new value.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_at_i32
+        !> Replaces every value in a PK_INT32 column.
+        module subroutine set_all_i32(self, values, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int32), intent(in) :: values(:)      !! exactly the column's own shape.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_all_i32
+        !> Zero-copy typed pointer to a PK_INT32 column's storage. The kind must match EXACTLY (no
+        !! widening, DD2). Any structural mutation invalidates the pointer.
+        module subroutine data_ptr_i32(self, p)
+            class(parquet_column), intent(in), target :: self !! the column.
+            integer(int32), pointer, intent(out) :: p(:)      !! alias to the live storage.
+        end subroutine data_ptr_i32
+        !> Reads row `i`'s element from a PK_INT64 column.
+        module subroutine get_at_i64(self, i, value)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            integer(int64), intent(out) :: value   !! receives the value.
+        end subroutine get_at_i64
+        !> Writes row `i`'s element in a PK_INT64 column.
+        module subroutine set_at_i64(self, i, value, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: value       !! the new value.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_at_i64
+        !> Replaces every value in a PK_INT64 column.
+        module subroutine set_all_i64(self, values, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: values(:)      !! exactly the column's own shape.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_all_i64
+        !> Zero-copy typed pointer to a PK_INT64 column's storage. The kind must match EXACTLY (no
+        !! widening, DD2). Any structural mutation invalidates the pointer.
+        module subroutine data_ptr_i64(self, p)
+            class(parquet_column), intent(in), target :: self !! the column.
+            integer(int64), pointer, intent(out) :: p(:)      !! alias to the live storage.
+        end subroutine data_ptr_i64
+        !> Reads row `i`'s element from a PK_FLOAT32 column.
+        module subroutine get_at_f32(self, i, value)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            real(real32), intent(out) :: value   !! receives the value.
+        end subroutine get_at_f32
+        !> Writes row `i`'s element in a PK_FLOAT32 column.
+        module subroutine set_at_f32(self, i, value, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            real(real32), intent(in) :: value       !! the new value.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_at_f32
+        !> Replaces every value in a PK_FLOAT32 column.
+        module subroutine set_all_f32(self, values, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            real(real32), intent(in) :: values(:)      !! exactly the column's own shape.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_all_f32
+        !> Zero-copy typed pointer to a PK_FLOAT32 column's storage. The kind must match EXACTLY (no
+        !! widening, DD2). Any structural mutation invalidates the pointer.
+        module subroutine data_ptr_f32(self, p)
+            class(parquet_column), intent(in), target :: self !! the column.
+            real(real32), pointer, intent(out) :: p(:)      !! alias to the live storage.
+        end subroutine data_ptr_f32
+        !> Reads row `i`'s element from a PK_FLOAT64 column.
+        module subroutine get_at_f64(self, i, value)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            real(real64), intent(out) :: value   !! receives the value.
+        end subroutine get_at_f64
+        !> Writes row `i`'s element in a PK_FLOAT64 column.
+        module subroutine set_at_f64(self, i, value, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            real(real64), intent(in) :: value       !! the new value.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_at_f64
+        !> Replaces every value in a PK_FLOAT64 column.
+        module subroutine set_all_f64(self, values, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            real(real64), intent(in) :: values(:)      !! exactly the column's own shape.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_all_f64
+        !> Zero-copy typed pointer to a PK_FLOAT64 column's storage. The kind must match EXACTLY (no
+        !! widening, DD2). Any structural mutation invalidates the pointer.
+        module subroutine data_ptr_f64(self, p)
+            class(parquet_column), intent(in), target :: self !! the column.
+            real(real64), pointer, intent(out) :: p(:)      !! alias to the live storage.
+        end subroutine data_ptr_f64
+        !> Reads row `i`'s element from a PK_LOGICAL column.
+        module subroutine get_at_bool(self, i, value)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            logical, intent(out) :: value   !! receives the value.
+        end subroutine get_at_bool
+        !> Writes row `i`'s element in a PK_LOGICAL column.
+        module subroutine set_at_bool(self, i, value, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            logical, intent(in) :: value       !! the new value.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_at_bool
+        !> Replaces every value in a PK_LOGICAL column.
+        module subroutine set_all_bool(self, values, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            logical, intent(in) :: values(:)      !! exactly the column's own shape.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_all_bool
+        !> Zero-copy typed pointer to a PK_LOGICAL column's storage. The kind must match EXACTLY (no
+        !! widening, DD2). Any structural mutation invalidates the pointer.
+        module subroutine data_ptr_bool(self, p)
+            class(parquet_column), intent(in), target :: self !! the column.
+            logical, pointer, intent(out) :: p(:)      !! alias to the live storage.
+        end subroutine data_ptr_bool
+        !> Reads row `i`'s element from a PK_DATE column.
+        module subroutine get_at_date(self, i, value)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            type(parquet_date), intent(out) :: value   !! receives the value.
+        end subroutine get_at_date
+        !> Writes row `i`'s element in a PK_DATE column.
+        module subroutine set_at_date(self, i, value, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            type(parquet_date), intent(in) :: value       !! the new value.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_at_date
+        !> Replaces every value in a PK_DATE column.
+        module subroutine set_all_date(self, values, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            type(parquet_date), intent(in) :: values(:)      !! exactly the column's own shape.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_all_date
+        !> Zero-copy typed pointer to a PK_DATE column's storage. The kind must match EXACTLY (no
+        !! widening, DD2). Any structural mutation invalidates the pointer.
+        module subroutine data_ptr_date(self, p)
+            class(parquet_column), intent(in), target :: self !! the column.
+            type(parquet_date), pointer, intent(out) :: p(:)      !! alias to the live storage.
+        end subroutine data_ptr_date
+        !> Reads row `i`'s element from a PK_TIME column.
+        module subroutine get_at_time(self, i, value)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            type(parquet_time), intent(out) :: value   !! receives the value.
+        end subroutine get_at_time
+        !> Writes row `i`'s element in a PK_TIME column.
+        module subroutine set_at_time(self, i, value, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            type(parquet_time), intent(in) :: value       !! the new value.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_at_time
+        !> Replaces every value in a PK_TIME column.
+        module subroutine set_all_time(self, values, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            type(parquet_time), intent(in) :: values(:)      !! exactly the column's own shape.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_all_time
+        !> Zero-copy typed pointer to a PK_TIME column's storage. The kind must match EXACTLY (no
+        !! widening, DD2). Any structural mutation invalidates the pointer.
+        module subroutine data_ptr_time(self, p)
+            class(parquet_column), intent(in), target :: self !! the column.
+            type(parquet_time), pointer, intent(out) :: p(:)      !! alias to the live storage.
+        end subroutine data_ptr_time
+        !> Reads row `i`'s element from a PK_TIMESTAMP column.
+        module subroutine get_at_ts(self, i, value)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            type(parquet_timestamp), intent(out) :: value   !! receives the value.
+        end subroutine get_at_ts
+        !> Writes row `i`'s element in a PK_TIMESTAMP column.
+        module subroutine set_at_ts(self, i, value, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            type(parquet_timestamp), intent(in) :: value       !! the new value.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_at_ts
+        !> Replaces every value in a PK_TIMESTAMP column.
+        module subroutine set_all_ts(self, values, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            type(parquet_timestamp), intent(in) :: values(:)      !! exactly the column's own shape.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_all_ts
+        !> Zero-copy typed pointer to a PK_TIMESTAMP column's storage. The kind must match EXACTLY (no
+        !! widening, DD2). Any structural mutation invalidates the pointer.
+        module subroutine data_ptr_ts(self, p)
+            class(parquet_column), intent(in), target :: self !! the column.
+            type(parquet_timestamp), pointer, intent(out) :: p(:)      !! alias to the live storage.
+        end subroutine data_ptr_ts
+        !> Reads row `i`'s row's vector from a PK_INT32_VEC column.
+        module subroutine get_at_i32v(self, i, value)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            integer(int32), intent(out) :: value(:)   !! receives the values.
+        end subroutine get_at_i32v
+        !> Writes row `i`'s row's vector in a PK_INT32_VEC column.
+        module subroutine set_at_i32v(self, i, value, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int32), intent(in) :: value(:)       !! the new values.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_at_i32v
+        !> Replaces every value in a PK_INT32_VEC column.
+        module subroutine set_all_i32v(self, values, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int32), intent(in) :: values(:,:)      !! exactly the column's own shape.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_all_i32v
+        !> Zero-copy typed pointer to a PK_INT32_VEC column's storage. The kind must match EXACTLY (no
+        !! widening, DD2). Any structural mutation invalidates the pointer.
+        module subroutine data_ptr_i32v(self, p)
+            class(parquet_column), intent(in), target :: self !! the column.
+            integer(int32), pointer, intent(out) :: p(:,:)      !! alias to the live storage.
+        end subroutine data_ptr_i32v
+        !> Reads row `i`'s row's vector from a PK_INT64_VEC column.
+        module subroutine get_at_i64v(self, i, value)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            integer(int64), intent(out) :: value(:)   !! receives the values.
+        end subroutine get_at_i64v
+        !> Writes row `i`'s row's vector in a PK_INT64_VEC column.
+        module subroutine set_at_i64v(self, i, value, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: value(:)       !! the new values.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_at_i64v
+        !> Replaces every value in a PK_INT64_VEC column.
+        module subroutine set_all_i64v(self, values, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: values(:,:)      !! exactly the column's own shape.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_all_i64v
+        !> Zero-copy typed pointer to a PK_INT64_VEC column's storage. The kind must match EXACTLY (no
+        !! widening, DD2). Any structural mutation invalidates the pointer.
+        module subroutine data_ptr_i64v(self, p)
+            class(parquet_column), intent(in), target :: self !! the column.
+            integer(int64), pointer, intent(out) :: p(:,:)      !! alias to the live storage.
+        end subroutine data_ptr_i64v
+        !> Reads row `i`'s row's vector from a PK_FLOAT32_VEC column.
+        module subroutine get_at_f32v(self, i, value)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            real(real32), intent(out) :: value(:)   !! receives the values.
+        end subroutine get_at_f32v
+        !> Writes row `i`'s row's vector in a PK_FLOAT32_VEC column.
+        module subroutine set_at_f32v(self, i, value, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            real(real32), intent(in) :: value(:)       !! the new values.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_at_f32v
+        !> Replaces every value in a PK_FLOAT32_VEC column.
+        module subroutine set_all_f32v(self, values, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            real(real32), intent(in) :: values(:,:)      !! exactly the column's own shape.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_all_f32v
+        !> Zero-copy typed pointer to a PK_FLOAT32_VEC column's storage. The kind must match EXACTLY (no
+        !! widening, DD2). Any structural mutation invalidates the pointer.
+        module subroutine data_ptr_f32v(self, p)
+            class(parquet_column), intent(in), target :: self !! the column.
+            real(real32), pointer, intent(out) :: p(:,:)      !! alias to the live storage.
+        end subroutine data_ptr_f32v
+        !> Reads row `i`'s row's vector from a PK_FLOAT64_VEC column.
+        module subroutine get_at_f64v(self, i, value)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            real(real64), intent(out) :: value(:)   !! receives the values.
+        end subroutine get_at_f64v
+        !> Writes row `i`'s row's vector in a PK_FLOAT64_VEC column.
+        module subroutine set_at_f64v(self, i, value, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            real(real64), intent(in) :: value(:)       !! the new values.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_at_f64v
+        !> Replaces every value in a PK_FLOAT64_VEC column.
+        module subroutine set_all_f64v(self, values, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            real(real64), intent(in) :: values(:,:)      !! exactly the column's own shape.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_all_f64v
+        !> Zero-copy typed pointer to a PK_FLOAT64_VEC column's storage. The kind must match EXACTLY (no
+        !! widening, DD2). Any structural mutation invalidates the pointer.
+        module subroutine data_ptr_f64v(self, p)
+            class(parquet_column), intent(in), target :: self !! the column.
+            real(real64), pointer, intent(out) :: p(:,:)      !! alias to the live storage.
+        end subroutine data_ptr_f64v
+        !> Reads row `i`'s row's vector from a PK_LOGICAL_VEC column.
+        module subroutine get_at_boolv(self, i, value)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            logical, intent(out) :: value(:)   !! receives the values.
+        end subroutine get_at_boolv
+        !> Writes row `i`'s row's vector in a PK_LOGICAL_VEC column.
+        module subroutine set_at_boolv(self, i, value, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            logical, intent(in) :: value(:)       !! the new values.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_at_boolv
+        !> Replaces every value in a PK_LOGICAL_VEC column.
+        module subroutine set_all_boolv(self, values, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            logical, intent(in) :: values(:,:)      !! exactly the column's own shape.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_all_boolv
+        !> Zero-copy typed pointer to a PK_LOGICAL_VEC column's storage. The kind must match EXACTLY (no
+        !! widening, DD2). Any structural mutation invalidates the pointer.
+        module subroutine data_ptr_boolv(self, p)
+            class(parquet_column), intent(in), target :: self !! the column.
+            logical, pointer, intent(out) :: p(:,:)      !! alias to the live storage.
+        end subroutine data_ptr_boolv
+        !> Reads row `i`'s row's vector from a PK_DATE_VEC column.
+        module subroutine get_at_datev(self, i, value)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            type(parquet_date), intent(out) :: value(:)   !! receives the values.
+        end subroutine get_at_datev
+        !> Writes row `i`'s row's vector in a PK_DATE_VEC column.
+        module subroutine set_at_datev(self, i, value, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            type(parquet_date), intent(in) :: value(:)       !! the new values.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_at_datev
+        !> Replaces every value in a PK_DATE_VEC column.
+        module subroutine set_all_datev(self, values, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            type(parquet_date), intent(in) :: values(:,:)      !! exactly the column's own shape.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_all_datev
+        !> Zero-copy typed pointer to a PK_DATE_VEC column's storage. The kind must match EXACTLY (no
+        !! widening, DD2). Any structural mutation invalidates the pointer.
+        module subroutine data_ptr_datev(self, p)
+            class(parquet_column), intent(in), target :: self !! the column.
+            type(parquet_date), pointer, intent(out) :: p(:,:)      !! alias to the live storage.
+        end subroutine data_ptr_datev
+        !> Reads row `i`'s row's vector from a PK_TIME_VEC column.
+        module subroutine get_at_timev(self, i, value)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            type(parquet_time), intent(out) :: value(:)   !! receives the values.
+        end subroutine get_at_timev
+        !> Writes row `i`'s row's vector in a PK_TIME_VEC column.
+        module subroutine set_at_timev(self, i, value, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            type(parquet_time), intent(in) :: value(:)       !! the new values.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_at_timev
+        !> Replaces every value in a PK_TIME_VEC column.
+        module subroutine set_all_timev(self, values, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            type(parquet_time), intent(in) :: values(:,:)      !! exactly the column's own shape.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_all_timev
+        !> Zero-copy typed pointer to a PK_TIME_VEC column's storage. The kind must match EXACTLY (no
+        !! widening, DD2). Any structural mutation invalidates the pointer.
+        module subroutine data_ptr_timev(self, p)
+            class(parquet_column), intent(in), target :: self !! the column.
+            type(parquet_time), pointer, intent(out) :: p(:,:)      !! alias to the live storage.
+        end subroutine data_ptr_timev
+        !> Reads row `i`'s row's vector from a PK_TIMESTAMP_VEC column.
+        module subroutine get_at_tsv(self, i, value)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            type(parquet_timestamp), intent(out) :: value(:)   !! receives the values.
+        end subroutine get_at_tsv
+        !> Writes row `i`'s row's vector in a PK_TIMESTAMP_VEC column.
+        module subroutine set_at_tsv(self, i, value, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            type(parquet_timestamp), intent(in) :: value(:)       !! the new values.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_at_tsv
+        !> Replaces every value in a PK_TIMESTAMP_VEC column.
+        module subroutine set_all_tsv(self, values, modify_nulls)
+            class(parquet_column), intent(inout) :: self !! the column.
+            type(parquet_timestamp), intent(in) :: values(:,:)      !! exactly the column's own shape.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine set_all_tsv
+        !> Zero-copy typed pointer to a PK_TIMESTAMP_VEC column's storage. The kind must match EXACTLY (no
+        !! widening, DD2). Any structural mutation invalidates the pointer.
+        module subroutine data_ptr_tsv(self, p)
+            class(parquet_column), intent(in), target :: self !! the column.
+            type(parquet_timestamp), pointer, intent(out) :: p(:,:)      !! alias to the live storage.
+        end subroutine data_ptr_tsv
+    end interface
+    !
+    ! ---- Value append per kind + storage helpers (parquet_columns_mutate, GENERATED) ----
+    interface
+        !> Appends rows to a PK_INT32 column, growing its storage.
+        module subroutine append_values_i32(self, values)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int32), intent(in) :: values(:)      !! rows to append.
+        end subroutine append_values_i32
+        !> Appends rows to a PK_INT64 column, growing its storage.
+        module subroutine append_values_i64(self, values)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: values(:)      !! rows to append.
+        end subroutine append_values_i64
+        !> Appends rows to a PK_FLOAT32 column, growing its storage.
+        module subroutine append_values_f32(self, values)
+            class(parquet_column), intent(inout) :: self !! the column.
+            real(real32), intent(in) :: values(:)      !! rows to append.
+        end subroutine append_values_f32
+        !> Appends rows to a PK_FLOAT64 column, growing its storage.
+        module subroutine append_values_f64(self, values)
+            class(parquet_column), intent(inout) :: self !! the column.
+            real(real64), intent(in) :: values(:)      !! rows to append.
+        end subroutine append_values_f64
+        !> Appends rows to a PK_LOGICAL column, growing its storage.
+        module subroutine append_values_bool(self, values)
+            class(parquet_column), intent(inout) :: self !! the column.
+            logical, intent(in) :: values(:)      !! rows to append.
+        end subroutine append_values_bool
+        !> Appends rows to a PK_DATE column, growing its storage.
+        module subroutine append_values_date(self, values)
+            class(parquet_column), intent(inout) :: self !! the column.
+            type(parquet_date), intent(in) :: values(:)      !! rows to append.
+        end subroutine append_values_date
+        !> Appends rows to a PK_TIME column, growing its storage.
+        module subroutine append_values_time(self, values)
+            class(parquet_column), intent(inout) :: self !! the column.
+            type(parquet_time), intent(in) :: values(:)      !! rows to append.
+        end subroutine append_values_time
+        !> Appends rows to a PK_TIMESTAMP column, growing its storage.
+        module subroutine append_values_ts(self, values)
+            class(parquet_column), intent(inout) :: self !! the column.
+            type(parquet_timestamp), intent(in) :: values(:)      !! rows to append.
+        end subroutine append_values_ts
+        !> Appends rows to a PK_INT32_VEC column, growing its storage.
+        module subroutine append_values_i32v(self, values)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int32), intent(in) :: values(:,:)      !! rows to append.
+        end subroutine append_values_i32v
+        !> Appends rows to a PK_INT64_VEC column, growing its storage.
+        module subroutine append_values_i64v(self, values)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: values(:,:)      !! rows to append.
+        end subroutine append_values_i64v
+        !> Appends rows to a PK_FLOAT32_VEC column, growing its storage.
+        module subroutine append_values_f32v(self, values)
+            class(parquet_column), intent(inout) :: self !! the column.
+            real(real32), intent(in) :: values(:,:)      !! rows to append.
+        end subroutine append_values_f32v
+        !> Appends rows to a PK_FLOAT64_VEC column, growing its storage.
+        module subroutine append_values_f64v(self, values)
+            class(parquet_column), intent(inout) :: self !! the column.
+            real(real64), intent(in) :: values(:,:)      !! rows to append.
+        end subroutine append_values_f64v
+        !> Appends rows to a PK_LOGICAL_VEC column, growing its storage.
+        module subroutine append_values_boolv(self, values)
+            class(parquet_column), intent(inout) :: self !! the column.
+            logical, intent(in) :: values(:,:)      !! rows to append.
+        end subroutine append_values_boolv
+        !> Appends rows to a PK_DATE_VEC column, growing its storage.
+        module subroutine append_values_datev(self, values)
+            class(parquet_column), intent(inout) :: self !! the column.
+            type(parquet_date), intent(in) :: values(:,:)      !! rows to append.
+        end subroutine append_values_datev
+        !> Appends rows to a PK_TIME_VEC column, growing its storage.
+        module subroutine append_values_timev(self, values)
+            class(parquet_column), intent(inout) :: self !! the column.
+            type(parquet_time), intent(in) :: values(:,:)      !! rows to append.
+        end subroutine append_values_timev
+        !> Appends rows to a PK_TIMESTAMP_VEC column, growing its storage.
+        module subroutine append_values_tsv(self, values)
+            class(parquet_column), intent(inout) :: self !! the column.
+            type(parquet_timestamp), intent(in) :: values(:,:)      !! rows to append.
+        end subroutine append_values_tsv
+        !> Rebuilds the active storage so row k becomes the row that was at `idx(k)`. Serves both
+        !! `reindex` (a permutation) and `delete_by_mask` (a subset, in order). Values only --
+        !! validity is the caller's business.
+        module subroutine gather_storage(self, idx)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: idx(:)         !! source row index per destination row.
+        end subroutine gather_storage
+        !> Grows the active storage by `n` rows, preserving existing values. New rows hold
+        !! unspecified values for numeric kinds and null elements for temporal kinds.
+        module subroutine grow_storage(self, n)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: n              !! number of rows to add (>= 0).
+        end subroutine grow_storage
+        !> Appends every row of `other`'s active storage to `self`'s (values only; the caller
+        !! settles validity). Both columns must already have the same kind and width.
+        module subroutine append_storage(self, other)
+            class(parquet_column), intent(inout) :: self !! the destination column.
+            type(parquet_column), intent(in) :: other    !! the source column (unchanged).
+        end subroutine append_storage
+        !> Copies the active storage (values only) into `out`, which must already have the same
+        !! kind and geometry.
+        module subroutine copy_storage(self, out)
+            class(parquet_column), intent(in) :: self  !! the source column.
+            type(parquet_column), intent(inout) :: out !! the destination column.
+        end subroutine copy_storage
+    end interface
+    !
+    ! ---- Shared internal helpers (parquet_columns_util) ----
+    ! Declared here rather than contained in this module so that EVERY submodule can call them:
+    ! a procedure contained in one submodule is invisible to its siblings, and one contained in
+    ! the module itself is reported as unused when this file is compiled on its own.
+    interface
+        !> Aborts unless the column's active kind is `expected`.
+        module subroutine check_kind(self, expected, proc)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer, intent(in) :: expected           !! the PK_* kind the caller requires.
+            character(len=*), intent(in) :: proc      !! calling procedure name (for the message).
+        end subroutine check_kind
+        !> Aborts unless `i` is a valid 1-based row index.
+        module subroutine check_index(self, i, proc)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! the offending 1-based row index.
+            character(len=*), intent(in) :: proc      !! calling procedure name (for the message).
+        end subroutine check_index
+        !> Aborts unless `n` matches the column's own row count.
+        module subroutine check_nrows(self, n, proc)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: n           !! the supplied row count.
+            character(len=*), intent(in) :: proc      !! calling procedure name (for the message).
+        end subroutine check_nrows
+        !> Aborts unless `n` matches the column's own vector width.
+        module subroutine check_width(self, n, proc)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: n           !! the supplied element count per row.
+            character(len=*), intent(in) :: proc      !! calling procedure name (for the message).
+        end subroutine check_width
+        !> Number of validity bits the column needs: one per ELEMENT, so `nrows*width` for a
+        !! vector kind and `nrows` for a scalar kind (RF8).
+        pure module function bits_needed(self) result(res)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64) :: res                     !! required bit count.
+        end function bits_needed
+        !> Number of int64 blocks needed to hold `nbits` bits.
+        pure module function blocks_for(nbits) result(res)
+            integer(int64), intent(in) :: nbits !! bit count.
+            integer(int64) :: res               !! block count.
+        end function blocks_for
+        !> Whether bit `b` (1-based) of a bitmap is set. An unallocated bitmap has no set bits.
+        pure module function bit_test(map, b) result(res)
+            integer(int64), allocatable, intent(in) :: map(:) !! the bitmap.
+            integer(int64), intent(in) :: b                   !! 1-based bit index.
+            logical :: res                                    !! .true. when the bit is set.
+        end function bit_test
+        !> Sets bit `b` (1-based) of an allocated bitmap.
+        pure module subroutine bit_set(map, b)
+            integer(int64), intent(inout) :: map(:) !! the bitmap.
+            integer(int64), intent(in) :: b         !! 1-based bit index.
+        end subroutine bit_set
+        !> Clears bit `b` (1-based) of an allocated bitmap.
+        pure module subroutine bit_clear(map, b)
+            integer(int64), intent(inout) :: map(:) !! the bitmap.
+            integer(int64), intent(in) :: b         !! 1-based bit index.
+        end subroutine bit_clear
+        !> Ensures the bitmap exists and covers every element, zero-filling new blocks (0 = valid),
+        !! and marks the column bitmap-backed.
+        module subroutine ensure_bitmap(self)
+            class(parquet_column), intent(inout) :: self !! the column.
+        end subroutine ensure_bitmap
+        !> Releases the bitmap in O(1): every row becomes valid and a null-free column costs one
+        !! scalar again (R2).
+        module subroutine drop_bitmap(self)
+            class(parquet_column), intent(inout) :: self !! the column.
+        end subroutine drop_bitmap
+        !> Whether a kind stores its null state inside each element (the temporal kinds).
+        pure module function is_temporal_kind(kind) result(res)
+            integer, intent(in) :: kind !! a PK_* discriminator.
+            logical :: res              !! .true. for the date/time/timestamp kinds.
+        end function is_temporal_kind
+        !> Whether a kind delegates its storage and validity to parquet_string_column.
+        pure module function is_string_kind(kind) result(res)
+            integer, intent(in) :: kind !! a PK_* discriminator.
+            logical :: res              !! .true. for PK_STRING and PK_STRING_VEC.
+        end function is_string_kind
+        !> Fixed-length kind name, used to build this module's error messages.
+        pure module function kind_text(kind) result(res)
+            integer, intent(in) :: kind !! a PK_* discriminator.
+            character(len=16) :: res    !! the kind's name, blank-padded.
+        end function kind_text
+    end interface
+    !
+contains
+    !
+    ! ==================================================================================
+    ! Shared private helpers -- host-associated by every submodule.
+    ! ==================================================================================
+    !
+    !> The column's active kind discriminator. `PK_NONE` until `init` is called.
+    pure function kindof(self) result(res)
+        class(parquet_column), intent(in) :: self !! the column.
+        integer :: res                            !! the active PK_* constant.
+        res = self%kind
+    end function kindof
+    !
+    !> Number of rows the column currently holds.
+    pure function length(self) result(res)
+        class(parquet_column), intent(in) :: self !! the column.
+        integer(int64) :: res                     !! the row count.
+        res = self%nrows
+    end function length
+    !
+    !> Bytes currently occupied by the null bitmap — **0 for a null-free column**, which is the
+    !! whole point of the sparse representation (R2): nothing is allocated until the column
+    !! actually holds a null. Also the cheapest way for a test or a memory report to prove that.
+    !! Always 0 for the string and temporal kinds, whose null state is not a column bitmap.
+    pure function validity_bytes(self) result(res)
+        class(parquet_column), intent(in) :: self !! the column.
+        integer(int64) :: res                     !! bitmap size in bytes.
+        if (allocated(self%validity)) then
+            res = size(self%validity, kind=int64)*8_int64
+        else
+            res = 0_int64
+        end if
+    end function validity_bytes
+    !
+    !> Values per row: 1 for every scalar kind, the vector width for a *_VEC kind.
+    pure function colwidth(self) result(res)
+        class(parquet_column), intent(in) :: self !! the column.
+        integer(int32) :: res                     !! the column width.
+        res = self%width
+    end function colwidth
+    !
+    !> Copies a human-readable name for a PK_* kind out (for error messages and callers that
+    !! dispatch on `kindof`).
+    subroutine parquet_kind_name(kind, name)
+        integer, intent(in) :: kind                        !! a PK_* discriminator.
+        character(len=:), allocatable, intent(out) :: name !! the kind's name.
+        name = trim(kind_text(kind))
+    end subroutine parquet_kind_name
+    !
+    !
+end module parquet_columns

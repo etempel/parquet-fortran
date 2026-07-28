@@ -105,6 +105,13 @@ module parquet_strings
         procedure, private :: erase_i32                !! int32 specific of erase.
         procedure, private :: erase_i64                !! int64 specific of erase.
         generic :: erase => erase_i32, erase_i64       !! Remove element i (shifts later elements down).
+        procedure, private :: reindex_i32              !! int32 specific of reindex.
+        procedure, private :: reindex_i64              !! int64 specific of reindex.
+        generic :: reindex => reindex_i32, reindex_i64 !! Reorder every element by a permutation.
+        procedure :: delete_by_mask                    !! Keep only the elements whose mask entry is .true.
+        procedure, private :: append_nulls_i32         !! int32 specific of append_nulls.
+        procedure, private :: append_nulls_i64         !! int64 specific of append_nulls.
+        generic :: append_nulls => append_nulls_i32, append_nulls_i64 !! Append n null elements in bulk.
         procedure :: strip_all                         !! Strip both ends of every non-null element.
         procedure :: trim_all                          !! Trailing-trim every non-null element.
         ! --- searching / comparison ---
@@ -1018,6 +1025,157 @@ contains
         self%nrows = self%nrows - 1_int64
         self%nchars = self%nchars - old_len
     end subroutine erase_i64
+    !
+    !> int32 specific of reindex; see the reindex generic.
+    subroutine reindex_i32(self, perm)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int32), intent(in) :: perm(:)               !! 1-based permutation of 1..size().
+        call self%reindex_i64(int(perm, int64))
+    end subroutine reindex_i32
+    !
+    !> int64 specific of reindex: reorders every element so that element `k` of the result is the
+    !! element that was at `perm(k)` before the call, rebuilding the payload, offsets and validity
+    !! in one O(nchars) pass. `perm` must be a true permutation of `1..size()`; it is fully
+    !! validated first (length, range, no duplicates), so a bad permutation aborts before any
+    !! buffer is touched and the column is left unchanged. The null count is preserved by
+    !! construction. Invalidates every outstanding handle into the column.
+    subroutine reindex_i64(self, perm)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int64), intent(in) :: perm(:)               !! 1-based permutation of 1..size().
+        integer(int64) :: n, k, p, a, b, elen, pos
+        integer(int64), allocatable :: new_off(:)
+        character(len=1), allocatable :: new_data(:)
+        logical, allocatable :: seen(:), old_null(:)
+        n = self%nrows
+        if (size(perm, kind=int64) /= n) then
+            error stop EP//"reindex: permutation length does not match the row count"
+        end if
+        if (n == 0_int64) return
+        ! validate first: a bad permutation must not leave the column half-rebuilt
+        allocate(seen(n))
+        seen = .false.
+        do k = 1_int64, n
+            p = perm(k)
+            if (p < 1_int64 .or. p > n) error stop EP//"reindex: permutation entry out of range"
+            if (seen(p)) error stop EP//"reindex: permutation contains a duplicate index"
+            seen(p) = .true.
+        end do
+        deallocate(seen)
+        ! capture the old null flags before any buffer is replaced
+        if (self%has_nulls) then
+            allocate(old_null(n))
+            do k = 1_int64, n
+                old_null(k) = .not. bit_valid(self, k)
+            end do
+        end if
+        ! gather payload and offsets in permuted order
+        allocate(new_off(n+1_int64))
+        new_off(1) = 0_int64
+        allocate(new_data(max(self%nchars, 1_int64)))
+        pos = 0_int64
+        do k = 1_int64, n
+            call elem_bounds(self, perm(k), a, b)
+            elen = b - a + 1_int64
+            if (elen > 0_int64) new_data(pos+1_int64:pos+elen) = self%data(a:b)
+            pos = pos + elen
+            new_off(k+1_int64) = pos
+        end do
+        call move_alloc(new_off, self%offsets)
+        call move_alloc(new_data, self%data)
+        ! rebuild validity in the new order (n_null is unchanged by a permutation)
+        if (self%has_nulls) then
+            call ensure_validity_cap(self, n)
+            do k = 1_int64, n
+                if (old_null(perm(k))) then
+                    call set_bit_null(self, k)
+                else
+                    call set_bit_valid(self, k)
+                end if
+            end do
+        end if
+    end subroutine reindex_i64
+    !
+    !> Keeps only the elements whose `keep` entry is .true., in order, compacting payload, offsets
+    !! and validity in one O(nchars) in-place pass. `keep` must have exactly `size()` entries.
+    !! Dropping every element leaves a valid empty column. Invalidates every outstanding handle
+    !! into the column. Note this is the bulk counterpart of `erase`: deleting m elements one at a
+    !! time costs O(m*nchars), this costs O(nchars) once.
+    subroutine delete_by_mask(self, keep)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        logical, intent(in) :: keep(:)                      !! .true. for every element to retain.
+        integer(int64) :: n, k, j, a, b, elen, pos, kept, nn
+        logical, allocatable :: old_null(:)
+        n = self%nrows
+        if (size(keep, kind=int64) /= n) then
+            error stop EP//"delete_by_mask: mask length does not match the row count"
+        end if
+        if (n == 0_int64) return
+        if (self%has_nulls) then
+            allocate(old_null(n))
+            do k = 1_int64, n
+                old_null(k) = .not. bit_valid(self, k)
+            end do
+        end if
+        ! compact payload and offsets in place; the write cursor never overtakes the read cursor
+        pos = 0_int64
+        kept = 0_int64
+        do k = 1_int64, n
+            if (.not. keep(k)) cycle
+            call elem_bounds(self, k, a, b)
+            elen = b - a + 1_int64
+            do j = 0_int64, elen - 1_int64
+                self%data(pos+1_int64+j) = self%data(a+j)
+            end do
+            pos = pos + elen
+            kept = kept + 1_int64
+            self%offsets(kept+1_int64) = pos
+        end do
+        self%nrows = kept
+        self%nchars = pos
+        ! rebuild validity for the surviving elements and recount the nulls
+        if (self%has_nulls) then
+            nn = 0_int64
+            kept = 0_int64
+            do k = 1_int64, n
+                if (.not. keep(k)) cycle
+                kept = kept + 1_int64
+                if (old_null(k)) then
+                    call set_bit_null(self, kept)
+                    nn = nn + 1_int64
+                else
+                    call set_bit_valid(self, kept)
+                end if
+            end do
+            self%n_null = nn
+        end if
+    end subroutine delete_by_mask
+    !
+    !> int32 specific of append_nulls; see the append_nulls generic.
+    subroutine append_nulls_i32(self, n)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int32), intent(in) :: n                     !! number of null elements to append.
+        call self%append_nulls_i64(int(n, int64))
+    end subroutine append_nulls_i32
+    !
+    !> int64 specific of append_nulls: appends `n` null (zero-width, invalid) elements in one bulk
+    !! operation -- the counterpart of calling `append_null` n times, but with a single capacity
+    !! growth instead of one per element. `n == 0` is a no-op; a negative `n` aborts.
+    subroutine append_nulls_i64(self, n)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int64), intent(in) :: n                     !! number of null elements to append.
+        integer(int64) :: k
+        if (n < 0_int64) error stop EP//"append_nulls: negative element count"
+        if (n == 0_int64) return
+        call ensure_offsets_cap(self, self%nrows + n)
+        self%has_nulls = .true.
+        call ensure_validity_cap(self, self%nrows + n)
+        do k = 1_int64, n
+            self%offsets(self%nrows+1_int64+k) = self%nchars
+            call set_bit_null(self, self%nrows + k)
+        end do
+        self%n_null = self%n_null + n
+        self%nrows = self%nrows + n
+    end subroutine append_nulls_i64
     !
     !> Strips leading and trailing blanks from every non-null element, in place (O(nchars)).
     subroutine strip_all(self)

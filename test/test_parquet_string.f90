@@ -33,6 +33,9 @@ contains
             new_unittest("set_null (column-level and handle write-through)", test_set_null), &
             new_unittest("erase preserves order and compacts", test_erase), &
             new_unittest("append_column merges payload and nulls", test_append_column), &
+            new_unittest("reindex permutes payload and nulls", test_reindex), &
+            new_unittest("delete_by_mask compacts in one pass", test_delete_by_mask), &
+            new_unittest("append_nulls appends n null elements", test_append_nulls), &
             new_unittest("find (exact, trimmed, reverse, absent)", test_find), &
             new_unittest("equals/contains/startswith/endswith", test_compare_ops), &
             new_unittest("view handle basics", test_view_handle), &
@@ -322,6 +325,102 @@ contains
             call check(error, a%validate(), "invariants hold after mixed append")
         end block
     end subroutine test_append_column
+    !
+    !
+    !> reindex is the bulk counterpart of a permutation applied with erase/append: it rebuilds
+    !> payload, offsets and validity in one pass. The fixture puts the SHORTEST element first
+    !> (CLAUDE.md's "sized from the first element" rule), so a length derived from element 1
+    !> would truncate the later, longer ones.
+    subroutine test_reindex(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: col
+        character(len=:), allocatable :: s
+        !
+        call col%append_string("a")
+        call col%append_string("bcdef")
+        call col%append_null()
+        call col%append_string("gh")
+        call col%reindex([4_int64, 3_int64, 2_int64, 1_int64])
+        call check(error, col%size() == 4_int64, "reindex must not change the element count")
+        if (allocated(error)) return
+        call col%get(1_int64, s)
+        call check(error, s == "gh", "reindex should move element perm(1) to position 1")
+        if (allocated(error)) return
+        call col%get(3_int64, s)
+        call check(error, s == "bcdef", "a longer element must survive reindex intact")
+        if (allocated(error)) return
+        call check(error, col%is_null(2_int64), "reindex should carry a null to its new position")
+        if (allocated(error)) return
+        call check(error, col%null_count() == 1_int64, "reindex must preserve the null count")
+        if (allocated(error)) return
+        call check(error, col%validate(), "reindex must leave the column's invariants intact")
+        if (allocated(error)) return
+        ! the int32 convenience specific must behave identically to the int64 one
+        call col%reindex([4, 3, 2, 1])
+        call col%get(1_int64, s)
+        call check(error, s == "a", "the int32 reindex specific should permute the same way")
+    end subroutine test_reindex
+    !
+    !> delete_by_mask is the bulk counterpart of erase: deleting m elements one at a time is
+    !> O(m*nchars), this is O(nchars) once.
+    subroutine test_delete_by_mask(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: col
+        character(len=:), allocatable :: s
+        logical :: none_keep(4)
+        !
+        call col%append_string("a")
+        call col%append_string("bcdef")
+        call col%append_null()
+        call col%append_string("gh")
+        call col%delete_by_mask([.false., .true., .true., .true.])
+        call check(error, col%size() == 3_int64, "delete_by_mask should keep exactly the .true. elements")
+        if (allocated(error)) return
+        call col%get(1_int64, s)
+        call check(error, s == "bcdef", "the surviving payload must be intact and in order")
+        if (allocated(error)) return
+        call check(error, col%is_null(2_int64), "a surviving null must still be null")
+        if (allocated(error)) return
+        call check(error, col%null_count() == 1_int64, "delete_by_mask should recount the nulls")
+        if (allocated(error)) return
+        call col%get(3_int64, s)
+        call check(error, s == "gh", "the last surviving element should keep its content")
+        if (allocated(error)) return
+        call check(error, col%validate(), "delete_by_mask must leave the column's invariants intact")
+        if (allocated(error)) return
+        none_keep = .false.
+        call col%delete_by_mask(none_keep(1:3))
+        call check(error, col%size() == 0_int64, "deleting everything should leave a valid empty column")
+        if (allocated(error)) return
+        call check(error, col%validate(), "an emptied column must still satisfy its invariants")
+    end subroutine test_delete_by_mask
+    !
+    !> append_nulls is the bulk counterpart of calling append_null n times -- one capacity
+    !> growth instead of n.
+    subroutine test_append_nulls(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: col
+        character(len=:), allocatable :: s
+        !
+        call col%append_string("a")
+        call col%append_nulls(3_int64)
+        call check(error, col%size() == 4_int64, "append_nulls should add the requested element count")
+        if (allocated(error)) return
+        call check(error, col%null_count() == 3_int64, "append_nulls should count every appended null")
+        if (allocated(error)) return
+        call check(error, col%is_null(4_int64), "the appended elements should read back as null")
+        if (allocated(error)) return
+        call col%get(1_int64, s)
+        call check(error, s == "a", "append_nulls must not disturb the existing payload")
+        if (allocated(error)) return
+        call col%append_nulls(0_int64)
+        call check(error, col%size() == 4_int64, "append_nulls(0) should be a no-op")
+        if (allocated(error)) return
+        call check(error, col%validate(), "append_nulls must leave the column's invariants intact")
+        if (allocated(error)) return
+        call col%append_nulls(2)
+        call check(error, col%size() == 6_int64, "the int32 append_nulls specific should append too")
+    end subroutine test_append_nulls
     !
     subroutine test_find(error)
         type(error_type), allocatable, intent(out) :: error

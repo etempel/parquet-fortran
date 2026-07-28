@@ -12,6 +12,7 @@ program error_scenarios
     use parquet
     use parquet_maml_base, only: parquet_maml_file, get_parquet_maml
     use parquet_strings, only : parquet_string_column, parquet_string
+    use parquet_columns
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp, &
         parquet_unit_seconds, parquet_unit_millis, parquet_unit_nanos
     use iso_fortran_env, only : int32, int64, real32, real64
@@ -572,6 +573,42 @@ program error_scenarios
         call scenario_print_schema_info_open_failure()
     case ("schema_add_metadata_before_parse")
         call scenario_schema_add_metadata_before_parse()
+    case ("columns_data_ptr_kind_mismatch")
+        call scenario_columns_data_ptr_kind_mismatch()
+    case ("columns_uninitialized_append_nulls")
+        call scenario_columns_uninitialized_append_nulls()
+    case ("columns_get_at_index_out_of_range")
+        call scenario_columns_get_at_index_out_of_range()
+    case ("columns_append_kind_mismatch")
+        call scenario_columns_append_kind_mismatch()
+    case ("columns_append_width_mismatch")
+        call scenario_columns_append_width_mismatch()
+    case ("string_column_reindex_length_mismatch")
+        call scenario_string_column_reindex_length_mismatch()
+    case ("string_column_reindex_out_of_range")
+        call scenario_string_column_reindex_out_of_range()
+    case ("string_column_delete_by_mask_length_mismatch")
+        call scenario_string_column_delete_by_mask_length_mismatch()
+    case ("string_column_append_nulls_negative")
+        call scenario_string_column_append_nulls_negative()
+    case ("columns_string_column_wrong_kind")
+        call scenario_columns_string_column_wrong_kind()
+    case ("columns_init_container_kind")
+        call scenario_columns_init_container_kind()
+    case ("columns_init_width_on_scalar_kind")
+        call scenario_columns_init_width_on_scalar_kind()
+    case ("columns_set_all_length_mismatch")
+        call scenario_columns_set_all_length_mismatch()
+    case ("columns_get_at_width_mismatch")
+        call scenario_columns_get_at_width_mismatch()
+    case ("columns_delete_by_mask_length_mismatch")
+        call scenario_columns_delete_by_mask_length_mismatch()
+    case ("columns_reindex_length_mismatch")
+        call scenario_columns_reindex_length_mismatch()
+    case ("columns_clear_null_temporal")
+        call scenario_columns_clear_null_temporal()
+    case ("columns_reindex_duplicate_index")
+        call scenario_columns_reindex_duplicate_index()
     case ("string_column_index_out_of_range")
         call scenario_string_column_index_out_of_range()
     case ("string_column_view_all_size_mismatch")
@@ -7388,5 +7425,178 @@ contains
         call parquet_close_writer(writer)
         print '(a)', "unexpectedly wrote a flat column whose schema col_size is still 'auto'"
     end subroutine scenario_flat_write_col_size_still_auto
+
+    !> parquet_column%data_ptr is EXACT-kind by design (DD2): it aliases raw storage, so a
+    !! pointer of a different kind would reinterpret the bytes rather than convert them. Asking
+    !! an int32 column for an int64 pointer must abort, not widen.
+    subroutine scenario_columns_data_ptr_kind_mismatch()
+        type(parquet_column), target :: col
+        integer(int64), pointer :: p(:)
+        call col%init(PK_INT32, 3_int64)
+        call col%set_all([1_int32, 2_int32, 3_int32])
+        call col%data_ptr(p)   ! int64 pointer into an int32 column -> aborts
+        print '(a,i0)', "unexpectedly aliased an int32 column through an int64 pointer, size=", size(p)
+    end subroutine scenario_columns_data_ptr_kind_mismatch
+
+    !> A default-initialized parquet_column has no kind and no storage; a structural mutation on
+    !! it must say so rather than silently doing nothing.
+    subroutine scenario_columns_uninitialized_append_nulls()
+        type(parquet_column) :: col
+        call col%append_nulls(2_int64)   ! PK_NONE -> aborts
+        print '(a,i0)', "unexpectedly appended null rows to a column with no kind, length=", col%length()
+    end subroutine scenario_columns_uninitialized_append_nulls
+
+    !> Row indices are checked against the column's own length on every element access.
+    subroutine scenario_columns_get_at_index_out_of_range()
+        type(parquet_column) :: col
+        real(real64) :: v
+        call col%init(PK_FLOAT64, 3_int64)
+        call col%set_all([1.0_real64, 2.0_real64, 3.0_real64])
+        call col%get_at(99_int64, v)   ! index 99 > nrows 3 -> aborts
+        print '(a,f0.1)', "unexpectedly read an out-of-range row: ", v
+    end subroutine scenario_columns_get_at_index_out_of_range
+
+    !> append requires identical kinds: silently widening an int32 source into a float64 target
+    !! would change the target column's storage kind, which section E of feature_table.md rules
+    !! out (use cast_column instead).
+    subroutine scenario_columns_append_kind_mismatch()
+        type(parquet_column) :: a, b
+        call a%init(PK_FLOAT64, 2_int64)
+        call a%set_all([1.0_real64, 2.0_real64])
+        call b%init(PK_INT32, 2_int64)
+        call b%set_all([3_int32, 4_int32])
+        call a%append(b)   ! int32 into float64 -> aborts
+        print '(a,i0)', "unexpectedly appended a column of a different kind, length=", a%length()
+    end subroutine scenario_columns_append_kind_mismatch
+
+    !> Two vector columns of the same kind but different widths describe different row shapes;
+    !! concatenating them would produce rows of two different lengths in one column.
+    subroutine scenario_columns_append_width_mismatch()
+        type(parquet_column) :: a, b
+        call a%init(PK_FLOAT64_VEC, 1_int64, width=3_int32)
+        call b%init(PK_FLOAT64_VEC, 1_int64, width=2_int32)
+        call a%append(b)   ! width 2 into width 3 -> aborts
+        print '(a,i0)', "unexpectedly appended a vector column of a different width, length=", a%length()
+    end subroutine scenario_columns_append_width_mismatch
+
+    !> reindex validates its permutation IN FULL before touching any storage, so a bad
+    !! permutation aborts with the column still intact rather than half rebuilt. A duplicated
+    !! index is the interesting case: every entry is in range, yet the result would silently
+    !! drop a row and duplicate another.
+    subroutine scenario_columns_reindex_duplicate_index()
+        type(parquet_column) :: col
+        call col%init(PK_INT32, 3_int64)
+        call col%set_all([1_int32, 2_int32, 3_int32])
+        call col%reindex([1_int64, 2_int64, 2_int64])   ! 3 is missing, 2 appears twice -> aborts
+        print '(a,i0)', "unexpectedly reindexed with a duplicated index, length=", col%length()
+    end subroutine scenario_columns_reindex_duplicate_index
+
+    !> A temporal element becomes valid by having a value written to it -- there is no separate
+    !! "mark valid" state to flip, because the null flag lives inside the element. clear_null on
+    !! such a column therefore says so rather than silently doing nothing.
+    subroutine scenario_columns_clear_null_temporal()
+        type(parquet_column) :: col
+        call col%init(PK_DATE, 2_int64)
+        call col%clear_null(1_int64)   ! temporal kind -> aborts
+        print '(a,l1)', "unexpectedly cleared a temporal element's null state, is_null=", col%is_null(1_int64)
+    end subroutine scenario_columns_clear_null_temporal
+
+    !> The container kinds are declared so the type's layout is final, but their internals are
+    !! deferred to feature_map_list_struct.md -- asking for one now must say so plainly rather
+    !! than produce a column with no storage.
+    subroutine scenario_columns_init_container_kind()
+        type(parquet_column) :: col
+        call col%init(PK_LIST, 2_int64)   ! reserved kind -> aborts
+        print '(a,i0)', "unexpectedly initialized a reserved container kind, length=", col%length()
+    end subroutine scenario_columns_init_container_kind
+
+    !> width > 1 only means something for a *_VEC kind; silently ignoring it on a scalar kind
+    !! would give the caller a column shaped differently from the one they asked for.
+    subroutine scenario_columns_init_width_on_scalar_kind()
+        type(parquet_column) :: col
+        call col%init(PK_INT32, 2_int64, width=4_int32)   ! scalar kind + width -> aborts
+        print '(a,i0)', "unexpectedly gave a scalar column a width of ", col%colwidth()
+    end subroutine scenario_columns_init_width_on_scalar_kind
+
+    !> A whole-column set must supply exactly one value per row: a shorter array would leave
+    !! part of the column silently stale, a longer one would drop values.
+    subroutine scenario_columns_set_all_length_mismatch()
+        type(parquet_column) :: col
+        call col%init(PK_INT32, 3_int64)
+        call col%set_all([1_int32, 2_int32])   ! 2 values for 3 rows -> aborts
+        print '(a,i0)', "unexpectedly set a column from a mismatched value count, length=", col%length()
+    end subroutine scenario_columns_set_all_length_mismatch
+
+    !> A vector row access must match the column's width exactly.
+    subroutine scenario_columns_get_at_width_mismatch()
+        type(parquet_column) :: col
+        real(real64) :: row(2)
+        call col%init(PK_FLOAT64_VEC, 2_int64, width=3_int32)
+        call col%get_at(1_int64, row)   ! 2-element buffer for a width-3 column -> aborts
+        print '(a,f0.1)', "unexpectedly read a width-3 row into a 2-element buffer, first=", row(1)
+    end subroutine scenario_columns_get_at_width_mismatch
+
+    !> delete_by_mask needs one mask entry per row; a short mask would silently keep the tail.
+    subroutine scenario_columns_delete_by_mask_length_mismatch()
+        type(parquet_column) :: col
+        call col%init(PK_INT32, 3_int64)
+        call col%delete_by_mask([.true., .false.])   ! 2 entries for 3 rows -> aborts
+        print '(a,i0)', "unexpectedly filtered a column with a short mask, length=", col%length()
+    end subroutine scenario_columns_delete_by_mask_length_mismatch
+
+    !> reindex needs a full permutation; a short one cannot describe where every row goes.
+    subroutine scenario_columns_reindex_length_mismatch()
+        type(parquet_column) :: col
+        call col%init(PK_INT32, 3_int64)
+        call col%reindex([2_int64, 1_int64])   ! 2 entries for 3 rows -> aborts
+        print '(a,i0)', "unexpectedly reindexed a column with a short permutation, length=", col%length()
+    end subroutine scenario_columns_reindex_length_mismatch
+
+    !> string_column hands back the embedded parquet_string_column, which only the string kinds
+    !! have -- asking a numeric column for one must say so rather than return a null pointer the
+    !! caller would then dereference.
+    subroutine scenario_columns_string_column_wrong_kind()
+        type(parquet_column), target :: col
+        type(parquet_string_column), pointer :: sp
+        call col%init(PK_FLOAT64, 2_int64)
+        call col%string_column(sp)   ! not a string kind -> aborts
+        print '(a,i0)', "unexpectedly obtained a string store from a float64 column, size=", sp%size()
+    end subroutine scenario_columns_string_column_wrong_kind
+
+    !> parquet_string_column%reindex validates the permutation before touching any buffer, so a
+    !! wrong-length permutation aborts with the column intact.
+    subroutine scenario_string_column_reindex_length_mismatch()
+        type(parquet_string_column) :: col
+        call col%append_string("a")
+        call col%append_string("bc")
+        call col%reindex([1_int64])   ! 1 entry for 2 elements -> aborts
+        print '(a,i0)', "unexpectedly reindexed with a short permutation, size=", col%size()
+    end subroutine scenario_string_column_reindex_length_mismatch
+
+    !> An in-range check on every permutation entry, for the same reason.
+    subroutine scenario_string_column_reindex_out_of_range()
+        type(parquet_string_column) :: col
+        call col%append_string("a")
+        call col%append_string("bc")
+        call col%reindex([1_int64, 9_int64])   ! entry 9 > size 2 -> aborts
+        print '(a,i0)', "unexpectedly reindexed with an out-of-range entry, size=", col%size()
+    end subroutine scenario_string_column_reindex_out_of_range
+
+    !> delete_by_mask needs exactly one mask entry per element.
+    subroutine scenario_string_column_delete_by_mask_length_mismatch()
+        type(parquet_string_column) :: col
+        call col%append_string("a")
+        call col%append_string("bc")
+        call col%delete_by_mask([.true.])   ! 1 entry for 2 elements -> aborts
+        print '(a,i0)', "unexpectedly filtered with a short mask, size=", col%size()
+    end subroutine scenario_string_column_delete_by_mask_length_mismatch
+
+    !> A negative bulk-null count is a caller bug, not an empty append.
+    subroutine scenario_string_column_append_nulls_negative()
+        type(parquet_string_column) :: col
+        call col%append_string("a")
+        call col%append_nulls(-3_int64)   ! negative count -> aborts
+        print '(a,i0)', "unexpectedly appended a negative number of nulls, size=", col%size()
+    end subroutine scenario_string_column_append_nulls_negative
 
 end program error_scenarios

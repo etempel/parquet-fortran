@@ -38,6 +38,7 @@ working rules).
   - [Error stop messages: include file/schema context](#error-stop-messages-include-fileschema-context)
   - [Guard mutating public procedures against being called twice](#guard-mutating-public-procedures-against-being-called-twice)
   - [Implicit finalizers must never route through a path that can throw/abort](#implicit-finalizers-must-never-route-through-a-path-that-can-throwabort)
+  - [Automatic BYTE_STREAM_SPLIT for float columns in the writer](#automatic-byte_stream_split-for-float-columns-in-the-writer)
 - [Element-domain modules (`parquet_strings`, `parquet_temporal`)](#element-domain-modules-parquet_strings-parquet_temporal)
   - [The `parquet_strings` module](#the-parquet_strings-module)
   - [The `parquet_temporal` module (date/time/timestamp)](#the-parquet_temporal-module-datetimetimestamp)
@@ -569,6 +570,35 @@ finalizer its own dedicated "abandon" entry point that skips them entirely — s
 pattern — rather than trying to have the finalizer conditionally decide when it's "safe" to call
 the real close. Apply the same pattern to any future finalizable type (e.g. a `parquet_reader`-side
 completeness check, if one is ever added).
+
+### Automatic BYTE_STREAM_SPLIT for float columns in the writer
+
+`apply_float_byte_stream_split` (`parquet_wrapper.cpp`) is called at both places `WriterProperties`
+get built (the first-row-group path in `parquet_finish_row_group`, and `close_parquet_writer`'s own
+`WriteTable` path) and, for every `float32`/`float64` field, calls `disable_dictionary(name)` *and*
+`encoding(name, Encoding::BYTE_STREAM_SPLIT)` on that same column. This is automatic and type-based
+— not exposed as a public argument — because dictionary encoding rarely helps floating-point data
+(samples are usually near-unique) while byte-stream-splitting each value's bytes across separate
+per-position streams compresses substantially better under most codecs; every other column type is
+left at the writer's normal defaults (dictionary enabled, no BSS).
+
+**The `disable_dictionary` + `encoding(..., BYTE_STREAM_SPLIT)` pair must always be applied
+together, on the same set of columns, never one without the other.** Confirmed directly from
+`parquet/properties.h`: `Builder::encoding(path, type)`'s own doc comment states it "is only
+applied if dictionary encoding is disabled" for that column — requesting BYTE_STREAM_SPLIT while
+dictionary stays enabled for that column is a **silent no-op**, not an error, and produces a file
+that still uses ordinary dictionary encoding despite the (ineffective) BSS request. If a future
+change relocates or refactors this logic, keep both calls paired and keep calling
+`apply_float_byte_stream_split` at **both** `WriterProperties::Builder` construction sites listed
+above — the debug/test-only fixture writers elsewhere in this file (`parquet_debug_write_*`) are
+deliberately not included, since they bypass the normal schema-driven writer path entirely.
+Verified empirically (not just from the header comment) via a scratch program writing a
+float32/float64/int32 file and inspecting `pyarrow.parquet.ParquetFile(...).metadata`'s
+per-column `encodings`: the float columns report `('RLE', 'BYTE_STREAM_SPLIT')` with no
+`RLE_DICTIONARY`, while the int32 column keeps `('PLAIN', 'RLE', 'RLE_DICTIONARY')` — this
+library has no reader-side API to introspect a file's physical encoding, so `pyarrow` (or another
+external tool) is the only way to confirm this end-to-end; a pure test-drive/Fortran test can only
+confirm the *data* round-trips correctly, not which encoding was used to store it.
 
 ## Element-domain modules (`parquet_strings`, `parquet_temporal`)
 

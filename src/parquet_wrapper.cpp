@@ -1118,6 +1118,32 @@ extern "C"
 		return max_col_size;
 	}
 
+	// Applies BYTE_STREAM_SPLIT to every float32/float64 column in `fields`, on `builder` --
+	// automatic, type-based, and not exposed as a public argument (see CLAUDE.md's "Element-domain
+	// modules" / writer-compression notes for the rationale: floats are effectively always
+	// near-unique, so dictionary encoding never pays off for them, and byte-stream-splitting each
+	// value's bytes across separate per-position streams compresses substantially better under
+	// zstd than plain floats do). Every other column type is left at the writer's normal defaults
+	// (dictionary enabled).
+	//
+	// Parquet's WriterProperties::Builder::encoding(path, type) is only honored when dictionary
+	// encoding is disabled for that same column (see parquet/properties.h) -- requesting
+	// BYTE_STREAM_SPLIT while dictionary stays enabled is a silent no-op, not an error. So
+	// disable_dictionary must be paired with encoding(..., BYTE_STREAM_SPLIT) for exactly the same
+	// set of columns, never applied on its own.
+	static void apply_float_byte_stream_split(parquet::WriterProperties::Builder &builder,
+		const std::vector<std::shared_ptr<arrow::Field>> &fields)
+	{
+		for (const auto &field : fields)
+		{
+			if (!field) continue;
+			auto type_id = field->type()->id();
+			if (type_id != arrow::Type::FLOAT && type_id != arrow::Type::DOUBLE) continue;
+			builder.disable_dictionary(field->name());
+			builder.encoding(field->name(), parquet::Encoding::BYTE_STREAM_SPLIT);
+		}
+	}
+
 	// Core of check_explicit_chunk_size_fits_arrow_limit / check_chunk_size_fits_metadata_limit,
 	// below -- both need only a (name, col_size) view of one column, whether it comes from an
 	// already-built arrow::Field (the WriteTable/batch path and the streaming path once its
@@ -6783,10 +6809,11 @@ extern "C"
 			arrow_writer_builder.store_schema();
 			arrow_writer_builder.set_use_threads(writer_handle->use_threads);
 			auto arrow_writer_properties = arrow_writer_builder.build();
-			auto writer_properties = parquet::WriterProperties::Builder()
-				.compression(writer_handle->compression_codec)
-				->compression_level(writer_handle->compression_level)
-				->build();
+			parquet::WriterProperties::Builder writer_props_builder;
+			writer_props_builder.compression(writer_handle->compression_codec)
+				->compression_level(writer_handle->compression_level);
+			apply_float_byte_stream_split(writer_props_builder, writer_handle->fields);
+			auto writer_properties = writer_props_builder.build();
 
 			auto result = parquet::arrow::FileWriter::Open(*schema, arrow::default_memory_pool(),
 				writer_handle->outfile, writer_properties, arrow_writer_properties);
@@ -7428,11 +7455,12 @@ extern "C"
 		// whenever effective_chunk_size exceeds it. Set explicitly here so
 		// effective_chunk_size (whether auto-sized above or given by the
 		// caller) is the actual, sole authority on row group size.
-		auto writer_properties = parquet::WriterProperties::Builder()
-			.compression(writer_handle->compression_codec)
+		parquet::WriterProperties::Builder writer_props_builder;
+		writer_props_builder.compression(writer_handle->compression_codec)
 			->compression_level(writer_handle->compression_level)
-			->max_row_group_length(effective_chunk_size)
-			->build();
+			->max_row_group_length(effective_chunk_size);
+		apply_float_byte_stream_split(writer_props_builder, writer_handle->fields);
+		auto writer_properties = writer_props_builder.build();
 
 		auto status = parquet::arrow::WriteTable(
 			*table,

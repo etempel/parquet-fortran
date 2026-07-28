@@ -436,6 +436,7 @@ contains
         character(len=:), allocatable :: compression_name, col_out_name
         integer :: level_value, chunk_size_value
         logical :: comp_ok
+        logical :: compression_defaulted
         logical :: use_threads_value
         logical :: overwrite_value, file_exists
         character(len=12), parameter :: valid_compressions(6) = [character(len=12) :: &
@@ -457,12 +458,17 @@ contains
         writer%qc = present(schema)
         if (present(qc)) writer%qc = qc
 
-        ! Defaults to "snappy" -- Parquet-the-library's own built-in default is
-        ! actually "uncompressed" (confirmed in parquet/properties.h), but the
-        ! ecosystem convention on top of it (pyarrow, Spark, ...) is snappy,
-        ! and this library intentionally follows that convention rather than
-        ! the raw library default.
-        compression_name = "snappy"
+        ! Defaults to "zstd" (level 3) -- Parquet-the-library's own built-in default is
+        ! actually "uncompressed" (confirmed in parquet/properties.h), and the wider
+        ! ecosystem convention on top of it (pyarrow, Spark, ...) is snappy, but this
+        ! library intentionally goes one step further: zstd at a moderate level gives a
+        ! meaningfully better compression ratio than snappy for a modest write-time cost,
+        ! with no read-time penalty (see the compression benchmark backing this decision).
+        ! The default level (3) only applies when compression itself is left absent --
+        ! an explicit compression="zstd" with no compression_level still falls through to
+        ! Arrow's own codec default (level 1) a few lines down, unchanged from before.
+        compression_defaulted = .not. present(compression)
+        compression_name = "zstd"
         if (present(compression)) call parquet_to_lower(trim(compression), compression_name)
 
         comp_ok = .false.
@@ -479,6 +485,7 @@ contains
 
         level_value = -huge(level_value) - 1 ! Arrow's kUseDefaultCompressionLevel sentinel (INT_MIN):
                                               ! "use the codec's own default".
+        if (compression_defaulted) level_value = 3 ! This library's own default level for the default "zstd" codec.
         if (present(compression_level)) level_value = compression_level
 
         chunk_size_value = -1 ! <= 0 tells the C++ side "not set": auto-size from the final row count at close time.

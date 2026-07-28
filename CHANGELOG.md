@@ -33,6 +33,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`parquet_open_writer`'s default compression codec is now `"zstd"` at level 3, changed from
+  `"snappy"`.** This is a behavior change for any caller that omits `compression=` — files written
+  without an explicit codec will now be smaller (better ratio than snappy) at a modest extra write
+  cost, with no read-time penalty. Pass `compression="snappy"` explicitly to keep the previous
+  default behavior.
+- `float32`/`float64` columns are now automatically written with BYTE_STREAM_SPLIT encoding and
+  dictionary encoding disabled, regardless of the chosen `compression` codec — improves the
+  achievable compression ratio for floating-point data. Automatic and type-based; not a new
+  argument, and every other column type is unaffected.
 - Reorganized `src/parquet_wrapper.cpp` with section-banner comments for navigability (no
   functional change).
 

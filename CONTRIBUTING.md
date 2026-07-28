@@ -426,7 +426,7 @@ Prefer reporting a fatal condition directly (print a diagnostic to stderr and ca
 These were looked at (during an audit comparing this library against Arrow C++'s broader feature set) and deliberately deferred rather than rejected outright — they're worth revisiting if a concrete use case actually needs them, rather than adding speculatively:
 
 **Plausible future candidates, if needed:**
-- Per-column writer properties (e.g. `disable_statistics()` for write-heavy/throwaway files, explicit dictionary-encoding toggles) — small, additive, doesn't touch the type system.
+- Per-column writer properties (e.g. `disable_statistics()` for write-heavy/throwaway files) — small, additive, doesn't touch the type system. (One instance of this — BYTE_STREAM_SPLIT + disabled dictionary encoding for `float32`/`float64` columns — is now implemented, but automatically/type-based rather than as a caller-facing toggle; see [Automatic BYTE_STREAM_SPLIT for float columns](CLAUDE.md#automatic-byte_stream_split-for-float-columns-in-the-writer). A *manual* per-column override for other types remains unimplemented.)
 - `qc:`/`parquet_filter` support for the `date`/`time`/`timestamp` types (`parquet_date`/
   `parquet_time`/`parquet_timestamp`) — neither quality-control range/miss checks nor row filtering
   is implemented for these three yet, unlike every other supported type. An `INTERVAL`/duration

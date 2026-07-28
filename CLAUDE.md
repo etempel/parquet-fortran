@@ -1131,3 +1131,4 @@ file row. Regression-tested via `test/error_scenarios.f90`'s
 it would actually read a whole column, on a tiny fixture — the scenario finishing without
 aborting proves none of the four calls took that path) plus its negative control
 `scenario_whole_column_read_forced_error_control` (proves the hook itself actually fires).
+

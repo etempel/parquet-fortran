@@ -49,6 +49,8 @@ contains
             new_unittest("load a MAML file from disk", test_load_maml_file), &
             new_unittest("a CRLF-terminated MAML file parses correctly (trailing char(13) stripped)", &
                 test_load_maml_file_crlf), &
+            new_unittest("load a qc-maml file from disk and use it via parquet_open_reader", &
+                test_load_qc_maml_file), &
             new_unittest("get_column_index finds an existing column", test_get_column_index_found), &
             new_unittest("get_num_fields/get_field_name report all fields, unfiltered", &
                 test_get_num_fields_and_field_name), &
@@ -516,6 +518,57 @@ contains
         if (allocated(error)) return
         call check(error, schema%get_num_fields() == 1, "expected exactly one parsed field")
     end subroutine test_load_maml_file_crlf
+
+    !> Writes `lines` verbatim to `path`, one per record -- used below to produce a throwaway
+    !! qc-maml file (parquet_load_qc_maml_file only reads from disk, no in-memory constructor
+    !! exists for a qc-maml, same as every other maml in this codebase; mirrors
+    !! error_scenarios.f90's own write_text_file).
+    subroutine write_text_file(path, lines)
+        character(len=*), intent(in) :: path
+        character(len=*), intent(in) :: lines(:)
+        integer :: unit, i
+
+        open(newunit=unit, file=path, status="replace", action="write")
+        do i = 1, size(lines)
+            write(unit, '(a)') trim(lines(i))
+        end do
+        close(unit)
+    end subroutine write_text_file
+
+    !> Happy-path coverage for parquet_load_qc_maml_file (every other exercise of it lives in
+    !! test/error_scenarios.f90's abort/negative-path scenarios -- this is the one in-process
+    !! test-drive test proving the disk-loaded qc-maml also works end to end on a clean read,
+    !! not just that it can trigger an error stop). Declares qc: min:/max: for "ra" in
+    !! test/fixtures/list_vector.parquet, whose ra values ([1.5,2.5,3.5,4.5], see
+    !! test_add_col_qc_roundtrip above) all fall within [0, 10], so the default hard qc mode
+    !! (qc_soft=.false.) does not abort.
+    subroutine test_load_qc_maml_file(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_reader) :: reader
+        integer :: nrows
+        real(real64), allocatable :: ra(:)
+        character(len=*), parameter :: qc_maml_file = "test_run/qc_maml_load_test.maml"
+
+        call write_text_file(qc_maml_file, [character(len=32) :: &
+            "fields:", "- name: ra", "  qc:", "    min: 0", "    max: 10"])
+
+        schema = parquet_load_qc_maml_file(qc_maml_file)
+
+        call check(error, trim(schema%maml%name) == qc_maml_file .and. size(schema%maml%lines) == 5, &
+            "parquet_load_qc_maml_file returned unexpected raw content")
+        if (allocated(error)) return
+
+        call parquet_open_reader(reader, "test/fixtures/list_vector.parquet", schema=schema)
+        call parquet_get_nrows(reader, nrows)
+        allocate(ra(nrows))
+        call parquet_read_column(reader, "ra", ra)
+        call parquet_close_reader(reader)
+
+        call check(error, nrows == 4 .and. abs(ra(1) - 1.5_real64) < 1.0e-12_real64 .and. &
+            abs(ra(4) - 4.5_real64) < 1.0e-12_real64, &
+            "disk-loaded qc-maml did not read back the ra column correctly")
+    end subroutine test_load_qc_maml_file
 
     subroutine test_get_column_index_found(error)
         type(error_type), allocatable, intent(out) :: error

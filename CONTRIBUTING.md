@@ -14,6 +14,7 @@ This file covers developing, testing, and extending this repository itself. If y
   - [Testing genuine OpenMP concurrency](#testing-genuine-openmp-concurrency)
   - [Continuous integration (GitLab CI)](#continuous-integration-gitlab-ci)
   - [Mirroring to GitHub](#mirroring-to-github)
+  - [Releasing](#releasing)
   - [Publishing to the fpm registry](#publishing-to-the-fpm-registry)
 - [Regenerating the built-in MAML module](#regenerating-the-built-in-maml-module)
 - [Extending the MAML schema](#extending-the-maml-schema)
@@ -213,6 +214,12 @@ NROWS=3000000000 MAX_SIZE_GB=120 tools/test_large_scale.sh
 tools/check_doc_anchors.py
 ```
 
+`tools/check_bindc_boundary.py` cross-checks every Fortran `bind(C)` interface (`src/parquet_bindings.f90`, plus the debug-hook interfaces in `test/error_scenarios.f90`/`test/test_temporal.f90`) against its C++ `extern "C"` definition in `src/parquet_wrapper.cpp`, verifying arity, base type, by-value-vs-by-reference, and (for functions) return type all agree — a `bind(C)` interface has no compile-time link to the C++ side it describes, so a kind mismatch there compiles cleanly on both sides and corrupts memory silently at runtime instead of failing to build. Run it after touching either side of that boundary:
+
+```bash
+tools/check_bindc_boundary.py
+```
+
 `tools/generate_logo_svg.py` regenerates `doc/media/logo.svg`/`logo.png`/`logo-192.png`/
 `favicon.png` from an original raster source: it traces the raster into an editable SVG via
 `vtracer`, then a polish pass recolors/gradient-fills the traced badge shape and adds a shadowed
@@ -307,6 +314,36 @@ that need to point at `github.com` instead once mirrored. `tools/mirror_to_githu
 automatically from a disposable local branch — so `main` never carries GitHub-targeted content,
 even transiently — via `tools/prep_github_mirroring.sh` (see that script's header for the exact
 mechanics, including its `--reverse` mode).
+
+### Releasing
+
+Bumping the version is currently a manual sequence across several files — nothing checks that all
+of them were updated together except `parquet_get_version`'s own runtime drift warning (see below),
+so work through this list in full for every release:
+
+1. **`VERSION.txt`** — the source of truth. `fpm.toml`'s `version = "VERSION.txt"` and its
+   `RELEASE_VERSION={version}` macro derive from this automatically; nothing else to do for that
+   part.
+2. **`src/parquet.f90`'s `cversion`** — a hand-maintained `"vX.Y.Z (date)"` string (e.g.
+   `"v1.0.0 (2026-07-27)"`), used as `parquet_get_version`'s `mode="internal"` value. Update both
+   the version and the date. `parquet_get_version` compares the fpm-injected `RELEASE_VERSION`
+   macro against this string and prints a runtime warning if they disagree — the one part of this
+   sequence that is actually checked, but only after the fact (at a user's next run), not at
+   release time.
+3. **`CHANGELOG.md`** — add a new `## [X.Y.Z] - YYYY-MM-DD` section (Keep-a-Changelog format,
+   `### Added`/`### Changed`/`### Fixed`/etc. grouping, matching the existing `[1.0.0]` section).
+   If `[Unreleased]` entries have accumulated since the last release (see `CLAUDE.md`'s changelog
+   guidance), retitle that section rather than starting a new one.
+4. **A git tag** matching the version (e.g. `v1.0.1`), on the commit that bumped `VERSION.txt`.
+5. **`README.md`'s status line** (`**Status: 1.0 — first stable release.**`, near the top) —
+   only needs touching on a **major** version bump (it deliberately names the series, not the
+   patch level, specifically so routine `1.0.x` releases don't need this step at all).
+6. **`fpm publish`** — see "Publishing to the fpm registry" below; this is a separate, deliberate
+   step with its own prep script, not part of the version bump itself.
+
+None of this is automated or enforced by CI today — a future release-checklist script (comparing
+`VERSION.txt` against `cversion` and the latest `CHANGELOG.md` heading, say) would close that gap,
+but hasn't been written.
 
 ### Publishing to the fpm registry
 
@@ -422,3 +459,39 @@ These were looked at (during an audit comparing this library against Arrow C++'s
 
 **Probably out of scope for this library's design:**
 - Arrow's `dataset` module (multi-file/partitioned scanning), encryption, and Flight — these serve a different usage pattern (distributed/partitioned datasets, secure transport) than this library's "one file, one reader/writer" design, and adding them would cut against the intentional minimalism this codebase aims for.
+
+**Maintainability changes considered and declined:**
+- Splitting the single `src/parquet_wrapper.cpp` translation unit (7,000+ lines) into several
+  smaller files. Looked at during a review pass and rejected — the cost/benefit is clearly
+  negative, in descending order of severity:
+  1. **A silent-breakage hazard for the `g_debug_*` test-only overrides.** These are file-scope
+     `static` globals (e.g. `g_debug_force_whole_column_read_error`, `g_debug_string_offset_limit`,
+     `g_debug_col_size_limit`) read by production guard checks and written only by dedicated
+     `parquet_debug_set_*` functions reachable from `test/error_scenarios.f90`. `static` file-scope
+     linkage means one object *per translation unit* — if a split ever put a setter in a different
+     `.cpp` than the guard reading it, each TU would silently get its own copy: it would compile,
+     link, and the override would simply stop working, with no diagnostic anywhere. Every one of
+     them would have to become a genuine `extern` global in a shared internal header to survive a
+     split safely (see the `CLAUDE.md` note below).
+  2. **~90+ `static` (internal-linkage) helper functions would need their linkage reworked** —
+     either moved into a shared internal header as `inline` (inflating compile time for every TU
+     that includes it) or given external linkage inside a named namespace. Both are mechanical but
+     touch nearly every function in the file: a large diff on a sensitive file, which is exactly
+     what makes a real correctness regression easy to miss.
+  3. **Coverage tooling is tightly coupled to this one filename.** `CLAUDE.md`'s own
+     "`src/parquet_wrapper.cpp`: GCC vs Clang gcov attribution" section, `.gitlab-ci.yml`'s gcovr
+     invocation, and `tools/coverage_cpp.sh`'s exclusion-pattern/artifact-marker conventions are all
+     keyed to this file. A split would touch every path in every coverage report and require
+     revisiting all three, for no change in what's actually covered.
+  4. **The large Arrow/Parquet/standard-library include preamble would be duplicated** across every
+     new translation unit, so total compile time would likely *increase* rather than decrease
+     unless a shared precompiled-header-style internal header absorbed it — which is its own
+     ongoing maintenance burden.
+
+  Instead, the file gained ~15 plain-comment section banners (`// ==== ... ====`) marking its
+  existing implicit sections, which gives most of the navigational benefit (an editor outline, a
+  `grep '^// ===='`) with none of the above costs. Revisit an actual split only if a concrete
+  trigger appears — e.g. compile time becoming a real irritant, or a genuinely independent future
+  subsystem (a new element domain such as `MAP`/`LIST` support) being added with no shared helpers
+  with the existing code; a new subsystem is the one case where a *second* `.cpp` is cheap, since it
+  need not disturb the existing helpers at all.

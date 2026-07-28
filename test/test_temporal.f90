@@ -92,6 +92,40 @@ contains
         call d%get(y, mo, dd)
         call d%set(y, mo, dd)
         call check(error, d%raw() == -huge(0_int32) - 1_int32, "civil round-trip at day -huge-1")
+        if (allocated(error)) return
+        ! monotonicity near the extremes: d+1 (raw day count) must never yield an earlier civil date
+        call d%set_raw(huge(0_int32) - 1_int32)
+        call d%get(y, mo, dd)
+        block
+            type(parquet_date) :: d2
+            integer(int32) :: y2, mo2, dd2
+            d2 = d + 1_int32
+            call d2%get(y2, mo2, dd2)
+            call check(error, d2%raw() == huge(0_int32) .and. &
+                (y2 > y .or. (y2 == y .and. (mo2 > mo .or. (mo2 == mo .and. dd2 > dd)))), &
+                "day huge(int32)-1 -> +1 must advance the civil date, not go backwards")
+        end block
+        if (allocated(error)) return
+        call d%set_raw(-huge(0_int32))
+        call d%get(y, mo, dd)
+        block
+            type(parquet_date) :: d2
+            integer(int32) :: y2, mo2, dd2
+            d2 = d + 1_int32
+            call d2%get(y2, mo2, dd2)
+            call check(error, d2%raw() == -huge(0_int32) + 1_int32 .and. &
+                (y2 > y .or. (y2 == y .and. (mo2 > mo .or. (mo2 == mo .and. dd2 > dd)))), &
+                "day -huge(int32) -> +1 must advance the civil date, not go backwards")
+        end block
+        if (allocated(error)) return
+        ! leap-day property near each extreme: a year divisible by 400 still has a 29 February
+        call d%set(5881200, 2, 29)
+        call check(error, d%year() == 5881200 .and. d%month() == 2 .and. d%day() == 29, &
+            "year 5881200 (div by 400, near DATE_DAYS_MAX) must have a leap day")
+        if (allocated(error)) return
+        call d%set(-5877600, 2, 29)
+        call check(error, d%year() == -5877600 .and. d%month() == 2 .and. d%day() == 29, &
+            "year -5877600 (div by 400, near DATE_DAYS_MIN) must have a leap day")
     end subroutine test_date_civil_roundtrip
     !
     subroutine test_date_mjd(error)
@@ -565,6 +599,19 @@ contains
         call ts%set_mjd(-1.0e-15_real64)
         call check(error, ts%get_date() == parquet_date(1858, 11, 17) &
             .and. ts%get_time() == parquet_time(0, 0, 0), "MJD rollover must land exactly at 1858-11-17T00:00:00")
+        if (allocated(error)) return
+        ! accepted extreme just inside MJD_ABS_BOUND (1.0e14; the rejected side is exercised at
+        ! 2.0e14 by the temporal_ts_set_mjd_out_of_range error scenario) -- must not abort, and
+        ! must round-trip to within real64's relative precision at this magnitude
+        mjd = 9.9999e13_real64
+        call ts%set_mjd(mjd)
+        call check(error, abs(ts%to_mjd() - mjd) <= abs(mjd)*1.0e-9_real64, &
+            "MJD round-trip must hold near the accepted extreme (positive)")
+        if (allocated(error)) return
+        mjd = -9.9999e13_real64
+        call ts%set_mjd(mjd)
+        call check(error, abs(ts%to_mjd() - mjd) <= abs(mjd)*1.0e-9_real64, &
+            "MJD round-trip must hold near the accepted extreme (negative)")
     end subroutine test_ts_mjd_jd
     !
     subroutine test_ts_strings(error)
@@ -746,6 +793,16 @@ contains
         call a%set_raw(-huge(0_int64) - 1_int64 + 10_int64, 0)
         call b%set_raw(-huge(0_int64) - 1_int64 + 10_int64, 0)
         call check(error, (a - b) == 0_int64, "diff_ns near the extreme negative end of int64 must stay exact")
+        if (allocated(error)) return
+        ! accepted extreme of TS_DIFF_NS_BOUND_SECONDS (huge(int64)/parquet_ns_per_sec - 1): the
+        ! largest seconds-difference the bound accepts must still admit a full 999999999 ns
+        ! component without overflowing -- this is exactly the property the "- 1" headroom exists
+        ! for (temporal_ts_diff_ns_overflow's error scenario exercises one second beyond this,
+        ! which must abort instead).
+        call a%set_raw(huge(0_int64)/parquet_ns_per_sec - 1_int64, 999999999)
+        call b%set_raw(0_int64, 0)
+        call check(error, (a - b) == (huge(0_int64)/parquet_ns_per_sec - 1_int64)*parquet_ns_per_sec + 999999999_int64, &
+            "diff_ns at the largest accepted seconds span must still admit a full 999999999 ns component")
     end subroutine test_ts_arithmetic
     !
     subroutine test_unit_constants(error)

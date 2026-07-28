@@ -88,6 +88,7 @@ REMOVE_PATHS=(
     docs.md
     test/fixtures
     tools/benchmark_threads.sh
+    tools/check_bindc_boundary.py
     tools/check_doc_anchors.py
     tools/count_lines.py
     tools/count_tests.sh

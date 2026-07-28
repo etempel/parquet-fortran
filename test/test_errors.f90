@@ -327,6 +327,8 @@ contains
                 test_qc_maml_missing_name_aborts), &
             new_unittest("qc-maml: unknown qc: sub-key aborts", &
                 test_qc_maml_unknown_subkey_aborts), &
+            new_unittest("maml: a source line exceeding the length limit aborts (not silently truncated)", &
+                test_maml_line_too_long_aborts), &
             new_unittest("qc: existing Null-abort behavior is unchanged", &
                 test_qc_existing_null_abort_unchanged_aborts), &
             new_unittest("qc: hard mode (default) aborts on a range violation", &
@@ -2094,6 +2096,17 @@ contains
             failure_message="an unknown qc: sub-key was expected to abort", &
             required_stderr="unknown sub-key")
     end subroutine test_qc_maml_unknown_subkey_aborts
+
+    !> feature_doc.md point 7's F1 finding: a MAML source line over 1024 characters used to be
+    !! silently truncated by a fixed-length read (iostat still 0, no diagnostic). Now aborts,
+    !! naming the offending line number, instead of producing incomplete metadata silently.
+    subroutine test_maml_line_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "maml_line_too_long", expect_abort=.true., &
+            failure_message="a MAML source line exceeding the length limit was expected to abort", &
+            required_stderr="exceeds")
+    end subroutine test_maml_line_too_long_aborts
 
     !> qc being active must never change the existing strict-by-default Null
     !> behavior: reading a column with a genuine Null and no null_value=/

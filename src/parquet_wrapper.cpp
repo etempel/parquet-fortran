@@ -50,6 +50,8 @@
 #include <unordered_set>
 #include <vector>
 
+// ==== Handle types, concurrency guard, and process-global state ====
+//
 // Neither ParquetReaderHandle nor ParquetWriterHandle's own data structures
 // (column_cache, the fields/arrays/*_metadata vectors, defined below) are
 // synchronized -- concurrent calls into the *same* handle from more than one
@@ -391,11 +393,25 @@ extern "C"
 		// Pins the most recent array handed out (by pointer, not value) by
 		// parquet_read_string_column_chunk_buffers, whose row-group-scoped array (from
 		// get_row_group_chunk_array) is otherwise never retained anywhere -- unlike a whole-column
-		// read's array, which column_cache already keeps alive for the reader's whole lifetime.
-		// Fortran (parquet_read.f90) always consumes the returned buffer pointers immediately
-		// (append_buffers), before any other call on this same reader, so a single slot -- next
-		// overwritten by the next such call -- is sufficient; it does not need per-column tracking.
+		// read's *unresolved* (pre-struct-path) array, which column_cache already keeps alive for
+		// the reader's whole lifetime. Fortran (parquet_read.f90) always consumes the returned
+		// buffer pointers immediately (append_buffers), before any other call on this same reader,
+		// so a single slot -- next overwritten by the next such call -- is sufficient; it does not
+		// need per-column tracking.
 		std::shared_ptr<arrow::Array> last_chunk_buffers_array;
+		// Same idea as last_chunk_buffers_array, above, but for parquet_read_string_column_buffers
+		// (the whole-column counterpart): column_cache only ever stores the *pre*-unwrap_struct_path
+		// array (keyed by the top-level column's physical index), so for a plain (non-struct)
+		// column, get_single_chunk_array's returned array genuinely is the same object already
+		// cached, and stays alive on its own. But for a dotted struct-field path,
+		// unwrap_struct_path builds a brand-new Array (with a freshly allocated combined-validity
+		// buffer) that is never placed into column_cache -- nothing kept it alive past the end of
+		// parquet_read_string_column_buffers's own local variable, so the moment that function
+		// returned, the buffer backing the just-exported validity pointer was freed, and Fortran's
+		// append_buffers read freed memory (observed in practice as every row reading back null,
+		// not a crash). Pinning here unconditionally (cheap: one extra shared_ptr assignment, even
+		// for the already-safe non-struct case) closes this for every case uniformly.
+		std::shared_ptr<arrow::Array> last_whole_column_buffers_array;
 		std::atomic<bool> busy{false}; // guards against two threads calling into the same reader at once; see ConcurrencyGuard.
 	};
 
@@ -581,6 +597,8 @@ extern "C"
 			leaf_id != arrow::Type::LARGE_LIST && leaf_id != arrow::Type::MAP;
 	}
 
+	// ==== Struct-path resolution ====
+	//
 	// Walks `child_path` through nested STRUCT fields of `root` (the already-read top-level
 	// struct array), combining every hop's own validity bit -- root's own, each intermediate
 	// struct's, and the final leaf's -- into one mask: a row is null in the result if the
@@ -803,6 +821,8 @@ extern "C"
 	// existing column_cache instead of re-reading per leaf path.
 	static int64_t g_debug_physical_column_read_count = 0;
 
+	// ==== Whole-column reads (caching, filter/sample application, qc dispatch) ====
+	//
 	// Reads (and caches) exactly one column's data from disk -- every other
 	// column in the file is never touched, regardless of how many columns
 	// the file has or how large they are. This is what makes reading a
@@ -874,6 +894,8 @@ extern "C"
 		return array;
 	}
 
+	// ==== String-like accessors and buffer extraction ====
+	//
 	// True for any Arrow string representation this library's read paths can decode via
 	// make_string_like_accessor's GetView/IsNull interface -- STRING (int32 offsets, the
 	// default this library writes), LARGE_STRING (int64 offsets, used only for a column whose
@@ -954,22 +976,27 @@ extern "C"
 	// offsets_int32_out is set to 1 for a plain STRING array (int32
 	// offsets) or 0 for LARGE_STRING (int64 offsets) -- append_buffers accepts both.
 	//
-	// Relies on `array`'s own offset() being 0: every caller of this reaches `array` via
+	// `array`'s own offset() is not always 0: every caller reaches `array` via
 	// combine_column_chunks (either directly, for a whole-column read, or through
-	// get_row_group_chunk_array, for a chunked read), which only ever returns a freshly
-	// ReadColumn/ReadRowGroup-decoded chunk or the result of arrow::Concatenate -- never a
-	// genuine Slice() -- so offset() is 0 in every reachable case today. This is deliberately not
-	// re-verified/rebased here: doing so correctly would need an O(nrows) copy of the offsets
-	// buffer (rebasing every entry), which isn't worth paying for a case that cannot currently
-	// occur. If that ever changes, parquet_strings.f90's append_buffers has its own precondition
-	// guard (offsets(1) must be 0) that aborts loudly instead of silently misplacing bytes --
-	// see its doc comment. data_out is still correctly rebased by raw_value_offsets()[0] below (a
-	// single pointer add, always correct and free to do regardless); only the offsets values
-	// themselves and the validity bitmap rely on the offset()==0 assumption.
+	// get_row_group_chunk_array, for a chunked read) for a *plain* (non-struct) column, which only
+	// ever returns a freshly ReadColumn/ReadRowGroup-decoded chunk or the result of
+	// arrow::Concatenate -- never a genuine Slice() -- so offset() is 0 there. But for a dotted
+	// struct-field path, `array` instead comes from unwrap_struct_path, whose own
+	// StructArray::field() calls *can* return a genuinely sliced (nonzero-offset) child array (see
+	// unwrap_struct_path's own comment) -- offset() has been observed to stay 0 in every fixture
+	// exercised so far, but nothing about the type signature here guarantees that, so it is
+	// reported rather than assumed. data_out/*nchars_out are always correct regardless of offset()
+	// (raw_value_offsets()[0]/total_values_length() already account for it -- a single pointer add,
+	// free to do regardless). The offsets values themselves still rely on offset()==0 (or,
+	// equivalently, that the sliced-away leading elements contributed 0 bytes) -- append_buffers'
+	// own precondition guard (offsets(1) must be 0) aborts loudly rather than silently misplacing
+	// bytes if that ever fails, see its doc comment. *validity_offset_out reports the element
+	// offset separately so append_buffers can correctly align the validity bitmap (whose bits are
+	// never pre-rebased by Arrow, unlike the two buffers above) even when offset() is nonzero.
 	static void extract_string_buffers(const std::shared_ptr<arrow::Array> &array,
 		int64_t *nrows_out, int64_t *nchars_out,
 		const void **offsets_out, const void **data_out, const void **validity_out,
-		int8_t *offsets_int32_out)
+		int8_t *offsets_int32_out, int64_t *validity_offset_out)
 	{
 		bool is_large = array->type_id() == arrow::Type::LARGE_STRING;
 		*offsets_int32_out = is_large ? 0 : 1;
@@ -989,6 +1016,7 @@ extern "C"
 			*data_out = arr->raw_data() + (arr->length() > 0 ? arr->raw_value_offsets()[0] : 0);
 		}
 		*validity_out = array->null_bitmap_data();
+		*validity_offset_out = array->data()->offset;
 	}
 
 	// Arrow's real limit for a plain STRING array: its offsets buffer is int32, capping total
@@ -1020,6 +1048,8 @@ extern "C"
 		return n_values * item_len > limit;
 	}
 
+	// ==== Hard int32-only Arrow limit guards (col_size, chunk_size, column count) ====
+	//
 	// Arrow's real limit for a vector column's per-row width: arrow::FixedSizeListBuilder and
 	// arrow::fixed_size_list() both take `list_size` as a plain int32_t. Unlike the string byte-offset
 	// limit above, there is no "large" fixed-size-list variant to auto-upgrade to -- this is a hard
@@ -2000,6 +2030,8 @@ extern "C"
 		}
 	}
 
+	// ==== VOTable-style metadata XML sidecar ====
+	//
 	// Escapes the 5 reserved XML characters (& < > " ') in `s`, for build_votable_xml.
 	static std::string xml_escape(const std::string &s)
 	{
@@ -2285,6 +2317,8 @@ extern "C"
 		return std::make_shared<arrow::KeyValueMetadata>(keys, values);
 	}
 
+	// ==== Writer lifecycle (create/options) ====
+	//
 	// Creates filename and returns an opaque handle to a new parquet writer for it.
 	void *create_parquet_writer(const char *filename)
 	{
@@ -2378,6 +2412,8 @@ extern "C"
 		*patch = PARQUET_VERSION_PATCH;
 	}
 
+	// ==== Reader lifecycle (create/prefetch/qc/sample/filter/introspection) ====
+	//
 	// Opens the file and parses its footer/schema only -- no column's actual
 	// data is read from disk here. FileReaderBuilder::Open/Build touch just
 	// enough of the file to learn the schema and per-row-group metadata
@@ -3929,6 +3965,8 @@ extern "C"
 extern "C"
 {
 
+	// ==== Numeric/string/temporal column reads: scalar, array, row mode, element mode ====
+	//
 	// Shared by both the scalar (parquet_read_*_column) and fixed-size-list
 	// (parquet_read_*_array_column) numeric read paths below: each pair
 	// previously duplicated the exact same per-physical-type widening/
@@ -5051,14 +5089,15 @@ extern "C"
 	// a time into a fixed-width padded Fortran buffer, hands back the decoded column's own
 	// offsets/data/validity buffers directly (see extract_string_buffers), for the caller
 	// (parquet_read.f90) to bulk-append straight into a parquet_string_column via its own
-	// append_buffers. The array is already kept alive indefinitely by get_single_chunk_array's
-	// own column_cache, so -- unlike the row-group-scoped chunk variant below -- no extra pinning
-	// is needed here: the returned pointers stay valid for the reader's whole remaining lifetime,
-	// not just until the next call.
+	// append_buffers. For a plain (non-struct) column the array is already kept alive indefinitely
+	// by get_single_chunk_array's own column_cache; for a dotted struct-field path it is instead a
+	// freshly built, uncached array (see unwrap_struct_path) that would otherwise be destroyed the
+	// moment this function returns -- reader_handle->last_whole_column_buffers_array pins it either
+	// way (cheap, and uniform for both cases), same idea as last_chunk_buffers_array below.
 	void parquet_read_string_column_buffers(void *handle, const char *name,
 		int64_t *nrows_out, int64_t *nchars_out,
 		const void **offsets_out, const void **data_out, const void **validity_out,
-		int8_t *offsets_int32_out)
+		int8_t *offsets_int32_out, int64_t *validity_offset_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
@@ -5070,7 +5109,9 @@ extern "C"
 					" -- STRING_VIEW columns are not supported by this compact buffer read; " // GCOVR_EXCL_LINE
 					"use a fixed-width parquet_read_column instead" : "") + ")"); // GCOVR_EXCL_LINE
 		}
-		extract_string_buffers(array, nrows_out, nchars_out, offsets_out, data_out, validity_out, offsets_int32_out);
+		reader_handle->last_whole_column_buffers_array = array;
+		extract_string_buffers(array, nrows_out, nchars_out, offsets_out, data_out, validity_out, offsets_int32_out,
+			validity_offset_out);
 		mark_read(reader_handle, name, "string", array);
 	}
 
@@ -5682,6 +5723,8 @@ extern "C"
 extern "C"
 {
 
+	// ==== Chunked (row-group-scoped) column reads ====
+	//
 	// parquet_read_{int32,int64,float32,float64,bool8,string}_column_chunk are the direct targets
 	// of parquet_read_column_chunk -- the row-group-scoped counterpart of parquet_read_*_column
 	// (see get_row_group_chunk_array, above), for reading a large column one row group at a time
@@ -5803,7 +5846,7 @@ extern "C"
 	void parquet_read_string_column_chunk_buffers(void *handle, const char *name, int64_t row_group,
 		int64_t *nrows_out, int64_t *nchars_out,
 		const void **offsets_out, const void **data_out, const void **validity_out,
-		int8_t *offsets_int32_out)
+		int8_t *offsets_int32_out, int64_t *validity_offset_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_row_group_chunk_array(reader_handle, name, row_group, "parquet_read_column_chunk");
@@ -5816,7 +5859,8 @@ extern "C"
 					"use a fixed-width parquet_read_column instead" : "") + ")"); // GCOVR_EXCL_LINE
 		}
 		reader_handle->last_chunk_buffers_array = array;
-		extract_string_buffers(array, nrows_out, nchars_out, offsets_out, data_out, validity_out, offsets_int32_out);
+		extract_string_buffers(array, nrows_out, nchars_out, offsets_out, data_out, validity_out, offsets_int32_out,
+			validity_offset_out);
 	}
 
 	// Reads row group `row_group`'s full vector int32 column `name` into `data`.
@@ -5945,6 +5989,8 @@ extern "C"
 		}
 	}
 
+	// ==== Schema-less writer: column/table metadata declaration ====
+	//
 	// Declares one column's schema metadata on a schema-less writer, growing fields/arrays to match.
 	void parquet_add_column_metadata(
 		void *handle,
@@ -6196,6 +6242,8 @@ static void append_typed_column_chunk(void *handle, const char *name, const Valu
 extern "C"
 {
 
+	// ==== Whole-column append (writer, one row group's full column at a time) ====
+	//
 	// Appends one int32 column's values (scalar or, for col_size > 1, fixed-size-list) to `handle`.
 	void parquet_append_int32_column(void *handle, const char *name, const int32_t *data, int64_t nrows, int64_t col_size, const int8_t *valid_in)
 	{
@@ -6377,7 +6425,16 @@ extern "C"
 		const int64_t *offsets, const char *data, const uint8_t *validity)
 	{
 		auto writer_handle = as_handle(handle);
-		(void)nchars; // implied by offsets[nrows]; kept as an argument for a self-describing C signature.
+		if (nrows > 0 && nchars != offsets[nrows])
+		{ // GCOVR_EXCL_START -- defensive backstop: the only caller (parquet_strings.f90's
+		  // raw_buffers) always derives nchars/offsets from the same column state, so this cannot
+		  // currently be triggered through the public API; guards against a future caller/refactor
+		  // passing an inconsistent pair instead of trusting offsets silently.
+			report_fatal_error("parquet_write_column", "column '" + std::string(name) + "': nchars (" +
+				std::to_string(nchars) + ") does not match offsets[nrows] (" +
+				std::to_string(offsets[nrows]) + ")");
+		}
+		// GCOVR_EXCL_STOP
 
 		arrow::LargeStringBuilder builder;
 		arrow::Status status;
@@ -6612,7 +6669,16 @@ extern "C"
 		const int64_t *offsets, const char *data, const uint8_t *validity)
 	{
 		auto writer_handle = as_handle(handle);
-		(void)nchars; // implied by offsets[nrows]; kept as an argument for a self-describing C signature.
+		if (nrows > 0 && nchars != offsets[nrows])
+		{ // GCOVR_EXCL_START -- defensive backstop: the only caller (parquet_strings.f90's
+		  // raw_buffers) always derives nchars/offsets from the same column state, so this cannot
+		  // currently be triggered through the public API; guards against a future caller/refactor
+		  // passing an inconsistent pair instead of trusting offsets silently.
+			report_fatal_error("parquet_write_column_chunk", "column '" + std::string(name) + "': nchars (" +
+				std::to_string(nchars) + ") does not match offsets[nrows] (" +
+				std::to_string(offsets[nrows]) + ")");
+		}
+		// GCOVR_EXCL_STOP
 		bool first_chunk_ever;
 		auto idx = check_column_chunk_write_preconditions(writer_handle, name, first_chunk_ever);
 
@@ -6765,6 +6831,8 @@ extern "C"
 		return resolve_chunk_size(writer_handle);
 	}
 
+	// ==== Test-only debug hooks (error-scenario/fixture support, never public API) ====
+	//
 	// Test-only: overrides g_debug_string_offset_limit (see its own comment for why this is a
 	// process-global) so test/error_scenarios.f90's scenario_large_utf8_roundtrip can exercise
 	// the arrow::large_utf8() write/read path with a tiny fixture instead of needing genuine

@@ -11,6 +11,7 @@
 !> what used to be parquet_metadata_sections.f90 and parquet_metadata_validate.f90.
 submodule (parquet:parquet_metadata) parquet_metadata_maml
     use ieee_arithmetic, only: ieee_is_nan
+    use iso_fortran_env, only: iostat_eor, iostat_end
     implicit none
 
     ! Schema of allowed top-level MAML sections and, for sections whose list
@@ -684,23 +685,58 @@ contains
         call parquet_validate_maml_internal(loaded_maml)
     end procedure parquet_validate_maml_file
 
-    module procedure parquet_load_maml_file
-        character(len=1024), allocatable :: lines(:)
-        character(len=1024) :: line
-        integer :: unit, ios, nlines, i, max_len
+    !> Reads `filename` line-by-line into a freshly allocated `lines(:)`/`nlines`, shared by
+    !! parquet_load_maml_file/parquet_load_qc_maml_file below. Strips a trailing CRLF `char(13)`
+    !! from every line (a `.maml` file authored/edited on Windows retains one after a formatted
+    !! read on a Unix build, which would otherwise survive into every parsed key/value and produce
+    !! a misleading "invalid data_type"-style error naming what looks like a perfectly correct
+    !! value); `error stop`s naming the offending line number if any single line exceeds
+    !! maml_max_line_len characters, rather than silently truncating it with no diagnostic (a
+    !! `read(unit,'(A)')` into a fixed-length variable is defined to discard the remainder of a
+    !! longer record and still report `iostat == 0`) -- see CLAUDE.md's MAML parser robustness
+    !! notes. `context` is the caller's own name, used as the error-message prefix, matching the
+    !! "cannot open file" error below.
+    subroutine parquet_read_maml_source_lines(filename, context, lines, nlines)
+        character(len=*), intent(in) :: filename !! path to the .maml file to read.
+        character(len=*), intent(in) :: context !! caller's own name, used as the error-message prefix.
+        character(len=maml_max_line_len), allocatable, intent(out) :: lines(:) !! one element per source line.
+        integer, intent(out) :: nlines !! number of lines read.
+        character(len=maml_max_line_len) :: line
+        integer :: unit, ios, reclen
+        character(len=32) :: idx_buf, len_buf
 
         nlines = 0
         open(newunit=unit, file=trim(filename), status="old", action="read", iostat=ios)
-        if (ios /= 0) error stop "parquet_load_maml_file: cannot open file: " // trim(filename)
+        if (ios /= 0) error stop trim(context) // ": cannot open file: " // trim(filename)
 
         do
-            read(unit, '(A)', iostat=ios) line
-            if (ios /= 0) exit
+            ! Non-advancing read + size= is the standard idiom to detect a record longer than the
+            ! buffer: ios == 0 (rather than iostat_eor) after the read means the buffer filled
+            ! before the record ended, i.e. more of this line remains unread.
+            read(unit, '(A)', advance='no', size=reclen, iostat=ios) line
+            if (ios == iostat_end) exit
+            if (ios /= 0 .and. ios /= iostat_eor) exit
             nlines = nlines + 1
-            call parquet_append_line(lines, nlines, line)
+            if (ios == 0) then
+                write(idx_buf, '(I0)') nlines
+                write(len_buf, '(I0)') maml_max_line_len
+                error stop trim(context) // ": line " // trim(idx_buf) // " exceeds " // &
+                    trim(len_buf) // " characters: " // trim(filename)
+            end if
+            if (reclen > 0) then
+                if (line(reclen:reclen) == char(13)) reclen = reclen - 1
+            end if
+            call parquet_append_line(lines, nlines, line(1:reclen))
         end do
 
         close(unit)
+    end subroutine parquet_read_maml_source_lines
+
+    module procedure parquet_load_maml_file
+        character(len=maml_max_line_len), allocatable :: lines(:)
+        integer :: nlines, i, max_len
+
+        call parquet_read_maml_source_lines(filename, "parquet_load_maml_file", lines, nlines)
 
         maml%name = trim(filename)
 
@@ -718,22 +754,10 @@ contains
     end procedure parquet_load_maml_file
 
     module procedure parquet_load_qc_maml_file
-        character(len=1024), allocatable :: lines(:)
-        character(len=1024) :: line
-        integer :: unit, ios, nlines, i, max_len
+        character(len=maml_max_line_len), allocatable :: lines(:)
+        integer :: nlines, i, max_len
 
-        nlines = 0
-        open(newunit=unit, file=trim(filename), status="old", action="read", iostat=ios)
-        if (ios /= 0) error stop "parquet_load_qc_maml_file: cannot open file: " // trim(filename)
-
-        do
-            read(unit, '(A)', iostat=ios) line
-            if (ios /= 0) exit
-            nlines = nlines + 1
-            call parquet_append_line(lines, nlines, line)
-        end do
-
-        close(unit)
+        call parquet_read_maml_source_lines(filename, "parquet_load_qc_maml_file", lines, nlines)
 
         schema%maml%name = trim(filename)
 
@@ -773,7 +797,7 @@ contains
     end subroutine parquet_qc_append_empty_rule
 
     module procedure parquet_parse_qc_maml
-        character(len=1024) :: line
+        character(len=maml_max_line_len) :: line
         character(len=:), allocatable :: tline, key, cvalue, raw, errors, miss_lower
         character(len=:), allocatable :: qc_maml_suffix
         logical :: in_fields, have_current, in_qc

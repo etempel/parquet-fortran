@@ -30,7 +30,7 @@ openmp = "*"
 
 ## The concurrency guard
 
-Calling into a *shared* `parquet_writer`/`parquet_reader` from more than one thread at a time (the "not safe" case above) is actively detected and rejected: the second concurrent caller triggers an immediate process abort (`std::abort()`) with a diagnostic on stderr. This is a fail-fast race guard, not a locking mechanism. Sequential, non-overlapping hand-off between threads remains allowed. (This is one of two classes of process-abort failure in this library — see [Error handling](error-handling.html) for the other, Fortran `error stop`.)
+Calling into a *shared* `parquet_writer`/`parquet_reader` from more than one thread at a time (the "not safe" case above) is actively detected and rejected: the second concurrent caller triggers an immediate process abort (`std::abort()`) with a diagnostic on stderr. This is a fail-fast race guard, not a locking mechanism. Sequential, non-overlapping hand-off between threads remains allowed. (This is one of two classes of process-abort failure in this library — see [Error handling](error-handling.html#the-two-failure-classes) for the other, Fortran `error stop`.)
 
 ## Streaming/chunked writes and reads
 

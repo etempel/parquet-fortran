@@ -28,6 +28,8 @@ A [MAML](https://github.com/asgr/MAML-Format) file is YAML. Table-level metadata
 
 If you're new to MAML in this library, focus first on `table:` and `fields:` (`name` + `data_type` for each field). Everything else is optional metadata or advanced behavior.
 
+**A `.maml` source line is limited to 1024 characters** — a longer line (e.g. an unusually long `info:`/`description:`/`keywords:` value, or a long `protected_cols:` list) fails with `error stop` naming the offending line number, rather than being silently truncated. A `.maml` file with Windows-style CRLF line endings is handled transparently (the trailing `\r` is stripped on read) and needs no special handling.
+
 An abridged version of the base example:
 
 ```yaml
@@ -55,6 +57,8 @@ fields:
 - name: myflag
   data_type: boolean
 ```
+
+## The fields: section
 
 Notes on the `fields:` entries:
 
@@ -101,6 +105,8 @@ fields:
 - `user_maml%col_map` (populated by `parquet_validate_user_maml`) exposes the parsed entries for inspection.
 - Since it lives inside `extra:`, `col_map:` does not produce any table-level metadata entry of its own (nor does `protected_cols:`, `extra:`'s other specifically-parsed key — see [Null values](supported-data-types.html#null-values)); anything else nested inside `extra:` is accepted unvalidated and otherwise unused.
 
+## How table-level keys become metadata entries
+
 Table-level keys become parquet metadata entries, with these special mappings:
 
 | Top-level key | Becomes |
@@ -113,5 +119,10 @@ Table-level keys become parquet metadata entries, with these special mappings:
 | any other allowed section, given as a plain-string list (e.g. `survey:`, `author:`, `license:`, ...) | Several entries that all share that key's name (e.g. multiple `list_key` entries with the same name). |
 | any other allowed section, given as a list of *maps* | **Not** specially handled: only its first sub-key ends up captured as a raw, unparsed string, and the rest of that entry's sub-keys are silently dropped. Use `keyarray:` for arbitrary structured metadata instead. |
 | `extra:` | Opaque to table-level metadata (produces no metadata entry of its own), but not ignored: `col_map:` and `protected_cols:` are specifically parsed out of it — see [Renaming columns for output with `col_map:`](#renaming-columns-for-output-with-col_map) and [Null values](supported-data-types.html#null-values). Anything else nested inside `extra:` is accepted unvalidated and otherwise unused. |
+
+Every entry in this table is read back on the read side with `parquet_get_metadata` (see
+[Reading table metadata with `parquet_get_metadata`](reading.html#reading-table-metadata-with-parquet_get_metadata)),
+and a schema can add further entries at runtime that were never in the MAML file at all — see
+[Runtime table metadata](building-schema-in-code.html#runtime-table-metadata-schemaadd_metadata-and-schemaclear_metadata).
 
 In short: validation is strict for the known schema (`fields`, `keyarray`, `DOIs`, etc.), permissive for `extra:`, and intentionally shallow beyond the explicitly registered nested blocks. (If you're contributing to `parquet-fortran` itself and want to extend its MAML structure, see [CONTRIBUTING.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CONTRIBUTING.md#extending-the-maml-schema).)

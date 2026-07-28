@@ -48,6 +48,8 @@ contains
             new_unittest("strip_all / trim_all in place", test_strip_all_trim_all), &
             new_unittest("validate and statistics", test_validate_stats), &
             new_unittest("interop append_buffers (int64/int32/validity/merge)", test_interop_buffers), &
+            new_unittest("interop append_buffers validity_offset_bits (sliced-source rebase)", &
+                test_interop_buffers_validity_offset), &
             new_unittest("interop raw_buffers export counts", test_raw_buffers), &
             new_unittest("growth over many rows", test_large_growth), &
             new_unittest("first element shortest regression", test_first_shortest), &
@@ -801,6 +803,50 @@ contains
         b = ibset(b, 0)
         b = ibset(b, 3)
     end function ibits_byte
+    !
+    !> append_buffers' validity_offset_bits argument (feature_doc.md point 4's "Rebase validity"
+    !! fix): when a source array is a genuinely sliced child (e.g. a struct-nested leaf resolved
+    !! through a non-zero-offset StructArray::field(), see parquet_wrapper.cpp's
+    !! extract_string_buffers/unwrap_struct_path comments), Arrow's validity bitmap is not
+    !! pre-rebased the way offsets/data are -- element 1 of the logical slice starts at bit
+    !! `validity_offset_bits`, not bit 0. This test constructs one validity byte where the first 3
+    !! bits (deliberately the extreme/leading case, per this project's "sized/typed from the first
+    !! element" fixture convention) belong to elements *before* the slice and are set to the
+    !! opposite pattern of the real data, so a caller that ignored validity_offset_bits (reading
+    !! from bit 0 instead of bit 3) would read back the wrong null pattern rather than merely
+    !! landing on a coincidentally-correct answer.
+    subroutine test_interop_buffers_validity_offset(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: col
+        integer(int64), target :: off(5)
+        character(len=1), target :: dat(4)
+        integer(int8), target :: valbyte
+        character(len=:), allocatable :: s
+        ! Bits 0-2 (before the slice) = 1,1,1 -- the opposite of the real elements 1/4 (null) --
+        ! so an implementation that forgot the offset and read from bit 0 would see rows 1/4 as
+        ! valid instead of null. Bits 3-6 (the real elements) = 0(null),1(valid),1(valid),0(null).
+        valbyte = 0_int8
+        valbyte = ibset(valbyte, 0)
+        valbyte = ibset(valbyte, 1)
+        valbyte = ibset(valbyte, 2)
+        valbyte = ibset(valbyte, 4)
+        valbyte = ibset(valbyte, 5)
+        ! 4 elements: "" (null), "de", "fg", "" (null).
+        off = [0_int64, 0_int64, 2_int64, 4_int64, 4_int64]
+        dat = [character(len=1) :: "d", "e", "f", "g"]
+        call col%append_buffers(4_int64, 4_int64, c_loc(off), c_loc(dat), c_loc(valbyte), .false., &
+            validity_offset_bits=3_int64)
+        call check(error, col%size() == 4, "validity_offset_bits: size")
+        if (allocated(error)) return
+        call check(error, col%is_null(1) .and. (.not. col%is_null(2)) .and. (.not. col%is_null(3)) &
+            .and. col%is_null(4), "validity_offset_bits: null pattern honors the bit offset, not bit 0")
+        if (allocated(error)) return
+        call col%get(2, s)
+        call check(error, s == "de", "validity_offset_bits: row 2 content")
+        if (allocated(error)) return
+        call col%get(3, s)
+        call check(error, s == "fg", "validity_offset_bits: row 3 content")
+    end subroutine test_interop_buffers_validity_offset
     !
     subroutine test_raw_buffers(error)
         type(error_type), allocatable, intent(out) :: error

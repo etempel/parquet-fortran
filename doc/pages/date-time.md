@@ -253,8 +253,8 @@ with finer precision than the target unit `error stop`s (a nanosecond-precision 
 value written into a microsecond column, say) rather than silently truncating.
 
 To declare a specific unit, use a MAML `data_type` token — see
-[Building a schema in code](building-schema-in-code.html) or
-[The MAML metadata format](maml-format.html):
+[Building a schema in code](building-schema-in-code.html#building-a-schema-with-init-and-add_field) or
+[The MAML metadata format](maml-format.html#the-fields-section):
 
 ```yaml
 fields:
@@ -355,5 +355,5 @@ above.
   [Difference and offset arithmetic](#difference-and-offset-arithmetic) above for the timestamp
   arithmetic this bullet used to mention as missing — that is now implemented.)
 - `LIST`/`MAP` element types are unrelated to this page; see
-  [Supported data types](supported-data-types.html) for the library's current struct/list/map
+  [Supported data types](supported-data-types.html#reading-a-nested-struct-field) for the library's current struct/list/map
   coverage.

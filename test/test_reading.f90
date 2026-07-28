@@ -13,6 +13,7 @@
 module test_reading
     use parquet
     use parquet_maml_base
+    use parquet_strings, only : parquet_string_column
     use iso_fortran_env, only : int32, int64, real32, real64
     use testdrive, only : new_unittest, unittest_type, error_type, check, test_failed
     use test_errors, only : check_scenario_exit_status
@@ -75,6 +76,8 @@ contains
                 test_filter_extended_type_decimal32), &
             new_unittest("read nested struct-field scalar/vector leaves (arbitrary depth, combined nulls)", &
                 test_read_nested_struct_leaves), &
+            new_unittest("read a struct-nested string leaf into a compact parquet_string_column", &
+                test_read_nested_struct_string_compact), &
             new_unittest("row filter on a nested struct-field leaf", &
                 test_filter_nested_struct_leaf), &
             new_unittest("date/time/timestamp: row-mode and element-mode reads on a vector column", &
@@ -116,7 +119,8 @@ contains
         integer:: nrows, nelem, ntot
         !
         inquire(file=in_file, exist=exists)
-        call check(error, exists)
+        call check(error, exists, &
+            "exists")
         if (allocated(error)) then
             call test_failed(error, "input parquet file missing: expected test_run/test_simple.parquet")
             return
@@ -125,7 +129,8 @@ contains
         call parquet_open_reader(reader, in_file)
         call parquet_get_nrows(reader, nrows)
         !
-        call check(error, nrows == 5)
+        call check(error, nrows == 5, &
+            "nrows == 5")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "unexpected number of rows in simple parquet file")
@@ -136,7 +141,8 @@ contains
         allocate(xdata32(nrows))
         !
         call parquet_read_column(reader, "colx", xdata)
-        call check(error, xdata(1) == 1.0_real64 .and. xdata(size(xdata)) == real(nrows, kind=real64))
+        call check(error, xdata(1) == 1.0_real64 .and. xdata(size(xdata)) == real(nrows, kind=real64), &
+            "xdata(1) == 1.0_real64 .and. xdata(size(xdata)) == real(nrows, kind=real64)")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "colx column contents do not match expected values")
@@ -144,7 +150,8 @@ contains
         end if
 
         call parquet_read_column(reader, "colx", xdata32)
-        call check(error, xdata32(1) == 1.0_real32 .and. xdata32(size(xdata32)) == real(nrows, kind=real32))
+        call check(error, xdata32(1) == 1.0_real32 .and. xdata32(size(xdata32)) == real(nrows, kind=real32), &
+            "xdata32(1) == 1.0_real32 .and. xdata32(size(xdata32)) == real(nrows, kind=real32)")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "colx column contents do not match expected values (xdata32)")
@@ -154,7 +161,8 @@ contains
         call parquet_get_col_size(reader, "arr", nelem)
         call parquet_get_column_total_elements(reader, "arr", ntot)
 
-        call check(error, nelem == 3 .and. ntot == 15)
+        call check(error, nelem == 3 .and. ntot == 15, &
+            "nelem == 3 .and. ntot == 15")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "unexpected column size or total elements for arr")
@@ -163,7 +171,8 @@ contains
 
         allocate(arr(3, nrows))
         call parquet_read_column(reader, "arr", arr)
-        call check(error, arr(1,1) == 2.0_real64 .and. arr(3,nrows) == real(nrows + 3, kind=real64))
+        call check(error, arr(1,1) == 2.0_real64 .and. arr(3,nrows) == real(nrows + 3, kind=real64), &
+            "arr(1,1) == 2.0_real64 .and. arr(3,nrows) == real(nrows + 3, kind=real64)")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "arr column contents do not match expected values")
@@ -194,7 +203,8 @@ contains
         character(len=*), parameter :: in_file = "test_run/test_parquet.parquet"
 
         inquire(file=in_file, exist=exists)
-        call check(error, exists)
+        call check(error, exists, &
+            "exists")
         if (allocated(error)) then
             call test_failed(error, "input parquet file missing: expected test_run/test_parquet.parquet")
             return
@@ -203,7 +213,8 @@ contains
         call parquet_open_reader(reader, in_file)
         call parquet_get_nrows(reader, nrows)
 
-        call check(error, nrows == 20_int64)
+        call check(error, nrows == 20_int64, &
+            "nrows == 20_int64")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "unexpected number of rows in parquet file")
@@ -215,7 +226,8 @@ contains
         allocate(ids(n))
         call parquet_read_column(reader, "id0", ids)
 
-        call check(error, ids(1) == 1_int32 .and. ids(size(ids)) == int(nrows, kind=int32))
+        call check(error, ids(1) == 1_int32 .and. ids(size(ids)) == int(nrows, kind=int32), &
+            "ids(1) == 1_int32 .and. ids(size(ids)) == int(nrows, kind=int32)")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "id0 column contents do not match expected values")
@@ -226,16 +238,18 @@ contains
         call parquet_read_column(reader, "id0", ids_r32)
         call parquet_read_column(reader, "id0", ids_r64)
 
-        call check(error, abs(ids_r32(1) - 1.0_real32) < 1.0e-6_real32 .and. &
-                          abs(ids_r32(size(ids_r32)) - real(nrows, kind=real32)) < 1.0e-6_real32)
+        call check(error, abs(ids_r32(1) - 1.0_real32) < 1.0e-6_real32 .and. abs(ids_r32(size(ids_r32)) - real(nrows,kind=real32)) &
+            < 1.0e-6_real32, &
+            "abs(ids_r32(1) - 1.0_real32) < 1.0e-6_real32 .and. abs(ids_r32(size(ids_r32)) - real(nrows, kind=real32)) < 1.0e-6_re")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "id0 int32->real32 conversion failed")
             return
         end if
 
-        call check(error, abs(ids_r64(1) - 1.0_real64) < 1.0d-12 .and. &
-                          abs(ids_r64(size(ids_r64)) - real(nrows, kind=real64)) < 1.0d-12)
+        call check(error, abs(ids_r64(1) - 1.0_real64) < 1.0d-12 .and. abs(ids_r64(size(ids_r64)) - real(nrows,kind=real64)) < &
+            1.0d-12, &
+            "abs(ids_r64(1) - 1.0_real64) < 1.0d-12 .and. abs(ids_r64(size(ids_r64)) - real(nrows, kind=real64)) < 1.0d-12")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "id0 int32->real64 conversion failed")
@@ -259,84 +273,96 @@ contains
         call parquet_read_column(reader, "myflag", flag)
         call parquet_read_column(reader, "flag_array", flag_array)
 
-        call check(error, idarr(1,1) == 11_int64 .and. idarr(2,n) == 202_int64)
+        call check(error, idarr(1,1) == 11_int64 .and. idarr(2,n) == 202_int64, &
+            "idarr(1,1) == 11_int64 .and. idarr(2,n) == 202_int64")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "idarr column values do not match expected pattern")
             return
         end if
 
-        call check(error, index(trim(name(1)), "var_Obj") == 1 .and. index(trim(name(n)), "var_Obj") == 1)
+        call check(error, index(trim(name(1)), "var_Obj") == 1 .and. index(trim(name(n)), "var_Obj") == 1, &
+            "index(trim(name(1)), ""var_Obj"") == 1 .and. index(trim(name(n)), ""var_Obj"") == 1")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "name column values do not have expected prefix")
             return
         end if
 
-        call check(error, trim(name_arr(1,1)) == "N1" .and. trim(name_arr(3,n)) == "N3")
+        call check(error, trim(name_arr(1,1)) == "N1" .and. trim(name_arr(3,n)) == "N3", &
+            "trim(name_arr(1,1)) == ""N1"" .and. trim(name_arr(3,n)) == ""N3""")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "name_arr column values do not match expected values")
             return
         end if
 
-        call check(error, idlong(1) == 1000_int64 .and. idlong(n) == 20000_int64)
+        call check(error, idlong(1) == 1000_int64 .and. idlong(n) == 20000_int64, &
+            "idlong(1) == 1000_int64 .and. idlong(n) == 20000_int64")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "idlong column values do not match expected values")
             return
         end if
 
-        call check(error, abs(value(1) - 10.0_real32) < 1.0e-6_real32 .and. abs(value(n) - 200.0_real32) < 1.0e-6_real32)
+        call check(error, abs(value(1) - 10.0_real32) < 1.0e-6_real32 .and. abs(value(n) - 200.0_real32) < 1.0e-6_real32, &
+            "abs(value(1) - 10.0_real32) < 1.0e-6_real32 .and. abs(value(n) - 200.0_real32) < 1.0e-6_real32")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "value column values do not match expected values")
             return
         end if
 
-        call check(error, abs(value_64(1) - 20.0_real64) < 1.0d-12 .and. abs(value_64(n) - 400.0_real64) < 1.0d-12)
+        call check(error, abs(value_64(1) - 20.0_real64) < 1.0d-12 .and. abs(value_64(n) - 400.0_real64) < 1.0d-12, &
+            "abs(value_64(1) - 20.0_real64) < 1.0d-12 .and. abs(value_64(n) - 400.0_real64) < 1.0d-12")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "value_64 column values do not match expected values")
             return
         end if
 
-        call check(error, abs(arr(1,1) - 2.0_real32) < 1.0e-6_real32 .and. abs(arr(5,n) - 25.0_real32) < 1.0e-6_real32)
+        call check(error, abs(arr(1,1) - 2.0_real32) < 1.0e-6_real32 .and. abs(arr(5,n) - 25.0_real32) < 1.0e-6_real32, &
+            "abs(arr(1,1) - 2.0_real32) < 1.0e-6_real32 .and. abs(arr(5,n) - 25.0_real32) < 1.0e-6_real32")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "arr column values do not match expected values")
             return
         end if
 
-        call check(error, abs(arrlong(1,1) - 11.0_real64) < 1.0d-12 .and. abs(arrlong(5,n) - 205.0_real64) < 1.0d-12)
+        call check(error, abs(arrlong(1,1) - 11.0_real64) < 1.0d-12 .and. abs(arrlong(5,n) - 205.0_real64) < 1.0d-12, &
+            "abs(arrlong(1,1) - 11.0_real64) < 1.0d-12 .and. abs(arrlong(5,n) - 205.0_real64) < 1.0d-12")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "arrlong column values do not match expected values")
             return
         end if
 
-        call check(error, abs(val(1) - 0.1_real32) < 1.0e-6_real32 .and. abs(val(10) - 1.0_real32) < 1.0e-6_real32)
+        call check(error, abs(val(1) - 0.1_real32) < 1.0e-6_real32 .and. abs(val(10) - 1.0_real32) < 1.0e-6_real32, &
+            "abs(val(1) - 0.1_real32) < 1.0e-6_real32 .and. abs(val(10) - 1.0_real32) < 1.0e-6_real32")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "val column values do not match expected values")
             return
         end if
 
-        call check(error, iarr(1,1) == 2_int32 .and. iarr(3,n) == 23_int32)
+        call check(error, iarr(1,1) == 2_int32 .and. iarr(3,n) == 23_int32, &
+            "iarr(1,1) == 2_int32 .and. iarr(3,n) == 23_int32")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "iarr column values do not match expected values")
             return
         end if
 
-        call check(error, (.not. flag(1)) .and. flag(n))
+        call check(error, (.not. flag(1)) .and. flag(n), &
+            "(.not. flag(1)) .and. flag(n)")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "myflag column values do not match expected pattern")
             return
         end if
 
-        call check(error, flag_array(1,1) .and. flag_array(6,n))
+        call check(error, flag_array(1,1) .and. flag_array(6,n), &
+            "flag_array(1,1) .and. flag_array(6,n)")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "flag_array column values do not match expected pattern")
@@ -355,7 +381,8 @@ contains
         character(len=*), parameter :: in_file = "test_run/test_parquet.parquet"
 
         inquire(file=in_file, exist=exists)
-        call check(error, exists)
+        call check(error, exists, &
+            "exists")
         if (allocated(error)) then
             call test_failed(error, "input parquet file missing: expected test_run/test_parquet.parquet")
             return
@@ -364,7 +391,8 @@ contains
         call parquet_open_reader(reader, in_file)
         call parquet_get_nrows(reader, nrows)
 
-        call check(error, nrows == 20_int64)
+        call check(error, nrows == 20_int64, &
+            "nrows == 20_int64")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "unexpected number of rows in parquet file")
@@ -372,7 +400,8 @@ contains
         end if
 
         call parquet_get_col_size(reader, "arr", col_size)
-        call check(error, col_size == 5)
+        call check(error, col_size == 5, &
+            "col_size == 5")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "unexpected column array size for arr")
@@ -380,7 +409,8 @@ contains
         end if
 
         call parquet_get_col_size(reader, "idarr", col_size)
-        call check(error, col_size == 2)
+        call check(error, col_size == 2, &
+            "col_size == 2")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "unexpected column array size for idarr")
@@ -388,7 +418,8 @@ contains
         end if
 
         call parquet_get_col_size(reader, "iarr", col_size)
-        call check(error, col_size == 3)
+        call check(error, col_size == 3, &
+            "col_size == 3")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "unexpected column array size for iarr")
@@ -396,7 +427,8 @@ contains
         end if
 
         call parquet_get_col_size(reader, "flag_array", col_size)
-        call check(error, col_size == 6)
+        call check(error, col_size == 6, &
+            "col_size == 6")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "unexpected column array size for flag_array")
@@ -404,7 +436,8 @@ contains
         end if
 
         call parquet_get_col_size(reader, "id0", col_size)
-        call check(error, col_size == 1)
+        call check(error, col_size == 1, &
+            "col_size == 1")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "unexpected column array size for id0")
@@ -412,7 +445,8 @@ contains
         end if
 
         call parquet_get_column_total_elements(reader, "arr", nelem)
-        call check(error, nelem == 100_int64)
+        call check(error, nelem == 100_int64, &
+            "nelem == 100_int64")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "unexpected total element count for arr")
@@ -420,7 +454,8 @@ contains
         end if
 
         call parquet_get_column_total_elements(reader, "id0", nelem)
-        call check(error, nelem == 20_int64)
+        call check(error, nelem == 20_int64, &
+            "nelem == 20_int64")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "unexpected total element count for id0")
@@ -428,7 +463,8 @@ contains
         end if
 
         call parquet_get_string_length(reader, "name", strlen_max)
-        call check(error, strlen_max == 10)
+        call check(error, strlen_max == 10, &
+            "strlen_max == 10")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "unexpected max string length for name")
@@ -436,7 +472,8 @@ contains
         end if
 
         call parquet_get_string_length(reader, "name_arr", strlen_max)
-        call check(error, strlen_max == 2)
+        call check(error, strlen_max == 2, &
+            "strlen_max == 2")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "unexpected max string length for name_arr")
@@ -459,7 +496,8 @@ contains
         character(len=*), parameter :: in_file = "test_run/test_parquet.parquet"
 
         inquire(file=in_file, exist=exists)
-        call check(error, exists)
+        call check(error, exists, &
+            "exists")
         if (allocated(error)) then
             call test_failed(error, "input parquet file missing: expected test_run/test_parquet.parquet")
             return
@@ -468,7 +506,8 @@ contains
         call parquet_open_reader(reader, in_file)
         call parquet_get_nrows(reader, nrows)
 
-        call check(error, nrows == 20_int64)
+        call check(error, nrows == 20_int64, &
+            "nrows == 20_int64")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "unexpected number of rows in parquet file")
@@ -478,7 +517,8 @@ contains
         n = int(nrows)
 
         call parquet_read_array_row_mode(reader, "arr", arr_row, 1)
-        call check(error, abs(arr_row(1) - 2.0_real32) < 1.0e-6_real32 .and. abs(arr_row(5) - 6.0_real32) < 1.0e-6_real32)
+        call check(error, abs(arr_row(1) - 2.0_real32) < 1.0e-6_real32 .and. abs(arr_row(5) - 6.0_real32) < 1.0e-6_real32, &
+            "abs(arr_row(1) - 2.0_real32) < 1.0e-6_real32 .and. abs(arr_row(5) - 6.0_real32) < 1.0e-6_real32")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "arr row_mode values do not match expected values for row 1")
@@ -486,7 +526,8 @@ contains
         end if
 
         call parquet_read_array_row_mode(reader, "arr", arr_row, n)
-        call check(error, abs(arr_row(1) - 21.0_real32) < 1.0e-6_real32 .and. abs(arr_row(5) - 25.0_real32) < 1.0e-6_real32)
+        call check(error, abs(arr_row(1) - 21.0_real32) < 1.0e-6_real32 .and. abs(arr_row(5) - 25.0_real32) < 1.0e-6_real32, &
+            "abs(arr_row(1) - 21.0_real32) < 1.0e-6_real32 .and. abs(arr_row(5) - 25.0_real32) < 1.0e-6_real32")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "arr row_mode values do not match expected values for last row")
@@ -494,7 +535,8 @@ contains
         end if
 
         call parquet_read_array_row_mode(reader, "idarr", idarr_row, 1)
-        call check(error, idarr_row(1) == 11_int64 .and. idarr_row(2) == 12_int64)
+        call check(error, idarr_row(1) == 11_int64 .and. idarr_row(2) == 12_int64, &
+            "idarr_row(1) == 11_int64 .and. idarr_row(2) == 12_int64")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "idarr row_mode values do not match expected values for row 1")
@@ -502,7 +544,8 @@ contains
         end if
 
         call parquet_read_array_row_mode(reader, "idarr", idarr_row, n)
-        call check(error, idarr_row(1) == 201_int64 .and. idarr_row(2) == 202_int64)
+        call check(error, idarr_row(1) == 201_int64 .and. idarr_row(2) == 202_int64, &
+            "idarr_row(1) == 201_int64 .and. idarr_row(2) == 202_int64")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "idarr row_mode values do not match expected values for last row")
@@ -510,7 +553,8 @@ contains
         end if
 
         call parquet_read_array_element_mode(reader, "arr", arr_elem, 1)
-        call check(error, abs(arr_elem(1) - 2.0_real32) < 1.0e-6_real32 .and. abs(arr_elem(n) - 21.0_real32) < 1.0e-6_real32)
+        call check(error, abs(arr_elem(1) - 2.0_real32) < 1.0e-6_real32 .and. abs(arr_elem(n) - 21.0_real32) < 1.0e-6_real32, &
+            "abs(arr_elem(1) - 2.0_real32) < 1.0e-6_real32 .and. abs(arr_elem(n) - 21.0_real32) < 1.0e-6_real32")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "arr element_mode values do not match expected values for element 1")
@@ -518,7 +562,8 @@ contains
         end if
 
         call parquet_read_array_element_mode(reader, "arr", arr_elem, 5)
-        call check(error, abs(arr_elem(1) - 6.0_real32) < 1.0e-6_real32 .and. abs(arr_elem(n) - 25.0_real32) < 1.0e-6_real32)
+        call check(error, abs(arr_elem(1) - 6.0_real32) < 1.0e-6_real32 .and. abs(arr_elem(n) - 25.0_real32) < 1.0e-6_real32, &
+            "abs(arr_elem(1) - 6.0_real32) < 1.0e-6_real32 .and. abs(arr_elem(n) - 25.0_real32) < 1.0e-6_real32")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "arr element_mode values do not match expected values for element 5")
@@ -526,7 +571,8 @@ contains
         end if
 
         call parquet_read_array_element_mode(reader, "idarr", idarr_elem, 1)
-        call check(error, idarr_elem(1) == 11_int64 .and. idarr_elem(n) == 201_int64)
+        call check(error, idarr_elem(1) == 11_int64 .and. idarr_elem(n) == 201_int64, &
+            "idarr_elem(1) == 11_int64 .and. idarr_elem(n) == 201_int64")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "idarr element_mode values do not match expected values for element 1")
@@ -534,7 +580,8 @@ contains
         end if
 
         call parquet_read_array_element_mode(reader, "idarr", idarr_elem, 2)
-        call check(error, idarr_elem(1) == 12_int64 .and. idarr_elem(n) == 202_int64)
+        call check(error, idarr_elem(1) == 12_int64 .and. idarr_elem(n) == 202_int64, &
+            "idarr_elem(1) == 12_int64 .and. idarr_elem(n) == 202_int64")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "idarr element_mode values do not match expected values for element 2")
@@ -564,7 +611,8 @@ contains
         character(len=*), parameter :: in_file = "test_run/test_parquet.parquet"
 
         inquire(file=in_file, exist=exists)
-        call check(error, exists)
+        call check(error, exists, &
+            "exists")
         if (allocated(error)) then
             call test_failed(error, "input parquet file missing: expected test_run/test_parquet.parquet")
             return
@@ -572,7 +620,8 @@ contains
 
         call parquet_open_reader(reader, in_file)
         call parquet_get_nrows(reader, nrows)
-        call check(error, nrows == 20_int64)
+        call check(error, nrows == 20_int64, &
+            "nrows == 20_int64")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "unexpected number of rows in parquet file")
@@ -582,7 +631,8 @@ contains
 
         ! --- int32 vector "iarr" (col_size 3): row i = [i+1, i+2, i+3] ---
         call parquet_read_array_row_mode(reader, "iarr", iarr_row, 1)
-        call check(error, all(iarr_row == [2_int32, 3_int32, 4_int32]))
+        call check(error, all(iarr_row == [2_int32, 3_int32, 4_int32]), &
+            "all(iarr_row == [2_int32, 3_int32, 4_int32])")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "iarr row_mode values do not match expected values for row 1")
@@ -590,7 +640,8 @@ contains
         end if
 
         call parquet_read_array_row_mode(reader, "iarr", iarr_row, n)
-        call check(error, all(iarr_row == [21_int32, 22_int32, 23_int32]))
+        call check(error, all(iarr_row == [21_int32, 22_int32, 23_int32]), &
+            "all(iarr_row == [21_int32, 22_int32, 23_int32])")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "iarr row_mode values do not match expected values for last row")
@@ -598,7 +649,8 @@ contains
         end if
 
         call parquet_read_array_element_mode(reader, "iarr", iarr_elem, 1)
-        call check(error, iarr_elem(1) == 2_int32 .and. iarr_elem(n) == 21_int32)
+        call check(error, iarr_elem(1) == 2_int32 .and. iarr_elem(n) == 21_int32, &
+            "iarr_elem(1) == 2_int32 .and. iarr_elem(n) == 21_int32")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "iarr element_mode values do not match expected values for element 1")
@@ -606,7 +658,8 @@ contains
         end if
 
         call parquet_read_array_element_mode(reader, "iarr", iarr_elem, 3)
-        call check(error, iarr_elem(1) == 4_int32 .and. iarr_elem(n) == 23_int32)
+        call check(error, iarr_elem(1) == 4_int32 .and. iarr_elem(n) == 23_int32, &
+            "iarr_elem(1) == 4_int32 .and. iarr_elem(n) == 23_int32")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "iarr element_mode values do not match expected values for element 3")
@@ -615,8 +668,8 @@ contains
 
         ! --- float64 vector "arrlong" (col_size 5): row i = [i*10+1 .. i*10+5] ---
         call parquet_read_array_row_mode(reader, "arrlong", arrlong_row, 1)
-        call check(error, all(abs(arrlong_row - [11.0_real64, 12.0_real64, 13.0_real64, &
-            14.0_real64, 15.0_real64]) < 1.0e-9_real64))
+        call check(error, all(abs(arrlong_row - [11.0_real64,12.0_real64,13.0_real64,14.0_real64,15.0_real64]) < 1.0e-9_real64), &
+            "all(abs(arrlong_row - [11.0_real64, 12.0_real64, 13.0_real64, 14.0_real64, 15.0_real64]) < 1.0e-9_real64)")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "arrlong row_mode values do not match expected values for row 1")
@@ -624,8 +677,9 @@ contains
         end if
 
         call parquet_read_array_row_mode(reader, "arrlong", arrlong_row, n)
-        call check(error, all(abs(arrlong_row - [201.0_real64, 202.0_real64, 203.0_real64, &
-            204.0_real64, 205.0_real64]) < 1.0e-9_real64))
+        call check(error, all(abs(arrlong_row - [201.0_real64,202.0_real64,203.0_real64,204.0_real64,205.0_real64]) < &
+            1.0e-9_real64), &
+            "all(abs(arrlong_row - [201.0_real64, 202.0_real64, 203.0_real64, 204.0_real64, 205.0_real64]) < 1.0e-9_real64)")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "arrlong row_mode values do not match expected values for last row")
@@ -633,8 +687,9 @@ contains
         end if
 
         call parquet_read_array_element_mode(reader, "arrlong", arrlong_elem, 1)
-        call check(error, abs(arrlong_elem(1) - 11.0_real64) < 1.0e-9_real64 .and. &
-                          abs(arrlong_elem(n) - 201.0_real64) < 1.0e-9_real64)
+        call check(error, abs(arrlong_elem(1) - 11.0_real64) < 1.0e-9_real64 .and. abs(arrlong_elem(n) - 201.0_real64) < &
+            1.0e-9_real64, &
+            "abs(arrlong_elem(1) - 11.0_real64) < 1.0e-9_real64 .and. abs(arrlong_elem(n) - 201.0_real64) < 1.0e-9_real64")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "arrlong element_mode values do not match expected values for element 1")
@@ -642,8 +697,9 @@ contains
         end if
 
         call parquet_read_array_element_mode(reader, "arrlong", arrlong_elem, 5)
-        call check(error, abs(arrlong_elem(1) - 15.0_real64) < 1.0e-9_real64 .and. &
-                          abs(arrlong_elem(n) - 205.0_real64) < 1.0e-9_real64)
+        call check(error, abs(arrlong_elem(1) - 15.0_real64) < 1.0e-9_real64 .and. abs(arrlong_elem(n) - 205.0_real64) < &
+            1.0e-9_real64, &
+            "abs(arrlong_elem(1) - 15.0_real64) < 1.0e-9_real64 .and. abs(arrlong_elem(n) - 205.0_real64) < 1.0e-9_real64")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "arrlong element_mode values do not match expected values for element 5")
@@ -652,7 +708,8 @@ contains
 
         ! --- boolean vector "flag_array" (col_size 6): row i = [mod(i+j,2)==0, j=1..6] ---
         call parquet_read_array_row_mode(reader, "flag_array", flag_row, 1)
-        call check(error, all(flag_row .eqv. [.true., .false., .true., .false., .true., .false.]))
+        call check(error, all(flag_row .eqv. [.true., .false., .true., .false., .true., .false.]), &
+            "all(flag_row .eqv. [.true., .false., .true., .false., .true., .false.])")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "flag_array row_mode values do not match expected values for row 1")
@@ -660,7 +717,8 @@ contains
         end if
 
         call parquet_read_array_row_mode(reader, "flag_array", flag_row, n)
-        call check(error, all(flag_row .eqv. [.false., .true., .false., .true., .false., .true.]))
+        call check(error, all(flag_row .eqv. [.false., .true., .false., .true., .false., .true.]), &
+            "all(flag_row .eqv. [.false., .true., .false., .true., .false., .true.])")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "flag_array row_mode values do not match expected values for last row")
@@ -668,7 +726,8 @@ contains
         end if
 
         call parquet_read_array_element_mode(reader, "flag_array", flag_elem, 1)
-        call check(error, flag_elem(1) .eqv. .true. .and. flag_elem(n) .eqv. .false.)
+        call check(error, flag_elem(1) .eqv. .true. .and. flag_elem(n) .eqv. .false., &
+            "flag_elem(1) .eqv. .true. .and. flag_elem(n) .eqv. .false.")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "flag_array element_mode values do not match expected values for element 1")
@@ -676,7 +735,8 @@ contains
         end if
 
         call parquet_read_array_element_mode(reader, "flag_array", flag_elem, 6)
-        call check(error, flag_elem(1) .eqv. .false. .and. flag_elem(n) .eqv. .true.)
+        call check(error, flag_elem(1) .eqv. .false. .and. flag_elem(n) .eqv. .true., &
+            "flag_elem(1) .eqv. .false. .and. flag_elem(n) .eqv. .true.")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "flag_array element_mode values do not match expected values for element 6")
@@ -816,7 +876,8 @@ contains
 
         call parquet_open_reader(reader, out_file)
         call parquet_get_nrows(reader, nrows)
-        call check(error, nrows == 3)
+        call check(error, nrows == 3, &
+            "nrows == 3")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "expected 3 rows in the string-vector fixture")
@@ -825,9 +886,9 @@ contains
 
         ! --- row mode: each row's three strings, first element the shortest ---
         call parquet_read_array_row_mode(reader, "tags", row_buf, 1)
-        call check(error, trim(row_buf(1)) == repeat("a", 1) .and. &
-                          trim(row_buf(2)) == repeat("b", 2) .and. &
-                          trim(row_buf(3)) == repeat("c", 3))
+        call check(error, trim(row_buf(1)) == repeat("a",1) .and. trim(row_buf(2)) == repeat("b",2) .and. trim(row_buf(3)) == &
+            repeat("c",3), &
+            "trim(row_buf(1)) == repeat(""a"", 1) .and. trim(row_buf(2)) == repeat(""b"", 2) .and. trim(row_buf(3)) == repeat(""c")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "row-mode row 1 strings truncated or wrong (short first element)")
@@ -835,9 +896,9 @@ contains
         end if
 
         call parquet_read_array_row_mode(reader, "tags", row_buf, 3)
-        call check(error, trim(row_buf(1)) == repeat("g", 7) .and. &
-                          trim(row_buf(2)) == repeat("h", 8) .and. &
-                          trim(row_buf(3)) == repeat("i", 9))
+        call check(error, trim(row_buf(1)) == repeat("g",7) .and. trim(row_buf(2)) == repeat("h",8) .and. trim(row_buf(3)) == &
+            repeat("i",9), &
+            "trim(row_buf(1)) == repeat(""g"", 7) .and. trim(row_buf(2)) == repeat(""h"", 8) .and. trim(row_buf(3)) == repeat(""i")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "row-mode row 3 strings truncated or wrong")
@@ -846,9 +907,9 @@ contains
 
         ! --- element mode: one element index across all rows, first row shortest ---
         call parquet_read_array_element_mode(reader, "tags", elem_buf, 1)
-        call check(error, trim(elem_buf(1)) == repeat("a", 1) .and. &
-                          trim(elem_buf(2)) == repeat("d", 4) .and. &
-                          trim(elem_buf(3)) == repeat("g", 7))
+        call check(error, trim(elem_buf(1)) == repeat("a",1) .and. trim(elem_buf(2)) == repeat("d",4) .and. trim(elem_buf(3)) == &
+            repeat("g",7), &
+            "trim(elem_buf(1)) == repeat(""a"", 1) .and. trim(elem_buf(2)) == repeat(""d"", 4) .and. trim(elem_buf(3)) == repeat(")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "element-mode element 1 strings truncated or wrong (short first row)")
@@ -856,9 +917,9 @@ contains
         end if
 
         call parquet_read_array_element_mode(reader, "tags", elem_buf, 3)
-        call check(error, trim(elem_buf(1)) == repeat("c", 3) .and. &
-                          trim(elem_buf(2)) == repeat("f", 6) .and. &
-                          trim(elem_buf(3)) == repeat("i", 9))
+        call check(error, trim(elem_buf(1)) == repeat("c",3) .and. trim(elem_buf(2)) == repeat("f",6) .and. trim(elem_buf(3)) == &
+            repeat("i",9), &
+            "trim(elem_buf(1)) == repeat(""c"", 3) .and. trim(elem_buf(2)) == repeat(""f"", 6) .and. trim(elem_buf(3)) == repeat(")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "element-mode element 3 strings truncated or wrong")
@@ -869,12 +930,10 @@ contains
         ! not just row/element mode -- same short-first fixture, checked at
         ! both the shortest (row 1) and longest (row 3) ends. ---
         call parquet_read_column(reader, "tags", tags_mat)
-        call check(error, trim(tags_mat(1,1)) == repeat("a", 1) .and. &
-                          trim(tags_mat(2,1)) == repeat("b", 2) .and. &
-                          trim(tags_mat(3,1)) == repeat("c", 3) .and. &
-                          trim(tags_mat(1,3)) == repeat("g", 7) .and. &
-                          trim(tags_mat(2,3)) == repeat("h", 8) .and. &
-                          trim(tags_mat(3,3)) == repeat("i", 9))
+        call check(error, trim(tags_mat(1,1)) == repeat("a",1) .and. trim(tags_mat(2,1)) == repeat("b",2) .and. &
+            trim(tags_mat(3,1)) == repeat("c",3) .and. trim(tags_mat(1,3)) == repeat("g",7) .and. trim(tags_mat(2,3)) == &
+            repeat("h",8) .and. trim(tags_mat(3,3)) == repeat("i",9), &
+            "trim(tags_mat(1,1)) == repeat(""a"", 1) .and. trim(tags_mat(2,1)) == repeat(""b"", 2) .and. trim(tags_mat(3,1)) == re")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "full matrix read of a string-vector column truncated or wrong (short first element)")
@@ -884,7 +943,8 @@ contains
         ! --- parquet_get_string_length must reflect the true maximum across
         ! the whole column, not just the (deliberately shortest) first value. ---
         call parquet_get_string_length(reader, "tags", strlen_max)
-        call check(error, strlen_max == 9)
+        call check(error, strlen_max == 9, &
+            "strlen_max == 9")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "parquet_get_string_length for a string-vector column ignored a longer, later element")
@@ -892,7 +952,8 @@ contains
         end if
 
         call parquet_get_string_length(reader, "note", strlen_max)
-        call check(error, strlen_max == 10)
+        call check(error, strlen_max == 10, &
+            "strlen_max == 10")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "parquet_get_string_length for a scalar string column ignored a longer, later element")
@@ -908,7 +969,8 @@ contains
 
         call parquet_get_version(ver_string)
 
-        call check(error, len_trim(ver_string) > 0)
+        call check(error, len_trim(ver_string) > 0, &
+            "len_trim(ver_string) > 0")
         if (allocated(error)) then
             call test_failed(error, "library version string is empty")
             return
@@ -920,7 +982,9 @@ contains
         call parquet_get_version(internal_ver_string, mode="internal")
 
         call check(error, len_trim(internal_ver_string) > 0 .and. internal_ver_string(1:1) == "v" .and. &
-            index(internal_ver_string, "(") > 0)
+            index(internal_ver_string, "(") > 0, &
+            "len_trim(internal_ver_string) > 0 .and. internal_ver_string(1:1) == ""v"" .and. " // &
+            "index(internal_ver_string, ""("") > 0")
         if (allocated(error)) then
             call test_failed(error, "parquet_get_version(mode='internal') did not return a v-prefixed, " // &
                 "dated internal version string")
@@ -931,7 +995,8 @@ contains
         ! C++ libraries -- the actual numbers vary by build, so just check the format.
         call parquet_get_version(arrow_ver_string, mode="arrow")
 
-        call check(error, is_dotted_version_triplet(arrow_ver_string))
+        call check(error, is_dotted_version_triplet(arrow_ver_string), &
+            "is_dotted_version_triplet(arrow_ver_string)")
         if (allocated(error)) then
             call test_failed(error, "parquet_get_version(mode='arrow') did not return a major.minor.patch string, got '" // &
                 arrow_ver_string // "'")
@@ -940,7 +1005,8 @@ contains
 
         call parquet_get_version(parquet_ver_string, mode="parquet")
 
-        call check(error, is_dotted_version_triplet(parquet_ver_string))
+        call check(error, is_dotted_version_triplet(parquet_ver_string), &
+            "is_dotted_version_triplet(parquet_ver_string)")
         if (allocated(error)) then
             call test_failed(error, "parquet_get_version(mode='parquet') did not return a major.minor.patch string, got '" // &
                 parquet_ver_string // "'")
@@ -974,63 +1040,72 @@ contains
         type(parquet_maml_file) :: maml
 
         maml = parquet_maml_maml_example()
-        call check(error, trim(maml%name) == "maml_example.maml" .and. size(maml%lines) == 91)
+        call check(error, trim(maml%name) == "maml_example.maml" .and. size(maml%lines) == 91, &
+            "trim(maml%name) == ""maml_example.maml"" .and. size(maml%lines) == 91")
         if (allocated(error)) then
             call test_failed(error, "parquet_maml_maml_example returned unexpected content")
             return
         end if
 
         maml = parquet_maml_maml_example2()
-        call check(error, trim(maml%name) == "maml_example2.maml" .and. size(maml%lines) == 83)
+        call check(error, trim(maml%name) == "maml_example2.maml" .and. size(maml%lines) == 83, &
+            "trim(maml%name) == ""maml_example2.maml"" .and. size(maml%lines) == 83")
         if (allocated(error)) then
             call test_failed(error, "parquet_maml_maml_example2 returned unexpected content")
             return
         end if
 
         maml = get_parquet_maml("maml_example.maml")
-        call check(error, trim(maml%name) == "maml_example.maml")
+        call check(error, trim(maml%name) == "maml_example.maml", &
+            "trim(maml%name) == ""maml_example.maml""")
         if (allocated(error)) then
             call test_failed(error, "get_parquet_maml('maml_example.maml') returned unexpected content")
             return
         end if
 
         maml = get_parquet_maml("maml_example")
-        call check(error, trim(maml%name) == "maml_example.maml")
+        call check(error, trim(maml%name) == "maml_example.maml", &
+            "trim(maml%name) == ""maml_example.maml""")
         if (allocated(error)) then
             call test_failed(error, "get_parquet_maml('maml_example') returned unexpected content")
             return
         end if
 
         maml = get_parquet_maml("maml_example2.maml")
-        call check(error, trim(maml%name) == "maml_example2.maml")
+        call check(error, trim(maml%name) == "maml_example2.maml", &
+            "trim(maml%name) == ""maml_example2.maml""")
         if (allocated(error)) then
             call test_failed(error, "get_parquet_maml('maml_example2.maml') returned unexpected content")
             return
         end if
 
         maml = get_parquet_maml("maml_example2")
-        call check(error, trim(maml%name) == "maml_example2.maml")
+        call check(error, trim(maml%name) == "maml_example2.maml", &
+            "trim(maml%name) == ""maml_example2.maml""")
         if (allocated(error)) then
             call test_failed(error, "get_parquet_maml('maml_example2') returned unexpected content")
             return
         end if
 
         maml = parquet_maml_maml_example3()
-        call check(error, trim(maml%name) == "maml_example3.maml" .and. size(maml%lines) == 48)
+        call check(error, trim(maml%name) == "maml_example3.maml" .and. size(maml%lines) == 48, &
+            "trim(maml%name) == ""maml_example3.maml"" .and. size(maml%lines) == 48")
         if (allocated(error)) then
             call test_failed(error, "parquet_maml_maml_example3 returned unexpected content")
             return
         end if
 
         maml = get_parquet_maml("maml_example3.maml")
-        call check(error, trim(maml%name) == "maml_example3.maml")
+        call check(error, trim(maml%name) == "maml_example3.maml", &
+            "trim(maml%name) == ""maml_example3.maml""")
         if (allocated(error)) then
             call test_failed(error, "get_parquet_maml('maml_example3.maml') returned unexpected content")
             return
         end if
 
         maml = get_parquet_maml("maml_example3")
-        call check(error, trim(maml%name) == "maml_example3.maml")
+        call check(error, trim(maml%name) == "maml_example3.maml", &
+            "trim(maml%name) == ""maml_example3.maml""")
         if (allocated(error)) then
             call test_failed(error, "get_parquet_maml('maml_example3') returned unexpected content")
             return
@@ -1047,7 +1122,8 @@ contains
         call parquet_read_column(reader, "id_with_null", values, null_value=-1_int32)
         call parquet_close_reader(reader)
 
-        call check(error, values(1) == 1_int32 .and. values(2) == -1_int32 .and. values(3) == 3_int32)
+        call check(error, values(1) == 1_int32 .and. values(2) == -1_int32 .and. values(3) == 3_int32, &
+            "values(1) == 1_int32 .and. values(2) == -1_int32 .and. values(3) == 3_int32")
         if (allocated(error)) then
             call test_failed(error, "null_value substitution did not replace the Null in row 2")
             return
@@ -1065,7 +1141,8 @@ contains
         call parquet_read_column(reader, "id_with_null", values, is_valid=valid)
         call parquet_close_reader(reader)
 
-        call check(error, valid(1) .and. (.not. valid(2)) .and. valid(3))
+        call check(error, valid(1) .and. (.not. valid(2)) .and. valid(3), &
+            "valid(1) .and. (.not. valid(2)) .and. valid(3)")
         if (allocated(error)) then
             call test_failed(error, "is_valid mask did not correctly flag the Null in row 2")
             return
@@ -1073,7 +1150,8 @@ contains
 
         ! Without null_value, the Null slot must still get a safe type-default
         ! (0), never Arrow's undefined buffer content.
-        call check(error, values(2) == 0_int32)
+        call check(error, values(2) == 0_int32, &
+            "values(2) == 0_int32")
         if (allocated(error)) then
             call test_failed(error, "is_valid-only read did not default the Null slot to 0")
             return
@@ -1091,13 +1169,15 @@ contains
         call parquet_read_column(reader, "id_with_null", values, null_value=-99_int32, is_valid=valid)
         call parquet_close_reader(reader)
 
-        call check(error, valid(1) .and. (.not. valid(2)) .and. valid(3))
+        call check(error, valid(1) .and. (.not. valid(2)) .and. valid(3), &
+            "valid(1) .and. (.not. valid(2)) .and. valid(3)")
         if (allocated(error)) then
             call test_failed(error, "is_valid mask incorrect when combined with null_value")
             return
         end if
 
-        call check(error, values(1) == 1_int32 .and. values(2) == -99_int32 .and. values(3) == 3_int32)
+        call check(error, values(1) == 1_int32 .and. values(2) == -99_int32 .and. values(3) == 3_int32, &
+            "values(1) == 1_int32 .and. values(2) == -99_int32 .and. values(3) == 3_int32")
         if (allocated(error)) then
             call test_failed(error, "null_value substitution incorrect when combined with is_valid")
             return
@@ -1115,13 +1195,15 @@ contains
         call parquet_read_column(reader, "name_with_null", values, null_value="MISSING", is_valid=valid)
         call parquet_close_reader(reader)
 
-        call check(error, valid(1) .and. (.not. valid(2)) .and. valid(3))
+        call check(error, valid(1) .and. (.not. valid(2)) .and. valid(3), &
+            "valid(1) .and. (.not. valid(2)) .and. valid(3)")
         if (allocated(error)) then
             call test_failed(error, "is_valid mask incorrect for string column with a Null")
             return
         end if
 
-        call check(error, trim(values(1)) == "first" .and. trim(values(2)) == "MISSING" .and. trim(values(3)) == "third")
+        call check(error, trim(values(1)) == "first" .and. trim(values(2)) == "MISSING" .and. trim(values(3)) == "third", &
+            "trim(values(1)) == ""first"" .and. trim(values(2)) == ""MISSING"" .and. trim(values(3)) == ""third""")
         if (allocated(error)) then
             call test_failed(error, "null_value substitution incorrect for string column")
             return
@@ -1140,15 +1222,16 @@ contains
         call parquet_close_reader(reader)
 
         ! Row 1: [1, 2], row 2: [3, 4], row 3: [5, Null].
-        call check(error, all(valid(:, 1)) .and. all(valid(:, 2)) .and. valid(1, 3) .and. (.not. valid(2, 3)))
+        call check(error, all(valid(:, 1)) .and. all(valid(:, 2)) .and. valid(1, 3) .and. (.not. valid(2, 3)), &
+            "all(valid(:, 1)) .and. all(valid(:, 2)) .and. valid(1, 3) .and. (.not. valid(2, 3))")
         if (allocated(error)) then
             call test_failed(error, "is_valid mask incorrect for array column with an element-level Null")
             return
         end if
 
-        call check(error, values(1,1) == 1_int32 .and. values(2,1) == 2_int32 .and. &
-                          values(1,2) == 3_int32 .and. values(2,2) == 4_int32 .and. &
-                          values(1,3) == 5_int32 .and. values(2,3) == -1_int32)
+        call check(error, values(1,1) == 1_int32 .and. values(2,1) == 2_int32 .and. values(1,2) == 3_int32 .and. values(2,2) == &
+            4_int32 .and. values(1,3) == 5_int32 .and. values(2,3) == -1_int32, &
+            "values(1,1) == 1_int32 .and. values(2,1) == 2_int32 .and. values(1,2) == 3_int32 .and. values(2,2) == 4_int32 .and. v")
         if (allocated(error)) then
             call test_failed(error, "null_value substitution incorrect for array column")
             return
@@ -1176,7 +1259,8 @@ contains
         logical :: ok
         !
         inquire(file=in_file, exist=exists)
-        call check(error, exists)
+        call check(error, exists, &
+            "exists")
         if (allocated(error)) then
             call test_failed(error, "input parquet file missing: expected test/fixtures/list_vector.parquet")
             return
@@ -1184,7 +1268,8 @@ contains
         !
         call parquet_open_reader(reader, in_file)
         call parquet_get_nrows(reader, nrows)
-        call check(error, nrows == 4)
+        call check(error, nrows == 4, &
+            "nrows == 4")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "unexpected number of rows in list_vector fixture")
@@ -1195,7 +1280,8 @@ contains
         ! fixed_size_list column would: uniform per-row length 3, 12 total.
         call parquet_get_col_size(reader, "spec", nelem)
         call parquet_get_column_total_elements(reader, "spec", ntot)
-        call check(error, nelem == 3 .and. ntot == 12)
+        call check(error, nelem == 3 .and. ntot == 12, &
+            "nelem == 3 .and. ntot == 12")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "unexpected col_size/total elements for list-encoded spec column")
@@ -1213,14 +1299,16 @@ contains
         ! ever ran against this library's own fixed_size_list writer output before.
         allocate(row_out(nelem), elem_out(nrows))
         call parquet_read_array_row_mode(reader, "spec", row_out, 2)
-        call check(error, all(abs(row_out - [1.1_real64, 1.2_real64, 1.3_real64]) < 1.0e-12_real64))
+        call check(error, all(abs(row_out - [1.1_real64, 1.2_real64, 1.3_real64]) < 1.0e-12_real64), &
+            "all(abs(row_out - [1.1_real64, 1.2_real64, 1.3_real64]) < 1.0e-12_real64)")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "row-mode read of a LIST-encoded vector column did not match row 2")
             return
         end if
         call parquet_read_array_element_mode(reader, "spec", elem_out, 2)
-        call check(error, all(abs(elem_out - [0.2_real64, 1.2_real64, 2.2_real64, 3.2_real64]) < 1.0e-12_real64))
+        call check(error, all(abs(elem_out - [0.2_real64, 1.2_real64, 2.2_real64, 3.2_real64]) < 1.0e-12_real64), &
+            "all(abs(elem_out - [0.2_real64, 1.2_real64, 2.2_real64, 3.2_real64]) < 1.0e-12_real64)")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "element-mode read of a LIST-encoded vector column did not match element 2")
@@ -1228,12 +1316,14 @@ contains
         end if
         call parquet_close_reader(reader)
         !
-        call check(error, all(id == [10_int32, 20_int32, 30_int32, 40_int32]))
+        call check(error, all(id == [10_int32, 20_int32, 30_int32, 40_int32]), &
+            "all(id == [10_int32, 20_int32, 30_int32, 40_int32])")
         if (allocated(error)) then
             call test_failed(error, "scalar ID column alongside list-encoded vector read incorrectly")
             return
         end if
-        call check(error, all(abs(ra - [1.5_real64, 2.5_real64, 3.5_real64, 4.5_real64]) < 1.0e-12_real64))
+        call check(error, all(abs(ra - [1.5_real64, 2.5_real64, 3.5_real64, 4.5_real64]) < 1.0e-12_real64), &
+            "all(abs(ra - [1.5_real64, 2.5_real64, 3.5_real64, 4.5_real64]) < 1.0e-12_real64)")
         if (allocated(error)) then
             call test_failed(error, "scalar ra column alongside list-encoded vector read incorrectly")
             return
@@ -1246,7 +1336,8 @@ contains
             ok = ok .and. abs(spec(2, row) - (real(row - 1, real64) + 0.2_real64)) < 1.0e-12_real64
             ok = ok .and. abs(spec(3, row) - (real(row - 1, real64) + 0.3_real64)) < 1.0e-12_real64
         end do
-        call check(error, ok)
+        call check(error, ok, &
+            "ok")
         if (allocated(error)) then
             call test_failed(error, "list-encoded spec vector column values do not match expected")
             return
@@ -1777,7 +1868,8 @@ contains
         real(real64) :: r64(3)
         !
         inquire(file=in_file, exist=exists)
-        call check(error, exists)
+        call check(error, exists, &
+            "exists")
         if (allocated(error)) then
             call test_failed(error, "input parquet file missing: expected test/fixtures/extended_types.parquet")
             return
@@ -1785,7 +1877,8 @@ contains
         !
         call parquet_open_reader(reader, in_file)
         call parquet_get_nrows(reader, nrows)
-        call check(error, nrows == 3)
+        call check(error, nrows == 3, &
+            "nrows == 3")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "unexpected number of rows in extended_types fixture")
@@ -1794,61 +1887,73 @@ contains
         !
         ! INT8/INT16/UINT8/UINT16 -> int32, all always-exact widenings.
         call parquet_read_column(reader, "v_int8", i32)
-        call check(error, all(i32 == [5_int32, -128_int32, 127_int32]))
+        call check(error, all(i32 == [5_int32, -128_int32, 127_int32]), &
+            "all(i32 == [5_int32, -128_int32, 127_int32])")
         call fail_if_error(error, reader, "v_int8 -> int32")
         if (allocated(error)) return
         call parquet_read_column(reader, "v_int16", i32)
-        call check(error, all(i32 == [100_int32, -32768_int32, 32767_int32]))
+        call check(error, all(i32 == [100_int32, -32768_int32, 32767_int32]), &
+            "all(i32 == [100_int32, -32768_int32, 32767_int32])")
         call fail_if_error(error, reader, "v_int16 -> int32")
         if (allocated(error)) return
         call parquet_read_column(reader, "v_uint8", i32)
-        call check(error, all(i32 == [10_int32, 0_int32, 255_int32]))
+        call check(error, all(i32 == [10_int32, 0_int32, 255_int32]), &
+            "all(i32 == [10_int32, 0_int32, 255_int32])")
         call fail_if_error(error, reader, "v_uint8 -> int32")
         if (allocated(error)) return
         call parquet_read_column(reader, "v_uint16", i32)
-        call check(error, all(i32 == [1000_int32, 0_int32, 65535_int32]))
+        call check(error, all(i32 == [1000_int32, 0_int32, 65535_int32]), &
+            "all(i32 == [1000_int32, 0_int32, 65535_int32])")
         call fail_if_error(error, reader, "v_uint16 -> int32")
         if (allocated(error)) return
         !
         ! UINT32 -> both int32 (fits, since every fixture value <= 2000000000)
         ! and int64.
         call parquet_read_column(reader, "v_uint32", i32)
-        call check(error, all(i32 == [1000_int32, 0_int32, 2000000000_int32]))
+        call check(error, all(i32 == [1000_int32, 0_int32, 2000000000_int32]), &
+            "all(i32 == [1000_int32, 0_int32, 2000000000_int32])")
         call fail_if_error(error, reader, "v_uint32 -> int32")
         if (allocated(error)) return
         call parquet_read_column(reader, "v_uint32", i64)
-        call check(error, all(i64 == [1000_int64, 0_int64, 2000000000_int64]))
+        call check(error, all(i64 == [1000_int64, 0_int64, 2000000000_int64]), &
+            "all(i64 == [1000_int64, 0_int64, 2000000000_int64])")
         call fail_if_error(error, reader, "v_uint32 -> int64")
         if (allocated(error)) return
         !
         ! UINT64 -> int64, and widened into real64 and real32.
         call parquet_read_column(reader, "v_uint64", i64)
-        call check(error, all(i64 == [1000_int64, 0_int64, 2000000000_int64]))
+        call check(error, all(i64 == [1000_int64, 0_int64, 2000000000_int64]), &
+            "all(i64 == [1000_int64, 0_int64, 2000000000_int64])")
         call fail_if_error(error, reader, "v_uint64 -> int64")
         if (allocated(error)) return
         call parquet_read_column(reader, "v_uint64", r64)
-        call check(error, all(abs(r64 - [1000.0_real64, 0.0_real64, 2000000000.0_real64]) < 1.0e-6_real64))
+        call check(error, all(abs(r64 - [1000.0_real64, 0.0_real64, 2000000000.0_real64]) < 1.0e-6_real64), &
+            "all(abs(r64 - [1000.0_real64, 0.0_real64, 2000000000.0_real64]) < 1.0e-6_real64)")
         call fail_if_error(error, reader, "v_uint64 -> real64")
         if (allocated(error)) return
         ! convert_values_to_float32's own UINT64 case had never fired
         ! (only the real64-target UINT64 case, above, had).
         call parquet_read_column(reader, "v_uint64", r32)
-        call check(error, all(abs(r32 - [1000.0_real32, 0.0_real32, 2000000000.0_real32]) < 1.0_real32))
+        call check(error, all(abs(r32 - [1000.0_real32, 0.0_real32, 2000000000.0_real32]) < 1.0_real32), &
+            "all(abs(r32 - [1000.0_real32, 0.0_real32, 2000000000.0_real32]) < 1.0_real32)")
         call fail_if_error(error, reader, "v_uint64 -> real32")
         if (allocated(error)) return
         !
         ! HALF_FLOAT -> int32 (every fixture value is exactly integral) and
         ! real32/real64.
         call parquet_read_column(reader, "v_half_float", i32)
-        call check(error, all(i32 == [2_int32, -3_int32, 100_int32]))
+        call check(error, all(i32 == [2_int32, -3_int32, 100_int32]), &
+            "all(i32 == [2_int32, -3_int32, 100_int32])")
         call fail_if_error(error, reader, "v_half_float -> int32")
         if (allocated(error)) return
         call parquet_read_column(reader, "v_half_float", r32)
-        call check(error, all(abs(r32 - [2.0_real32, -3.0_real32, 100.0_real32]) < 1.0e-3_real32))
+        call check(error, all(abs(r32 - [2.0_real32, -3.0_real32, 100.0_real32]) < 1.0e-3_real32), &
+            "all(abs(r32 - [2.0_real32, -3.0_real32, 100.0_real32]) < 1.0e-3_real32)")
         call fail_if_error(error, reader, "v_half_float -> real32")
         if (allocated(error)) return
         call parquet_read_column(reader, "v_half_float", r64)
-        call check(error, all(abs(r64 - [2.0_real64, -3.0_real64, 100.0_real64]) < 1.0e-3_real64))
+        call check(error, all(abs(r64 - [2.0_real64, -3.0_real64, 100.0_real64]) < 1.0e-3_real64), &
+            "all(abs(r64 - [2.0_real64, -3.0_real64, 100.0_real64]) < 1.0e-3_real64)")
         call fail_if_error(error, reader, "v_half_float -> real64")
         if (allocated(error)) return
         !
@@ -1856,53 +1961,61 @@ contains
         ! integer column) -> int64 and real64, one column per width so every
         ! branch of decimal_to_int64_checked/decimal_value_at is exercised.
         call parquet_read_column(reader, "v_decimal32", i64)
-        call check(error, all(i64 == [12_int64, -34_int64, 999_int64]))
+        call check(error, all(i64 == [12_int64, -34_int64, 999_int64]), &
+            "all(i64 == [12_int64, -34_int64, 999_int64])")
         call fail_if_error(error, reader, "v_decimal32 -> int64")
         if (allocated(error)) return
         call parquet_read_column(reader, "v_decimal32", r64)
-        call check(error, all(abs(r64 - [12.0_real64, -34.0_real64, 999.0_real64]) < 1.0e-6_real64))
+        call check(error, all(abs(r64 - [12.0_real64, -34.0_real64, 999.0_real64]) < 1.0e-6_real64), &
+            "all(abs(r64 - [12.0_real64, -34.0_real64, 999.0_real64]) < 1.0e-6_real64)")
         call fail_if_error(error, reader, "v_decimal32 -> real64")
         if (allocated(error)) return
         ! convert_values_to_float32's own DECIMAL32/64/128/256 case
         ! (a single shared line for all four widths) had never fired -- only the real64-target
         ! sibling in convert_values_to_float64, above, had.
         call parquet_read_column(reader, "v_decimal32", r32)
-        call check(error, all(abs(r32 - [12.0_real32, -34.0_real32, 999.0_real32]) < 1.0e-3_real32))
+        call check(error, all(abs(r32 - [12.0_real32, -34.0_real32, 999.0_real32]) < 1.0e-3_real32), &
+            "all(abs(r32 - [12.0_real32, -34.0_real32, 999.0_real32]) < 1.0e-3_real32)")
         call fail_if_error(error, reader, "v_decimal32 -> real32")
         if (allocated(error)) return
         !
         call parquet_read_column(reader, "v_decimal64", i64)
-        call check(error, all(i64 == [123456_int64, -7890_int64, 999999999_int64]))
+        call check(error, all(i64 == [123456_int64, -7890_int64, 999999999_int64]), &
+            "all(i64 == [123456_int64, -7890_int64, 999999999_int64])")
         call fail_if_error(error, reader, "v_decimal64 -> int64")
         if (allocated(error)) return
         call parquet_read_column(reader, "v_decimal64", r64)
-        call check(error, all(abs(r64 - [123456.0_real64, -7890.0_real64, 999999999.0_real64]) < 1.0e-3_real64))
+        call check(error, all(abs(r64 - [123456.0_real64, -7890.0_real64, 999999999.0_real64]) < 1.0e-3_real64), &
+            "all(abs(r64 - [123456.0_real64, -7890.0_real64, 999999999.0_real64]) < 1.0e-3_real64)")
         call fail_if_error(error, reader, "v_decimal64 -> real64")
         if (allocated(error)) return
         !
         call parquet_read_column(reader, "v_decimal128", i64)
-        call check(error, all(i64 == [123456789012_int64, -1_int64, 999999999999_int64]))
+        call check(error, all(i64 == [123456789012_int64, -1_int64, 999999999999_int64]), &
+            "all(i64 == [123456789012_int64, -1_int64, 999999999999_int64])")
         call fail_if_error(error, reader, "v_decimal128 -> int64")
         if (allocated(error)) return
         call parquet_read_column(reader, "v_decimal128", r64)
-        call check(error, &
-            all(abs(r64 - [123456789012.0_real64, -1.0_real64, 999999999999.0_real64]) < 1.0_real64))
+        call check(error, all(abs(r64 - [123456789012.0_real64, -1.0_real64, 999999999999.0_real64]) < 1.0_real64), &
+            "all(abs(r64 - [123456789012.0_real64, -1.0_real64, 999999999999.0_real64]) < 1.0_real64)")
         call fail_if_error(error, reader, "v_decimal128 -> real64")
         if (allocated(error)) return
         !
         call parquet_read_column(reader, "v_decimal256", i64)
-        call check(error, all(i64 == [123456789012345_int64, -1_int64, 999999999999999_int64]))
+        call check(error, all(i64 == [123456789012345_int64, -1_int64, 999999999999999_int64]), &
+            "all(i64 == [123456789012345_int64, -1_int64, 999999999999999_int64])")
         call fail_if_error(error, reader, "v_decimal256 -> int64")
         if (allocated(error)) return
         call parquet_read_column(reader, "v_decimal256", r64)
-        call check(error, &
-            all(abs(r64 - [123456789012345.0_real64, -1.0_real64, 999999999999999.0_real64]) < 1.0_real64))
+        call check(error, all(abs(r64 - [123456789012345.0_real64, -1.0_real64, 999999999999999.0_real64]) < 1.0_real64), &
+            "all(abs(r64 - [123456789012345.0_real64, -1.0_real64, 999999999999999.0_real64]) < 1.0_real64)")
         call fail_if_error(error, reader, "v_decimal256 -> real64")
         if (allocated(error)) return
         !
         ! DECIMAL128(10, 2), genuinely fractional -- real-target only.
         call parquet_read_column(reader, "v_decimal_scaled", r64)
-        call check(error, all(abs(r64 - [1.00_real64, -2.00_real64, 123.45_real64]) < 1.0e-6_real64))
+        call check(error, all(abs(r64 - [1.00_real64, -2.00_real64, 123.45_real64]) < 1.0e-6_real64), &
+            "all(abs(r64 - [1.00_real64, -2.00_real64, 123.45_real64]) < 1.0e-6_real64)")
         call fail_if_error(error, reader, "v_decimal_scaled -> real64")
         if (allocated(error)) return
         !
@@ -1928,7 +2041,8 @@ contains
         !
         call parquet_open_reader(reader, out_file)
         call parquet_read_column(reader, "v", back)
-        call check(error, all(abs(back - [1.5_real64, -2.25_real64, 100.75_real64]) < 1.0e-6_real64))
+        call check(error, all(abs(back - [1.5_real64, -2.25_real64, 100.75_real64]) < 1.0e-6_real64), &
+            "all(abs(back - [1.5_real64, -2.25_real64, 100.75_real64]) < 1.0e-6_real64)")
         call fail_if_error(error, reader, "v (real32) -> real64")
         if (allocated(error)) return
         call parquet_close_reader(reader)
@@ -1949,7 +2063,8 @@ contains
         call filt%add("v_int8 > 0")
         call parquet_open_reader(reader, "test/fixtures/extended_types.parquet", filter=filt)
         call parquet_get_nrows(reader, nrows)
-        call check(error, nrows == 2)
+        call check(error, nrows == 2, &
+            "nrows == 2")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "filtering v_int8 > 0 did not keep exactly 2 rows")
@@ -1959,7 +2074,8 @@ contains
         allocate(id(nrows))
         call parquet_read_column(reader, "id", id)
         call parquet_close_reader(reader)
-        call check(error, all(id == [1_int32, 3_int32]))
+        call check(error, all(id == [1_int32, 3_int32]), &
+            "all(id == [1_int32, 3_int32])")
         if (allocated(error)) then
             call test_failed(error, "filtering v_int8 > 0 did not keep the expected rows (id 1 and 3)")
             return
@@ -1981,7 +2097,8 @@ contains
         call filt%add("v_half_float > 0")
         call parquet_open_reader(reader, "test/fixtures/extended_types.parquet", filter=filt)
         call parquet_get_nrows(reader, nrows)
-        call check(error, nrows == 2)
+        call check(error, nrows == 2, &
+            "nrows == 2")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "filtering v_half_float > 0 did not keep exactly 2 rows")
@@ -1991,7 +2108,8 @@ contains
         allocate(id(nrows))
         call parquet_read_column(reader, "id", id)
         call parquet_close_reader(reader)
-        call check(error, all(id == [1_int32, 3_int32]))
+        call check(error, all(id == [1_int32, 3_int32]), &
+            "all(id == [1_int32, 3_int32])")
         if (allocated(error)) then
             call test_failed(error, "filtering v_half_float > 0 did not keep the expected rows (id 1 and 3)")
             return
@@ -2011,7 +2129,8 @@ contains
         call filt%add("v_uint64 >= 500")
         call parquet_open_reader(reader, "test/fixtures/extended_types.parquet", filter=filt)
         call parquet_get_nrows(reader, nrows)
-        call check(error, nrows == 2)
+        call check(error, nrows == 2, &
+            "nrows == 2")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "filtering v_uint64 >= 500 did not keep exactly 2 rows")
@@ -2021,7 +2140,8 @@ contains
         allocate(id(nrows))
         call parquet_read_column(reader, "id", id)
         call parquet_close_reader(reader)
-        call check(error, all(id == [1_int32, 3_int32]))
+        call check(error, all(id == [1_int32, 3_int32]), &
+            "all(id == [1_int32, 3_int32])")
         if (allocated(error)) then
             call test_failed(error, "filtering v_uint64 >= 500 did not keep the expected rows (id 1 and 3)")
             return
@@ -2043,7 +2163,8 @@ contains
         call filt%add("v_decimal32 > 0")
         call parquet_open_reader(reader, "test/fixtures/extended_types.parquet", filter=filt)
         call parquet_get_nrows(reader, nrows)
-        call check(error, nrows == 2)
+        call check(error, nrows == 2, &
+            "nrows == 2")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "filtering v_decimal32 > 0 did not keep exactly 2 rows")
@@ -2053,7 +2174,8 @@ contains
         allocate(id(nrows))
         call parquet_read_column(reader, "id", id)
         call parquet_close_reader(reader)
-        call check(error, all(id == [1_int32, 3_int32]))
+        call check(error, all(id == [1_int32, 3_int32]), &
+            "all(id == [1_int32, 3_int32])")
         if (allocated(error)) then
             call test_failed(error, "filtering v_decimal32 > 0 did not keep the expected rows (id 1 and 3)")
             return
@@ -2084,7 +2206,8 @@ contains
         real(real64) :: spectrum(3, 5), spectrum_row(3)
 
         inquire(file=in_file, exist=exists)
-        call check(error, exists)
+        call check(error, exists, &
+            "exists")
         if (allocated(error)) then
             call test_failed(error, "input parquet file missing: expected test/fixtures/nested_struct.parquet")
             return
@@ -2092,7 +2215,8 @@ contains
 
         call parquet_open_reader(reader, in_file)
         call parquet_get_nrows(reader, nrows)
-        call check(error, nrows == 5)
+        call check(error, nrows == 5, &
+            "nrows == 5")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "unexpected number of rows in nested_struct fixture")
@@ -2100,57 +2224,130 @@ contains
         end if
 
         call parquet_read_column(reader, "main.id", id, null_value=-1_int32, is_valid=id_valid)
-        call check(error, all(id_valid .eqv. [.true., .false., .true., .true., .true.]))
+        call check(error, all(id_valid .eqv. [.true., .false., .true., .true., .true.]), &
+            "all(id_valid .eqv. [.true., .false., .true., .true., .true.])")
         call fail_if_error(error, reader, "main.id is_valid (root-level null only)")
         if (allocated(error)) return
-        call check(error, id(1) == 1_int32 .and. id(3) == 3_int32 .and. id(4) == 4_int32 .and. id(5) == 5_int32)
+        call check(error, id(1) == 1_int32 .and. id(3) == 3_int32 .and. id(4) == 4_int32 .and. id(5) == 5_int32, &
+            "id(1) == 1_int32 .and. id(3) == 3_int32 .and. id(4) == 4_int32 .and. id(5) == 5_int32")
         call fail_if_error(error, reader, "main.id values")
         if (allocated(error)) return
 
         call parquet_read_column(reader, "main.inner.name", name, null_value="MISSING", is_valid=name_valid)
-        call check(error, all(name_valid .eqv. [.true., .false., .false., .true., .true.]))
+        call check(error, all(name_valid .eqv. [.true., .false., .false., .true., .true.]), &
+            "all(name_valid .eqv. [.true., .false., .false., .true., .true.])")
         call fail_if_error(error, reader, "main.inner.name is_valid (root + mid-level null combination)")
         if (allocated(error)) return
-        call check(error, trim(name(1)) == "Alice" .and. trim(name(4)) == "Dave" .and. trim(name(5)) == "Eve")
+        call check(error, trim(name(1)) == "Alice" .and. trim(name(4)) == "Dave" .and. trim(name(5)) == "Eve", &
+            "trim(name(1)) == ""Alice"" .and. trim(name(4)) == ""Dave"" .and. trim(name(5)) == ""Eve""")
         call fail_if_error(error, reader, "main.inner.name values")
         if (allocated(error)) return
 
         call parquet_read_column(reader, "main.inner.age", age, null_value=-1_int32, is_valid=age_valid)
-        call check(error, all(age_valid .eqv. [.true., .false., .false., .false., .true.]))
+        call check(error, all(age_valid .eqv. [.true., .false., .false., .false., .true.]), &
+            "all(age_valid .eqv. [.true., .false., .false., .false., .true.])")
         call fail_if_error(error, reader, "main.inner.age is_valid (root + mid-level + leaf-level null combination)")
         if (allocated(error)) return
-        call check(error, age(1) == 30_int32 .and. age(5) == 50_int32)
+        call check(error, age(1) == 30_int32 .and. age(5) == 50_int32, &
+            "age(1) == 30_int32 .and. age(5) == 50_int32")
         call fail_if_error(error, reader, "main.inner.age values")
         if (allocated(error)) return
 
         call parquet_read_column(reader, "main.inner.deep.value", deep_value, null_value=-1_int32, is_valid=deep_valid)
-        call check(error, all(deep_valid .eqv. [.true., .false., .false., .true., .false.]))
+        call check(error, all(deep_valid .eqv. [.true., .false., .false., .true., .false.]), &
+            "all(deep_valid .eqv. [.true., .false., .false., .true., .false.])")
         call fail_if_error(error, reader, "main.inner.deep.value is_valid (3-level-deep null combination)")
         if (allocated(error)) return
-        call check(error, deep_value(1) == 100_int32 .and. deep_value(4) == 400_int32)
+        call check(error, deep_value(1) == 100_int32 .and. deep_value(4) == 400_int32, &
+            "deep_value(1) == 100_int32 .and. deep_value(4) == 400_int32")
         call fail_if_error(error, reader, "main.inner.deep.value values")
         if (allocated(error)) return
 
         ! "vecdata.spectrum": a FIXED_SIZE_LIST vector-column leaf resolved through a struct path
         ! -- always valid, values row i = [i.0, i.1, i.2] (see the fixture generator).
         call parquet_get_col_size(reader, "vecdata.spectrum", col_size)
-        call check(error, col_size == 3)
+        call check(error, col_size == 3, &
+            "col_size == 3")
         call fail_if_error(error, reader, "vecdata.spectrum col_size")
         if (allocated(error)) return
 
         call parquet_read_column(reader, "vecdata.spectrum", spectrum)
-        call check(error, all(abs(spectrum(:, 1) - [1.0_real64, 1.1_real64, 1.2_real64]) < 1.0e-9_real64))
+        call check(error, all(abs(spectrum(:, 1) - [1.0_real64, 1.1_real64, 1.2_real64]) < 1.0e-9_real64), &
+            "all(abs(spectrum(:, 1) - [1.0_real64, 1.1_real64, 1.2_real64]) < 1.0e-9_real64)")
         call fail_if_error(error, reader, "vecdata.spectrum full-column values (row 1)")
         if (allocated(error)) return
 
         call parquet_read_array_row_mode(reader, "vecdata.spectrum", spectrum_row, 5)
         call parquet_close_reader(reader)
-        call check(error, all(abs(spectrum_row - [5.0_real64, 5.1_real64, 5.2_real64]) < 1.0e-9_real64))
+        call check(error, all(abs(spectrum_row - [5.0_real64, 5.1_real64, 5.2_real64]) < 1.0e-9_real64), &
+            "all(abs(spectrum_row - [5.0_real64, 5.1_real64, 5.2_real64]) < 1.0e-9_real64)")
         if (allocated(error)) then
             call test_failed(error, "vecdata.spectrum row-mode read (row 5) did not match expected values")
             return
         end if
     end subroutine test_read_nested_struct_leaves
+
+    !> Regression test for a confirmed use-after-free: reading a struct-nested string leaf
+    !! ("main.inner.name") into a compact `parquet_string_column` (the offsets/data/validity
+    !! buffer-handoff path behind parquet_read_column) used to read back as all-Null for every
+    !! row, because unwrap_struct_path's freshly synthesized combined-validity array was never
+    !! retained anywhere past the end of parquet_read_string_column_buffers's own local variable --
+    !! the returned validity pointer aimed at memory freed the moment that C++ function returned to
+    !! Fortran. Fixed by pinning the array in ParquetReaderHandle::last_whole_column_buffers_array,
+    !! mirroring the row-group-scoped chunk read's existing last_chunk_buffers_array. This is
+    !! distinct from the fixed-width parquet_read_column read of the same column already covered by
+    !! test_read_nested_struct_leaves, above, which goes through a different (unaffected) code path.
+    subroutine test_read_nested_struct_string_compact(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: in_file = "test/fixtures/nested_struct.parquet"
+        type(parquet_string_column) :: name
+
+        call parquet_open_reader(reader, in_file)
+        call parquet_read_column(reader, "main.inner.name", name)
+        call parquet_close_reader(reader)
+
+        call check(error, name%size() == 5_int64, &
+            "name%size() == 5_int64")
+        if (allocated(error)) then
+            call test_failed(error, "main.inner.name (compact) row count mismatch")
+            return
+        end if
+
+        call check(error, (.not. name%is_null(1_int64)) .and. name%is_null(2_int64) .and. name%is_null(3_int64) .and. (.not. &
+            name%is_null(4_int64)) .and. (.not. name%is_null(5_int64)), &
+            "(.not. name%is_null(1_int64)) .and. name%is_null(2_int64) .and. name%is_null(3_int64) .and. (.not. name%is_null(4_int")
+        if (allocated(error)) then
+            call test_failed(error, "main.inner.name (compact) is_null pattern incorrect -- " // &
+                "the use-after-free regression would show every row as null")
+            return
+        end if
+
+        block
+            character(len=:), allocatable :: s
+            call name%get(1_int64, s)
+            call check(error, s == "Alice", &
+                "s == ""Alice""")
+            if (allocated(error)) then
+                call test_failed(error, "main.inner.name (compact) row 1 value mismatch")
+                return
+            end if
+            call name%get(4_int64, s)
+            call check(error, s == "Dave", &
+                "s == ""Dave""")
+            if (allocated(error)) then
+                call test_failed(error, "main.inner.name (compact) row 4 value mismatch")
+                return
+            end if
+            call name%get(5_int64, s)
+            call check(error, s == "Eve", &
+                "s == ""Eve""")
+            if (allocated(error)) then
+                call test_failed(error, "main.inner.name (compact) row 5 value mismatch")
+                return
+            end if
+        end block
+    end subroutine test_read_nested_struct_string_compact
 
     !> Row filtering against a dotted struct-field path ("main.inner.age"): of the 5 rows, only
     !> row 1 (age=30) and row 5 (age=50) have a valid (non-null) age at all, and only row 5's value
@@ -2167,7 +2364,8 @@ contains
         call filt%add("main.inner.age > 35")
         call parquet_open_reader(reader, "test/fixtures/nested_struct.parquet", filter=filt)
         call parquet_get_nrows(reader, nrows)
-        call check(error, nrows == 1)
+        call check(error, nrows == 1, &
+            "nrows == 1")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "filtering main.inner.age > 35 did not keep exactly 1 row")
@@ -2177,7 +2375,8 @@ contains
         allocate(id(nrows))
         call parquet_read_column(reader, "main.id", id)
         call parquet_close_reader(reader)
-        call check(error, all(id == [5_int32]))
+        call check(error, all(id == [5_int32]), &
+            "all(id == [5_int32])")
         if (allocated(error)) then
             call test_failed(error, "filtering main.inner.age > 35 did not keep the expected row (id 5)")
             return

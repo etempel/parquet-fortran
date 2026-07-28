@@ -794,17 +794,21 @@ module parquet_bindings
         !> Reads scalar string column `name` from `reader` as its own raw offsets/data/validity
         !> buffers -- the compact counterpart to parquet_read_string_column, for handing straight
         !> to parquet_string_column's append_buffers instead of copying one string at a time into
-        !> a fixed-width padded buffer. All five output arguments are plain (non-`value`) dummies,
+        !> a fixed-width padded buffer. All six output arguments are plain (non-`value`) dummies,
         !> so they are passed by reference/address, exactly like a C `T *` out-parameter -- the
         !> only such outputs in this module (every other binding's outputs are pre-sized arrays
         !> the caller allocates first). The returned pointers reference memory owned by `reader`
-        !> (the file's own decoded/cached column array) and stay valid only until the next call
-        !> into this same reader; the caller (parquet_read.f90) is expected to consume them
-        !> (append_buffers) immediately, before making any other call on `reader`. `offsets_int32`
-        !> is 1 when `offsets` holds int32 values (a plain STRING column), 0 for int64
-        !> (LARGE_STRING) -- see parquet_strings.f90's append_buffers, which accepts both.
+        !> (the file's own decoded/cached column array, or -- for a dotted struct-field path -- a
+        !> freshly built array the reader now pins for exactly this purpose) and stay valid only
+        !> until the next call into this same reader; the caller (parquet_read.f90) is expected to
+        !> consume them (append_buffers) immediately, before making any other call on `reader`.
+        !> `offsets_int32` is 1 when `offsets` holds int32 values (a plain STRING column), 0 for
+        !> int64 (LARGE_STRING) -- see parquet_strings.f90's append_buffers, which accepts both.
+        !> `validity_offset` is the source array's own element offset (usually 0; can be nonzero
+        !> for a struct-nested leaf) -- append_buffers needs it to correctly align `validity`'s
+        !> bit 0, which (unlike `offsets`/`data`) Arrow never pre-rebases for a sliced array.
         subroutine parquet_read_string_column_buffers(reader, name, nrows, nchars, offsets, data, validity, &
-                offsets_int32) bind(C, name="parquet_read_string_column_buffers")
+                offsets_int32, validity_offset) bind(C, name="parquet_read_string_column_buffers")
             import
             type(c_ptr), value :: reader
             character(kind=c_char) :: name(*)
@@ -814,6 +818,7 @@ module parquet_bindings
             type(c_ptr), intent(out) :: data
             type(c_ptr), intent(out) :: validity
             integer(c_int8_t), intent(out) :: offsets_int32
+            integer(c_long_long), intent(out) :: validity_offset
         end subroutine
 
         !> Reads one row (`row_index`) of vector int32 column `name` from `reader` into `data`.
@@ -1168,9 +1173,10 @@ module parquet_bindings
         !> offsets/data/validity buffers -- the compact counterpart to
         !> parquet_read_string_column_chunk. Same by-reference output convention and buffer
         !> lifetime as parquet_read_string_column_buffers above; the returned pointers are only
-        !> valid until the next call into this same `reader`.
+        !> valid until the next call into this same `reader`. `validity_offset` is the source
+        !> array's own element offset -- see parquet_read_string_column_buffers's own doc comment.
         subroutine parquet_read_string_column_chunk_buffers(reader, name, row_group, nrows, nchars, offsets, data, &
-                validity, offsets_int32) bind(C, name="parquet_read_string_column_chunk_buffers")
+                validity, offsets_int32, validity_offset) bind(C, name="parquet_read_string_column_chunk_buffers")
             import
             type(c_ptr), value :: reader
             character(kind=c_char) :: name(*)
@@ -1181,6 +1187,7 @@ module parquet_bindings
             type(c_ptr), intent(out) :: data
             type(c_ptr), intent(out) :: validity
             integer(c_int8_t), intent(out) :: offsets_int32
+            integer(c_long_long), intent(out) :: validity_offset
         end subroutine
 
         ! ================================================================================

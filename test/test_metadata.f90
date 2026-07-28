@@ -179,7 +179,8 @@ contains
         call write_metadata_fixture("test_run/metadata_scalar.parquet", reader)
 
         call parquet_get_metadata(reader, "meta_i32", i32)
-        call check(error, i32 == 42_int32)
+        call check(error, i32 == 42_int32, &
+            "i32 == 42_int32")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "int32 metadata did not round-trip")
@@ -187,7 +188,8 @@ contains
         end if
 
         call parquet_get_metadata(reader, "meta_i64", i64)
-        call check(error, i64 == 123456789012_int64)
+        call check(error, i64 == 123456789012_int64, &
+            "i64 == 123456789012_int64")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "int64 metadata did not round-trip")
@@ -195,7 +197,8 @@ contains
         end if
 
         call parquet_get_metadata(reader, "meta_f32", f32)
-        call check(error, abs(f32 - 3.5_real32) < 1.0e-5_real32)
+        call check(error, abs(f32 - 3.5_real32) < 1.0e-5_real32, &
+            "abs(f32 - 3.5_real32) < 1.0e-5_real32")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "float32 metadata did not round-trip")
@@ -203,7 +206,8 @@ contains
         end if
 
         call parquet_get_metadata(reader, "meta_f64", f64)
-        call check(error, abs(f64 - 3.14159265358979_real64) < 1.0e-10_real64)
+        call check(error, abs(f64 - 3.14159265358979_real64) < 1.0e-10_real64, &
+            "abs(f64 - 3.14159265358979_real64) < 1.0e-10_real64")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "float64 metadata did not round-trip")
@@ -211,7 +215,8 @@ contains
         end if
 
         call parquet_get_metadata(reader, "meta_bool", lg)
-        call check(error, lg .eqv. .true.)
+        call check(error, lg .eqv. .true., &
+            "lg .eqv. .true.")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "logical metadata did not round-trip")
@@ -219,7 +224,8 @@ contains
         end if
 
         call parquet_get_metadata(reader, "meta_bool_false", lg)
-        call check(error, lg .eqv. .false.)
+        call check(error, lg .eqv. .false., &
+            "lg .eqv. .false.")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "logical .false. metadata did not round-trip")
@@ -227,7 +233,8 @@ contains
         end if
 
         call parquet_get_metadata(reader, "meta_str", sval)
-        call check(error, trim(sval) == "hello world")
+        call check(error, trim(sval) == "hello world", &
+            "trim(sval) == ""hello world""")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "string metadata did not round-trip")
@@ -249,13 +256,15 @@ contains
         call write_metadata_fixture("test_run/metadata_array.parquet", reader)
 
         call parquet_get_metadata(reader, "meta_i32_arr", i32arr)
-        call check(error, size(i32arr) == 3)
+        call check(error, size(i32arr) == 3, &
+            "size(i32arr) == 3")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "int32 array metadata has wrong size")
             return
         end if
-        call check(error, all(i32arr == [1_int32, 2_int32, 3_int32]))
+        call check(error, all(i32arr == [1_int32, 2_int32, 3_int32]), &
+            "all(i32arr == [1_int32, 2_int32, 3_int32])")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "int32 array metadata did not round-trip")
@@ -263,7 +272,8 @@ contains
         end if
 
         call parquet_get_metadata(reader, "meta_i64_arr", i64arr)
-        call check(error, all(i64arr == [10_int64, 20_int64, 30_int64]))
+        call check(error, all(i64arr == [10_int64, 20_int64, 30_int64]), &
+            "all(i64arr == [10_int64, 20_int64, 30_int64])")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "int64 array metadata did not round-trip")
@@ -271,13 +281,15 @@ contains
         end if
 
         call parquet_get_metadata(reader, "meta_f32_arr", f32arr)
-        call check(error, size(f32arr) == 2)
+        call check(error, size(f32arr) == 2, &
+            "size(f32arr) == 2")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "float32 array metadata has wrong size")
             return
         end if
-        call check(error, all(abs(f32arr - [1.5_real32, 2.5_real32]) < 1.0e-5_real32))
+        call check(error, all(abs(f32arr - [1.5_real32, 2.5_real32]) < 1.0e-5_real32), &
+            "all(abs(f32arr - [1.5_real32, 2.5_real32]) < 1.0e-5_real32)")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "float32 array metadata did not round-trip")
@@ -285,7 +297,8 @@ contains
         end if
 
         call parquet_get_metadata(reader, "meta_f64_arr", f64arr)
-        call check(error, all(abs(f64arr - [1.25_real64, 2.25_real64]) < 1.0e-10_real64))
+        call check(error, all(abs(f64arr - [1.25_real64, 2.25_real64]) < 1.0e-10_real64), &
+            "all(abs(f64arr - [1.25_real64, 2.25_real64]) < 1.0e-10_real64)")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "float64 array metadata did not round-trip")
@@ -293,13 +306,15 @@ contains
         end if
 
         call parquet_get_metadata(reader, "meta_bool_arr", lgarr)
-        call check(error, size(lgarr) == 3)
+        call check(error, size(lgarr) == 3, &
+            "size(lgarr) == 3")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "logical array metadata has wrong size")
             return
         end if
-        call check(error, lgarr(1) .eqv. .true. .and. lgarr(2) .eqv. .false. .and. lgarr(3) .eqv. .true.)
+        call check(error, lgarr(1) .eqv. .true. .and. lgarr(2) .eqv. .false. .and. lgarr(3) .eqv. .true., &
+            "lgarr(1) .eqv. .true. .and. lgarr(2) .eqv. .false. .and. lgarr(3) .eqv. .true.")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "logical array metadata did not round-trip")
@@ -339,14 +354,16 @@ contains
         call parquet_open_reader(reader, out_file)
         call parquet_get_metadata(reader, "mixed_tags", sarr)
 
-        call check(error, size(sarr) == 3)
+        call check(error, size(sarr) == 3, &
+            "size(sarr) == 3")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "mixed-length string array metadata has wrong size")
             return
         end if
 
-        call check(error, trim(sarr(1)) == "ab")
+        call check(error, trim(sarr(1)) == "ab", &
+            "trim(sarr(1)) == ""ab""")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, &
@@ -354,14 +371,16 @@ contains
             return
         end if
 
-        call check(error, trim(sarr(2)) == "category_long")
+        call check(error, trim(sarr(2)) == "category_long", &
+            "trim(sarr(2)) == ""category_long""")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "middle element of a mixed-length string array metadata did not round-trip")
             return
         end if
 
-        call check(error, trim(sarr(3)) == "final_tag_here")
+        call check(error, trim(sarr(3)) == "final_tag_here", &
+            "trim(sarr(3)) == ""final_tag_here""")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, &
@@ -383,7 +402,8 @@ contains
         ! in parquet_wrapper.cpp) -- parquet_get_metadata makes no distinction
         ! between reserved/internal keys and ones added via add_metadata.
         call parquet_get_metadata(reader, "DATE", sval)
-        call check(error, len_trim(sval) > 0)
+        call check(error, len_trim(sval) > 0, &
+            "len_trim(sval) > 0")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "reserved metadata key 'DATE' was not readable")
@@ -434,7 +454,8 @@ contains
         call write_metadata_fixture("test_run/metadata_missing_default.parquet", reader)
 
         call parquet_get_metadata(reader, "does_not_exist", i32, default=99_int32)
-        call check(error, i32 == 99_int32)
+        call check(error, i32 == 99_int32, &
+            "i32 == 99_int32")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "missing key with a default did not return the default value")
@@ -452,7 +473,8 @@ contains
         call write_metadata_fixture("test_run/metadata_missing_no_warn.parquet", reader)
 
         call parquet_get_metadata(reader, "does_not_exist", i32, default=7_int32, warn=.false.)
-        call check(error, i32 == 7_int32)
+        call check(error, i32 == 7_int32, &
+            "i32 == 7_int32")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "missing key with warn=.false. did not return the default value")
@@ -471,7 +493,8 @@ contains
         call parquet_get_metadata(reader, "does_not_exist", i32, default=13_int32, warn=.false.)
         call parquet_close_reader(reader)
 
-        call check(error, i32 == 13_int32)
+        call check(error, i32 == 13_int32, &
+            "i32 == 13_int32")
         if (allocated(error)) then
             call test_failed(error, "missing key on a file with no metadata did not return the default value")
             return
@@ -486,7 +509,8 @@ contains
         call write_metadata_fixture("test_run/metadata_conversion_failure.parquet", reader)
 
         call parquet_get_metadata(reader, "meta_not_a_number", i32, default=-1_int32)
-        call check(error, i32 == -1_int32)
+        call check(error, i32 == -1_int32, &
+            "i32 == -1_int32")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "unparsable metadata value with a default did not fall back to it")
@@ -507,7 +531,8 @@ contains
         ! int32 must be treated as a conversion failure (falls back to
         ! default), never silently wrapped/truncated into some other int32.
         call parquet_get_metadata(reader, "meta_i64", i32, default=-2_int32)
-        call check(error, i32 == -2_int32)
+        call check(error, i32 == -2_int32, &
+            "i32 == -2_int32")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "int64-range metadata value requested as int32 was not caught as an overflow")
@@ -542,8 +567,9 @@ contains
         call parquet_get_metadata(reader, "meta_not_a_number", lg, default=.true.)
         call parquet_close_reader(reader)
 
-        call check(error, i64 == -21_int64 .and. abs(f32 + 2.5_real32) < 1.0e-5_real32 .and. &
-            abs(f64 + 3.5_real64) < 1.0e-10_real64 .and. (lg .eqv. .true.))
+        call check(error, i64 == -21_int64 .and. abs(f32 + 2.5_real32) < 1.0e-5_real32 .and. abs(f64 + 3.5_real64) < &
+            1.0e-10_real64 .and. (lg .eqv. .true.), &
+            "i64 == -21_int64 .and. abs(f32 + 2.5_real32) < 1.0e-5_real32 .and. abs(f64 + 3.5_real64) < 1.0e-10_real64 .and. (lg .")
         if (allocated(error)) then
             call test_failed(error, &
                 "an unparsable scalar value with a default did not fall back to it for one or more types")
@@ -579,11 +605,10 @@ contains
         call parquet_get_metadata(reader, "does_not_exist", svalb, default="fallback2", warn=.false.)
         call parquet_close_reader(reader)
 
-        call check(error, i64 == -11_int64 .and. i64b == -12_int64 .and. &
-            abs(f32 + 1.5_real32) < 1.0e-5_real32 .and. abs(f32b + 1.6_real32) < 1.0e-5_real32 .and. &
-            abs(f64 + 2.5_real64) < 1.0e-10_real64 .and. abs(f64b + 2.6_real64) < 1.0e-10_real64 .and. &
-            (lg .eqv. .true.) .and. (lgb .eqv. .true.) .and. &
-            trim(sval) == "fallback" .and. trim(svalb) == "fallback2")
+        call check(error, i64 == -11_int64 .and. i64b == -12_int64 .and. abs(f32 + 1.5_real32) < 1.0e-5_real32 .and. abs(f32b + &
+            1.6_real32) < 1.0e-5_real32 .and. abs(f64 + 2.5_real64) < 1.0e-10_real64 .and. abs(f64b + 2.6_real64) < 1.0e-10_real64 &
+            .and. (lg .eqv. .true.) .and. (lgb .eqv. .true.) .and. trim(sval) == "fallback" .and. trim(svalb) == "fallback2", &
+            "i64 == -11_int64 .and. i64b == -12_int64 .and. abs(f32 + 1.5_real32) < 1.0e-5_real32 .and. abs(f32b + 1.6_real32) < 1")
         if (allocated(error)) then
             call test_failed(error, &
                 "a missing scalar key with a default did not return the default for one or more types")
@@ -616,7 +641,8 @@ contains
 
         call parquet_open_reader(reader, out_file)
         call parquet_get_metadata(reader, "bad_int_arr", i32arr, default=fallback)
-        call check(error, all(i32arr == fallback))
+        call check(error, all(i32arr == fallback), &
+            "all(i32arr == fallback)")
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, &
@@ -669,8 +695,9 @@ contains
         call parquet_get_metadata(reader, "bad_bool_arr", lgarr, default=lg_fb)
         call parquet_close_reader(reader)
 
-        call check(error, all(i64arr == i64_fb) .and. all(abs(f32arr - f32_fb) < 1.0e-5_real32) .and. &
-            all(abs(f64arr - f64_fb) < 1.0e-10_real64) .and. all(lgarr .eqv. lg_fb))
+        call check(error, all(i64arr == i64_fb) .and. all(abs(f32arr - f32_fb) < 1.0e-5_real32) .and. all(abs(f64arr - f64_fb) < &
+            1.0e-10_real64) .and. all(lgarr .eqv. lg_fb), &
+            "all(i64arr == i64_fb) .and. all(abs(f32arr - f32_fb) < 1.0e-5_real32) .and. all(abs(f64arr - f64_fb) < 1.0e-10_real64")
         if (allocated(error)) then
             call test_failed(error, &
                 "an array with an unparsable element did not fall back to the default array for one or more types")
@@ -708,10 +735,10 @@ contains
         call parquet_get_metadata(reader, "no_such_array", sarr, default=["aa", "bb"])
         call parquet_close_reader(reader)
 
-        call check(error, all(i32arr == i32_fb) .and. all(i64arr == i64_fb) .and. &
-            all(abs(f32arr - f32_fb) < 1.0e-5_real32) .and. &
-            all(abs(f64arr - f64_fb) < 1.0e-10_real64) .and. all(lgarr .eqv. lg_fb) .and. &
-            size(sarr) == 2 .and. trim(sarr(1)) == "aa" .and. trim(sarr(2)) == "bb")
+        call check(error, all(i32arr == i32_fb) .and. all(i64arr == i64_fb) .and. all(abs(f32arr - f32_fb) < 1.0e-5_real32) .and. &
+            all(abs(f64arr - f64_fb) < 1.0e-10_real64) .and. all(lgarr .eqv. lg_fb) .and. size(sarr) == 2 .and. trim(sarr(1)) == &
+            "aa" .and. trim(sarr(2)) == "bb", &
+            "all(i32arr == i32_fb) .and. all(i64arr == i64_fb) .and. all(abs(f32arr - f32_fb) < 1.0e-5_real32) .and. all(abs(f64ar")
         if (allocated(error)) then
             call test_failed(error, &
                 "a missing array key with a default did not return the default array for one or more types")
@@ -1397,7 +1424,8 @@ contains
         call check(error, size(schema%metadata%items) == n_before + 1, &
             "add_metadata should still append even when the key duplicates a MAML-declared top-level key")
         if (allocated(error)) return
-        call check(error, trim(schema%metadata%items(n_before + 1)%key) == "author")
+        call check(error, trim(schema%metadata%items(n_before + 1)%key) == "author", &
+            "trim(schema%metadata%items(n_before + 1)%key) == ""author""")
         if (allocated(error)) return
         call check(error, trim(schema%metadata%items(n_before + 1)%value) == "Bob", &
             "the newly-appended duplicate entry should still carry the caller's own value, not overwrite the original")
@@ -1422,7 +1450,8 @@ contains
         call check(error, size(schema%metadata%items) == n_before + 1, &
             "a duplicate non-reserved key should still append a new entry (category B), not overwrite")
         if (allocated(error)) return
-        call check(error, trim(schema%metadata%items(n_before)%value) == "1")
+        call check(error, trim(schema%metadata%items(n_before)%value) == "1", &
+            "trim(schema%metadata%items(n_before)%value) == ""1""")
         if (allocated(error)) return
         call check(error, trim(schema%metadata%items(n_before + 1)%value) == "2", &
             "both the original and the duplicate entry should be preserved, in call order")

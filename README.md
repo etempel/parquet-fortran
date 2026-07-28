@@ -13,6 +13,8 @@
 
 Library to read/write parquet files and handle MAML files. The parquet file metadata can be defined using the [MAML-format](https://github.com/asgr/MAML-Format). The metadata in the MAML file is converted to the VOTable style metadata in the parquet header.
 
+**Status: 1.0 — first stable release.** The `use parquet` API follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) — see [API stability](#important-behavior) for exactly what that covers, and [CHANGELOG.md](CHANGELOG.md) for release history. `parquet_get_version` reports the version of the library you actually linked against.
+
 **Features:**
 
 - Read and write parquet columns for `int32`/`int64`/`float32`/`float64`/`logical`/`character` (MAML: `boolean`/`string`) — as plain 1D columns or fixed-length vector columns (a vector column is read back whether it was stored on disk as a `fixed_size_list` or a variable-length `list`).

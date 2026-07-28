@@ -360,6 +360,8 @@ program error_scenarios
         call scenario_qc_maml_missing_name()
     case ("qc_maml_unknown_subkey")
         call scenario_qc_maml_unknown_subkey()
+    case ("maml_line_too_long")
+        call scenario_maml_line_too_long()
     case ("write_row_count_mismatch")
         call scenario_write_row_count_mismatch()
     case ("read_row_count_mismatch")
@@ -4571,6 +4573,24 @@ contains
             schema=parquet_load_qc_maml_file("test_run/qc_bad_subkey.maml"))
         print '(a)', "unexpectedly opened a reader with an unknown qc: sub-key"
     end subroutine scenario_qc_maml_unknown_subkey
+
+    !> Regression scenario for feature_doc.md point 7's F1 finding: a MAML source line longer
+    !! than parquet_metadata's maml_max_line_len (1024 characters) used to be silently truncated
+    !! by a fixed-length `read(unit,'(A)')` (iostat still 0), producing incomplete metadata with
+    !! no diagnostic. parquet_metadata_maml.f90's parquet_read_maml_source_lines now detects this
+    !! via a non-advancing read + size= and aborts naming the offending line number, instead.
+    subroutine scenario_maml_line_too_long()
+        type(parquet_schema) :: schema
+        character(len=1100) :: long_info
+
+        long_info = repeat("x", 1100)
+        call write_text_file("test_run/maml_line_too_long.maml", [character(len=1200) :: &
+            "table: line_too_long_test", "fields:", "- name: id0", "  data_type: int32", &
+            "  info: " // trim(long_info)])
+
+        call parquet_parse_maml("test_run/maml_line_too_long.maml", schema)
+        print '(a)', "unexpectedly parsed a MAML file with a line exceeding the length limit"
+    end subroutine scenario_maml_line_too_long
 
     !> Opening a nonexistent file for reading previously called Arrow's
     !> ValueOrDie() with no status check first, which aborts the process

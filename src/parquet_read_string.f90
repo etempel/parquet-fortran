@@ -82,7 +82,7 @@ contains
     !> fixed-width padded array. Every Null lands as values%append_null() -- there is no
     !> null_value/is_valid to plumb through here, unlike every other parquet_read_column specific.
     module procedure parquet_read_string_column_compact
-        integer(int64) :: nrows, nchars
+        integer(int64) :: nrows, nchars, validity_offset
         type(c_ptr) :: offsets_ptr, data_ptr, validity_ptr
         integer(c_int8_t) :: offsets_int32_flag
 
@@ -90,9 +90,9 @@ contains
         call check_column_exists(reader, name, "parquet_read_column")
         call values%clear()
         call parquet_read_string_column_buffers(reader%handle, trim(name)//char(0), nrows, nchars, &
-            offsets_ptr, data_ptr, validity_ptr, offsets_int32_flag)
+            offsets_ptr, data_ptr, validity_ptr, offsets_int32_flag, validity_offset)
         call values%append_buffers(nrows, nchars, offsets_ptr, data_ptr, validity_ptr, &
-            offsets_int32_flag /= 0_c_int8_t)
+            offsets_int32_flag /= 0_c_int8_t, validity_offset)
     end procedure parquet_read_string_column_compact
     !> Shared body of parquet_read_string_array_row_mode/_row_index_int64.
     subroutine parquet_read_string_array_row_mode_impl(reader, name, values, row_index, null_value, is_valid)
@@ -259,7 +259,7 @@ contains
         character(len=*), intent(in) :: name !! column name.
         integer(int64), intent(in) :: row_group !! 1-based row group.
         type(parquet_string_column), intent(inout) :: values !! cleared, then filled with this row group's rows.
-        integer(int64) :: nrows, nchars
+        integer(int64) :: nrows, nchars, validity_offset
         type(c_ptr) :: offsets_ptr, data_ptr, validity_ptr
         integer(c_int8_t) :: offsets_int32_flag
 
@@ -269,9 +269,9 @@ contains
         call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
         call values%clear()
         call parquet_read_string_column_chunk_buffers(reader%handle, trim(name)//char(0), row_group, nrows, nchars, &
-            offsets_ptr, data_ptr, validity_ptr, offsets_int32_flag)
+            offsets_ptr, data_ptr, validity_ptr, offsets_int32_flag, validity_offset)
         call values%append_buffers(nrows, nchars, offsets_ptr, data_ptr, validity_ptr, &
-            offsets_int32_flag /= 0_c_int8_t)
+            offsets_int32_flag /= 0_c_int8_t, validity_offset)
     end subroutine parquet_read_string_column_chunk_compact_impl
     module procedure parquet_read_string_column_chunk_compact_rg32
         call parquet_read_string_column_chunk_compact_impl(reader, name, int(row_group, kind=int64), values)

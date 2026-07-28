@@ -1549,10 +1549,13 @@ contains
     !! construction and must be rebased by the caller (subtract the slice's own starting offset
     !! from every offsets entry, and advance `data` by that same amount) before calling this;
     !! passing an un-rebased `offsets` aborts immediately rather than silently misplacing every
-    !! element's bytes. `validity`, when not C_NULL_PTR, has the same requirement for its bit 0
-    !! (must already correspond to element 1 of this chunk) -- that misalignment cannot be
-    !! detected from a raw bitmap pointer alone, so it is documented here rather than guarded.
-    subroutine append_buffers(self, nrows_in, nchars_in, offsets, data, validity, offsets_int32)
+    !! element's bytes. `validity`, when not C_NULL_PTR, is addressed starting from bit
+    !! `validity_offset_bits` (default 0) rather than assumed to already start at bit 0 -- unlike
+    !! `offsets`/`data`, Arrow never pre-rebases a validity bitmap for a sliced source array, so a
+    !! nonzero source `offset()` (e.g. a struct-nested leaf resolved through a sliced child array)
+    !! must be passed through here explicitly; that misalignment cannot be detected from a raw
+    !! bitmap pointer alone; the caller is responsible for reporting the correct offset.
+    subroutine append_buffers(self, nrows_in, nchars_in, offsets, data, validity, offsets_int32, validity_offset_bits)
         class(parquet_string_column), intent(inout) :: self !! the destination column.
         integer(int64), intent(in) :: nrows_in              !! number of incoming elements.
         integer(int64), intent(in) :: nchars_in             !! incoming payload byte count.
@@ -1560,12 +1563,15 @@ contains
         type(c_ptr), intent(in) :: data                     !! -> nchars_in payload bytes, at offsets(0).
         type(c_ptr), intent(in) :: validity                 !! -> Arrow bitmap, or C_NULL_PTR.
         logical, intent(in) :: offsets_int32                !! .true. => source offsets are int32.
+        integer(int64), intent(in), optional :: validity_offset_bits !! bit index of element 1 in `validity` (default 0).
         integer(int64), pointer :: off64(:)
         integer(int32), pointer :: off32(:)
         character(len=1), pointer :: din(:)
         integer(int8), pointer :: vin(:)
-        integer(int64) :: base, k
+        integer(int64) :: base, k, voff, abit
         if (nrows_in <= 0) return
+        voff = 0_int64
+        if (present(validity_offset_bits)) voff = validity_offset_bits
         if (offsets_int32) then
             call c_f_pointer(offsets, off32, [nrows_in+1])
             if (off32(1) /= 0_int32) then
@@ -1596,9 +1602,10 @@ contains
         if (c_associated(validity)) then
             self%has_nulls = .true.
             call ensure_validity_cap(self, self%nrows + nrows_in)
-            call c_f_pointer(validity, vin, [(nrows_in + 7_int64)/8_int64])
+            call c_f_pointer(validity, vin, [(voff + nrows_in + 7_int64)/8_int64])
             do k = 1_int64, nrows_in
-                if (iand(vin((k-1_int64)/8_int64 + 1_int64), BIT_MASK(int(mod(k-1_int64, 8_int64)))) /= 0_int8) then
+                abit = voff + k - 1_int64
+                if (iand(vin(abit/8_int64 + 1_int64), BIT_MASK(int(mod(abit, 8_int64)))) /= 0_int8) then
                     call set_bit_valid(self, self%nrows + k)
                 else
                     call set_bit_null(self, self%nrows + k)

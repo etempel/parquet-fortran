@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Fixed a use-after-free in the compact string-buffer read path for struct-nested string columns.
+- Fixed silent truncation of MAML lines beyond 1024 characters, and CRLF (Windows line-ending)
+  handling in MAML files.
+- Fixed a documentation error pointing readers at `is_init()` instead of `is_parsed()`.
+- Fixed several stale/broken documentation cross-links and anchors.
+
+### Added
+
+- Added `tools/check_bindc_boundary.py`, wired into CI, to catch `bind(C)`/`extern "C"` signature
+  mismatches between Fortran and C++.
+- Added test coverage for temporal boundary values, struct-nested string buffers, and MAML CRLF
+  handling; added descriptive failure messages to ~200 previously message-less test assertions.
+
+### Changed
+
+- Reorganized `src/parquet_wrapper.cpp` with section-banner comments for navigability (no
+  functional change).
+
+Fixed many minor documentation issues along the way (broken links, stale wording, missing
+cross-references) — see individual `doc/pages/*.md` diffs for detail.
+
 ## [1.0.0] - 2026-07-27
 
 **Toolchain floor:** gfortran ≥ 13 (13 on CI; 15.2.0 the primary development target), Intel

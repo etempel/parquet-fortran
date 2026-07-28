@@ -10,6 +10,14 @@ submodule (parquet) parquet_metadata
     use iso_fortran_env, only: output_unit
     implicit none
 
+    !> Maximum length, in characters, of one MAML source line -- shared by parquet_append_line's
+    !! growth buffer and every fixed-length line-scratch variable in this submodule tree
+    !! (parquet_metadata_maml.f90's file loaders and parquet_parse_maml_lines/parquet_parse_qc_maml
+    !! below). parquet_load_maml_file/parquet_load_qc_maml_file enforce this at read time
+    !! (error stop on a longer line) rather than silently truncating -- see CLAUDE.md's MAML
+    !! parser robustness notes.
+    integer, parameter :: maml_max_line_len = 1024
+
     ! ---- MAML load/parse/validate helpers (metadata-subtree-only private interfaces,
     ! relocated here from parquet.f90 -- see CLAUDE.md's private-helper relocation rule) ----
     interface
@@ -46,7 +54,7 @@ submodule (parquet) parquet_metadata
         !> Appends `line` to `lines` at 1-based position `n`, growing the
         !> array if needed; internal MAML-source-lines plumbing.
         module subroutine parquet_append_line(lines, n, line)
-            character(len=1024), allocatable, intent(inout) :: lines(:) !! line buffer being appended to.
+            character(len=maml_max_line_len), allocatable, intent(inout) :: lines(:) !! line buffer being appended to.
             integer, intent(in) :: n !! number of lines already in use before this call.
             character(len=*), intent(in) :: line !! line text to store.
         end subroutine parquet_append_line
@@ -1065,7 +1073,7 @@ contains
         type(parquet_column_info), intent(out) :: cinfo !! parsed per-field schema/QC state.
         type(parquet_table_metadata), intent(out) :: metadata !! parsed flat key-value table metadata.
         type(parquet_column_type), allocatable :: tmp(:)
-        character(len=1024) :: line
+        character(len=maml_max_line_len) :: line
         character(len=:), allocatable :: tline, key, cvalue
         logical :: in_fields, have_current, in_list, in_field_list, in_keyarray, in_doiarray, in_dependsarray, in_extra
         logical :: in_qc

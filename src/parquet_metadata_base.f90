@@ -11,7 +11,7 @@ submodule (parquet:parquet_metadata) parquet_metadata_base
 contains
 
     module procedure parquet_append_line
-        character(len=1024), allocatable :: tmp(:)
+        character(len=maml_max_line_len), allocatable :: tmp(:)
 
         ! See g_maml_mutex in parquet_wrapper.cpp.
         call parquet_maml_lock()

@@ -86,7 +86,8 @@ contains
         !$omp end parallel do
 
         do i = 1, nfiles
-            call check(error, ok(i))
+            call check(error, ok(i), &
+                "ok(i)")
             if (allocated(error)) then
                 call test_failed(error, "parallel write failed for file: " // trim(filenames(i)))
                 return
@@ -179,7 +180,8 @@ contains
         !$omp end parallel do
 
         do i = 1, nfiles
-            call check(error, ok(i))
+            call check(error, ok(i), &
+                "ok(i)")
             if (allocated(error)) then
                 call test_failed(error, "parallel read failed or returned wrong data for file: " // trim(filenames(i)))
                 return
@@ -247,7 +249,8 @@ contains
         !$omp end parallel do
 
         do i = 1, nfiles
-            call check(error, ok(i))
+            call check(error, ok(i), &
+                "ok(i)")
             if (allocated(error)) then
                 if (mod(i,2) == 0) then
                     call test_failed(error, "parallel write failed for file: " // trim(write_files(i)))
@@ -274,7 +277,8 @@ contains
         !$omp end parallel do
 
         do i = 1, nfiles
-            call check(error, ok(i))
+            call check(error, ok(i), &
+                "ok(i)")
             if (allocated(error)) then
                 call test_failed(error, "concurrent MAML parsing failed on one or more threads")
                 return
@@ -312,7 +316,8 @@ contains
         logical :: exists
 
         inquire(file=shared_file, exist=exists)
-        call check(error, exists)
+        call check(error, exists, &
+            "exists")
         if (allocated(error)) then
             call test_failed(error, "input parquet file missing: expected " // shared_file)
             return
@@ -326,7 +331,8 @@ contains
         !$omp end parallel do
 
         do i = 1, nfiles
-            call check(error, ok(i))
+            call check(error, ok(i), &
+                "ok(i)")
             if (allocated(error)) then
                 call test_failed(error, "repeated concurrent reads of a shared file failed on one or more threads")
                 return
@@ -394,7 +400,8 @@ contains
         !$omp end parallel do
 
         do i = 1, n
-            call check(error, ok(i))
+            call check(error, ok(i), &
+                "ok(i)")
             if (allocated(error)) then
                 call test_failed(error, "stress write failed for file: " // trim(filenames(i)))
                 return
@@ -409,7 +416,8 @@ contains
         !$omp end parallel do
 
         do i = 1, n
-            call check(error, ok(i))
+            call check(error, ok(i), &
+                "ok(i)")
             if (allocated(error)) then
                 call test_failed(error, "stress read failed or returned wrong data for file: " // trim(filenames(i)))
                 return

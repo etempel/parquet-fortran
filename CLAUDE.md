@@ -34,6 +34,7 @@ working rules).
   - [Naming conventions](#naming-conventions)
   - [Public numeric arguments: provide both int32 and int64 kinds](#public-numeric-arguments-provide-both-int32-and-int64-kinds)
   - [MAML fixture directory: `schemas/`](#maml-fixture-directory-schemas)
+  - [Reading MAML source files: shared helper, line-length limit, CRLF handling](#reading-maml-source-files-shared-helper-line-length-limit-crlf-handling)
   - [Error stop messages: include file/schema context](#error-stop-messages-include-fileschema-context)
   - [Guard mutating public procedures against being called twice](#guard-mutating-public-procedures-against-being-called-twice)
   - [Implicit finalizers must never route through a path that can throw/abort](#implicit-finalizers-must-never-route-through-a-path-that-can-throwabort)
@@ -42,11 +43,14 @@ working rules).
   - [The `parquet_temporal` module (date/time/timestamp)](#the-parquet_temporal-module-datetimetimestamp)
 - [Build & compiler notes](#build--compiler-notes)
   - [Compiler & language gotchas](#compiler--language-gotchas)
+  - [Verifying the bind(C) boundary](#verifying-the-bindc-boundary)
+  - [If `src/parquet_wrapper.cpp` is ever split into multiple translation units](#if-srcparquet_wrappercpp-is-ever-split-into-multiple-translation-units)
   - [Stale `fpm` build cache](#stale-fpm-build-cache)
   - [Keeping `tools/prep_fpm_publish.sh` in sync](#keeping-toolsprep_fpm_publishsh-in-sync)
   - [Manual (never-`fpm test`) large-scale/benchmark tools](#manual-never-fpm-test-large-scalebenchmark-tools)
 - [Testing & coverage](#testing--coverage)
   - [Running a single test suite/test](#running-a-single-test-suitetest)
+  - [Every `check()` call needs its own message](#every-check-call-needs-its-own-message)
   - [Measuring test coverage](#measuring-test-coverage)
   - [Fortran gcov attribution artifacts](#fortran-gcov-attribution-artifacts)
   - [`src/parquet_wrapper.cpp`: GCC vs Clang gcov attribution](#srcparquet_wrappercpp-gcc-vs-clang-gcov-attribution)
@@ -131,9 +135,12 @@ Whenever asked to implement a new feature in this repository, always:
 Do this without being asked separately each time — it applies by default to any
 "implement/add feature" request in this repo, not just when explicitly reminded.
 
-**CHANGELOG is paused until release.** The project is pre-release; the changelog will only be
-maintained from the first public release (1.0) onward — do **not** add `CHANGELOG.md`
-`[Unreleased]` entries in the meantime.
+**CHANGELOG is active as of the 1.0.0 release.** `CHANGELOG.md` has a published `[1.0.0]`
+section — every user-facing change from here on (new feature, behavior change, bug fix affecting
+documented behavior) gets an `[Unreleased]` entry added at the top of the file, following the
+existing [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format already used there. Do
+this without being asked separately, the same way tests/docs are added by default for a new
+feature (see "New features require tests and docs" above).
 
 ### Documentation structure
 
@@ -498,6 +505,30 @@ types x `integer(int32)`/`integer(int64)` row_index, each pair delegating to one
 MAML schemas aren't forced to match this project's convention — see
 `doc/pages/embedding-maml-schemas.md` for the user-facing how-to.
 
+### Reading MAML source files: shared helper, line-length limit, CRLF handling
+
+Any code path that reads a `.maml` file's lines from disk (`parquet_load_maml_file`,
+`parquet_load_qc_maml_file`, or a future one) should go through the shared
+`parquet_read_maml_source_lines(filename, context, lines, nlines)` subroutine in
+`parquet_metadata_maml.f90` rather than writing its own read loop. It handles two things a
+hand-rolled loop easily misses:
+
+- **A per-line length cap.** Lines are read into a fixed `character(len=maml_max_line_len)`
+  buffer (`maml_max_line_len = 1024`, declared once in `parquet_metadata.f90` and host-associated
+  to descendants — don't hardcode `1024` again elsewhere). A line longer than this is detected via
+  non-advancing read + `size=`/`iostat_eor` (not silently truncated with `iostat == 0`, which was
+  the original bug this helper fixes) and aborts with a clear message naming the offending line
+  number, rather than letting a truncated `keywords:`/`protected_cols:` line validate and write
+  incomplete metadata into the output file.
+- **CRLF transparency.** A trailing `char(13)` (from a Windows-edited `.maml` file) is stripped
+  before the line is returned — plain Fortran `trim()` does not remove it, so without this a
+  CRLF file produces a confusing "invalid data_type"-style error for a value that looks visibly
+  correct to a human reading the file.
+
+If a future MAML-adjacent feature needs to read a `.maml`-like file's lines directly, reuse this
+helper (or extend it) instead of duplicating the read loop — that's exactly the class of bug it
+was introduced to close off project-wide.
+
 ### Error stop messages: include file/schema context
 
 New `error stop` messages in the read/write/schema-building paths should append the relevant
@@ -567,6 +598,32 @@ one element). User guide: `doc/pages/string-columns.md`.
   on.
 - **`allow_null=.true.` on `get`/`to_string` returns an empty string, not unallocated** — see the
   gfortran note in "Compiler & language gotchas" below.
+- **A struct-nested leaf read through the compact buffer-handoff path needs its validity bitmap's
+  element offset threaded through explicitly — the offsets/data buffers do not need this.**
+  `extract_string_buffers` (`parquet_wrapper.cpp`) reports the source Arrow array's own
+  `data()->offset` as an extra out-argument (`validity_offset` in `parquet_bindings.f90`'s
+  `parquet_read_string_column_buffers`/`_chunk_buffers`), and `append_buffers` (this module) takes
+  a matching optional `validity_offset_bits` argument to start its bit-walk at the right bit —
+  because Arrow never pre-rebases a validity bitmap for a sliced array the way it does the
+  offsets/data buffers (`raw_value_offsets()[0]` already accounts for slicing on those two).
+  Precondition for any future non-scalar `parquet_string_column` specific (a vector/matrix column,
+  or any new call site reached through `unwrap_struct_path`'s struct-path resolution): don't drop
+  this argument or assume a fresh `offsets(1)==0` guard alone is sufficient — a sliced source whose
+  removed leading elements are all empty strings passes that guard while still needing the
+  validity offset to avoid misaligned nulls.
+- **`get_single_chunk_array`'s whole-column struct-path result is not retained by `column_cache`
+  the way a plain column's result is — anything that returns a raw pointer into it across the
+  `bind(C)` boundary must pin it itself.** `column_cache` only ever stores the *pre*-
+  `unwrap_struct_path` array; a dotted struct-field path additionally builds a fresh, uncached
+  array (a new combined-validity buffer) on every call. `parquet_read_string_column_buffers` learned
+  this the hard way (a confirmed, 100%-reproducible use-after-free: every row of a struct-nested
+  string leaf read via the compact `parquet_string_column` path came back `Null`, because the
+  freshly built validity buffer was freed the instant that function returned to Fortran, before
+  Fortran's `append_buffers` read the pointer) — fixed by pinning the returned array in
+  `ParquetReaderHandle::last_whole_column_buffers_array`, mirroring `last_chunk_buffers_array`'s
+  existing pattern for the row-group-scoped chunk read. Any future whole-column function that hands
+  a raw buffer pointer back across the `bind(C)` boundary for a column reachable via a struct path
+  must pin its array the same way — don't assume `column_cache` alone covers it.
 
 ### The `parquet_temporal` module (date/time/timestamp)
 
@@ -604,6 +661,19 @@ counterpart. User guide: `doc/pages/date-time.md`.
   The `DATE64` decode branch in `parquet_wrapper.cpp`'s `convert_date_values` is kept as
   defensive dead code (in case a future Arrow/Parquet version changes this) and `GCOVR_EXCL`'d
   rather than chased with an unbuildable fixture.
+- **`civil_from_days`'s final `if (m <= 2) y = y + 1` line is easy to drop when hand-transcribing
+  or re-deriving this algorithm** (e.g. to compute an expected civil date for a boundary-value test
+  by hand/in a scratch script) — Howard Hinnant's algorithm computes a year-of-era relative to a
+  March-based year, and this trailing correction is what shifts a January/February result back
+  onto the actual calendar year; omitting it silently produces a year that is off by exactly one
+  for any date whose month is January or February (confirmed by re-deriving the function from
+  `parquet_temporal.f90`'s source without this line and getting a consistent one-year error only
+  on Jan/Feb dates, e.g. `civil_from_days(0)` coming out as `1969-01-01` instead of `1970-01-01`).
+  If you ever need to independently re-verify a `days_from_civil`/`civil_from_days` boundary value
+  outside the Fortran source (by hand or in another language), re-read both functions' full bodies
+  in `parquet_temporal.f90` first rather than reconstructing them from memory, and sanity-check the
+  result via a *round-trip* (`days_from_civil(civil_from_days(z)) == z`) rather than trusting a
+  single-direction computation.
 - **Legacy `INT96` timestamp test fixtures**: `enable_deprecated_int96_timestamps()` is a method
   on `parquet::ArrowWriterProperties::Builder`, *not* `parquet::WriterProperties::Builder` (easy
   to guess wrong — the name doesn't indicate which builder). See
@@ -685,6 +755,42 @@ counterpart. User guide: `doc/pages/date-time.md`.
   component itself — a much larger, easier-to-get-subtly-wrong change than it first appears.
   Prefer keeping `intent(out)` and solving misuse-prevention some other way.
 
+### Verifying the bind(C) boundary
+
+A `bind(C)` interface (`src/parquet_bindings.f90`) has no compile-time link to the `extern "C"`
+definition it describes in `src/parquet_wrapper.cpp` — gfortran and gcc each compile their own
+half against the interface/definition text alone. A kind mismatch introduced by hand-editing
+either side (e.g. a dummy silently changed from `integer(c_int32_t)` to `integer(c_int64_t)`
+without the matching C++ parameter changing too) compiles cleanly on both sides and corrupts
+memory silently at runtime, with no compiler diagnostic at all. Run `tools/check_bindc_boundary.py`
+after touching either side of this boundary (a signature in `parquet_bindings.f90`, an `extern "C"`
+function in `parquet_wrapper.cpp`, or one of the hand-written local `bind(C)` debug-hook interfaces
+in `test/error_scenarios.f90`/`test/test_temporal.f90`) — it cross-checks arity, base type,
+by-value-vs-by-reference, and (for functions) return type, and is wired into CI (`.gitlab-ci.yml`'s
+`lint` stage) so a mismatch fails the pipeline rather than only surfacing at runtime. It does
+**not** check length/ownership contracts, array rank, or NUL-termination conventions — see its own
+module docstring for what's out of scope, and "The `parquet_strings` module" above for a confirmed
+instance of that different class of bug.
+
+### If `src/parquet_wrapper.cpp` is ever split into multiple translation units
+
+A maintainability review considered splitting this single 7,400+-line file and decided against it
+(see CONTRIBUTING.md's "Features considered but not implemented" for the full four-cost writeup,
+and `src/parquet_wrapper.cpp`'s own `// ====`-banner comments, added instead, for a cheaper
+navigability improvement). If that decision is ever revisited, the single most important, least
+obvious hazard is this: **every `g_debug_*` process-global test-only override
+(`g_debug_force_whole_column_read_error`, `g_debug_string_offset_limit`, `g_debug_col_size_limit`,
+`g_debug_list_element_count_limit`, `g_debug_column_count_limit`, `g_debug_force_sample_mask_error`,
+`g_debug_physical_column_read_count`) is currently declared `static` at file scope, meaning exactly
+one instance per translation unit.** Splitting the file without changing this would silently give
+each new `.cpp` its own separate copy of every one of these globals. It would still compile and
+link cleanly — there is no diagnostic for this — but any `parquet_debug_set_*` setter reachable from
+`test/error_scenarios.f90` would then be writing to a *different* object than the guard code reads,
+so the override would silently stop working and the corresponding error scenario would start
+testing nothing at all while still reporting green. Before any split, promote every one of these to
+a genuine `extern` global with exactly one definition in a shared internal header (not `static`),
+and re-run every affected error scenario to confirm the override still takes effect.
+
 ### Stale `fpm` build cache
 
 If `fpm test` behaves unexpectedly after source changes (e.g. a test target seems to run old
@@ -755,6 +861,18 @@ run_tester -- reading`), or `fpm test run_tester -- <suite> "<test name>"` to ru
 named test within it. Prefer this over a full `fpm test` while iterating — the full suite
 (including OpenMP/error-scenario subprocess tests) takes much longer than the one suite
 relevant to a given change.
+
+### Every `check()` call needs its own message
+
+Every test-drive `call check(error, condition, ...)` in `test/*.f90` should carry a message
+argument, not just the bare condition. Without one, a failure reports only a file/line number —
+which combines badly with this suite's common `all(...)`/compound-condition idiom (e.g.
+`all((dates + offsets) == expected)`), where a bare line number gives no hint which element or
+sub-condition actually failed. A convenient default when there's no more descriptive text at hand
+is the condition's own source text as a string (whitespace-normalized, with any embedded `"`
+doubled per Fortran's escaping rule) — better than nothing, and it at least echoes back exactly
+what was expected without requiring a separate hand-written description. Apply this to every new
+`check()` call from now on, not only when a review flags a gap.
 
 ### Measuring test coverage
 

@@ -521,7 +521,7 @@ Differences from the padded `character(len=...)` path:
   through.
 - **No pre-sizing.** On read, `values` is cleared and grown to fit — unlike a padded array, you
   never need to know the row count (or the longest string's length —
-  [`parquet_get_string_length`](reading.html) has no role here) ahead of time.
+  [`parquet_get_string_length`](reading.html#column-shape-and-size-queries) has no role here) ahead of time.
 - **Scalar (1-D) columns only.** There is no vector/matrix `parquet_string_column` specific — a
   vector-of-strings column still needs the padded `character(len=...), dimension(:,:)` path.
 - **File format is identical either way.** Parquet's `BYTE_ARRAY` physical type is always

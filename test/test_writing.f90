@@ -277,7 +277,8 @@ contains
         call parquet_close_writer(writer)
         !
         inquire(file=out_file, exist=exists)
-        call check(error, exists)
+        call check(error, exists, &
+            "exists")
         if (allocated(error)) then
             call test_failed(error, "expected simple output parquet file was not created")
             return
@@ -3102,7 +3103,8 @@ contains
         call write_test_data(out_file, test_data, schema)
 
         inquire(file=out_file, exist=exists)
-        call check(error, exists)
+        call check(error, exists, &
+            "exists")
         if (allocated(error)) then
             call test_failed(error, "expected output parquet file was not created")
             return

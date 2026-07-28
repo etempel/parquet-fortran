@@ -47,6 +47,8 @@ contains
             new_unittest("validate a user MAML that is a valid subset", test_validate_user_maml_ok), &
             new_unittest("col_map: renames a field to an internal name", test_validate_user_maml_col_map_ok), &
             new_unittest("load a MAML file from disk", test_load_maml_file), &
+            new_unittest("a CRLF-terminated MAML file parses correctly (trailing char(13) stripped)", &
+                test_load_maml_file_crlf), &
             new_unittest("get_column_index finds an existing column", test_get_column_index_found), &
             new_unittest("get_num_fields/get_field_name report all fields, unfiltered", &
                 test_get_num_fields_and_field_name), &
@@ -173,7 +175,8 @@ contains
         ! Should not error stop: this is a well-formed MAML file.
         call parquet_validate_maml(maml)
 
-        call check(error, .true.)
+        call check(error, .true., &
+            ".true.")
     end subroutine test_validate_maml_ok
 
     !> schemas/maml_example2.maml exercises several things maml_example.maml does
@@ -190,7 +193,8 @@ contains
         ! Should not error stop: this is a well-formed MAML file.
         call parquet_validate_maml(maml)
 
-        call check(error, .true.)
+        call check(error, .true., &
+            ".true.")
     end subroutine test_validate_maml_example2_ok
 
     !> parquet_find_maml_nested_section (parquet_metadata_sections.f90) only
@@ -217,7 +221,8 @@ contains
         ! "qc:", so it has no declared nested schema and is left unvalidated.
         call parquet_validate_maml(maml)
 
-        call check(error, .true.)
+        call check(error, .true., &
+            ".true.")
     end subroutine test_validate_maml_unmatched_nested_ok
 
     !> parquet_validate_maml is generic: it also accepts a filename directly
@@ -229,7 +234,8 @@ contains
         ! Should not error stop: this is a well-formed MAML file.
         call parquet_validate_maml("schemas/maml_example2.maml")
 
-        call check(error, .true.)
+        call check(error, .true., &
+            ".true.")
     end subroutine test_validate_maml_by_filename_ok
 
     !> schemas/maml_example.maml/maml_example2.maml (and every other fixture)
@@ -470,6 +476,46 @@ contains
         call check(error, trim(maml%name) == "schemas/maml_example.maml" .and. size(maml%lines) == 91, &
             "parquet_load_maml_file returned unexpected content")
     end subroutine test_load_maml_file
+
+    !> Writes `lines` to `path` with an explicit trailing CRLF (char(13)//char(10)) on every line,
+    !! via unformatted stream I/O so the bytes on disk are exact -- a plain formatted `write`
+    !! always emits the platform's own line terminator (LF on Unix), so this is the only way to
+    !! construct a genuinely CRLF-terminated fixture at runtime without checking in a CRLF file
+    !! (which risks being silently normalized by .gitattributes/editor settings).
+    subroutine write_text_file_crlf(path, lines)
+        character(len=*), intent(in) :: path
+        character(len=*), intent(in) :: lines(:)
+        integer :: unit, i
+
+        open(newunit=unit, file=path, status="replace", action="write", access="stream", form="unformatted")
+        do i = 1, size(lines)
+            write(unit) trim(lines(i)) // char(13) // char(10)
+        end do
+        close(unit)
+    end subroutine write_text_file_crlf
+
+    !> Regression test for feature_doc.md point 7's F2 finding: a `.maml` file authored/edited on
+    !! Windows retains a trailing `\r` on every line after a Unix `read(unit,'(A)')`, and `trim()`
+    !! does not strip it (`char(13)` is not a blank) -- so `data_type: int32\r` failed to match
+    !! `valid_maml_data_types` and the reader printed a misleading "invalid data_type" error naming
+    !! what looked like a perfectly correct value. Fixed in
+    !! parquet_metadata_maml.f90's parquet_read_maml_source_lines, which now strips a trailing
+    !! char(13) from every line read. This constructs a CRLF-terminated fixture at runtime (see
+    !! write_text_file_crlf) and confirms it now parses successfully with the correct field type.
+    subroutine test_load_maml_file_crlf(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        character(len=*), parameter :: maml_file = "test_run/maml_crlf.maml"
+
+        call write_text_file_crlf(maml_file, [character(len=32) :: &
+            "table: crlf_test", "fields:", "- name: id0", "  data_type: int32"])
+
+        call parquet_parse_maml(maml_file, schema)
+
+        call check(error, schema%is_parsed(), "a CRLF-terminated MAML file should parse successfully")
+        if (allocated(error)) return
+        call check(error, schema%get_num_fields() == 1, "expected exactly one parsed field")
+    end subroutine test_load_maml_file_crlf
 
     subroutine test_get_column_index_found(error)
         type(error_type), allocatable, intent(out) :: error

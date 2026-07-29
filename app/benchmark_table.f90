@@ -32,7 +32,7 @@ program benchmark_table
     use parquet
     use parquet_tables
     use iso_fortran_env, only : int32, int64, real32, real64, error_unit, output_unit
-    use iso_c_binding, only : c_int64_t
+    use iso_c_binding, only : c_int64_t, c_int
     implicit none
 
     !> Bytes currently held by Arrow's process-wide memory pool. Declared locally rather than in
@@ -185,8 +185,15 @@ contains
     !! reflects what actually stayed allocated (including anything Arrow kept) rather than what
     !! this program thinks it allocated. Returns -1 when it cannot be determined.
     function rss_mib() result(mib)
+        interface
+            function getpid() bind(C, name="getpid")
+                import :: c_int
+                integer(c_int) :: getpid
+            end function getpid
+        end interface
+        integer(c_int) :: pid
         real(real64) :: mib !! resident set size, MiB, or -1.
-        integer :: u, ios, pid
+        integer :: u, ios
         character(len=256) :: line, cmdfile
         real(real64) :: kb
 

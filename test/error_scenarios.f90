@@ -5332,12 +5332,19 @@ contains
     !> side: every thread calls parquet_write_column on the *same* shared
     !> writer instance, each writing its own column names (thread index +
     !> batch + iteration) so a successful call would never legitimately fail
-    !> for an unrelated reason like a duplicate column name.
+    !> for an unrelated reason like a duplicate column name. Uses the same
+    !> batches/iterations_per_batch magnitude as the reader scenario above
+    !> (200 x 500, not the originally-much-smaller 50 x 100): the smaller
+    !> writer-side count gave the ConcurrencyGuard far fewer chances to
+    !> actually observe two threads inside the guarded region at once and
+    !> was confirmed to intermittently finish without the race ever firing
+    !> on a real CI runner, so it is now sized the same as the reader
+    !> scenario's own already-tuned count.
     subroutine scenario_concurrent_calls_into_shared_writer()
         type(parquet_writer) :: writer
         integer(int32) :: values(3) = [1_int32, 2_int32, 3_int32]
-        integer, parameter :: batches = 50
-        integer, parameter :: iterations_per_batch = 100
+        integer, parameter :: batches = 200
+        integer, parameter :: iterations_per_batch = 500
         integer :: b, i, tid, nthreads
         character(len=32) :: colname
 

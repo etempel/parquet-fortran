@@ -306,6 +306,12 @@ extern "C"
 		// (parquet_metadata.f90) never re-reads the file: every call just
 		// scans this in-memory copy.
 		std::vector<std::pair<std::string, std::string>> table_metadata_cache;
+		// Every readable column of this file, as the (possibly dotted) leaf paths every
+		// column-name argument in this library already accepts -- populated once by
+		// create_parquet_reader (schema-only, no column data), so parquet_reader_get_column_count/
+		// _name_length/_name are all O(1) lookups into it and can never disagree with each other.
+		// See collect_column_leaf_paths for exactly which fields become an entry.
+		std::vector<std::string> column_path_cache;
 		// Set by parquet_reader_set_sample and/or parquet_reader_set_filter: a plain (never-null)
 		// boolean mask, one entry per row of the *unfiltered* file, true for rows that pass random
 		// downsampling (parquet_open_reader's sample_fraction=, if given) AND every filter clause
@@ -352,6 +358,11 @@ extern "C"
 		// that column, for the same reporting purpose.
 		std::unordered_set<int> was_prefetched;
 		std::unordered_set<int> was_read;
+		// Set by parquet_reader_release_column for every column whose cached array it dropped.
+		// was_prefetched/was_read are never cleared, so without this parquet_reader_print_stat
+		// would still list a released column as "touched" and then look it up in column_cache,
+		// where it no longer is -- see its own handling of this.
+		std::unordered_set<int> was_released;
 		std::unordered_map<int, std::string> output_type_used;
 		std::unordered_map<int, int64_t> output_str_len_used;
 		// Read-time QC (see parquet_reader_set_qc, called from parquet_open_reader
@@ -595,6 +606,36 @@ extern "C"
 		auto leaf_id = field->type()->id();
 		return leaf_id != arrow::Type::STRUCT && leaf_id != arrow::Type::LIST &&
 			leaf_id != arrow::Type::LARGE_LIST && leaf_id != arrow::Type::MAP;
+	}
+
+	// Appends `field`'s addressable column name(s) to `out`, as the dotted leaf paths
+	// resolve_struct_path/struct_path_exists accept: a STRUCT field contributes one entry per
+	// leaf beneath it (recursively, to any depth) and no entry for itself, since a bare struct
+	// name is not readable; every other field -- scalar, FIXED_SIZE_LIST (vector), and also
+	// LIST/LARGE_LIST/MAP -- contributes exactly one entry under its own name.
+	//
+	// LIST/MAP are deliberately INCLUDED even though nothing can read them today: this powers
+	// parquet_get_column_names, whose job is to report what the file actually contains, and a
+	// caller that goes on to ask parquet_column_exists/parquet_get_column_type about such a name
+	// gets a truthful "not a supported type" answer. Silently omitting them would instead make a
+	// column simply vanish from a file listing, which is a much harder thing to diagnose. A
+	// LIST/MAP nested *inside* a struct is the one case with no addressable name at all (a dotted
+	// path may not land on one -- see resolve_struct_path), so it is emitted under its dotted
+	// path for the same reporting reason, and every lookup on it truthfully answers "not found".
+	static void collect_column_leaf_paths(
+		const std::shared_ptr<arrow::Field> &field, const std::string &prefix, std::vector<std::string> &out)
+	{
+		std::string path = prefix.empty() ? field->name() : prefix + "." + field->name();
+		if (field->type()->id() == arrow::Type::STRUCT)
+		{
+			auto struct_type = std::static_pointer_cast<arrow::StructType>(field->type());
+			for (int i = 0; i < struct_type->num_fields(); ++i)
+			{
+				collect_column_leaf_paths(struct_type->field(i), path, out);
+			}
+			return;
+		}
+		out.push_back(path);
 	}
 
 	// ==== Struct-path resolution ====
@@ -2516,6 +2557,11 @@ extern "C"
 			}
 		}
 
+		for (int i = 0; i < handle->schema->num_fields(); ++i)
+		{
+			collect_column_leaf_paths(handle->schema->field(i), std::string(), handle->column_path_cache);
+		}
+
 		return handle;
 	}
 
@@ -3514,6 +3560,85 @@ extern "C"
 		copy_string_with_padding(buf, buf_len, entry.second);
 	}
 
+	// Bytes currently held by Arrow's process-wide default memory pool.
+	//
+	// Diagnostic only, and deliberately NOT declared in src/parquet_bindings.f90: the one
+	// consumer is app/benchmark_table.f90, which declares its own local bind(C) interface for
+	// it (the same convention the debug-only g_debug_* setters use). It exists because RSS
+	// cannot answer the question it answers -- Arrow's pool does not return freed pages to the
+	// OS, so a released column buffer keeps counting toward RSS while no longer counting here.
+	// That difference is what distinguishes "parquet_reader_release_column worked" from "the
+	// buffers are still alive".
+	int64_t parquet_get_arrow_bytes_allocated()
+	{
+		return arrow::default_memory_pool()->bytes_allocated();
+	}
+
+	// Drops column `name`'s decoded Arrow array from column_cache, freeing its buffers, so a
+	// caller that has already copied the values Fortran-side does not keep a second full copy
+	// alive for the reader's whole lifetime (parquet_tables' materialization does exactly this).
+	// A later read of the same column simply re-reads and re-decodes it -- this is a pure memory/
+	// time trade, never a correctness change, and it composes with an active filter or sample
+	// because those are re-applied to every freshly decoded column by get_single_chunk_array.
+	//
+	// `name` may be a dotted struct-leaf path; the cache is keyed by TOP-LEVEL field index, so
+	// releasing any leaf releases the whole struct's array -- a caller walking several leaves of
+	// one struct should release only after its last leaf, or it will re-read the struct each time.
+	// Deliberately non-throwing and forgiving: an unknown name, or a column that was never read,
+	// is a silent no-op rather than an error (there is nothing a caller could usefully do about
+	// either, and an exception here would cross the extern "C" boundary uncaught).
+	void parquet_reader_release_column(void *handle, const char *name)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		std::string full_name(name);
+		// Mirrors resolve_struct_path's "an exact top-level match always wins" rule, without
+		// needing its (throwing) leaf-type validation -- all this needs is the cache key.
+		int idx = reader_handle->schema->GetFieldIndex(full_name);
+		if (idx < 0)
+		{
+			auto dot = full_name.find('.');
+			if (dot == std::string::npos) return;
+			idx = reader_handle->schema->GetFieldIndex(full_name.substr(0, dot));
+			if (idx < 0) return;
+		}
+		if (reader_handle->column_cache.erase(idx) > 0) reader_handle->was_released.insert(idx);
+	}
+
+	// parquet_get_column_names (parquet_read.f90) walks the reader's column_path_cache once
+	// through these three accessors -- the same length-then-copy convention the table-metadata
+	// accessors just above use. `index` is 0-based. Nothing here reads column data: the cache was
+	// built from the schema alone at open time.
+	int32_t parquet_reader_get_column_count(void *handle)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		return static_cast<int32_t>(reader_handle->column_path_cache.size());
+	}
+
+	// Returns the column path at `index`, or aborts via report_fatal_error if out of range.
+	static const std::string &column_path_at(ParquetReaderHandle *reader_handle, int32_t index, const char *context)
+	{
+		if (index < 0 || index >= static_cast<int32_t>(reader_handle->column_path_cache.size()))
+		{
+			report_fatal_error(context, "column index out of range");
+		}
+		return reader_handle->column_path_cache[static_cast<size_t>(index)];
+	} // GCOVR_EXCL_LINE -- gcov attribution artifact: this closing brace shows uncovered even though the covered `return` above proves the body ran.
+
+	// Returns the byte length of column `index`'s (possibly dotted) name.
+	int64_t parquet_reader_get_column_name_length(void *handle, int32_t index)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		return static_cast<int64_t>(
+			column_path_at(reader_handle, index, "parquet_reader_get_column_name_length").size());
+	}
+
+	// Copies column `index`'s (possibly dotted) name into `buf`.
+	void parquet_reader_get_column_name(void *handle, int32_t index, char *buf, int64_t buf_len)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		copy_string_with_padding(buf, buf_len, column_path_at(reader_handle, index, "parquet_reader_get_column_name"));
+	}
+
 	// Returns a short human-readable type description for parquet_reader_print_stat,
 	// e.g. "list<double>" for a vector column, else the plain Arrow type name.
 	static std::string describe_parquet_type(const std::shared_ptr<arrow::Field> &field)
@@ -3612,7 +3737,25 @@ extern "C"
 		for (int idx : touched)
 		{
 			auto field = reader_handle->schema->field(idx);
-			auto array = reader_handle->column_cache.at(idx);
+			// A column released via parquet_reader_release_column is still "touched" (was_read/
+			// was_prefetched are never cleared) but its array is gone, so every value-derived
+			// cell below is unavailable. Report the row with those cells marked "released"
+			// rather than either dropping the row (losing the fact that it was read at all) or
+			// looking it up unconditionally -- an .at() miss here would throw across the
+			// extern "C" boundary uncaught, i.e. abort the process from a diagnostic call.
+			auto cached = reader_handle->column_cache.find(idx);
+			if (cached == reader_handle->column_cache.end())
+			{
+				rows.push_back({
+					field->name(), describe_parquet_type(field), "", "", "",
+					reader_handle->was_released.count(idx) ? "released" : "-", "-", "-", "", "", "",
+					reader_handle->was_prefetched.count(idx) ? "yes" : "no",
+					reader_handle->was_read.count(idx) ? "yes" : "no",
+					"",
+				});
+				continue;
+			}
+			auto array = cached->second;
 			auto flat = flatten_for_stats(array);
 
 			std::string col_size_str;

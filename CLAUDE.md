@@ -28,6 +28,7 @@ working rules).
   - [FORD config gotchas](#ford-config-gotchas)
 - [Source code structure & conventions](#source-code-structure--conventions)
   - [One program unit per file; filename == unit name](#one-program-unit-per-file-filename--unit-name)
+  - [Some `src/*.f90` files are generated — edit the generator, never the output](#some-srcf90-files-are-generated--edit-the-generator-never-the-output)
   - [Nested submodule tree](#nested-submodule-tree)
   - [Group interface bodies into commented `interface` blocks](#group-interface-bodies-into-commented-interface-blocks)
   - [A module procedure cannot implement its own submodule's spec-declared interface](#a-module-procedure-cannot-implement-its-own-submodules-spec-declared-interface)
@@ -39,6 +40,8 @@ working rules).
   - [Guard mutating public procedures against being called twice](#guard-mutating-public-procedures-against-being-called-twice)
   - [Implicit finalizers must never route through a path that can throw/abort](#implicit-finalizers-must-never-route-through-a-path-that-can-throwabort)
   - [Automatic BYTE_STREAM_SPLIT for float columns in the writer](#automatic-byte_stream_split-for-float-columns-in-the-writer)
+  - [`parquet_column` validity is ROW-granular, even for the vector kinds](#parquet_column-validity-is-row-granular-even-for-the-vector-kinds)
+  - [A `parquet_schema` built in code must be parsed before anything reads its fields](#a-parquet_schema-built-in-code-must-be-parsed-before-anything-reads-its-fields)
 - [Element-domain modules (`parquet_strings`, `parquet_temporal`)](#element-domain-modules-parquet_strings-parquet_temporal)
   - [The `parquet_strings` module](#the-parquet_strings-module)
   - [The `parquet_temporal` module (date/time/timestamp)](#the-parquet_temporal-module-datetimetimestamp)
@@ -49,8 +52,10 @@ working rules).
   - [Stale `fpm` build cache](#stale-fpm-build-cache)
   - [Keeping `tools/prep_fpm_publish.sh` in sync](#keeping-toolsprep_fpm_publishsh-in-sync)
   - [Manual (never-`fpm test`) large-scale/benchmark tools](#manual-never-fpm-test-large-scalebenchmark-tools)
+  - [Measuring whether Arrow memory was actually freed](#measuring-whether-arrow-memory-was-actually-freed-rss-cannot-answer-the-pool-counter-can)
 - [Testing & coverage](#testing--coverage)
   - [Running a single test suite/test](#running-a-single-test-suitetest)
+  - [Tests run concurrently: never share a fixture file path between two tests](#tests-run-concurrently-never-share-a-fixture-file-path-between-two-tests)
   - [Every `check()` call needs its own message](#every-check-call-needs-its-own-message)
   - [Measuring test coverage](#measuring-test-coverage)
   - [Fortran gcov attribution artifacts](#fortran-gcov-attribution-artifacts)
@@ -349,6 +354,41 @@ convention and is load-bearing for navigation and for the publish tooling (which
 file differently from the unit it defines. (fpm does not hard-fail on a mismatch by default —
 `module-naming = false` here — but treat it as a firm rule.)
 
+### Some `src/*.f90` files are generated — edit the generator, never the output
+
+Several source files are emitted by a `tools/` script from a single source of truth (a kind table, a
+schema, a template) and are **committed** rather than regenerated at build time, so `fpm build` stays
+dependency-free. They look like ordinary hand-written source when opened, which is exactly the trap:
+editing one directly appears to work, passes tests, and is then silently reverted the next time anyone
+regenerates.
+
+**Always check the top of a `src/*.f90` file before editing it.** Every generated file opens with a
+banner naming its generator (`GENERATED FILE -- DO NOT EDIT BY HAND` / `automatically generated`). If
+that banner is there, make the change in the generator's own input instead — the kind/field table or
+template inside the script — and re-run it. Currently generated: `src/parquet_maml_base.f90` (from
+`tools/generate_parquet_maml.sh` + the `.maml` files under `schemas/`), and `src/parquet_columns.f90`,
+`src/parquet_columns_access.f90`, `src/parquet_columns_mutate.f90` (from
+`tools/generate_parquet_columns.py`, whose kind table is the single place a supported column kind is
+declared). Treat this list as a snapshot — trust the banner, not the list, and add new generated files
+here when they appear.
+
+Working rules for this class of file:
+
+- **A generator must emit the project's own conventions**, or it multiplies a single template omission
+  across every kind it emits: `!>`/`!!` doc-comments on everything public (only `ford --warn docs.md`
+  would reveal their absence — see "FORD doc-comment conventions"), the `! GCOVR_EXCL_LINE` markers, and
+  the 132-column line limit.
+- **Prefer a generator that can verify its own output.** `tools/generate_parquet_columns.py --check`
+  re-derives the files in memory and exits nonzero if the committed copies have drifted — run it after
+  any change in that area, and give a new generator the same mode.
+- **Sibling generators should share one source of truth rather than each carrying its own copy.** A
+  second generator over the same kind table imports it from the existing script instead of duplicating
+  it; two drifting copies of a kind list is a much worse failure than one slightly awkward import.
+- **A generator that is maintainer-only belongs in `tools/prep_fpm_publish.sh`'s `REMOVE_PATHS`**
+  (downstream projects consume the committed output). One that is consumer-facing — like
+  `tools/generate_parquet_maml.sh`, which downstream projects run on their own schemas — does not. See
+  "Keeping `tools/prep_fpm_publish.sh` in sync".
+
 ### Nested submodule tree
 
 `src/*.f90`'s `parquet`/`parquet_read`/`parquet_write`/`parquet_metadata` files form a nested
@@ -600,6 +640,34 @@ library has no reader-side API to introspect a file's physical encoding, so `pya
 external tool) is the only way to confirm this end-to-end; a pure test-drive/Fortran test can only
 confirm the *data* round-trips correctly, not which encoding was used to store it.
 
+### `parquet_column` validity is ROW-granular, even for the vector kinds
+
+`parquet_column`'s validity API (`is_null`, `set_null`, `clear_null`) indexes by **row**, bounded by
+the column's `nrows` — never by a flattened `(row - 1) * width + element` element position. On a
+`*_VEC` kind, `set_null(i)` nulls **every element of row `i`**, and `is_null(i)` answers for the row.
+
+This is easy to get backwards, because the backing bitmap really is `width * nrows` bits, which makes
+flat element indexing look like the intended scheme. It is not reachable through the public API: there
+is no way to mark a single element of a vector row null. Passing a flat index instead aborts with
+`row index out of range` as soon as it exceeds `nrows` — which, on a fixture with no nulls, may not
+happen until some later code path (a write, say) starts asking about validity.
+
+**Consequence to preserve and document in any new read path:** a *per-element* null in a vector column
+read from a parquet file cannot be represented and must be widened to the whole row (`if any element
+of the row is null, mark the row null`). Do not silently drop it, and do not attempt to store it.
+
+### A `parquet_schema` built in code must be parsed before anything reads its fields
+
+`schema%init` + `schema%add_field` build the schema's MAML **text** only; `schema%cinfo` stays
+unpopulated until `parquet_parse_maml(schema)` runs. Calling `%get_num_fields`/`%get_field_name`/
+`%is_column_set` before that reads uninitialized state — in a loop bounded by `%get_num_fields()` this
+becomes a runaway allocation and an **OOM kill**, with no error message and nothing pointing at the
+schema. Any new procedure that walks a caller-supplied schema should therefore guard with
+`if (.not. schema%is_parsed()) error stop "<procedure>: this schema has not been parsed; call
+parquet_parse_maml(schema) after building it with %init/%add_field"` before touching `%cinfo`. Note
+`%is_parsed()` is the correct check, not `%is_init()` — the latter is `.true.` for exactly the
+unparsed from-scratch schema this guard exists to catch.
+
 ## Element-domain modules (`parquet_strings`, `parquet_temporal`)
 
 ### The `parquet_strings` module
@@ -784,6 +852,27 @@ counterpart. User guide: `doc/pages/date-time.md`.
   from the previous use unless the open body is rewritten to unconditionally reset every single
   component itself — a much larger, easier-to-get-subtly-wrong change than it first appears.
   Prefer keeping `intent(out)` and solving misuse-prevention some other way.
+- **cpp runs over every source file, so `/*` anywhere — including inside a Fortran comment —
+  breaks the build.** `fpm.toml` declares `[preprocess.cpp]`, which applies to *all* sources, not
+  just `.F90` ones. Writing a glob like `tools/*.sh` in a comment opens a C block comment and the
+  file fails to compile with a confusing `unterminated comment` pointing at the *last* line of the
+  comment block, not the offending one. A trailing `\` at the end of a comment or string literal is
+  a cpp line-continuation for the same reason, and silently splices the next source line. Neither is
+  a Fortran error, so nothing about the message suggests the real cause. Write `tools/ *.sh`, "a
+  shell wrapper under `tools/`", or anything else that avoids the two-character sequence.
+- **A type-bound procedure cannot share a name with a data component of the same type**
+  (`Error: Procedure 'x' at (1) has the same name as a component of 'my_type'`). When a natural
+  accessor name collides with the component it reports (`%nrows()` over an `nrows` component), rename
+  the **component** — it is private implementation detail — and keep the short binding name, which is
+  the public surface. Renaming the binding instead pushes an internal detail into the API.
+- **A private procedure contained directly in a module, whose only callers are that module's
+  submodules, compiles cleanly and then fails at LINK time** with `undefined symbol`. gfortran does
+  not emit it (it also reports `-Wunused-function` for it, which is the early warning). This is
+  invisible to per-file compilation and only appears when something actually links, so it can survive
+  a long way into a change. Fix: declare the procedure's interface in the module and implement it in a
+  submodule, exactly as `parquet.f90` already does for its shared private helpers (see
+  `src/parquet_columns_util.f90` for a file created solely to hold such helpers). Prefer that shape
+  from the start for any helper a submodule will call.
 
 ### Verifying the bind(C) boundary
 
@@ -882,6 +971,27 @@ the repo root first. Document usage (parameters, defaults, example invocations) 
 CONTRIBUTING.md's "Other tools/ helpers" section, not README.md — this is a contributor/
 maintainer tool, not part of the public library API.
 
+### Measuring whether Arrow memory was actually freed: RSS cannot answer, the pool counter can
+
+**Resident set size does not fall when Arrow buffers are freed**, so it cannot be used to verify that
+some code path released them. Arrow allocates through `arrow::default_memory_pool()`, which keeps
+freed pages instead of returning them to the OS (and glibc/macOS `malloc` behave the same way for
+ordinary allocations). A correct release and a complete failure to release therefore look nearly
+identical in `ps`/`/proc` output — and the difference that *does* show up is the transient peak, which
+misleads in the opposite direction.
+
+Measure `arrow::default_memory_pool()->bytes_allocated()` instead. `parquet_get_arrow_bytes_allocated`
+(`src/parquet_wrapper.cpp`) exposes it; it is deliberately **not** declared in
+`src/parquet_bindings.f90`, because it is a maintainer diagnostic rather than public API — the
+consumer declares its own local `bind(C)` interface for it, the same convention the `parquet_debug_*`
+hooks follow. Two further rules when writing such a measurement:
+
+- **Measure each path in its own process.** Running a baseline and the path under test in one process
+  reports the high-water mark of the pair, which makes whichever ran second look like it retained
+  memory it had already released.
+- **State in the output which number is the real answer.** A report that prints RSS next to the pool
+  figure invites the reader to draw the wrong conclusion from the wrong line.
+
 ## Testing & coverage
 
 ### Running a single test suite/test
@@ -891,6 +1001,21 @@ run_tester -- reading`), or `fpm test run_tester -- <suite> "<test name>"` to ru
 named test within it. Prefer this over a full `fpm test` while iterating — the full suite
 (including OpenMP/error-scenario subprocess tests) takes much longer than the one suite
 relevant to a given change.
+
+### Tests run concurrently: never share a fixture file path between two tests
+
+test-drive runs the tests in a suite **concurrently**, so two tests that write to the same fixture
+path can truncate the file out from under each other — one opens it while the other is rewriting it,
+and the reader gets an empty or half-written file (`Parquet file size is 0 bytes`). **Give every test
+its own fixture filename**, even when the contents are identical, and even when one test is
+"obviously" going to run before the other.
+
+This failure is **timing-dependent, so a green run proves nothing**: the same tests can pass under a
+plain `fpm test` and fail under `tools/coverage.sh` (instrumented builds change the timing), or pass
+for months and fail on a busier machine. If a test that touches files fails intermittently or only
+under coverage, check for a shared path before looking anywhere else. Where several tests genuinely
+need the *same* fixture contents, factor the writing into one shared helper that takes the filename
+as an argument, and have each caller pass its own.
 
 ### Every `check()` call needs its own message
 

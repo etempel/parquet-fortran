@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added `parquet_tables` (`parquet_table`): loads a whole parquet file into memory as one table
+  (`parquet_open_table`), hands columns back as ordinary Fortran arrays through a widening copy
+  (`%get`) or a zero-copy typed pointer (`%col`), builds a table from scratch in memory
+  (`parquet_new_table` + `%add_column`), and writes one back out through an ordinary
+  `parquet_schema` (`parquet_write_table`). This first version is eager, read-only and
+  single-threaded — see [the guide](doc/pages/table.md) for the current limitations.
+- Added `parquet_get_column_names`, which lists every column in a file (expanding a nested struct
+  into one dotted leaf path per leaf), and `parquet_release_column`, which frees a column's
+  decoded Arrow buffers once the caller has its own copy.
 - Added `parquet_columns` (`parquet_column`): type-erased, whole-column value storage with sparse
   null tracking, covering 18 scalar/vector kinds plus reserved slots for the future
   list/map/struct column types. It is the shared foundation the upcoming `parquet_table` and the

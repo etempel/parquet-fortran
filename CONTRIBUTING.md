@@ -69,8 +69,9 @@ To generate the executables:
 
 | Executable | Source | Purpose |
 |---|---|---|
-| `run_parquet_fortran` | `app/program.f90` | Prints the parquet-fortran library version number — a quick sanity check that a build/install actually picked up the version you expect. The only one of the five that ships in the fpm-published package (see `tools/prep_fpm_publish.sh`) — the other four are maintainer/CI-only dev tools kept in this repository but stripped from what a consumer installs. |
+| `run_parquet_fortran` | `app/program.f90` | Prints the parquet-fortran library version number — a quick sanity check that a build/install actually picked up the version you expect. The only one of the six that ships in the fpm-published package (see `tools/prep_fpm_publish.sh`) — the other five are maintainer/CI-only dev tools kept in this repository but stripped from what a consumer installs. |
 | `benchmark_threads` | `app/benchmark_threads.f90` | Driven by `tools/benchmark_threads.sh` — see [Other tools/ helpers](#other-tools-helpers). |
+| `benchmark_table` | `app/benchmark_table.f90` | Driven by `tools/benchmark_table.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `test_large_scale` | `app/test_large_scale.f90` | Driven by `tools/test_large_scale.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `playground` | `app/playground.f90` | Maintainer scratch file for trying out Fortran code; no fixed purpose. |
 | `demo_print_schema_info` | `app/demo_print_schema_info.f90` | Maintainer demo for reviewing `schema%print_schema_info`'s output. |
@@ -160,6 +161,8 @@ The `clang++` invocation is unconditional, with no `FPM_CXX`/`CXX` override — 
 
 A few more `tools/` scripts, unrelated to fixtures and not part of the build or test flow:
 
+`tools/generate_parquet_tables.py` regenerates the per-kind blocks of the `parquet_tables` table layer: `src/parquet_tables.f90` (the module spec), `src/parquet_tables_access.f90`, `src/parquet_tables_addcol.f90` and `src/parquet_tables_materialize.f90`. It **imports its kind table from `tools/generate_parquet_columns.py`** rather than keeping a second copy, so a new column kind is declared in exactly one place and the two layers cannot drift apart. Output is committed and `--check` verifies it, exactly as for the columns generator. The other four `parquet_tables_*.f90` files (`lifecycle`, `query`, `read`, `write`) are hand-written and the script never touches them. Maintainer-only (stripped from the fpm-published package).
+
 `tools/generate_parquet_columns.py` regenerates the per-kind blocks of the `parquet_columns` foundation module: `src/parquet_columns.f90` (the module spec), `src/parquet_columns_access.f90` and `src/parquet_columns_mutate.f90`. Its output is **committed**, exactly like `tools/generate_parquet_maml.sh`'s, so nothing is generated at build time and the fpm build stays dependency-free. Re-run it after editing the kind table at the top of the script — for example when a new column kind is added — and commit the regenerated files; `tools/generate_parquet_columns.py --check` re-derives the output and fails if the committed files have drifted, which is the cheap way to catch a forgotten regeneration. The other four `parquet_columns_*.f90` files (`util`, `validity`, `structural`, `string`) are hand-written and the script never touches them. Maintainer-only (stripped from the fpm-published package, see `tools/prep_fpm_publish.sh`).
 
 `tools/count_lines.py` reports code/comment/blank line counts for `src/` and `test/`, a convenience for repository metrics.
@@ -186,6 +189,27 @@ MAX_STEPS=6 TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads.sh
 NMULT=20 TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads.sh
 # Keep the synthetic file at a path of your own choosing instead of a temp dir that gets deleted:
 TEST_FILE=/tmp/benchmark.parquet TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads.sh
+```
+
+`tools/benchmark_table.sh` measures what the `parquet_table` layer costs against reading and
+writing columns directly, on one synthetic float64 file. It drives `app/benchmark_table.f90`
+through four runs: a raw reader baseline, a table open+materialize, `%get` against `%col`, and
+`parquet_write_table` against a hand-written per-column write loop.
+
+The number worth watching is **"Arrow pool still holding"** in the two read sections. `parquet_table`
+keeps its own Fortran copy of every column and releases the reader's decoded Arrow buffers as it
+goes, so a fully materialized table should report ~0 MiB there while the raw baseline reports the
+whole file. **Resident set size cannot answer this question** — Arrow's memory pool keeps freed
+pages rather than returning them to the OS, so RSS stays high in both cases; the pool's own
+`bytes_allocated()` is what distinguishes "released" from "still alive". The two read modes also run
+as separate processes for the same reason.
+
+```sh
+tools/benchmark_table.sh
+# Bigger file, more columns:
+TARGET_FILE_SIZE_GB=2.0 NCOLS=16 tools/benchmark_table.sh
+# Keep the synthetic file instead of a temp dir that gets deleted:
+TEST_FILE=/tmp/bench_table.parquet tools/benchmark_table.sh
 ```
 
 `tools/test_large_scale.sh` is a manual, user-runnable check (never run by `fpm test`/CI) that this

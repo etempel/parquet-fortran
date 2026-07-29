@@ -13,6 +13,7 @@ program error_scenarios
     use parquet_maml_base, only: parquet_maml_file, get_parquet_maml
     use parquet_strings, only : parquet_string_column, parquet_string
     use parquet_columns
+    use parquet_tables
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp, &
         parquet_unit_seconds, parquet_unit_millis, parquet_unit_nanos
     use iso_fortran_env, only : int32, int64, real32, real64
@@ -883,6 +884,26 @@ program error_scenarios
         call scenario_set_array_size_already_resolved_no_force()
     case ("flat_write_col_size_still_auto")
         call scenario_flat_write_col_size_still_auto()
+    case ("table_assignment_blocked")
+        call scenario_table_assignment_blocked()
+    case ("table_not_opened")
+        call scenario_table_not_opened()
+    case ("table_pointer_kind_mismatch")
+        call scenario_table_pointer_kind_mismatch()
+    case ("table_unknown_column")
+        call scenario_table_unknown_column()
+    case ("table_unsupported_column_read")
+        call scenario_table_unsupported_column_read()
+    case ("table_add_column_row_mismatch")
+        call scenario_table_add_column_row_mismatch()
+    case ("table_add_column_duplicate")
+        call scenario_table_add_column_duplicate()
+    case ("table_set_length_mismatch")
+        call scenario_table_set_length_mismatch()
+    case ("table_write_missing_column")
+        call scenario_table_write_missing_column()
+    case ("table_write_unparsed_schema")
+        call scenario_table_write_unparsed_schema()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -7598,5 +7619,123 @@ contains
         call col%append_nulls(-3_int64)   ! negative count -> aborts
         print '(a,i0)', "unexpectedly appended a negative number of nulls, size=", col%size()
     end subroutine scenario_string_column_append_nulls_negative
+
+    !> Writes the small fixture the parquet_table scenarios below open.
+    subroutine write_table_scenario_fixture(fname)
+        character(len=*), intent(in) :: fname !! file to write.
+        type(parquet_writer) :: w
+        integer(int32) :: ids(3)
+        real(real64) :: vals(3)
+        ids = [1_int32, 2_int32, 3_int32]
+        vals = [1.5_real64, 2.5_real64, 3.5_real64]
+        call parquet_open_writer(w, fname)
+        call parquet_write_column(w, "id", ids)
+        call parquet_write_column(w, "val", vals)
+        call parquet_close_writer(w)
+    end subroutine write_table_scenario_fixture
+
+    !> The column store lives behind a pointer, so intrinsic assignment would leave two tables
+    !! sharing (and later double-freeing) one store. It must abort, not silently alias.
+    subroutine scenario_table_assignment_blocked()
+        type(parquet_table) :: a, b
+        call write_table_scenario_fixture("test_run/es_table_assign.parquet")
+        call parquet_open_table(a, "test_run/es_table_assign.parquet")
+        b = a   ! -> aborts
+        print '(a,i0)', "unexpectedly copied a table by assignment, ncols=", b%ncols()
+    end subroutine scenario_table_assignment_blocked
+
+    !> Every accessor guards a never-opened table rather than dereferencing a null store.
+    subroutine scenario_table_not_opened()
+        type(parquet_table) :: t
+        integer(int64) :: n
+        n = t%nrows()   ! never opened -> aborts
+        print '(a,i0)', "unexpectedly read a row count from an unopened table, n=", n
+    end subroutine scenario_table_not_opened
+
+    !> The pointer path is exact-kind by design (it aliases raw storage), so asking for an
+    !! int64 pointer into an int32 column must abort rather than silently widening.
+    subroutine scenario_table_pointer_kind_mismatch()
+        type(parquet_table) :: t
+        integer(int64), pointer :: p(:)
+        call write_table_scenario_fixture("test_run/es_table_ptr.parquet")
+        call parquet_open_table(t, "test_run/es_table_ptr.parquet")
+        call t%col("id", p)   ! int64 pointer into an int32 column -> aborts
+        print '(a,i0)', "unexpectedly aliased an int32 column through an int64 pointer, size=", size(p)
+    end subroutine scenario_table_pointer_kind_mismatch
+
+    !> Without found=, a missing column is fatal rather than quietly empty.
+    subroutine scenario_table_unknown_column()
+        type(parquet_table) :: t
+        real(real64), allocatable :: v(:)
+        call write_table_scenario_fixture("test_run/es_table_unknown.parquet")
+        call parquet_open_table(t, "test_run/es_table_unknown.parquet")
+        call t%get("no_such_column", v)   ! -> aborts
+        print '(a,i0)', "unexpectedly read a column that does not exist, size=", size(v)
+    end subroutine scenario_table_unknown_column
+
+    !> A column whose physical type this library cannot read gets a slot so it still shows up in
+    !! a listing, but reading its values must say so rather than hand back an empty column.
+    subroutine scenario_table_unsupported_column_read()
+        type(parquet_table) :: t
+        integer(int32), allocatable :: v(:)
+        call parquet_open_table(t, "test/fixtures/extended_types.parquet")
+        call t%get("v_uint32", v)   ! foreign uint32 column -> aborts
+        print '(a,i0)', "unexpectedly read an unsupported column, size=", size(v)
+    end subroutine scenario_table_unsupported_column_read
+
+    !> Every column of a table must have the same number of rows.
+    subroutine scenario_table_add_column_row_mismatch()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32, 3_int32])
+        call t%add_column("b", [1_int32, 2_int32])   ! wrong length -> aborts
+        print '(a,i0)', "unexpectedly added a column of the wrong length, nrows=", t%nrows()
+    end subroutine scenario_table_add_column_row_mismatch
+
+    !> Replacing a column silently would lose data, so it needs an explicit force=.
+    subroutine scenario_table_add_column_duplicate()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32, 3_int32])
+        call t%add_column("a", [4_int32, 5_int32, 6_int32])   ! no force= -> aborts
+        print '(a,i0)', "unexpectedly replaced a column without force=, ncols=", t%ncols()
+    end subroutine scenario_table_add_column_duplicate
+
+    !> %set replaces values, never the row set, so a different-length array must abort.
+    subroutine scenario_table_set_length_mismatch()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_table_set.parquet")
+        call parquet_open_table(t, "test_run/es_table_set.parquet")
+        call t%set("val", [1.0_real64, 2.0_real64])   ! 2 values into a 3-row column -> aborts
+        print '(a,i0)', "unexpectedly set a column from a shorter array, nrows=", t%nrows()
+    end subroutine scenario_table_set_length_mismatch
+
+    !> A schema naming a column the table does not have is a typo, not an empty output column.
+    subroutine scenario_table_write_missing_column()
+        type(parquet_table) :: t
+        type(parquet_schema) :: s
+        call write_table_scenario_fixture("test_run/es_table_wmiss_in.parquet")
+        call parquet_open_table(t, "test_run/es_table_wmiss_in.parquet")
+        call s%init("wmiss")
+        call s%add_field("id", "int32")
+        call s%add_field("absent", "float64")
+        call parquet_parse_maml(s)
+        call parquet_write_table(t, "test_run/es_table_wmiss_out.parquet", s)   ! -> aborts
+        print '(a)', "unexpectedly wrote a table missing a schema column"
+    end subroutine scenario_table_write_missing_column
+
+    !> A schema built with %init/%add_field holds only MAML text until parquet_parse_maml runs;
+    !! writing with it unparsed would otherwise read uninitialized state and run away.
+    subroutine scenario_table_write_unparsed_schema()
+        type(parquet_table) :: t
+        type(parquet_schema) :: s
+        call write_table_scenario_fixture("test_run/es_table_unparsed_in.parquet")
+        call parquet_open_table(t, "test_run/es_table_unparsed_in.parquet")
+        call s%init("unparsed")
+        call s%add_field("id", "int32")
+        ! deliberately NO parquet_parse_maml(s) here
+        call parquet_write_table(t, "test_run/es_table_unparsed_out.parquet", s)   ! -> aborts
+        print '(a)', "unexpectedly wrote a table with an unparsed schema"
+    end subroutine scenario_table_write_unparsed_schema
 
 end program error_scenarios

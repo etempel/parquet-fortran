@@ -47,6 +47,8 @@ module parquet_bindings
     public :: parquet_reader_get_table_metadata_count
     public :: parquet_reader_get_table_metadata_key_length, parquet_reader_get_table_metadata_value_length
     public :: parquet_reader_get_table_metadata_key, parquet_reader_get_table_metadata_value
+    public :: parquet_reader_get_column_count, parquet_reader_get_column_name_length
+    public :: parquet_reader_get_column_name, parquet_reader_release_column
     public :: parquet_reader_prefetch_columns, parquet_reader_prefetch_all_columns, parquet_reader_has_column
     public :: parquet_reader_get_column_type_name
     public :: parquet_reader_set_filter
@@ -649,6 +651,41 @@ module parquet_bindings
             integer(c_long_long), value :: index
             character(kind=c_char) :: buf(*)
             integer(c_long_long), value :: buf_len
+        end subroutine
+
+        !> Returns the number of addressable (leaf-path) columns in `reader`'s schema.
+        function parquet_reader_get_column_count(reader) &
+                bind(C, name="parquet_reader_get_column_count") result(count)
+            import
+            type(c_ptr), value :: reader
+            integer(c_int32_t) :: count
+        end function
+
+        !> Returns the byte length of column `index`'s (possibly dotted) name. `index` is 0-based.
+        function parquet_reader_get_column_name_length(reader, index) &
+                bind(C, name="parquet_reader_get_column_name_length") result(strlen)
+            import
+            type(c_ptr), value :: reader
+            integer(c_int32_t), value :: index
+            integer(c_long_long) :: strlen
+        end function
+
+        !> Copies column `index`'s (possibly dotted) name into `buf`. `index` is 0-based.
+        subroutine parquet_reader_get_column_name(reader, index, buf, buf_len) &
+                bind(C, name="parquet_reader_get_column_name")
+            import
+            type(c_ptr), value :: reader
+            integer(c_int32_t), value :: index
+            character(kind=c_char) :: buf(*)
+            integer(c_long_long), value :: buf_len
+        end subroutine
+
+        !> Drops column `name`'s decoded Arrow array from the reader's cache, freeing its buffers.
+        subroutine parquet_reader_release_column(reader, name) &
+                bind(C, name="parquet_reader_release_column")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
         end subroutine
 
         !> Reads scalar int32 column `name` from `reader` into `data` (with optional validity mask).

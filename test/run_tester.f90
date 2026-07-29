@@ -23,6 +23,7 @@ program tester
     use test_parquet_string, only : collect_tests_parquet_string
     use test_columns, only : collect_tests_parquet_columns
     use test_temporal, only : collect_tests_parquet_temporal
+    use test_table, only : collect_tests_parquet_table
     use parquet_bindings, only : parquet_warmup_memory_pool
     !
     implicit none
@@ -65,7 +66,8 @@ program tester
         new_testsuite("openmp", collect_tests_parquet_openmp), &
         new_testsuite("parquet_string", collect_tests_parquet_string), &
         new_testsuite("temporal", collect_tests_parquet_temporal), &
-        new_testsuite("columns", collect_tests_parquet_columns) &
+        new_testsuite("columns", collect_tests_parquet_columns), &
+        new_testsuite("table", collect_tests_parquet_table) &
         ]
     !
     ! command line argument for a specific testsuite and test

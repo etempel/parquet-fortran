@@ -87,6 +87,7 @@ REMOVE_PATHS=(
     .github
     docs.md
     test/fixtures
+    tools/benchmark_table.sh
     tools/benchmark_threads.sh
     tools/check_bindc_boundary.py
     tools/check_doc_anchors.py
@@ -97,6 +98,7 @@ REMOVE_PATHS=(
     tools/fix_ford_page_links.sh
     tools/generate_fixtures.cpp
     tools/generate_parquet_columns.py
+    tools/generate_parquet_tables.py
     tools/generate_logo_svg.py
     tools/mirror_to_github.sh
     tools/prep_github_mirroring.sh

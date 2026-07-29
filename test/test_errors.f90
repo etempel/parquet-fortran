@@ -475,6 +475,26 @@ contains
                 test_columns_delete_by_mask_length_mismatch_aborts), &
             new_unittest("parquet_column reindex with a short permutation aborts", &
                 test_columns_reindex_length_mismatch_aborts), &
+            new_unittest("copying a parquet_table by assignment aborts", &
+                test_table_assignment_blocked_aborts), &
+            new_unittest("using a never-opened parquet_table aborts", &
+                test_table_not_opened_aborts), &
+            new_unittest("parquet_table %col with a mismatched pointer kind aborts", &
+                test_table_pointer_kind_mismatch_aborts), &
+            new_unittest("parquet_table read of an unknown column aborts", &
+                test_table_unknown_column_aborts), &
+            new_unittest("parquet_table read of an unsupported column type aborts", &
+                test_table_unsupported_column_read_aborts), &
+            new_unittest("parquet_table add_column with a mismatched row count aborts", &
+                test_table_add_column_row_mismatch_aborts), &
+            new_unittest("parquet_table add_column of an existing name without force= aborts", &
+                test_table_add_column_duplicate_aborts), &
+            new_unittest("parquet_table %set with a mismatched array length aborts", &
+                test_table_set_length_mismatch_aborts), &
+            new_unittest("parquet_write_table with a schema column the table lacks aborts", &
+                test_table_write_missing_column_aborts), &
+            new_unittest("parquet_write_table with an unparsed schema aborts", &
+                test_table_write_unparsed_schema_aborts), &
             new_unittest("parquet_string_column indexing out of range aborts", &
                 test_string_column_index_out_of_range_aborts), &
             new_unittest("parquet_string_column view_all with a mismatched-size array aborts", &
@@ -684,6 +704,76 @@ contains
     !
     ! ---- parquet_columns foundation abort paths ----
     !
+    subroutine test_table_assignment_blocked_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_assignment_blocked", expect_abort=.true., &
+            failure_message="copying a parquet_table by intrinsic assignment was expected to abort", &
+            required_stderr="parquet_table: assignment is not supported")
+    end subroutine test_table_assignment_blocked_aborts
+
+    subroutine test_table_not_opened_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_not_opened", expect_abort=.true., &
+            failure_message="querying a never-opened parquet_table was expected to abort", &
+            required_stderr="parquet_table: nrows: table has not been opened")
+    end subroutine test_table_not_opened_aborts
+
+    subroutine test_table_pointer_kind_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_pointer_kind_mismatch", expect_abort=.true., &
+            failure_message="aliasing an int32 table column through an int64 pointer was expected to abort", &
+            required_stderr="parquet_table: col: pointer kind does not match the stored kind (PK_INT32)")
+    end subroutine test_table_pointer_kind_mismatch_aborts
+
+    subroutine test_table_unknown_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_unknown_column", expect_abort=.true., &
+            failure_message="reading a column that does not exist was expected to abort", &
+            required_stderr="parquet_table: get: no column of this name")
+    end subroutine test_table_unknown_column_aborts
+
+    subroutine test_table_unsupported_column_read_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_unsupported_column_read", expect_abort=.true., &
+            failure_message="reading a column of an unsupported physical type was expected to abort", &
+            required_stderr="this column's type is not supported by parquet_table")
+    end subroutine test_table_unsupported_column_read_aborts
+
+    subroutine test_table_add_column_row_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_add_column_row_mismatch", expect_abort=.true., &
+            failure_message="adding a column of a different length was expected to abort", &
+            required_stderr="parquet_table: add_column: every column must have the same number of rows")
+    end subroutine test_table_add_column_row_mismatch_aborts
+
+    subroutine test_table_add_column_duplicate_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_add_column_duplicate", expect_abort=.true., &
+            failure_message="adding a second column of the same name without force= was expected to abort", &
+            required_stderr="a column of this name already exists; pass force=.true. to replace it")
+    end subroutine test_table_add_column_duplicate_aborts
+
+    subroutine test_table_set_length_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_set_length_mismatch", expect_abort=.true., &
+            failure_message="setting a column from a shorter array was expected to abort", &
+            required_stderr="this replaces values, never the row set")
+    end subroutine test_table_set_length_mismatch_aborts
+
+    subroutine test_table_write_missing_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_write_missing_column", expect_abort=.true., &
+            failure_message="writing with a schema naming an absent column was expected to abort", &
+            required_stderr="the schema declares a column the table does not have")
+    end subroutine test_table_write_missing_column_aborts
+
+    subroutine test_table_write_unparsed_schema_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_write_unparsed_schema", expect_abort=.true., &
+            failure_message="writing with an unparsed schema was expected to abort", &
+            required_stderr="this schema has not been parsed; call parquet_parse_maml(schema)")
+    end subroutine test_table_write_unparsed_schema_aborts
+
     subroutine test_columns_data_ptr_kind_mismatch_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "columns_data_ptr_kind_mismatch", expect_abort=.true., &

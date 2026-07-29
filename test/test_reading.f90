@@ -104,7 +104,12 @@ contains
                 test_list_type_foreign_fixture), &
             new_unittest("parquet_column_exists/parquet_get_column_type: all 9 canonical types, group aliases, " // &
                 "case-insensitivity, missing columns, struct-leaf paths, and a foreign-typed column", &
-                test_column_exists_and_get_column_type) &
+                test_column_exists_and_get_column_type), &
+            new_unittest("parquet_get_column_names lists every column, expanding nested structs " // &
+                "into dotted leaf paths", &
+                test_get_column_names), &
+            new_unittest("parquet_release_column frees a column's buffers without changing any result", &
+                test_release_column) &
             ]
     end subroutine collect_tests_parquet_reading
 
@@ -3068,5 +3073,106 @@ contains
 
         call parquet_close_reader(reader)
     end subroutine test_column_exists_and_get_column_type
+    !
+    !> parquet_get_column_names lists every column in schema order, expanding a nested STRUCT
+    !> into one dotted leaf path per leaf (to any depth) and never emitting the bare struct
+    !> name, and lists LIST/MAP columns too even though they cannot be read.
+    subroutine test_get_column_names(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        character(len=:), allocatable :: names(:), type_name
+        integer :: i
+        logical :: found_bare_struct
+
+        ! Every name this returns must be usable as-is by the rest of the API.
+        call parquet_open_reader(reader, "test/fixtures/nested_struct.parquet")
+        call parquet_get_column_names(reader, names)
+        call check(error, size(names) == 5, "nested_struct.parquet should list 5 leaf columns")
+        if (allocated(error)) return
+        call check(error, trim(names(1)) == "main.id", "names(1) should be main.id")
+        if (allocated(error)) return
+        call check(error, trim(names(2)) == "main.inner.name", "names(2) should be main.inner.name")
+        if (allocated(error)) return
+        call check(error, trim(names(4)) == "main.inner.deep.value", &
+            "names(4) should be the doubly-nested leaf main.inner.deep.value")
+        if (allocated(error)) return
+        call check(error, trim(names(5)) == "vecdata.spectrum", &
+            "names(5) should be the vector leaf vecdata.spectrum")
+        if (allocated(error)) return
+
+        found_bare_struct = .false.
+        do i = 1, size(names)
+            if (trim(names(i)) == "main" .or. trim(names(i)) == "vecdata") found_bare_struct = .true.
+        end do
+        call check(error, .not. found_bare_struct, &
+            "a bare struct name must not be listed -- it is not readable")
+        if (allocated(error)) return
+
+        ! Every listed name must resolve through the ordinary lookup path.
+        do i = 1, size(names)
+            call check(error, parquet_column_exists(reader, trim(names(i))), &
+                "every name from parquet_get_column_names must exist: " // trim(names(i)))
+            if (allocated(error)) return
+        end do
+        call parquet_close_reader(reader)
+
+        ! A flat file: names come back in schema order, and a column whose physical type is
+        ! outside the nine canonical tokens is still listed (parquet_get_column_type is what
+        ! reports it as unsupported, not omission from the listing).
+        call parquet_open_reader(reader, "test/fixtures/extended_types.parquet")
+        call parquet_get_column_names(reader, names)
+        call check(error, size(names) > 0, "extended_types.parquet should list at least one column")
+        if (allocated(error)) return
+        found_bare_struct = .false.
+        do i = 1, size(names)
+            if (trim(names(i)) == "v_uint32") found_bare_struct = .true.
+        end do
+        call check(error, found_bare_struct, &
+            "a foreign-typed column (v_uint32) must still appear in the listing")
+        if (allocated(error)) return
+        call parquet_get_column_type(reader, trim(names(1)), type_name)
+        call check(error, len(type_name) > 0, "the first listed column should have a resolvable type")
+        if (allocated(error)) return
+        call parquet_close_reader(reader)
+    end subroutine test_get_column_names
+    !
+    !> parquet_release_column frees a column's decoded buffers without changing any result:
+    !> a re-read after a release returns exactly the same values, and releasing an unknown
+    !> name or a never-read column is a silent no-op.
+    subroutine test_release_column(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        integer(int32), allocatable :: before(:), after(:)
+        integer :: nrows
+        character(len=*), parameter :: in_file = "test/fixtures/nested_struct.parquet"
+
+        call parquet_open_reader(reader, in_file)
+        call parquet_get_nrows(reader, nrows)
+        allocate(before(nrows), after(nrows))
+
+        ! main.id carries Nulls, so null_value= is required -- and using a Null-containing
+        ! column here is deliberate: it proves a release/re-read preserves validity too, not
+        ! just values.
+        call parquet_read_column(reader, "main.id", before, null_value=-1_int32)
+        call parquet_release_column(reader, "main.id")
+        ! Re-reading after a release must re-decode transparently and agree exactly.
+        call parquet_read_column(reader, "main.id", after, null_value=-1_int32)
+        call check(error, all(before == after), &
+            "a column re-read after parquet_release_column must be identical")
+        if (allocated(error)) return
+
+        ! Both no-op cases: a name that does not exist, and a column never read.
+        call parquet_release_column(reader, "no_such_column_at_all")
+        call parquet_release_column(reader, "main.inner.age")
+        call check(error, .true., "releasing an unknown or never-read column must not error")
+        if (allocated(error)) return
+
+        ! Still readable afterwards.
+        call parquet_read_column(reader, "main.id", after, null_value=-1_int32)
+        call check(error, all(before == after), &
+            "reads must still work after a no-op release")
+        if (allocated(error)) return
+        call parquet_close_reader(reader)
+    end subroutine test_release_column
     !
 end module test_reading

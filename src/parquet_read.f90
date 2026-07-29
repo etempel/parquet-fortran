@@ -947,5 +947,33 @@ contains
                 "float64, boolean, string, date, time, timestamp" // name_suffix
         end if
     end procedure parquet_get_column_type
+    module procedure parquet_get_column_names
+        integer(c_int32_t) :: ncols, i
+        integer(c_long_long) :: name_len, max_len
+        character(len=:), allocatable :: buf
+
+        call check_reader_open(reader, "parquet_get_column_names")
+        ncols = parquet_reader_get_column_count(reader%handle)
+        ! Two passes: the first finds the longest name so `names` can be allocated at exactly
+        ! that length (a fixed-length array cannot hold ragged names, and guessing a maximum
+        ! would silently truncate a long dotted struct path). Both passes are pure schema
+        ! lookups into a cache built at open time -- neither reads any column data.
+        max_len = 0
+        do i = 0, ncols - 1
+            name_len = parquet_reader_get_column_name_length(reader%handle, i)
+            if (name_len > max_len) max_len = name_len
+        end do
+        allocate(character(len=int(max_len)) :: names(ncols))
+        if (ncols == 0) return
+        allocate(character(len=int(max_len)) :: buf)
+        do i = 0, ncols - 1
+            call parquet_reader_get_column_name(reader%handle, i, buf, max_len)
+            names(i + 1) = buf
+        end do
+    end procedure parquet_get_column_names
+    module procedure parquet_release_column
+        call check_reader_open(reader, "parquet_release_column")
+        call parquet_reader_release_column(reader%handle, trim(name)//char(0))
+    end procedure parquet_release_column
 
 end submodule parquet_read

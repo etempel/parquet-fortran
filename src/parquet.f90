@@ -18,7 +18,7 @@ module parquet
     implicit none
     private
     !
-    character(len=*),parameter:: cversion = "v1.0.2 (2026-07-28)" !! version info
+    character(len=*),parameter:: cversion = "v1.0.3 (2026-07-29)" !! version info
 #ifndef RELEASE_VERSION
 #  define RELEASE_VERSION 0.1
 #endif
@@ -947,6 +947,8 @@ module parquet
     public :: parquet_get_string_length
     public :: parquet_column_exists
     public :: parquet_get_column_type
+    public :: parquet_get_column_names
+    public :: parquet_release_column
     public :: parquet_get_metadata
     public :: parquet_read_column
     public :: parquet_read_column_chunk
@@ -2273,6 +2275,36 @@ module parquet
             character(len=*), intent(in) :: name !! existing column name (dotted struct-leaf path allowed).
             character(len=:), allocatable, intent(out) :: type_name !! resolved canonical type token.
         end subroutine parquet_get_column_type
+        !> Returns every column `reader`'s file contains, in schema order, as the same
+        !> (possibly dotted) names every other column-name argument in this module accepts:
+        !> a nested STRUCT field contributes one entry per leaf beneath it ("addr.city"), never
+        !> its own bare name, and every other field contributes one entry under its own name.
+        !> `names` comes back allocated to exactly the column count, each element trimmed to the
+        !> longest name present (blank-padded), so `trim(names(i))` is the name to pass on.
+        !> A zero-column file yields a zero-size `names`.
+        !>
+        !> LIST/MAP columns (and any leaf beneath a struct that is itself a LIST/MAP) ARE listed,
+        !> even though no read entry point supports them: the purpose here is to report what the
+        !> file actually holds. Pass a listed name to parquet_column_exists (no `types`) or
+        !> parquet_get_column_type to find out whether it can be read.
+        module subroutine parquet_get_column_names(reader, names)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=:), allocatable, intent(out) :: names(:) !! one entry per column, schema order.
+        end subroutine parquet_get_column_names
+        !> Frees column `name`'s decoded Arrow buffers inside `reader`, after the caller has
+        !> copied the values it wanted into its own Fortran storage. Purely a memory/time trade:
+        !> a later read of the same column transparently re-reads and re-decodes it, so this can
+        !> never change a result. Composes with an active filter=/sample_fraction= (both are
+        !> re-applied to every freshly decoded column).
+        !>
+        !> `name` may be a dotted struct-leaf path, but the reader caches a struct as ONE array,
+        !> so releasing any leaf frees the whole struct -- when walking several leaves of one
+        !> struct, release only after the last of them, or each will re-read the struct.
+        !> A name that doesn't exist, or a column that was never read, is a silent no-op.
+        module subroutine parquet_release_column(reader, name)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column to free (dotted struct-leaf path allowed).
+        end subroutine parquet_release_column
     end interface
 
     ! ---- Read column specifics (by type x access mode) ----

@@ -7,6 +7,13 @@ session investigated, or a chronological record of development. Only add general
 that will still be correct and actionable for a future task, independent of which session
 produced it (git history/commit messages are the right place for "what happened when").
 
+**If checked out inside a larger workspace** (e.g. alongside sibling Fortran projects under a
+shared `fortran/` directory), check whether `../../fortran/CLAUDE.md` exists and read it too — it
+captures conventions shared across those projects (workflow guardrails, documentation/FORD
+conventions, generic Fortran/fpm gotchas, testing & coverage conventions) that apply here as well,
+unless this file says otherwise. This repository is also developed and used completely standalone,
+so that file won't always exist — treat it as supplementary, not required.
+
 ## Contents
 
 This file is a reference, not a start-to-finish read — jump to the note you need. Keep this ToC

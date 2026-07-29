@@ -1973,7 +1973,35 @@ extern "C"
 		run_qc_checks(reader_handle, name, name, array);
 	}
 
-	// Returns the vector-column element count of a fixed-size-list or list array (0 for a scalar column).
+	// Whether measuring a leaf field's col_size requires reading its data, given that the caller
+	// has already handled FIXED_SIZE_LIST (whose width is a schema constant).
+	//
+	// Only a plain LIST/LARGE_LIST does. Arrow lets such a column carry a DIFFERENT length in
+	// every row, so there is no schema-level width to read -- get_col_size has to walk the whole
+	// offsets buffer to find out whether one uniform width even exists. Nothing else needs the
+	// data: get_col_size's own fallthrough returns 1 for every non-list array, so for a scalar
+	// column (and this is the overwhelmingly common case -- every column of an ordinary file)
+	// decoding it answers a question whose answer was fixed by the schema alone.
+	//
+	// This predicate is what keeps parquet_open_table's classification pass schema-only.
+	// parquet_table asks for col_size on EVERY column at open time to tell a scalar column from
+	// a vector one -- the type name cannot distinguish them, since
+	// parquet_reader_get_column_type_name unwraps a list to its value type and reports
+	// "float64" for both a double and a LIST<double>. Without this test that pass decoded, and
+	// immediately discarded, the entire file, which made a "lazy" open cost as much as reading
+	// everything (measured: 0.163 s -> 0.001 s on a 0.4 GB 8-column file).
+	//
+	// STRUCT and MAP never reach here at all: collect_column_leaf_paths expands a struct into
+	// one path per leaf, so a struct is never itself measured, and a MAP (like decimal, binary,
+	// and every other unsupported type) fails parquet_column_exists's types= probe in
+	// table_classify, which returns before asking for col_size.
+	static bool needs_data_to_measure_col_size(const std::shared_ptr<arrow::DataType> &type)
+	{
+		return type->id() == arrow::Type::LIST || type->id() == arrow::Type::LARGE_LIST;
+	}
+
+	// Returns the vector-column element count of a fixed-size-list or list array (1 for a scalar
+	// column; 0 only for an EMPTY list column).
 	static int64_t get_col_size(const std::shared_ptr<arrow::Array> &array)
 	{
 		if (array->type_id() == arrow::Type::FIXED_SIZE_LIST)
@@ -3398,8 +3426,8 @@ extern "C"
 		return 1;
 	}
 
-	// Returns the declared vector-column element count of `name` (0 for a scalar column),
-	// without reading any column data for the common FIXED_SIZE_LIST case. A FIXED_SIZE_LIST
+	// Returns the declared vector-column element count of `name` (1 for a scalar column),
+	// without reading any column data except for a plain LIST/LARGE_LIST. A FIXED_SIZE_LIST
 	// column's width is a schema-level constant (arrow::FixedSizeListType::list_size()), so it's
 	// read straight off the already in-memory schema -- the same schema-only introspection
 	// pattern max_fixed_size_list_col_size/check_explicit_chunk_size_fits_arrow_limit use on the
@@ -3409,8 +3437,10 @@ extern "C"
 	// and in CLAUDE.md's "Guarding a hard Arrow int32-only ceiling"). A plain LIST/LARGE_LIST
 	// column (only ever produced by a non-this-library writer -- this library always writes
 	// FIXED_SIZE_LIST for vector columns) has no such schema-level constant, since its per-row
-	// width can vary; that case still falls back to get_col_size's own data-scanning heuristic
-	// via get_single_chunk_array.
+	// width can vary; that case, and ONLY that case, still falls back to get_col_size's own
+	// data-scanning heuristic via get_single_chunk_array. Every other leaf type -- above all a
+	// plain scalar column, whose width is 1 by construction -- returns without reading anything;
+	// see needs_data_to_measure_col_size for why that matters so much to parquet_open_table.
 	int64_t parquet_reader_get_column_col_size(void *handle, const char *name)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -3418,6 +3448,10 @@ extern "C"
 		if (resolved.leaf_field->type()->id() == arrow::Type::FIXED_SIZE_LIST)
 		{
 			return static_cast<int64_t>(std::static_pointer_cast<arrow::FixedSizeListType>(resolved.leaf_field->type())->list_size());
+		}
+		if (!needs_data_to_measure_col_size(resolved.leaf_field->type()))
+		{
+			return 1;
 		}
 		auto array = get_single_chunk_array(reader_handle, name);
 		return get_col_size(array);
@@ -3442,6 +3476,10 @@ extern "C"
 			return reader_handle->nrows * col_size;
 		}
 		auto nrows = reader_handle->nrows;
+		if (!needs_data_to_measure_col_size(resolved.leaf_field->type()))
+		{
+			return nrows;
+		}
 		// Calls the same static helpers parquet_reader_get_column_col_size
 		// itself uses, rather than that exported function directly -- going
 		// through the exported function would re-enter as_reader_handle on

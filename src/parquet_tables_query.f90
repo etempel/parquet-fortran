@@ -18,6 +18,14 @@ submodule (parquet_tables) parquet_tables_query
     !
 contains
     !
+    module procedure table_scope_of
+        sc%regime = self%regime
+        sc%row_lo = self%row_lo
+        sc%row_hi = self%row_hi
+        sc%nrows = self%row_count
+        sc%detached = self%detached
+    end procedure table_scope_of
+    !
     module procedure table_nrows
         call table_check_open(self, "nrows")
         n = self%row_count
@@ -50,25 +58,33 @@ contains
     end procedure table_has_column
     !
     module procedure table_find
+        idx = 0
+        if (.not. associated(self%cache)) return
+        idx = cache_find(self%cache, name)
+    end procedure table_find
+    !
+    module procedure cache_find
         integer :: i
         !
         idx = 0
-        if (.not. associated(self%cache)) return
-        do i = 1, self%cache%ncols
-            if (self%cache%cols(i)%name == trim(name)) then
+        do i = 1, cache%ncols
+            if (cache%cols(i)%name == trim(name)) then
                 idx = i
                 return
             end if
         end do
-    end procedure table_find
+    end procedure cache_find
     !
     module procedure table_column_kind
         integer :: idx
         !
+        ! Answers from the DESCRIPTOR, not from the value store, because a column that has not
+        ! been touched yet holds no values -- and %kind is precisely how a caller decides which
+        ! %col specific to call, so it has to work before the first read, not after it.
         k = PK_NONE
         call table_lookup_or_fail(self, name, "kind", idx, found)
         if (idx == 0) return
-        k = self%cache%cols(idx)%values%kindof()
+        k = self%cache%cols(idx)%declared_kind
     end procedure table_column_kind
     !
     module procedure table_column_width
@@ -77,7 +93,7 @@ contains
         wdt = 1
         call table_lookup_or_fail(self, name, "width", idx, found)
         if (idx == 0) return
-        wdt = self%cache%cols(idx)%values%colwidth()
+        wdt = self%cache%cols(idx)%width
     end procedure table_column_width
     !
     module procedure table_column_unit
@@ -113,8 +129,11 @@ contains
     end procedure table_is_detached
     !
     module procedure table_filename
+        ! Deliberately does NOT go through table_check_open: asking an unopened table where it
+        ! came from is a fair question with a good answer ("nowhere"), unlike asking it for values.
         fname = ""
-        if (allocated(self%source_file)) fname = self%source_file
+        if (.not. associated(self%cache)) return
+        if (allocated(self%cache%source_file)) fname = self%cache%source_file
     end procedure table_filename
     !
     module procedure table_get_file_metadata
@@ -123,12 +142,12 @@ contains
         !
         call table_check_open(self, "get_file_metadata")
         value = ""
-        if (.not. self%file_backed) then
+        if (.not. self%cache%file_backed) then
             if (present(found)) then
                 found = .false.
                 return
             end if
-            call table_context_suffix(self, "", sfx)
+            call table_context_suffix(self%cache, "", sfx)
             error stop EP // "get_file_metadata: this table was not opened from a file" // sfx
         end if
         ! warn=.false. keeps a missing key quiet here: whether it is fatal is `found`'s job,
@@ -140,7 +159,7 @@ contains
             return
         end if
         if (.not. got) then
-            call table_context_suffix(self, "", sfx)
+            call table_context_suffix(self%cache, "", sfx)
             error stop EP // "get_file_metadata: no metadata key '" // trim(key) // "'" // sfx
         end if
     end procedure table_get_file_metadata
@@ -162,7 +181,7 @@ contains
                 found = .false.
                 return
             end if
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             error stop EP // trim(proc) // ": no column of this name" // sfx
         end if
         ! A column whose physical type this library cannot read got a slot at open time so it
@@ -174,18 +193,16 @@ contains
                 idx = 0
                 return
             end if
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             error stop EP // trim(proc) // ": this column's type is not supported by " // &
                 "parquet_table, so its values were never read" // sfx
         end if
-        if (self%cache%cols(idx)%residency == RES_EMPTY) then
-            if (present(found)) then
-                found = .false.
-                idx = 0
-                return
-            end if
-            call table_context_suffix(self, name, sfx)
-            error stop EP // trim(proc) // ": this column holds no values" // sfx
+        ! The lazy first touch, and the ONLY place it happens: every value accessor -- %col,
+        ! %get, %set, %is_null, a row handle's %get, %get_slice -- reaches its slot through here,
+        ! so residency is settled once, in one place. A column already resident costs the
+        ! comparison below and nothing else.
+        if (self%cache%cols(idx)%residency /= RES_FULL) then
+            call table_touch(self%cache, table_scope_of(self), idx, proc)
         end if
         if (present(found)) found = .true.
     end procedure table_resolve
@@ -194,7 +211,7 @@ contains
         character(len=:), allocatable :: sfx, got, want
         !
         if (self%cache%cols(idx)%values%kindof() == kind) return
-        call table_context_suffix(self, self%cache%cols(idx)%name, sfx)
+        call table_context_suffix(self%cache, self%cache%cols(idx)%name, sfx)
         call parquet_kind_name(self%cache%cols(idx)%values%kindof(), got)
         call parquet_kind_name(kind, want)
         error stop EP // trim(proc) // ": column kind is " // got // ", not " // want // sfx
@@ -205,7 +222,7 @@ contains
         character(len=32) :: gots, wants
         !
         if (self%cache%cols(idx)%values%length() == n) return
-        call table_context_suffix(self, self%cache%cols(idx)%name, sfx)
+        call table_context_suffix(self%cache, self%cache%cols(idx)%name, sfx)
         write(gots, "(I0)") n
         write(wants, "(I0)") self%cache%cols(idx)%values%length()
         error stop EP // trim(proc) // ": array has " // trim(gots) // " rows but the column " // &
@@ -224,8 +241,8 @@ contains
         character(len=:), allocatable :: parts
         !
         parts = ""
-        if (allocated(self%source_file)) then
-            if (len(self%source_file) > 0) parts = " (file '" // self%source_file // "'"
+        if (allocated(cache%source_file)) then
+            if (len(cache%source_file) > 0) parts = " (file '" // cache%source_file // "'"
         end if
         if (len(parts) == 0 .and. len_trim(name) > 0) then
             suffix = " (column '" // trim(name) // "')"
@@ -260,7 +277,7 @@ contains
                 found = .false.
                 return
             end if
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             error stop EP // trim(proc) // ": no column of this name" // sfx
         end if
         if (present(found)) found = .true.

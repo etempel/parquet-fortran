@@ -904,6 +904,30 @@ program error_scenarios
         call scenario_table_write_missing_column()
     case ("table_write_unparsed_schema")
         call scenario_table_write_unparsed_schema()
+    case ("table_slice_below_first_row")
+        call scenario_table_slice_below_first_row()
+    case ("table_slice_past_last_row")
+        call scenario_table_slice_past_last_row()
+    case ("table_slice_inverted")
+        call scenario_table_slice_inverted()
+    case ("table_row_index_out_of_range")
+        call scenario_table_row_index_out_of_range()
+    case ("table_get_slice_out_of_range")
+        call scenario_table_get_slice_out_of_range()
+    case ("table_slice_zero_step")
+        call scenario_table_slice_zero_step()
+    case ("table_reload_in_memory_column")
+        call scenario_table_reload_in_memory_column()
+    case ("table_reload_not_file_backed")
+        call scenario_table_reload_not_file_backed()
+    case ("table_row_unknown_column")
+        call scenario_table_row_unknown_column()
+    case ("table_row_kind_mismatch")
+        call scenario_table_row_kind_mismatch()
+    case ("table_get_slice_kind_mismatch")
+        call scenario_table_get_slice_kind_mismatch()
+    case ("table_first_touch_in_parallel")
+        call scenario_table_first_touch_in_parallel()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -3030,14 +3054,16 @@ contains
         type(parquet_reader) :: reader
         character(len=*), parameter :: out_file = &
             "test_run/error_scenario_col_size_and_row_mode_avoid_whole_column_read.parquet"
-        integer(int32) :: vec_data(3, 4), row_buf(3), elem_buf(4)
+        integer(int32) :: vec_data(3, 4), row_buf(3), elem_buf(4), sca_data(4)
         integer :: col_size_back
         integer(int64) :: total_elems
 
         vec_data = reshape([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], [3, 4])
+        sca_data = [10, 20, 30, 40]
 
         call parquet_open_writer(writer, out_file)
         call parquet_write_column(writer, "vec", vec_data)
+        call parquet_write_column(writer, "sca", sca_data)
         call parquet_close_writer(writer)
 
         call parquet_open_reader(reader, out_file)
@@ -3058,8 +3084,29 @@ contains
         call parquet_read_array_element_mode(reader, "vec", elem_buf, 2)
         if (any(elem_buf /= [2, 5, 8, 11])) error stop "element_mode values mismatch for element 2"
 
-        call parquet_debug_set_force_whole_column_read_error(0)
+        ! The SCALAR column is the case parquet_open_table depends on: it asks for col_size on
+        ! every column to tell a scalar from a vector, so a scalar column that still decoded its
+        ! data here would make a lazy open cost a full read of the whole file -- silently, since
+        ! the data is discarded again immediately and only the timing gives it away.
+        call parquet_get_col_size(reader, "sca", col_size_back)
+        if (col_size_back /= 1) error stop "col_size mismatch for scalar column"
+
+        call parquet_get_column_total_elements(reader, "sca", total_elems)
+        if (total_elems /= 4_int64) error stop "total element count mismatch for scalar column"
+
         call parquet_close_reader(reader)
+        ! And the same thing end to end: opening a table classifies every column, and must do so
+        ! without decoding any of them. Declared in a block so the table is finalized here, while
+        ! the forced error is still armed, rather than at the end of the subroutine.
+        block
+            type(parquet_table) :: tbl
+            call parquet_open_table(tbl, out_file)
+            if (tbl%ncols() /= 2) error stop "table should see both columns"
+            if (tbl%width("sca") /= 1) error stop "scalar column width mismatch after table open"
+            if (tbl%width("vec") /= 3) error stop "vector column width mismatch after table open"
+        end block
+
+        call parquet_debug_set_force_whole_column_read_error(0)
         print '(a)', "parquet_get_col_size/parquet_get_column_total_elements/" // &
             "parquet_read_array_row_mode/parquet_read_array_element_mode all avoided a whole-column read, as expected"
     end subroutine scenario_col_size_and_row_mode_avoid_whole_column_read
@@ -7744,5 +7791,138 @@ contains
         call parquet_write_table(t, "test_run/es_table_unparsed_out.parquet", s)   ! -> aborts
         print '(a)', "unexpectedly wrote a table with an unparsed schema"
     end subroutine scenario_table_write_unparsed_schema
+
+    !> A slice starting before row 1 cannot be satisfied, and quietly clamping it would hand
+    !! back a table whose row 1 is not the row the caller asked for.
+    subroutine scenario_table_slice_below_first_row()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_table_slice_lo.parquet")
+        call parquet_open_table(t, "test_run/es_table_slice_lo.parquet", 0, 2)   ! -> aborts
+        print '(a,i0)', "unexpectedly opened a slice starting below row 1, nrows=", t%nrows()
+    end subroutine scenario_table_slice_below_first_row
+
+    !> Likewise past the end: the rows simply are not there.
+    subroutine scenario_table_slice_past_last_row()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_table_slice_hi.parquet")
+        call parquet_open_table(t, "test_run/es_table_slice_hi.parquet", 2, 99)   ! -> aborts
+        print '(a,i0)', "unexpectedly opened a slice past the last row, nrows=", t%nrows()
+    end subroutine scenario_table_slice_past_last_row
+
+    !> An inverted slice would silently be an empty table, which is never what was meant.
+    subroutine scenario_table_slice_inverted()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_table_slice_inv.parquet")
+        call parquet_open_table(t, "test_run/es_table_slice_inv.parquet", 3, 1)   ! -> aborts
+        print '(a,i0)', "unexpectedly opened an inverted slice, nrows=", t%nrows()
+    end subroutine scenario_table_slice_inverted
+
+    !> A row handle is checked where it is made, not at its first read: a handle that can never
+    !! work should fail at the mistake, not several calls later.
+    subroutine scenario_table_row_index_out_of_range()
+        type(parquet_table) :: t
+        type(parquet_table_row) :: r
+        call write_table_scenario_fixture("test_run/es_table_rowidx.parquet")
+        call parquet_open_table(t, "test_run/es_table_rowidx.parquet")
+        r = t%row(9)   ! only 3 rows -> aborts
+        print '(a,i0)', "unexpectedly made a handle on a row that does not exist, i=", r%index()
+    end subroutine scenario_table_row_index_out_of_range
+
+    !> Every index a slice selects is validated before anything indexes with it, so an
+    !! out-of-range one is a clear message rather than a bounds abort inside the value store.
+    subroutine scenario_table_get_slice_out_of_range()
+        type(parquet_table) :: t
+        type(parquet_slice) :: s
+        real(real64), allocatable :: v(:)
+        call write_table_scenario_fixture("test_run/es_table_slice_range.parquet")
+        call parquet_open_table(t, "test_run/es_table_slice_range.parquet")
+        s = parquet_slice_list([1, 7])   ! only 3 rows
+        call t%get_slice("val", s, v)    ! -> aborts
+        print '(a,i0)', "unexpectedly sliced past the last row, size=", size(v)
+    end subroutine scenario_table_get_slice_out_of_range
+
+    !> A zero step is rejected when the slice is built: every use of it would either loop
+    !! forever or select nothing.
+    subroutine scenario_table_slice_zero_step()
+        type(parquet_slice) :: s
+        s = parquet_slice_range(1, 3, 0)   ! -> aborts
+        print '(a)', "unexpectedly built a slice with a zero step"
+    end subroutine scenario_table_slice_zero_step
+
+    !> A column added in memory has no file behind it, so there is nothing to reload from --
+    !! and keeping its current values would make %reload look like it had worked.
+    subroutine scenario_table_reload_in_memory_column()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_table_reload_col.parquet")
+        call parquet_open_table(t, "test_run/es_table_reload_col.parquet")
+        call t%add_column("computed", [1.0_real64, 2.0_real64, 3.0_real64])
+        call t%reload("computed")   ! -> aborts
+        print '(a,i0)', "unexpectedly reloaded an in-memory column, ncols=", t%ncols()
+    end subroutine scenario_table_reload_in_memory_column
+
+    !> The same, one level up: a table that never came from a file has nothing to reload at all.
+    subroutine scenario_table_reload_not_file_backed()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32, 3_int32])
+        call t%reload("a")   ! -> aborts
+        print '(a,i0)', "unexpectedly reloaded a column of an in-memory table, ncols=", t%ncols()
+    end subroutine scenario_table_reload_not_file_backed
+
+    !> A row handle resolves its column by name on every access, so a name that is not there is
+    !! as fatal as it is on the table itself.
+    subroutine scenario_table_row_unknown_column()
+        type(parquet_table) :: t
+        type(parquet_table_row) :: r
+        real(real64) :: v
+        call write_table_scenario_fixture("test_run/es_table_row_unknown.parquet")
+        call parquet_open_table(t, "test_run/es_table_row_unknown.parquet")
+        r = t%row(1)
+        call r%get("no_such_column", v)   ! -> aborts
+        print '(a,f0.1)', "unexpectedly read a row of a column that does not exist, v=", v
+    end subroutine scenario_table_row_unknown_column
+
+    !> A row read into a variable whose kind the column cannot be widened into must say so
+    !! rather than hand back a converted-looking value.
+    subroutine scenario_table_row_kind_mismatch()
+        type(parquet_table) :: t
+        type(parquet_table_row) :: r
+        logical :: v
+        call write_table_scenario_fixture("test_run/es_table_row_kind.parquet")
+        call parquet_open_table(t, "test_run/es_table_row_kind.parquet")
+        r = t%row(1)
+        call r%get("val", v)   ! float64 column into a logical -> aborts
+        print '(a,l1)', "unexpectedly read a float64 row into a logical, v=", v
+    end subroutine scenario_table_row_kind_mismatch
+
+    !> The same for the sliced copy path: widening is the only conversion on offer.
+    subroutine scenario_table_get_slice_kind_mismatch()
+        type(parquet_table) :: t
+        type(parquet_slice) :: s
+        logical, allocatable :: v(:)
+        call write_table_scenario_fixture("test_run/es_table_slice_kind.parquet")
+        call parquet_open_table(t, "test_run/es_table_slice_kind.parquet")
+        s = parquet_slice_range(1, 2)
+        call t%get_slice("val", s, v)   ! float64 column into a logical array -> aborts
+        print '(a,i0)', "unexpectedly sliced a float64 column into a logical array, size=", size(v)
+    end subroutine scenario_table_get_slice_kind_mismatch
+
+    !> A lazy first touch inside a parallel region publishes shared state with no ordering
+    !! behind it, so it is forbidden outright rather than guarded by a lock on the read path
+    !! (RF4). Needs a real OpenMP build to trigger: without -fopenmp there is no region to be
+    !! inside of, and the scenario simply reads the column and exits 0.
+    subroutine scenario_table_first_touch_in_parallel()
+        type(parquet_table) :: t
+        real(real64), allocatable :: v(:)
+        integer :: i
+        call write_table_scenario_fixture("test_run/es_table_omp_touch.parquet")
+        call parquet_open_table(t, "test_run/es_table_omp_touch.parquet")
+        !$omp parallel do default(shared) private(i, v)
+        do i = 1, 2
+            call t%get("val", v)   ! first touch inside the region -> aborts
+        end do
+        !$omp end parallel do
+        print '(a)', "unexpectedly first-touched a column inside a parallel region"
+    end subroutine scenario_table_first_touch_in_parallel
 
 end program error_scenarios

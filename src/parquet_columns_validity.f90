@@ -103,6 +103,74 @@ contains
         end select
     end procedure is_null
     !
+    !> Builds the whole per-row validity mask in one pass.
+    !!
+    !! Three cases, in decreasing order of how well they can be done:
+    !!
+    !!  1. **No nulls at all** -- `valid` is left unallocated and nothing is scanned. This is the
+    !!     case worth optimising for: it is what every column of an ordinary file looks like, and
+    !!     an unallocated result passed to an `optional` dummy is an absent argument, so the
+    !!     caller's writer never has to build a null bitmap either.
+    !!  2. **A bitmap kind with nulls** -- the bitmap is walked one 64-bit block at a time, and a
+    !!     block that is entirely zero (64 valid elements, the overwhelmingly common block even in
+    !!     a column that does have nulls) is skipped without touching a single row. Only a nonzero
+    !!     block costs per-row work.
+    !!  3. **A string or temporal kind** -- their null state does not live in this bitmap at all
+    !!     (see the table in the module doc), so there is nothing to walk and the per-row `is_null`
+    !!     loop is the honest implementation.
+    module procedure row_validity
+        integer(int64) :: i, n, nblk, blk, base, lo, hi, w, nbits
+        integer(int64) :: word
+        integer :: p
+        !
+        n = self%nrows
+        if (n <= 0_int64) return
+        ! Case 1. any_null is O(1) for a column that never had a null set, so this costs nothing
+        ! on the common path -- and refreshes the temporal kinds' cache, which is why `self` is
+        ! intent(inout) here just as it is on any_null itself.
+        if (.not. self%any_null()) return
+        allocate(valid(n))
+        valid = .true.
+        ! Case 3.
+        if (is_string_kind(self%kind) .or. is_temporal_kind(self%kind)) then
+            do i = 1_int64, n
+                valid(i) = .not. self%is_null(i)
+            end do
+            return
+        end if
+        ! Case 2. any_null already established there is a bitmap; the guard keeps a future caller
+        ! from turning a missing one into an out-of-bounds read.
+        if (.not. allocated(self%validity)) return
+        w = int(self%width, int64)
+        nbits = bits_needed(self)
+        nblk = min(blocks_for(nbits), size(self%validity, kind=int64))
+        do blk = 1_int64, nblk
+            word = self%validity(blk)
+            if (word == 0_int64) cycle
+            base = (blk - 1_int64)*BITS_PER_BLOCK
+            if (w == 1_int64) then
+                ! Scalar kinds: one bit per row, so a block covers 64 consecutive rows and each
+                ! set bit names its row directly.
+                do p = 0, int(BITS_PER_BLOCK) - 1
+                    if (.not. btest(word, p)) cycle
+                    i = base + int(p, int64) + 1_int64
+                    if (i <= n) valid(i) = .false.
+                end do
+            else
+                ! Vector kinds: a row's validity is its FIRST element's bit (the same convention
+                ! is_null uses), so consecutive rows sit `width` bits apart and a block spans only
+                ! part of a row range. Derive that range and test the one bit each row owns.
+                lo = base/w + 1_int64
+                hi = (base + BITS_PER_BLOCK - 1_int64)/w + 1_int64
+                if (lo < 1_int64) lo = 1_int64
+                if (hi > n) hi = n
+                do i = lo, hi
+                    if (bit_test(self%validity, (i - 1_int64)*w + 1_int64)) valid(i) = .false.
+                end do
+            end if
+        end do
+    end procedure row_validity
+    !
     !> Marks row `i` null.
     !!
     !! For a bitmap kind this is where the bitmap is lazily allocated (R2 ii) -- the first null

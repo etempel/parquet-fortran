@@ -119,6 +119,16 @@ The user runs `.gitlab-ci.yml` on their own GitLab server — don't attempt to e
 locally instead (`fpm build`/`fpm test` with the same `FPM_FFLAGS`/`FPM_CXXFLAGS`/
 `FPM_LDFLAGS` the CI job sets, minus anything CI-environment-specific like the apt installs).
 
+**In practice that means `FPM_FFLAGS` only.** Setting `FPM_CXXFLAGS`/`FPM_LDFLAGS` to CI's values
+*replaces* whatever the local environment supplies for the C++ half, which on a dev machine is
+where Arrow's include and library paths come from — the build then fails with
+`fatal error: 'arrow/api.h' file not found`, which looks like a missing dependency rather than a
+flag problem. CI can set them because its own image puts Arrow on the default search path. So
+locally run `FPM_FFLAGS="-fopenmp" fpm test` (adding `--coverage` only when measuring coverage, and
+preferring `tools/coverage.sh` for that) and leave the C++ flags to the environment. **Run the
+OpenMP form at least once** before declaring a change verified: it is a genuinely different build
+(see "Tests run concurrently" for a guard that only exists under it), and CI runs only that one.
+
 ### Don't commit or push on the main/default branch yourself
 
 The user always commits and pushes their own changes on `main` — even after explicitly asking
@@ -222,14 +232,33 @@ undocumented-entity warnings are opt-in (`-w`/`--warn` on the command line, or a
 `ford docs.md` only proves nothing is *broken* (bad cross-references, malformed metadata, parse
 failures), not that everything is documented. A completely undocumented new procedure can be added
 and `ford docs.md` will still "run clean." To actually check coverage, run `ford --warn docs.md`
-instead — expect it to be noisy (on the order of 2,700 warnings as of this writing), dominated by
-two categories that are *not* required by this project's conventions and can be ignored:
-`Undocumented variable` for local variables (`i`, `idx`, `res`, ...), and
-`Undocumented moduleprocedure` for the abbreviated `module procedure NAME ... end procedure NAME`
-form (exempted by the bullet below). Everything else in that output is a real gap worth acting on.
-The "before/after regression" check two bullets down needs `ford --warn docs.md`'s count for the
+instead — expect it to be very noisy (several thousand warnings), dominated by categories that are
+*not* required by this project's conventions and can be ignored:
+
+- `Undocumented variable` for local variables (`i`, `idx`, `res`, ...);
+- `Undocumented moduleprocedure` for the abbreviated `module procedure NAME ... end procedure NAME`
+  form (exempted by the bullet below);
+- `Could not extract source code for proc ...` — the separate FORD limitation documented under
+  "FORD config gotchas" below, not a documentation gap at all;
+- **`Undocumented interface` and `Undocumented proc`** — these fire on interfaces that *are*
+  documented, so they are noise too. Verify before believing either one:
+  `parquet_prefetch_columns_array` and `table_materialize` both carry full `!>`/`!!`
+  doc-comments and both appear in this list. The count
+  scales with how many interface bodies exist, so **adding N documented procedures raises it by
+  roughly N** — and a large chunk of the entries are FORD's own unnamed `'unknown'` placeholders,
+  which name no entity at all and cannot be acted on even in principle.
+
+**The one category that is genuinely load-bearing is `Unknown entity`,** which is the `public ::`
+re-export limitation documented under "FORD config gotchas" and sits at a stable 14. Compare *that*
+number across a change, not the total: it is the only one that moves for a real reason. When a
+before/after total does move, break the delta down by category
+(`grep "Warning" | sed -E 's/.*Warning: //'`) rather than treating the raw count as a regression —
+a stage that adds a few dozen procedures will add several hundred warnings while documenting every
+one of them.
+The "before/after regression" check further down needs `ford --warn docs.md`'s output for the
 same reason — comparing two plain `ford docs.md` runs compares two counts that are both
-structurally 0 (Graphviz-only) and cannot detect a coverage regression.
+structurally 0 (Graphviz-only) and cannot detect a coverage regression — but compare it
+per-category, per the paragraph above, not as a single total.
 
 Keep new code to the same standard:
 
@@ -267,7 +296,10 @@ Keep new code to the same standard:
   changes, run `ford --warn docs.md` (not plain `ford docs.md` — its warning count is always 0
   regardless of coverage, see above, so it cannot detect a regression this way), note the warning
   count, `git stash pop`, and re-run — matching counts confirm the refactor didn't silently drop
-  doc-comments FORD would have warned about anyway. A relocated private helper legitimately
+  doc-comments FORD would have warned about anyway. **A pure refactor is the only case where the
+  raw totals should match**; a stage that *adds* procedures raises the total by design, so there
+  compare `Unknown entity` and the per-category breakdown instead (see above). A relocated
+  private helper legitimately
   disappearing from its old module's FORD
   page (private procedures don't get individual page entries) is expected and not a regression by
   itself — cross-check with `grep 'public ::'` in `parquet.f90` before treating an "not found on
@@ -802,6 +834,31 @@ counterpart. User guide: `doc/pages/date-time.md`.
   `schema%set_col_qc` (corrupted column name → a spurious "column not found" abort at
   runtime — see README.md's Prerequisites). That's the reason for the version floor; don't
   refactor otherwise-correct source to accommodate an old compiler.
+- **Never give a FINALIZABLE derived type to OpenMP's `private()` — declare it in a `block`
+  inside the loop body instead.** gfortran does not reliably default-initialize a `private` copy
+  of such a type, so a pointer component starts as garbage and the *first* thing that finalizes
+  it — including the implicit finalization of an `intent(out)` dummy on entry to an "open"
+  procedure — frees an undefined pointer and the process dies inside the allocator, with a
+  backtrace pointing at malloc rather than at any of this library's own code. Confirmed with
+  `parquet_table` (`private(t)` + `parquet_open_table`), and **reproducible with
+  `OMP_NUM_THREADS=1`, which is what rules out a data race** and identifies it as initialization.
+  The working form declares the variable where it is used, so ordinary block-scope
+  initialization and finalization apply:
+
+  ```fortran
+  !$omp parallel do default(shared) private(rg) reduction(+:total)
+  do rg = 1, n
+      block
+          type(parquet_table) :: mine     ! NOT private(mine)
+          ...
+      end block
+  end do
+  ```
+
+  This applies to every finalizable type this library exposes (`parquet_table`, `parquet_reader`,
+  `parquet_writer`, `parquet_table_row`), and to any future one — so a per-thread instance of any
+  of them belongs in a `block`, and any example or guide page showing `private(<that type>)` is
+  wrong and should be corrected on sight.
 - **Every `submodule (parquet) name` file needs its own `implicit none`** (right after the
   `submodule` line, before `contains`) — a submodule's `implicit none` is *not* inherited from
   the ancestor module; confirmed with a minimal repro where gfortran silently accepted an
@@ -1023,6 +1080,21 @@ for months and fail on a busier machine. If a test that touches files fails inte
 under coverage, check for a shared path before looking anywhere else. Where several tests genuinely
 need the *same* fixture contents, factor the writing into one shared helper that takes the filename
 as an argument, and have each caller pass its own.
+
+**Second consequence, for any library code that inspects OpenMP state:** test-drive achieves that
+concurrency with its own `!$omp parallel do`, so under a `-fopenmp` build **`omp_in_parallel()`
+returns `.true.` inside every procedure a test calls**. A guard that refuses to do something "inside
+a parallel region" therefore fires during the entire test suite, not just in the test that meant to
+provoke it — and, because a plain non-OpenMP `fpm test` compiles the check out entirely, the suite
+passes locally and fails only in CI (whose `FPM_FFLAGS` includes `-fopenmp`). Two rules follow:
+run any change to such a guard under `FPM_FFLAGS="-fopenmp" fpm test`, not just a plain one; and
+prefer a guard keyed on something more precise than "am I in a parallel region" — see
+`unsafe_first_touch` (`parquet_tables_read.f90`), which records at open time *which thread* created
+an object and refuses only when the object could actually be shared, so a thread-private object used
+in the obvious way is unaffected. `test/run_tester.f90`'s `suite_is_safe_to_parallelize` can exclude
+a whole suite from that parallelism, but reach for it only when the suite genuinely cannot run
+concurrently — narrowing the guard is the better fix, since the suite's parallelism is itself an
+ongoing regression check.
 
 ### Every `check()` call needs its own message
 
@@ -1284,7 +1356,13 @@ limit once `nrows * col_size` crosses int32, even though the column was written 
 row-group-scoped rather than guarded — keep them that way, don't revert to a whole-column read:
 `parquet_get_col_size`/`parquet_get_column_total_elements` read `col_size`
 straight off the schema's `FixedSizeListType::list_size()` (no data read at all) for a
-FIXED_SIZE_LIST column, and `parquet_read_array_row_mode` resolves which row group a given
+FIXED_SIZE_LIST column — **but only for that case: a plain `LIST`/`LARGE_LIST` column, which this
+library never writes but another tool can, has no schema-level width, so both fall back to
+`get_single_chunk_array` and read the whole column to measure it.** Any code path that asks for
+`col_size` on every column of an arbitrary file (`parquet_table`'s open-time classification is the
+existing example) is therefore not automatically metadata-only, and should release afterwards
+(`parquet_release_column`, a no-op when nothing was decoded) rather than assume nothing was read.
+`parquet_read_array_row_mode` resolves which row group a given
 `row_index` falls in (`resolve_row_group_for_row`, walking each row group's `num_rows()` from the
 file footer) and reads only that one row group (`get_row_group_chunk_array`, the same helper the
 `_column_chunk` family already used) rather than the whole column.

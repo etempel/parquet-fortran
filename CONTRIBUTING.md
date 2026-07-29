@@ -193,13 +193,57 @@ TEST_FILE=/tmp/benchmark.parquet TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads
 
 `tools/benchmark_table.sh` measures what the `parquet_table` layer costs against reading and
 writing columns directly, on one synthetic float64 file. It drives `app/benchmark_table.f90`
-through four runs: a raw reader baseline, a table open+materialize, `%get` against `%col`, and
-`parquet_write_table` against a hand-written per-column write loop.
+through seven runs: a raw reader baseline, a table open+`materialize_all`, a lazy open that reads
+only `TOUCH` of the columns, a slice-regime open covering one of `SLICES` equal row ranges, an
+access comparison, and `parquet_write_table` against a hand-written per-column write loop — once on
+a null-free table and once on one where `NULLFRAC` of the rows are null.
+
+The **access** run needs a fixture with at least two columns (`NCOLS=2` or more) and reports two
+separate things. First, on already-materialized columns, what `%get` and `%col` themselves cost —
+the columns are prefetched before anything is timed, because opening is lazy and a `%get` on a cold
+column would otherwise decode the whole column from the file, measuring the decode rather than the
+copy. Second, and the reason the mode exists, the same `z = x + y` evaluated three ways: over plain
+allocatable arrays, over `%col` pointers, and over `%col` pointers the caller declared `contiguous`.
+Computing through a pointer is measurably slower than over arrays you own (roughly 1.1x on
+bandwidth-bound columns, ~1.7x once they fit in cache), and the `contiguous` row is there to test the
+obvious explanation and refute it — promising contiguity at the call site recovers nothing, so the
+gap is not `%col`'s missing stride guarantee. The actionable figure is **"passes before `%get`
+wins"**: `%col` skips a copy, so it is ahead until you have iterated over the same columns enough
+times for the slower arithmetic to give that saving back.
+
+The **write** run materializes the table before timing anything, for the same reason the access run
+prefetches: a `parquet_write_table` on a freshly opened table would decode every column as it wrote
+it, charging the whole read to the write path, while the hand-written loop that runs afterwards
+finds every column resident. The comparison still leans slightly towards the hand-written loop,
+which copies each column out with `%get` first where `parquet_write_table` writes from the store
+with no copy — so parity in that output means the table path is genuinely no more expensive.
+
+The **write_nulls** run is the counterpart to `write`. `write` measures the null-free path, where a
+column with no nulls is handed to the writer with no validity mask at all; `write_nulls` measures
+the case that shortcut cannot help, and splits it three ways: `parquet_write_table`, a hand-written
+loop building its mask a row at a time through `%is_null`, and the same loop handed a finished mask.
+The third is the floor — writing with nulls and nothing else — so the gap above it is mask
+construction, and `parquet_write_table` should sit at that floor because it walks the validity
+bitmap a word at a time. The per-row line is legitimately much slower: `%is_null` takes a column
+name, so every call repeats a lookup the library does once, and the public API offers no way to
+hoist it. It builds its null-carrying input itself (an untimed extra write plus read) rather than
+asking the fixture writer for one, because `parquet_table` exposes no way to mark a row null in
+memory.
+
+The lazy and slice runs are the ones to read against `read_table`: the open figure shows what an
+open costs when it reads nothing, and the two partial modes show that a program pays only for the
+columns and rows it asks for. A slice cannot be cheaper than one row group, so a fixture written
+with a single row group will show no slice saving — the mode says so in its own output.
+
+The raw baseline reads **one array per column and holds them all at once**, matching what a table
+holds. Reusing a single buffer for every column instead would measure a different job and flatter
+the raw path — the same pages get overwritten and stay warm, where the table touches the whole
+file's worth of distinct memory (worth ~15% of the raw-vs-table gap on a 0.4 GB 8-column file).
 
 The number worth watching is **"Arrow pool still holding"** in the two read sections. `parquet_table`
 keeps its own Fortran copy of every column and releases the reader's decoded Arrow buffers as it
 goes, so a fully materialized table should report ~0 MiB there while the raw baseline reports the
-whole file. **Resident set size cannot answer this question** — Arrow's memory pool keeps freed
+whole file (on top of its own Fortran copies — roughly two copies resident). **Resident set size cannot answer this question** — Arrow's memory pool keeps freed
 pages rather than returning them to the OS, so RSS stays high in both cases; the pool's own
 `bytes_allocated()` is what distinguishes "released" from "still alive". The two read modes also run
 as separate processes for the same reason.
@@ -208,6 +252,8 @@ as separate processes for the same reason.
 tools/benchmark_table.sh
 # Bigger file, more columns:
 TARGET_FILE_SIZE_GB=2.0 NCOLS=16 tools/benchmark_table.sh
+# Read 2 of 32 columns, and one eighth of the rows:
+NCOLS=32 TOUCH=2 SLICES=8 tools/benchmark_table.sh
 # Keep the synthetic file instead of a temp dir that gets deleted:
 TEST_FILE=/tmp/bench_table.parquet tools/benchmark_table.sh
 ```

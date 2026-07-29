@@ -21,7 +21,7 @@ contains
         call table_resolve(self, name, "col", idx, found)
         if (idx == 0) return
         if (self%cache%cols(idx)%values%kindof() /= PK_INT32) then
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
                 "); the pointer path never widens -- use %get to copy with widening" // sfx
@@ -37,7 +37,7 @@ contains
         call table_resolve(self, name, "col", idx, found)
         if (idx == 0) return
         if (self%cache%cols(idx)%values%kindof() /= PK_INT64) then
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
                 "); the pointer path never widens -- use %get to copy with widening" // sfx
@@ -53,7 +53,7 @@ contains
         call table_resolve(self, name, "col", idx, found)
         if (idx == 0) return
         if (self%cache%cols(idx)%values%kindof() /= PK_FLOAT32) then
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
                 "); the pointer path never widens -- use %get to copy with widening" // sfx
@@ -69,7 +69,7 @@ contains
         call table_resolve(self, name, "col", idx, found)
         if (idx == 0) return
         if (self%cache%cols(idx)%values%kindof() /= PK_FLOAT64) then
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
                 "); the pointer path never widens -- use %get to copy with widening" // sfx
@@ -85,7 +85,7 @@ contains
         call table_resolve(self, name, "col", idx, found)
         if (idx == 0) return
         if (self%cache%cols(idx)%values%kindof() /= PK_LOGICAL) then
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
                 "); the pointer path never widens -- use %get to copy with widening" // sfx
@@ -101,7 +101,7 @@ contains
         call table_resolve(self, name, "col", idx, found)
         if (idx == 0) return
         if (self%cache%cols(idx)%values%kindof() /= PK_DATE) then
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
                 "); the pointer path never widens -- use %get to copy with widening" // sfx
@@ -117,7 +117,7 @@ contains
         call table_resolve(self, name, "col", idx, found)
         if (idx == 0) return
         if (self%cache%cols(idx)%values%kindof() /= PK_TIME) then
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
                 "); the pointer path never widens -- use %get to copy with widening" // sfx
@@ -133,7 +133,7 @@ contains
         call table_resolve(self, name, "col", idx, found)
         if (idx == 0) return
         if (self%cache%cols(idx)%values%kindof() /= PK_TIMESTAMP) then
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
                 "); the pointer path never widens -- use %get to copy with widening" // sfx
@@ -149,7 +149,7 @@ contains
         call table_resolve(self, name, "col", idx, found)
         if (idx == 0) return
         if (self%cache%cols(idx)%values%kindof() /= PK_INT32_VEC) then
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
                 "); the pointer path never widens -- use %get to copy with widening" // sfx
@@ -165,7 +165,7 @@ contains
         call table_resolve(self, name, "col", idx, found)
         if (idx == 0) return
         if (self%cache%cols(idx)%values%kindof() /= PK_INT64_VEC) then
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
                 "); the pointer path never widens -- use %get to copy with widening" // sfx
@@ -181,7 +181,7 @@ contains
         call table_resolve(self, name, "col", idx, found)
         if (idx == 0) return
         if (self%cache%cols(idx)%values%kindof() /= PK_FLOAT32_VEC) then
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
                 "); the pointer path never widens -- use %get to copy with widening" // sfx
@@ -197,7 +197,7 @@ contains
         call table_resolve(self, name, "col", idx, found)
         if (idx == 0) return
         if (self%cache%cols(idx)%values%kindof() /= PK_FLOAT64_VEC) then
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
                 "); the pointer path never widens -- use %get to copy with widening" // sfx
@@ -213,7 +213,7 @@ contains
         call table_resolve(self, name, "col", idx, found)
         if (idx == 0) return
         if (self%cache%cols(idx)%values%kindof() /= PK_LOGICAL_VEC) then
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
                 "); the pointer path never widens -- use %get to copy with widening" // sfx
@@ -229,7 +229,7 @@ contains
         call table_resolve(self, name, "col", idx, found)
         if (idx == 0) return
         if (self%cache%cols(idx)%values%kindof() /= PK_DATE_VEC) then
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
                 "); the pointer path never widens -- use %get to copy with widening" // sfx
@@ -245,7 +245,7 @@ contains
         call table_resolve(self, name, "col", idx, found)
         if (idx == 0) return
         if (self%cache%cols(idx)%values%kindof() /= PK_TIME_VEC) then
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
                 "); the pointer path never widens -- use %get to copy with widening" // sfx
@@ -261,7 +261,7 @@ contains
         call table_resolve(self, name, "col", idx, found)
         if (idx == 0) return
         if (self%cache%cols(idx)%values%kindof() /= PK_TIMESTAMP_VEC) then
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
                 "); the pointer path never widens -- use %get to copy with widening" // sfx
@@ -285,7 +285,7 @@ contains
             allocate(arr(size(p)))
             arr = p
         case default
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "get: column kind (" // kname // ") cannot be copied into this array" // sfx
         end select
@@ -312,7 +312,7 @@ contains
             allocate(arr(size(p_i32)))
             arr = p_i32
         case default
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "get: column kind (" // kname // ") cannot be copied into this array" // sfx
         end select
@@ -334,7 +334,7 @@ contains
             allocate(arr(size(p)))
             arr = p
         case default
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "get: column kind (" // kname // ") cannot be copied into this array" // sfx
         end select
@@ -361,7 +361,7 @@ contains
             allocate(arr(size(p_f32)))
             arr = p_f32
         case default
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "get: column kind (" // kname // ") cannot be copied into this array" // sfx
         end select
@@ -383,7 +383,7 @@ contains
             allocate(arr(size(p)))
             arr = p
         case default
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "get: column kind (" // kname // ") cannot be copied into this array" // sfx
         end select
@@ -405,7 +405,7 @@ contains
             allocate(arr(size(p)))
             arr = p
         case default
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "get: column kind (" // kname // ") cannot be copied into this array" // sfx
         end select
@@ -427,7 +427,7 @@ contains
             allocate(arr(size(p)))
             arr = p
         case default
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "get: column kind (" // kname // ") cannot be copied into this array" // sfx
         end select
@@ -449,7 +449,7 @@ contains
             allocate(arr(size(p)))
             arr = p
         case default
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "get: column kind (" // kname // ") cannot be copied into this array" // sfx
         end select
@@ -471,7 +471,7 @@ contains
             allocate(arr(size(p,1), size(p,2)))
             arr = p
         case default
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "get: column kind (" // kname // ") cannot be copied into this array" // sfx
         end select
@@ -498,7 +498,7 @@ contains
             allocate(arr(size(p_i32v,1), size(p_i32v,2)))
             arr = p_i32v
         case default
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "get: column kind (" // kname // ") cannot be copied into this array" // sfx
         end select
@@ -520,7 +520,7 @@ contains
             allocate(arr(size(p,1), size(p,2)))
             arr = p
         case default
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "get: column kind (" // kname // ") cannot be copied into this array" // sfx
         end select
@@ -547,7 +547,7 @@ contains
             allocate(arr(size(p_f32v,1), size(p_f32v,2)))
             arr = p_f32v
         case default
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "get: column kind (" // kname // ") cannot be copied into this array" // sfx
         end select
@@ -569,7 +569,7 @@ contains
             allocate(arr(size(p,1), size(p,2)))
             arr = p
         case default
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "get: column kind (" // kname // ") cannot be copied into this array" // sfx
         end select
@@ -591,7 +591,7 @@ contains
             allocate(arr(size(p,1), size(p,2)))
             arr = p
         case default
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "get: column kind (" // kname // ") cannot be copied into this array" // sfx
         end select
@@ -613,7 +613,7 @@ contains
             allocate(arr(size(p,1), size(p,2)))
             arr = p
         case default
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "get: column kind (" // kname // ") cannot be copied into this array" // sfx
         end select
@@ -635,7 +635,7 @@ contains
             allocate(arr(size(p,1), size(p,2)))
             arr = p
         case default
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             error stop EP // "get: column kind (" // kname // ") cannot be copied into this array" // sfx
         end select
@@ -895,5 +895,659 @@ contains
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_arr_chrv
+    !
+    module procedure row_get_i32
+        integer :: idx
+        !
+        call row_resolve(self, name, "get", idx)
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_INT32)
+            call self%cache%cols(idx)%values%get_at(self%irow, value)
+        case default
+            call row_kind_error(self, name, idx)
+        end select
+    end procedure row_get_i32
+    !
+    module procedure row_get_i64
+        integer :: idx
+        integer(int32) :: v_i32
+        !
+        call row_resolve(self, name, "get", idx)
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_INT64)
+            call self%cache%cols(idx)%values%get_at(self%irow, value)
+        case (PK_INT32)
+            call self%cache%cols(idx)%values%get_at(self%irow, v_i32)
+            value = v_i32
+        case default
+            call row_kind_error(self, name, idx)
+        end select
+    end procedure row_get_i64
+    !
+    module procedure row_get_f32
+        integer :: idx
+        !
+        call row_resolve(self, name, "get", idx)
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_FLOAT32)
+            call self%cache%cols(idx)%values%get_at(self%irow, value)
+        case default
+            call row_kind_error(self, name, idx)
+        end select
+    end procedure row_get_f32
+    !
+    module procedure row_get_f64
+        integer :: idx
+        real(real32) :: v_f32
+        !
+        call row_resolve(self, name, "get", idx)
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_FLOAT64)
+            call self%cache%cols(idx)%values%get_at(self%irow, value)
+        case (PK_FLOAT32)
+            call self%cache%cols(idx)%values%get_at(self%irow, v_f32)
+            value = v_f32
+        case default
+            call row_kind_error(self, name, idx)
+        end select
+    end procedure row_get_f64
+    !
+    module procedure row_get_bool
+        integer :: idx
+        !
+        call row_resolve(self, name, "get", idx)
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_LOGICAL)
+            call self%cache%cols(idx)%values%get_at(self%irow, value)
+        case default
+            call row_kind_error(self, name, idx)
+        end select
+    end procedure row_get_bool
+    !
+    module procedure row_get_str
+        integer :: idx
+        type(parquet_string_column), pointer :: store
+        !
+        call row_resolve(self, name, "get", idx)
+        call row_require_kind(self, name, idx, PK_STRING)
+        call self%cache%cols(idx)%values%string_column(store)
+        ! allow_null keeps a null row from aborting: it reads back as "", and %is_null is how a
+        ! caller tells the two apart.
+        call store%get(self%irow, value, allow_null=.true.)
+    end procedure row_get_str
+    !
+    module procedure row_get_date
+        integer :: idx
+        !
+        call row_resolve(self, name, "get", idx)
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_DATE)
+            call self%cache%cols(idx)%values%get_at(self%irow, value)
+        case default
+            call row_kind_error(self, name, idx)
+        end select
+    end procedure row_get_date
+    !
+    module procedure row_get_time
+        integer :: idx
+        !
+        call row_resolve(self, name, "get", idx)
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_TIME)
+            call self%cache%cols(idx)%values%get_at(self%irow, value)
+        case default
+            call row_kind_error(self, name, idx)
+        end select
+    end procedure row_get_time
+    !
+    module procedure row_get_ts
+        integer :: idx
+        !
+        call row_resolve(self, name, "get", idx)
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_TIMESTAMP)
+            call self%cache%cols(idx)%values%get_at(self%irow, value)
+        case default
+            call row_kind_error(self, name, idx)
+        end select
+    end procedure row_get_ts
+    !
+    module procedure row_get_i32v
+        integer :: idx
+        !
+        call row_resolve(self, name, "get", idx)
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_INT32_VEC)
+            allocate(value(self%cache%cols(idx)%width))
+            call self%cache%cols(idx)%values%get_at(self%irow, value)
+        case default
+            call row_kind_error(self, name, idx)
+        end select
+    end procedure row_get_i32v
+    !
+    module procedure row_get_i64v
+        integer :: idx
+        integer(int32), allocatable :: v_i32v(:)
+        !
+        call row_resolve(self, name, "get", idx)
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_INT64_VEC)
+            allocate(value(self%cache%cols(idx)%width))
+            call self%cache%cols(idx)%values%get_at(self%irow, value)
+        case (PK_INT32_VEC)
+            allocate(v_i32v(self%cache%cols(idx)%width))
+            call self%cache%cols(idx)%values%get_at(self%irow, v_i32v)
+            allocate(value(self%cache%cols(idx)%width))
+            value = v_i32v
+        case default
+            call row_kind_error(self, name, idx)
+        end select
+    end procedure row_get_i64v
+    !
+    module procedure row_get_f32v
+        integer :: idx
+        !
+        call row_resolve(self, name, "get", idx)
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_FLOAT32_VEC)
+            allocate(value(self%cache%cols(idx)%width))
+            call self%cache%cols(idx)%values%get_at(self%irow, value)
+        case default
+            call row_kind_error(self, name, idx)
+        end select
+    end procedure row_get_f32v
+    !
+    module procedure row_get_f64v
+        integer :: idx
+        real(real32), allocatable :: v_f32v(:)
+        !
+        call row_resolve(self, name, "get", idx)
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_FLOAT64_VEC)
+            allocate(value(self%cache%cols(idx)%width))
+            call self%cache%cols(idx)%values%get_at(self%irow, value)
+        case (PK_FLOAT32_VEC)
+            allocate(v_f32v(self%cache%cols(idx)%width))
+            call self%cache%cols(idx)%values%get_at(self%irow, v_f32v)
+            allocate(value(self%cache%cols(idx)%width))
+            value = v_f32v
+        case default
+            call row_kind_error(self, name, idx)
+        end select
+    end procedure row_get_f64v
+    !
+    module procedure row_get_boolv
+        integer :: idx
+        !
+        call row_resolve(self, name, "get", idx)
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_LOGICAL_VEC)
+            allocate(value(self%cache%cols(idx)%width))
+            call self%cache%cols(idx)%values%get_at(self%irow, value)
+        case default
+            call row_kind_error(self, name, idx)
+        end select
+    end procedure row_get_boolv
+    !
+    module procedure row_get_strv
+        integer :: idx, e, wdt, maxlen
+        integer(int64) :: flat
+        character(len=:), allocatable :: s
+        type(parquet_string_column), pointer :: store
+        !
+        call row_resolve(self, name, "get", idx)
+        call row_require_kind(self, name, idx, PK_STRING_VEC)
+        wdt = self%cache%cols(idx)%width
+        ! A vector string column is ONE flat store of width*nrows elements, element (e, i) at
+        ! (i-1)*width + e. Two passes, because a fixed-length array cannot be grown per element.
+        call self%cache%cols(idx)%values%string_column(store)
+        maxlen = 1
+        do e = 1, wdt
+            flat = (self%irow - 1) * int(wdt, int64) + int(e, int64)
+            call store%get(flat, s, allow_null=.true.)
+            if (len(s) > maxlen) maxlen = len(s)
+        end do
+        allocate(character(len=maxlen) :: value(wdt))
+        do e = 1, wdt
+            flat = (self%irow - 1) * int(wdt, int64) + int(e, int64)
+            call store%get(flat, s, allow_null=.true.)
+            value(e) = s
+        end do
+    end procedure row_get_strv
+    !
+    module procedure row_get_datev
+        integer :: idx
+        !
+        call row_resolve(self, name, "get", idx)
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_DATE_VEC)
+            allocate(value(self%cache%cols(idx)%width))
+            call self%cache%cols(idx)%values%get_at(self%irow, value)
+        case default
+            call row_kind_error(self, name, idx)
+        end select
+    end procedure row_get_datev
+    !
+    module procedure row_get_timev
+        integer :: idx
+        !
+        call row_resolve(self, name, "get", idx)
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_TIME_VEC)
+            allocate(value(self%cache%cols(idx)%width))
+            call self%cache%cols(idx)%values%get_at(self%irow, value)
+        case default
+            call row_kind_error(self, name, idx)
+        end select
+    end procedure row_get_timev
+    !
+    module procedure row_get_tsv
+        integer :: idx
+        !
+        call row_resolve(self, name, "get", idx)
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_TIMESTAMP_VEC)
+            allocate(value(self%cache%cols(idx)%width))
+            call self%cache%cols(idx)%values%get_at(self%irow, value)
+        case default
+            call row_kind_error(self, name, idx)
+        end select
+    end procedure row_get_tsv
+    !
+    module procedure get_slice_i32
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "get_slice", idx)
+        call slice_resolve(s, self%row_count, rows, "get_slice")
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_INT32)
+            allocate(arr(size(rows)))
+            do k = 1, size(rows, kind=int64)
+                call self%cache%cols(idx)%values%get_at(rows(k), arr(k))
+            end do
+        case default
+            call slice_kind_error(self, name, idx)
+        end select
+    end procedure get_slice_i32
+    !
+    module procedure get_slice_i64
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        integer(int32) :: v_i32
+        !
+        call table_resolve(self, name, "get_slice", idx)
+        call slice_resolve(s, self%row_count, rows, "get_slice")
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_INT64)
+            allocate(arr(size(rows)))
+            do k = 1, size(rows, kind=int64)
+                call self%cache%cols(idx)%values%get_at(rows(k), arr(k))
+            end do
+        case (PK_INT32)
+            allocate(arr(size(rows)))
+            do k = 1, size(rows, kind=int64)
+                call self%cache%cols(idx)%values%get_at(rows(k), v_i32)
+                arr(k) = v_i32
+            end do
+        case default
+            call slice_kind_error(self, name, idx)
+        end select
+    end procedure get_slice_i64
+    !
+    module procedure get_slice_f32
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "get_slice", idx)
+        call slice_resolve(s, self%row_count, rows, "get_slice")
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_FLOAT32)
+            allocate(arr(size(rows)))
+            do k = 1, size(rows, kind=int64)
+                call self%cache%cols(idx)%values%get_at(rows(k), arr(k))
+            end do
+        case default
+            call slice_kind_error(self, name, idx)
+        end select
+    end procedure get_slice_f32
+    !
+    module procedure get_slice_f64
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        real(real32) :: v_f32
+        !
+        call table_resolve(self, name, "get_slice", idx)
+        call slice_resolve(s, self%row_count, rows, "get_slice")
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_FLOAT64)
+            allocate(arr(size(rows)))
+            do k = 1, size(rows, kind=int64)
+                call self%cache%cols(idx)%values%get_at(rows(k), arr(k))
+            end do
+        case (PK_FLOAT32)
+            allocate(arr(size(rows)))
+            do k = 1, size(rows, kind=int64)
+                call self%cache%cols(idx)%values%get_at(rows(k), v_f32)
+                arr(k) = v_f32
+            end do
+        case default
+            call slice_kind_error(self, name, idx)
+        end select
+    end procedure get_slice_f64
+    !
+    module procedure get_slice_bool
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "get_slice", idx)
+        call slice_resolve(s, self%row_count, rows, "get_slice")
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_LOGICAL)
+            allocate(arr(size(rows)))
+            do k = 1, size(rows, kind=int64)
+                call self%cache%cols(idx)%values%get_at(rows(k), arr(k))
+            end do
+        case default
+            call slice_kind_error(self, name, idx)
+        end select
+    end procedure get_slice_bool
+    !
+    module procedure get_slice_date
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "get_slice", idx)
+        call slice_resolve(s, self%row_count, rows, "get_slice")
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_DATE)
+            allocate(arr(size(rows)))
+            do k = 1, size(rows, kind=int64)
+                call self%cache%cols(idx)%values%get_at(rows(k), arr(k))
+            end do
+        case default
+            call slice_kind_error(self, name, idx)
+        end select
+    end procedure get_slice_date
+    !
+    module procedure get_slice_time
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "get_slice", idx)
+        call slice_resolve(s, self%row_count, rows, "get_slice")
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_TIME)
+            allocate(arr(size(rows)))
+            do k = 1, size(rows, kind=int64)
+                call self%cache%cols(idx)%values%get_at(rows(k), arr(k))
+            end do
+        case default
+            call slice_kind_error(self, name, idx)
+        end select
+    end procedure get_slice_time
+    !
+    module procedure get_slice_ts
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "get_slice", idx)
+        call slice_resolve(s, self%row_count, rows, "get_slice")
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_TIMESTAMP)
+            allocate(arr(size(rows)))
+            do k = 1, size(rows, kind=int64)
+                call self%cache%cols(idx)%values%get_at(rows(k), arr(k))
+            end do
+        case default
+            call slice_kind_error(self, name, idx)
+        end select
+    end procedure get_slice_ts
+    !
+    module procedure get_slice_i32v
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "get_slice", idx)
+        call slice_resolve(s, self%row_count, rows, "get_slice")
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_INT32_VEC)
+            allocate(arr(self%cache%cols(idx)%width, size(rows)))
+            do k = 1, size(rows, kind=int64)
+                call self%cache%cols(idx)%values%get_at(rows(k), arr(:, k))
+            end do
+        case default
+            call slice_kind_error(self, name, idx)
+        end select
+    end procedure get_slice_i32v
+    !
+    module procedure get_slice_i64v
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        integer(int32), allocatable :: v_i32v(:)
+        !
+        call table_resolve(self, name, "get_slice", idx)
+        call slice_resolve(s, self%row_count, rows, "get_slice")
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_INT64_VEC)
+            allocate(arr(self%cache%cols(idx)%width, size(rows)))
+            do k = 1, size(rows, kind=int64)
+                call self%cache%cols(idx)%values%get_at(rows(k), arr(:, k))
+            end do
+        case (PK_INT32_VEC)
+            allocate(arr(self%cache%cols(idx)%width, size(rows)))
+            allocate(v_i32v(self%cache%cols(idx)%width))
+            do k = 1, size(rows, kind=int64)
+                call self%cache%cols(idx)%values%get_at(rows(k), v_i32v)
+                arr(:, k) = v_i32v
+            end do
+        case default
+            call slice_kind_error(self, name, idx)
+        end select
+    end procedure get_slice_i64v
+    !
+    module procedure get_slice_f32v
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "get_slice", idx)
+        call slice_resolve(s, self%row_count, rows, "get_slice")
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_FLOAT32_VEC)
+            allocate(arr(self%cache%cols(idx)%width, size(rows)))
+            do k = 1, size(rows, kind=int64)
+                call self%cache%cols(idx)%values%get_at(rows(k), arr(:, k))
+            end do
+        case default
+            call slice_kind_error(self, name, idx)
+        end select
+    end procedure get_slice_f32v
+    !
+    module procedure get_slice_f64v
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        real(real32), allocatable :: v_f32v(:)
+        !
+        call table_resolve(self, name, "get_slice", idx)
+        call slice_resolve(s, self%row_count, rows, "get_slice")
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_FLOAT64_VEC)
+            allocate(arr(self%cache%cols(idx)%width, size(rows)))
+            do k = 1, size(rows, kind=int64)
+                call self%cache%cols(idx)%values%get_at(rows(k), arr(:, k))
+            end do
+        case (PK_FLOAT32_VEC)
+            allocate(arr(self%cache%cols(idx)%width, size(rows)))
+            allocate(v_f32v(self%cache%cols(idx)%width))
+            do k = 1, size(rows, kind=int64)
+                call self%cache%cols(idx)%values%get_at(rows(k), v_f32v)
+                arr(:, k) = v_f32v
+            end do
+        case default
+            call slice_kind_error(self, name, idx)
+        end select
+    end procedure get_slice_f64v
+    !
+    module procedure get_slice_boolv
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "get_slice", idx)
+        call slice_resolve(s, self%row_count, rows, "get_slice")
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_LOGICAL_VEC)
+            allocate(arr(self%cache%cols(idx)%width, size(rows)))
+            do k = 1, size(rows, kind=int64)
+                call self%cache%cols(idx)%values%get_at(rows(k), arr(:, k))
+            end do
+        case default
+            call slice_kind_error(self, name, idx)
+        end select
+    end procedure get_slice_boolv
+    !
+    module procedure get_slice_datev
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "get_slice", idx)
+        call slice_resolve(s, self%row_count, rows, "get_slice")
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_DATE_VEC)
+            allocate(arr(self%cache%cols(idx)%width, size(rows)))
+            do k = 1, size(rows, kind=int64)
+                call self%cache%cols(idx)%values%get_at(rows(k), arr(:, k))
+            end do
+        case default
+            call slice_kind_error(self, name, idx)
+        end select
+    end procedure get_slice_datev
+    !
+    module procedure get_slice_timev
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "get_slice", idx)
+        call slice_resolve(s, self%row_count, rows, "get_slice")
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_TIME_VEC)
+            allocate(arr(self%cache%cols(idx)%width, size(rows)))
+            do k = 1, size(rows, kind=int64)
+                call self%cache%cols(idx)%values%get_at(rows(k), arr(:, k))
+            end do
+        case default
+            call slice_kind_error(self, name, idx)
+        end select
+    end procedure get_slice_timev
+    !
+    module procedure get_slice_tsv
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "get_slice", idx)
+        call slice_resolve(s, self%row_count, rows, "get_slice")
+        select case (self%cache%cols(idx)%declared_kind)
+        case (PK_TIMESTAMP_VEC)
+            allocate(arr(self%cache%cols(idx)%width, size(rows)))
+            do k = 1, size(rows, kind=int64)
+                call self%cache%cols(idx)%values%get_at(rows(k), arr(:, k))
+            end do
+        case default
+            call slice_kind_error(self, name, idx)
+        end select
+    end procedure get_slice_tsv
+    !
+    module procedure get_slice_str
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        character(len=:), allocatable :: sv
+        type(parquet_string_column), pointer :: store
+        !
+        call table_resolve(self, name, "get_slice", idx)
+        call table_require_kind(self, idx, PK_STRING, "get_slice")
+        call slice_resolve(s, self%row_count, rows, "get_slice")
+        call self%cache%cols(idx)%values%string_column(store)
+        ! Built element by element rather than copied and trimmed: a gather has no contiguous
+        ! source range to clone from, and appending keeps the result compact.
+        do k = 1, size(rows, kind=int64)
+            if (store%is_null(rows(k))) then
+                call arr%append_null()
+            else
+                call store%get(rows(k), sv)
+                call arr%append_string(sv)
+            end if
+        end do
+    end procedure get_slice_str
+    !
+    module procedure get_slice_chr
+        integer :: idx, maxlen
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        character(len=:), allocatable :: sv
+        type(parquet_string_column), pointer :: store
+        !
+        call table_resolve(self, name, "get_slice", idx)
+        call table_require_kind(self, idx, PK_STRING, "get_slice")
+        call slice_resolve(s, self%row_count, rows, "get_slice")
+        call self%cache%cols(idx)%values%string_column(store)
+        ! Two passes: a fixed-length array's width must be the longest element SELECTED, which
+        ! is not known until every selected row has been looked at.
+        maxlen = 1
+        do k = 1, size(rows, kind=int64)
+            call store%get(rows(k), sv, allow_null=.true.)
+            if (len(sv) > maxlen) maxlen = len(sv)
+        end do
+        allocate(character(len=maxlen) :: arr(size(rows)))
+        do k = 1, size(rows, kind=int64)
+            call store%get(rows(k), sv, allow_null=.true.)
+            arr(k) = sv
+        end do
+    end procedure get_slice_chr
+    !
+    module procedure get_slice_chrv
+        integer :: idx, maxlen, e, wdt
+        integer(int64) :: k, flat
+        integer(int64), allocatable :: rows(:)
+        character(len=:), allocatable :: sv
+        type(parquet_string_column), pointer :: store
+        !
+        call table_resolve(self, name, "get_slice", idx)
+        call table_require_kind(self, idx, PK_STRING_VEC, "get_slice")
+        call slice_resolve(s, self%row_count, rows, "get_slice")
+        wdt = self%cache%cols(idx)%width
+        call self%cache%cols(idx)%values%string_column(store)
+        maxlen = 1
+        do k = 1, size(rows, kind=int64)
+            do e = 1, wdt
+                flat = (rows(k) - 1) * int(wdt, int64) + int(e, int64)
+                call store%get(flat, sv, allow_null=.true.)
+                if (len(sv) > maxlen) maxlen = len(sv)
+            end do
+        end do
+        allocate(character(len=maxlen) :: arr(wdt, size(rows)))
+        do k = 1, size(rows, kind=int64)
+            do e = 1, wdt
+                flat = (rows(k) - 1) * int(wdt, int64) + int(e, int64)
+                call store%get(flat, sv, allow_null=.true.)
+                arr(e, k) = sv
+            end do
+        end do
+    end procedure get_slice_chrv
     !
 end submodule parquet_tables_access

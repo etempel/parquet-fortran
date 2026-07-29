@@ -495,6 +495,28 @@ contains
                 test_table_write_missing_column_aborts), &
             new_unittest("parquet_write_table with an unparsed schema aborts", &
                 test_table_write_unparsed_schema_aborts), &
+            new_unittest("opening a table slice starting before row 1 aborts", &
+                test_table_slice_below_first_row_aborts), &
+            new_unittest("opening a table slice past the last row aborts", &
+                test_table_slice_past_last_row_aborts), &
+            new_unittest("opening an inverted table slice aborts", &
+                test_table_slice_inverted_aborts), &
+            new_unittest("a row handle on a row that does not exist aborts", &
+                test_table_row_index_out_of_range_aborts), &
+            new_unittest("get_slice selecting a row outside the table aborts", &
+                test_table_get_slice_out_of_range_aborts), &
+            new_unittest("parquet_slice_range with a zero step aborts", &
+                test_table_slice_zero_step_aborts), &
+            new_unittest("reloading an in-memory column aborts", &
+                test_table_reload_in_memory_column_aborts), &
+            new_unittest("reloading a column of a table with no file aborts", &
+                test_table_reload_not_file_backed_aborts), &
+            new_unittest("a row handle reading an unknown column aborts", &
+                test_table_row_unknown_column_aborts), &
+            new_unittest("a row handle reading into an incompatible kind aborts", &
+                test_table_row_kind_mismatch_aborts), &
+            new_unittest("get_slice into an incompatible kind aborts", &
+                test_table_get_slice_kind_mismatch_aborts), &
             new_unittest("parquet_string_column indexing out of range aborts", &
                 test_string_column_index_out_of_range_aborts), &
             new_unittest("parquet_string_column view_all with a mismatched-size array aborts", &
@@ -773,6 +795,83 @@ contains
             failure_message="writing with an unparsed schema was expected to abort", &
             required_stderr="this schema has not been parsed; call parquet_parse_maml(schema)")
     end subroutine test_table_write_unparsed_schema_aborts
+
+    subroutine test_table_slice_below_first_row_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_slice_below_first_row", expect_abort=.true., &
+            failure_message="a slice starting below row 1 was expected to abort", &
+            required_stderr="row slice [0, 2] is not inside this file's 1..3 rows")
+    end subroutine test_table_slice_below_first_row_aborts
+
+    subroutine test_table_slice_past_last_row_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_slice_past_last_row", expect_abort=.true., &
+            failure_message="a slice past the last row was expected to abort", &
+            required_stderr="row slice [2, 99] is not inside this file's 1..3 rows")
+    end subroutine test_table_slice_past_last_row_aborts
+
+    subroutine test_table_slice_inverted_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_slice_inverted", expect_abort=.true., &
+            failure_message="an inverted slice was expected to abort", &
+            required_stderr="row slice [3, 1] is not inside this file's 1..3 rows")
+    end subroutine test_table_slice_inverted_aborts
+
+    subroutine test_table_row_index_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_row_index_out_of_range", expect_abort=.true., &
+            failure_message="a row handle on a nonexistent row was expected to abort", &
+            required_stderr="row: row index 9 is outside this table's 1..3 rows")
+    end subroutine test_table_row_index_out_of_range_aborts
+
+    subroutine test_table_get_slice_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_get_slice_out_of_range", expect_abort=.true., &
+            failure_message="a slice selecting a row past the end was expected to abort", &
+            required_stderr="slice selects row 7, outside the table's 1..3 rows")
+    end subroutine test_table_get_slice_out_of_range_aborts
+
+    subroutine test_table_slice_zero_step_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_slice_zero_step", expect_abort=.true., &
+            failure_message="a zero-step slice was expected to abort", &
+            required_stderr="parquet_slice_range: step must not be zero")
+    end subroutine test_table_slice_zero_step_aborts
+
+    subroutine test_table_reload_in_memory_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_reload_in_memory_column", expect_abort=.true., &
+            failure_message="reloading an in-memory column was expected to abort", &
+            required_stderr="this column was not read from a file, so there is nothing to reload it from")
+    end subroutine test_table_reload_in_memory_column_aborts
+
+    subroutine test_table_reload_not_file_backed_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_reload_not_file_backed", expect_abort=.true., &
+            failure_message="reloading a column of a fileless table was expected to abort", &
+            required_stderr="this column was not read from a file, so there is nothing to reload it from")
+    end subroutine test_table_reload_not_file_backed_aborts
+
+    subroutine test_table_row_unknown_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_row_unknown_column", expect_abort=.true., &
+            failure_message="a row handle reading an unknown column was expected to abort", &
+            required_stderr="row get: no column of this name")
+    end subroutine test_table_row_unknown_column_aborts
+
+    subroutine test_table_row_kind_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_row_kind_mismatch", expect_abort=.true., &
+            failure_message="a row read into an incompatible kind was expected to abort", &
+            required_stderr="cannot be copied into this variable")
+    end subroutine test_table_row_kind_mismatch_aborts
+
+    subroutine test_table_get_slice_kind_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_get_slice_kind_mismatch", expect_abort=.true., &
+            failure_message="a sliced read into an incompatible kind was expected to abort", &
+            required_stderr="cannot be copied into this array")
+    end subroutine test_table_get_slice_kind_mismatch_aborts
 
     subroutine test_columns_data_ptr_kind_mismatch_aborts(error)
         type(error_type), allocatable, intent(out) :: error

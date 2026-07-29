@@ -3161,10 +3161,15 @@ contains
             "a column re-read after parquet_release_column must be identical")
         if (allocated(error)) return
 
-        ! Both no-op cases: a name that does not exist, and a column never read.
+        ! Three no-op cases: a name that does not exist, a column never read, and a column
+        ! released a second time. The last one matters to any caller that releases per column
+        ! rather than in one pass, since it cannot always know whether an earlier release
+        ! already dropped the same (top-level) array.
         call parquet_release_column(reader, "no_such_column_at_all")
         call parquet_release_column(reader, "main.inner.age")
-        call check(error, .true., "releasing an unknown or never-read column must not error")
+        call parquet_release_column(reader, "main.id")
+        call check(error, .true., &
+            "releasing an unknown, never-read or already-released column must not error")
         if (allocated(error)) return
 
         ! Still readable afterwards.

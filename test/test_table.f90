@@ -59,6 +59,27 @@ contains
                 test_pointer_is_live), &
             new_unittest("nulls survive a round trip for all three validity dispatch classes", &
                 test_nulls_roundtrip), &
+            new_unittest("nulls survive being written back out by parquet_write_table", &
+                test_write_table_nulls), &
+            new_unittest("a null in a vector string column is widened to the whole row", &
+                test_string_vector_nulls), &
+            new_unittest("opening reads nothing; each accessor touches only its own column", &
+                test_lazy_first_touch), &
+            new_unittest("prefetch and materialize_all read columns ahead of first touch", &
+                test_prefetch), &
+            new_unittest("reload restores a column's file values after set", test_reload), &
+            new_unittest("row group bounds partition the file's rows exactly", &
+                test_row_group_bounds), &
+            new_unittest("a slice straddling a row-group boundary reads all 18 kinds correctly", &
+                test_slice_kind_matrix), &
+            new_unittest("slice bounds inside, on and across row groups all agree with the full table", &
+                test_slice_shapes), &
+            new_unittest("a row handle reads every kind, widens, and triggers its own first touch", &
+                test_row_view), &
+            new_unittest("get_slice copies range, strided, descending and list selections", &
+                test_get_slice), &
+            new_unittest("a thread's own slice table may be read lazily inside a parallel region", &
+                test_parallel_private_slices), &
             new_unittest("a column this library cannot read does not stop the file opening", &
                 test_unsupported_column), &
             new_unittest("nested struct leaves become dotted columns", test_struct_leaves), &
@@ -137,8 +158,16 @@ contains
         if (allocated(error)) return
         call check(error, .not. t%is_detached(), "a freshly opened table is not detached")
         if (allocated(error)) return
-        call check(error, t%residency("f64") == RES_FULL, &
-            "an eagerly materialized column should be RES_FULL")
+        ! Everything above was answered without reading a single column: opening classifies
+        ! from the schema and stops there.
+        call check(error, t%residency("f64") == RES_EMPTY, &
+            "no column should be resident before it is touched")
+        if (allocated(error)) return
+        call check(error, t%kind("f64") == PK_FLOAT64, &
+            "kind must answer from the schema, before the column is read")
+        if (allocated(error)) return
+        call check(error, t%width("f64") == 1, &
+            "width must answer from the schema, before the column is read")
     end subroutine test_open_basics
     !
     subroutine test_roundtrip_scalar_numeric(error)
@@ -412,10 +441,276 @@ contains
         call check(error, .not. t%is_null("d", 1_int64), "a valid date row should not be null")
     end subroutine test_nulls_roundtrip
     !
+    !> Nulls must survive being written back out by `parquet_write_table`, not merely read.
+    !!
+    !! This guards the two shortcuts the write path takes when building its `is_valid=` mask, both
+    !! of which fail silently if wrong -- the file simply comes back with every row valid:
+    !!
+    !!  * a column with NO nulls is written with no mask at all (`row_validity` returns an
+    !!    unallocated array, which makes the `optional` dummy absent), so `clean` below must come
+    !!    back with no nulls AND its values intact;
+    !!  * a column WITH nulls has its mask built by walking the validity bitmap 64 bits at a time,
+    !!    so the null rows are placed deliberately at and around block boundaries (64/65, 128/129)
+    !!    and at the very first and last row, which is where an off-by-one in that walk shows up.
+    !!
+    !! The vector column is not redundant with the scalar one: a vector row's validity is its first
+    !! element's bit, so consecutive rows sit `width` bits apart and the walk has to derive which
+    !! rows a block covers rather than reading them off directly.
+    subroutine test_write_table_nulls(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: NBIG = 200 !! spans four 64-bit validity blocks.
+        integer, parameter :: NW = 3     !! vector width, so rows sit 3 bits apart.
+        type(error_type), allocatable :: e2
+        type(parquet_writer) :: w
+        type(parquet_table) :: t, t2
+        type(parquet_schema) :: s
+        real(real64) :: f64(NBIG), clean(NBIG), fv(NW, NBIG)
+        real(real64), allocatable :: back(:)
+        logical :: valid_f(NBIG), valid_v(NW, NBIG)
+        integer :: i
+        integer, parameter :: fnull(6) = [1, 64, 65, 128, 129, 200]
+        integer, parameter :: vnull(4) = [2, 64, 65, 130]
+        character(len=*), parameter :: f = "test_run/table_write_nulls.parquet"
+        character(len=*), parameter :: fo = "test_run/table_write_nulls_out.parquet"
+        !
+        do i = 1, NBIG
+            f64(i) = real(i, real64)
+            clean(i) = real(1000 + i, real64)
+            fv(:, i) = real(i, real64)
+        end do
+        valid_f = .true.
+        valid_v = .true.
+        do i = 1, size(fnull)
+            valid_f(fnull(i)) = .false.
+        end do
+        do i = 1, size(vnull)
+            valid_v(:, vnull(i)) = .false.
+        end do
+        !
+        call parquet_open_writer(w, f)
+        call parquet_write_column(w, "f", f64, is_valid=valid_f)
+        call parquet_write_column(w, "fv", fv, is_valid=valid_v)
+        call parquet_write_column(w, "clean", clean)
+        call parquet_close_writer(w)
+        !
+        call parquet_open_table(t, f)
+        call s%init("wn")
+        call s%add_field("f", "float64")
+        call s%add_field("fv", "float64", col_size=NW)
+        call s%add_field("clean", "float64")
+        call parquet_parse_maml(s)
+        call parquet_write_table(t, fo, s)
+        !
+        call parquet_open_table(t2, fo)
+        call check(error, t2%nrows() == int(NBIG, int64), "the rewritten table should keep its row count")
+        if (allocated(error)) return
+        call check_null_positions(t2, "f", fnull, NBIG, error)
+        if (allocated(error)) return
+        call check_null_positions(t2, "fv", vnull, NBIG, error)
+        if (allocated(error)) return
+        ! The no-mask fast path must not invent nulls, and must not disturb the values either.
+        do i = 1, NBIG
+            call check(e2, .not. t2%is_null("clean", int(i, int64)), &
+                "a column written with no validity mask should come back with no nulls")
+            if (allocated(e2)) then
+                call move_alloc(e2, error)
+                return
+            end if
+        end do
+        call t2%get("clean", back)
+        call check(error, all(back == clean), &
+            "a column written with no validity mask should keep its values")
+    end subroutine test_write_table_nulls
+    !
+    !> Asserts that exactly the rows listed in `nulls` are null in `name`, and no others.
+    subroutine check_null_positions(t, name, nulls, nrow, error)
+        type(parquet_table), intent(inout) :: t              !! the reopened table.
+        character(len=*), intent(in) :: name                 !! column to check.
+        integer, intent(in) :: nulls(:)                      !! the row numbers expected to be null.
+        integer, intent(in) :: nrow                          !! total rows.
+        type(error_type), allocatable, intent(out) :: error  !! set on the first disagreement.
+        logical :: want
+        integer :: i
+        character(len=64) :: msg
+        !
+        do i = 1, nrow
+            want = any(nulls == i)
+            if (t%is_null(name, int(i, int64)) .eqv. want) cycle
+            if (want) then
+                write(msg, '(a,i0,a)') "row ", i, " should be null after the table write"
+            else
+                write(msg, '(a,i0,a)') "row ", i, " should NOT be null after the table write"
+            end if
+            call check(error, .false., trim(msg) // " (column " // name // ")")
+            return
+        end do
+    end subroutine check_null_positions
+    !
+    !> A vector string column whose LAST row carries a null -- the case that caught the
+    !! materializer indexing validity by flat element position. parquet_column's validity is
+    !! row-granular even for a vector kind, so a per-element null has to be widened to the whole
+    !! row; a flat (row-1)*width+element index runs past nrows and aborts the read outright.
+    subroutine test_string_vector_nulls(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: w
+        type(parquet_table) :: t
+        character(len=6) :: sv(NVEC, NROW)
+        logical :: valid(NVEC, NROW)
+        integer :: i, e
+        character(len=*), parameter :: f = "test_run/table_strvec_nulls.parquet"
+        !
+        do i = 1, NROW
+            do e = 1, NVEC
+                write(sv(e, i), '(a,i0,i0)') "s", i, e
+            end do
+        end do
+        ! First element deliberately the shortest (CLAUDE.md).
+        sv(1, 1) = "a"
+        valid = .true.
+        valid(2, NROW) = .false.   ! a late row: a flat index here exceeds nrows
+        valid(1, 4) = .false.
+        !
+        call parquet_open_writer(w, f)
+        call parquet_write_column(w, "sv", sv, is_valid=valid)
+        call parquet_close_writer(w)
+        !
+        call parquet_open_table(t, f)
+        call check(error, t%kind("sv") == PK_STRING_VEC, "sv should resolve to PK_STRING_VEC")
+        if (allocated(error)) return
+        call check(error, t%is_null("sv", int(NROW, int64)), &
+            "a null element in the last row should make that row null")
+        if (allocated(error)) return
+        call check(error, t%is_null("sv", 4_int64), &
+            "a null element in row 4 should make row 4 null")
+        if (allocated(error)) return
+        call check(error, .not. t%is_null("sv", 1_int64), &
+            "a row with no null element should not report null")
+        if (allocated(error)) return
+        call check(error, .not. t%is_null("sv", 2_int64), &
+            "a row with no null element should not report null")
+    end subroutine test_string_vector_nulls
+    !
+    !> Opening classifies but reads nothing, and each accessor pulls in exactly the column it
+    !! was asked about -- the whole point of the lazy layer, and the easiest property to lose
+    !! silently (a stray whole-table read at open still passes every value assertion).
+    subroutine test_lazy_first_touch(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        real(real64), allocatable :: g(:)
+        real(real64), pointer :: p(:)
+        integer :: i
+        character(len=:), allocatable :: names(:)
+        character(len=*), parameter :: f = "test_run/table_lazy.parquet"
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t, f)
+        call t%column_names(names)
+        do i = 1, size(names)
+            call check(error, t%residency(trim(names(i))) == RES_EMPTY, &
+                "no column may be resident before it is touched: "//trim(names(i)))
+            if (allocated(error)) return
+        end do
+        !
+        ! %get touches one column and only that one.
+        call t%get("f64", g)
+        call check(error, t%residency("f64") == RES_FULL, "%get should make its column resident")
+        if (allocated(error)) return
+        call check(error, t%residency("i32") == RES_EMPTY, &
+            "%get on one column must not read any other")
+        if (allocated(error)) return
+        call check(error, abs(g(2) - 4.5_real64) < 1.0e-12_real64, &
+            "a lazily read column must hold the file's values")
+        if (allocated(error)) return
+        ! %col triggers a first touch of its own, on a column nothing has read yet.
+        call parquet_open_table(t, f)
+        call check(error, t%residency("f64") == RES_EMPTY, "precondition: the reopened table is empty")
+        if (allocated(error)) return
+        call t%col("f64", p)
+        call check(error, t%residency("f64") == RES_FULL, "%col should make its column resident")
+        if (allocated(error)) return
+        call check(error, abs(p(2) - 4.5_real64) < 1.0e-12_real64, &
+            "the pointer must alias the lazily read values")
+        if (allocated(error)) return
+        ! %is_null is a value question, so it touches as well.
+        call check(error, .not. t%is_null("b", 1_int64), "b row 1 should not be null")
+        if (allocated(error)) return
+        call check(error, t%residency("b") == RES_FULL, "%is_null should make its column resident")
+    end subroutine test_lazy_first_touch
+    !
+    subroutine test_prefetch(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        logical :: got
+        character(len=*), parameter :: f = "test_run/table_prefetch.parquet"
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t, f)
+        call t%prefetch("f64")
+        call check(error, t%residency("f64") == RES_FULL, "prefetch should read its column")
+        if (allocated(error)) return
+        call check(error, t%residency("i32") == RES_EMPTY, "prefetch should read nothing else")
+        if (allocated(error)) return
+        ! Prefetching an already-resident column is a no-op, not an error.
+        call t%prefetch("f64")
+        call check(error, t%residency("f64") == RES_FULL, "prefetching twice should be harmless")
+        if (allocated(error)) return
+        !
+        call t%prefetch(["i32", "f32"])
+        call check(error, t%residency("i32") == RES_FULL .and. t%residency("f32") == RES_FULL, &
+            "the array form should read every name it is given")
+        if (allocated(error)) return
+        call check(error, t%residency("s") == RES_EMPTY, "the array form should read nothing else")
+        if (allocated(error)) return
+        ! found= turns a missing name into a report rather than an abort, and the names that DO
+        ! exist are still read.
+        call t%prefetch(["i64 ", "nope"], found=got)
+        call check(error, .not. got, "prefetch should report a missing name through found=")
+        if (allocated(error)) return
+        call check(error, t%residency("i64") == RES_FULL, &
+            "a missing name must not stop the other names being read")
+        if (allocated(error)) return
+        !
+        call t%materialize_all()
+        call check(error, t%residency("s") == RES_FULL, "materialize_all should read the rest")
+        if (allocated(error)) return
+        call t%materialize_all()
+        call check(error, t%residency("s") == RES_FULL, "materialize_all should be idempotent")
+    end subroutine test_prefetch
+    !
+    subroutine test_reload(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        real(real64), allocatable :: g(:)
+        real(real64) :: edited(NROW)
+        character(len=*), parameter :: f = "test_run/table_reload.parquet"
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t, f)
+        call t%get("f64", g)
+        edited = 0.0_real64
+        call t%set("f64", edited)
+        call t%get("f64", g)
+        call check(error, all(abs(g) < 1.0e-12_real64), "precondition: set replaced the values")
+        if (allocated(error)) return
+        !
+        call t%reload("f64")
+        call t%get("f64", g)
+        call check(error, abs(g(2) - 4.5_real64) < 1.0e-12_real64, &
+            "reload should bring back the file's own values")
+        if (allocated(error)) return
+        call check(error, t%residency("f64") == RES_FULL, "a reloaded column is resident")
+        if (allocated(error)) return
+        ! Reloading a column that was never touched is just a first touch.
+        call t%reload("i32")
+        call check(error, t%residency("i32") == RES_FULL, &
+            "reloading an untouched column should simply read it")
+    end subroutine test_reload
+    !
     subroutine test_unsupported_column(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table) :: t
         character(len=:), allocatable :: names(:)
+        integer(int64), allocatable :: ids(:)
         integer :: i
         logical :: saw_uint32, ok
         character(len=*), parameter :: f = "test/fixtures/extended_types.parquet"
@@ -446,8 +741,12 @@ contains
         call check(error, t%is_supported("id"), &
             "a supported column in the same file should still be readable")
         if (allocated(error)) return
+        call check(error, t%residency("id") == RES_EMPTY, &
+            "a supported column starts empty like any other")
+        if (allocated(error)) return
+        call t%get("id", ids)
         call check(error, t%residency("id") == RES_FULL, &
-            "a supported column should still be materialized despite an unsupported sibling")
+            "a supported column should still be readable despite an unsupported sibling")
         if (allocated(error)) return
         ! And a soft-failing read of the unsupported column reports rather than aborts.
         call t%get("v_uint32", names, found=ok)
@@ -807,6 +1106,641 @@ contains
         call parquet_write_column(w, "v_ts", v_ts)
         call parquet_close_writer(w)
     end subroutine write_matrix_fixture
+    !
+    !> All 18 kinds again, but long enough to span several row groups -- which is what the slice
+    !! regime is about, and what a 6-row single-row-group fixture cannot exercise at all.
+    !! `chunk` forces the row-group size, so the boundaries are known to the test rather than
+    !! left to the writer's own auto-sizing.
+    subroutine write_slice_fixture(fname, n, chunk)
+        character(len=*), intent(in) :: fname !! file to write.
+        integer, intent(in) :: n              !! rows to write.
+        integer, intent(in) :: chunk          !! rows per row group.
+        type(parquet_writer) :: w
+        integer :: i, e
+        integer(int32), allocatable :: a_i32(:), v_i32(:,:)
+        integer(int64), allocatable :: a_i64(:), v_i64(:,:)
+        real(real32), allocatable :: a_f32(:), v_f32(:,:)
+        real(real64), allocatable :: a_f64(:), v_f64(:,:)
+        logical, allocatable :: a_bool(:), v_bool(:,:), valid(:)
+        character(len=8), allocatable :: a_str(:), v_str(:,:)
+        type(parquet_date), allocatable :: a_date(:), v_date(:,:)
+        type(parquet_time), allocatable :: a_time(:), v_time(:,:)
+        type(parquet_timestamp), allocatable :: a_ts(:), v_ts(:,:)
+        !
+        allocate(a_i32(n), a_i64(n), a_f32(n), a_f64(n), a_bool(n), a_str(n), valid(n))
+        allocate(a_date(n), a_time(n), a_ts(n))
+        allocate(v_i32(NVEC, n), v_i64(NVEC, n), v_f32(NVEC, n), v_f64(NVEC, n))
+        allocate(v_bool(NVEC, n), v_str(NVEC, n), v_date(NVEC, n), v_time(NVEC, n), v_ts(NVEC, n))
+        do i = 1, n
+            a_i32(i) = i
+            a_i64(i) = int(i, int64) * 1000_int64
+            a_f32(i) = real(i, real32) * 0.25_real32
+            a_f64(i) = real(i, real64) * 1.75_real64
+            a_bool(i) = mod(i, 2) == 1
+            a_date(i) = parquet_date(2026, 1, 1 + mod(i, 28))
+            a_time(i) = parquet_time(1, 2, mod(i, 60))
+            a_ts(i) = parquet_timestamp(2026, 1, 1 + mod(i, 28), 3, 4, mod(i, 60))
+            ! Deliberately the shortest first, so a "sized from the first element" bug shows up.
+            write(a_str(i), '(a,i0)') "r", i
+            do e = 1, NVEC
+                v_i32(e, i) = i * 10 + e
+                v_i64(e, i) = int(i * 10 + e, int64) * 1000_int64
+                v_f32(e, i) = real(i * 10 + e, real32) * 0.5_real32
+                v_f64(e, i) = real(i * 10 + e, real64) * 1.5_real64
+                v_bool(e, i) = mod(i + e, 2) == 0
+                v_date(e, i) = parquet_date(2026, 2, e)
+                v_time(e, i) = parquet_time(5, 6, e)
+                v_ts(e, i) = parquet_timestamp(2026, 2, e, 7, 8, 9)
+                write(v_str(e, i), '(a,i0,i0)') "v", i, e
+            end do
+        end do
+        a_str(1) = "a"
+        v_str(1, 1) = "b"
+        ! One null per validity dispatch class, placed in the middle so a slice can straddle it.
+        valid = .true.
+        valid(n / 2) = .false.
+        a_date(n / 2 + 1) = parquet_date()
+        !
+        call parquet_open_writer(w, fname, chunk_size=chunk)
+        call parquet_write_column(w, "s_i32", a_i32, is_valid=valid)
+        call parquet_write_column(w, "s_i64", a_i64)
+        call parquet_write_column(w, "s_f32", a_f32)
+        call parquet_write_column(w, "s_f64", a_f64)
+        call parquet_write_column(w, "s_bool", a_bool)
+        call parquet_write_column(w, "s_str", a_str, is_valid=valid)
+        call parquet_write_column(w, "s_date", a_date)
+        call parquet_write_column(w, "s_time", a_time)
+        call parquet_write_column(w, "s_ts", a_ts)
+        call parquet_write_column(w, "v_i32", v_i32)
+        call parquet_write_column(w, "v_i64", v_i64)
+        call parquet_write_column(w, "v_f32", v_f32)
+        call parquet_write_column(w, "v_f64", v_f64)
+        call parquet_write_column(w, "v_bool", v_bool)
+        call parquet_write_column(w, "v_str", v_str)
+        call parquet_write_column(w, "v_date", v_date)
+        call parquet_write_column(w, "v_time", v_time)
+        call parquet_write_column(w, "v_ts", v_ts)
+        call parquet_close_writer(w)
+    end subroutine write_slice_fixture
+    !
+    subroutine test_row_group_bounds(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_reader) :: r
+        integer(int64), allocatable :: bounds(:,:), tbounds(:,:)
+        integer(int64) :: nrg, rg
+        character(len=*), parameter :: f = "test_run/table_rgbounds.parquet"
+        !
+        call write_slice_fixture(f, 20, 7)
+        !
+        ! The standalone planning form: no table needed, and none open.
+        call parquet_table_row_group_bounds(f, bounds)
+        call parquet_open_reader(r, f)
+        call parquet_get_num_row_groups(r, nrg)
+        call parquet_close_reader(r)
+        call check(error, size(bounds, 2, kind=int64) == nrg, &
+            "there should be one bounds entry per row group")
+        if (allocated(error)) return
+        call check(error, bounds(1, 1) == 1_int64, "the first row group must start at row 1")
+        if (allocated(error)) return
+        call check(error, bounds(2, nrg) == 20_int64, "the last row group must end at the last row")
+        if (allocated(error)) return
+        do rg = 2_int64, nrg
+            call check(error, bounds(1, rg) == bounds(2, rg - 1) + 1_int64, &
+                "row groups must partition the rows with no gap and no overlap")
+            if (allocated(error)) return
+        end do
+        !
+        ! The table-level form answers the same thing, in FILE row numbering, even for a slice.
+        call parquet_open_table(t, f, 9, 12)
+        call t%row_group_bounds(tbounds)
+        call check(error, all(tbounds == bounds), &
+            "a slice table should report the file's own row groups, not the slice's")
+    end subroutine test_row_group_bounds
+    !
+    !> The slice regime over every kind, with the slice deliberately straddling two row-group
+    !! boundaries so that both the head trim and the tail trim are exercised, and the middle row
+    !! group is taken whole.
+    subroutine test_slice_kind_matrix(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: full, sl
+        integer, parameter :: N = 20, CH = 7, LO = 6, HI = 16
+        integer(int32), allocatable :: f_i32(:), s_i32(:), fv_i32(:,:), sv_i32(:,:)
+        integer(int64), allocatable :: f_i64(:), s_i64(:), fv_i64(:,:), sv_i64(:,:)
+        real(real32), allocatable :: f_f32(:), s_f32(:), fv_f32(:,:), sv_f32(:,:)
+        real(real64), allocatable :: f_f64(:), s_f64(:), fv_f64(:,:), sv_f64(:,:)
+        logical, allocatable :: f_bool(:), s_bool(:), fv_bool(:,:), sv_bool(:,:)
+        character(len=:), allocatable :: f_str(:), s_str(:), fv_str(:,:), sv_str(:,:)
+        type(parquet_date), allocatable :: f_date(:), s_date(:), fv_date(:,:), sv_date(:,:)
+        type(parquet_time), allocatable :: f_time(:), s_time(:), fv_time(:,:), sv_time(:,:)
+        type(parquet_timestamp), allocatable :: f_ts(:), s_ts(:), fv_ts(:,:), sv_ts(:,:)
+        ! A timestamp's civil fields are reached through its date part rather than directly, and
+        ! a chained x%get_date()%raw() is not valid Fortran, so the part needs a name.
+        type(parquet_date) :: dp_a, dp_b
+        integer :: i
+        character(len=*), parameter :: f = "test_run/table_slice_matrix.parquet"
+        !
+        call write_slice_fixture(f, N, CH)
+        call parquet_open_table(full, f)
+        call parquet_open_table(sl, f, LO, HI)
+        !
+        call check(error, sl%nrows() == int(HI - LO + 1, int64), &
+            "a slice table's row count is the slice's own length")
+        if (allocated(error)) return
+        call check(error, full%nrows() == int(N, int64), "the full table still covers every row")
+        if (allocated(error)) return
+        !
+        call full%get("s_i32", f_i32);  call sl%get("s_i32", s_i32)
+        call check(error, all(s_i32 == f_i32(LO:HI)), "s_i32 slice should equal the full column's rows")
+        if (allocated(error)) return
+        call full%get("s_i64", f_i64);  call sl%get("s_i64", s_i64)
+        call check(error, all(s_i64 == f_i64(LO:HI)), "s_i64 slice should equal the full column's rows")
+        if (allocated(error)) return
+        call full%get("s_f32", f_f32);  call sl%get("s_f32", s_f32)
+        call check(error, all(abs(s_f32 - f_f32(LO:HI)) < 1.0e-6_real32), &
+            "s_f32 slice should equal the full column's rows")
+        if (allocated(error)) return
+        call full%get("s_f64", f_f64);  call sl%get("s_f64", s_f64)
+        call check(error, all(abs(s_f64 - f_f64(LO:HI)) < 1.0e-12_real64), &
+            "s_f64 slice should equal the full column's rows")
+        if (allocated(error)) return
+        call full%get("s_bool", f_bool); call sl%get("s_bool", s_bool)
+        call check(error, all(s_bool .eqv. f_bool(LO:HI)), &
+            "s_bool slice should equal the full column's rows")
+        if (allocated(error)) return
+        call full%get("s_str", f_str);  call sl%get("s_str", s_str)
+        do i = 1, HI - LO + 1
+            call check(error, trim(s_str(i)) == trim(f_str(LO + i - 1)), &
+                "s_str slice should equal the full column's rows")
+            if (allocated(error)) return
+        end do
+        ! %raw is the comparator of choice for the temporal kinds: unlike the civil accessors
+        ! it never aborts on a null element, and the fixture has one.
+        call full%get("s_date", f_date); call sl%get("s_date", s_date)
+        do i = 1, HI - LO + 1
+            call check(error, s_date(i)%raw() == f_date(LO + i - 1)%raw() .and. &
+                (s_date(i)%is_null() .eqv. f_date(LO + i - 1)%is_null()), &
+                "s_date slice should equal the full column's rows")
+            if (allocated(error)) return
+        end do
+        call full%get("s_time", f_time); call sl%get("s_time", s_time)
+        do i = 1, HI - LO + 1
+            call check(error, s_time(i)%raw() == f_time(LO + i - 1)%raw(), &
+                "s_time slice should equal the full column's rows")
+            if (allocated(error)) return
+        end do
+        call full%get("s_ts", f_ts);    call sl%get("s_ts", s_ts)
+        do i = 1, HI - LO + 1
+            dp_a = s_ts(i)%get_date()
+            dp_b = f_ts(LO + i - 1)%get_date()
+            call check(error, dp_a%raw() == dp_b%raw(), &
+                "s_ts slice should equal the full column's rows")
+            if (allocated(error)) return
+        end do
+        !
+        call full%get("v_i32", fv_i32); call sl%get("v_i32", sv_i32)
+        call check(error, all(sv_i32 == fv_i32(:, LO:HI)), "v_i32 slice should equal the full rows")
+        if (allocated(error)) return
+        call full%get("v_i64", fv_i64); call sl%get("v_i64", sv_i64)
+        call check(error, all(sv_i64 == fv_i64(:, LO:HI)), "v_i64 slice should equal the full rows")
+        if (allocated(error)) return
+        call full%get("v_f32", fv_f32); call sl%get("v_f32", sv_f32)
+        call check(error, all(abs(sv_f32 - fv_f32(:, LO:HI)) < 1.0e-6_real32), &
+            "v_f32 slice should equal the full rows")
+        if (allocated(error)) return
+        call full%get("v_f64", fv_f64); call sl%get("v_f64", sv_f64)
+        call check(error, all(abs(sv_f64 - fv_f64(:, LO:HI)) < 1.0e-12_real64), &
+            "v_f64 slice should equal the full rows")
+        if (allocated(error)) return
+        call full%get("v_bool", fv_bool); call sl%get("v_bool", sv_bool)
+        call check(error, all(sv_bool .eqv. fv_bool(:, LO:HI)), "v_bool slice should equal the full rows")
+        if (allocated(error)) return
+        call full%get("v_str", fv_str); call sl%get("v_str", sv_str)
+        call check(error, trim(sv_str(2, 1)) == trim(fv_str(2, LO)), &
+            "v_str slice should equal the full rows")
+        if (allocated(error)) return
+        call full%get("v_date", fv_date); call sl%get("v_date", sv_date)
+        call check(error, sv_date(2, 1)%raw() == fv_date(2, LO)%raw(), &
+            "v_date slice should equal the full rows")
+        if (allocated(error)) return
+        call full%get("v_time", fv_time); call sl%get("v_time", sv_time)
+        call check(error, sv_time(2, 1)%raw() == fv_time(2, LO)%raw(), &
+            "v_time slice should equal the full rows")
+        if (allocated(error)) return
+        call full%get("v_ts", fv_ts);   call sl%get("v_ts", sv_ts)
+        dp_a = sv_ts(2, 1)%get_date()
+        dp_b = fv_ts(2, LO)%get_date()
+        call check(error, dp_a%raw() == dp_b%raw(), "v_ts slice should equal the full rows")
+        if (allocated(error)) return
+        !
+        ! Nulls have to survive the trim-and-concatenate too: the fixture's null row is inside
+        ! this slice.
+        do i = 1, HI - LO + 1
+            call check(error, sl%is_null("s_i32", int(i, int64)) .eqv. &
+                full%is_null("s_i32", int(LO + i - 1, int64)), &
+                "a null must land on the same row after slicing")
+            if (allocated(error)) return
+        end do
+    end subroutine test_slice_kind_matrix
+    !
+    !> The four slice shapes that differ in how much trimming they need: wholly inside one row
+    !! group, exactly on row-group boundaries, the whole file, and a single row at each end.
+    subroutine test_slice_shapes(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: full, sl
+        integer, parameter :: N = 20, CH = 7
+        integer(int32), allocatable :: fg(:), sg(:)
+        character(len=*), parameter :: f = "test_run/table_slice_shapes.parquet"
+        !
+        call write_slice_fixture(f, N, CH)
+        call parquet_open_table(full, f)
+        call full%get("s_i32", fg)
+        !
+        ! Wholly inside row group 2 (rows 8..14).
+        call parquet_open_table(sl, f, 9, 12)
+        call sl%get("s_i32", sg)
+        call check(error, size(sg) == 4 .and. all(sg == fg(9:12)), &
+            "a slice inside one row group should read just those rows")
+        if (allocated(error)) return
+        !
+        ! Exactly one whole row group: no trimming at either end.
+        call parquet_open_table(sl, f, 8, 14)
+        call sl%get("s_i32", sg)
+        call check(error, size(sg) == 7 .and. all(sg == fg(8:14)), &
+            "a row-group-aligned slice should need no trimming")
+        if (allocated(error)) return
+        !
+        ! The whole file, expressed as a slice: must agree with the full regime exactly.
+        call parquet_open_table(sl, f, 1, N)
+        call sl%get("s_i32", sg)
+        call check(error, size(sg) == N .and. all(sg == fg), &
+            "a whole-file slice should equal the full-regime table")
+        if (allocated(error)) return
+        !
+        ! Single rows at both ends -- the extreme trims.
+        call parquet_open_table(sl, f, 1, 1)
+        call sl%get("s_i32", sg)
+        call check(error, size(sg) == 1 .and. sg(1) == fg(1), &
+            "a one-row slice at the start should read only row 1")
+        if (allocated(error)) return
+        call parquet_open_table(sl, f, N, N)
+        call sl%get("s_i32", sg)
+        call check(error, size(sg) == 1 .and. sg(1) == fg(N), &
+            "a one-row slice at the end should read only the last row")
+        if (allocated(error)) return
+        !
+        ! A slice crossing every boundary, read through the pointer path rather than the copy.
+        call parquet_open_table(sl, f, 2, 19)
+        call sl%get("s_i32", sg)
+        call check(error, size(sg) == 18 .and. all(sg == fg(2:19)), &
+            "a slice spanning all row groups should still line up")
+    end subroutine test_slice_shapes
+    !
+    !> The row handle over every kind, plus the two properties that are easy to lose: it reads
+    !! through a table declared WITHOUT `target` (it must point at the store, never at the
+    !! table), and it triggers a lazy first touch of its own.
+    subroutine test_row_view(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t          ! deliberately NOT `target` -- see the module doc
+        type(parquet_table_row) :: r
+        integer, parameter :: N = 20, CH = 7
+        integer(int32) :: x_i32
+        integer(int64) :: x_i64
+        real(real32) :: x_f32
+        real(real64) :: x_f64
+        logical :: x_bool
+        character(len=:), allocatable :: x_str, xv_str(:)
+        type(parquet_date) :: x_date
+        type(parquet_time) :: x_time
+        type(parquet_timestamp) :: x_ts
+        integer(int32), allocatable :: xv_i32(:)
+        real(real64), allocatable :: xv_f64(:)
+        integer(int64), allocatable :: w_i64(:)
+        integer(int64) :: w_scalar
+        real(real64) :: w_f64
+        character(len=*), parameter :: f = "test_run/table_rowview.parquet"
+        !
+        call write_slice_fixture(f, N, CH)
+        call parquet_open_table(t, f)
+        !
+        ! A handle on a table where nothing has been read yet.
+        r = t%row(5)
+        call check(error, r%index() == 5_int64, "a handle should report the row it was made for")
+        if (allocated(error)) return
+        call check(error, t%residency("s_i32") == RES_EMPTY, "precondition: nothing read yet")
+        if (allocated(error)) return
+        call r%get("s_i32", x_i32)
+        call check(error, x_i32 == 5, "row 5 of s_i32 should be 5")
+        if (allocated(error)) return
+        call check(error, t%residency("s_i32") == RES_FULL, &
+            "a row handle's get must trigger the same first touch the table's get does")
+        if (allocated(error)) return
+        !
+        call r%get("s_i64", x_i64)
+        call check(error, x_i64 == 5000_int64, "row 5 of s_i64 should be 5000")
+        if (allocated(error)) return
+        call r%get("s_f32", x_f32)
+        call check(error, abs(x_f32 - 1.25_real32) < 1.0e-6_real32, "row 5 of s_f32 should be 1.25")
+        if (allocated(error)) return
+        call r%get("s_f64", x_f64)
+        call check(error, abs(x_f64 - 8.75_real64) < 1.0e-12_real64, "row 5 of s_f64 should be 8.75")
+        if (allocated(error)) return
+        call r%get("s_bool", x_bool)
+        call check(error, x_bool, "row 5 of s_bool should be true")
+        if (allocated(error)) return
+        call r%get("s_str", x_str)
+        call check(error, x_str == "r5", "row 5 of s_str should be r5")
+        if (allocated(error)) return
+        call r%get("s_date", x_date)
+        call check(error, x_date%day() == 1 + mod(5, 28), "row 5 of s_date should keep its day")
+        if (allocated(error)) return
+        call r%get("s_time", x_time)
+        call check(error, x_time%second() == mod(5, 60), "row 5 of s_time should keep its second")
+        if (allocated(error)) return
+        call r%get("s_ts", x_ts)
+        call check(error, .not. x_ts%is_null(), "row 5 of s_ts should not be null")
+        if (allocated(error)) return
+        !
+        ! Vector kinds come back as one array per row.
+        call r%get("v_i32", xv_i32)
+        call check(error, size(xv_i32) == NVEC .and. xv_i32(2) == 52, &
+            "a vector row should come back width-long, in element order")
+        if (allocated(error)) return
+        call r%get("v_f64", xv_f64)
+        call check(error, abs(xv_f64(3) - 79.5_real64) < 1.0e-12_real64, &
+            "a float64 vector row should hold its own values")
+        if (allocated(error)) return
+        call r%get("v_str", xv_str)
+        call check(error, size(xv_str) == NVEC .and. trim(xv_str(1)) == "v51", &
+            "a string vector row should come back width-long")
+        if (allocated(error)) return
+        !
+        ! Widening works exactly as it does on the table's own %get.
+        call r%get("s_i32", w_scalar)
+        call check(error, w_scalar == 5_int64, "a row get should widen int32 into int64")
+        if (allocated(error)) return
+        call r%get("s_f32", w_f64)
+        call check(error, abs(w_f64 - 1.25_real64) < 1.0e-6_real64, &
+            "a row get should widen float32 into float64")
+        if (allocated(error)) return
+        call r%get("v_i32", w_i64)
+        call check(error, w_i64(2) == 52_int64, "a row get should widen an int32 vector too")
+        if (allocated(error)) return
+        !
+        ! The remaining kinds, so every generated row_get_* specific is exercised rather than
+        ! sampled -- each is its own procedure, and an untested one is untested code.
+        block
+            integer(int64), allocatable :: yv_i64(:)
+            real(real32), allocatable :: yv_f32(:)
+            logical, allocatable :: yv_bool(:)
+            type(parquet_date), allocatable :: yv_date(:)
+            type(parquet_time), allocatable :: yv_time(:)
+            type(parquet_timestamp), allocatable :: yv_ts(:)
+            r = t%row(5)
+            call r%get("v_i64", yv_i64)
+            call check(error, yv_i64(2) == 52000_int64, "row 5 of v_i64, element 2")
+            if (allocated(error)) return
+            call r%get("v_f32", yv_f32)
+            call check(error, abs(yv_f32(2) - 26.0_real32) < 1.0e-5_real32, "row 5 of v_f32, element 2")
+            if (allocated(error)) return
+            call r%get("v_bool", yv_bool)
+            call check(error, size(yv_bool) == NVEC, "row 5 of v_bool should be width-long")
+            if (allocated(error)) return
+            call r%get("v_date", yv_date)
+            call check(error, yv_date(2)%day() == 2, "row 5 of v_date, element 2 keeps its day")
+            if (allocated(error)) return
+            call r%get("v_time", yv_time)
+            call check(error, yv_time(2)%second() == 2, "row 5 of v_time, element 2 keeps its second")
+            if (allocated(error)) return
+            call r%get("v_ts", yv_ts)
+            call check(error, .not. yv_ts(2)%is_null(), "row 5 of v_ts, element 2 should not be null")
+            if (allocated(error)) return
+        end block
+        !
+        ! Nulls, and a handle on a slice table, whose row 1 is the slice's own first row.
+        r = t%row(int(N / 2, int64))
+        call check(error, r%is_null("s_i32"), "the fixture's null row should report null")
+        if (allocated(error)) return
+        call parquet_open_table(t, f, 6, 16)
+        r = t%row(1)
+        call r%get("s_i32", x_i32)
+        call check(error, x_i32 == 6, "row 1 of a [6,16] slice is the file's row 6")
+    end subroutine test_row_view
+    !
+    !> Every slice form against the same column, each checked against the equivalent Fortran
+    !! array section so the expected answer is not restated by hand.
+    subroutine test_get_slice(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_slice) :: s
+        integer, parameter :: N = 20, CH = 7
+        integer(int32), allocatable :: full(:), part(:)
+        integer(int64), allocatable :: wide(:)
+        real(real64), allocatable :: fv(:,:), pv(:,:)
+        character(len=:), allocatable :: cs(:)
+        type(parquet_string_column) :: sc_out
+        character(len=*), parameter :: f = "test_run/table_getslice.parquet"
+        !
+        call write_slice_fixture(f, N, CH)
+        call parquet_open_table(t, f)
+        call t%get("s_i32", full)
+        !
+        ! start:stop
+        s = parquet_slice_range(3, 8)
+        call t%get_slice("s_i32", s, part)
+        call check(error, size(part) == 6 .and. all(part == full(3:8)), &
+            "a start:stop slice should equal the same array section")
+        if (allocated(error)) return
+        ! start:stop:step
+        s = parquet_slice_range(1, 10, 2)
+        call t%get_slice("s_i32", s, part)
+        call check(error, size(part) == 5 .and. all(part == full(1:10:2)), &
+            "a strided slice should equal the same array section")
+        if (allocated(error)) return
+        ! open-ended start: -- resolved against the table, at use
+        s = parquet_slice_range(17)
+        call t%get_slice("s_i32", s, part)
+        call check(error, size(part) == 4 .and. all(part == full(17:N)), &
+            "an open-ended slice should run to the table's last row")
+        if (allocated(error)) return
+        ! descending
+        s = parquet_slice_range(10, 6, -2)
+        call t%get_slice("s_i32", s, part)
+        call check(error, size(part) == 3 .and. all(part == full(10:6:-2)), &
+            "a descending slice should equal the same array section")
+        if (allocated(error)) return
+        ! explicit list, deliberately out of order and with a repeat
+        s = parquet_slice_list([9, 2, 2, 15])
+        call t%get_slice("s_i32", s, part)
+        call check(error, size(part) == 4 .and. &
+            all(part == [full(9), full(2), full(2), full(15)]), &
+            "a list slice should gather in the order given, repeats included")
+        if (allocated(error)) return
+        ! the int64 constructors, and a descending slice with an open end (which runs to row 1)
+        s = parquet_slice_list([9_int64, 2_int64])
+        call t%get_slice("s_i32", s, part)
+        call check(error, all(part == [full(9), full(2)]), &
+            "the int64 list constructor should gather the same rows")
+        if (allocated(error)) return
+        s = parquet_slice_range(3_int64, 8_int64, 2_int64)
+        call t%get_slice("s_i32", s, part)
+        call check(error, all(part == full(3:8:2)), &
+            "the int64 range constructor should select the same rows")
+        if (allocated(error)) return
+        s = parquet_slice_range(4, step=-1)
+        call t%get_slice("s_i32", s, part)
+        call check(error, size(part) == 4 .and. all(part == full(4:1:-1)), &
+            "a descending slice with no stop should run down to row 1")
+        if (allocated(error)) return
+        ! an empty gather is legal and yields nothing
+        s = parquet_slice_list([integer(int32) ::])
+        call t%get_slice("s_i32", s, part)
+        call check(error, size(part) == 0, "an empty list slice should select no rows")
+        if (allocated(error)) return
+        ! widening, exactly as %get does
+        s = parquet_slice_range(3, 5)
+        call t%get_slice("s_i32", s, wide)
+        call check(error, all(wide == int(full(3:5), int64)), &
+            "get_slice should widen int32 into int64")
+        if (allocated(error)) return
+        ! a vector column keeps its (element, row) shape
+        call t%get("v_f64", fv)
+        call t%get_slice("v_f64", s, pv)
+        call check(error, size(pv, 1) == NVEC .and. size(pv, 2) == 3 .and. &
+            all(abs(pv - fv(:, 3:5)) < 1.0e-12_real64), &
+            "a sliced vector column should keep its (element, row) shape")
+        if (allocated(error)) return
+        ! strings, in both the character and the compact forms
+        call t%get_slice("s_str", s, cs)
+        call check(error, size(cs) == 3 .and. trim(cs(1)) == "r3", &
+            "a sliced string column should come back in row order")
+        if (allocated(error)) return
+        call t%get_slice("s_str", s, sc_out)
+        call check(error, sc_out%size() == 3_int64, &
+            "the compact form should hold one element per selected row")
+        if (allocated(error)) return
+        !
+        ! The remaining kinds, so every generated get_slice_* specific is exercised. Each is
+        ! checked against the equivalent array section of the same column read whole.
+        block
+            integer(int64), allocatable :: q_i64(:), qv_i64(:,:)
+            real(real32), allocatable :: q_f32(:), qv_f32(:,:)
+            real(real64), allocatable :: q_f64(:)
+            logical, allocatable :: q_bool(:), qv_bool(:,:)
+            integer(int32), allocatable :: qv_i32(:,:)
+            type(parquet_date), allocatable :: q_date(:), qv_date(:,:)
+            type(parquet_time), allocatable :: q_time(:), qv_time(:,:)
+            type(parquet_timestamp), allocatable :: q_ts(:), qv_ts(:,:)
+            character(len=:), allocatable :: qv_str(:,:)
+            integer(int64), allocatable :: r_i64(:)
+            real(real32), allocatable :: r_f32(:)
+            real(real64), allocatable :: r_f64(:)
+            logical, allocatable :: r_bool(:)
+            !
+            call t%get_slice("s_i64", s, q_i64); call t%get("s_i64", r_i64)
+            call check(error, all(q_i64 == r_i64(3:5)), "s_i64 slice equals its array section")
+            if (allocated(error)) return
+            call t%get_slice("s_f32", s, q_f32); call t%get("s_f32", r_f32)
+            call check(error, all(abs(q_f32 - r_f32(3:5)) < 1.0e-6_real32), &
+                "s_f32 slice equals its array section")
+            if (allocated(error)) return
+            call t%get_slice("s_f64", s, q_f64); call t%get("s_f64", r_f64)
+            call check(error, all(abs(q_f64 - r_f64(3:5)) < 1.0e-12_real64), &
+                "s_f64 slice equals its array section")
+            if (allocated(error)) return
+            call t%get_slice("s_bool", s, q_bool); call t%get("s_bool", r_bool)
+            call check(error, all(q_bool .eqv. r_bool(3:5)), "s_bool slice equals its array section")
+            if (allocated(error)) return
+            call t%get_slice("s_date", s, q_date)
+            call check(error, size(q_date) == 3, "s_date slice should hold the selected rows")
+            if (allocated(error)) return
+            call t%get_slice("s_time", s, q_time)
+            call check(error, size(q_time) == 3, "s_time slice should hold the selected rows")
+            if (allocated(error)) return
+            call t%get_slice("s_ts", s, q_ts)
+            call check(error, size(q_ts) == 3, "s_ts slice should hold the selected rows")
+            if (allocated(error)) return
+            call t%get_slice("v_i32", s, qv_i32)
+            call check(error, size(qv_i32, 1) == NVEC .and. size(qv_i32, 2) == 3, &
+                "v_i32 slice keeps its (element, row) shape")
+            if (allocated(error)) return
+            call t%get_slice("v_i64", s, qv_i64)
+            call check(error, size(qv_i64, 2) == 3, "v_i64 slice should hold the selected rows")
+            if (allocated(error)) return
+            call t%get_slice("v_f32", s, qv_f32)
+            call check(error, size(qv_f32, 2) == 3, "v_f32 slice should hold the selected rows")
+            if (allocated(error)) return
+            call t%get_slice("v_bool", s, qv_bool)
+            call check(error, size(qv_bool, 2) == 3, "v_bool slice should hold the selected rows")
+            if (allocated(error)) return
+            call t%get_slice("v_date", s, qv_date)
+            call check(error, size(qv_date, 2) == 3, "v_date slice should hold the selected rows")
+            if (allocated(error)) return
+            call t%get_slice("v_time", s, qv_time)
+            call check(error, size(qv_time, 2) == 3, "v_time slice should hold the selected rows")
+            if (allocated(error)) return
+            call t%get_slice("v_ts", s, qv_ts)
+            call check(error, size(qv_ts, 2) == 3, "v_ts slice should hold the selected rows")
+            if (allocated(error)) return
+            call t%get_slice("v_str", s, qv_str)
+            call check(error, size(qv_str, 1) == NVEC .and. size(qv_str, 2) == 3, &
+                "v_str slice keeps its (element, row) shape")
+            if (allocated(error)) return
+            ! Widening on the vector path too.
+            call t%get_slice("v_i32", s, qv_i64)
+            call check(error, size(qv_i64, 2) == 3, "get_slice should widen an int32 vector column")
+            if (allocated(error)) return
+        end block
+        !
+        ! A slice is relative to the TABLE, so on a slice-regime table row 1 is its own first row.
+        call parquet_open_table(t, f, 6, 16)
+        s = parquet_slice_range(1, 3)
+        call t%get_slice("s_i32", s, part)
+        call check(error, all(part == full(6:8)), &
+            "a slice of a slice-regime table counts from that table's own first row")
+    end subroutine test_get_slice
+    !
+    !> The parallel-per-row-group shape: each iteration opens its OWN slice table and reads it
+    !! lazily. That first touch happens inside a parallel region, and it must be allowed --
+    !! a table a thread opened itself cannot be shared with another thread, which is exactly the
+    !! distinction the first-touch guard draws. A blanket "no first touch in a parallel region"
+    !! rule would make the slice regime unusable where it matters most.
+    subroutine test_parallel_private_slices(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer(int64), allocatable :: bounds(:,:)
+        integer(int32), allocatable :: full(:)
+        integer(int64) :: total
+        integer :: rg
+        character(len=*), parameter :: f = "test_run/table_parallel_slices.parquet"
+        !
+        call write_slice_fixture(f, 20, 7)
+        call parquet_open_table(t, f)
+        call t%get("s_i32", full)
+        call parquet_table_row_group_bounds(f, bounds)
+        !
+        total = 0_int64
+        ! The per-thread table is declared in a BLOCK inside the loop, not with private(t).
+        ! An OpenMP private copy of a finalizable derived type is not reliably default-
+        ! initialized by gfortran, so `parquet_open_table`'s intent(out) finalizer runs over an
+        ! undefined `cache` pointer and the program dies in the allocator -- confirmed, and
+        ! reproducible even with OMP_NUM_THREADS=1. A block-local is properly initialized on
+        ! entry and finalized at exit, which is what a per-thread table wants anyway.
+        !$omp parallel do default(shared) private(rg) reduction(+:total)
+        do rg = 1, size(bounds, 2)
+            block
+                type(parquet_table) :: mine
+                integer(int32), allocatable :: part(:)
+                call parquet_open_table(mine, f, bounds(1, rg), bounds(2, rg))
+                call mine%get("s_i32", part)   ! lazy first touch, inside the region
+                total = total + sum(int(part, int64))
+            end block
+        end do
+        !$omp end parallel do
+        !
+        call check(error, total == sum(int(full, int64)), &
+            "reading every row group's own slice should cover the file exactly once")
+    end subroutine test_parallel_private_slices
     !
     !> Builds the parsed schema that writes all 18 kinds back out.
     subroutine build_matrix_schema(sc)

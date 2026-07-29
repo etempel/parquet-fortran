@@ -22,6 +22,7 @@ contains
         call self%cache%cols(idx)%values%init(PK_INT32, size(values, kind=int64), 1_int32, unit)
         call self%cache%cols(idx)%values%set_all(values)
         self%cache%cols(idx)%declared_kind = PK_INT32
+        self%cache%cols(idx)%width = 1_int32
         self%cache%cols(idx)%residency = RES_FULL
         self%cache%cols(idx)%user_populated = .true.
     end procedure add_column_i32
@@ -35,6 +36,7 @@ contains
         call self%cache%cols(idx)%values%init(PK_INT64, size(values, kind=int64), 1_int32, unit)
         call self%cache%cols(idx)%values%set_all(values)
         self%cache%cols(idx)%declared_kind = PK_INT64
+        self%cache%cols(idx)%width = 1_int32
         self%cache%cols(idx)%residency = RES_FULL
         self%cache%cols(idx)%user_populated = .true.
     end procedure add_column_i64
@@ -48,6 +50,7 @@ contains
         call self%cache%cols(idx)%values%init(PK_FLOAT32, size(values, kind=int64), 1_int32, unit)
         call self%cache%cols(idx)%values%set_all(values)
         self%cache%cols(idx)%declared_kind = PK_FLOAT32
+        self%cache%cols(idx)%width = 1_int32
         self%cache%cols(idx)%residency = RES_FULL
         self%cache%cols(idx)%user_populated = .true.
     end procedure add_column_f32
@@ -61,6 +64,7 @@ contains
         call self%cache%cols(idx)%values%init(PK_FLOAT64, size(values, kind=int64), 1_int32, unit)
         call self%cache%cols(idx)%values%set_all(values)
         self%cache%cols(idx)%declared_kind = PK_FLOAT64
+        self%cache%cols(idx)%width = 1_int32
         self%cache%cols(idx)%residency = RES_FULL
         self%cache%cols(idx)%user_populated = .true.
     end procedure add_column_f64
@@ -74,6 +78,7 @@ contains
         call self%cache%cols(idx)%values%init(PK_LOGICAL, size(values, kind=int64), 1_int32, unit)
         call self%cache%cols(idx)%values%set_all(values)
         self%cache%cols(idx)%declared_kind = PK_LOGICAL
+        self%cache%cols(idx)%width = 1_int32
         self%cache%cols(idx)%residency = RES_FULL
         self%cache%cols(idx)%user_populated = .true.
     end procedure add_column_bool
@@ -87,6 +92,7 @@ contains
         call self%cache%cols(idx)%values%init(PK_DATE, size(values, kind=int64), 1_int32, unit)
         call self%cache%cols(idx)%values%set_all(values)
         self%cache%cols(idx)%declared_kind = PK_DATE
+        self%cache%cols(idx)%width = 1_int32
         self%cache%cols(idx)%residency = RES_FULL
         self%cache%cols(idx)%user_populated = .true.
     end procedure add_column_date
@@ -100,6 +106,7 @@ contains
         call self%cache%cols(idx)%values%init(PK_TIME, size(values, kind=int64), 1_int32, unit)
         call self%cache%cols(idx)%values%set_all(values)
         self%cache%cols(idx)%declared_kind = PK_TIME
+        self%cache%cols(idx)%width = 1_int32
         self%cache%cols(idx)%residency = RES_FULL
         self%cache%cols(idx)%user_populated = .true.
     end procedure add_column_time
@@ -113,6 +120,7 @@ contains
         call self%cache%cols(idx)%values%init(PK_TIMESTAMP, size(values, kind=int64), 1_int32, unit)
         call self%cache%cols(idx)%values%set_all(values)
         self%cache%cols(idx)%declared_kind = PK_TIMESTAMP
+        self%cache%cols(idx)%width = 1_int32
         self%cache%cols(idx)%residency = RES_FULL
         self%cache%cols(idx)%user_populated = .true.
     end procedure add_column_ts
@@ -126,6 +134,7 @@ contains
         call self%cache%cols(idx)%values%init(PK_INT32_VEC, size(values, 2, kind=int64), int(size(values, 1), int32), unit)
         call self%cache%cols(idx)%values%set_all(values)
         self%cache%cols(idx)%declared_kind = PK_INT32_VEC
+        self%cache%cols(idx)%width = int(size(values, 1), int32)
         self%cache%cols(idx)%residency = RES_FULL
         self%cache%cols(idx)%user_populated = .true.
     end procedure add_column_i32v
@@ -139,6 +148,7 @@ contains
         call self%cache%cols(idx)%values%init(PK_INT64_VEC, size(values, 2, kind=int64), int(size(values, 1), int32), unit)
         call self%cache%cols(idx)%values%set_all(values)
         self%cache%cols(idx)%declared_kind = PK_INT64_VEC
+        self%cache%cols(idx)%width = int(size(values, 1), int32)
         self%cache%cols(idx)%residency = RES_FULL
         self%cache%cols(idx)%user_populated = .true.
     end procedure add_column_i64v
@@ -152,6 +162,7 @@ contains
         call self%cache%cols(idx)%values%init(PK_FLOAT32_VEC, size(values, 2, kind=int64), int(size(values, 1), int32), unit)
         call self%cache%cols(idx)%values%set_all(values)
         self%cache%cols(idx)%declared_kind = PK_FLOAT32_VEC
+        self%cache%cols(idx)%width = int(size(values, 1), int32)
         self%cache%cols(idx)%residency = RES_FULL
         self%cache%cols(idx)%user_populated = .true.
     end procedure add_column_f32v
@@ -165,6 +176,7 @@ contains
         call self%cache%cols(idx)%values%init(PK_FLOAT64_VEC, size(values, 2, kind=int64), int(size(values, 1), int32), unit)
         call self%cache%cols(idx)%values%set_all(values)
         self%cache%cols(idx)%declared_kind = PK_FLOAT64_VEC
+        self%cache%cols(idx)%width = int(size(values, 1), int32)
         self%cache%cols(idx)%residency = RES_FULL
         self%cache%cols(idx)%user_populated = .true.
     end procedure add_column_f64v
@@ -178,6 +190,7 @@ contains
         call self%cache%cols(idx)%values%init(PK_LOGICAL_VEC, size(values, 2, kind=int64), int(size(values, 1), int32), unit)
         call self%cache%cols(idx)%values%set_all(values)
         self%cache%cols(idx)%declared_kind = PK_LOGICAL_VEC
+        self%cache%cols(idx)%width = int(size(values, 1), int32)
         self%cache%cols(idx)%residency = RES_FULL
         self%cache%cols(idx)%user_populated = .true.
     end procedure add_column_boolv
@@ -191,6 +204,7 @@ contains
         call self%cache%cols(idx)%values%init(PK_DATE_VEC, size(values, 2, kind=int64), int(size(values, 1), int32), unit)
         call self%cache%cols(idx)%values%set_all(values)
         self%cache%cols(idx)%declared_kind = PK_DATE_VEC
+        self%cache%cols(idx)%width = int(size(values, 1), int32)
         self%cache%cols(idx)%residency = RES_FULL
         self%cache%cols(idx)%user_populated = .true.
     end procedure add_column_datev
@@ -204,6 +218,7 @@ contains
         call self%cache%cols(idx)%values%init(PK_TIME_VEC, size(values, 2, kind=int64), int(size(values, 1), int32), unit)
         call self%cache%cols(idx)%values%set_all(values)
         self%cache%cols(idx)%declared_kind = PK_TIME_VEC
+        self%cache%cols(idx)%width = int(size(values, 1), int32)
         self%cache%cols(idx)%residency = RES_FULL
         self%cache%cols(idx)%user_populated = .true.
     end procedure add_column_timev
@@ -217,6 +232,7 @@ contains
         call self%cache%cols(idx)%values%init(PK_TIMESTAMP_VEC, size(values, 2, kind=int64), int(size(values, 1), int32), unit)
         call self%cache%cols(idx)%values%set_all(values)
         self%cache%cols(idx)%declared_kind = PK_TIMESTAMP_VEC
+        self%cache%cols(idx)%width = int(size(values, 1), int32)
         self%cache%cols(idx)%residency = RES_FULL
         self%cache%cols(idx)%user_populated = .true.
     end procedure add_column_tsv
@@ -230,6 +246,7 @@ contains
         call self%cache%cols(idx)%values%init(PK_STRING, size(values, kind=int64), 1_int32, unit)
         call self%cache%cols(idx)%values%set_all(values)
         self%cache%cols(idx)%declared_kind = PK_STRING
+        self%cache%cols(idx)%width = 1
         self%cache%cols(idx)%residency = RES_FULL
         self%cache%cols(idx)%user_populated = .true.
     end procedure add_column_chr
@@ -244,6 +261,7 @@ contains
             int(size(values, 1), int32), unit)
         call self%cache%cols(idx)%values%set_all(values)
         self%cache%cols(idx)%declared_kind = PK_STRING_VEC
+        self%cache%cols(idx)%width = size(values, 1)
         self%cache%cols(idx)%residency = RES_FULL
         self%cache%cols(idx)%user_populated = .true.
     end procedure add_column_chrv

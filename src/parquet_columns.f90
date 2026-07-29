@@ -141,6 +141,7 @@ module parquet_columns
         procedure :: set_unit                          !! Set (or clear) the unit string.
         procedure :: any_null                          !! Whether the column holds at least one null.
         procedure :: is_null                           !! Whether element i is null.
+        procedure :: row_validity                      !! Build the whole per-row validity mask at once.
         ! --- validity mutation (sparse: see the module doc) ---
         procedure :: set_null                          !! Mark element i null.
         procedure :: clear_null                        !! Mark element i valid (value left unspecified).
@@ -343,6 +344,21 @@ module parquet_columns
             integer(int64), intent(in) :: i           !! 1-based row index.
             logical :: res                            !! .true. when the row is null.
         end function is_null
+        !> Fills `valid` with one entry per row: `.true.` where the row is not null.
+        !!
+        !! The bulk counterpart of `is_null`, and worth having as its own entry point rather than
+        !! a loop at the call site for two reasons. It is inside the module that owns the bitmap,
+        !! so it can walk that bitmap a 64-bit word at a time and skip whole runs of valid rows,
+        !! where an outside loop can only ask one row at a time through a call the compiler cannot
+        !! inline. And a null-free column returns an UNALLOCATED `valid` -- which, passed on to an
+        !! `optional` dummy such as `parquet_write_column`'s `is_valid=`, counts as an absent
+        !! argument (F2018 15.5.2.12), so the common no-nulls case costs no allocation and no scan
+        !! at all rather than a mask that is uniformly `.true.`. Callers must therefore test
+        !! `allocated(valid)` and not assume a mask came back.
+        module subroutine row_validity(self, valid)
+            class(parquet_column), intent(inout) :: self  !! the column (null cache may be refreshed).
+            logical, allocatable, intent(out) :: valid(:) !! per-row mask, or unallocated when no nulls.
+        end subroutine row_validity
         !> Marks row `i` null, allocating the bitmap on first use (R2).
         module subroutine set_null(self, i)
             class(parquet_column), intent(inout) :: self !! the column.

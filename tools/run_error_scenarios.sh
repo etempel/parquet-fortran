@@ -216,6 +216,17 @@ scenarios=(
     "table_set_length_mismatch:1"
     "table_write_missing_column:1"
     "table_write_unparsed_schema:1"
+    "table_slice_below_first_row:1"
+    "table_slice_past_last_row:1"
+    "table_slice_inverted:1"
+    "table_row_index_out_of_range:1"
+    "table_get_slice_out_of_range:1"
+    "table_slice_zero_step:1"
+    "table_reload_in_memory_column:1"
+    "table_reload_not_file_backed:1"
+    "table_row_unknown_column:1"
+    "table_row_kind_mismatch:1"
+    "table_get_slice_kind_mismatch:1"
     "col_size_overflow:1"
     "col_size_and_row_mode_avoid_whole_column_read:0"
     "whole_column_read_forced_error_control:1"
@@ -504,9 +515,13 @@ scenarios=(
 # pool of other concurrent processes would only add timing noise), and do not
 # count towards failures whether they abort (guard fired) or skip (no real
 # concurrency available).
+# table_first_touch_in_parallel joins them for the same reason: without a real
+# OpenMP flag there is no parallel region for the RF4 guard to notice, so the
+# scenario simply reads the column and exits 0.
 concurrency_scenarios=(
     "concurrent_calls_into_shared_reader"
     "concurrent_calls_into_shared_writer"
+    "table_first_touch_in_parallel"
 )
 
 echo "Building error_scenarios..."

@@ -42,16 +42,18 @@ contains
             ! applied by the writer on the way out, so nothing here ever sees the output name.
             idx = table_find(table, fname)
             if (idx == 0) then
-                call table_context_suffix(table, fname, sfx)
+                call table_context_suffix(table%cache, fname, sfx)
                 error stop EP // "parquet_write_table: the schema declares a column the table " // &
                     "does not have" // sfx
             end if
-            if (.not. table%cache%cols(idx)%supported .or. &
-                    table%cache%cols(idx)%residency == RES_EMPTY) then
-                call table_context_suffix(table, fname, sfx)
+            if (.not. table%cache%cols(idx)%supported) then
+                call table_context_suffix(table%cache, fname, sfx)
                 error stop EP // "parquet_write_table: the schema declares a column that holds " // &
                     "no values" // sfx
             end if
+            ! Writing a column the caller never read is a first touch like any other: the schema
+            ! naming it IS the request to read it. Nothing has to be pre-materialized to write.
+            call table_touch(table%cache, table_scope_of(table), idx, "parquet_write_table")
             call write_one_column(writer, table, idx, fname)
         end do
         call parquet_close_writer(writer)
@@ -150,7 +152,7 @@ contains
                 call col%data_ptr(p_tsv)
                 call parquet_write_column(writer, name, p_tsv)
             case default
-                call table_context_suffix(table, name, sfx)
+                call table_context_suffix(table%cache, name, sfx)
                 call parquet_kind_name(col%kindof(), kname)
                 error stop EP // "parquet_write_table: column kind " // kname // &
                     " cannot be written" // sfx
@@ -158,22 +160,27 @@ contains
         end associate
     end subroutine write_one_column
     !
-    !> Builds a per-row validity mask for a scalar column from its own null state.
+    !> Builds a per-row validity mask for a scalar column, or leaves `valid` UNALLOCATED when the
+    !! column holds no nulls.
+    !!
+    !! Every call site passes the result straight on as `is_valid=`, and an unallocated allocatable
+    !! actual makes an `optional` dummy absent (F2018 15.5.2.12) -- so a null-free column reaches
+    !! `parquet_write_column` with no mask argument at all, which is exactly what a hand-written
+    !! write of the same data would do. That matters more than it looks: passing a uniformly-`.true.`
+    !! mask instead costs an nrows-long allocation here AND makes the writer build an Arrow null
+    !! bitmap it did not need, which together were measured as the whole of `parquet_write_table`'s
+    !! ~2.5x gap against a hand-written per-column loop.
     subroutine scalar_validity(table, idx, valid)
         type(parquet_table), intent(in) :: table            !! the table.
         integer, intent(in) :: idx                          !! slot index.
-        logical, allocatable, intent(out) :: valid(:)       !! .true. where the row is not null.
-        integer(int64) :: i, n
+        logical, allocatable, intent(out) :: valid(:)       !! .true. where the row is not null; see above.
         !
-        n = table%cache%cols(idx)%values%length()
-        allocate(valid(n))
-        do i = 1, n
-            valid(i) = .not. table%cache%cols(idx)%values%is_null(i)
-        end do
+        call table%cache%cols(idx)%values%row_validity(valid)
     end subroutine scalar_validity
     !
     !> Builds a per-element validity mask for a vector column, shaped (width, nrows) to match
-    !! the stored orientation.
+    !! the stored orientation -- or leaves `valid` unallocated when there are no nulls, exactly as
+    !! `scalar_validity` does and for the same reason.
     !!
     !! parquet_column's validity is ROW-granular even for a vector kind -- is_null(i) takes a row
     !! index bounded by nrows, not a flat element index -- so a null row comes back as a whole
@@ -183,14 +190,17 @@ contains
         type(parquet_table), intent(in) :: table            !! the table.
         integer, intent(in) :: idx                          !! slot index.
         logical, allocatable, intent(out) :: valid(:,:)     !! .true. where the element is not null.
+        logical, allocatable :: rows(:)
         integer(int64) :: i, n
         integer :: wdt
         !
+        call table%cache%cols(idx)%values%row_validity(rows)
+        if (.not. allocated(rows)) return
         n = table%cache%cols(idx)%values%length()
         wdt = table%cache%cols(idx)%values%colwidth()
         allocate(valid(wdt, n))
         do i = 1, n
-            valid(:, i) = .not. table%cache%cols(idx)%values%is_null(i)
+            valid(:, i) = rows(i)
         end do
     end subroutine vector_validity
     !

@@ -18,23 +18,67 @@ submodule (parquet_tables) parquet_tables_lifecycle
     !
 contains
     !
-    module procedure parquet_open_table
+    module procedure open_table_full
+        call open_table_impl(table, filename, .false., 0_int64, 0_int64)
+    end procedure open_table_full
+    !
+    module procedure open_table_slice_i32
+        call open_table_impl(table, filename, .true., int(row_lo, int64), int(row_hi, int64))
+    end procedure open_table_slice_i32
+    !
+    module procedure open_table_slice_i64
+        call open_table_impl(table, filename, .true., row_lo, row_hi)
+    end procedure open_table_slice_i64
+    !
+    !> The one open path: both regimes differ only in which rows the table claims, and both
+    !! classify without reading. Shared rather than duplicated so the slice regime cannot drift
+    !! from the full one on anything but its row scope.
+    subroutine open_table_impl(table, filename, sliced, row_lo, row_hi)
+        type(parquet_table), intent(out) :: table !! the table to fill.
+        character(len=*), intent(in) :: filename  !! parquet file to open.
+        logical, intent(in) :: sliced             !! .true. for the slice regime.
+        integer(int64), intent(in) :: row_lo      !! first file row (slice regime only).
+        integer(int64), intent(in) :: row_hi      !! last file row (slice regime only).
         integer :: i, ncol
+        integer(int64) :: file_rows
         character(len=:), allocatable :: names(:)
+        character(len=32) :: lo_s, hi_s, n_s
         !
         ! `table` is intent(out) on a finalizable type, so table_finalize has already run on any
         ! previous contents by the time we get here -- that, and not any code below, is what stops
         ! a reopen from leaking the old cache. Do not "simplify" this to intent(inout).
         allocate(table%cache)
-        table%file_backed = .true.
-        table%source_file = trim(filename)
-        table%regime = REGIME_FULL
+        call record_open_thread(table%cache)
+        table%cache%file_backed = .true.
+        table%cache%source_file = trim(filename)
         !
         allocate(table%cache%reader)
         call parquet_open_reader(table%cache%reader, trim(filename))
-        call parquet_get_nrows(table%cache%reader, table%row_count)
-        table%row_lo = 1
-        table%row_hi = table%row_count
+        call parquet_get_nrows(table%cache%reader, file_rows)
+        if (sliced) then
+            ! Validated before anything else is set up, so a bad slice fails while the table is
+            ! still obviously unusable rather than half-built.
+            if (row_lo < 1_int64 .or. row_hi > file_rows .or. row_lo > row_hi) then
+                write(lo_s, "(I0)") row_lo
+                write(hi_s, "(I0)") row_hi
+                write(n_s, "(I0)") file_rows
+                error stop EP // "parquet_open_table: row slice [" // trim(lo_s) // ", " // &
+                    trim(hi_s) // "] is not inside this file's 1.." // trim(n_s) // " rows " // &
+                    "(file '" // trim(filename) // "')"
+            end if
+            table%regime = REGIME_SLICE
+            table%row_lo = row_lo
+            table%row_hi = row_hi
+            table%row_count = row_hi - row_lo + 1_int64
+            ! Every column's read walks these, so they are worked out once here rather than
+            ! per column.
+            call reader_row_group_bounds(table%cache%reader, table%cache%rg_bounds)
+        else
+            table%regime = REGIME_FULL
+            table%row_lo = 1
+            table%row_hi = file_rows
+            table%row_count = file_rows
+        end if
         !
         call parquet_get_column_names(table%cache%reader, names)
         ncol = size(names)
@@ -46,14 +90,25 @@ contains
             table%cache%cols(i)%file_source = .true.
         end do
         !
-        call table_materialize_all(table)
-        table%cache%reads_started = .true.
-    end procedure parquet_open_table
+        ! Classify everything up front (schema only, no column data), so %kind/%width/%nrows
+        ! answer for every column while none of them is resident.
+        do i = 1, ncol
+            call table_classify(table%cache, i)
+        end do
+        ! ...then drop anything classification itself had to decode. Only one case can: a
+        ! foreign plain LIST column, whose per-row width has no schema-level answer, so the
+        ! reader measures it from the data (see table_classify). Releasing a name nothing
+        ! decoded is a no-op, which is what makes this sweep cheap enough to do unconditionally.
+        do i = 1, ncol
+            call table_release_one(table%cache, table%cache%cols(i)%file_name)
+        end do
+    end subroutine open_table_impl
     !
     module procedure parquet_new_table
         allocate(table%cache)
-        table%file_backed = .false.
-        table%source_file = ""
+        call record_open_thread(table%cache)
+        table%cache%file_backed = .false.
+        table%cache%source_file = ""
         table%regime = REGIME_FULL
         table%row_count = 0
         table%row_lo = 1
@@ -61,6 +116,51 @@ contains
         allocate(table%cache%cols(COL_HEADROOM))
         table%cache%ncols = 0
     end procedure parquet_new_table
+    !
+    module procedure reader_row_group_bounds
+        integer(int64) :: nrg, rg, rows, next
+        !
+        ! Built entirely from the footer: the row-group count and each group's own row count.
+        ! Row groups are NOT guaranteed uniform, so each is asked rather than the first one
+        ! scaled -- assuming uniformity here would misplace every boundary after the first
+        ! short group.
+        call parquet_get_num_row_groups(reader, nrg)
+        allocate(bounds(2, nrg))
+        next = 1_int64
+        do rg = 1_int64, nrg
+            call parquet_get_chunk_size(reader, rows, row_group=rg)
+            bounds(1, rg) = next
+            bounds(2, rg) = next + rows - 1_int64
+            next = next + rows
+        end do
+    end procedure reader_row_group_bounds
+    !
+    module procedure parquet_table_row_group_bounds
+        type(parquet_reader) :: reader
+        !
+        ! Opening a reader reads the footer and schema only, so this planning call is cheap
+        ! enough to make before deciding anything -- which is the point: a thread cannot open
+        ! its slice table until it knows which slice to ask for.
+        call parquet_open_reader(reader, trim(filename))
+        call reader_row_group_bounds(reader, bounds)
+        call parquet_close_reader(reader)
+    end procedure parquet_table_row_group_bounds
+    !
+    module procedure table_row_group_bounds
+        character(len=:), allocatable :: sfx
+        !
+        call table_check_open(self, "row_group_bounds")
+        if (.not. self%cache%file_backed) then
+            call table_context_suffix(self%cache, "", sfx)
+            error stop EP // "row_group_bounds: this table was not opened from a file, so it " // &
+                "has no row groups" // sfx
+        end if
+        if (allocated(self%cache%rg_bounds)) then
+            bounds = self%cache%rg_bounds
+        else
+            call reader_row_group_bounds(self%cache%reader, bounds)
+        end if
+    end procedure table_row_group_bounds
     !
     module procedure table_assign_guard
         ! Deliberately unconditional. `lhs`/`rhs` exist only to give the assignment the right
@@ -90,11 +190,11 @@ contains
         existing = table_find(self, name)
         if (existing > 0) then
             if (.not. present(force)) then
-                call table_context_suffix(self, name, sfx)
+                call table_context_suffix(self%cache, name, sfx)
                 error stop EP // "add_column: a column of this name already exists; pass " // &
                     "force=.true. to replace it" // sfx
             else if (.not. force) then
-                call table_context_suffix(self, name, sfx)
+                call table_context_suffix(self%cache, name, sfx)
                 error stop EP // "add_column: a column of this name already exists; pass " // &
                     "force=.true. to replace it" // sfx
             end if
@@ -139,7 +239,7 @@ contains
             return
         end if
         if (n /= self%row_count) then
-            call table_context_suffix(self, name, sfx)
+            call table_context_suffix(self%cache, name, sfx)
             write(got, "(I0)") n
             write(want, "(I0)") self%row_count
             error stop EP // "add_column: every column must have the same number of rows (got " // &

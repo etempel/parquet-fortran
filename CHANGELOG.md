@@ -9,12 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Added `parquet_tables` (`parquet_table`): loads a whole parquet file into memory as one table
+- Added `parquet_tables` (`parquet_table`): presents a whole parquet file as one in-memory table
   (`parquet_open_table`), hands columns back as ordinary Fortran arrays through a widening copy
   (`%get`) or a zero-copy typed pointer (`%col`), builds a table from scratch in memory
   (`parquet_new_table` + `%add_column`), and writes one back out through an ordinary
-  `parquet_schema` (`parquet_write_table`). This first version is eager, read-only and
-  single-threaded — see [the guide](doc/pages/table.md) for the current limitations.
+  `parquet_schema` (`parquet_write_table`). See [the guide](doc/pages/table.md) for the current
+  limitations.
+- `parquet_table` reads a column's values on first use rather than at open time: opening reads
+  only the file's schema, so `%kind`/`%width`/`%nrows`/`%column_names` answer immediately and a
+  program pays only for the columns it touches. `%prefetch`, `%materialize_all` and `%reload`
+  control this explicitly; `%residency` reports it. A first touch inside an OpenMP parallel
+  region on a table shared across that region is a hard error — prefetch before it instead.
+- Added a row-range (slice) form of `parquet_open_table(table, filename, row_lo, row_hi)`, which
+  reads only the row groups covering that range, plus `parquet_table_row_group_bounds` and
+  `%row_group_bounds` for finding the natural boundaries to split a file on.
+- Added `parquet_table_row` (`t%row(i)`), a lightweight handle on a single row, and
+  `parquet_slice` with `parquet_slice_range`/`parquet_slice_list` and `%get_slice`, which copies
+  a strided or gathered row selection out of a column.
 - Added `parquet_get_column_names`, which lists every column in a file (expanding a nested struct
   into one dotted leaf path per leaf), and `parquet_release_column`, which frees a column's
   decoded Arrow buffers once the caller has its own copy.

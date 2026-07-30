@@ -152,10 +152,14 @@ contains
                 call col%data_ptr(p_tsv)
                 call parquet_write_column(writer, name, p_tsv)
             case default
-                call table_context_suffix(table%cache, name, sfx)
-                call parquet_kind_name(col%kindof(), kname)
-                error stop EP // "parquet_write_table: column kind " // kname // &
-                    " cannot be written" // sfx
+                ! Not reachable through the public API: by the time write_one_column runs, the
+                ! caller (parquet_write_table) has already rejected an unsupported slot and
+                ! table_touch has resolved/materialized this one, so col%kindof() is always one
+                ! of the 18 kinds handled above.
+                call table_context_suffix(table%cache, name, sfx) ! GCOVR_EXCL_LINE
+                call parquet_kind_name(col%kindof(), kname) ! GCOVR_EXCL_LINE
+                error stop EP // "parquet_write_table: column kind " // kname // & ! GCOVR_EXCL_LINE
+                    " cannot be written" // sfx ! GCOVR_EXCL_LINE
             end select
         end associate
     end subroutine write_one_column

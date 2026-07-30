@@ -922,6 +922,8 @@ program error_scenarios
         call scenario_table_set_length_mismatch()
     case ("table_write_missing_column")
         call scenario_table_write_missing_column()
+    case ("table_write_unsupported_column")
+        call scenario_table_write_unsupported_column()
     case ("table_write_unparsed_schema")
         call scenario_table_write_unparsed_schema()
     case ("table_slice_below_first_row")
@@ -7951,6 +7953,20 @@ contains
         call parquet_write_table(t, "test_run/es_table_wmiss_out.parquet", s)   ! -> aborts
         print '(a)', "unexpectedly wrote a table missing a schema column"
     end subroutine scenario_table_write_missing_column
+
+    !> A schema naming a column the table DOES have, but whose values were never readable in the
+    !! first place (a foreign physical type), is a different mistake from a missing column and
+    !! has its own guard/message in parquet_write_table.
+    subroutine scenario_table_write_unsupported_column()
+        type(parquet_table) :: t
+        type(parquet_schema) :: s
+        call parquet_open_table(t, "test/fixtures/extended_types.parquet")
+        call s%init("wunsupported")
+        call s%add_field("v_uint32", "int32")
+        call parquet_parse_maml(s)
+        call parquet_write_table(t, "test_run/es_table_wunsupported_out.parquet", s)   ! -> aborts
+        print '(a)', "unexpectedly wrote a table's unsupported column"
+    end subroutine scenario_table_write_unsupported_column
 
     !> A schema built with %init/%add_field holds only MAML text until parquet_parse_maml runs;
     !! writing with it unparsed would otherwise read uninitialized state and run away.

@@ -493,6 +493,8 @@ contains
                 test_table_set_length_mismatch_aborts), &
             new_unittest("parquet_write_table with a schema column the table lacks aborts", &
                 test_table_write_missing_column_aborts), &
+            new_unittest("parquet_write_table with a schema naming an unsupported column aborts", &
+                test_table_write_unsupported_column_aborts), &
             new_unittest("parquet_write_table with an unparsed schema aborts", &
                 test_table_write_unparsed_schema_aborts), &
             new_unittest("opening a table slice starting before row 1 aborts", &
@@ -812,6 +814,13 @@ contains
             failure_message="writing with a schema naming an absent column was expected to abort", &
             required_stderr="the schema declares a column the table does not have")
     end subroutine test_table_write_missing_column_aborts
+
+    subroutine test_table_write_unsupported_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_write_unsupported_column", expect_abort=.true., &
+            failure_message="writing a schema-named unsupported column was expected to abort", &
+            required_stderr="the schema declares a column that holds no values")
+    end subroutine test_table_write_unsupported_column_aborts
 
     subroutine test_table_write_unparsed_schema_aborts(error)
         type(error_type), allocatable, intent(out) :: error

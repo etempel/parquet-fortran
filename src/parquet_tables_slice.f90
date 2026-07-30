@@ -57,9 +57,14 @@ contains
         character(len=32) :: v_s, n_s
         !
         if (.not. s%strided) then
+            ! Not reachable through the public API: strided defaults to .true., and the only
+            ! two places that ever set it .false. (slice_list_i32/slice_list_i64) always assign
+            ! %indices in that same call, even for an empty list (a zero-size array is still
+            ! allocated). There is no constructor that leaves a list-form slice's %indices
+            ! unallocated.
             if (.not. allocated(s%indices)) then
-                allocate(rows(0))
-                return
+                allocate(rows(0)) ! GCOVR_EXCL_LINE
+                return ! GCOVR_EXCL_LINE
             end if
             rows = s%indices
         else

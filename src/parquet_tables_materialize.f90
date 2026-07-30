@@ -801,7 +801,11 @@ contains
         case (PK_TIMESTAMP_VEC)
             call mat_tsv(reader, name, col, nrows, wdt, unit)
         case default
-            error stop EP // "internal: no materializer for this column kind"
+            ! table_classify only ever assigns a slot one of the supported PK_* kinds handled
+            ! above (an unsupported column stays PK_NONE and is never routed to a materializer),
+            ! so this branch guards an internal invariant with no path reachable through the
+            ! public API -- there is no way to feed it a value that would actually take it.
+            error stop EP // "internal: no materializer for this column kind" ! GCOVR_EXCL_LINE
         end select
     end procedure table_materialize_kind
     !
@@ -844,7 +848,9 @@ contains
         case (PK_TIMESTAMP_VEC)
             call matchunk_tsv(reader, name, rg, col, nrows, wdt, unit)
         case default
-            error stop EP // "internal: no row-group materializer for this column kind"
+            ! Same internal invariant as table_materialize_kind's own case default above -- not
+            ! reachable through the public API.
+            error stop EP // "internal: no row-group materializer for this column kind" ! GCOVR_EXCL_LINE
         end select
     end procedure table_materialize_chunk_kind
     !

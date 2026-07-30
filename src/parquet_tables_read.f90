@@ -53,7 +53,9 @@ contains
             ! "parquet_get_column_type on a column outside the 9 canonical types aborts" in
             ! test_errors.f90. There is no path that reaches this select with any other token.
             kind = PK_NONE ! GCOVR_EXCL_LINE
-            ok = .false. ! GCOVR_EXCL_LINE
+            ok = .false. ! GCOVR_EXCL_LINE -- gcov attribution artifact: shows a large positive
+                ! hit count under -O0 despite gcov's own unexecuted_block flag agreeing with
+                ! kind = PK_NONE above (0 hits) that this branch is never actually entered.
         end select
     end procedure table_kind_from_type
     !

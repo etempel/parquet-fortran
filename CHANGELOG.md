@@ -82,6 +82,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mismatches between Fortran and C++.
 - Added test coverage for temporal boundary values, struct-nested string buffers, and MAML CRLF
   handling; added descriptive failure messages to ~200 previously message-less test assertions.
+- Added test coverage for `parquet_table`'s `found=`/kind-mismatch/widening branches across
+  `%get`/`%col`/`%prefetch`/row handles/`%get_slice`, and for its lifecycle, query and write
+  guards (duplicate `add_column`, in-memory `%row_group_bounds`/`%get_file_metadata`, unknown
+  columns, unsupported columns, and the OpenMP first-touch guard on a deferred-width column) —
+  `parquet_tables_lifecycle.f90`/`_query.f90`/`_row.f90`/`_slice.f90`/`_write.f90` are now fully
+  covered. A handful of remaining branches in `_materialize.f90`/`_read.f90`/`_slice.f90`/
+  `_write.f90` are confirmed unreachable through the public API (an internal kind invariant, or
+  the `%detached` guard reserved for a not-yet-implemented row-structural-mutation feature) and
+  are marked `GCOVR_EXCL_LINE` rather than tested.
 
 ### Changed
 

@@ -169,6 +169,7 @@ contains
     module procedure parquet_parse_filter_expr
         integer, allocatable :: kinds(:), tok_lo(:), tok_hi(:)
         integer :: ntok, pos, depth
+        character(len=:), allocatable :: unexpected_tok
 
         call lex_filter_expr(rule, kinds, tok_lo, tok_hi, ntok, ok, errmsg)
         if (.not. ok) return
@@ -179,17 +180,22 @@ contains
         if (.not. ok) return
         if (pos <= ntok) then
             ok = .false.
-            errmsg = "filter expression '" // trim(rule) // "': unexpected '" // tok_text(pos) // &
+            call tok_text(pos, unexpected_tok)
+            errmsg = "filter expression '" // trim(rule) // "': unexpected '" // unexpected_tok // &
                 "' (a missing and/or?)"
             return
         end if
     contains
-        !> The token at `p`, as it appears in the rule.
-        pure function tok_text(p) result(res)
+        !> The token at `p`, as it appears in the rule. A subroutine (not a `character(len=...)`
+        !> function whose length is a specification expression over host-associated arrays) --
+        !> that shape reliably segfaults ifx 2026.1.1 when called from a sibling contained
+        !> procedure such as parse_clause/parse_primary; see the ifx internal-compiler-error
+        !> report filed alongside this fix for the minimal reproducer.
+        pure subroutine tok_text(p, res)
             integer, intent(in) :: p !! 1-based token index.
-            character(len=tok_hi(p)-tok_lo(p)+1) :: res !! that token's own text.
+            character(len=:), allocatable, intent(out) :: res !! that token's own text.
             res = rule(tok_lo(p):tok_hi(p))
-        end function tok_text
+        end subroutine tok_text
         !> or_expr := and_expr { or and_expr } -- lowest precedence, so it is the entry point.
         recursive subroutine parse_or_expr(sub_ok, sub_err)
             logical, intent(out) :: sub_ok !! .true. if this production parsed.
@@ -244,6 +250,7 @@ contains
         recursive subroutine parse_primary(sub_ok, sub_err)
             logical, intent(out) :: sub_ok !! .true. if this production parsed.
             character(len=:), allocatable, intent(out) :: sub_err !! failure message; "" when sub_ok.
+            character(len=:), allocatable :: cur_tok
             sub_ok = .false.
             sub_err = ""
             if (pos > ntok) then
@@ -272,15 +279,17 @@ contains
                 end if
                 if (kinds(pos) /= TK_RPAREN) then
                     sub_ok = .false.
+                    call tok_text(pos, cur_tok)
                     sub_err = "filter expression '" // trim(rule) // "': expected ')' but found '" // &
-                        tok_text(pos) // "'"
+                        cur_tok // "'"
                     return
                 end if
                 pos = pos + 1
             case (TK_RPAREN)
                 sub_err = "filter expression '" // trim(rule) // "' has an unbalanced ')'"
             case (TK_AND, TK_OR)
-                sub_err = "filter expression '" // trim(rule) // "' has a dangling '" // tok_text(pos) // &
+                call tok_text(pos, cur_tok)
+                sub_err = "filter expression '" // trim(rule) // "' has a dangling '" // cur_tok // &
                     "' with no clause on one side of it"
             case default
                 call parse_clause(sub_ok, sub_err)
@@ -294,7 +303,7 @@ contains
         subroutine parse_clause(sub_ok, sub_err)
             logical, intent(out) :: sub_ok !! .true. if the clause parsed.
             character(len=:), allocatable, intent(out) :: sub_err !! failure message; "" when sub_ok.
-            character(len=:), allocatable :: clause_text, pname, pop, pvalue
+            character(len=:), allocatable :: clause_text, pname, pop, pvalue, cur_tok
             logical :: pis_string
             integer :: taken
 
@@ -306,7 +315,8 @@ contains
                 if (taken >= 3) exit
                 if (kinds(pos) /= TK_TEXT .and. kinds(pos) /= TK_QUOTED) exit
                 if (taken > 0) clause_text = clause_text // " "
-                clause_text = clause_text // tok_text(pos)
+                call tok_text(pos, cur_tok)
+                clause_text = clause_text // cur_tok
                 taken = taken + 1
                 pos = pos + 1
                 ! A no-value operator ends the clause immediately, so a following bare name

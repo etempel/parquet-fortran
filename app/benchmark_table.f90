@@ -310,6 +310,14 @@ contains
         write(output_unit, '(a)') "The reader caches every column it decodes, so the Arrow figure"
         write(output_unit, '(a)') "here is the whole file ON TOP of the Fortran copies -- roughly"
         write(output_unit, '(a)') "two copies resident. That is the memory the table has to beat."
+        write(output_unit, '(a)') "Expect this to come out SLOWER than --mode=read_table, and do"
+        write(output_unit, '(a)') "not read that as table-layer overhead being negative: the table"
+        write(output_unit, '(a)') "runs the same parquet_read_column per column and one release"
+        write(output_unit, '(a)') "call more. The gap is that this path never releases, so every"
+        write(output_unit, '(a)') "column needs fresh pages from the OS instead of reusing the"
+        write(output_unit, '(a)') "ones Arrow already faulted in -- a whole file's worth of extra"
+        write(output_unit, '(a)') "page faults. Calling parquet_release_column after each read"
+        write(output_unit, '(a)') "closes it from this side too."
         call parquet_close_reader(r)
     end subroutine bench_read_raw
 
@@ -356,12 +364,24 @@ contains
     !!
     !! Reported against `read_table`'s figures for the same fixture -- the point of the pair is
     !! the ratio, which should track `touch / ncols` rather than sitting near 1.
+    !!
+    !! The read is `%prefetch`, NOT a `%get` loop, and that is the whole reason this mode reads
+    !! as it does. `%get` is a copy, not an accessor: it allocates a fresh array the size of the
+    !! column and copies the values into it. A `%get` loop therefore measures the read PLUS a
+    !! full extra allocation and copy per column, where `--mode=read_table`'s `%materialize_all`
+    !! measures only the read -- so the two ratios are not comparable, and the touched columns
+    !! come out roughly 1.8x what scaling `read_table` by `touch / ncols` predicts. That is not
+    !! the library failing to scale; it is two different jobs. `%prefetch` is the same job.
+    !!
+    !! The copy is still worth knowing about, so it is timed on its own line afterwards, and the
+    !! checksum -- another full pass over every touched column -- is taken outside both.
     subroutine bench_read_lazy(file, touch)
         character(len=*), intent(in) :: file !! fixture to read.
         integer, intent(in) :: touch         !! how many columns to actually read.
         type(parquet_table) :: t
         real(real64), allocatable :: g(:)
-        real(real64) :: t0, t_open, t_touch, arrow_open, arrow_after, data_mib, checksum
+        real(real64), pointer :: p(:)
+        real(real64) :: t0, t_open, t_touch, t_get, arrow_open, arrow_after, data_mib, checksum
         character(len=:), allocatable :: names(:)
         integer :: i, n
 
@@ -372,14 +392,25 @@ contains
         call t%column_names(names)
         n = min(touch, t%ncols())
 
-        checksum = 0.0_real64
+        t0 = now()
+        call t%prefetch(names(1:n))
+        t_touch = now() - t0
+        arrow_after = real(parquet_get_arrow_bytes_allocated(), real64) / 1048576.0_real64
+
+        ! Warm columns now, so this is the copy and nothing else.
         t0 = now()
         do i = 1, n
             call t%get(trim(names(i)), g)
-            checksum = checksum + sum(g)
         end do
-        t_touch = now() - t0
-        arrow_after = real(parquet_get_arrow_bytes_allocated(), real64) / 1048576.0_real64
+        t_get = now() - t0
+
+        ! Untimed: keeps every read live so none of it can be elided, without charging a full
+        ! reduction over every touched column to either figure above.
+        checksum = 0.0_real64
+        do i = 1, n
+            call t%col(trim(names(i)), p)
+            checksum = checksum + sum(p)
+        end do
         data_mib = real(t%nrows(), real64) * real(n, real64) * 8.0_real64 / 1048576.0_real64
 
         write(output_unit, '(a)') "--- read: lazy (open, then touch a few columns) ---"
@@ -387,12 +418,18 @@ contains
             "   touched: ", n
         write(output_unit, '(a,f10.3,a)') "open (schema only)          : ", t_open, " s"
         write(output_unit, '(a,f10.1,a)') "Arrow pool after open       : ", arrow_open, " MiB"
-        write(output_unit, '(a,f10.3,a)') "reading the touched columns : ", t_touch, " s"
+        write(output_unit, '(a,f10.3,a)') "prefetch the touched columns: ", t_touch, " s"
         write(output_unit, '(a,f10.1,a)') "Arrow pool after those reads: ", arrow_after, " MiB"
+        write(output_unit, '(a,f10.3,a)') "%get copy-out of the same   : ", t_get, " s"
         write(output_unit, '(a,f10.1,a)') "touched column data         : ", data_mib, " MiB"
         write(output_unit, '(a,es12.4)')  "checksum (keeps reads live) : ", checksum
         write(output_unit, '(a)') "Compare the open figure with --mode=read_table's: opening now"
         write(output_unit, '(a)') "reads nothing at all, and only the touched columns are paid for."
+        write(output_unit, '(a)') "The prefetch line is the one to scale against --mode=read_table's"
+        write(output_unit, '(a)') "materialize_all by touched/columns -- both read, and do nothing"
+        write(output_unit, '(a)') "else. The %get line is what asking for your OWN array costs on"
+        write(output_unit, '(a)') "top: a fresh allocation the size of the column, plus the copy."
+        write(output_unit, '(a)') "Use %col instead where the table's own storage will do."
     end subroutine bench_read_lazy
 
     !> The slice regime's memory story: one slice of a file, against the whole of it.

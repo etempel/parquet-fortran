@@ -267,6 +267,11 @@ A slice need not line up with row-group boundaries — the covering groups are r
 It cannot be cheaper than one row group, though, since a row group is the smallest unit the
 format lets a reader decode.
 
+Beyond that floor, a slice costs about its share: each column is allocated once at the slice's
+own row count and each covering row group is written straight into its place, so reading a
+quarter of a file costs roughly a quarter of reading all of it, however many row groups the
+slice spans.
+
 ## One row at a time
 
 `t%row(i)` returns a lightweight, non-owning handle on a single row — the natural thing to hand

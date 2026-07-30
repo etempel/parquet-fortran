@@ -55,6 +55,8 @@ contains
             new_unittest("append_values grows every kind", test_append_values), &
             new_unittest("append concatenates two columns and their nulls", test_append_column), &
             new_unittest("append_nulls adds all-null rows", test_append_nulls), &
+            new_unittest("paste overwrites a row range in place", test_paste_values), &
+            new_unittest("paste replaces the pasted range's validity", test_paste_validity), &
             new_unittest("reindex permutes values and validity together", test_reindex), &
             new_unittest("delete_by_mask keeps order and recompacts", test_delete_by_mask), &
             new_unittest("deep_copy is independent of its source", test_deep_copy), &
@@ -645,6 +647,189 @@ contains
         if (allocated(error)) return
         call check(error, c%is_null(3_int64), "the appended string rows should be null")
     end subroutine test_append_nulls
+    !
+    !> `paste` writes into rows that already exist, so the things worth asserting are that the
+    !! right rows changed, that the neighbours did NOT, and that the geometry is untouched --
+    !! an off-by-one in the destination cursor is the failure this operation invites, and it is
+    !! silent (the column still has the right length, just wrong values in it).
+    subroutine test_paste_values(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: dst, src
+        integer(int32) :: v
+        real(real64) :: row(2)
+        type(parquet_date) :: d(2), d1
+        integer :: i
+        !
+        ! Whole source, into the middle: rows 2..4 change, 1 and 5 must not.
+        call dst%init(PK_INT32, 5_int64)
+        call dst%set_all([1_int32, 2_int32, 3_int32, 4_int32, 5_int32])
+        call src%init(PK_INT32, 3_int64)
+        call src%set_all([70_int32, 80_int32, 90_int32])
+        call dst%paste(src, 2_int64)
+        call check(error, dst%length() == 5_int64, "paste must not change the destination's row count")
+        if (allocated(error)) return
+        call dst%get_at(1_int64, v)
+        call check(error, v == 1_int32, "paste must not touch the row before its destination range")
+        if (allocated(error)) return
+        call dst%get_at(2_int64, v)
+        call check(error, v == 70_int32, "paste should write the source's first row at `at`")
+        if (allocated(error)) return
+        call dst%get_at(4_int64, v)
+        call check(error, v == 90_int32, "paste should write the source's last row at at+count-1")
+        if (allocated(error)) return
+        call dst%get_at(5_int64, v)
+        call check(error, v == 5_int32, "paste must not touch the row after its destination range")
+        if (allocated(error)) return
+        call check(error, src%length() == 3_int64, "paste must leave the source unchanged")
+        if (allocated(error)) return
+        !
+        ! A sub-range of the source: from= skips its leading rows, count= bounds the copy. This
+        ! is the shape the slice regime uses to trim a row group to the slice's own bounds.
+        call dst%init(PK_INT32, 4_int64)
+        call dst%set_all([0_int32, 0_int32, 0_int32, 0_int32])
+        call src%init(PK_INT32, 4_int64)
+        call src%set_all([11_int32, 22_int32, 33_int32, 44_int32])
+        call dst%paste(src, 1_int64, 3_int64, 2_int64)
+        call dst%get_at(1_int64, v)
+        call check(error, v == 33_int32, "paste(from=3) should start at the source's third row")
+        if (allocated(error)) return
+        call dst%get_at(2_int64, v)
+        call check(error, v == 44_int32, "paste(from=3, count=2) should copy exactly two rows")
+        if (allocated(error)) return
+        call dst%get_at(3_int64, v)
+        call check(error, v == 0_int32, "paste(count=2) must stop after two rows")
+        if (allocated(error)) return
+        !
+        ! count=0 is a no-op rather than an error, matching append's own empty-source behaviour.
+        call dst%paste(src, 1_int64, 1_int64, 0_int64)
+        call dst%get_at(1_int64, v)
+        call check(error, v == 33_int32, "paste(count=0) should change nothing at all")
+        if (allocated(error)) return
+        !
+        ! A vector kind: the copy is per row, carrying every element of the row with it.
+        call dst%init(PK_FLOAT64_VEC, 3_int64, width=2_int32)
+        call dst%set_all(reshape([0.0_real64, 0.0_real64, 0.0_real64, 0.0_real64, &
+            0.0_real64, 0.0_real64], [2, 3]))
+        call src%init(PK_FLOAT64_VEC, 1_int64, width=2_int32)
+        call src%set_all(reshape([8.5_real64, 9.5_real64], [2, 1]))
+        call dst%paste(src, 3_int64)
+        call dst%get_at(3_int64, row)
+        call check(error, all(row == [8.5_real64, 9.5_real64]), &
+            "paste should carry every element of a vector row")
+        if (allocated(error)) return
+        call dst%get_at(2_int64, row)
+        call check(error, all(row == [0.0_real64, 0.0_real64]), &
+            "paste must not disturb a neighbouring vector row")
+        if (allocated(error)) return
+        !
+        ! A temporal kind: the pasted elements carry their own validity, so a real date landing on
+        ! an init-time null row has to make that row valid without any bitmap being involved.
+        do i = 1, 2
+            call d(i)%set(2026, 7, 20 + i)
+        end do
+        call dst%init(PK_DATE, 3_int64)
+        call check(error, dst%is_null(2_int64), "precondition: a fresh temporal column is all null")
+        if (allocated(error)) return
+        call src%init(PK_DATE, 2_int64)
+        call src%set_all(d)
+        call dst%paste(src, 2_int64)
+        call dst%get_at(2_int64, d1)
+        call check(error, d1%year() == 2026 .and. d1%month() == 7 .and. d1%day() == 21, &
+            "paste should copy a temporal element's value")
+        if (allocated(error)) return
+        call check(error, .not. dst%is_null(2_int64), &
+            "a pasted temporal element should make its row valid again")
+        if (allocated(error)) return
+        call check(error, dst%is_null(1_int64), &
+            "paste must not disturb a temporal row outside its range")
+    end subroutine test_paste_values
+    !
+    !> Validity is *replaced* over the pasted range, not merged into it. Both directions matter:
+    !! a null source element must null the destination row, and a valid source element must clear
+    !! a null the destination already had. Merging (append's rule, where the destination rows are
+    !! always fresh) would leave a stale null on top of a value that was really read.
+    subroutine test_paste_validity(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: dst, src
+        !
+        ! An all-valid source must not materialize a bitmap on a null-free destination (R2).
+        call dst%init(PK_INT32, 4_int64)
+        call dst%set_all([1_int32, 2_int32, 3_int32, 4_int32])
+        call src%init(PK_INT32, 2_int64)
+        call src%set_all([9_int32, 9_int32])
+        call dst%paste(src, 1_int64)
+        call check(error, dst%validity_bytes() == 0_int64, &
+            "pasting an all-valid source must not allocate a bitmap on a null-free column")
+        if (allocated(error)) return
+        call check(error, .not. dst%any_null(), "a null-free paste must leave the column null-free")
+        if (allocated(error)) return
+        !
+        ! A null in the source nulls the destination row it lands on, and only that one.
+        call src%set_null(2_int64)
+        call dst%paste(src, 3_int64)
+        call check(error, dst%is_null(4_int64), "paste should carry the source's null across")
+        if (allocated(error)) return
+        call check(error, .not. dst%is_null(3_int64), &
+            "paste must not null a row whose source element was valid")
+        if (allocated(error)) return
+        !
+        ! The other direction: an all-valid source over a row the destination had marked null
+        ! must clear it. This is the assertion that distinguishes replace from merge.
+        call dst%init(PK_INT32, 3_int64)
+        call dst%set_all([1_int32, 2_int32, 3_int32])
+        call dst%set_null(2_int64)
+        call check(error, dst%is_null(2_int64), "precondition: the destination row starts null")
+        if (allocated(error)) return
+        call src%init(PK_INT32, 1_int64)
+        call src%set_all([42_int32])
+        call dst%paste(src, 2_int64)
+        call check(error, .not. dst%is_null(2_int64), &
+            "pasting a valid element over a null row must clear the null")
+        if (allocated(error)) return
+        !
+        ! The same clearing has to happen on the OTHER code path -- when the source carries nulls
+        ! of its own, so the per-element copy runs rather than the all-valid shortcut. Row 2 of
+        ! the source is valid and lands on a destination row that is null, so that null must go.
+        ! Without this case a "merge instead of replace" bug survives: the all-valid path above
+        ! never reaches the branch that copies bits one at a time.
+        call dst%init(PK_INT32, 3_int64)
+        call dst%set_all([1_int32, 2_int32, 3_int32])
+        call dst%set_null(2_int64)
+        call src%init(PK_INT32, 2_int64)
+        call src%set_all([51_int32, 52_int32])
+        call src%set_null(1_int64)
+        call dst%paste(src, 1_int64)
+        call check(error, dst%is_null(1_int64), &
+            "a null source element should null the row it is pasted onto")
+        if (allocated(error)) return
+        call check(error, .not. dst%is_null(2_int64), &
+            "a valid source element must clear a null the destination already had")
+        if (allocated(error)) return
+        !
+        ! ... and it must clear only the pasted range, leaving the column's other nulls alone.
+        call dst%init(PK_INT32, 3_int64)
+        call dst%set_all([1_int32, 2_int32, 3_int32])
+        call dst%set_null(1_int64)
+        call dst%set_null(3_int64)
+        call src%init(PK_INT32, 1_int64)
+        call src%set_all([42_int32])
+        call dst%paste(src, 2_int64)
+        call check(error, dst%is_null(1_int64) .and. dst%is_null(3_int64), &
+            "paste must leave nulls outside its destination range untouched")
+        if (allocated(error)) return
+        !
+        ! On a vector kind a row's null covers every element of that row, in both directions.
+        call dst%init(PK_INT32_VEC, 2_int64, width=2_int32)
+        call dst%set_all(reshape([1_int32, 2_int32, 3_int32, 4_int32], [2, 2]))
+        call src%init(PK_INT32_VEC, 1_int64, width=2_int32)
+        call src%set_all(reshape([7_int32, 8_int32], [2, 1]))
+        call src%set_null(1_int64)
+        call dst%paste(src, 2_int64)
+        call check(error, dst%is_null(2_int64), "a null vector row should paste as a null row")
+        if (allocated(error)) return
+        call check(error, .not. dst%is_null(1_int64), &
+            "pasting a null vector row must not null its neighbour")
+    end subroutine test_paste_validity
     !
     subroutine test_reindex(error)
         type(error_type), allocatable, intent(out) :: error

@@ -182,6 +182,70 @@ contains
         end do
     end procedure append_nulls
     !
+    !> Overwrites the existing row range `at .. at+count-1` with rows of `src` (see the full
+    !! contract on the interface in `parquet_columns.f90`).
+    !!
+    !! Not a row-structural operation: `nrows` is unchanged, nothing is reallocated, and no
+    !! outstanding `data_ptr`/row handle is invalidated -- which is the whole point, since the
+    !! caller has already sized the column and is filling it in pieces.
+    !!
+    !! Validity is *replaced*, not merged: an element pasted from a valid source element becomes
+    !! valid even if the destination row was null before. Overwriting a row range and leaving a
+    !! stale null behind would be a silent wrong answer, so the all-valid source path still has
+    !! to clear bits -- but only when this column actually has a bitmap to clear.
+    module procedure paste
+        integer(int64) :: n, f, k, w, e, src_base, dst_base
+        if (self%kind /= src%kind) error stop EP//"paste: column kinds differ"
+        if (self%width /= src%width) error stop EP//"paste: column widths differ"
+        if (is_string_kind(self%kind)) then
+            error stop EP//"paste: the string kinds cannot be overwritten in place; use append"
+        end if
+        f = 1_int64
+        if (present(from)) f = from
+        n = src%nrows - f + 1_int64
+        if (present(count)) n = count
+        if (f < 1_int64) error stop EP//"paste: source row index is below 1"
+        if (n < 0_int64) error stop EP//"paste: negative row count"
+        if (n == 0_int64) return
+        if (f + n - 1_int64 > src%nrows) then
+            error stop EP//"paste: source row range extends past the end of the source column"
+        end if
+        if (at < 1_int64) error stop EP//"paste: destination row index is below 1"
+        if (at + n - 1_int64 > self%nrows) then
+            error stop EP//"paste: destination row range extends past the end of the column"
+        end if
+        call paste_storage(self, src, at, f, n)
+        if (is_temporal_kind(self%kind)) then
+            self%nulls_dirty = .true.
+            return
+        end if
+        w = int(self%width, int64)
+        if (src%has_nulls) then
+            call ensure_bitmap(self)
+            do k = 1_int64, n
+                src_base = (f + k - 2_int64)*w
+                dst_base = (at + k - 2_int64)*w
+                do e = 1_int64, w
+                    if (bit_test(src%validity, src_base + e)) then
+                        call bit_set(self%validity, dst_base + e)
+                    else
+                        call bit_clear(self%validity, dst_base + e)
+                    end if
+                end do
+            end do
+        else if (self%has_nulls) then
+            ! Every source element is valid, so the destination range must end up all-valid too.
+            ! Skipped entirely when this column has no bitmap: there is then nothing to clear,
+            ! and materializing one just to write zeros into it would defeat the sparse design.
+            do k = 1_int64, n
+                dst_base = (at + k - 2_int64)*w
+                do e = 1_int64, w
+                    call bit_clear(self%validity, dst_base + e)
+                end do
+            end do
+        end if
+    end procedure paste
+    !
     !> Keeps only the rows whose `keep` entry is .true., preserving their order.
     !!
     !! A row-structural operation: it changes the row set, so at the table layer it is one of the

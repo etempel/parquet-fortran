@@ -6,11 +6,11 @@
 ! Regenerate with:  tools/generate_parquet_columns.py
 ! The kind table lives in that script; edit it there, not here.
 !
-!> Per-kind value append for `parquet_column`, plus the three kind-dispatched storage
-!! helpers (`gather_storage`, `grow_storage`, `copy_storage`) that the hand-written structural
-!! operations in `parquet_columns_structural` are built on -- so `reindex`, `delete_by_mask`,
-!! `append`, `append_nulls` and `deep_copy` each exist ONCE, kind-agnostically, instead of
-!! eighteen times.
+!> Per-kind value append for `parquet_column`, plus the four kind-dispatched storage
+!! helpers (`gather_storage`, `grow_storage`, `copy_storage`, `paste_storage`) that the
+!! hand-written structural operations in `parquet_columns_structural` are built on -- so
+!! `reindex`, `delete_by_mask`, `append`, `append_nulls`, `paste` and `deep_copy` each exist
+!! ONCE, kind-agnostically, instead of eighteen times.
 submodule (parquet_columns) parquet_columns_mutate
     implicit none
 contains
@@ -513,5 +513,48 @@ contains
             error stop EP//"append_storage: column has no active storage"
         end select
     end procedure append_storage
+    !
+    module procedure paste_storage
+        select case (self%kind)
+        case (PK_INT32)
+            self%i32(at:at+n-1_int64) = src%i32(from:from+n-1_int64)
+        case (PK_INT64)
+            self%i64(at:at+n-1_int64) = src%i64(from:from+n-1_int64)
+        case (PK_FLOAT32)
+            self%f32(at:at+n-1_int64) = src%f32(from:from+n-1_int64)
+        case (PK_FLOAT64)
+            self%f64(at:at+n-1_int64) = src%f64(from:from+n-1_int64)
+        case (PK_LOGICAL)
+            self%bool(at:at+n-1_int64) = src%bool(from:from+n-1_int64)
+        case (PK_DATE)
+            self%dt(at:at+n-1_int64) = src%dt(from:from+n-1_int64)
+        case (PK_TIME)
+            self%tm(at:at+n-1_int64) = src%tm(from:from+n-1_int64)
+        case (PK_TIMESTAMP)
+            self%ts(at:at+n-1_int64) = src%ts(from:from+n-1_int64)
+        case (PK_INT32_VEC)
+            self%i32v(:, at:at+n-1_int64) = src%i32v(:, from:from+n-1_int64)
+        case (PK_INT64_VEC)
+            self%i64v(:, at:at+n-1_int64) = src%i64v(:, from:from+n-1_int64)
+        case (PK_FLOAT32_VEC)
+            self%f32v(:, at:at+n-1_int64) = src%f32v(:, from:from+n-1_int64)
+        case (PK_FLOAT64_VEC)
+            self%f64v(:, at:at+n-1_int64) = src%f64v(:, from:from+n-1_int64)
+        case (PK_LOGICAL_VEC)
+            self%boolv(:, at:at+n-1_int64) = src%boolv(:, from:from+n-1_int64)
+        case (PK_DATE_VEC)
+            self%dtv(:, at:at+n-1_int64) = src%dtv(:, from:from+n-1_int64)
+        case (PK_TIME_VEC)
+            self%tmv(:, at:at+n-1_int64) = src%tmv(:, from:from+n-1_int64)
+        case (PK_TIMESTAMP_VEC)
+            self%tsv(:, at:at+n-1_int64) = src%tsv(:, from:from+n-1_int64)
+        case (PK_STRING, PK_STRING_VEC)
+            ! Unreachable through paste, which rejects the string kinds before it gets here --
+            ! kept so this select is exhaustive over every storable kind, like its siblings above.
+            error stop EP//"paste_storage: the string kinds cannot be overwritten in place" ! GCOVR_EXCL_LINE
+        case default
+            error stop EP//"paste_storage: column has no active storage"
+        end select
+    end procedure paste_storage
     !
 end submodule parquet_columns_mutate

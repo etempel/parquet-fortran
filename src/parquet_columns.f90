@@ -149,6 +149,7 @@ module parquet_columns
         ! --- structural mutation ---
         procedure :: append                            !! Append another column of identical kind/width.
         procedure :: append_nulls                      !! Append n all-null rows.
+        procedure :: paste                             !! Overwrite an existing row range from another column.
         procedure :: delete_by_mask                    !! Keep only rows whose mask entry is .true.
         procedure :: reindex                           !! Reorder rows by a permutation.
         ! --- string-kind storage access (PK_STRING / PK_STRING_VEC) ---
@@ -334,6 +335,33 @@ module parquet_columns
             class(parquet_column), intent(inout) :: self !! the column.
             integer(int64), intent(in) :: n              !! number of null rows to append (>= 0).
         end subroutine append_nulls
+        !> Overwrites the already-allocated rows `at .. at+count-1` with `count` rows of `src`,
+        !! starting at `src` row `from`. Kind and width must match; nothing is reallocated and
+        !! `nrows` does not change.
+        !!
+        !! This is the counterpart of `append` for a column whose final row count is known up
+        !! front: `init` it once at full size, then paste each piece into place. Assembling a
+        !! column from k pieces with `append` instead costs O(k^2) copying, because every append
+        !! reallocates the whole column exact-fit and copies everything already in it (see
+        !! `grow_storage`) -- which is why `parquet_table`'s slice regime uses this.
+        !!
+        !! `from`/`count` default to 1 and `src%nrows`, i.e. all of `src`. Passing them copies a
+        !! sub-range directly, so a caller trimming a piece to a row window does not need to build
+        !! a mask and call `delete_by_mask` first.
+        !!
+        !! Validity follows the same kind-dispatched rules as `append`: bitmap-backed kinds copy
+        !! `src`'s null bits into the destination positions (materializing this column's bitmap
+        !! only if `src` actually has nulls), and the temporal kinds carry their null state inside
+        !! the pasted elements. **The string kinds are not supported** and abort: their store is
+        !! variable-length, so a row range cannot be overwritten in place -- and they already grow
+        !! geometrically under `append`, so there is nothing to gain (see `parquet_string_column`).
+        module subroutine paste(self, src, at, from, count)
+            class(parquet_column), intent(inout) :: self       !! the destination column.
+            type(parquet_column), intent(in) :: src            !! the source column (unchanged).
+            integer(int64), intent(in) :: at                   !! 1-based first destination row.
+            integer(int64), intent(in), optional :: from       !! 1-based first source row (default 1).
+            integer(int64), intent(in), optional :: count      !! rows to copy (default all of `src`).
+        end subroutine paste
         !> Keeps only the rows whose `keep` entry is .true., preserving order.
         module subroutine delete_by_mask(self, keep)
             class(parquet_column), intent(inout) :: self !! the column.
@@ -1231,6 +1259,18 @@ module parquet_columns
             class(parquet_column), intent(inout) :: self !! the destination column.
             type(parquet_column), intent(in) :: other    !! the source column (unchanged).
         end subroutine append_storage
+        !> Overwrites rows `at .. at+n-1` of `self`'s active storage with rows `from .. from+n-1`
+        !! of `src`'s (values only; the caller settles validity). Both columns must already have
+        !! the same kind and width, and every index must already be in range -- `paste` checks all
+        !! of that before calling this. Aborts on the string kinds, which cannot be overwritten in
+        !! place.
+        module subroutine paste_storage(self, src, at, from, n)
+            class(parquet_column), intent(inout) :: self !! the destination column.
+            type(parquet_column), intent(in) :: src      !! the source column (unchanged).
+            integer(int64), intent(in) :: at             !! 1-based first destination row.
+            integer(int64), intent(in) :: from           !! 1-based first source row.
+            integer(int64), intent(in) :: n              !! rows to copy (> 0).
+        end subroutine paste_storage
         !> Copies the active storage (values only) into `out`, which must already have the same
         !! kind and geometry.
         module subroutine copy_storage(self, out)

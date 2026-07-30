@@ -612,6 +612,22 @@ program error_scenarios
         call scenario_columns_clear_null_temporal()
     case ("columns_reindex_duplicate_index")
         call scenario_columns_reindex_duplicate_index()
+    case ("columns_paste_kind_mismatch")
+        call scenario_columns_paste_kind_mismatch()
+    case ("columns_paste_width_mismatch")
+        call scenario_columns_paste_width_mismatch()
+    case ("columns_paste_string_kind")
+        call scenario_columns_paste_string_kind()
+    case ("columns_paste_source_index_below_one")
+        call scenario_columns_paste_source_index_below_one()
+    case ("columns_paste_negative_count")
+        call scenario_columns_paste_negative_count()
+    case ("columns_paste_source_past_end")
+        call scenario_columns_paste_source_past_end()
+    case ("columns_paste_destination_index_below_one")
+        call scenario_columns_paste_destination_index_below_one()
+    case ("columns_paste_destination_past_end")
+        call scenario_columns_paste_destination_past_end()
     case ("string_column_index_out_of_range")
         call scenario_string_column_index_out_of_range()
     case ("string_column_view_all_size_mismatch")
@@ -7633,6 +7649,88 @@ contains
         call a%append(b)   ! width 2 into width 3 -> aborts
         print '(a,i0)', "unexpectedly appended a vector column of a different width, length=", a%length()
     end subroutine scenario_columns_append_width_mismatch
+
+    !> paste writes into rows that already exist, so -- unlike append -- a mismatched kind cannot
+    !! be absorbed by growing the destination. It is the same check append makes, at the same
+    !! point, for the same reason: the storage arrays being copied between are of different types.
+    subroutine scenario_columns_paste_kind_mismatch()
+        type(parquet_column) :: a, b
+        call a%init(PK_INT32, 2_int64)
+        call b%init(PK_FLOAT64, 2_int64)
+        call a%paste(b, 1_int64)   ! float64 into int32 -> aborts
+        print '(a,i0)', "unexpectedly pasted a column of a different kind, length=", a%length()
+    end subroutine scenario_columns_paste_kind_mismatch
+
+    !> Same kind, different vector width: the rows are not the same shape, so pasting one over
+    !! the other would write the wrong number of elements per row.
+    subroutine scenario_columns_paste_width_mismatch()
+        type(parquet_column) :: a, b
+        call a%init(PK_FLOAT64_VEC, 2_int64, width=3_int32)
+        call b%init(PK_FLOAT64_VEC, 1_int64, width=2_int32)
+        call a%paste(b, 1_int64)   ! width 2 into width 3 -> aborts
+        print '(a,i0)', "unexpectedly pasted a vector column of a different width, length=", a%length()
+    end subroutine scenario_columns_paste_width_mismatch
+
+    !> A string column's values live in one packed variable-length store, so there is no fixed
+    !! slot for row i to be overwritten in place -- the whole point paste relies on. Rather than
+    !! silently doing something else, it says so and names append as the operation that works.
+    subroutine scenario_columns_paste_string_kind()
+        type(parquet_column) :: a, b
+        call a%init(PK_STRING, 2_int64)
+        call a%set_all(["x", "y"])
+        call b%init(PK_STRING, 1_int64)
+        call b%set_all(["z"])
+        call a%paste(b, 1_int64)   ! string kind -> aborts
+        print '(a,i0)', "unexpectedly pasted into a string column, length=", a%length()
+    end subroutine scenario_columns_paste_string_kind
+
+    !> from= is 1-based like every other row index in this library, so 0 is not "the beginning".
+    subroutine scenario_columns_paste_source_index_below_one()
+        type(parquet_column) :: a, b
+        call a%init(PK_INT32, 2_int64)
+        call b%init(PK_INT32, 2_int64)
+        call a%paste(b, 1_int64, 0_int64)   ! from=0 -> aborts
+        print '(a,i0)', "unexpectedly pasted from source row 0, length=", a%length()
+    end subroutine scenario_columns_paste_source_index_below_one
+
+    !> count=0 is a legitimate no-op, but a negative count is a caller-side arithmetic mistake
+    !! (a subtraction that came out backwards), and silently treating it as 0 would hide it.
+    subroutine scenario_columns_paste_negative_count()
+        type(parquet_column) :: a, b
+        call a%init(PK_INT32, 2_int64)
+        call b%init(PK_INT32, 2_int64)
+        call a%paste(b, 1_int64, 1_int64, -1_int64)   ! count < 0 -> aborts
+        print '(a,i0)', "unexpectedly pasted a negative row count, length=", a%length()
+    end subroutine scenario_columns_paste_negative_count
+
+    !> Reading past the end of the SOURCE: from+count-1 exceeds what the source actually holds.
+    subroutine scenario_columns_paste_source_past_end()
+        type(parquet_column) :: a, b
+        call a%init(PK_INT32, 4_int64)
+        call b%init(PK_INT32, 2_int64)
+        call a%paste(b, 1_int64, 2_int64, 2_int64)   ! source rows 2..3 of a 2-row column -> aborts
+        print '(a,i0)', "unexpectedly pasted past the end of the source, length=", a%length()
+    end subroutine scenario_columns_paste_source_past_end
+
+    !> at= is 1-based too, and paste never grows the destination, so there is no row 0 to write.
+    subroutine scenario_columns_paste_destination_index_below_one()
+        type(parquet_column) :: a, b
+        call a%init(PK_INT32, 2_int64)
+        call b%init(PK_INT32, 1_int64)
+        call a%paste(b, 0_int64)   ! at=0 -> aborts
+        print '(a,i0)', "unexpectedly pasted at destination row 0, length=", a%length()
+    end subroutine scenario_columns_paste_destination_index_below_one
+
+    !> The one that matters most: paste does NOT grow the destination, so a range running off the
+    !! end is a caller error rather than an append. Silently growing instead would turn a
+    !! miscomputed cursor into a longer column that still looks plausible.
+    subroutine scenario_columns_paste_destination_past_end()
+        type(parquet_column) :: a, b
+        call a%init(PK_INT32, 3_int64)
+        call b%init(PK_INT32, 2_int64)
+        call a%paste(b, 3_int64)   ! rows 3..4 of a 3-row column -> aborts
+        print '(a,i0)', "unexpectedly pasted past the end of the destination, length=", a%length()
+    end subroutine scenario_columns_paste_destination_past_end
 
     !> reindex validates its permutation IN FULL before touching any storage, so a bad
     !! permutation aborts with the column still intact rather than half rebuilt. A duplicated

@@ -1527,6 +1527,21 @@ contains
         call full%get("s_i32", f_i32);  call sl%get("s_i32", s_i32)
         call check(error, all(s_i32 == f_i32(LO:HI)), "s_i32 slice should equal the full column's rows")
         if (allocated(error)) return
+        ! Values alone do not prove the assembly is right: a slice is built row group by row
+        ! group, and each piece's validity has to land on the same rows its values did. The
+        ! fixture's null sits at row N/2, inside this slice, so a null that is dropped, kept
+        ! after it should have been replaced, or shifted by a row shows up here -- checked for
+        ! both validity dispatch classes that have a bitmap or a store behind them.
+        do i = 1, HI - LO + 1
+            call check(error, sl%is_null("s_i32", int(i, int64)) .eqv. &
+                full%is_null("s_i32", int(LO + i - 1, int64)), &
+                "s_i32 slice validity should match the same row of the full column")
+            if (allocated(error)) return
+            call check(error, sl%is_null("s_str", int(i, int64)) .eqv. &
+                full%is_null("s_str", int(LO + i - 1, int64)), &
+                "s_str slice validity should match the same row of the full column")
+            if (allocated(error)) return
+        end do
         call full%get("s_i64", f_i64);  call sl%get("s_i64", s_i64)
         call check(error, all(s_i64 == f_i64(LO:HI)), "s_i64 slice should equal the full column's rows")
         if (allocated(error)) return

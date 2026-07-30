@@ -449,6 +449,22 @@ contains
                 test_columns_append_kind_mismatch_aborts), &
             new_unittest("parquet_column append of a different vector width aborts", &
                 test_columns_append_width_mismatch_aborts), &
+            new_unittest("parquet_column paste of a different kind aborts", &
+                test_columns_paste_kind_mismatch_aborts), &
+            new_unittest("parquet_column paste of a different vector width aborts", &
+                test_columns_paste_width_mismatch_aborts), &
+            new_unittest("parquet_column paste on a string kind aborts", &
+                test_columns_paste_string_kind_aborts), &
+            new_unittest("parquet_column paste with from= below 1 aborts", &
+                test_columns_paste_source_index_below_one_aborts), &
+            new_unittest("parquet_column paste with a negative count aborts", &
+                test_columns_paste_negative_count_aborts), &
+            new_unittest("parquet_column paste reading past the source end aborts", &
+                test_columns_paste_source_past_end_aborts), &
+            new_unittest("parquet_column paste with at= below 1 aborts", &
+                test_columns_paste_destination_index_below_one_aborts), &
+            new_unittest("parquet_column paste past the destination end aborts", &
+                test_columns_paste_destination_past_end_aborts), &
             new_unittest("parquet_column reindex with a duplicated index aborts", &
                 test_columns_reindex_duplicate_index_aborts), &
             new_unittest("parquet_column clear_null on a temporal kind aborts", &
@@ -1025,6 +1041,65 @@ contains
             failure_message="appending a vector column of a different width was expected to abort", &
             required_stderr="parquet_columns: append: column widths differ")
     end subroutine test_columns_append_width_mismatch_aborts
+
+    subroutine test_columns_paste_kind_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_paste_kind_mismatch", expect_abort=.true., &
+            failure_message="pasting a column of a different kind was expected to abort", &
+            required_stderr="parquet_columns: paste: column kinds differ")
+    end subroutine test_columns_paste_kind_mismatch_aborts
+
+    subroutine test_columns_paste_width_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_paste_width_mismatch", expect_abort=.true., &
+            failure_message="pasting a vector column of a different width was expected to abort", &
+            required_stderr="parquet_columns: paste: column widths differ")
+    end subroutine test_columns_paste_width_mismatch_aborts
+
+    subroutine test_columns_paste_string_kind_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_paste_string_kind", expect_abort=.true., &
+            failure_message="pasting into a string column was expected to abort", &
+            required_stderr="parquet_columns: paste: the string kinds cannot be overwritten in place")
+    end subroutine test_columns_paste_string_kind_aborts
+
+    subroutine test_columns_paste_source_index_below_one_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_paste_source_index_below_one", &
+            expect_abort=.true., &
+            failure_message="pasting from source row 0 was expected to abort", &
+            required_stderr="parquet_columns: paste: source row index is below 1")
+    end subroutine test_columns_paste_source_index_below_one_aborts
+
+    subroutine test_columns_paste_negative_count_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_paste_negative_count", expect_abort=.true., &
+            failure_message="pasting a negative row count was expected to abort", &
+            required_stderr="parquet_columns: paste: negative row count")
+    end subroutine test_columns_paste_negative_count_aborts
+
+    subroutine test_columns_paste_source_past_end_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_paste_source_past_end", expect_abort=.true., &
+            failure_message="pasting past the end of the source was expected to abort", &
+            required_stderr="parquet_columns: paste: source row range extends past the end of the source column")
+    end subroutine test_columns_paste_source_past_end_aborts
+
+    subroutine test_columns_paste_destination_index_below_one_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_paste_destination_index_below_one", &
+            expect_abort=.true., &
+            failure_message="pasting at destination row 0 was expected to abort", &
+            required_stderr="parquet_columns: paste: destination row index is below 1")
+    end subroutine test_columns_paste_destination_index_below_one_aborts
+
+    subroutine test_columns_paste_destination_past_end_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_paste_destination_past_end", &
+            expect_abort=.true., &
+            failure_message="pasting past the end of the destination was expected to abort", &
+            required_stderr="parquet_columns: paste: destination row range extends past the end of the column")
+    end subroutine test_columns_paste_destination_past_end_aborts
 
     subroutine test_columns_reindex_duplicate_index_aborts(error)
         type(error_type), allocatable, intent(out) :: error

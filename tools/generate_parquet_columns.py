@@ -17,13 +17,13 @@ build stays dependency-free):
                                     submodule reaches by host association.
   src/parquet_columns_access.f90    get_at / set_at / set_all / data_ptr, for the 16 array kinds.
   src/parquet_columns_mutate.f90    append_values for the 16 array kinds, plus the three
-                                    kind-dispatched storage helpers (gather / grow / copy) that
-                                    the hand-written structural operations are built on.
+                                    kind-dispatched storage helpers (gather / grow / copy / paste)
+                                    that the hand-written structural operations are built on.
 
 NOT emitted (hand-written, and never touched by this script):
 
   src/parquet_columns_validity.f90    kind-dispatched validity (RF8)
-  src/parquet_columns_structural.f90  init/clear/append/append_nulls/delete_by_mask/reindex/deep_copy
+  src/parquet_columns_structural.f90  init/clear/append/append_nulls/paste/delete_by_mask/reindex/deep_copy
   src/parquet_columns_string.f90      the string kinds, which delegate to parquet_string_column (DD1)
 
 Usage:  tools/generate_parquet_columns.py [--check]
@@ -213,6 +213,7 @@ module parquet_columns
         ! --- structural mutation ---
         procedure :: append                            !! Append another column of identical kind/width.
         procedure :: append_nulls                      !! Append n all-null rows.
+        procedure :: paste                             !! Overwrite an existing row range from another column.
         procedure :: delete_by_mask                    !! Keep only rows whose mask entry is .true.
         procedure :: reindex                           !! Reorder rows by a permutation.
         ! --- string-kind storage access (PK_STRING / PK_STRING_VEC) ---
@@ -292,6 +293,33 @@ module parquet_columns
             class(parquet_column), intent(inout) :: self !! the column.
             integer(int64), intent(in) :: n              !! number of null rows to append (>= 0).
         end subroutine append_nulls
+        !> Overwrites the already-allocated rows `at .. at+count-1` with `count` rows of `src`,
+        !! starting at `src` row `from`. Kind and width must match; nothing is reallocated and
+        !! `nrows` does not change.
+        !!
+        !! This is the counterpart of `append` for a column whose final row count is known up
+        !! front: `init` it once at full size, then paste each piece into place. Assembling a
+        !! column from k pieces with `append` instead costs O(k^2) copying, because every append
+        !! reallocates the whole column exact-fit and copies everything already in it (see
+        !! `grow_storage`) -- which is why `parquet_table`'s slice regime uses this.
+        !!
+        !! `from`/`count` default to 1 and `src%nrows`, i.e. all of `src`. Passing them copies a
+        !! sub-range directly, so a caller trimming a piece to a row window does not need to build
+        !! a mask and call `delete_by_mask` first.
+        !!
+        !! Validity follows the same kind-dispatched rules as `append`: bitmap-backed kinds copy
+        !! `src`'s null bits into the destination positions (materializing this column's bitmap
+        !! only if `src` actually has nulls), and the temporal kinds carry their null state inside
+        !! the pasted elements. **The string kinds are not supported** and abort: their store is
+        !! variable-length, so a row range cannot be overwritten in place -- and they already grow
+        !! geometrically under `append`, so there is nothing to gain (see `parquet_string_column`).
+        module subroutine paste(self, src, at, from, count)
+            class(parquet_column), intent(inout) :: self       !! the destination column.
+            type(parquet_column), intent(in) :: src            !! the source column (unchanged).
+            integer(int64), intent(in) :: at                   !! 1-based first destination row.
+            integer(int64), intent(in), optional :: from       !! 1-based first source row (default 1).
+            integer(int64), intent(in), optional :: count      !! rows to copy (default all of `src`).
+        end subroutine paste
         !> Keeps only the rows whose `keep` entry is .true., preserving order.
         module subroutine delete_by_mask(self, keep)
             class(parquet_column), intent(inout) :: self !! the column.
@@ -494,6 +522,18 @@ module parquet_columns
             class(parquet_column), intent(inout) :: self !! the destination column.
             type(parquet_column), intent(in) :: other    !! the source column (unchanged).
         end subroutine append_storage
+        !> Overwrites rows `at .. at+n-1` of `self`'s active storage with rows `from .. from+n-1`
+        !! of `src`'s (values only; the caller settles validity). Both columns must already have
+        !! the same kind and width, and every index must already be in range -- `paste` checks all
+        !! of that before calling this. Aborts on the string kinds, which cannot be overwritten in
+        !! place.
+        module subroutine paste_storage(self, src, at, from, n)
+            class(parquet_column), intent(inout) :: self !! the destination column.
+            type(parquet_column), intent(in) :: src      !! the source column (unchanged).
+            integer(int64), intent(in) :: at             !! 1-based first destination row.
+            integer(int64), intent(in) :: from           !! 1-based first source row.
+            integer(int64), intent(in) :: n              !! rows to copy (> 0).
+        end subroutine paste_storage
         !> Copies the active storage (values only) into `out`, which must already have the same
         !! kind and geometry.
         module subroutine copy_storage(self, out)
@@ -815,11 +855,11 @@ def gen_mutate():
     o = []
     w = o.append
     w(BANNER)
-    w("""!> Per-kind value append for `parquet_column`, plus the three kind-dispatched storage
-!! helpers (`gather_storage`, `grow_storage`, `copy_storage`) that the hand-written structural
-!! operations in `parquet_columns_structural` are built on -- so `reindex`, `delete_by_mask`,
-!! `append`, `append_nulls` and `deep_copy` each exist ONCE, kind-agnostically, instead of
-!! eighteen times.
+    w("""!> Per-kind value append for `parquet_column`, plus the four kind-dispatched storage
+!! helpers (`gather_storage`, `grow_storage`, `copy_storage`, `paste_storage`) that the
+!! hand-written structural operations in `parquet_columns_structural` are built on -- so
+!! `reindex`, `delete_by_mask`, `append`, `append_nulls`, `paste` and `deep_copy` each exist
+!! ONCE, kind-agnostically, instead of eighteen times.
 submodule (parquet_columns) parquet_columns_mutate
     implicit none
 contains""")
@@ -960,6 +1000,25 @@ contains""")
             error stop EP//"append_storage: column has no active storage"
         end select
     end procedure append_storage
+    !
+    module procedure paste_storage
+        select case (self%kind)""")
+    for k in ARRAY_KINDS:
+        tag, pk, decl, comp, rank, cat = k
+        if rank == 1:
+            w(f"""        case ({pk})
+            self%{comp}(at:at+n-1_int64) = src%{comp}(from:from+n-1_int64)""")
+        else:
+            w(f"""        case ({pk})
+            self%{comp}(:, at:at+n-1_int64) = src%{comp}(:, from:from+n-1_int64)""")
+    w("""        case (PK_STRING, PK_STRING_VEC)
+            ! Unreachable through paste, which rejects the string kinds before it gets here --
+            ! kept so this select is exhaustive over every storable kind, like its siblings above.
+            error stop EP//"paste_storage: the string kinds cannot be overwritten in place" ! GCOVR_EXCL_LINE
+        case default
+            error stop EP//"paste_storage: column has no active storage"
+        end select
+    end procedure paste_storage
     !
 end submodule parquet_columns_mutate""")
     return "\n".join(o) + "\n"

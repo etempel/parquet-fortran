@@ -48,6 +48,7 @@ working rules).
   - [Implicit finalizers must never route through a path that can throw/abort](#implicit-finalizers-must-never-route-through-a-path-that-can-throwabort)
   - [Automatic BYTE_STREAM_SPLIT for float columns in the writer](#automatic-byte_stream_split-for-float-columns-in-the-writer)
   - [`parquet_column` validity is ROW-granular, even for the vector kinds](#parquet_column-validity-is-row-granular-even-for-the-vector-kinds)
+  - [Assembling a `parquet_column` from pieces: preallocate and `%paste`](#assembling-a-parquet_column-from-pieces-preallocate-and-paste)
   - [A `parquet_schema` built in code must be parsed before anything reads its fields](#a-parquet_schema-built-in-code-must-be-parsed-before-anything-reads-its-fields)
 - [Element-domain modules (`parquet_strings`, `parquet_temporal`)](#element-domain-modules-parquet_strings-parquet_temporal)
   - [The `parquet_strings` module](#the-parquet_strings-module)
@@ -165,6 +166,34 @@ documented behavior) gets an `[Unreleased]` entry added at the top of the file, 
 existing [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format already used there. Do
 this without being asked separately, the same way tests/docs are added by default for a new
 feature (see "New features require tests and docs" above).
+
+**`[Unreleased]` is written for someone upgrading from the last release, not as a development
+log.** Everything in it is read against `[1.0.0]` (or whatever the newest published section is),
+so an entry only earns its place if it describes a difference a reader of that release would
+actually see. Four rules follow, and they apply to every future entry — not just when someone
+asks for a cleanup:
+
+- **`### Changed` and `### Fixed` are for functionality that is in the RELEASED version.** A fix
+  or behavior change to something that is itself still sitting in `[Unreleased]` is invisible to
+  every user — there is no released behavior for it to differ from — so it does not get its own
+  entry. Fold whatever the reader needs to know into that feature's own `### Added` bullet
+  instead, and drop the rest. This is the rule that keeps the section from filling up with the
+  history of how an unreleased feature was built.
+- **`### Added` records overall features, not each part of one.** A sub-feature, a new
+  type-bound procedure, or a helper that exists to serve a feature already listed belongs *in
+  that feature's bullet*, not as a bullet of its own. Several closely related additions that
+  share a purpose (say, a set of new metadata-only reader queries) go in one bullet together.
+- **Leave out what is not user-facing at all**: test coverage, internal refactors and file
+  reorganizations explicitly marked "no functional change", tooling that changes nothing a
+  consumer of the library can observe. A genuinely new contributor-facing tool wired into CI can
+  have one short line; its subsequent tweaks cannot.
+- **One `### Added`/`### Changed`/`### Fixed` per release section, in that order.** Appending a
+  second `### Added` after `### Fixed` is easy to do by accident when adding an entry to a long
+  section, and it silently splits the list a reader is trying to read as one.
+
+Re-read the whole `[Unreleased]` section when adding to it, rather than appending to the end: an
+entry frequently belongs inside a bullet that is already there, and a fix being added may
+supersede text further up.
 
 ### Documentation structure
 
@@ -696,6 +725,35 @@ happen until some later code path (a write, say) starts asking about validity.
 read from a parquet file cannot be represented and must be widened to the whole row (`if any element
 of the row is null, mark the row null`). Do not silently drop it, and do not attempt to store it.
 
+### Assembling a `parquet_column` from pieces: preallocate and `%paste`
+
+`grow_storage` (`parquet_columns_mutate.f90`, generated) reallocates **exact-fit** and copies
+everything already in the column — there is no capacity headroom and no geometric growth. So
+`%append` in a loop is O(k²) in both copying and allocation: building a column from k pieces copies
+k(k-1)/2 pieces' worth of data and allocates k(k+1)/2, ending up holding only k. This is invisible
+in a unit test and only shows up at scale — it made `parquet_table`'s slice regime cost as much as
+reading the whole file.
+
+**When the final row count is known before the pieces are, `init` the column once at full size and
+`%paste` each piece into place.** `%paste(src, at [, from] [, count])` overwrites an existing row
+range without reallocating or changing `nrows`; `from`/`count` copy a sub-range of the source, so
+trimming a piece needs no `keep` mask and no `%delete_by_mask` either. `materialize_slice`
+(`parquet_tables_read.f90`) is the worked example. Two things to know before using it:
+
+- **`%paste` REPLACES the pasted range's validity, it does not merge it** (`%append`'s rule, where
+  the destination rows are always fresh, is merge). A valid source element clears a null the
+  destination already had. Preserve this in any change: merging instead would leave a stale null
+  sitting on top of a value that really was read, and the table path cannot catch it, because there
+  the destination is always freshly `init`'d — only `test/test_columns.f90` covers that difference.
+- **The string kinds are excluded and abort.** A `parquet_string_column` is a packed
+  variable-length store with no fixed row slots, so it cannot be overwritten in place — but it also
+  does not need to be, because `ensure_offsets_cap`/`ensure_data_cap`/`ensure_validity_cap`
+  (`parquet_strings.f90`) already grow it **geometrically** (1.5x). Keep the grow-and-append shape
+  for those two kinds, and don't "fix" the exclusion.
+
+If a future kind gains its own storage, decide which of these two shapes it has before adding it to
+the paste path.
+
 ### A `parquet_schema` built in code must be parsed before anything reads its fields
 
 `schema%init` + `schema%add_field` build the schema's MAML **text** only; `schema%cinfo` stays
@@ -1068,6 +1126,15 @@ before being noticed:**
 - **Take the best of several rounds, not one measurement.** Single rounds of the `access` mode swung
   0.96x–1.22x on the same build — wider than the effect being measured. The minimum is the run least
   disturbed by everything else on the machine, which is what these modes are actually asking about.
+- **An accessor that copies is not a read — make two modes being compared do the SAME job.** `%get`
+  allocates a fresh array the size of the column and copies into it, so a `%get` loop measures the
+  read *plus* a full allocation and copy per column, and `sum(...)` on top adds another whole pass.
+  Timed against `%materialize_all`, which only reads, that made reading 4 of 16 columns look 1.8x
+  what scaling the full read by `touch / ncols` predicts — reported as the library failing to scale
+  when the two sides were simply not measuring the same work. Compare `%prefetch` with
+  `%materialize_all`; time any `%get` on its own line; keep the keep-it-live checksum outside every
+  timed region and take it through `%col`. The same caution applies to any future accessor whose
+  cost scales with rows.
 
 **To measure the committed baseline against the working tree**, `git stash push -- src tools`, rebuild,
 measure, then `git stash pop` — this keeps `app/`, `test/` and the fixtures in place, so the benchmark

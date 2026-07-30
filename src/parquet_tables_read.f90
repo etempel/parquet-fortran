@@ -133,21 +133,38 @@ contains
     !!
     !! The full regime reads a column in one call; a slice cannot, because a whole-column read
     !! would decode every row group in the file -- the very cost the slice regime exists to
-    !! avoid. So each covering row group is read on its own, the first and last are trimmed to
-    !! the slice's own bounds, and the pieces are concatenated.
+    !! avoid. So each covering row group is read on its own and placed into the slice's column.
     !!
-    !! Trimming happens on the CHUNK, not on the assembled column: the overshoot is then bounded
-    !! by one row group at each end instead of being carried through the whole assembly.
+    !! The column is sized ONCE, up front, and each row group is pasted into its place: the row
+    !! count is `sc%nrows`, which is known before any data is read. Growing it with `append`
+    !! instead is quadratic -- every append reallocates the column exact-fit and copies
+    !! everything already in it (`grow_storage`), so assembling k row groups copies k*(k-1)/2
+    !! chunks' worth of data and allocates far more memory than the finished column occupies. On
+    !! a 16-column, quarter-of-8-GB slice spanning 8 row groups that cost as much as reading the
+    !! whole file. Trimming the first and last row group to the slice bounds is likewise just the
+    !! sub-range `paste` is asked for, rather than a `keep` mask plus `delete_by_mask`.
+    !!
+    !! The string kinds cannot be pasted (a variable-length store has no fixed row slots), so
+    !! they keep the grow-and-append shape -- which costs them nothing, because
+    !! `parquet_string_column` grows its buffers geometrically rather than exact-fit.
     subroutine materialize_slice(cache, sc, idx)
         type(parquet_table_cache), intent(inout) :: cache !! the column store.
         type(table_scope), intent(in) :: sc               !! rows this table covers.
         integer, intent(in) :: idx                        !! slot to fill.
         type(parquet_column) :: chunk
         logical, allocatable :: keep(:)
-        integer(int64) :: rg, rg_lo, rg_hi, lo, hi, rows_rg
+        character(len=:), allocatable :: sfx
+        integer(int64) :: rg, rg_lo, rg_hi, lo, hi, rows_rg, cursor, take
+        logical :: in_place
         !
         associate (slot => cache%cols(idx), bounds => cache%rg_bounds)
-            call slot%values%init(slot%declared_kind, 0_int64, int(slot%width, int32), "")
+            in_place = .not. (slot%declared_kind == PK_STRING .or. slot%declared_kind == PK_STRING_VEC)
+            if (in_place) then
+                call slot%values%init(slot%declared_kind, sc%nrows, int(slot%width, int32), "")
+            else
+                call slot%values%init(slot%declared_kind, 0_int64, int(slot%width, int32), "")
+            end if
+            cursor = 1_int64
             do rg = 1_int64, size(bounds, 2, kind=int64)
                 rg_lo = bounds(1, rg)
                 rg_hi = bounds(2, rg)
@@ -157,16 +174,32 @@ contains
                     slot%file_name, rg, chunk, rows_rg, int(slot%width, int32), "")
                 lo = max(sc%row_lo, rg_lo)
                 hi = min(sc%row_hi, rg_hi)
-                if (lo > rg_lo .or. hi < rg_hi) then
-                    allocate(keep(rows_rg))
-                    keep = .false.
-                    keep(lo - rg_lo + 1_int64:hi - rg_lo + 1_int64) = .true.
-                    call chunk%delete_by_mask(keep)
-                    deallocate(keep)
+                take = hi - lo + 1_int64
+                if (in_place) then
+                    call slot%values%paste(chunk, cursor, lo - rg_lo + 1_int64, take)
+                else
+                    if (lo > rg_lo .or. hi < rg_hi) then
+                        allocate(keep(rows_rg))
+                        keep = .false.
+                        keep(lo - rg_lo + 1_int64:hi - rg_lo + 1_int64) = .true.
+                        call chunk%delete_by_mask(keep)
+                        deallocate(keep)
+                    end if
+                    call slot%values%append(chunk)
                 end if
-                call slot%values%append(chunk)
+                cursor = cursor + take
                 call chunk%clear()
             end do
+            ! A preallocated column that the row groups did not completely fill would hand back
+            ! uninitialized values as if they had been read, so say so instead. Not reachable
+            ! through any public path: cache%rg_bounds is built from the file footer and the scope
+            ! was validated against it at open time, so the covering row groups always tile the
+            ! slice exactly. Kept as an assertion because the failure it guards is silent.
+            if (cursor - 1_int64 /= sc%nrows) then
+                call table_context_suffix(cache, slot%name, sfx) ! GCOVR_EXCL_LINE
+                error stop EP // "materialize: the row groups covering this slice do not " // & ! GCOVR_EXCL_LINE
+                    "cover every one of its rows" // sfx ! GCOVR_EXCL_LINE
+            end if
         end associate
     end subroutine materialize_slice
     !

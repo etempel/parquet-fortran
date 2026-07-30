@@ -114,7 +114,7 @@ See [Error handling](doc/pages/error-handling.md) and [Limitations](#limitations
 The code compiles successfully with the following compilers and libraries. It might compile with previous or later versions as well but this is not tested.
 
 - Fortran compiler:
-    - Intel Fortran (ifx) v2026.1.0 — confirmed manually outside CI; not exercised by the GitLab CI pipeline itself (gfortran only, see below).
+    - Intel Fortran (ifx) v2026.1.0 and v2026.1.1 — confirmed manually outside CI; not exercised by the GitLab CI pipeline itself (gfortran only, see below).
     - Gfortran v15.2.0 (development), v13 (CI)
     - **Minimum gfortran: 13.** Older versions (e.g. Ubuntu 22.04's default compiler)
       miscompile part of the schema-building API — see

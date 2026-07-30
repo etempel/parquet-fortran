@@ -1011,6 +1011,50 @@ counterpart. User guide: `doc/pages/date-time.md`.
   submodule, exactly as `parquet.f90` already does for its shared private helpers (see
   `src/parquet_columns_util.f90` for a file created solely to hold such helpers). Prefer that shape
   from the start for any helper a submodule will call.
+- **The "no `character`-returning function" rule above extends to an *automatic*-length result,
+  not just a deferred-length one, when the length is a specification expression over
+  host-associated variables — that shape is an ifx internal compiler error.** ifx 2026.1.1
+  segfaults (ICE, and the source line it names is meaningless) on:
+
+  ```fortran
+  submodule (m) sm
+  contains
+      module procedure p
+          integer, allocatable :: lo(:), hi(:)          ! host-associated allocatables
+          ...
+      contains
+          subroutine sibling(...)
+              ... // tok(k) // ...                      ! call from a SIBLING contained procedure
+          end subroutine sibling
+          pure function tok(k) result(res)
+              character(len=hi(k)-lo(k)+1) :: res       ! length reads those allocatables
+              res = text(lo(k):hi(k))
+          end function tok
+      end procedure p
+  end submodule sm
+  ```
+
+  Every one of these conditions is required, confirmed by bisecting each away independently:
+  `-O1` or higher (at `-O0` it compiles clean, which is why `fpm build --profile debug` succeeds
+  while a plain `fpm build` fails — an easy signal to misread as a flaky build); the call coming
+  from a **sibling** contained procedure rather than from the module procedure's own statements;
+  and the whole construct sitting inside a `submodule`'s `module procedure` body rather than a
+  plain `program`/`contains`. Recursion is **not** required. gfortran compiles and runs the same
+  code correctly at `-O2`, so this will not show up in CI. Fix it the same way the bullet above
+  forces for its own (unrelated, gfortran) reason — a subroutine with an `intent(out)` allocatable
+  `character` argument — or, where the body is a one-liner, drop the helper and write the
+  expression at the call sites. `tok_text` (`src/parquet_read_filter.f90`) is the worked example.
+- **Never interpolate unbounded caller-supplied text into an `error stop` message — cap it to a
+  short preview.** ifx 2026.1.1's `ERROR STOP` runtime corrupts the heap once the composed message
+  reaches **8192 bytes** (confirmed with a minimal standalone repro: 8191 bytes aborts cleanly,
+  8192 crashes every time). This bites hardest exactly where it is least expected: a "value too
+  long" guard that reports the offending value verbatim is *guaranteed* to build a huge message on
+  the one input that triggers it, turning a clean abort into a crash and an error-scenario test
+  into a confusing stderr-mismatch failure. `parquet_filter_add` (`src/parquet.f90`) is the
+  pattern to copy — at most the first 100 characters of the rule, plus `"..."` when truncated.
+  Apply the same cap to any new message embedding a rule, a MAML line, a filename, or any other
+  value whose length the caller controls; it is better behaviour regardless of compiler, since a
+  multi-kilobyte error message is unreadable anyway.
 
 ### Verifying the bind(C) boundary
 

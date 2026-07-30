@@ -706,6 +706,18 @@ contains
         character(len=32) :: idx_buf, len_buf
 
         nlines = 0
+
+        ! Concurrent non-advancing (advance='no', size=) reads on separate units have been
+        ! observed to spuriously report ios == 0 (i.e. a false "line exceeds maml_max_line_len"
+        ! abort on a line nowhere near that long) under heavy multi-threaded contention with
+        ! ifx's I/O runtime -- e.g. 100+ OpenMP threads from test-drive's own concurrent
+        ! "examples" suite each parsing the same static fixture in the schemas dir at once. Each
+        ! thread opens its own unit, so this is not a shared-fixture race in this library's own
+        ! logic; serializing the whole open/read-loop/close sequence works around the runtime
+        ! race regardless of its exact cause. (Written "schemas dir" below, not "schemas/*.maml",
+        ! since a literal "/*" anywhere in this file opens a C block comment under cpp -- see
+        ! CLAUDE.md's "Compiler & language gotchas".)
+        !$omp critical (parquet_read_maml_source_lines_critical)
         open(newunit=unit, file=trim(filename), status="old", action="read", iostat=ios)
         if (ios /= 0) error stop trim(context) // ": cannot open file: " // trim(filename)
 
@@ -730,6 +742,7 @@ contains
         end do
 
         close(unit)
+        !$omp end critical (parquet_read_maml_source_lines_critical)
     end subroutine parquet_read_maml_source_lines
 
     module procedure parquet_load_maml_file

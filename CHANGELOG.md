@@ -55,6 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handling in MAML files.
 - Fixed a documentation error pointing readers at `is_init()` instead of `is_parsed()`.
 - Fixed several stale/broken documentation cross-links and anchors.
+- Fixed a spurious "line exceeds 1024 characters" abort when loading a MAML file, observed under
+  heavy multi-threaded contention (e.g. ifx with 100+ concurrent OpenMP threads reading the same
+  MAML fixture at once): the non-advancing read used to detect over-length lines is now serialized
+  with an OpenMP critical section.
 
 ### Added
 

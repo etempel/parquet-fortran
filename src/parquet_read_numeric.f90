@@ -489,7 +489,7 @@ contains
 
         call check_reader_open(reader, "parquet_read_column_chunk")
         call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
+        call check_reader_no_sort(reader, "parquet_read_column_chunk")
         call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
         call parquet_read_int32_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
@@ -518,7 +518,7 @@ contains
         nrows = size(values, 2, kind=int64)
         call check_reader_open(reader, "parquet_read_column_chunk")
         call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
+        call check_reader_no_sort(reader, "parquet_read_column_chunk")
         call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
         call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)
         call parquet_read_int32_array_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
@@ -550,7 +550,7 @@ contains
 
         call check_reader_open(reader, "parquet_read_column_chunk")
         call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
+        call check_reader_no_sort(reader, "parquet_read_column_chunk")
         call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
         call parquet_read_int64_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
@@ -579,7 +579,7 @@ contains
         nrows = size(values, 2, kind=int64)
         call check_reader_open(reader, "parquet_read_column_chunk")
         call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
+        call check_reader_no_sort(reader, "parquet_read_column_chunk")
         call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
         call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)
         call parquet_read_int64_array_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
@@ -611,7 +611,7 @@ contains
 
         call check_reader_open(reader, "parquet_read_column_chunk")
         call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
+        call check_reader_no_sort(reader, "parquet_read_column_chunk")
         call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
         call parquet_read_float32_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
@@ -640,7 +640,7 @@ contains
         nrows = size(values, 2, kind=int64)
         call check_reader_open(reader, "parquet_read_column_chunk")
         call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
+        call check_reader_no_sort(reader, "parquet_read_column_chunk")
         call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
         call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)
         call parquet_read_float32_array_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
@@ -672,7 +672,7 @@ contains
 
         call check_reader_open(reader, "parquet_read_column_chunk")
         call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
+        call check_reader_no_sort(reader, "parquet_read_column_chunk")
         call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
         call parquet_read_float64_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
@@ -701,7 +701,7 @@ contains
         nrows = size(values, 2, kind=int64)
         call check_reader_open(reader, "parquet_read_column_chunk")
         call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
+        call check_reader_no_sort(reader, "parquet_read_column_chunk")
         call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
         call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)
         call parquet_read_float64_array_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
@@ -734,7 +734,7 @@ contains
 
         call check_reader_open(reader, "parquet_read_column_chunk")
         call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
+        call check_reader_no_sort(reader, "parquet_read_column_chunk")
         call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
         allocate(tmp(size(values, kind=int64)))
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
@@ -768,7 +768,7 @@ contains
         nrows = size(values, 2, kind=int64)
         call check_reader_open(reader, "parquet_read_column_chunk")
         call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
+        call check_reader_no_sort(reader, "parquet_read_column_chunk")
         call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
         allocate(flat(asize*nrows))
         call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)

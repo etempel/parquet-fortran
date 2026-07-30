@@ -54,6 +54,7 @@ module parquet_bindings
     public :: parquet_reader_prefetch_columns, parquet_reader_prefetch_all_columns, parquet_reader_has_column
     public :: parquet_reader_get_column_type_name
     public :: c_reader_set_filter, parquet_reader_has_decoded_columns, parquet_reader_has_filter_clauses
+    public :: c_reader_set_sort, parquet_reader_has_sort
     public :: parquet_reader_set_sample
     public :: parquet_reader_set_qc
     public :: parquet_read_int32_column, parquet_read_int64_column
@@ -533,7 +534,7 @@ module parquet_bindings
         !> unchanged.
         function c_reader_set_filter(reader, names_packed, name_len, ops_packed, op_len, &
                 values_packed, value_len, is_string_flags, n, node_kind, node_leaf, n_nodes, &
-                expr_text, err_out, err_cap) &
+                expr_text, rg_lo, rg_hi, err_out, err_cap) &
                 bind(C, name="parquet_reader_set_filter") result(status)
             import
             type(c_ptr), value :: reader
@@ -549,9 +550,49 @@ module parquet_bindings
             integer(c_int32_t) :: node_leaf(*)
             integer(c_long_long), value :: n_nodes
             character(kind=c_char) :: expr_text(*)
+            integer(c_long_long), value :: rg_lo
+            integer(c_long_long), value :: rg_hi
             character(kind=c_char) :: err_out(*)
             integer(c_long_long), value :: err_cap
             integer(c_long_long) :: status
+        end function
+
+        !> Installs a read-time sort on `reader`: `n` keys, each a fixed-width
+        !> `name_len` column name in `names_packed` plus one `descending` and
+        !> one `nulls_first` int8 flag, applied in the order given.
+        !> `key_text` is the whole key list re-rendered for
+        !> parquet_reader_print_stat's "sort:" line and is never parsed by the
+        !> C++ side. Returns 0 on success, or 1 with a NUL-terminated message
+        !> in `err_out` (capacity `err_cap`), so the Fortran caller owns the
+        !> error stop text -- the same convention c_reader_set_filter uses.
+        !> Named c_reader_set_sort on this side because the public API
+        !> procedure parquet_reader_set_sort (parquet.f90) owns that name; the
+        !> bind(C) symbol, and so parquet_wrapper.cpp, is unchanged.
+        function c_reader_set_sort(reader, names_packed, name_len, descending, nulls_first, &
+                n, key_text, err_out, err_cap) &
+                bind(C, name="parquet_reader_set_sort") result(status)
+            import
+            type(c_ptr), value :: reader !! open reader handle.
+            character(kind=c_char) :: names_packed(*) !! `n` blank-padded column names, `name_len` chars each.
+            integer(c_long_long), value :: name_len !! width of one packed name.
+            integer(c_int8_t) :: descending(*) !! per key: nonzero for descending order.
+            integer(c_int8_t) :: nulls_first(*) !! per key: nonzero to place nulls before values.
+            integer(c_long_long), value :: n !! number of sort keys.
+            character(kind=c_char) :: key_text(*) !! whole key list, for print_stat only.
+            character(kind=c_char) :: err_out(*) !! receives the failure message, if any.
+            integer(c_long_long), value :: err_cap !! capacity of err_out, in characters.
+            integer(c_long_long) :: status !! 0 on success, 1 on failure.
+        end function
+
+        !> Whether a read-time sort is active on `reader` (1) or not (0). The
+        !> predicate every "not while sorted" guard keys on -- deliberately
+        !> about a sort permutation only, never a filter/sample mask, which
+        !> chunked reads and row/element mode all support.
+        function parquet_reader_has_sort(reader) &
+                bind(C, name="parquet_reader_has_sort") result(has_sort)
+            import
+            type(c_ptr), value :: reader !! open reader handle.
+            integer(c_long_long) :: has_sort !! 1 when a sort is active, 0 otherwise.
         end function
 
         !> Whether any column of `reader` has already been decoded into its

@@ -23,6 +23,7 @@ program tester
     use test_parquet_string, only : collect_tests_parquet_string
     use test_columns, only : collect_tests_parquet_columns
     use test_filter, only : collect_tests_filter
+    use test_sort, only : collect_tests_sort
     use test_temporal, only : collect_tests_parquet_temporal
     use test_table, only : collect_tests_parquet_table
     use parquet_bindings, only : parquet_warmup_memory_pool
@@ -69,6 +70,7 @@ program tester
         new_testsuite("temporal", collect_tests_parquet_temporal), &
         new_testsuite("columns", collect_tests_parquet_columns), &
         new_testsuite("filter", collect_tests_filter), &
+        new_testsuite("sort", collect_tests_sort), &
         new_testsuite("table", collect_tests_parquet_table) &
         ]
     !

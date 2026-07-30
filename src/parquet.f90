@@ -54,6 +54,14 @@ module parquet
     integer, parameter :: filter_max_depth = 32
     integer, parameter :: filter_max_nodes = 1024
 
+    !> The two limits on one parquet_sortkey, in the same spirit as the filter caps above: a
+    !> clean error stop rather than an unbounded allocation on accidentally-huge input. Declared
+    !> here once and reached by host association from parquet_read/parquet_read_sort.
+    !>   sortkey_max_key_len -- characters in one %add key ("<column> [asc|desc]").
+    !>   sortkey_max_keys    -- keys across every %add call of one parquet_sortkey.
+    integer, parameter :: sortkey_max_key_len = 320
+    integer, parameter :: sortkey_max_keys = 16
+
     !> Canonical single data-type tokens parquet_column_exists/parquet_get_column_type recognize:
     !> valid_maml_data_types plus the three temporal base tokens ("date"/"time"/"timestamp").
     !> parquet_column_exists additionally accepts the group aliases "int" (int32/int64), "float"
@@ -436,6 +444,47 @@ module parquet
         procedure :: add => parquet_filter_add !! Appends one AND-combined filter expression.
     end type parquet_filter
 
+    !> A read-time sort specification: an ordered list of sort KEYS, each naming one column and
+    !> the direction to order it by. Passed as parquet_open_reader(..., sort_by=), or applied to
+    !> an already-open reader with parquet_reader_set_sort. Every column read afterwards comes
+    !> back in that order.
+    !>
+    !> One key per %add call, applied in the order added (first key is the primary one):
+    !>
+    !>     type(parquet_sortkey) :: srt
+    !>     call srt%add("ra asc")
+    !>     call srt%add("dec desc")
+    !>     call srt%add("id", nulls_first=.true.)
+    !>
+    !> Key text is "<column> [asc|desc]" -- the direction is optional and defaults to ascending,
+    !> is case-insensitive, and a leading "-" on the column name is shorthand for descending
+    !> ("-dec" == "dec desc"). The column may be a dotted struct-leaf path, exactly as a filter
+    !> clause's may.
+    !>
+    !> Nulls sort LAST by default, per key; pass nulls_first=.true. on %add to put that key's
+    !> null rows first instead. NaN sits between real values and nulls (so, by default: values,
+    !> then NaNs, then nulls) and, like nulls, its placement is absolute -- ordering a key
+    !> descending reverses the values, not where nulls and NaNs go. This reproduces Arrow's own
+    !> sort ordering exactly, so a result cross-checked against pyarrow matches row for row.
+    !>
+    !> Keys are unvalidated here -- the column must exist and be a sortable scalar column, which
+    !> is checked once a reader actually applies the sort. See "Reading rows in sorted order" in
+    !> doc/pages/reading.md.
+    !>
+    !> The type is named for what it holds (the keys), not for the operation; a sorted read is
+    !> requested through parquet_open_reader/parquet_reader_set_sort.
+    type parquet_sortkey
+        !> Raw, unvalidated key text, one entry per %add call. Deferred-length, the same way
+        !! parquet_filter%rules is: every entry shares the length of the longest key added so far.
+        character(len=:), allocatable :: keys(:)
+        !> Per key: .true. to place that key's null rows before its values instead of after.
+        !! Same extent as keys(1:n).
+        logical, allocatable :: nulls_first(:)
+        integer :: n = 0 !! Number of keys actually in use.
+    contains
+        procedure :: add => parquet_sortkey_add !! Appends one sort key, applied after those already added.
+    end type parquet_sortkey
+
     !> Internal plumbing only (not part of the public API): one column's
     !> read-time QC declaration, parsed from a qc-maml's fields: entries by
     !> parquet_parse_qc_maml. min_text/max_text carry the qc: min:/max: value
@@ -737,7 +786,8 @@ module parquet
     !> across all rows" access pattern. Reads only the one row group `row_index` falls in (not the
     !> whole column), unless a row filter is active (parquet_open_reader(..., filter=)/
     !> parquet_reader_set_filter), in which case `row_index` addresses the filtered result and the
-    !> whole (filtered) column is read, since a filter mask has no row-group structure of its own.
+    !> whole (filtered) column is read -- mapping a filtered row index back to its physical row
+    !> group needs a per-row-group survivor count that this path does not yet use.
     interface parquet_read_array_row_mode
         module procedure parquet_read_int32_array_row_mode
         module procedure parquet_read_int32_array_row_mode_row_index_int64
@@ -773,7 +823,8 @@ module parquet
     !> call), so a vector column whose total element count (rows times per-row width) would
     !> otherwise exceed 2,147,483,647 can still be read this way. If a row filter is active
     !> (parquet_open_reader(..., filter=)/parquet_reader_set_filter), the whole (filtered) column
-    !> is read instead, since a filter mask has no row-group structure of its own.
+    !> is read instead, for the same reason parquet_read_array_row_mode falls back: `elem_index`
+    !> then addresses the filtered result.
     interface parquet_read_array_element_mode
         module procedure parquet_read_int32_array_element_mode
         module procedure parquet_read_int64_array_element_mode
@@ -977,6 +1028,8 @@ module parquet
     public :: parquet_writer
     public :: parquet_reader
     public :: parquet_filter
+    public :: parquet_sortkey
+    public :: parquet_reader_set_sort
     public :: parquet_column_info
     public :: parquet_column_type
     public :: parquet_size_auto
@@ -1007,6 +1060,24 @@ module parquet
     public :: parquet_load_qc_maml_file
     public :: parquet_validate_maml
     public :: parquet_validate_user_maml
+    !> Applies a filter to an already-open reader (see the specifics' own doc-comments for the
+    !> full contract). Two forms: whole-file, and scoped to an inclusive 1-based row-group range.
+    !>
+    !> The scoped form is the memory-bounded one, and the difference is in how the mask is BUILT,
+    !> not merely in which rows survive. Whole-file, every filter column is read in one batched,
+    !> thread-parallel pass and left decoded in the reader's cache -- fastest, and the right
+    !> default. Scoped, the expression is evaluated one row group at a time and each chunk is
+    !> released before the next is read, so peak memory is one row group's worth of the filter
+    !> columns rather than the whole file; rows outside the range never match, and nothing is left
+    !> cached, so a filter column read afterwards is read again. Use it when the file is larger
+    !> than memory, or when only part of it is of interest -- typically alongside chunked reads
+    !> over the same row groups.
+    interface parquet_reader_set_filter
+        module procedure parquet_reader_set_filter_base
+        module procedure parquet_reader_set_filter_scoped_int32
+        module procedure parquet_reader_set_filter_scoped_int64
+    end interface parquet_reader_set_filter
+
     public :: parquet_open_reader
     public :: parquet_reader_set_filter
     public :: parquet_close_reader
@@ -2144,10 +2215,42 @@ module parquet
         !> A reader opened with sample_fraction= is fine: the filter combines
         !> with the sample draw, the same way passing both to
         !> parquet_open_reader does.
-        module subroutine parquet_reader_set_filter(reader, filter)
+        module subroutine parquet_reader_set_filter_base(reader, filter)
             type(parquet_reader), intent(inout) :: reader !! open, unfiltered reader with no column decoded yet.
             type(parquet_filter), intent(in) :: filter !! filter whose rules are parsed, validated, and applied.
-        end subroutine parquet_reader_set_filter
+        end subroutine parquet_reader_set_filter_base
+        !> Row-group-scoped form, int32 bounds -- see the generic interface above.
+        module subroutine parquet_reader_set_filter_scoped_int32(reader, filter, row_group_lo, row_group_hi)
+            type(parquet_reader), intent(inout) :: reader !! open, unfiltered reader with no column decoded yet.
+            type(parquet_filter), intent(in) :: filter !! filter whose rules are parsed, validated, and applied.
+            integer(int32), intent(in) :: row_group_lo !! first row group to evaluate over (1-based).
+            integer(int32), intent(in) :: row_group_hi !! last row group to evaluate over (inclusive).
+        end subroutine parquet_reader_set_filter_scoped_int32
+        !> Row-group-scoped form, int64 bounds -- see the generic interface above.
+        module subroutine parquet_reader_set_filter_scoped_int64(reader, filter, row_group_lo, row_group_hi)
+            type(parquet_reader), intent(inout) :: reader !! open, unfiltered reader with no column decoded yet.
+            type(parquet_filter), intent(in) :: filter !! filter whose rules are parsed, validated, and applied.
+            integer(int64), intent(in) :: row_group_lo !! first row group to evaluate over (1-based).
+            integer(int64), intent(in) :: row_group_hi !! last row group to evaluate over (inclusive).
+        end subroutine parquet_reader_set_filter_scoped_int64
+        !> Applies `sort_by` to an already-open `reader`, exactly as
+        !> parquet_open_reader(..., sort_by=) would have: every column read
+        !> from here on -- and every column already decoded -- comes back in
+        !> key order. Provided for the same reasons parquet_reader_set_filter
+        !> is: a caller that does not own the parquet_open_reader call, or one
+        !> that can only choose its keys after inspecting the file's schema.
+        !>
+        !> Refuses, with error stop, in three states: when the reader already
+        !> has a sort (add every key to one parquet_sortkey instead), when any
+        !> column has already been decoded on this reader (data already handed
+        !> back could not then be aligned with anything read afterwards), and
+        !> when a chunked read has already been done (its row groups have no
+        !> meaning once the rows are reordered). A reader opened with filter=
+        !> or sample_fraction= is fine: the sort orders the surviving rows.
+        module subroutine parquet_reader_set_sort(reader, sort_by)
+            type(parquet_reader), intent(inout) :: reader !! open, unsorted reader with no column decoded yet.
+            type(parquet_sortkey), intent(in) :: sort_by !! sort keys, parsed and validated here.
+        end subroutine parquet_reader_set_sort
         !> Reader, int32 specific of parquet_get_chunk_size -- see the generic interface above.
         module subroutine parquet_get_chunk_size_reader_int32(reader, chunk_size, row_group)
             type(parquet_reader), intent(in) :: reader !! open reader.
@@ -2173,7 +2276,7 @@ module parquet
         !> the file immediately after opening. Materializes the whole file in
         !> memory up front -- see MANUAL.md's "Performance and memory" section.
         module subroutine parquet_open_reader_base(reader, filename, use_threads, filter, sample_fraction, sample_seed, &
-                schema, qc, qc_soft, prefetch)
+                schema, qc, qc_soft, prefetch, sort_by)
             type(parquet_reader), intent(out) :: reader !! reader to open.
             character(len=*), intent(in) :: filename !! .parquet file path.
             logical, intent(in), optional :: use_threads !! use Arrow's multi-threaded reader.
@@ -2188,6 +2291,7 @@ module parquet
             !! (on whenever a schema is given), pass .false. to opt out; no-op without a schema.
             logical, intent(in), optional :: qc_soft !! qc violations warn instead of error-stopping.
             logical, intent(in), optional :: prefetch !! read and cache every column immediately.
+            type(parquet_sortkey), intent(in), optional :: sort_by !! read-time sort keys; applied after any filter.
         end subroutine parquet_open_reader_base
         !> nrows (integer(int64)): filled in with the post-filter/post-sample row count
         !> via parquet_get_nrows(reader, nrows, check_positive=.true.) -- so,
@@ -2199,7 +2303,7 @@ module parquet
         !> yourself afterwards, without check_positive, to get 0 back instead
         !> of aborting.
         module subroutine parquet_open_reader_nrows_int64(reader, filename, use_threads, filter, sample_fraction, &
-                sample_seed, schema, qc, qc_soft, nrows, prefetch)
+                sample_seed, schema, qc, qc_soft, nrows, prefetch, sort_by)
             type(parquet_reader), intent(out) :: reader !! reader to open.
             character(len=*), intent(in) :: filename !! .parquet file path.
             logical, intent(in), optional :: use_threads !! use Arrow's multi-threaded reader.
@@ -2215,6 +2319,7 @@ module parquet
             logical, intent(in), optional :: qc_soft !! qc violations warn instead of error-stopping.
             integer(int64), intent(out) :: nrows !! post-filter/post-sample row count; error stops if zero.
             logical, intent(in), optional :: prefetch !! read and cache every column immediately.
+            type(parquet_sortkey), intent(in), optional :: sort_by !! read-time sort keys; applied after any filter.
         end subroutine parquet_open_reader_nrows_int64
         !> Same as parquet_open_reader_nrows_int64, but for a caller-supplied
         !> integer(int32) nrows -- also fails with error stop (via
@@ -2222,7 +2327,7 @@ module parquet
         !> exactly as a direct parquet_get_nrows(reader, nrows) call with an
         !> integer(int32) nrows would.
         module subroutine parquet_open_reader_nrows_int32(reader, filename, use_threads, filter, sample_fraction, &
-                sample_seed, schema, qc, qc_soft, nrows, prefetch)
+                sample_seed, schema, qc, qc_soft, nrows, prefetch, sort_by)
             type(parquet_reader), intent(out) :: reader !! reader to open.
             character(len=*), intent(in) :: filename !! .parquet file path.
             logical, intent(in), optional :: use_threads !! use Arrow's multi-threaded reader.
@@ -2238,6 +2343,7 @@ module parquet
             logical, intent(in), optional :: qc_soft !! qc violations warn instead of error-stopping.
             integer(int32), intent(out) :: nrows !! post-filter/post-sample row count; error stops if zero or if it overflows int32.
             logical, intent(in), optional :: prefetch !! read and cache every column immediately.
+            type(parquet_sortkey), intent(in), optional :: sort_by !! read-time sort keys; applied after any filter.
         end subroutine parquet_open_reader_nrows_int32
         !> Closes `reader`, freeing the underlying C++ handle. check_complete (optional,
         !> default .false.): verify every column read via parquet_read_column_chunk had every
@@ -3454,5 +3560,52 @@ contains
         call move_alloc(tmp, this%rules)
         this%n = this%n + 1
     end subroutine parquet_filter_add
+
+    !> Appends one sort key; see parquet_sortkey's own doc comment for the key
+    !> grammar and the null-placement rule. Unvalidated here -- the reader
+    !> parses each key and checks the column when it actually applies the sort.
+    !> The stored text is deferred-length, exactly as parquet_filter%add's is.
+    subroutine parquet_sortkey_add(this, key, nulls_first)
+        class(parquet_sortkey), intent(inout) :: this !! sort spec gaining one key.
+        character(len=*), intent(in) :: key !! "<column> [asc|desc]" (max sortkey_max_key_len characters).
+        logical, intent(in), optional :: nulls_first !! place this key's null rows first; defaults to .false. (nulls last).
+        character(len=:), allocatable :: tmp(:)
+        logical, allocatable :: tmp_nf(:)
+        character(len=32) :: cap_str
+        logical :: nf
+
+        if (len(key) > sortkey_max_key_len) then
+            write(cap_str, '(i0)') sortkey_max_key_len
+            error stop "parquet_sortkey%add: key exceeds the maximum supported length (" // trim(cap_str) // &
+                " characters): " // trim(key)
+        end if
+        if (this%n >= sortkey_max_keys) then
+            write(cap_str, '(i0)') sortkey_max_keys
+            error stop "parquet_sortkey%add: too many sort keys (maximum " // trim(cap_str) // ")"
+        end if
+        nf = .false.
+        if (present(nulls_first)) nf = nulls_first
+
+        if (.not. allocated(this%keys)) then
+            allocate(character(len=len(key)) :: tmp(1))
+            tmp(1) = key
+            call move_alloc(tmp, this%keys)
+            allocate(tmp_nf(1))
+            tmp_nf(1) = nf
+            call move_alloc(tmp_nf, this%nulls_first)
+            this%n = 1
+            return
+        end if
+
+        allocate(character(len=max(len(this%keys), len(key))) :: tmp(this%n + 1))
+        tmp(1:this%n) = this%keys(1:this%n)
+        tmp(this%n + 1) = key
+        call move_alloc(tmp, this%keys)
+        allocate(tmp_nf(this%n + 1))
+        tmp_nf(1:this%n) = this%nulls_first(1:this%n)
+        tmp_nf(this%n + 1) = nf
+        call move_alloc(tmp_nf, this%nulls_first)
+        this%n = this%n + 1
+    end subroutine parquet_sortkey_add
 
 end module

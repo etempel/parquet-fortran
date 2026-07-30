@@ -1517,6 +1517,33 @@ entirely when the answer is no. Rules to preserve:
 - **Keep the two fallbacks** for when a mask genuinely is needed: `check_or_report_nulls` short-circuits
   to `memset` when `null_count() == 0`, and the per-row replay sits behind `if (.not. all(valid))`.
 
+**A row transform is either a MASK or a PERMUTATION, and only the permutation restricts anything.**
+`filter=`/`sample_fraction=` install a boolean mask; `sort_by=` installs an `Int64Array` permutation
+(`sort_perm`). `apply_row_transform` applies them in that order — filter first, then sort within the
+survivors — at the single choke point every whole-column decode goes through. The distinction is
+load-bearing for every guard: a mask only ever *removes* rows, so row groups stay contiguous and
+chunked reads, `parquet_get_chunk_size` and row/element mode all work under one (row-group-scoped,
+against each group's surviving count). A permutation *reorders* rows, so sorted row 5 may come from
+row group 47 — nothing row-group-scoped survives it. **Every "not while transformed" check must key
+on `reader_has_sort_permutation` (C++) / `check_reader_no_sort` (Fortran), never on the mask**;
+widening either to "any transform" silently re-bans everything filtering supports, and dropping them
+silently returns physically ordered rows from a sorted reader. Row mode and element mode each route
+their whole-column fallback through ONE decision point (`fetch_row_mode_array` and a branch inside
+`stream_element_mode_row_groups`) rather than per-entry-point branches, so a new type family cannot
+miss it.
+
+**The sort engine is deliberately free of reader state** (`SortKeyData`, `sort_compare_key`,
+`sort_build_permutation` in `parquet_wrapper.cpp`): its keys arrive as plain typed vectors, and only
+`sort_bind_arrow_key` touches Arrow. That is what lets the same engine later serve `parquet_table`'s
+in-memory sort (whose Arrow buffers are gone) and a possible public `parquet_sort` module over any
+1-D array. Don't reach for reader state from anything under that banner. Two further rules:
+its ordering **must keep reproducing `arrow::compute::SortIndices` exactly** (nulls/NaNs absolute,
+never flipped by `descending`; ascending gives values → NaNs → nulls; ties hold file order), since
+that is what makes a `pyarrow` cross-check agree row for row; and the **integer counting-sort fast
+path is a second code path producing the same answer**, so it keeps its own tests plus the
+`parquet_debug_set_disable_sort_counting_path` hook that forces the comparator path for comparison —
+it is the one place in the engine where a wrong answer would be fast rather than slow.
+
 **A new reader query that a sibling module needs has to be PUBLIC `parquet` API** — there is no
 internal back door. `parquet_reader`'s components are `private`, so `parquet_tables` (and any future
 sibling module) cannot reach `%handle` and therefore cannot call `parquet_bindings` directly on a
@@ -1624,13 +1651,23 @@ the fixed offset, and writes them into the correct slice of the caller's already
 group's worth of elements, even though the final output still spans the whole file.
 `resolve_element_mode_col_size` mirrors `parquet_get_col_size`'s own schema-only col_size lookup,
 so element mode doesn't need a whole-column read just to validate `col_index`/compute the stride
-offset either. The one case that falls back to the whole-column path (for all four) is
-an active row filter (`parquet_open_reader(..., filter=)`/`parquet_reader_set_filter`): a filter
-mask has no row-group structure of its own (see `get_row_group_chunk_array`'s own comment), so
-`row_index`/the per-row iteration there means "index into the filtered result", not a physical
-file row. Regression-tested via `test/error_scenarios.f90`'s
+offset either. **An active row filter/sample does not change any of this.** `row_index`/
+`elem_index` then address the filtered result rather than a physical file row, and both are
+resolved against each row group's *surviving* count instead of the footer's physical one —
+`row_group_effective_rows`, which `resolve_row_group_for_row` and
+`stream_element_mode_row_groups` both walk, so one function covers the masked and unmasked cases
+and neither mode has a separate filtered branch any more. This works because
+`get_row_group_chunk_array` hands back a chunk with that row group's own mask segment already
+applied, so a local index within the returned chunk *is* a rank among survivors. A row group with
+no survivors contributes 0 and is stepped over, exactly as a physically empty one already was.
+The one remaining whole-column read in this area is `list_width_verified`'s masked branch, for a
+plain `LIST`/`LARGE_LIST` column only (a width measured per row group under a mask would answer
+about rows the caller filtered away). Regression-tested via `test/error_scenarios.f90`'s
 `scenario_col_size_and_row_mode_avoid_whole_column_read` (a process-global
 `g_debug_force_whole_column_read_error` hook forces `get_single_chunk_array` to abort the instant
 it would actually read a whole column, on a tiny fixture — the scenario finishing without
-aborting proves none of the four calls took that path) plus its negative control
+aborting proves none of the four calls took that path), its filtered counterpart
+`scenario_filter_row_element_mode_no_whole_column_read` (same hook, armed after a filtered open,
+across all four entry-point families: the int32 template, the hand-written logical and string
+pair, and the temporal template), plus the shared negative control
 `scenario_whole_column_read_forced_error_control` (proves the hook itself actually fires).

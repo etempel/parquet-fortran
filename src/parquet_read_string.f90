@@ -184,7 +184,7 @@ contains
         nrows = size(values, kind=int64)
         call check_reader_open(reader, "parquet_read_column_chunk")
         call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
+        call check_reader_no_sort(reader, "parquet_read_column_chunk")
         call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
         item_len = len(values(1))
         allocate(packed(item_len*nrows))
@@ -226,7 +226,7 @@ contains
         nrows = size(values, 2, kind=int64)
         call check_reader_open(reader, "parquet_read_column_chunk")
         call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
+        call check_reader_no_sort(reader, "parquet_read_column_chunk")
         call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
         item_len = len(values(1,1))
         allocate(packed(item_len*asize*nrows))
@@ -265,7 +265,7 @@ contains
 
         call check_reader_open(reader, "parquet_read_column_chunk")
         call check_column_exists(reader, name, "parquet_read_column_chunk")
-        call check_reader_no_filter(reader, "parquet_read_column_chunk")
+        call check_reader_no_sort(reader, "parquet_read_column_chunk")
         call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
         call values%clear()
         call parquet_read_string_column_chunk_buffers(reader%handle, trim(name)//char(0), row_group, nrows, nchars, &

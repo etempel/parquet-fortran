@@ -21,6 +21,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   applied to an already-open reader with the new `parquet_reader_set_filter`. Rule text is no
   longer capped at 512 characters, and `parquet_close_reader(..., print_stat=.true.)` prints the
   whole expression as applied. See [Row filtering](doc/pages/reading.md#row-filtering-with-parquet_filter).
+- Read-time sorting: `parquet_open_reader(..., sort_by=srt)` returns a file's rows ordered by one
+  or more columns, and every column read afterwards comes back in that order. Keys are added one
+  per `srt%add("ra asc")`/`%add("-dec")` call to a `parquet_sortkey` and applied in order, with
+  per-key `nulls_first=`, stable ties, and any scalar column type as a key (including `date`/
+  `time`/`timestamp` and dotted struct-leaf paths). Sorting composes with `filter=`/
+  `sample_fraction=` — the filter runs first, the sort orders the survivors — and can also be
+  applied to an already-open reader with `parquet_reader_set_sort`. Null and NaN placement
+  reproduce Arrow's own sort ordering exactly, so a result cross-checked against `pyarrow` matches
+  row for row. While a sort is active, row-group-scoped operations (`parquet_read_column_chunk`,
+  `parquet_get_chunk_size`) are refused and row/element mode read the whole column, since a sorted
+  row belongs to no single row group. See
+  [Reading rows in sorted order](doc/pages/reading.md#reading-rows-in-sorted-order-with-parquet_sortkey).
+- Streaming/chunked reads now work on a filtered or sampled reader, which previously refused them
+  outright: `parquet_read_column_chunk` hands back that row group's surviving rows, and
+  `parquet_get_chunk_size` reports that same count, so a chunked loop's sizes still sum to
+  `parquet_get_nrows` (a row group with no survivors reads as an empty chunk, and still counts as
+  read for `check_complete`). Read-time qc validates the filtered chunk rather than the raw one.
+  `parquet_reader_set_filter(reader, filter, row_group_lo, row_group_hi)` additionally scopes the
+  filter to a row-group range and evaluates it one row group at a time, so peak memory is one row
+  group's worth of the filter columns instead of the whole file — enough to filter a file larger
+  than memory. See [Streaming/chunked reads](doc/pages/reading.md#streamingchunked-reads).
 - Added `parquet_tables` (`parquet_table`): presents a whole parquet file as one in-memory table
   (`parquet_open_table`), hands columns back as ordinary Fortran arrays through a widening copy
   (`%get`) or a zero-copy typed pointer (`%col`), builds a table from scratch in memory
@@ -56,6 +77,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `parquet_read_array_row_mode` and `parquet_read_array_element_mode` stay row-group-scoped on a
+  filtered or sampled reader, where they previously fell back to reading the whole (filtered)
+  column. `row_index`/`elem_index` still address the filtered result, and are now resolved
+  against each row group's surviving row count — so row mode reads only the row group the
+  requested row lives in, and element mode streams row group by row group, exactly as they
+  already did without a filter. Results are unchanged; peak memory is not.
 - **`parquet_open_writer`'s default compression codec is now `"zstd"` at level 3, changed from
   `"snappy"`.** This is a behavior change for any caller that omits `compression=` — files written
   without an explicit codec will now be smaller (better ratio than snappy) at a modest extra write

@@ -148,8 +148,6 @@ contains
                 test_write_chunk_row_count_mismatch_aborts), &
             new_unittest("streaming: writing a chunk with type mismatch aborts", &
                 test_write_chunk_type_mismatch_aborts), &
-            new_unittest("chunked read: parquet_read_column_chunk on a filtered reader aborts", &
-                test_read_chunk_with_filter_aborts), &
             new_unittest("chunked read: hard qc violation in one row group aborts, naming that row group", &
                 test_read_chunk_qc_hard_aborts), &
             new_unittest("chunked read: soft qc violation warns once per column across multiple row groups", &
@@ -285,6 +283,30 @@ contains
                 test_prefetch_unknown_column_aborts), &
             new_unittest("filter: unknown column aborts", &
                 test_filter_unknown_column_aborts), &
+            new_unittest("sort: unknown column aborts", &
+                test_sort_unknown_column_aborts), &
+            new_unittest("sort: vector column key aborts", &
+                test_sort_vector_column_aborts), &
+            new_unittest("sort: empty key aborts", &
+                test_sort_empty_key_aborts), &
+            new_unittest("sort: unrecognized direction aborts", &
+                test_sort_bad_direction_aborts), &
+            new_unittest("sort: two direction words abort", &
+                test_sort_two_direction_words_aborts), &
+            new_unittest("sort: '-' plus an explicit direction aborts", &
+                test_sort_minus_and_direction_aborts), &
+            new_unittest("sort: over-long key aborts", &
+                test_sort_key_too_long_aborts), &
+            new_unittest("sort: too many keys aborts", &
+                test_sort_too_many_keys_aborts), &
+            new_unittest("sort: chunked read on a sorted reader aborts", &
+                test_sort_chunked_read_aborts), &
+            new_unittest("sort: parquet_get_chunk_size on a sorted reader aborts", &
+                test_sort_get_chunk_size_aborts), &
+            new_unittest("sort: a second parquet_reader_set_sort aborts", &
+                test_sort_set_sort_twice_aborts), &
+            new_unittest("sort: parquet_reader_set_sort after a read aborts", &
+                test_sort_set_sort_after_read_aborts), &
             new_unittest("filter: vector column aborts", &
                 test_filter_vector_column_aborts), &
             new_unittest("filter: malformed rule aborts", &
@@ -347,12 +369,14 @@ contains
                 test_filter_leaf_too_long_aborts), &
             new_unittest("filter: combined %add rules past the node limit abort", &
                 test_filter_too_many_nodes_across_adds_aborts), &
+            new_unittest("filter: a row-group scope past the last row group aborts", &
+                test_filter_scope_out_of_range_aborts), &
+            new_unittest("filter: a reversed row-group scope aborts", &
+                test_filter_scope_reversed_aborts), &
             new_unittest("sample_fraction: negative value aborts", &
                 test_sample_negative_fraction_aborts), &
             new_unittest("sample_fraction: NaN value aborts", &
                 test_sample_nan_fraction_aborts), &
-            new_unittest("chunked read on a reader opened with sample_fraction (no filter=) aborts", &
-                test_read_chunk_with_sample_aborts), &
             new_unittest("print_stat reports the sample: fraction=.../seed=... line", &
                 test_print_stat_sampled_rows), &
             new_unittest("a forced sample-mask-build failure aborts via a clean error stop", &
@@ -1792,14 +1816,6 @@ contains
                 "maml: internal:multitype_table)")
     end subroutine test_write_chunk_type_mismatch_aborts
 
-    subroutine test_read_chunk_with_filter_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status_and_stderr(error, "read_chunk_with_filter", expect_abort=.true., &
-            failure_message="a chunked read on a filtered reader was expected to error stop", &
-            required_stderr="chunked reads are not supported on a reader opened with an active filter=")
-    end subroutine test_read_chunk_with_filter_aborts
-
     subroutine test_read_chunk_qc_hard_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
@@ -2466,6 +2482,126 @@ contains
             required_stderr="parquet_prefetch_columns: column not found in parquet file: not_a_real_column")
     end subroutine test_prefetch_unknown_column_aborts
 
+    !> Read-time sort abort path: see scenario_sort_unknown_column in test/error_scenarios.f90
+    !> for what it does and why that state is rejected.
+    subroutine test_sort_unknown_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sort_unknown_column", expect_abort=.true., &
+            failure_message="opening a reader sorted by an unknown column was expected to abort", &
+            required_stderr="unknown column in sort key: nosuch")
+    end subroutine test_sort_unknown_column_aborts
+
+    !> Read-time sort abort path: see scenario_sort_vector_column in test/error_scenarios.f90
+    !> for what it does and why that state is rejected.
+    subroutine test_sort_vector_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sort_vector_column", expect_abort=.true., &
+            failure_message="opening a reader sorted by a vector column was expected to abort", &
+            required_stderr="sort key 'vec' is a vector column")
+    end subroutine test_sort_vector_column_aborts
+
+    !> Read-time sort abort path: see scenario_sort_empty_key in test/error_scenarios.f90
+    !> for what it does and why that state is rejected.
+    subroutine test_sort_empty_key_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sort_empty_key", expect_abort=.true., &
+            failure_message="an empty sort key was expected to abort", &
+            required_stderr="empty sort key")
+    end subroutine test_sort_empty_key_aborts
+
+    !> Read-time sort abort path: see scenario_sort_bad_direction in test/error_scenarios.f90
+    !> for what it does and why that state is rejected.
+    subroutine test_sort_bad_direction_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sort_bad_direction", expect_abort=.true., &
+            failure_message="an unrecognized sort direction was expected to abort", &
+            required_stderr="has an unrecognized direction 'sideways'")
+    end subroutine test_sort_bad_direction_aborts
+
+    !> Read-time sort abort path: see scenario_sort_two_direction_words in test/error_scenarios.f90
+    !> for what it does and why that state is rejected.
+    subroutine test_sort_two_direction_words_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sort_two_direction_words", expect_abort=.true., &
+            failure_message="two direction words in one sort key were expected to abort", &
+            required_stderr="has more than one direction word")
+    end subroutine test_sort_two_direction_words_aborts
+
+    !> Read-time sort abort path: see scenario_sort_minus_and_direction in test/error_scenarios.f90
+    !> for what it does and why that state is rejected.
+    subroutine test_sort_minus_and_direction_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sort_minus_and_direction", expect_abort=.true., &
+            failure_message="combining the '-' shorthand with an explicit direction was expected to abort", &
+            required_stderr="combines the '-' shorthand with an explicit direction")
+    end subroutine test_sort_minus_and_direction_aborts
+
+    !> Read-time sort abort path: see scenario_sort_key_too_long in test/error_scenarios.f90
+    !> for what it does and why that state is rejected.
+    subroutine test_sort_key_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sort_key_too_long", expect_abort=.true., &
+            failure_message="a sort key longer than the supported maximum was expected to abort", &
+            required_stderr="parquet_sortkey%add: key exceeds the maximum supported length")
+    end subroutine test_sort_key_too_long_aborts
+
+    !> Read-time sort abort path: see scenario_sort_too_many_keys in test/error_scenarios.f90
+    !> for what it does and why that state is rejected.
+    subroutine test_sort_too_many_keys_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sort_too_many_keys", expect_abort=.true., &
+            failure_message="more sort keys than the cap allows was expected to abort", &
+            required_stderr="parquet_sortkey%add: too many sort keys")
+    end subroutine test_sort_too_many_keys_aborts
+
+    !> Read-time sort abort path: see scenario_sort_chunked_read in test/error_scenarios.f90
+    !> for what it does and why that state is rejected.
+    subroutine test_sort_chunked_read_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sort_chunked_read", expect_abort=.true., &
+            failure_message="a chunked read on a sorted reader was expected to abort", &
+            required_stderr="parquet_read_column_chunk: not supported on a reader with an active sort")
+    end subroutine test_sort_chunked_read_aborts
+
+    !> Read-time sort abort path: see scenario_sort_get_chunk_size in test/error_scenarios.f90
+    !> for what it does and why that state is rejected.
+    subroutine test_sort_get_chunk_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sort_get_chunk_size", expect_abort=.true., &
+            failure_message="asking for a chunk size on a sorted reader was expected to abort", &
+            required_stderr="parquet_get_chunk_size: not supported on a reader with an active sort")
+    end subroutine test_sort_get_chunk_size_aborts
+
+    !> Read-time sort abort path: see scenario_sort_set_sort_twice in test/error_scenarios.f90
+    !> for what it does and why that state is rejected.
+    subroutine test_sort_set_sort_twice_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sort_set_sort_twice", expect_abort=.true., &
+            failure_message="applying a second sort to one reader was expected to abort", &
+            required_stderr="this reader already has an active sort")
+    end subroutine test_sort_set_sort_twice_aborts
+
+    !> Read-time sort abort path: see scenario_sort_set_sort_after_read in test/error_scenarios.f90
+    !> for what it does and why that state is rejected.
+    subroutine test_sort_set_sort_after_read_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sort_set_sort_after_read", expect_abort=.true., &
+            failure_message="applying a sort after reading a column was expected to abort", &
+            required_stderr="a column has already been read on this reader")
+    end subroutine test_sort_set_sort_after_read_aborts
+
     !> parquet_open_reader(..., filter=) validates every filter column name
     !> against the schema before applying it -- an unknown column aborts
     !> cleanly rather than reaching Arrow's own uncaught exception.
@@ -2757,6 +2893,23 @@ contains
             required_stderr="more terms than the supported limit")
     end subroutine test_filter_too_many_nodes_across_adds_aborts
 
+    !> Both ends of the scoped filter's row-group range validation.
+    subroutine test_filter_scope_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_scope_out_of_range", expect_abort=.true., &
+            failure_message="a filter scoped past the last row group was expected to abort", &
+            required_stderr="filter row-group range")
+    end subroutine test_filter_scope_out_of_range_aborts
+
+    subroutine test_filter_scope_reversed_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_scope_reversed", expect_abort=.true., &
+            failure_message="a reversed row-group scope was expected to abort", &
+            required_stderr="filter row-group range")
+    end subroutine test_filter_scope_reversed_aborts
+
     !> parquet_open_reader's sample_fraction < 0.0 aborts immediately.
     subroutine test_sample_negative_fraction_aborts(error)
         type(error_type), allocatable, intent(out) :: error
@@ -2776,17 +2929,6 @@ contains
             failure_message="a NaN sample_fraction was expected to abort", &
             required_stderr="sample_fraction must not be NaN")
     end subroutine test_sample_nan_fraction_aborts
-
-    !> Chunked reads are disallowed on a reader opened with sample_fraction < 1.0 alone (no
-    !> filter=) -- sampling shares filter_mask/parquet_reader_has_filter with filter=, so
-    !> check_reader_no_filter's guard fires the same way it does for an active filter=.
-    subroutine test_read_chunk_with_sample_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status_and_stderr(error, "read_chunk_with_sample", expect_abort=.true., &
-            failure_message="a chunked read on a sampled reader was expected to error stop", &
-            required_stderr="chunked reads are not supported on a reader opened with an active filter=/sample_fraction=")
-    end subroutine test_read_chunk_with_sample_aborts
 
     !> parquet_reader_print_stat's "sample: fraction=... seed=..." line.
     subroutine test_print_stat_sampled_rows(error)

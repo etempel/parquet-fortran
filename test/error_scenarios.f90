@@ -218,8 +218,6 @@ program error_scenarios
         call scenario_write_chunk_row_count_mismatch()
     case ("write_chunk_type_mismatch")
         call scenario_write_chunk_type_mismatch()
-    case ("read_chunk_with_filter")
-        call scenario_read_chunk_with_filter()
     case ("read_chunk_qc_hard_aborts")
         call scenario_read_chunk_qc_hard_aborts()
     case ("read_chunk_qc_soft_warns")
@@ -354,12 +352,52 @@ program error_scenarios
         call scenario_filter_leaf_too_long()
     case ("filter_too_many_nodes_across_adds")
         call scenario_filter_too_many_nodes_across_adds()
+    case ("filter_scope_out_of_range")
+        call scenario_filter_scope_out_of_range()
+    case ("filter_scope_reversed")
+        call scenario_filter_scope_reversed()
+    case ("filter_row_element_mode_no_whole_column_read")
+        call scenario_filter_row_element_mode_no_whole_column_read()
+    case ("filter_scoped_reads_no_whole_column")
+        call scenario_filter_scoped_reads_no_whole_column()
+    case ("sort_unknown_column")
+        call scenario_sort_unknown_column()
+    case ("sort_vector_column")
+        call scenario_sort_vector_column()
+    case ("sort_empty_key")
+        call scenario_sort_empty_key()
+    case ("sort_bad_direction")
+        call scenario_sort_bad_direction()
+    case ("sort_minus_only")
+        call scenario_sort_minus_only()
+    case ("sort_name_too_long")
+        call scenario_sort_name_too_long()
+    case ("sort_two_direction_words")
+        call scenario_sort_two_direction_words()
+    case ("sort_minus_and_direction")
+        call scenario_sort_minus_and_direction()
+    case ("sort_key_too_long")
+        call scenario_sort_key_too_long()
+    case ("sort_too_many_keys")
+        call scenario_sort_too_many_keys()
+    case ("sort_chunked_read")
+        call scenario_sort_chunked_read()
+    case ("sort_chunked_read_string")
+        call scenario_sort_chunked_read_string()
+    case ("sort_chunked_read_vector")
+        call scenario_sort_chunked_read_vector()
+    case ("sort_chunked_read_temporal")
+        call scenario_sort_chunked_read_temporal()
+    case ("sort_get_chunk_size")
+        call scenario_sort_get_chunk_size()
+    case ("sort_set_sort_twice")
+        call scenario_sort_set_sort_twice()
+    case ("sort_set_sort_after_read")
+        call scenario_sort_set_sort_after_read()
     case ("sample_negative_fraction")
         call scenario_sample_negative_fraction()
     case ("sample_nan_fraction")
         call scenario_sample_nan_fraction()
-    case ("read_chunk_with_sample")
-        call scenario_read_chunk_with_sample()
     case ("print_stat_sampled_rows")
         call scenario_print_stat_sampled_rows()
     case ("sample_mask_build_error")
@@ -1652,27 +1690,6 @@ contains
         print '(a)', "unexpectedly wrote an over-length string into a fixed-size string matrix chunk column " // &
             "without error"
     end subroutine scenario_write_chunk_string_matrix_exceeds_array_size
-
-    !> parquet_read_column_chunk is disallowed outright on a reader opened with an active
-    !> filter=, since the filter mask is a single flat mask sized to the whole unfiltered file
-    !> with no row-group structure of its own -- see check_reader_no_filter's own comment in
-    !> parquet_read.f90.
-    subroutine scenario_read_chunk_with_filter()
-        type(parquet_writer) :: writer
-        type(parquet_reader) :: reader
-        type(parquet_filter) :: filt
-        integer(int32) :: v(4), back(2)
-
-        v = [1, 2, 3, 4]
-        call parquet_open_writer(writer, "test_run/read_chunk_filter.parquet", chunk_size=2)
-        call parquet_write_column(writer, "v", v)
-        call parquet_close_writer(writer)
-
-        call filt%add("v >= 0")
-        call parquet_open_reader(reader, "test_run/read_chunk_filter.parquet", filter=filt)
-        call parquet_read_column_chunk(reader, "v", 1, back)
-        print '(a)', "unexpectedly read a chunk on a filtered reader without aborting"
-    end subroutine scenario_read_chunk_with_filter
 
     !> Default (qc_soft=.false., hard): a chunk read whose own row group contains an
     !> out-of-range value with qc active aborts the process, naming that row group -- reusing
@@ -3197,6 +3214,430 @@ contains
             "parquet_read_array_row_mode/parquet_read_array_element_mode all avoided a whole-column read, as expected"
     end subroutine scenario_col_size_and_row_mode_avoid_whole_column_read
 
+    !> The same guarantee as scenario_col_size_and_row_mode_avoid_whole_column_read, but with a
+    !> ROW FILTER active -- which used to be the one case where both modes deliberately gave it up
+    !> and read the whole (filtered) column, because `row_index`/`elem_index` address the filtered
+    !> result rather than a physical file row and nothing mapped one to the other.
+    !>
+    !> They now map it by walking each row group's SURVIVING row count instead of its physical one
+    !> (resolve_row_group_for_row / stream_element_mode_row_groups in parquet_wrapper.cpp), so the
+    !> filtered case is row-group-scoped exactly like the unfiltered one. All four entry-point
+    !> families are exercised, since three of them carry their own copy of that logic rather than
+    !> sharing one: the int32 template, the hand-written logical and string pair, and the temporal
+    !> template.
+    !>
+    !> Same mechanism as the scenario above: parquet_debug_set_force_whole_column_read_error is
+    !> armed AFTER the reader is opened (opening with filter= legitimately reads the filter column
+    !> whole-file to build the mask), so this scenario finishing without aborting is the assertion.
+    !> Its negative control is the shared scenario_whole_column_read_forced_error_control.
+    subroutine scenario_filter_row_element_mode_no_whole_column_read()
+        interface
+            subroutine parquet_debug_set_force_whole_column_read_error(enable) &
+                bind(C, name="parquet_debug_set_force_whole_column_read_error")
+                use iso_c_binding, only : c_int
+                integer(c_int), value :: enable !! nonzero forces the next whole-column read to abort; 0 restores normal behavior.
+            end subroutine parquet_debug_set_force_whole_column_read_error
+        end interface
+
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: out_file = &
+            "test_run/error_scenario_filter_row_element_mode_no_whole_column_read.parquet"
+        integer(int32) :: id(8), vec(3, 8), row_buf(3), elem_buf(6)
+        logical :: flg(2, 8), flg_row(2), flg_elem(6)
+        character(len=8) :: txt(2, 8), txt_row(2), txt_elem(6)
+        type(parquet_date) :: dt(2, 8), dt_row(2), dt_elem(6)
+        integer(int64) :: nrows, total_elems
+        integer :: i, col_size_back
+
+        do i = 1, 8
+            id(i) = i
+            vec(:, i) = [100 * i + 1, 100 * i + 2, 100 * i + 3]
+            flg(1, i) = mod(i, 2) == 0
+            flg(2, i) = i > 4
+            write(txt(1, i), '(a,i0)') "a", i
+            write(txt(2, i), '(a,i0)') "b", i
+            dt(1, i) = parquet_date(2024, 1, i)
+            dt(2, i) = parquet_date(2024, 6, i)
+        end do
+
+        call parquet_open_writer(writer, out_file, chunk_size=2)
+        call parquet_write_column(writer, "id", id)
+        call parquet_write_column(writer, "vec", vec)
+        call parquet_write_column(writer, "flg", flg)
+        call parquet_write_column(writer, "txt", txt)
+        call parquet_write_column(writer, "dt", dt)
+        call parquet_close_writer(writer)
+
+        ! "id > 2" leaves physical rows 3..8, i.e. row group 1 empty -- so filtered row 1 is
+        ! physical row 3, and a mapping still walking physical counts would return row 1's values.
+        call filt%add("id > 2")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        if (nrows /= 6_int64) error stop "filtered reader should report 6 surviving rows"
+
+        call parquet_debug_set_force_whole_column_read_error(1)
+
+        call parquet_get_col_size(reader, "vec", col_size_back)
+        if (col_size_back /= 3) error stop "col_size mismatch for the filtered vector column"
+        call parquet_get_column_total_elements(reader, "vec", total_elems)
+        if (total_elems /= 18_int64) error stop "total element count mismatch for the filtered vector column"
+
+        call parquet_read_array_row_mode(reader, "vec", row_buf, 1)
+        if (any(row_buf /= [301, 302, 303])) error stop "filtered row 1 should be physical row 3"
+        call parquet_read_array_element_mode(reader, "vec", elem_buf, 2)
+        if (any(elem_buf /= [302, 402, 502, 602, 702, 802])) error stop "filtered element 2 should span rows 3..8"
+
+        call parquet_read_array_row_mode(reader, "flg", flg_row, 1)
+        if (flg_row(1) .or. flg_row(2)) error stop "filtered logical row 1 should be physical row 3's flags"
+        call parquet_read_array_element_mode(reader, "flg", flg_elem, 1)
+        if (.not. all(flg_elem .eqv. [.false., .true., .false., .true., .false., .true.])) &
+            error stop "filtered logical element 1 should span rows 3..8"
+
+        call parquet_read_array_row_mode(reader, "txt", txt_row, 1)
+        if (txt_row(1) /= "a3" .or. txt_row(2) /= "b3") error stop "filtered string row 1 should be physical row 3"
+        call parquet_read_array_element_mode(reader, "txt", txt_elem, 2)
+        if (txt_elem(1) /= "b3" .or. txt_elem(6) /= "b8") error stop "filtered string element 2 should span rows 3..8"
+
+        call parquet_read_array_row_mode(reader, "dt", dt_row, 1)
+        if (.not. (dt_row(1) == parquet_date(2024, 1, 3))) error stop "filtered date row 1 should be physical row 3"
+        call parquet_read_array_element_mode(reader, "dt", dt_elem, 1)
+        if (.not. (dt_elem(6) == parquet_date(2024, 1, 8))) error stop "filtered date element 1 should end at row 8"
+
+        call parquet_close_reader(reader)
+        call parquet_debug_set_force_whole_column_read_error(0)
+        print '(a)', "row mode and element mode on a filtered reader avoided a whole-column read, as expected"
+    end subroutine scenario_filter_row_element_mode_no_whole_column_read
+
+    !> ---- Read-time sort (parquet_sortkey / sort_by=) abort paths ----
+    !>
+    !> Every rejection below is an error stop or a C++-side abort, so none of them can live in
+    !> test/test_sort.f90 -- the process dies. They share one tiny fixture helper so each scenario
+    !> is just the offending call.
+
+    !> Writes the small fixture every sort scenario below sorts: a scalar key `v`, a vector column
+    !> `vec` (an invalid sort key), and a string column `txt`.
+    subroutine write_sort_scenario_fixture(out_file)
+        character(len=*), intent(in) :: out_file !! fixture path (one per scenario).
+        type(parquet_writer) :: writer
+        integer(int32) :: v(4) = [30, 10, 40, 20]
+        integer(int32) :: vec(2, 4)
+        character(len=4) :: txt(4) = ["dd  ", "bb  ", "aa  ", "cc  "]
+        integer :: i
+
+        do i = 1, 4
+            vec(:, i) = [10 * i + 1, 10 * i + 2]
+        end do
+        call parquet_open_writer(writer, out_file, chunk_size=2)
+        call parquet_write_column(writer, "v", v)
+        call parquet_write_column(writer, "vec", vec)
+        call parquet_write_column(writer, "txt", txt)
+        call parquet_close_writer(writer)
+    end subroutine write_sort_scenario_fixture
+
+    !> A sort key naming a column the file does not have aborts, naming the column.
+    subroutine scenario_sort_unknown_column()
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_sort_unknown_column.parquet"
+
+        call write_sort_scenario_fixture(out_file)
+        call srt%add("nosuch asc")
+        call parquet_open_reader(reader, out_file, sort_by=srt)   ! -> aborts (unknown column in sort key)
+        print '(a)', "unexpectedly sorted by a column that does not exist"
+    end subroutine scenario_sort_unknown_column
+
+    !> A vector column has no single value per row to order by, so it is rejected -- from the
+    !> schema, before any data is read.
+    subroutine scenario_sort_vector_column()
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_sort_vector_column.parquet"
+
+        call write_sort_scenario_fixture(out_file)
+        call srt%add("vec asc")
+        call parquet_open_reader(reader, out_file, sort_by=srt)   ! -> aborts (vector column)
+        print '(a)', "unexpectedly sorted by a vector column"
+    end subroutine scenario_sort_vector_column
+
+    !> An empty key names no column.
+    subroutine scenario_sort_empty_key()
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_sort_empty_key.parquet"
+
+        call write_sort_scenario_fixture(out_file)
+        call srt%add("   ")
+        call parquet_open_reader(reader, out_file, sort_by=srt)   ! -> aborts (empty sort key)
+        print '(a)', "unexpectedly accepted an empty sort key"
+    end subroutine scenario_sort_empty_key
+
+    !> A key that is nothing but the '-' shorthand names no column to order by.
+    subroutine scenario_sort_minus_only()
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_sort_minus_only.parquet"
+
+        call write_sort_scenario_fixture(out_file)
+        call srt%add("-")
+        call parquet_open_reader(reader, out_file, sort_by=srt)   ! -> aborts (names no column)
+        print '(a)', "unexpectedly accepted a sort key that is only the '-' shorthand"
+    end subroutine scenario_sort_minus_only
+
+    !> A key whose COLUMN NAME exceeds the packed width the bind(C) boundary carries. Distinct
+    !> from scenario_sort_key_too_long, which trips parquet_sortkey%add's own whole-key cap
+    !> before the parser ever sees it -- this one is a legal-length key with an over-long name.
+    subroutine scenario_sort_name_too_long()
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_sort_name_too_long.parquet"
+
+        call write_sort_scenario_fixture(out_file)
+        call srt%add(repeat("x", 100) // " asc")
+        call parquet_open_reader(reader, out_file, sort_by=srt)   ! -> aborts (column name is too long)
+        print '(a)', "unexpectedly accepted a sort key with an over-long column name"
+    end subroutine scenario_sort_name_too_long
+
+    !> A direction word that is neither asc nor desc is a typo worth reporting, not something to
+    !> guess at.
+    subroutine scenario_sort_bad_direction()
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_sort_bad_direction.parquet"
+
+        call write_sort_scenario_fixture(out_file)
+        call srt%add("v sideways")
+        call parquet_open_reader(reader, out_file, sort_by=srt)   ! -> aborts (unrecognized direction)
+        print '(a)', "unexpectedly accepted an unrecognized sort direction"
+    end subroutine scenario_sort_bad_direction
+
+    !> More than one direction word is ambiguous rather than merely redundant.
+    subroutine scenario_sort_two_direction_words()
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_sort_two_direction_words.parquet"
+
+        call write_sort_scenario_fixture(out_file)
+        call srt%add("v asc desc")
+        call parquet_open_reader(reader, out_file, sort_by=srt)   ! -> aborts (more than one direction word)
+        print '(a)', "unexpectedly accepted two direction words in one sort key"
+    end subroutine scenario_sort_two_direction_words
+
+    !> The '-' shorthand and an explicit direction could equally be read as agreeing or as
+    !> cancelling out, so combining them is rejected rather than silently resolved.
+    subroutine scenario_sort_minus_and_direction()
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_sort_minus_and_direction.parquet"
+
+        call write_sort_scenario_fixture(out_file)
+        call srt%add("-v desc")
+        call parquet_open_reader(reader, out_file, sort_by=srt)   ! -> aborts (shorthand plus explicit direction)
+        print '(a)', "unexpectedly accepted '-' together with an explicit direction"
+    end subroutine scenario_sort_minus_and_direction
+
+    !> parquet_sortkey%add's own caps: a key longer than sortkey_max_key_len.
+    subroutine scenario_sort_key_too_long()
+        type(parquet_sortkey) :: srt
+        character(len=400) :: long_key
+
+        long_key = repeat("x", 400)
+        call srt%add(long_key)   ! -> aborts (key exceeds the maximum supported length)
+        print '(a)', "unexpectedly accepted an over-long sort key"
+    end subroutine scenario_sort_key_too_long
+
+    !> parquet_sortkey%add's other cap: more keys than sortkey_max_keys.
+    subroutine scenario_sort_too_many_keys()
+        type(parquet_sortkey) :: srt
+        character(len=16) :: key
+        integer :: i
+
+        do i = 1, 40
+            write(key, '(a,i0)') "c", i
+            call srt%add(trim(key))   ! -> aborts once past the cap
+        end do
+        print '(a)', "unexpectedly accepted more sort keys than the cap allows"
+    end subroutine scenario_sort_too_many_keys
+
+    !> A chunked read is meaningless under a sort: a sorted row can come from any row group, so
+    !> there is no coherent "row group N of the sorted output". This is the guard that, if
+    !> forgotten, would silently hand back physically ordered rows instead of aborting.
+    subroutine scenario_sort_chunked_read()
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        integer(int32) :: back(2)
+        character(len=*), parameter :: out_file = "test_run/error_scenario_sort_chunked_read.parquet"
+
+        call write_sort_scenario_fixture(out_file)
+        call srt%add("v asc")
+        call parquet_open_reader(reader, out_file, sort_by=srt)
+        call parquet_read_column_chunk(reader, "v", 1, back)   ! -> aborts (active sort)
+        print '(a)', "unexpectedly read a chunk on a sorted reader"
+    end subroutine scenario_sort_chunked_read
+
+    !> The same ban, reached through the STRING chunk specific. The guard is one identical line at
+    !> every chunked-read entry point, and the three type-family submodules each carry their own
+    !> copies, so one scenario per family is what keeps a dropped line from going unnoticed --
+    !> verified by deleting a single site and watching exactly one of these stop aborting.
+    subroutine scenario_sort_chunked_read_string()
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        character(len=4) :: back(2)
+        character(len=*), parameter :: out_file = "test_run/error_scenario_sort_chunked_read_string.parquet"
+
+        call write_sort_scenario_fixture(out_file)
+        call srt%add("v asc")
+        call parquet_open_reader(reader, out_file, sort_by=srt)
+        call parquet_read_column_chunk(reader, "txt", 1, back)   ! -> aborts (active sort)
+        print '(a)', "unexpectedly read a string chunk on a sorted reader"
+    end subroutine scenario_sort_chunked_read_string
+
+    !> The same ban, reached through the VECTOR (matrix) chunk specific -- a different shape again,
+    !> in the same submodule as the scalar one.
+    subroutine scenario_sort_chunked_read_vector()
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        integer(int32) :: back(2, 2)
+        character(len=*), parameter :: out_file = "test_run/error_scenario_sort_chunked_read_vector.parquet"
+
+        call write_sort_scenario_fixture(out_file)
+        call srt%add("v asc")
+        call parquet_open_reader(reader, out_file, sort_by=srt)
+        call parquet_read_column_chunk(reader, "vec", 1, back)   ! -> aborts (active sort)
+        print '(a)', "unexpectedly read a vector chunk on a sorted reader"
+    end subroutine scenario_sort_chunked_read_vector
+
+    !> The same ban, reached through the TEMPORAL chunk specific (parquet_read_temporal.f90's own
+    !> copies of the guard).
+    subroutine scenario_sort_chunked_read_temporal()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        type(parquet_date) :: d(4), back(2)
+        integer(int32) :: v(4) = [30, 10, 40, 20]
+        integer :: i
+        character(len=*), parameter :: out_file = "test_run/error_scenario_sort_chunked_read_temporal.parquet"
+
+        do i = 1, 4
+            d(i) = parquet_date(2024, 1, i)
+        end do
+        call parquet_open_writer(writer, out_file, chunk_size=2)
+        call parquet_write_column(writer, "v", v)
+        call parquet_write_column(writer, "d", d)
+        call parquet_close_writer(writer)
+
+        call srt%add("v asc")
+        call parquet_open_reader(reader, out_file, sort_by=srt)
+        call parquet_read_column_chunk(reader, "d", 1, back)   ! -> aborts (active sort)
+        print '(a)', "unexpectedly read a date chunk on a sorted reader"
+    end subroutine scenario_sort_chunked_read_temporal
+
+    !> Same reasoning for the row-group row count: it describes a row grouping the sorted result
+    !> no longer has.
+    subroutine scenario_sort_get_chunk_size()
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        integer(int64) :: chunk_rows
+        character(len=*), parameter :: out_file = "test_run/error_scenario_sort_get_chunk_size.parquet"
+
+        call write_sort_scenario_fixture(out_file)
+        call srt%add("v asc")
+        call parquet_open_reader(reader, out_file, sort_by=srt)
+        call parquet_get_chunk_size(reader, chunk_rows, row_group=1_int64)   ! -> aborts (active sort)
+        print '(a)', "unexpectedly asked for a chunk size on a sorted reader"
+    end subroutine scenario_sort_get_chunk_size
+
+    !> A second parquet_reader_set_sort on one reader: add every key to one parquet_sortkey
+    !> instead, since a second permutation would have to compose with the first.
+    subroutine scenario_sort_set_sort_twice()
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: first, second
+        character(len=*), parameter :: out_file = "test_run/error_scenario_sort_set_sort_twice.parquet"
+
+        call write_sort_scenario_fixture(out_file)
+        call first%add("v asc")
+        call second%add("txt asc")
+        call parquet_open_reader(reader, out_file)
+        call parquet_reader_set_sort(reader, first)
+        call parquet_reader_set_sort(reader, second)   ! -> aborts (already has an active sort)
+        print '(a)', "unexpectedly applied a second sort to one reader"
+    end subroutine scenario_sort_set_sort_twice
+
+    !> parquet_reader_set_sort after a column has been read: the rows already handed back could
+    !> not be aligned with anything read afterwards.
+    subroutine scenario_sort_set_sort_after_read()
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        integer(int32) :: back(4)
+        character(len=*), parameter :: out_file = "test_run/error_scenario_sort_set_sort_after_read.parquet"
+
+        call write_sort_scenario_fixture(out_file)
+        call srt%add("v asc")
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "v", back)
+        call parquet_reader_set_sort(reader, srt)   ! -> aborts (a column has already been read)
+        print '(a)', "unexpectedly applied a sort after reading a column"
+    end subroutine scenario_sort_set_sort_after_read
+
+    !> The point of a row-group-SCOPED filter (`parquet_reader_set_filter(reader, filt, lo, hi)`),
+    !> asserted rather than assumed: building the mask must not read any column whole-file. That is
+    !> the whole reason the scoped form exists -- it is what lets a file larger than memory be
+    !> filtered at all -- so it is worth a direct proof rather than an indirect one.
+    !>
+    !> It lives out of process, with the same forced-whole-column-read hook the two scenarios above
+    !> use, because the obvious in-process alternative does not work: comparing
+    !> parquet_get_arrow_bytes_allocated before and after reads a PROCESS-GLOBAL counter, and
+    !> test-drive runs a suite's tests concurrently, so every other test's Arrow allocations land in
+    !> the same number. An earlier version of this check lived in test/test_filter.f90 and failed
+    !> roughly one run in three for exactly that reason. Here nothing else is running.
+    !>
+    !> Negative control: scenario_whole_column_read_forced_error_control.
+    subroutine scenario_filter_scoped_reads_no_whole_column()
+        interface
+            subroutine parquet_debug_set_force_whole_column_read_error(enable) &
+                bind(C, name="parquet_debug_set_force_whole_column_read_error")
+                use iso_c_binding, only : c_int
+                integer(c_int), value :: enable !! nonzero forces the next whole-column read to abort; 0 restores normal behavior.
+            end subroutine parquet_debug_set_force_whole_column_read_error
+        end interface
+
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: out_file = &
+            "test_run/error_scenario_filter_scoped_reads_no_whole_column.parquet"
+        integer(int32) :: v(40), back(8)
+        integer(int64) :: nrows
+        integer :: i
+
+        do i = 1, 40
+            v(i) = i
+        end do
+        call parquet_open_writer(writer, out_file, chunk_size=10)
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+
+        call filt%add("v > 12")
+        call parquet_open_reader(reader, out_file)
+        ! Armed before the filter is built: the scoped path evaluates row group by row group and
+        ! must never reach get_single_chunk_array. (The unscoped path deliberately does -- it warms
+        ! every filter column whole-file first -- which is why this scenario scopes.)
+        call parquet_debug_set_force_whole_column_read_error(1)
+        call parquet_reader_set_filter(reader, filt, 2, 3)
+        call parquet_debug_set_force_whole_column_read_error(0)
+
+        ! Row groups 2 and 3 hold physical rows 11..30; "v > 12" keeps 13..30, and rows outside the
+        ! scoped range are dropped -- so 18 rows survive, and reading them back is a whole-column
+        ! read, which is fine now that the hook is disarmed again.
+        call parquet_get_nrows(reader, nrows)
+        if (nrows /= 18_int64) error stop "scoped filter should leave 18 surviving rows"
+        call parquet_read_column_chunk(reader, "v", 2, back)
+        if (any(back /= [13, 14, 15, 16, 17, 18, 19, 20])) error stop "scoped filter: row group 2 should yield 13..20"
+        call parquet_close_reader(reader)
+        print '(a)', "a row-group-scoped filter avoided a whole-column read, as expected"
+    end subroutine scenario_filter_scoped_reads_no_whole_column
+
     !> Resolving a plain LIST column's deferred width must never take the whole-column read path,
     !> however many columns are asked about.
     !>
@@ -3369,9 +3810,10 @@ contains
     end subroutine scenario_read_array_row_mode_string_type_mismatch
 
     !> parquet_read_array_element_mode's logical specific, on a reader opened with an active
-    !> filter (so parquet_read_bool8_array_element takes its filtered/whole-column branch),
-    !> with an elem_index (col_index) past col_size aborts with "col_index out of bounds"
-    !> before any type check runs.
+    !> filter, with an elem_index (col_index) past col_size aborts with "col_index out of bounds"
+    !> before any type check runs. The filtered reader is the point: it once took a separate
+    !> whole-column branch with its own copy of this bounds check, and now shares the
+    !> row-group-streaming path's -- so this keeps the filtered case covered either way.
     subroutine scenario_read_array_em_filt_bool_oob()
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
@@ -3394,8 +3836,9 @@ contains
         print '(a)', "unexpectedly read element_mode with an out-of-range col_index on a filtered logical reader"
     end subroutine scenario_read_array_em_filt_bool_oob
 
-    !> Same filtered branch as above, but with a valid col_index -- reaches the type-mismatch
-    !> check instead (the int32 column read via the logical specific).
+    !> Same filtered reader as above, but with a valid col_index -- reaches the type-mismatch
+    !> check instead (the int32 column read via the logical specific), which now runs per row
+    !> group rather than once over a whole-column array.
     subroutine scenario_read_array_em_filt_bool_tm()
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
@@ -3442,8 +3885,9 @@ contains
         print '(a)', "unexpectedly read element_mode with an out-of-range col_index on a filtered string reader"
     end subroutine scenario_read_array_em_filt_string_oob
 
-    !> Same filtered branch as above, but with a valid col_index -- reaches the type-mismatch
-    !> check instead (the int32 column read via the string specific).
+    !> Same filtered reader as above, but with a valid col_index -- reaches the type-mismatch
+    !> check instead (the int32 column read via the string specific), which now runs per row group
+    !> rather than once over a whole-column array.
     subroutine scenario_read_array_em_filt_string_tm()
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
@@ -3594,7 +4038,7 @@ contains
 
     !> read_list_primitive_element's own col_index bounds check (shared by every numeric
     !> parquet_read_*_array_element specific, not just logical/string) was completely untested,
-    !> filtered branch included -- this is the filtered-branch half.
+    !> the filtered case included -- this is the filtered half.
     subroutine scenario_read_array_em_filt_int32_oob()
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
@@ -4416,6 +4860,35 @@ contains
         print '(a)', "unexpectedly opened a reader whose combined %add rules exceed the node limit"
     end subroutine scenario_filter_too_many_nodes_across_adds
 
+    !> A row-group-scoped filter whose range runs past the file's own row-group count. Validated
+    !> C++-side (parquet_reader_set_filter), where the row-group count lives, and reported through
+    !> the same clean Fortran error stop as every other filter rejection.
+    subroutine scenario_filter_scope_out_of_range()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_scope_range.parquet"
+
+        call write_filter_syntax_fixture(out_file)
+        call parquet_open_reader(reader, out_file)
+        call filt%add("v > 1")
+        call parquet_reader_set_filter(reader, filt, 1, 99)
+        print '(a)', "unexpectedly applied a filter scoped past the file's last row group"
+    end subroutine scenario_filter_scope_out_of_range
+
+    !> The same validation from the other end: a reversed range (lo > hi) names no row groups at
+    !> all, which is a caller mistake rather than an empty result.
+    subroutine scenario_filter_scope_reversed()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_scope_reversed.parquet"
+
+        call write_filter_syntax_fixture(out_file)
+        call parquet_open_reader(reader, out_file)
+        call filt%add("v > 1")
+        call parquet_reader_set_filter(reader, filt, 2, 1)
+        print '(a)', "unexpectedly applied a filter with a reversed row-group range"
+    end subroutine scenario_filter_scope_reversed
+
     !> parquet_open_reader's sample_fraction < 0.0 aborts immediately -- see
     !> parquet_open_reader_base's NaN/negative checks (parquet_read.f90).
     subroutine scenario_sample_negative_fraction()
@@ -4450,24 +4923,6 @@ contains
         call parquet_open_reader(reader, out_file, sample_fraction=ieee_value(1.0_real64, ieee_quiet_nan))
         print '(a)', "unexpectedly opened a reader with a NaN sample_fraction"
     end subroutine scenario_sample_nan_fraction
-
-    !> parquet_read_column_chunk is disallowed on a reader opened with sample_fraction < 1.0 alone
-    !> (no filter= at all) -- sampling shares filter_mask/parquet_reader_has_filter with filter=,
-    !> so check_reader_no_filter's guard fires the same way (parquet_read.f90).
-    subroutine scenario_read_chunk_with_sample()
-        type(parquet_writer) :: writer
-        type(parquet_reader) :: reader
-        integer(int32) :: v(4), back(2)
-
-        v = [1, 2, 3, 4]
-        call parquet_open_writer(writer, "test_run/read_chunk_sample.parquet", chunk_size=2)
-        call parquet_write_column(writer, "v", v)
-        call parquet_close_writer(writer)
-
-        call parquet_open_reader(reader, "test_run/read_chunk_sample.parquet", sample_fraction=0.5_real64)
-        call parquet_read_column_chunk(reader, "v", 1, back)
-        print '(a)', "unexpectedly read a chunk on a sampled reader without aborting"
-    end subroutine scenario_read_chunk_with_sample
 
     !> parquet_reader_print_stat's "sample:" line (added alongside the pre-existing "rows: N (of M
     !> total)" summary -- see scenario_print_stat_filtered_rows above for that one). sample_seed=42

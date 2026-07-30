@@ -28,6 +28,35 @@ submodule (parquet) parquet_read
     integer, parameter :: filter_leaf_op_len = 16
     integer, parameter :: filter_leaf_value_len = 512
 
+    !> Fixed width of the packed sort-key column-name array crossing the bind(C) boundary, the
+    !> sort counterpart of filter_leaf_name_len above. Declared once here and host-associated to
+    !> parquet_read_sort, so the parser and the packer cannot disagree about it.
+    integer, parameter :: sort_key_name_len = 64
+
+    ! ---- Sort key parsing (parquet_read_sort) ----
+    interface
+        !> Parses one parquet_sortkey%add key ("ra asc", "-dec", "main.inner.age") into its
+        !> column name and direction. Purely syntactic: reports a parse failure via ok/errmsg --
+        !> never aborts, so the caller can attach the reader's file context to the message -- and
+        !> leaves every schema-dependent check (column exists, type is orderable) to the C++ side.
+        module subroutine parquet_parse_sort_key(key, name, descending, ok, errmsg)
+            character(len=*), intent(in) :: key !! raw key text from one %add call.
+            character(len=:), allocatable, intent(out) :: name !! column name (possibly a dotted struct path).
+            logical, intent(out) :: descending !! .true. for a descending key.
+            logical, intent(out) :: ok !! .true. if the key parsed.
+            character(len=:), allocatable, intent(out) :: errmsg !! parse-failure message; "" when ok.
+        end subroutine parquet_parse_sort_key
+        !> Re-renders the whole parsed key list in canonical form ("ra asc, dec desc"), for
+        !> parquet_reader_print_stat's own "sort:" line. Never parsed again by anything.
+        module subroutine parquet_render_sort_keys(key_name, descending, nulls_first, nkeys, text)
+            character(len=sort_key_name_len), intent(in) :: key_name(:) !! per-key column name.
+            integer(int8), intent(in) :: descending(:) !! per key: 1 for descending.
+            integer(int8), intent(in) :: nulls_first(:) !! per key: 1 to place nulls first.
+            integer, intent(in) :: nkeys !! keys in use.
+            character(len=:), allocatable, intent(out) :: text !! rendered key list.
+        end subroutine parquet_render_sort_keys
+    end interface
+
     ! ---- Filter expression parsing (parquet_read_filter) ----
     interface
         !> Parses one parquet_filter%add rule (a clause, or clauses combined with and/or/not and
@@ -148,24 +177,7 @@ contains
             error stop trim(context) // ": column not found in parquet file: " // trim(name) // name_suffix
         end if
     end subroutine check_column_exists
-    !> parquet_read_column_chunk's own extra guard, called right after check_column_exists: a
-    !> row-group-scoped read has no coherent way to apply reader%filter's own mask, which is a
-    !> single flat mask sized to the whole unfiltered file with no row-group structure of its
-    !> own (see get_row_group_chunk_array's own comment in parquet_wrapper.cpp) -- so chunk reads
-    !> are disallowed outright on a reader opened with filter= and/or sample_fraction < 1.0 (the
-    !> two share this same mask -- see parquet_reader_has_filter's own doc-comment in
-    !> parquet_bindings.f90), rather than silently ignoring it.
-    subroutine check_reader_no_filter(reader, context)
-        type(parquet_reader), intent(in) :: reader !! open reader to check.
-        character(len=*), intent(in) :: context !! calling procedure's name, used in the error-stop message.
-        character(len=:), allocatable :: name_suffix !! scratch (reader_filename_suffix).
-        if (parquet_reader_has_filter(reader%handle) /= 0) then
-            call reader_filename_suffix(reader, name_suffix)
-            error stop trim(context) // ": chunked reads are not supported on a reader opened with an " // &
-                "active filter=/sample_fraction= -- open a second, unfiltered reader for chunked access" // name_suffix
-        end if
-    end subroutine check_reader_no_filter
-    !> parquet_read_column_chunk's own extra guard, called right after check_reader_no_filter:
+    !> parquet_read_column_chunk's own extra guard, called right after check_column_exists:
     !> row_group must be within [1, num_row_groups], checked here (Fortran-side) rather than
     !> relying on Arrow's own ReadRowGroup bounds check, which throws an uncaught
     !> std::runtime_error (libc++abi terminate/SIGABRT with no diagnostic message reaching
@@ -451,10 +463,12 @@ contains
     !> parquet_get_nrows and every column read afterward already reflect the
     !> filtered row set (see parquet_reader_set_filter in parquet_wrapper.cpp
     !> for the actual validation/masking).
-    subroutine parquet_apply_filter(reader, filter, context)
+    subroutine parquet_apply_filter(reader, filter, context, row_group_lo, row_group_hi)
         type(parquet_reader), intent(inout) :: reader !! open reader the filter is applied to.
         type(parquet_filter), intent(in) :: filter !! filter whose rules are parsed, validated, and applied.
         character(len=*), intent(in) :: context !! calling procedure's name, used in every error-stop message.
+        integer(int64), intent(in) :: row_group_lo !! first row group to evaluate over, or 0 for the whole file.
+        integer(int64), intent(in) :: row_group_hi !! last row group to evaluate over, or 0 for the whole file.
         integer(int8), allocatable :: node_kind(:), leaf_is_string(:)
         integer(int32), allocatable :: node_leaf(:)
         character(len=filter_leaf_name_len), allocatable :: leaf_name(:)
@@ -502,11 +516,77 @@ contains
             ops_packed, int(filter_leaf_op_len, kind=c_long_long), values_packed, &
             int(filter_leaf_value_len, kind=c_long_long), leaf_is_string(1:nleaves), &
             int(nleaves, kind=c_long_long), node_kind(1:nnodes), node_leaf(1:nnodes), &
-            int(nnodes, kind=c_long_long), expr_text//char(0), c_err, int(len(c_err), kind=c_long_long))
+            int(nnodes, kind=c_long_long), expr_text//char(0), row_group_lo, row_group_hi, &
+            c_err, int(len(c_err), kind=c_long_long))
 
         call reader_filename_suffix(reader, name_suffix)
         if (status /= 0) error stop trim(context) // ": " // trim(c_err) // name_suffix
     end subroutine parquet_apply_filter
+    !> Parses every key of `sort_by`, packs them into the fixed-width arrays the bind(C) boundary
+    !> carries, and installs the sort -- called from parquet_open_reader(..., sort_by=) and from
+    !> parquet_reader_set_sort, which is why the abort messages take their `context` from the
+    !> caller. Mirrors parquet_apply_filter's shape exactly.
+    !>
+    !> Runs AFTER any filter/sample mask is installed, which is what makes "filter first, then
+    !> sort within the survivors" true: each key column is read through the normal path, so it
+    !> arrives already filtered, and the permutation covers the surviving rows only.
+    subroutine parquet_apply_sort(reader, sort_by, context)
+        type(parquet_reader), intent(inout) :: reader !! open reader the sort is applied to.
+        type(parquet_sortkey), intent(in) :: sort_by !! keys to parse, validate and apply.
+        character(len=*), intent(in) :: context !! calling procedure's name, used in every error-stop message.
+        character(len=sort_key_name_len), allocatable :: key_name(:)
+        integer(int8), allocatable :: descending(:), nulls_first(:)
+        character(kind=c_char), allocatable :: names_packed(:)
+        character(len=:), allocatable :: name, errmsg, key_text, name_suffix
+        logical :: ok, desc
+        character(len=1024) :: c_err
+        integer(c_long_long) :: status
+        integer :: i
+
+        if (sort_by%n == 0) return
+        allocate(key_name(sort_by%n), descending(sort_by%n), nulls_first(sort_by%n))
+        do i = 1, sort_by%n
+            call parquet_parse_sort_key(sort_by%keys(i), name, desc, ok, errmsg)
+            if (.not. ok) then
+                call reader_filename_suffix(reader, name_suffix)
+                error stop trim(context) // ": invalid sort key: " // errmsg // name_suffix
+            end if
+            key_name(i) = name
+            descending(i) = merge(1_int8, 0_int8, desc)
+            nulls_first(i) = merge(1_int8, 0_int8, sort_by%nulls_first(i))
+        end do
+
+        call parquet_render_sort_keys(key_name, descending, nulls_first, sort_by%n, key_text)
+        call pack_fixed_width_strings(key_name(1:sort_by%n), names_packed)
+
+        c_err = ""
+        status = c_reader_set_sort(reader%handle, names_packed, int(sort_key_name_len, kind=c_long_long), &
+            descending(1:sort_by%n), nulls_first(1:sort_by%n), int(sort_by%n, kind=c_long_long), &
+            key_text//char(0), c_err, int(len(c_err), kind=c_long_long))
+
+        call reader_filename_suffix(reader, name_suffix)
+        if (status /= 0) error stop trim(context) // ": " // trim(c_err) // name_suffix
+    end subroutine parquet_apply_sort
+    !> Refuses any row-group-scoped operation while a read-time sort is active. A sort permutation
+    !> destroys row-group locality outright -- sorted row 5 may come from row group 47 and row 6
+    !> from row group 3 -- so there is no coherent "row group N of the sorted output" to serve.
+    !>
+    !> This is NOT the guard the filter/sample mask once had, and the difference is the whole point
+    !> (see reader_has_sort_permutation in parquet_wrapper.cpp): a mask only ever REMOVES rows, so
+    !> row groups stay contiguous and every chunked read works under one. Only a permutation
+    !> reorders. Keep every new "not while sorted" check keyed on this one predicate rather than
+    !> testing the handle directly, so a future row transform cannot be added without the guards
+    !> noticing it.
+    subroutine check_reader_no_sort(reader, context)
+        type(parquet_reader), intent(in) :: reader !! reader to check.
+        character(len=*), intent(in) :: context !! calling procedure's name, used in the error-stop message.
+        character(len=:), allocatable :: name_suffix
+        if (parquet_reader_has_sort(reader%handle) /= 0) then
+            call reader_filename_suffix(reader, name_suffix)
+            error stop trim(context) // ": not supported on a reader with an active sort, since a sorted row " // &
+                "can come from any row group; read the column whole (parquet_read_column) instead" // name_suffix
+        end if
+    end subroutine check_reader_no_sort
     !> Rewrites every temporal (date/time/timestamp) leaf's value from the ISO-8601 text the
     !> caller wrote into the raw integer that column actually stores, so the C++ evaluator can
     !> compare it directly against the column's own values -- no ISO parsing and no unit
@@ -723,7 +803,12 @@ contains
         if (present(qc_soft)) qc_soft_value = qc_soft
         if (present(schema) .and. qc_effective) call parquet_apply_qc(reader, schema%maml, qc_soft_value)
 
-        if (filter_will_apply) call parquet_apply_filter(reader, filter, "parquet_open_reader")
+        if (filter_will_apply) call parquet_apply_filter(reader, filter, "parquet_open_reader", 0_int64, 0_int64)
+
+        ! Strictly after the filter: the sort orders the SURVIVING rows, so every key column has
+        ! to arrive already masked (see parquet_apply_sort). Before the prefetch below, so a
+        ! prefetched column is cached in sorted order rather than needing a second pass.
+        if (present(sort_by)) call parquet_apply_sort(reader, sort_by, "parquet_open_reader")
 
         ! Must run AFTER parquet_apply_filter: a column cached before the
         ! filter mask exists would stay raw/unfiltered forever, since
@@ -754,7 +839,23 @@ contains
     !>
     !> A reader opened with sample_fraction= is accepted: the sample mask is already installed, and
     !> these clauses AND onto it exactly as they would have at open time.
-    module procedure parquet_reader_set_filter
+    module procedure parquet_reader_set_filter_base
+        call parquet_reader_set_filter_impl(reader, filter, 0_int64, 0_int64)
+    end procedure parquet_reader_set_filter_base
+    module procedure parquet_reader_set_filter_scoped_int32
+        call parquet_reader_set_filter_impl(reader, filter, int(row_group_lo, int64), int(row_group_hi, int64))
+    end procedure parquet_reader_set_filter_scoped_int32
+    module procedure parquet_reader_set_filter_scoped_int64
+        call parquet_reader_set_filter_impl(reader, filter, row_group_lo, row_group_hi)
+    end procedure parquet_reader_set_filter_scoped_int64
+    !> The one implementation behind every parquet_reader_set_filter form. row_group_lo/hi are 0
+    !> for the whole-file form and an inclusive 1-based range otherwise; the range itself is
+    !> validated C++-side, against the file's own row-group count.
+    subroutine parquet_reader_set_filter_impl(reader, filter, row_group_lo, row_group_hi)
+        type(parquet_reader), intent(inout) :: reader !! open, unfiltered reader with no column decoded yet.
+        type(parquet_filter), intent(in) :: filter !! filter whose rules are parsed, validated, and applied.
+        integer(int64), intent(in) :: row_group_lo !! first row group to evaluate over, or 0 for the whole file.
+        integer(int64), intent(in) :: row_group_hi !! last row group to evaluate over, or 0 for the whole file.
         character(len=:), allocatable :: name_suffix
 
         call check_reader_open(reader, "parquet_reader_set_filter")
@@ -770,17 +871,36 @@ contains
         end if
         if (filter%n == 0) return
 
-        call prefetch_filter_columns(reader, filter)
-        call parquet_apply_filter(reader, filter, "parquet_reader_set_filter")
-    end procedure parquet_reader_set_filter
+        ! The batched whole-file warm-up is the unscoped path's fast start; scoping exists
+        ! precisely to avoid reading whole columns, so it must not run there.
+        if (row_group_lo <= 0) call prefetch_filter_columns(reader, filter)
+        call parquet_apply_filter(reader, filter, "parquet_reader_set_filter", row_group_lo, row_group_hi)
+    end subroutine parquet_reader_set_filter_impl
+    module procedure parquet_reader_set_sort
+        character(len=:), allocatable :: name_suffix
+
+        call check_reader_open(reader, "parquet_reader_set_sort")
+        if (parquet_reader_has_sort(reader%handle) /= 0) then
+            call reader_filename_suffix(reader, name_suffix)
+            error stop "parquet_reader_set_sort: this reader already has an active sort; add every key to " // &
+                "one parquet_sortkey instead" // name_suffix
+        end if
+        if (parquet_reader_has_decoded_columns(reader%handle) /= 0) then
+            call reader_filename_suffix(reader, name_suffix)
+            error stop "parquet_reader_set_sort: a column has already been read on this reader; a sort " // &
+                "must be applied before any column is read" // name_suffix
+        end if
+        if (sort_by%n == 0) return
+        call parquet_apply_sort(reader, sort_by, "parquet_reader_set_sort")
+    end procedure parquet_reader_set_sort
     module procedure parquet_open_reader_nrows_int64
         call parquet_open_reader_base(reader, filename, use_threads, filter, sample_fraction, sample_seed, schema, qc, &
-            qc_soft, prefetch)
+            qc_soft, prefetch, sort_by)
         call parquet_get_nrows(reader, nrows, check_positive=.true.)
     end procedure parquet_open_reader_nrows_int64
     module procedure parquet_open_reader_nrows_int32
         call parquet_open_reader_base(reader, filename, use_threads, filter, sample_fraction, sample_seed, schema, qc, &
-            qc_soft, prefetch)
+            qc_soft, prefetch, sort_by)
         call parquet_get_nrows(reader, nrows, check_positive=.true.)
     end procedure parquet_open_reader_nrows_int32
     module procedure parquet_close_reader
@@ -1009,6 +1129,9 @@ contains
         character(len=:), allocatable :: name_suffix !! scratch (reader_filename_suffix).
 
         call check_reader_open(reader, "parquet_get_chunk_size")
+        ! A row group's row count is only meaningful while row groups still correspond to
+        ! contiguous result rows, which a sort permutation ends -- see check_reader_no_sort.
+        call check_reader_no_sort(reader, "parquet_get_chunk_size")
         rg = merge(row_group, 1_int64, row_group > 0)
         num_row_groups = int(parquet_reader_get_num_row_groups(reader%handle), kind=int64)
         if (rg < 1 .or. rg > num_row_groups) then

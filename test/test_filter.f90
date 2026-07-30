@@ -64,7 +64,25 @@ contains
             new_unittest("temporal: a date-only literal on a timestamp column means midnight", test_temporal_date_on_ts), &
             new_unittest("temporal: a temporal clause combined with a numeric one", test_temporal_in_expression), &
             new_unittest("parquet_reader_set_filter matches open-time filtering", test_set_filter_post_open), &
-            new_unittest("parquet_reader_set_filter composes with sample_fraction", test_set_filter_with_sample) &
+            new_unittest("parquet_reader_set_filter composes with sample_fraction", test_set_filter_with_sample), &
+            new_unittest("chunked read on a filtered reader returns the surviving rows", test_chunked_read_filtered), &
+            new_unittest("chunk sizes sum to parquet_get_nrows under a filter", test_chunk_sizes_sum_to_nrows), &
+            new_unittest("a row group with no surviving rows reads as an empty chunk", test_zero_survivor_row_group), &
+            new_unittest("a filter that removes every row", test_filter_removes_all_rows), &
+            new_unittest("chunked read on a sampled reader", test_chunked_read_sampled), &
+            new_unittest("filter and sample together, read chunked", test_chunked_read_filter_and_sample), &
+            new_unittest("check_complete is satisfied by a filtered chunked pass", test_check_complete_filtered_chunks), &
+            new_unittest("a scoped filter covers only its own row groups", test_scoped_filter_row_groups), &
+            new_unittest("qc validates the filtered chunk, not the raw one", test_qc_runs_on_filtered_chunk), &
+            new_unittest("row mode on a filtered reader addresses the filtered result", test_row_mode_filtered), &
+            new_unittest("row mode steps over row groups with no survivors", &
+                test_row_mode_filtered_skips_empty_row_groups), &
+            new_unittest("element mode on a filtered reader spans the surviving rows", test_element_mode_filtered), &
+            new_unittest("row and element mode, filtered, for logical and string columns", &
+                test_row_and_element_mode_filtered_bool_string), &
+            new_unittest("row and element mode, filtered, for a date column", &
+                test_row_and_element_mode_filtered_temporal), &
+            new_unittest("row and element mode on a sampled reader", test_row_and_element_mode_sampled) &
             ]
     end subroutine collect_tests_filter
     !
@@ -414,6 +432,295 @@ contains
             "struct leaf in an expression: the impossible or-branch must not change the row count")
     end subroutine test_struct_leaf_in_expression
     !
+    !> Writes a fixture with a known row-group layout: `nrows` rows, `chunk` rows per row group,
+    !> column v = 1..nrows. Row groups are what every test below addresses, so the layout is the
+    !> point of the fixture rather than the values.
+    subroutine write_chunked_fixture(file, nrows, chunk)
+        character(len=*), intent(in) :: file !! fixture path (one per test).
+        integer, intent(in) :: nrows !! total rows to write.
+        integer, intent(in) :: chunk !! rows per row group.
+        type(parquet_writer) :: writer
+        integer(int32), allocatable :: v(:)
+        integer :: i
+
+        allocate(v(nrows))
+        do i = 1, nrows
+            v(i) = i
+        end do
+        call parquet_open_writer(writer, file, chunk_size=chunk)
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+    end subroutine write_chunked_fixture
+    !
+    !> A chunked read on a filtered reader hands back that row group's surviving rows -- the
+    !> operation that used to abort outright, since the mask was believed to have no row-group
+    !> structure. 12 rows in 4 row groups of 3; "v > 4" leaves row group 1 empty, row group 2 with
+    !> two of its three rows, and row groups 3 and 4 intact.
+    subroutine test_chunked_read_filtered(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: sizes(4), rg
+        integer(int32) :: rg2(2), rg3(3)
+        character(len=*), parameter :: file = "test_run/filter_chunked_read.parquet"
+
+        call write_chunked_fixture(file, 12, 3)
+        call filt%add("v > 4")
+        call parquet_open_reader(reader, file, filter=filt)
+        do rg = 1, 4
+            call parquet_get_chunk_size(reader, sizes(rg), row_group=rg)
+        end do
+        call check(error, all(sizes == [0_int64, 2_int64, 3_int64, 3_int64]), &
+            "filtered chunk sizes: expected 0, 2, 3, 3")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+        call parquet_read_column_chunk(reader, "v", 2, rg2)
+        call parquet_read_column_chunk(reader, "v", 3, rg3)
+        call parquet_close_reader(reader)
+        call check(error, all(rg2 == [5, 6]), "filtered chunk: row group 2 should yield 5, 6")
+        if (allocated(error)) return
+        call check(error, all(rg3 == [7, 8, 9]), "filtered chunk: row group 3 should yield 7, 8, 9")
+    end subroutine test_chunked_read_filtered
+    !
+    !> The invariant a chunked loop depends on: the per-row-group sizes sum to the reader's own
+    !> row count. It is what lets a caller allocate per row group and still cover exactly the
+    !> filtered result, with no separate bookkeeping.
+    subroutine test_chunk_sizes_sum_to_nrows(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: nrows, total, size_rg, rg, num_rg
+        character(len=*), parameter :: file = "test_run/filter_chunk_sum.parquet"
+
+        call write_chunked_fixture(file, 17, 5)
+        call filt%add("v > 3 and v /= 11")
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_get_num_row_groups(reader, num_rg)
+        total = 0_int64
+        do rg = 1, num_rg
+            call parquet_get_chunk_size(reader, size_rg, row_group=rg)
+            total = total + size_rg
+        end do
+        call parquet_close_reader(reader)
+        call check(error, total == nrows, "sum of filtered chunk sizes must equal parquet_get_nrows")
+        if (allocated(error)) return
+        call check(error, nrows == 13_int64, "expected 13 surviving rows (v > 3, excluding 11)")
+    end subroutine test_chunk_sizes_sum_to_nrows
+    !
+    !> Under a selective filter a row group with no survivors is the normal case, not a curiosity:
+    !> it must read cleanly as a zero-length chunk rather than aborting on a length mismatch.
+    subroutine test_zero_survivor_row_group(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: chunk_rows
+        integer(int32) :: empty(0)
+        character(len=*), parameter :: file = "test_run/filter_zero_survivors.parquet"
+
+        call write_chunked_fixture(file, 9, 3)
+        call filt%add("v > 6")
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_chunk_size(reader, chunk_rows, row_group=1_int64)
+        call check(error, chunk_rows == 0_int64, "a row group with no survivors must report 0 rows")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+        ! Reading it must be a clean no-op, not an abort.
+        call parquet_read_column_chunk(reader, "v", 1, empty)
+        call parquet_close_reader(reader)
+        call check(error, .true., "reading a zero-survivor row group must not abort")
+    end subroutine test_zero_survivor_row_group
+    !
+    !> A filter no row satisfies: every row group is empty and the reader reports zero rows.
+    subroutine test_filter_removes_all_rows(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: nrows, chunk_rows, rg
+        character(len=*), parameter :: file = "test_run/filter_removes_all.parquet"
+
+        call write_chunked_fixture(file, 8, 4)
+        call filt%add("v > 1000")
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 0_int64, "a filter matching nothing must report zero rows")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+        do rg = 1, 2
+            call parquet_get_chunk_size(reader, chunk_rows, row_group=rg)
+            call check(error, chunk_rows == 0_int64, "every row group must report 0 rows under a filter matching nothing")
+            if (allocated(error)) exit
+        end do
+        call parquet_close_reader(reader)
+    end subroutine test_filter_removes_all_rows
+    !
+    !> Sampling shares the filter's mask machinery, so chunked reads work there too. A fraction
+    !> just under 1.0 with a fixed seed keeps every row, which makes the expected chunk sizes
+    !> assertable without depending on the draw.
+    subroutine test_chunked_read_sampled(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        integer(int64) :: chunk_rows
+        integer(int32) :: back(3)
+        character(len=*), parameter :: file = "test_run/filter_chunked_sampled.parquet"
+
+        call write_chunked_fixture(file, 9, 3)
+        call parquet_open_reader(reader, file, sample_fraction=0.999999_real64, sample_seed=11)
+        call parquet_get_chunk_size(reader, chunk_rows, row_group=2_int64)
+        call check(error, chunk_rows == 3_int64, "a near-1.0 sample must keep all 3 rows of row group 2")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+        call parquet_read_column_chunk(reader, "v", 2, back)
+        call parquet_close_reader(reader)
+        call check(error, all(back == [4, 5, 6]), "sampled chunk: row group 2 should yield 4, 5, 6")
+    end subroutine test_chunked_read_sampled
+    !
+    !> Filter and sample together, read chunked: the two compose into one mask, and the chunked
+    !> sizes still sum to the reader's row count.
+    subroutine test_chunked_read_filter_and_sample(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: nrows, total, size_rg, rg
+        character(len=*), parameter :: file = "test_run/filter_chunked_both.parquet"
+
+        call write_chunked_fixture(file, 12, 4)
+        call filt%add("v > 5")
+        call parquet_open_reader(reader, file, filter=filt, sample_fraction=0.999999_real64, sample_seed=3)
+        call parquet_get_nrows(reader, nrows)
+        total = 0_int64
+        do rg = 1, 3
+            call parquet_get_chunk_size(reader, size_rg, row_group=rg)
+            total = total + size_rg
+        end do
+        call parquet_close_reader(reader)
+        call check(error, nrows == 7_int64, "filter + near-1.0 sample: expected the filter's own 7 rows")
+        if (allocated(error)) return
+        call check(error, total == nrows, "filter + sample: chunk sizes must still sum to parquet_get_nrows")
+    end subroutine test_chunked_read_filter_and_sample
+    !
+    !> check_complete tracks row groups, not rows, so a filtered chunked pass still proves every
+    !> row group was visited -- including the ones that turned out to be empty.
+    subroutine test_check_complete_filtered_chunks(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: chunk_rows, rg
+        integer(int32), allocatable :: back(:)
+        character(len=*), parameter :: file = "test_run/filter_check_complete.parquet"
+
+        call write_chunked_fixture(file, 9, 3)
+        call filt%add("v > 6")
+        call parquet_open_reader(reader, file, filter=filt)
+        do rg = 1, 3
+            call parquet_get_chunk_size(reader, chunk_rows, row_group=rg)
+            allocate(back(chunk_rows))
+            call parquet_read_column_chunk(reader, "v", rg, back)
+            deallocate(back)
+        end do
+        ! Aborts if any row group was skipped for a column read this way.
+        call parquet_close_reader(reader, check_complete=.true.)
+        call check(error, .true., "a filtered chunked pass over every row group must satisfy check_complete")
+    end subroutine test_check_complete_filtered_chunks
+    !
+    !> A row-group-scoped filter narrows the reader to the surviving rows OF THOSE ROW GROUPS:
+    !> rows outside the range never match, whether or not they satisfy the expression. This is
+    !> what lets a caller filter part of a file without the mask (or the read behind it) covering
+    !> the whole of it.
+    subroutine test_scoped_filter_row_groups(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: nrows, chunk_rows
+        integer(int32) :: back(2)
+        character(len=*), parameter :: file = "test_run/filter_scoped_rows.parquet"
+
+        call write_chunked_fixture(file, 12, 3)
+        ! "v > 4" matches rows 5..12 across the file, but the scope keeps only row groups 2 and 3
+        ! (rows 4..9), so 5..9 survive.
+        call filt%add("v > 4")
+        call parquet_open_reader(reader, file)
+        call parquet_reader_set_filter(reader, filt, 2, 3)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 5_int64, "scoped filter: expected the 5 matching rows inside row groups 2-3")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+        call parquet_get_chunk_size(reader, chunk_rows, row_group=1_int64)
+        call check(error, chunk_rows == 0_int64, "scoped filter: a row group outside the scope must yield no rows")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+        call parquet_read_column_chunk(reader, "v", 2, back)
+        call parquet_close_reader(reader)
+        call check(error, all(back == [5, 6]), "scoped filter: row group 2 should yield 5, 6")
+        if (allocated(error)) return
+
+        ! The same scope given as integer(int64) bounds must mean the same thing -- the bounds are
+        ! generic over both kinds so a caller's plain INTEGER and an int64 row-group count are
+        ! equally acceptable.
+        block
+            type(parquet_filter) :: wide_filter
+            integer(int64) :: nrows64
+            call wide_filter%add("v > 4")
+            call parquet_open_reader(reader, file)
+            call parquet_reader_set_filter(reader, wide_filter, 2_int64, 3_int64)
+            call parquet_get_nrows(reader, nrows64)
+            call parquet_close_reader(reader)
+            call check(error, nrows64 == nrows, "scoped filter: int64 bounds must match int32 bounds")
+        end block
+    end subroutine test_scoped_filter_row_groups
+    !
+    !> Read-time qc runs AFTER filtering, so a value the filter removed cannot trigger it. The
+    !> fixture's row group 1 holds a value far outside the declared qc range; the filter excludes
+    !> exactly that row, and the chunked read must then pass qc in HARD mode -- which aborts the
+    !> process on a violation, so this test simply completing is the assertion.
+    !>
+    !> The reverse case (a violation that survives the filter and does abort) is
+    !> read_chunk_qc_hard_aborts in test/error_scenarios.f90, since it ends the process.
+    subroutine test_qc_runs_on_filtered_chunk(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        type(parquet_schema) :: schema
+        integer(int32) :: ra(4), back(1)
+        integer :: unit
+        character(len=*), parameter :: file = "test_run/filter_qc_filtered_chunk.parquet"
+        character(len=*), parameter :: maml = "test_run/filter_qc_filtered_chunk.maml"
+
+        ra = [400, 10, 20, 30] ! 400 violates the [0, 360] bound below; the filter removes it
+        call parquet_open_writer(writer, file, chunk_size=2)
+        call parquet_write_column(writer, "ra", ra)
+        call parquet_close_writer(writer)
+
+        open(newunit=unit, file=maml, status="replace", action="write")
+        write(unit, '(a)') "fields:"
+        write(unit, '(a)') "- name: ra"
+        write(unit, '(a)') "  qc:"
+        write(unit, '(a)') "    min: 0"
+        write(unit, '(a)') "    max: 360"
+        close(unit)
+
+        schema = parquet_load_qc_maml_file(maml)
+        call filt%add("ra < 100")
+        call parquet_open_reader(reader, file, filter=filt, schema=schema, qc=.true.)
+        ! Row group 1 holds rows 400 and 10; only 10 survives, so qc sees no violation.
+        call parquet_read_column_chunk(reader, "ra", 1, back)
+        call parquet_close_reader(reader)
+        call check(error, back(1) == 10, "qc on a filtered chunk: expected the one surviving row of row group 1")
+    end subroutine test_qc_runs_on_filtered_chunk
+    !
     !> Writes the null-bearing fixture the Kleene group filters against: v = 1..6 with rows 3 and
     !> 4 null, plus a null-free companion column u so an or can have one known-good operand.
     subroutine write_null_fixture(file)
@@ -675,5 +982,212 @@ contains
         call parquet_close_reader(reader)
         call check(error, nrows_filtered == 3, "set_filter with sample: expected the filter to apply on top of the sample")
     end subroutine test_set_filter_with_sample
+    !
+    !> Writes the fixture the row-mode/element-mode group below addresses: `nrows` rows in row
+    !> groups of `chunk` rows, a scalar filter column v = 1..nrows, and one vector column per
+    !> entry-point family -- int32 (the templated one), logical and string (both hand-written),
+    !> and date (the temporal template). Every vector value encodes its own row number, so a
+    !> wrong row-index mapping surfaces as a wrong value rather than as a crash.
+    subroutine write_vector_fixture(file, nrows, chunk)
+        character(len=*), intent(in) :: file !! fixture path (one per test).
+        integer, intent(in) :: nrows !! total rows to write.
+        integer, intent(in) :: chunk !! rows per row group.
+        type(parquet_writer) :: writer
+        integer(int32), allocatable :: v(:), vec(:,:)
+        logical, allocatable :: flg(:,:)
+        character(len=8), allocatable :: txt(:,:)
+        type(parquet_date), allocatable :: dt(:,:)
+        integer :: i
+
+        allocate(v(nrows), vec(3, nrows), flg(2, nrows), txt(2, nrows), dt(2, nrows))
+        do i = 1, nrows
+            v(i) = i
+            vec(:, i) = [100 * i + 1, 100 * i + 2, 100 * i + 3]
+            flg(1, i) = mod(i, 2) == 0
+            flg(2, i) = i > nrows / 2
+            write(txt(1, i), '(a,i0)') "a", i
+            write(txt(2, i), '(a,i0)') "b", i
+            dt(1, i) = parquet_date(2024, 1, 1) + int(i - 1, int32)
+            dt(2, i) = parquet_date(2024, 6, 1) + int(i - 1, int32)
+        end do
+
+        call parquet_open_writer(writer, file, chunk_size=chunk)
+        call parquet_write_column(writer, "v", v)
+        call parquet_write_column(writer, "vec", vec)
+        call parquet_write_column(writer, "flg", flg)
+        call parquet_write_column(writer, "txt", txt)
+        call parquet_write_column(writer, "dt", dt)
+        call parquet_close_writer(writer)
+    end subroutine write_vector_fixture
+    !
+    !> Row mode on a filtered reader: `row_index` addresses the filtered result, and the read
+    !> resolves it to one row group by walking SURVIVING counts rather than the footer's physical
+    !> ones. 12 rows in 4 row groups of 3, `v > 4` keeping physical rows 5..12, so filtered row 1
+    !> is physical row 5 -- in row group 2, which is the point: a mapping that still walked
+    !> physical counts would land in row group 1 and return row 1's values.
+    subroutine test_row_mode_filtered(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32) :: first(3), last(3), middle(3)
+        character(len=*), parameter :: file = "test_run/filter_row_mode.parquet"
+
+        call write_vector_fixture(file, 12, 3)
+        call filt%add("v > 4")
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_read_array_row_mode(reader, "vec", first, 1)
+        call parquet_read_array_row_mode(reader, "vec", middle, 4)
+        call parquet_read_array_row_mode(reader, "vec", last, 8)
+        call parquet_close_reader(reader)
+        call check(error, all(first == [501, 502, 503]), "filtered row 1 must be physical row 5")
+        if (allocated(error)) return
+        call check(error, all(middle == [801, 802, 803]), "filtered row 4 must be physical row 8")
+        if (allocated(error)) return
+        call check(error, all(last == [1201, 1202, 1203]), "filtered row 8 (the last) must be physical row 12")
+    end subroutine test_row_mode_filtered
+    !
+    !> The stepping-over case in isolation: a filter that empties whole row groups. `v > 6` on 12
+    !> rows in 4 groups of 3 leaves groups 1 and 2 with no survivors at all, so filtered row 1 is
+    !> physical row 7 in row group 3 -- the resolver must skip two zero-survivor groups, exactly
+    !> as it already skipped a physically empty one.
+    subroutine test_row_mode_filtered_skips_empty_row_groups(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: nrows
+        integer(int32) :: first(3)
+        character(len=*), parameter :: file = "test_run/filter_row_mode_skip.parquet"
+
+        call write_vector_fixture(file, 12, 3)
+        call filt%add("v > 6")
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_read_array_row_mode(reader, "vec", first, 1)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 6_int64, "v > 6 must leave 6 rows")
+        if (allocated(error)) return
+        call check(error, all(first == [701, 702, 703]), &
+            "filtered row 1 must be physical row 7, two zero-survivor row groups later")
+    end subroutine test_row_mode_filtered_skips_empty_row_groups
+    !
+    !> Element mode on a filtered reader: one element position across every SURVIVING row. Unlike
+    !> row mode this needs every row group, so it is the streaming loop's own row counts that have
+    !> to be the surviving ones -- a loop still stepping by physical counts would write past the
+    !> filtered output or abort on the nrows mismatch.
+    subroutine test_element_mode_filtered(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: nrows
+        integer(int32) :: elem(8)
+        integer :: i
+        character(len=*), parameter :: file = "test_run/filter_element_mode.parquet"
+
+        call write_vector_fixture(file, 12, 3)
+        call filt%add("v > 4")
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 8_int64, "v > 4 must leave 8 rows")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+        call parquet_read_array_element_mode(reader, "vec", elem, 2)
+        call parquet_close_reader(reader)
+        call check(error, all(elem == [(100 * i + 2, i = 5, 12)]), &
+            "element 2 across the filtered rows must be physical rows 5..12's second element")
+    end subroutine test_element_mode_filtered
+    !
+    !> The two hand-written (non-templated) entry-point pairs, which carry their own copy of the
+    !> row-group logic rather than sharing read_list_primitive_row/_element: logical and string.
+    subroutine test_row_and_element_mode_filtered_bool_string(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        logical :: flag_row(2), flag_elem(8)
+        character(len=8) :: txt_row(2), txt_elem(8)
+        character(len=8) :: expect_elem(8)
+        integer :: i
+        character(len=*), parameter :: file = "test_run/filter_row_element_bool_string.parquet"
+
+        call write_vector_fixture(file, 12, 3)
+        call filt%add("v > 4")
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_read_array_row_mode(reader, "flg", flag_row, 1)
+        call parquet_read_array_row_mode(reader, "txt", txt_row, 1)
+        call parquet_read_array_element_mode(reader, "flg", flag_elem, 1)
+        call parquet_read_array_element_mode(reader, "txt", txt_elem, 2)
+        call parquet_close_reader(reader)
+        ! Physical row 5: flg = [mod(5,2)==0, 5>6] = [F, F]; txt = ["a5", "b5"].
+        call check(error, .not. flag_row(1) .and. .not. flag_row(2), &
+            "filtered logical row 1 must be physical row 5's flags")
+        if (allocated(error)) return
+        call check(error, txt_row(1) == "a5" .and. txt_row(2) == "b5", &
+            "filtered string row 1 must be physical row 5's strings")
+        if (allocated(error)) return
+        call check(error, all(flag_elem .eqv. [(mod(i, 2) == 0, i = 5, 12)]), &
+            "logical element 1 across the filtered rows must be physical rows 5..12")
+        if (allocated(error)) return
+        do i = 5, 12
+            write(expect_elem(i - 4), '(a,i0)') "b", i
+        end do
+        call check(error, all(txt_elem == expect_elem), &
+            "string element 2 across the filtered rows must be physical rows 5..12")
+    end subroutine test_row_and_element_mode_filtered_bool_string
+    !
+    !> The temporal pair (read_temporal_row/read_temporal_element), which is its own template
+    !> again: date vector columns read by row and by element on a filtered reader.
+    subroutine test_row_and_element_mode_filtered_temporal(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        type(parquet_date) :: row_back(2), elem_back(8)
+        type(parquet_date) :: expect(8)
+        integer :: i
+        character(len=*), parameter :: file = "test_run/filter_row_element_temporal.parquet"
+
+        call write_vector_fixture(file, 12, 3)
+        call filt%add("v > 4")
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_read_array_row_mode(reader, "dt", row_back, 1)
+        call parquet_read_array_element_mode(reader, "dt", elem_back, 1)
+        call parquet_close_reader(reader)
+        call check(error, row_back(1) == parquet_date(2024, 1, 5) .and. row_back(2) == parquet_date(2024, 6, 5), &
+            "filtered date row 1 must be physical row 5's dates")
+        if (allocated(error)) return
+        do i = 5, 12
+            expect(i - 4) = parquet_date(2024, 1, 1) + int(i - 1, int32)
+        end do
+        call check(error, all(elem_back == expect), &
+            "date element 1 across the filtered rows must be physical rows 5..12")
+    end subroutine test_row_and_element_mode_filtered_temporal
+    !
+    !> A sample mask reaches row/element mode through exactly the same field a filter does, so it
+    !> gets the same treatment -- checked here against the filter-free path by drawing a sample
+    !> that keeps every row, which must then agree row for row with an unsampled read.
+    subroutine test_row_and_element_mode_sampled(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        integer(int64) :: nrows
+        integer(int32) :: row_back(3), elem_back(12)
+        integer :: i
+        character(len=*), parameter :: file = "test_run/filter_row_element_sampled.parquet"
+
+        call write_vector_fixture(file, 12, 3)
+        call parquet_open_reader(reader, file, sample_fraction=0.999999_real64, sample_seed=11)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 12_int64, "the near-1.0 draw must keep every row")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+        call parquet_read_array_row_mode(reader, "vec", row_back, 7)
+        call parquet_read_array_element_mode(reader, "vec", elem_back, 3)
+        call parquet_close_reader(reader)
+        call check(error, all(row_back == [701, 702, 703]), "sampled row 7 must still be physical row 7")
+        if (allocated(error)) return
+        call check(error, all(elem_back == [(100 * i + 3, i = 1, 12)]), &
+            "sampled element 3 must still span every physical row")
+    end subroutine test_row_and_element_mode_sampled
     !
 end module test_filter

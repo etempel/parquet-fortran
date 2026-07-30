@@ -3537,13 +3537,24 @@ contains
     subroutine parquet_filter_add(this, rule)
         class(parquet_filter), intent(inout) :: this !! filter gaining one rule.
         character(len=*), intent(in) :: rule !! raw filter expression text (max filter_max_rule_len characters).
-        character(len=:), allocatable :: tmp(:)
+        character(len=:), allocatable :: tmp(:), preview
         character(len=32) :: cap_str
 
         if (len(rule) > filter_max_rule_len) then
             write(cap_str, '(i0)') filter_max_rule_len
+            ! Only a short preview of the offending rule goes into the message, never the whole
+            ! (unboundedly long) text: besides being unreadable on an overlong rule, ifx 2026.1.1's
+            ! ERROR STOP runtime corrupts memory once the message reaches 8192 bytes -- confirmed
+            ! empirically (a minimal repro with error stop on a plain character(len=8192) message
+            ! crashes; 8191 does not), and a rule this long plus the surrounding text easily
+            ! crosses that boundary.
+            if (len(rule) > 100) then
+                preview = rule(1:100) // "..."
+            else
+                preview = trim(rule)
+            end if
             error stop "parquet_filter%add: rule exceeds the maximum supported length (" // trim(cap_str) // &
-                " characters): " // trim(rule)
+                " characters): " // preview
         end if
 
         if (.not. allocated(this%rules)) then

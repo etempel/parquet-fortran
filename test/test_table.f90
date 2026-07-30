@@ -100,6 +100,8 @@ contains
             new_unittest("unit is carried by add_column and reported by %unit", test_unit), &
             new_unittest("all 18 kinds: read back, pointer-alias and write out", test_kind_matrix), &
             new_unittest("all 18 kinds: %col aliases and %set replaces", test_kind_matrix_col_set), &
+            new_unittest("all 18 kinds: found= reports a missing column instead of aborting", &
+                test_kind_matrix_found), &
             new_unittest("all 18 kinds: add_column builds a table from scratch", test_kind_matrix_add), &
             new_unittest("filename and file metadata are reported back from the source file", &
                 test_filename_and_metadata) &
@@ -1345,6 +1347,14 @@ contains
         call t%row_group_bounds(tbounds)
         call check(error, all(tbounds == bounds), &
             "a slice table should report the file's own row groups, not the slice's")
+        if (allocated(error)) return
+        !
+        ! A full-regime table never precomputes rg_bounds at open time (only the slice regime
+        ! does, to plan which row groups it needs) -- so this must compute them on demand.
+        call parquet_open_table(t, f)
+        call t%row_group_bounds(tbounds)
+        call check(error, all(tbounds == bounds), &
+            "a full-regime table should compute row groups on demand too")
     end subroutine test_row_group_bounds
     !
     !> The slice regime over every kind, with the slice deliberately straddling two row-group
@@ -1545,6 +1555,7 @@ contains
         integer(int32), allocatable :: xv_i32(:)
         real(real64), allocatable :: xv_f64(:)
         integer(int64), allocatable :: w_i64(:)
+        real(real64), allocatable :: wv_f64(:)
         integer(int64) :: w_scalar
         real(real64) :: w_f64
         character(len=*), parameter :: f = "test_run/table_rowview.parquet"
@@ -1615,6 +1626,10 @@ contains
         call r%get("v_i32", w_i64)
         call check(error, w_i64(2) == 52_int64, "a row get should widen an int32 vector too")
         if (allocated(error)) return
+        call r%get("v_f32", wv_f64)
+        call check(error, abs(wv_f64(2) - 26.0_real64) < 1.0e-5_real64, &
+            "a row get should widen a float32 vector too")
+        if (allocated(error)) return
         !
         ! The remaining kinds, so every generated row_get_* specific is exercised rather than
         ! sampled -- each is its own procedure, and an untested one is untested code.
@@ -1667,7 +1682,8 @@ contains
         integer(int64), allocatable :: wide(:)
         real(real64), allocatable :: fv(:,:), pv(:,:)
         character(len=:), allocatable :: cs(:)
-        type(parquet_string_column) :: sc_out
+        type(parquet_string_column) :: sc_out, sc_null
+        real(real64), allocatable :: wf(:), wvf(:,:)
         character(len=*), parameter :: f = "test_run/table_getslice.parquet"
         !
         call write_slice_fixture(f, N, CH)
@@ -1748,6 +1764,21 @@ contains
         call check(error, sc_out%size() == 3_int64, &
             "the compact form should hold one element per selected row")
         if (allocated(error)) return
+        ! float32 -> float64 widening, scalar and vector (get_slice's own widen path, distinct
+        ! from %get's -- each generated get_slice_* specific has its own widen branch).
+        call t%get_slice("s_f32", s, wf)
+        block
+            real(real32), allocatable :: r_f32full(:), r_f32vfull(:,:)
+            call t%get("s_f32", r_f32full)
+            call check(error, all(abs(wf - real(r_f32full(3:5), real64)) < 1.0e-6_real64), &
+                "get_slice should widen float32 into float64")
+            if (allocated(error)) return
+            call t%get_slice("v_f32", s, wvf)
+            call t%get("v_f32", r_f32vfull)
+            call check(error, all(abs(wvf - real(r_f32vfull(:, 3:5), real64)) < 1.0e-6_real64), &
+                "get_slice should widen a float32 vector column into a float64 array")
+            if (allocated(error)) return
+        end block
         !
         ! The remaining kinds, so every generated get_slice_* specific is exercised. Each is
         ! checked against the equivalent array section of the same column read whole.
@@ -1820,6 +1851,13 @@ contains
             call check(error, size(qv_i64, 2) == 3, "get_slice should widen an int32 vector column")
             if (allocated(error)) return
         end block
+        !
+        ! A slice covering a null string row must widen the null itself, not just the shape.
+        s = parquet_slice_range(9, 11)
+        call t%get_slice("s_str", s, sc_null)
+        call check(error, sc_null%is_null(2_int64), &
+            "get_slice should widen a null string row into a null element rather than an empty one")
+        if (allocated(error)) return
         !
         ! A slice is relative to the TABLE, so on a slice-regime table row 1 is its own first row.
         call parquet_open_table(t, f, 6, 16)
@@ -2171,6 +2209,112 @@ contains
         call check(error, trim(g_str(4)) == "ghijklm", &
             "a set/get round trip should preserve scalar string values")
     end subroutine test_kind_matrix_col_set
+    !
+    !> found= on every %get/%col specific, swept the same way as test_kind_matrix_col_set: each
+    !! kind's %get/%col has its own generated "column not found" early-return branch, so it is
+    !! untested code unless a bogus name is actually looked up through that exact specific.
+    subroutine test_kind_matrix_found(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        character(len=*), parameter :: f = "test_run/table_matrix_found.parquet"
+        character(len=*), parameter :: miss = "no_such_column"
+        logical :: ok
+        integer(int32), pointer :: p_i32(:), p_i32v(:,:)
+        integer(int64), pointer :: p_i64(:), p_i64v(:,:)
+        real(real32), pointer :: p_f32(:), p_f32v(:,:)
+        real(real64), pointer :: p_f64(:), p_f64v(:,:)
+        logical, pointer :: p_bool(:), p_boolv(:,:)
+        type(parquet_date), pointer :: p_date(:), p_datev(:,:)
+        type(parquet_time), pointer :: p_time(:), p_timev(:,:)
+        type(parquet_timestamp), pointer :: p_ts(:), p_tsv(:,:)
+        integer(int32), allocatable :: g_i32(:), gv_i32(:,:)
+        integer(int64), allocatable :: g_i64(:), gv_i64(:,:)
+        real(real32), allocatable :: g_f32(:), gv_f32(:,:)
+        real(real64), allocatable :: g_f64(:), gv_f64(:,:)
+        logical, allocatable :: g_bool(:), gv_bool(:,:)
+        character(len=:), allocatable :: g_chr(:), gv_chr(:,:)
+        type(parquet_date), allocatable :: g_date(:), gv_date(:,:)
+        type(parquet_time), allocatable :: g_time(:), gv_time(:,:)
+        type(parquet_timestamp), allocatable :: g_ts(:), gv_ts(:,:)
+        type(parquet_string_column) :: g_str
+        !
+        call write_matrix_fixture(f)
+        call parquet_open_table(t, f)
+        !
+        ! --- %col: every kind with a pointer path ---
+        call t%col(miss, p_i32, found=ok);   call check(error, .not. ok .and. .not. associated(p_i32), "col i32 miss")
+        if (allocated(error)) return
+        call t%col(miss, p_i64, found=ok);   call check(error, .not. ok .and. .not. associated(p_i64), "col i64 miss")
+        if (allocated(error)) return
+        call t%col(miss, p_f32, found=ok);   call check(error, .not. ok .and. .not. associated(p_f32), "col f32 miss")
+        if (allocated(error)) return
+        call t%col(miss, p_f64, found=ok);   call check(error, .not. ok .and. .not. associated(p_f64), "col f64 miss")
+        if (allocated(error)) return
+        call t%col(miss, p_bool, found=ok);  call check(error, .not. ok .and. .not. associated(p_bool), "col bool miss")
+        if (allocated(error)) return
+        call t%col(miss, p_date, found=ok);  call check(error, .not. ok .and. .not. associated(p_date), "col date miss")
+        if (allocated(error)) return
+        call t%col(miss, p_time, found=ok);  call check(error, .not. ok .and. .not. associated(p_time), "col time miss")
+        if (allocated(error)) return
+        call t%col(miss, p_ts, found=ok);    call check(error, .not. ok .and. .not. associated(p_ts), "col ts miss")
+        if (allocated(error)) return
+        call t%col(miss, p_i32v, found=ok);  call check(error, .not. ok .and. .not. associated(p_i32v), "col i32v miss")
+        if (allocated(error)) return
+        call t%col(miss, p_i64v, found=ok);  call check(error, .not. ok .and. .not. associated(p_i64v), "col i64v miss")
+        if (allocated(error)) return
+        call t%col(miss, p_f32v, found=ok);  call check(error, .not. ok .and. .not. associated(p_f32v), "col f32v miss")
+        if (allocated(error)) return
+        call t%col(miss, p_f64v, found=ok);  call check(error, .not. ok .and. .not. associated(p_f64v), "col f64v miss")
+        if (allocated(error)) return
+        call t%col(miss, p_boolv, found=ok); call check(error, .not. ok .and. .not. associated(p_boolv), "col boolv miss")
+        if (allocated(error)) return
+        call t%col(miss, p_datev, found=ok); call check(error, .not. ok .and. .not. associated(p_datev), "col datev miss")
+        if (allocated(error)) return
+        call t%col(miss, p_timev, found=ok); call check(error, .not. ok .and. .not. associated(p_timev), "col timev miss")
+        if (allocated(error)) return
+        call t%col(miss, p_tsv, found=ok);   call check(error, .not. ok .and. .not. associated(p_tsv), "col tsv miss")
+        if (allocated(error)) return
+        !
+        ! --- %get: every kind, scalar and vector, plus both string forms ---
+        call t%get(miss, g_i32, found=ok);   call check(error, .not. ok .and. size(g_i32) == 0, "get i32 miss")
+        if (allocated(error)) return
+        call t%get(miss, g_i64, found=ok);   call check(error, .not. ok .and. size(g_i64) == 0, "get i64 miss")
+        if (allocated(error)) return
+        call t%get(miss, g_f32, found=ok);   call check(error, .not. ok .and. size(g_f32) == 0, "get f32 miss")
+        if (allocated(error)) return
+        call t%get(miss, g_f64, found=ok);   call check(error, .not. ok .and. size(g_f64) == 0, "get f64 miss")
+        if (allocated(error)) return
+        call t%get(miss, g_bool, found=ok);  call check(error, .not. ok .and. size(g_bool) == 0, "get bool miss")
+        if (allocated(error)) return
+        call t%get(miss, g_date, found=ok);  call check(error, .not. ok .and. size(g_date) == 0, "get date miss")
+        if (allocated(error)) return
+        call t%get(miss, g_time, found=ok);  call check(error, .not. ok .and. size(g_time) == 0, "get time miss")
+        if (allocated(error)) return
+        call t%get(miss, g_ts, found=ok);    call check(error, .not. ok .and. size(g_ts) == 0, "get ts miss")
+        if (allocated(error)) return
+        call t%get(miss, gv_i32, found=ok);  call check(error, .not. ok .and. size(gv_i32) == 0, "get i32v miss")
+        if (allocated(error)) return
+        call t%get(miss, gv_i64, found=ok);  call check(error, .not. ok .and. size(gv_i64) == 0, "get i64v miss")
+        if (allocated(error)) return
+        call t%get(miss, gv_f32, found=ok);  call check(error, .not. ok .and. size(gv_f32) == 0, "get f32v miss")
+        if (allocated(error)) return
+        call t%get(miss, gv_f64, found=ok);  call check(error, .not. ok .and. size(gv_f64) == 0, "get f64v miss")
+        if (allocated(error)) return
+        call t%get(miss, gv_bool, found=ok); call check(error, .not. ok .and. size(gv_bool) == 0, "get boolv miss")
+        if (allocated(error)) return
+        call t%get(miss, gv_date, found=ok); call check(error, .not. ok .and. size(gv_date) == 0, "get datev miss")
+        if (allocated(error)) return
+        call t%get(miss, gv_time, found=ok); call check(error, .not. ok .and. size(gv_time) == 0, "get timev miss")
+        if (allocated(error)) return
+        call t%get(miss, gv_ts, found=ok);   call check(error, .not. ok .and. size(gv_ts) == 0, "get tsv miss")
+        if (allocated(error)) return
+        call t%get(miss, g_str, found=ok);   call check(error, .not. ok, "get str (compact) miss")
+        if (allocated(error)) return
+        call t%get(miss, g_chr, found=ok);   call check(error, .not. ok .and. size(g_chr) == 0, "get str (chr) miss")
+        if (allocated(error)) return
+        call t%get(miss, gv_chr, found=ok)
+        call check(error, .not. ok .and. size(gv_chr) == 0, "get str vector (chrv) miss")
+    end subroutine test_kind_matrix_found
     !
     !> add_column for every kind: build a whole table from scratch in memory, then write it and
     !! read it back. Each kind has its own add_column specific, so this sweeps too.

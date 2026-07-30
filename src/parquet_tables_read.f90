@@ -47,8 +47,13 @@ contains
         case ("timestamp")
             kind = merge(PK_TIMESTAMP_VEC, PK_TIMESTAMP, vec)
         case default
-            kind = PK_NONE
-            ok = .false.
+            ! Both call sites (table_classify, table_resolve_width) only ever pass a type_name
+            ! that already came back from parquet_get_column_type, which itself either returns
+            ! one of exactly these 9 canonical tokens or error stops -- see
+            ! "parquet_get_column_type on a column outside the 9 canonical types aborts" in
+            ! test_errors.f90. There is no path that reaches this select with any other token.
+            kind = PK_NONE ! GCOVR_EXCL_LINE
+            ok = .false. ! GCOVR_EXCL_LINE
         end select
     end procedure table_kind_from_type
     !
@@ -76,11 +81,15 @@ contains
             ! for a column whose width is not knowable yet.
             call table_kind_from_type(type_name, 1, kind, ok)
             if (.not. ok) then
-                slot%supported = .false.
-                slot%declared_kind = PK_NONE
-                slot%width = 1
-                slot%residency = RES_EMPTY
-                return
+                ! Not reachable: the parquet_column_exists(types=...) probe above already
+                ! restricted type_name to the same 9 tokens table_kind_from_type recognizes, so
+                ! ok is always .true. here. Kept as a second line of defense rather than an
+                ! assertion, matching this procedure's own early-return shape above.
+                slot%supported = .false. ! GCOVR_EXCL_LINE
+                slot%declared_kind = PK_NONE ! GCOVR_EXCL_LINE
+                slot%width = 1 ! GCOVR_EXCL_LINE
+                slot%residency = RES_EMPTY ! GCOVR_EXCL_LINE
+                return ! GCOVR_EXCL_LINE
             end if
             slot%supported = .true.
             slot%residency = RES_EMPTY
@@ -276,10 +285,13 @@ contains
             call table_resolve_width(cache, sc, idx, .false., proc)
             if (sc%detached) then
                 ! D6: once a row-structural mutation has changed the row set, a column read from
-                ! the file would no longer line up with the columns already in memory.
-                call table_context_suffix(cache, slot%name, sfx)
-                error stop EP // trim(proc) // ": this table has been detached from its file by " // &
-                    "a row-structural change; materialize a column before mutating rows" // sfx
+                ! the file would no longer line up with the columns already in memory. Not
+                ! reachable yet: no row-structural mutation exists in this milestone, so
+                ! %detached is always .false. -- reserved for when one is added (see
+                ! parquet_tables.f90's %detached component doc).
+                call table_context_suffix(cache, slot%name, sfx) ! GCOVR_EXCL_LINE
+                error stop EP // trim(proc) // ": this table has been detached from its file by " // & ! GCOVR_EXCL_LINE
+                    "a row-structural change; materialize a column before mutating rows" // sfx ! GCOVR_EXCL_LINE
             end if
         end associate
         call table_materialize(cache, sc, idx)
@@ -418,9 +430,11 @@ contains
                 "nothing to reload it from" // sfx
         end if
         if (self%detached) then
-            call table_context_suffix(self%cache, name, sfx)
-            error stop EP // "reload: this table has been detached from its file by a " // &
-                "row-structural change, so a re-read would no longer line up" // sfx
+            ! Same reserved-for-future-feature guard as table_touch's own %detached check above --
+            ! not reachable yet, since nothing in this milestone ever sets %detached to .true.
+            call table_context_suffix(self%cache, name, sfx) ! GCOVR_EXCL_LINE
+            error stop EP // "reload: this table has been detached from its file by a " // & ! GCOVR_EXCL_LINE
+                "row-structural change, so a re-read would no longer line up" // sfx ! GCOVR_EXCL_LINE
         end if
         ! Drop what is there and take the first-touch path again, so a reload and a first read
         ! cannot drift apart.

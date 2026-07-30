@@ -892,14 +892,32 @@ program error_scenarios
         call scenario_table_not_opened()
     case ("table_pointer_kind_mismatch")
         call scenario_table_pointer_kind_mismatch()
+    case ("table_get_array_kind_mismatch")
+        call scenario_table_get_array_kind_mismatch()
     case ("table_unknown_column")
         call scenario_table_unknown_column()
     case ("table_unsupported_column_read")
         call scenario_table_unsupported_column_read()
+    case ("table_prefetch_unknown_column")
+        call scenario_table_prefetch_unknown_column()
+    case ("table_prefetch_unsupported_column")
+        call scenario_table_prefetch_unsupported_column()
     case ("table_add_column_row_mismatch")
         call scenario_table_add_column_row_mismatch()
     case ("table_add_column_duplicate")
         call scenario_table_add_column_duplicate()
+    case ("table_add_column_duplicate_force_false")
+        call scenario_table_add_column_duplicate_force_false()
+    case ("table_row_group_bounds_in_memory")
+        call scenario_table_row_group_bounds_in_memory()
+    case ("table_set_kind_mismatch")
+        call scenario_table_set_kind_mismatch()
+    case ("table_get_file_metadata_in_memory")
+        call scenario_table_get_file_metadata_in_memory()
+    case ("table_get_file_metadata_missing_key")
+        call scenario_table_get_file_metadata_missing_key()
+    case ("table_kind_unknown_column")
+        call scenario_table_kind_unknown_column()
     case ("table_set_length_mismatch")
         call scenario_table_set_length_mismatch()
     case ("table_write_missing_column")
@@ -924,12 +942,20 @@ program error_scenarios
         call scenario_table_reload_not_file_backed()
     case ("table_row_unknown_column")
         call scenario_table_row_unknown_column()
+    case ("table_row_unattached")
+        call scenario_table_row_unattached()
+    case ("table_row_unsupported_column")
+        call scenario_table_row_unsupported_column()
+    case ("table_row_string_kind_mismatch")
+        call scenario_table_row_string_kind_mismatch()
     case ("table_row_kind_mismatch")
         call scenario_table_row_kind_mismatch()
     case ("table_get_slice_kind_mismatch")
         call scenario_table_get_slice_kind_mismatch()
     case ("table_first_touch_in_parallel")
         call scenario_table_first_touch_in_parallel()
+    case ("table_resolve_width_in_parallel")
+        call scenario_table_resolve_width_in_parallel()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -7769,6 +7795,17 @@ contains
         print '(a,i0)', "unexpectedly aliased an int32 column through an int64 pointer, size=", size(p)
     end subroutine scenario_table_pointer_kind_mismatch
 
+    !> The copy-out path widens int32->int64/float32->float64 but nothing else, so a float64
+    !! column copied into an int32 array must abort rather than truncate or reinterpret it.
+    subroutine scenario_table_get_array_kind_mismatch()
+        type(parquet_table) :: t
+        integer(int32), allocatable :: v(:)
+        call write_table_scenario_fixture("test_run/es_table_get_arr.parquet")
+        call parquet_open_table(t, "test_run/es_table_get_arr.parquet")
+        call t%get("val", v)   ! float64 column into an int32 array -> aborts
+        print '(a,i0)', "unexpectedly copied a float64 column into an int32 array, size=", size(v)
+    end subroutine scenario_table_get_array_kind_mismatch
+
     !> Without found=, a missing column is fatal rather than quietly empty.
     subroutine scenario_table_unknown_column()
         type(parquet_table) :: t
@@ -7789,6 +7826,27 @@ contains
         print '(a,i0)', "unexpectedly read an unsupported column, size=", size(v)
     end subroutine scenario_table_unsupported_column_read
 
+    !> %prefetch resolves its name through table_prefetch_resolve, a separate procedure from
+    !! table_resolve -- so, like %kind's table_lookup_or_fail above, it needs its own scenario
+    !! for the "no found=, missing column" abort rather than relying on table_unknown_column.
+    subroutine scenario_table_prefetch_unknown_column()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_table_prefetch_unknown.parquet")
+        call parquet_open_table(t, "test_run/es_table_prefetch_unknown.parquet")
+        call t%prefetch("no_such_column")   ! no found= -> aborts
+        print '(a)', "unexpectedly prefetched a column that does not exist"
+    end subroutine scenario_table_prefetch_unknown_column
+
+    !> Asking to prefetch a column this library cannot read is a mistake, not a quiet no-op,
+    !! even though skipping it would be harmless -- so table_prefetch_resolve rejects it
+    !! regardless of found=.
+    subroutine scenario_table_prefetch_unsupported_column()
+        type(parquet_table) :: t
+        call parquet_open_table(t, "test/fixtures/extended_types.parquet")
+        call t%prefetch("v_uint32")   ! foreign uint32 column -> aborts
+        print '(a)', "unexpectedly prefetched an unsupported column"
+    end subroutine scenario_table_prefetch_unsupported_column
+
     !> Every column of a table must have the same number of rows.
     subroutine scenario_table_add_column_row_mismatch()
         type(parquet_table) :: t
@@ -7806,6 +7864,70 @@ contains
         call t%add_column("a", [4_int32, 5_int32, 6_int32])   ! no force= -> aborts
         print '(a,i0)', "unexpectedly replaced a column without force=, ncols=", t%ncols()
     end subroutine scenario_table_add_column_duplicate
+
+    !> The same guard, but with force= passed explicitly as .false. rather than omitted --
+    !! table_new_slot has its own separate branch for each of the two cases.
+    subroutine scenario_table_add_column_duplicate_force_false()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32, 3_int32])
+        call t%add_column("a", [4_int32, 5_int32, 6_int32], force=.false.)   ! -> aborts
+        print '(a,i0)', "unexpectedly replaced a column with force=.false., ncols=", t%ncols()
+    end subroutine scenario_table_add_column_duplicate_force_false
+
+    !> A table opened without a slice never populates rg_bounds at open time, so
+    !! %row_group_bounds must reject an in-memory table (which has no reader to ask either).
+    subroutine scenario_table_row_group_bounds_in_memory()
+        type(parquet_table) :: t
+        integer(int64), allocatable :: bounds(:,:)
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32, 3_int32])
+        call t%row_group_bounds(bounds)   ! no file behind this table -> aborts
+        print '(a,i0)', "unexpectedly reported row group bounds for an in-memory table, n=", size(bounds, 2)
+    end subroutine scenario_table_row_group_bounds_in_memory
+
+    !> %set is same-length AND same-kind: table_require_kind is the shared guard behind every
+    !! set_arr_* specific, so one abort here exercises all of them.
+    subroutine scenario_table_set_kind_mismatch()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_table_set_kind.parquet")
+        call parquet_open_table(t, "test_run/es_table_set_kind.parquet")
+        call t%set("id", [1.5_real64, 2.5_real64, 3.5_real64])   ! int32 column, float64 array -> aborts
+        print '(a)', "unexpectedly set an int32 column from a float64 array"
+    end subroutine scenario_table_set_kind_mismatch
+
+    !> Without found=, asking an in-memory table for file metadata is fatal -- there is no file
+    !! to have metadata, and quietly returning "" would look like a present-but-empty value.
+    subroutine scenario_table_get_file_metadata_in_memory()
+        type(parquet_table) :: t
+        character(len=:), allocatable :: val
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32, 3_int32])
+        call t%get_file_metadata("some_key", val)   ! no file behind this table -> aborts
+        print '(a,a)', "unexpectedly read file metadata from an in-memory table, val=", val
+    end subroutine scenario_table_get_file_metadata_in_memory
+
+    !> Without found=, an unknown metadata key on a real file is fatal rather than a silent "".
+    subroutine scenario_table_get_file_metadata_missing_key()
+        type(parquet_table) :: t
+        character(len=:), allocatable :: val
+        call write_table_scenario_fixture("test_run/es_table_meta_miss.parquet")
+        call parquet_open_table(t, "test_run/es_table_meta_miss.parquet")
+        call t%get_file_metadata("no_such_key", val)   ! -> aborts
+        print '(a,a)', "unexpectedly read an unknown metadata key, val=", val
+    end subroutine scenario_table_get_file_metadata_missing_key
+
+    !> table_lookup_or_fail is the shared guard behind %kind/%width/%unit/%residency/
+    !! %is_supported -- a separate procedure from table_resolve, so it needs its own scenario
+    !! rather than relying on table_unknown_column above (which only exercises table_resolve).
+    subroutine scenario_table_kind_unknown_column()
+        type(parquet_table) :: t
+        integer :: k
+        call write_table_scenario_fixture("test_run/es_table_kind_unknown.parquet")
+        call parquet_open_table(t, "test_run/es_table_kind_unknown.parquet")
+        k = t%kind("no_such_column")   ! no found= -> aborts
+        print '(a,i0)', "unexpectedly reported a kind for a column that does not exist, k=", k
+    end subroutine scenario_table_kind_unknown_column
 
     !> %set replaces values, never the row set, so a different-length array must abort.
     subroutine scenario_table_set_length_mismatch()
@@ -7947,6 +8069,43 @@ contains
         print '(a,l1)', "unexpectedly read a float64 row into a logical, v=", v
     end subroutine scenario_table_row_kind_mismatch
 
+    !> A default-initialized row handle is not attached to any table (its %cache pointer is
+    !! never associated except by t%row(i)), so any access through it must say so rather than
+    !! dereference a null cache.
+    subroutine scenario_table_row_unattached()
+        type(parquet_table_row) :: r
+        real(real64) :: v
+        call r%get("val", v)   ! r was never obtained from t%row(i) -> aborts
+        print '(a,f0.1)', "unexpectedly read a column through an unattached row handle, v=", v
+    end subroutine scenario_table_row_unattached
+
+    !> A row handle resolves its column the same way the table itself does: a column this
+    !! library cannot read is a mistake, not a quiet no-op, even through the row path.
+    subroutine scenario_table_row_unsupported_column()
+        type(parquet_table) :: t
+        type(parquet_table_row) :: r
+        integer(int32) :: v
+        call parquet_open_table(t, "test/fixtures/extended_types.parquet")
+        r = t%row(1)
+        call r%get("v_uint32", v)   ! foreign uint32 column -> aborts
+        print '(a,i0)', "unexpectedly read an unsupported column through a row handle, v=", v
+    end subroutine scenario_table_row_unsupported_column
+
+    !> row_get_str/row_get_strv go through row_require_kind rather than the inline
+    !! select-case/row_kind_error every numeric row_get_* specific uses (see
+    !! table_row_kind_mismatch above, which only exercises the numeric path) -- so the string
+    !! specific's own kind guard needs its own scenario.
+    subroutine scenario_table_row_string_kind_mismatch()
+        type(parquet_table) :: t
+        type(parquet_table_row) :: r
+        character(len=:), allocatable :: v
+        call write_table_scenario_fixture("test_run/es_table_row_str_kind.parquet")
+        call parquet_open_table(t, "test_run/es_table_row_str_kind.parquet")
+        r = t%row(1)
+        call r%get("val", v)   ! float64 column into a character variable -> aborts
+        print '(a,a)', "unexpectedly read a float64 row into a character variable, v=", v
+    end subroutine scenario_table_row_string_kind_mismatch
+
     !> The same for the sliced copy path: widening is the only conversion on offer.
     subroutine scenario_table_get_slice_kind_mismatch()
         type(parquet_table) :: t
@@ -7976,5 +8135,22 @@ contains
         !$omp end parallel do
         print '(a)', "unexpectedly first-touched a column inside a parallel region"
     end subroutine scenario_table_first_touch_in_parallel
+
+    !> %kind/%width resolve a deferred-width (plain LIST) column by calling table_resolve_width
+    !! directly, NOT through table_touch -- so they need their own parallel-region guard, and
+    !! their own scenario: table_first_touch_in_parallel above never reaches this branch, since
+    !! its column is not deferred-width and table_touch's own guard (checked first) already
+    !! aborts before table_resolve_width would ever run.
+    subroutine scenario_table_resolve_width_in_parallel()
+        type(parquet_table) :: t
+        integer :: i, w
+        call parquet_open_table(t, "test/fixtures/list_widths.parquet")
+        !$omp parallel do default(shared) private(i, w)
+        do i = 1, 2
+            w = t%width("uniform")   ! deferred-width column, first resolve inside the region -> aborts
+        end do
+        !$omp end parallel do
+        print '(a,i0)', "unexpectedly resolved a deferred column's width inside a parallel region, w=", w
+    end subroutine scenario_table_resolve_width_in_parallel
 
 end program error_scenarios

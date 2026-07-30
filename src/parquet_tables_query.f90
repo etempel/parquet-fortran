@@ -59,7 +59,10 @@ contains
     !
     module procedure table_find
         idx = 0
-        if (.not. associated(self%cache)) return
+        ! Defensive only: every call site (table_has_column, table_resolve, table_lookup_or_fail,
+        ! table_new_slot's own callers) runs table_check_open first, which already aborts on an
+        ! unassociated cache -- so this branch guards an invariant nothing reachable can violate.
+        if (.not. associated(self%cache)) return ! GCOVR_EXCL_LINE
         idx = cache_find(self%cache, name)
     end procedure table_find
     !

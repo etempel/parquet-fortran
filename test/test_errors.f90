@@ -513,10 +513,34 @@ contains
                 test_table_reload_not_file_backed_aborts), &
             new_unittest("a row handle reading an unknown column aborts", &
                 test_table_row_unknown_column_aborts), &
+            new_unittest("reading through an unattached row handle aborts", &
+                test_table_row_unattached_aborts), &
+            new_unittest("a row handle reading an unsupported column aborts", &
+                test_table_row_unsupported_column_aborts), &
+            new_unittest("a row handle reading a non-string column into a string aborts", &
+                test_table_row_string_kind_mismatch_aborts), &
             new_unittest("a row handle reading into an incompatible kind aborts", &
                 test_table_row_kind_mismatch_aborts), &
             new_unittest("get_slice into an incompatible kind aborts", &
                 test_table_get_slice_kind_mismatch_aborts), &
+            new_unittest("get into an incompatible array kind aborts", &
+                test_table_get_array_kind_mismatch_aborts), &
+            new_unittest("add_column(force=.false.) on a duplicate name aborts", &
+                test_table_add_column_duplicate_force_false_aborts), &
+            new_unittest("row_group_bounds on an in-memory table aborts", &
+                test_table_row_group_bounds_in_memory_aborts), &
+            new_unittest("set into an incompatible column kind aborts", &
+                test_table_set_kind_mismatch_aborts), &
+            new_unittest("get_file_metadata on an in-memory table aborts", &
+                test_table_get_file_metadata_in_memory_aborts), &
+            new_unittest("get_file_metadata with an unknown key aborts", &
+                test_table_get_file_metadata_missing_key_aborts), &
+            new_unittest("kind of an unknown column aborts", &
+                test_table_kind_unknown_column_aborts), &
+            new_unittest("prefetching an unknown column aborts", &
+                test_table_prefetch_unknown_column_aborts), &
+            new_unittest("prefetching an unsupported column aborts", &
+                test_table_prefetch_unsupported_column_aborts), &
             new_unittest("parquet_string_column indexing out of range aborts", &
                 test_string_column_index_out_of_range_aborts), &
             new_unittest("parquet_string_column view_all with a mismatched-size array aborts", &
@@ -859,6 +883,27 @@ contains
             required_stderr="row get: no column of this name")
     end subroutine test_table_row_unknown_column_aborts
 
+    subroutine test_table_row_unattached_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_row_unattached", expect_abort=.true., &
+            failure_message="reading through an unattached row handle was expected to abort", &
+            required_stderr="this row handle is not attached to a table")
+    end subroutine test_table_row_unattached_aborts
+
+    subroutine test_table_row_unsupported_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_row_unsupported_column", expect_abort=.true., &
+            failure_message="a row handle reading an unsupported column was expected to abort", &
+            required_stderr="this column's type is not supported")
+    end subroutine test_table_row_unsupported_column_aborts
+
+    subroutine test_table_row_string_kind_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_row_string_kind_mismatch", expect_abort=.true., &
+            failure_message="reading a float64 row into a character variable was expected to abort", &
+            required_stderr="row get: column kind is")
+    end subroutine test_table_row_string_kind_mismatch_aborts
+
     subroutine test_table_row_kind_mismatch_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "table_row_kind_mismatch", expect_abort=.true., &
@@ -872,6 +917,70 @@ contains
             failure_message="a sliced read into an incompatible kind was expected to abort", &
             required_stderr="cannot be copied into this array")
     end subroutine test_table_get_slice_kind_mismatch_aborts
+
+    subroutine test_table_get_array_kind_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_get_array_kind_mismatch", expect_abort=.true., &
+            failure_message="a %get into an incompatible array kind was expected to abort", &
+            required_stderr="cannot be copied into this array")
+    end subroutine test_table_get_array_kind_mismatch_aborts
+
+    subroutine test_table_add_column_duplicate_force_false_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_add_column_duplicate_force_false", &
+            expect_abort=.true., &
+            failure_message="add_column(force=.false.) on a duplicate name was expected to abort", &
+            required_stderr="pass force=.true. to replace it")
+    end subroutine test_table_add_column_duplicate_force_false_aborts
+
+    subroutine test_table_row_group_bounds_in_memory_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_row_group_bounds_in_memory", expect_abort=.true., &
+            failure_message="row_group_bounds on an in-memory table was expected to abort", &
+            required_stderr="this table was not opened from a file")
+    end subroutine test_table_row_group_bounds_in_memory_aborts
+
+    subroutine test_table_set_kind_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_set_kind_mismatch", expect_abort=.true., &
+            failure_message="setting an int32 column from a float64 array was expected to abort", &
+            required_stderr="column kind is")
+    end subroutine test_table_set_kind_mismatch_aborts
+
+    subroutine test_table_get_file_metadata_in_memory_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_get_file_metadata_in_memory", expect_abort=.true., &
+            failure_message="get_file_metadata on an in-memory table was expected to abort", &
+            required_stderr="this table was not opened from a file")
+    end subroutine test_table_get_file_metadata_in_memory_aborts
+
+    subroutine test_table_get_file_metadata_missing_key_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_get_file_metadata_missing_key", expect_abort=.true., &
+            failure_message="get_file_metadata with an unknown key was expected to abort", &
+            required_stderr="no metadata key")
+    end subroutine test_table_get_file_metadata_missing_key_aborts
+
+    subroutine test_table_kind_unknown_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_kind_unknown_column", expect_abort=.true., &
+            failure_message="%kind on an unknown column without found= was expected to abort", &
+            required_stderr="no column of this name")
+    end subroutine test_table_kind_unknown_column_aborts
+
+    subroutine test_table_prefetch_unknown_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_prefetch_unknown_column", expect_abort=.true., &
+            failure_message="prefetching an unknown column without found= was expected to abort", &
+            required_stderr="no column of this name")
+    end subroutine test_table_prefetch_unknown_column_aborts
+
+    subroutine test_table_prefetch_unsupported_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_prefetch_unsupported_column", expect_abort=.true., &
+            failure_message="prefetching an unsupported column was expected to abort", &
+            required_stderr="this column's type is not supported")
+    end subroutine test_table_prefetch_unsupported_column_aborts
 
     subroutine test_columns_data_ptr_kind_mismatch_aborts(error)
         type(error_type), allocatable, intent(out) :: error

@@ -229,6 +229,7 @@ scenarios=(
     "table_get_slice_kind_mismatch:1"
     "col_size_overflow:1"
     "col_size_and_row_mode_avoid_whole_column_read:0"
+    "list_width_never_reads_whole_column:0"
     "whole_column_read_forced_error_control:1"
     "read_array_full_bool_type_mismatch:1"
     "read_array_full_string_type_mismatch:1"

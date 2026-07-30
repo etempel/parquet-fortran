@@ -1345,6 +1345,56 @@ scoped per-row-group rather than per-column-total:
    asserting the exact stderr message) + `tools/run_error_scenarios.sh` entry + a README
    Limitations bullet describing the ceiling and that it aborts cleanly rather than corrupting.
 
+**Measuring a column's width must never materialize it, and only ONE column type needs data at
+all.** `parquet_get_col_size`/`parquet_get_column_total_elements` answer from the schema for every
+type except a plain `LIST`/`LARGE_LIST` — a scalar column's width is 1 by construction and a
+`FIXED_SIZE_LIST`'s is `list_size()`. Only a plain `LIST` genuinely needs the data, because Arrow
+lets every row hold a different length, so whether one uniform width exists is a property of the
+data (`needs_data_to_measure_col_size` is the single predicate encoding this). Two facts make this
+narrower than it looks: any Arrow-based writer preserves `FIXED_SIZE_LIST` via `store_schema()`, so
+the plain-`LIST` case only arises for a non-Arrow writer or genuinely ragged data; and
+`STRUCT`/`MAP`
+never reach the question at all (`collect_column_leaf_paths` expands a struct into per-leaf paths,
+and a `MAP` fails `parquet_column_exists`'s `types=` probe first).
+
+When it does need data, it is resolved in two tiers rather than by a whole-column read — keep both:
+
+1. **A footer screen** (`list_width_candidate`): per row group, `num_values / num_rows`. A
+   non-integral mean, or two row groups disagreeing, proves no uniform width exists, for free. A
+   surviving answer is a **candidate, never a proof** — rows of length 3,1,3,1 average to exactly 2,
+   and a null or empty list occupies exactly one leaf slot (both verified empirically, not assumed;
+   see `test/fixtures/list_widths.parquet`'s `avg_ok` and `null_avg` columns).
+2. **A row-group scan** (`list_width_verified`) only for a survivor, bailing at the first
+   disagreement, so peak memory is one row group. It deliberately does **not** use
+   `get_row_group_chunk_array` — that one records the row group as read
+   (`parquet_reader_check_complete`)
+   and runs qc, neither of which measuring a column should cause. Use
+   `read_row_group_array_for_measuring` instead, or a similar side-effect-free read.
+
+**`parquet_table` never pays for the scan on the read path**, and that is deliberate: `table_touch`
+resolves a deferred column with the *unproven candidate* (`table_resolve_width(...,
+proven=.false.)`)
+because `get_uniform_list_values` already checks every row's length against the width it was given
+and aborts on a mismatch — so the read that was going to happen anyway doubles as the proof, keeping
+`%prefetch` to one pass. Only `%kind`/`%width` pass `proven=.true.`, since answering a metadata
+query
+with a guess would silently mis-type the column. Two consequences to preserve if this is ever
+refactored: an empty column measures as **0**, not 1 (`parquet_get_col_size` has always reported 0
+for
+a zero-row list column — the Fortran wrapper must not clamp it, the table descriptor clamps with
+`max(w, 1)` itself); and a *slice* measures over its own row groups, so a globally-ragged file can
+present a uniform width within one slice and two tables over the same file can legitimately
+disagree.
+
+**A new non-touching query must be checked against this.** `%kind`/`%width` had to become
+touch-triggering for deferred columns; `%unit`, `%residency` and `%is_supported` deliberately did
+not
+(`%residency` would always report `RES_FULL`; `%is_supported` comes from the element type alone,
+since
+`table_kind_from_type`'s `ok` never depends on `col_size`). Anything reading `declared_kind` or
+`width` without going through `table_resolve` or `table_resolve_width` will read `PK_NONE`/0 for a
+deferred column.
+
 **Read side of the `nrows * col_size` ceiling: row-group-scoped, not a ceiling at all.** Unlike
 the write side above, `parquet_get_col_size`/`parquet_get_column_total_elements`/
 `parquet_read_array_row_mode`/`parquet_read_array_element_mode` on the *read* path must **not**

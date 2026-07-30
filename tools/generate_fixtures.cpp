@@ -20,6 +20,7 @@
 #include <arrow/util/float16.h>
 #include <parquet/arrow/writer.h>
 #include <cstdio>
+#include <functional>
 #include <memory>
 
 // test/fixtures/has_null.parquet: 3 rows with genuine Arrow/Parquet Nulls
@@ -177,6 +178,124 @@ static bool generate_list_vector_fixture()
     auto maybe_outfile = arrow::io::FileOutputStream::Open("test/fixtures/list_vector.parquet");
     auto outfile = *maybe_outfile;
     auto status = parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile, 4);
+    return status.ok();
+}
+
+// test/fixtures/list_widths.parquet: every shape a plain Parquet LIST column can take, in one
+// file, so the deferred-width machinery can be exercised end to end against all of them at once.
+//
+// The point of these columns is that a plain `list` carries NO width in the schema (unlike the
+// `fixed_size_list` this library writes), so whether one uniform width exists is a property of the
+// data. parquet_table therefore defers such a column's kind and width to first use, and resolves
+// them in two tiers: a footer screen (per row group, mean elements per row must be a whole number
+// and must agree between row groups) and, only for a survivor, a row-group-by-row-group scan. The
+// columns below are chosen to hit every outcome of that pair:
+//
+//   uniform   list<int32>,  every row length 3    -> screen yields candidate 3, scan confirms.
+//                                                    A VECTOR column of width 3.
+//   avg_ok    list<int32>,  lengths 3,1,3,1,...   -> mean is exactly 2, so the screen CANNOT
+//                                                    reject it. Only the scan catches it. This is
+//                                                    the column that proves a candidate is not a
+//                                                    proof, and that the read path rejects a wrong
+//                                                    candidate rather than mis-typing the column.
+//   ragged    list<int32>,  lengths 1,2,3,4,...   -> mean is non-integral; screen rejects for free.
+//   late      list<int32>,  uniform 3 except the
+//                           LAST row group        -> the screen catches it only because it compares
+//                                                    row groups against each other, not just each
+//                                                    one's own divisibility.
+//   with_null list<int32>,  one NULL list row     -> a null row has length 0, so no width >= 1
+//                                                    covers every row; the screen already rejects it.
+//   null_avg  list<int32>,  lengths 5,5,5,NULL     -> 16 slots over 4 rows is a mean of exactly 4,
+//                                                    because a null row occupies one slot -- so the
+//                                                    screen passes it and only the scan rejects it.
+//                                                    The null counterpart of avg_ok.
+//   with_empty list<int32>, one EMPTY list row    -> same, and distinct from the null case on the
+//                                                    Arrow side even though the verdict matches.
+//   nested    struct<vals: list<int32>>           -> the same deferral reached through a dotted
+//                                                    struct path ("nested.vals"), where the leaf
+//                                                    index and the max definition level both differ
+//                                                    from the top-level case.
+//   scalar    int32                               -> the control: a non-list column, whose width is
+//                                                    1 from the schema and which must never be
+//                                                    deferred or read to classify.
+//
+// Written with row_group_size 4 and 16 rows, so there are 4 row groups and the `late` column's
+// violation genuinely lives in a different row group from its uniform rows. store_schema() is
+// deliberately NOT called: with it, Arrow would round-trip a fixed_size_list as a fixed_size_list
+// and none of these columns would test the plain-LIST path at all.
+//
+// Used by test/test_table.f90's deferred-width tests and by
+// test/error_scenarios.f90's list_width_screen_avoids_column_read scenario.
+static bool generate_list_widths_fixture()
+{
+    constexpr int kRows = 16;
+    constexpr int kRowGroup = 4;
+
+    // Each lambda returns one row's element count; -1 means a NULL list, 0 an empty one.
+    auto build_list = [](const std::function<int(int)> &len_of) {
+        auto values = std::make_shared<arrow::Int32Builder>();
+        arrow::ListBuilder builder(arrow::default_memory_pool(), values);
+        arrow::Status st;
+        for (int row = 0; row < kRows; ++row)
+        {
+            int len = len_of(row);
+            if (len < 0)
+            {
+                st = builder.AppendNull();
+                continue;
+            }
+            st = builder.Append();
+            for (int e = 0; e < len; ++e)
+            {
+                st = values->Append(row * 100 + e);
+            }
+        }
+        std::shared_ptr<arrow::Array> out;
+        st = builder.Finish(&out);
+        return out;
+    };
+
+    auto uniform_arr = build_list([](int) { return 3; });
+    auto avg_ok_arr = build_list([](int row) { return row % 2 == 0 ? 3 : 1; });
+    auto ragged_arr = build_list([](int row) { return row % 4 + 1; });
+    // Uniform 3 everywhere except the final row group (rows 12..15), which holds 2s.
+    auto late_arr = build_list([](int row) { return row < kRows - kRowGroup ? 3 : 2; });
+    auto with_null_arr = build_list([](int row) { return row == 5 ? -1 : 3; });
+    // Lengths 5,5,5,NULL in every row group: 16 leaf slots over 4 rows, so the mean is exactly 4
+    // and the screen CANNOT reject it -- a null row occupies one slot. Only the scan sees that the
+    // null row's length is 0 and no width covers every row. The null counterpart of avg_ok.
+    auto null_avg_arr = build_list([](int row) { return row % 4 == 3 ? -1 : 5; });
+    auto with_empty_arr = build_list([](int row) { return row == 5 ? 0 : 3; });
+
+    auto nested_vals = build_list([](int) { return 3; });
+    auto nested_arr = arrow::StructArray::Make({nested_vals}, std::vector<std::string>{"vals"}).ValueOrDie();
+
+    arrow::Int32Builder scalar_builder;
+    arrow::Status st;
+    for (int row = 0; row < kRows; ++row)
+    {
+        st = scalar_builder.Append(row);
+    }
+    std::shared_ptr<arrow::Array> scalar_arr;
+    st = scalar_builder.Finish(&scalar_arr);
+
+    auto schema = arrow::schema({
+        arrow::field("uniform", arrow::list(arrow::int32())),
+        arrow::field("avg_ok", arrow::list(arrow::int32())),
+        arrow::field("ragged", arrow::list(arrow::int32())),
+        arrow::field("late", arrow::list(arrow::int32())),
+        arrow::field("with_null", arrow::list(arrow::int32())),
+        arrow::field("null_avg", arrow::list(arrow::int32())),
+        arrow::field("with_empty", arrow::list(arrow::int32())),
+        arrow::field("nested", arrow::struct_({arrow::field("vals", arrow::list(arrow::int32()))})),
+        arrow::field("scalar", arrow::int32()),
+    });
+    auto table = arrow::Table::Make(schema, {uniform_arr, avg_ok_arr, ragged_arr, late_arr,
+        with_null_arr, null_avg_arr, with_empty_arr, nested_arr, scalar_arr});
+
+    auto maybe_outfile = arrow::io::FileOutputStream::Open("test/fixtures/list_widths.parquet");
+    auto outfile = *maybe_outfile;
+    auto status = parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile, kRowGroup);
     return status.ok();
 }
 
@@ -889,6 +1008,7 @@ int main()
         {"test/fixtures/has_null.parquet", generate_has_null_fixture},
         {"test/fixtures/unsupported_type.parquet", generate_unsupported_type_fixture},
         {"test/fixtures/list_vector.parquet", generate_list_vector_fixture},
+        {"test/fixtures/list_widths.parquet", generate_list_widths_fixture},
         {"test/fixtures/extended_types.parquet", generate_extended_types_fixture},
         {"test/fixtures/nested_struct.parquet", generate_nested_struct_fixture},
         {"test/fixtures/map_list_types.parquet", generate_map_list_types_fixture},

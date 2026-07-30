@@ -46,6 +46,8 @@ contains
             new_unittest("read string column with null_value and is_valid", test_read_string_null), &
             new_unittest("read array column with null_value and is_valid", test_read_array_null), &
             new_unittest("read list-encoded vector column", test_read_list_vector_column), &
+            new_unittest("the LIST width footer screen and its proof disagree where expected", &
+                test_list_width_screen_and_proof), &
             new_unittest("array row-mode read at a row_index beyond the first row group", &
                 test_read_array_row_mode_beyond_first_row_group), &
             new_unittest("null_value on a Null-containing vector column (full/row/element modes, every type)", &
@@ -3180,4 +3182,87 @@ contains
         call parquet_close_reader(reader)
     end subroutine test_release_column
     !
+    !> `parquet_measure_list_width`'s two tiers, checked SEPARATELY -- the footer screen against the
+    !! proof -- because each catches cases the other does not and the proven answer alone hides the
+    !! screen entirely.
+    !!
+    !! `proven=.false.` reads no column data: per row group it compares the mean elements per row,
+    !! rejecting a non-integral mean or two row groups that disagree. `proven=.true.` additionally
+    !! walks the covered row groups. The pair of columns that pins the difference down:
+    !!
+    !! * `avg_ok` (rows alternating 3, 1) has an integral, perfectly consistent mean of 2, so the
+    !!   screen returns 2 -- a WRONG width that only the proof rejects. This is why anything acting
+    !!   on a candidate must be able to survive it being wrong.
+    !! * `ragged` (non-integral mean) and `late` (uniform except in its final row group) are both
+    !!   settled by the screen alone, for free. `late` is the one that needs the cross-row-group
+    !!   comparison rather than mere divisibility -- every one of its row groups divides evenly.
+    subroutine test_list_width_screen_and_proof(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        integer :: w
+        character(len=*), parameter :: f = "test/fixtures/list_widths.parquet"
+        !
+        call parquet_open_reader(reader, f)
+        !
+        ! --- the footer screen alone (no column data read) ---
+        call parquet_measure_list_width(reader, "uniform", 0, 0, .false., w)
+        call check(error, w == 3, "the screen should offer 3 for a genuinely uniform column")
+        if (allocated(error)) return
+        call parquet_measure_list_width(reader, "avg_ok", 0, 0, .false., w)
+        call check(error, w == 2, &
+            "the screen should offer 2 for rows of length 3,1 -- an integral mean it cannot reject")
+        if (allocated(error)) return
+        call parquet_measure_list_width(reader, "ragged", 0, 0, .false., w)
+        call check(error, w == 1, "a non-integral mean should be rejected by the screen alone")
+        if (allocated(error)) return
+        call parquet_measure_list_width(reader, "late", 0, 0, .false., w)
+        call check(error, w == 1, &
+            "row groups that disagree should be rejected by the screen alone, even though each " // &
+            "one divides evenly on its own")
+        if (allocated(error)) return
+        call parquet_measure_list_width(reader, "with_null", 0, 0, .false., w)
+        call check(error, w == 1, "a column with a null row should be rejected by the screen")
+        if (allocated(error)) return
+        call parquet_measure_list_width(reader, "with_empty", 0, 0, .false., w)
+        call check(error, w == 1, "a column with an empty row should be rejected by the screen")
+        if (allocated(error)) return
+        call parquet_measure_list_width(reader, "null_avg", 0, 0, .false., w)
+        call check(error, w == 4, &
+            "the screen should offer 4 for rows of length 5,5,5,NULL -- the null row's own slot " // &
+            "makes the mean a whole number")
+        if (allocated(error)) return
+        !
+        ! --- and the proof, which must correct the one the screen got wrong ---
+        call parquet_measure_list_width(reader, "uniform", 0, 0, .true., w)
+        call check(error, w == 3, "the proof should confirm 3 for the uniform column")
+        if (allocated(error)) return
+        call parquet_measure_list_width(reader, "avg_ok", 0, 0, .true., w)
+        call check(error, w == 1, "the proof must reject the screen's candidate of 2 for avg_ok")
+        if (allocated(error)) return
+        call parquet_measure_list_width(reader, "null_avg", 0, 0, .true., w)
+        call check(error, w == 1, &
+            "the proof must reject the screen's candidate of 4 for null_avg, on the strength of " // &
+            "the null row alone")
+        if (allocated(error)) return
+        !
+        ! --- row-group scoping: `late` is uniform within either half, but not across the file ---
+        call parquet_measure_list_width(reader, "late", 1, 3, .true., w)
+        call check(error, w == 3, "row groups 1..3 of late are uniformly width 3")
+        if (allocated(error)) return
+        call parquet_measure_list_width(reader, "late", 4, 4, .true., w)
+        call check(error, w == 2, "row group 4 of late is uniformly width 2")
+        if (allocated(error)) return
+        !
+        ! --- and a non-list column is answered from the schema either way ---
+        call check(error, .not. parquet_column_width_needs_data(reader, "scalar"), &
+            "a scalar column's width should not need data")
+        if (allocated(error)) return
+        call check(error, parquet_column_width_needs_data(reader, "uniform"), &
+            "a plain LIST column's width should need data")
+        if (allocated(error)) return
+        call parquet_measure_list_width(reader, "scalar", 0, 0, .true., w)
+        call check(error, w == 1, "a scalar column should measure as width 1")
+        call parquet_close_reader(reader)
+    end subroutine test_list_width_screen_and_proof
+
 end module test_reading

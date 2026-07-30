@@ -71,12 +71,10 @@ contains
                 return
             end if
             call parquet_get_column_type(cache%reader, slot%file_name, type_name)
-            ! For this library's own vector columns (FIXED_SIZE_LIST) this is a schema lookup and
-            ! reads nothing. A foreign plain LIST/LARGE_LIST column has no schema-level width, so
-            ! the reader falls back to measuring it from the data -- which is why the caller
-            ! releases every top-level name after classifying (see parquet_open_table).
-            call parquet_get_col_size(cache%reader, slot%file_name, col_size)
-            call table_kind_from_type(type_name, col_size, kind, ok)
+            ! Supportedness comes from the element type alone -- table_kind_from_type only uses
+            ! col_size to pick between a kind and its *_VEC form -- so it can be settled here even
+            ! for a column whose width is not knowable yet.
+            call table_kind_from_type(type_name, 1, kind, ok)
             if (.not. ok) then
                 slot%supported = .false.
                 slot%declared_kind = PK_NONE
@@ -85,9 +83,22 @@ contains
                 return
             end if
             slot%supported = .true.
+            slot%residency = RES_EMPTY
+            ! A plain LIST/LARGE_LIST is the one type whose width lives in the data rather than the
+            ! schema, so it is DEFERRED rather than measured here: classifying it now would mean
+            ! decoding the column at open, which is exactly what makes a lazy open worthless. Its
+            ! kind and width are resolved by table_resolve_width on first use.
+            if (parquet_column_width_needs_data(cache%reader, slot%file_name)) then
+                slot%declared_kind = PK_NONE
+                slot%width = 0
+                slot%width_pending = .true.
+                return
+            end if
+            ! Every remaining type -- scalar or FIXED_SIZE_LIST -- answers from the schema, free.
+            call parquet_get_col_size(cache%reader, slot%file_name, col_size)
+            call table_kind_from_type(type_name, col_size, kind, ok)
             slot%declared_kind = kind
             slot%width = max(col_size, 1)
-            slot%residency = RES_EMPTY
         end associate
     end procedure table_classify
     !
@@ -183,6 +194,55 @@ contains
 #endif
     end procedure unsafe_first_touch
     !
+    module procedure table_resolve_width
+        character(len=:), allocatable :: type_name, sfx
+        integer(int64) :: rg_lo, rg_hi
+        integer :: kind, w
+        logical :: ok
+        !
+        associate (slot => cache%cols(idx))
+            if (.not. slot%width_pending) return
+            ! Resolving reads data, so it is a first touch as far as RF4 is concerned even when it
+            ! does not materialize anything -- a shared store must not have it happen concurrently.
+            if (unsafe_first_touch(cache)) then
+                call table_context_suffix(cache, slot%name, sfx)
+                error stop EP // trim(proc) // ": this column's width is not known yet, and " // &
+                    "finding it means reading the column; do it before the parallel region " // &
+                    "(%kind, %width, %prefetch or %materialize_all)" // sfx
+            end if
+            call resolve_width_row_groups(cache, sc, rg_lo, rg_hi)
+            call parquet_measure_list_width(cache%reader, slot%file_name, rg_lo, rg_hi, proven, w)
+            call parquet_get_column_type(cache%reader, slot%file_name, type_name)
+            call table_kind_from_type(type_name, w, kind, ok)
+            slot%declared_kind = kind
+            ! An empty column measures as 0; a descriptor width is always at least 1, exactly as
+            ! table_classify's own max(col_size, 1) does for the schema-known kinds.
+            slot%width = max(w, 1)
+            slot%width_pending = .false.
+        end associate
+    end procedure table_resolve_width
+    !
+    !> The 1-based inclusive row-group range a scope covers, as table_resolve_width's measurement
+    !> bounds. 0/0 means "every row group" -- which is both what the whole-file regime wants and
+    !> what the C++ side reads as "no range given".
+    subroutine resolve_width_row_groups(cache, sc, rg_lo, rg_hi)
+        type(parquet_table_cache), intent(in) :: cache !! the column store.
+        type(table_scope), intent(in) :: sc            !! rows this table covers.
+        integer(int64), intent(out) :: rg_lo           !! first row group, or 0 for all.
+        integer(int64), intent(out) :: rg_hi           !! last row group, or 0 for all.
+        integer(int64) :: rg
+        !
+        rg_lo = 0_int64
+        rg_hi = 0_int64
+        if (sc%regime /= REGIME_SLICE) return
+        if (.not. allocated(cache%rg_bounds)) return
+        do rg = 1_int64, size(cache%rg_bounds, 2, kind=int64)
+            if (cache%rg_bounds(2, rg) < sc%row_lo .or. cache%rg_bounds(1, rg) > sc%row_hi) cycle
+            if (rg_lo == 0_int64) rg_lo = rg
+            rg_hi = rg
+        end do
+    end subroutine resolve_width_row_groups
+    !
     module procedure table_touch
         character(len=:), allocatable :: sfx
         !
@@ -197,7 +257,9 @@ contains
         if (unsafe_first_touch(cache)) then
             call table_context_suffix(cache, cache%cols(idx)%name, sfx)
             error stop EP // trim(proc) // ": this column was not read before the parallel " // &
-                "region; call table%prefetch(...) or table%materialize_all() before it" // sfx
+                "region; call table%prefetch(...) or table%materialize_all() before it. Note " // &
+                "%kind and %width count as a read for a variable-length LIST column, whose " // &
+                "width can only be found by reading it" // sfx
         end if
         associate (slot => cache%cols(idx))
             if (.not. slot%file_source) then
@@ -205,6 +267,13 @@ contains
                 error stop EP // trim(proc) // ": this column holds no values and has no file " // &
                     "column to read them from" // sfx
             end if
+            ! A deferred-width column has to be classified before it can be materialized, since the
+            ! materialize dispatches on the kind. The footer screen's unproven candidate is enough
+            ! here on purpose: the read below checks every row's length against the width it was
+            ! given (get_uniform_list_values, parquet_wrapper.cpp) and aborts on a mismatch, so a
+            ! wrong candidate fails loudly and the read doubles as the proof -- which is what keeps
+            ! this to ONE pass over the data instead of measuring first and then reading.
+            call table_resolve_width(cache, sc, idx, .false., proc)
             if (sc%detached) then
                 ! D6: once a row-structural mutation has changed the row set, a column read from
                 ! the file would no longer line up with the columns already in memory.

@@ -704,6 +704,28 @@ contains
     !> row_group argument (both kind-specifics translate "absent" to 0 before calling in),
     !> resolved here to 1 (the first row group) -- 0 can never be a valid 1-based row_group, so
     !> it is unambiguous as an "absent" sentinel.
+    !> Shared worker behind parquet_measure_list_width's two kind specifics.
+    subroutine parquet_measure_list_width_impl(reader, name, row_group_lo, row_group_hi, proven, width)
+        type(parquet_reader), intent(in) :: reader        !! open reader.
+        character(len=*), intent(in) :: name             !! column name.
+        integer(int64), intent(in) :: row_group_lo       !! first row group (1-based); <= 0 means all.
+        integer(int64), intent(in) :: row_group_hi       !! last row group (1-based, inclusive).
+        logical, intent(in) :: proven                    !! .true.: prove by reading; .false.: footer only.
+        integer, intent(out) :: width                    !! uniform element count per row, or 1.
+        integer(int64) :: w
+        !
+        call check_reader_open(reader, "parquet_measure_list_width")
+        call check_column_exists(reader, name, "parquet_measure_list_width")
+        if (proven) then
+            w = parquet_reader_list_width_verified(reader%handle, trim(name)//char(0), row_group_lo, row_group_hi)
+        else
+            w = parquet_reader_list_width_candidate(reader%handle, trim(name)//char(0), row_group_lo, row_group_hi)
+        end if
+        ! Deliberately NOT clamped to 1: a column with no rows reports 0, matching what
+        ! parquet_get_col_size has always answered for an empty list column.
+        width = int(w)
+    end subroutine parquet_measure_list_width_impl
+    !
     subroutine parquet_get_chunk_size_reader_impl(reader, chunk_size, row_group)
         type(parquet_reader), intent(in) :: reader !! open reader.
         integer(int64), intent(out) :: chunk_size !! row group's own physical row count.
@@ -742,6 +764,18 @@ contains
         call check_column_exists(reader, name, "parquet_get_col_size")
         col_size = int(parquet_reader_get_column_col_size(reader%handle, trim(name)//char(0)))
     end procedure parquet_get_col_size
+    module procedure parquet_measure_list_width_int32
+        call parquet_measure_list_width_impl(reader, name, int(row_group_lo, int64), &
+            int(row_group_hi, int64), proven, width)
+    end procedure parquet_measure_list_width_int32
+    module procedure parquet_measure_list_width_int64
+        call parquet_measure_list_width_impl(reader, name, row_group_lo, row_group_hi, proven, width)
+    end procedure parquet_measure_list_width_int64
+    module procedure parquet_column_width_needs_data
+        call check_reader_open(reader, "parquet_column_width_needs_data")
+        call check_column_exists(reader, name, "parquet_column_width_needs_data")
+        needs_data = parquet_reader_column_width_is_deferred(reader%handle, trim(name)//char(0)) /= 0
+    end procedure parquet_column_width_needs_data
     module procedure parquet_get_column_total_elements_int64
         call check_reader_open(reader, "parquet_get_column_total_elements")
         call check_column_exists(reader, name, "parquet_get_column_total_elements")

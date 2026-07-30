@@ -197,7 +197,7 @@ A quick index of the public `use parquet` API. For the full per-procedure refere
 
 **Writer — row filtering:** `parquet_write_row_mask`, `parquet_write_chunk_row_mask` — drop rows entirely (no trace, not a Null) from what gets written; see [Filtering rows with a mask](doc/pages/writing.md#filtering-rows-with-a-mask)
 
-**Reader — table & column info:** `parquet_open_reader`, `parquet_close_reader`, `parquet_get_nrows`, `parquet_get_num_row_groups`, `parquet_get_col_size`, `parquet_get_column_total_elements`, `parquet_get_string_length`, `parquet_get_column_time_info`, `parquet_column_exists`, `parquet_get_column_type`, `parquet_get_column_names`, `parquet_prefetch_columns`, `parquet_release_column`, `parquet_get_metadata`, `parquet_filter` (`filt%add`)
+**Reader — table & column info:** `parquet_open_reader`, `parquet_close_reader`, `parquet_get_nrows`, `parquet_get_num_row_groups`, `parquet_get_col_size`, `parquet_measure_list_width`, `parquet_column_width_needs_data`, `parquet_get_column_total_elements`, `parquet_get_string_length`, `parquet_get_column_time_info`, `parquet_column_exists`, `parquet_get_column_type`, `parquet_get_column_names`, `parquet_prefetch_columns`, `parquet_release_column`, `parquet_get_metadata`, `parquet_filter` (`filt%add`)
 
 **Reader — column data:** `parquet_read_column`, `parquet_read_array_row_mode`, `parquet_read_array_element_mode`
 

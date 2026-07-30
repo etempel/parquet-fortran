@@ -84,6 +84,11 @@ contains
         k = PK_NONE
         call table_lookup_or_fail(self, name, "kind", idx, found)
         if (idx == 0) return
+        ! For a plain LIST/LARGE_LIST column the kind is not known until the width is, and a
+        ! metadata query must not answer with a guess -- so this resolves it for real (proven),
+        ! which does read data for that one column type. Every other column was classified from
+        ! the schema at open and this is a no-op. See table_resolve_width.
+        call table_resolve_width(self%cache, table_scope_of(self), idx, .true., "kind")
         k = self%cache%cols(idx)%declared_kind
     end procedure table_column_kind
     !
@@ -93,6 +98,8 @@ contains
         wdt = 1
         call table_lookup_or_fail(self, name, "width", idx, found)
         if (idx == 0) return
+        ! Same as %kind above: proven, not guessed.
+        call table_resolve_width(self%cache, table_scope_of(self), idx, .true., "width")
         wdt = self%cache%cols(idx)%width
     end procedure table_column_width
     !

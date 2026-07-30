@@ -59,6 +59,10 @@ contains
                 test_pointer_is_live), &
             new_unittest("nulls survive a round trip for all three validity dispatch classes", &
                 test_nulls_roundtrip), &
+            new_unittest("a plain LIST column's width is deferred, then resolved and proven", &
+                test_deferred_list_width), &
+            new_unittest("a slice measures a plain LIST column over its own row groups only", &
+                test_deferred_list_width_slice), &
             new_unittest("nulls survive being written back out by parquet_write_table", &
                 test_write_table_nulls), &
             new_unittest("a null in a vector string column is widened to the whole row", &
@@ -440,6 +444,131 @@ contains
         if (allocated(error)) return
         call check(error, .not. t%is_null("d", 1_int64), "a valid date row should not be null")
     end subroutine test_nulls_roundtrip
+    !
+    !> A plain Parquet `LIST` column carries no width in its schema, so `parquet_table` defers its
+    !! kind and width to first use rather than decoding it at open. This checks both halves: that
+    !! opening leaves such a column unclassified and unread, and that `%kind`/`%width` then resolve
+    !! it to a PROVEN answer.
+    !!
+    !! `test/fixtures/list_widths.parquet` (see tools/generate_fixtures.cpp) holds one column per
+    !! outcome of the two-tier resolution. The one that matters most is `avg_ok`: its rows alternate
+    !! between lengths 3 and 1, so every row group averages exactly 2 elements per row and the
+    !! footer screen CANNOT reject it. Only the row-group scan can, which is precisely why
+    !! `%kind`/`%width` prove rather than trust the screen -- a candidate is not a proof.
+    subroutine test_deferred_list_width(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer(int32), allocatable :: v(:,:)
+        character(len=*), parameter :: f = "test/fixtures/list_widths.parquet"
+        !
+        call parquet_open_table(t, f)
+        call check(error, t%ncols() == 9, "the fixture should present all 9 columns")
+        if (allocated(error)) return
+        ! Opening must not have read anything, deferred columns included.
+        call check(error, t%residency("uniform") == RES_EMPTY, &
+            "opening must not materialize a deferred-width column")
+        if (allocated(error)) return
+        !
+        ! Uniform: screen yields candidate 3, the scan confirms it -> a real vector column.
+        call check(error, t%kind("uniform") == PK_INT32_VEC, &
+            "a uniform-width LIST column should resolve to the vector kind")
+        if (allocated(error)) return
+        call check(error, t%width("uniform") == 3, "its width should be 3")
+        if (allocated(error)) return
+        ! Resolving the width is not the same as reading the column.
+        call check(error, t%residency("uniform") == RES_EMPTY, &
+            "%kind/%width must resolve the width without materializing the column")
+        if (allocated(error)) return
+        !
+        ! avg_ok: lengths 3,1,3,1 average to exactly 2, so the footer screen passes it as a
+        ! candidate of 2 and only the scan rejects it. Getting 1 here is the whole point.
+        call check(error, t%width("avg_ok") == 1, &
+            "a LIST column whose mean row length is a whole number but whose rows differ must " // &
+            "not be reported as a vector column")
+        if (allocated(error)) return
+        call check(error, t%kind("avg_ok") == PK_INT32, &
+            "avg_ok should resolve to the scalar kind, not the vector kind")
+        if (allocated(error)) return
+        !
+        ! ragged: non-integral mean, rejected by the screen alone.
+        call check(error, t%width("ragged") == 1, "a ragged LIST column should report width 1")
+        if (allocated(error)) return
+        ! late: uniform except in the final row group, so only a row-group-vs-row-group comparison
+        ! catches it -- divisibility alone would not.
+        call check(error, t%width("late") == 1, &
+            "a LIST column that changes width only in its last row group should report width 1")
+        if (allocated(error)) return
+        ! A null or empty row has length 0, which no width >= 1 covers.
+        call check(error, t%width("with_null") == 1, &
+            "a LIST column containing a null row should report width 1")
+        if (allocated(error)) return
+        call check(error, t%width("with_empty") == 1, &
+            "a LIST column containing an empty row should report width 1")
+        if (allocated(error)) return
+        ! null_avg's mean IS a whole number (a null row occupies one leaf slot), so the screen
+        ! passes it and only the scan can reject it -- the null counterpart of avg_ok above.
+        call check(error, t%width("null_avg") == 1, &
+            "a LIST column whose null row keeps the mean integral must still report width 1")
+        if (allocated(error)) return
+        !
+        ! A plain LIST leaf underneath a STRUCT is a different matter: struct_path_exists
+        ! (parquet_wrapper.cpp) deliberately refuses to address a LIST/LARGE_LIST/MAP leaf through a
+        ! dotted path, so such a column is visible but not readable and deferral never applies to
+        ! it. Pinned here so the boundary is explicit rather than discovered -- a FIXED_SIZE_LIST
+        ! leaf under a struct IS addressable (see test/fixtures/nested_struct.parquet); only the
+        ! variable-length form is not.
+        call check(error, t%has_column("nested.vals"), &
+            "a struct-nested LIST leaf should still be listed as a column")
+        if (allocated(error)) return
+        call check(error, .not. t%is_supported("nested.vals"), &
+            "but it should be reported unsupported, not silently classified")
+        if (allocated(error)) return
+        !
+        ! The control: a scalar column is classified from the schema at open and never deferred.
+        call check(error, t%kind("scalar") == PK_INT32, "a scalar column should stay scalar")
+        if (allocated(error)) return
+        call check(error, t%width("scalar") == 1, "a scalar column's width should be 1")
+        if (allocated(error)) return
+        !
+        ! And the resolved column still reads correctly afterwards.
+        call t%get("uniform", v)
+        call check(error, size(v, 1) == 3 .and. size(v, 2) == 16, &
+            "the resolved vector column should read back as (3, 16)")
+        if (allocated(error)) return
+        call check(error, all(v(:, 2) == [100, 101, 102]), &
+            "row 2 of the resolved vector column should hold its own values")
+    end subroutine test_deferred_list_width
+    !
+    !> A slice measures a deferred column over the row groups IT covers, not the whole file.
+    !!
+    !! The `late` column is uniformly width 3 for its first three row groups and width 2 in the
+    !! fourth, so it has no file-wide width at all -- yet each of those two ranges is internally
+    !! uniform. A slice over rows 1..12 must therefore see a width-3 vector column, a slice over
+    !! rows 13..16 a width-2 one, and the whole file neither. Two tables over the same file
+    !! legitimately disagreeing is the documented consequence of measuring slice-locally, and this
+    !! test is what pins it down.
+    subroutine test_deferred_list_width_slice(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        character(len=*), parameter :: f = "test/fixtures/list_widths.parquet"
+        !
+        call parquet_open_table(t, f, 1_int64, 12_int64)
+        call check(error, t%width("late") == 3, &
+            "a slice covering only the uniform row groups should see width 3")
+        if (allocated(error)) return
+        call check(error, t%kind("late") == PK_INT32_VEC, &
+            "and should resolve to the vector kind")
+        if (allocated(error)) return
+        !
+        call parquet_open_table(t, f, 13_int64, 16_int64)
+        call check(error, t%width("late") == 2, &
+            "a slice covering only the final row group should see that row group's own width")
+        if (allocated(error)) return
+        !
+        call parquet_open_table(t, f)
+        call check(error, t%width("late") == 1, &
+            "the whole file has no single width, so the full table should report 1")
+    end subroutine test_deferred_list_width_slice
     !
     !> Nulls must survive being written back out by `parquet_write_table`, not merely read.
     !!

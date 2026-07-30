@@ -1973,6 +1973,21 @@ extern "C"
 		run_qc_checks(reader_handle, name, name, array);
 	}
 
+	// The schema-only half of parquet_reader_get_column_col_size, factored out so the sibling entry
+	// points below can reuse it. Deliberately NOT the exported function: calling that would
+	// re-enter as_reader_handle while the caller's own guard is still held, which the
+	// (non-reentrant by design) ConcurrencyGuard always rejects -- the same reasoning
+	// parquet_reader_get_column_total_elements already records for its own helper calls.
+	static int64_t parquet_reader_get_column_col_size_impl(ParquetReaderHandle *reader_handle, const char *name)
+	{
+		auto resolved = resolve_struct_path(reader_handle->schema, name);
+		if (resolved.leaf_field->type()->id() == arrow::Type::FIXED_SIZE_LIST)
+		{
+			return static_cast<int64_t>(std::static_pointer_cast<arrow::FixedSizeListType>(resolved.leaf_field->type())->list_size());
+		}
+		return 1;
+	}
+
 	// Whether measuring a leaf field's col_size requires reading its data, given that the caller
 	// has already handled FIXED_SIZE_LIST (whose width is a schema constant).
 	//
@@ -2050,6 +2065,208 @@ extern "C"
 			return value_length;
 		}
 		return 1;
+	}
+
+	// ==== Measuring a plain LIST column's width without materializing it ====
+	//
+	// A FIXED_SIZE_LIST carries its width in the schema, so none of this applies to it (nor to a
+	// scalar column, whose width is 1 by construction) -- see needs_data_to_measure_col_size.
+	// A plain LIST/LARGE_LIST may hold a DIFFERENT length in every row, so whether one uniform
+	// width exists at all is a property of the data, and the naive way to find out is to
+	// materialize the whole column and compare every row. On a large column that is exactly the
+	// read this library works hardest to avoid.
+	//
+	// Two cheaper tiers replace it:
+	//
+	//   1. list_width_candidate -- a screen from the file footer alone, reading NO column data.
+	//      Per row group, `num_values / num_rows` is the mean elements per row. If that is not a
+	//      whole number, or two row groups disagree, no single uniform width can exist and the
+	//      answer is settled for free. Only when every row group agrees on the same integer does
+	//      a candidate survive, and a candidate is NOT a proof: rows [3,1,3,1] average to exactly
+	//      2 (verified empirically -- see the tests over test/fixtures/list_widths.parquet).
+	//   2. list_width_verified -- runs the screen first, then, only for a surviving candidate,
+	//      walks the covered row groups one at a time and bails at the first disagreement. Peak
+	//      memory is one row group rather than the whole column.
+	//
+	// Both take a 1-based INCLUSIVE row-group range, with rg_lo <= 0 meaning "every row group".
+	// The range is what lets a sliced parquet_table measure only the row groups it actually
+	// covers; a slice's width is therefore a property of the slice's own rows, so a file that is
+	// ragged overall can legitimately present a uniform width within one slice.
+
+	// Whether every row of `array` holds the same number of elements, and if so how many.
+	// A non-list array is trivially uniform with width 1. A zero-length array carries no
+	// information at all and reports width -1, which callers skip rather than count as a
+	// disagreement.
+	static bool list_uniform_width(const std::shared_ptr<arrow::Array> &array, int64_t &width)
+	{
+		width = 1;
+		if (array->type_id() == arrow::Type::FIXED_SIZE_LIST)
+		{
+			auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
+			width = static_cast<int64_t>(list_arr->value_length());
+			return true;
+		}
+		if (array->type_id() == arrow::Type::LIST || array->type_id() == arrow::Type::LARGE_LIST)
+		{
+			if (array->length() == 0)
+			{
+				width = -1;
+				return true;
+			}
+			// A null or empty row has length 0, which disagrees with any width >= 1 -- so a LIST
+			// column carrying either is reported non-uniform, matching what get_uniform_list_values
+			// would have rejected on the read path anyway.
+			int64_t first = -1;
+			for (int64_t i = 0; i < array->length(); ++i)
+			{
+				int64_t len = 0;
+				if (array->type_id() == arrow::Type::LIST)
+				{
+					len = static_cast<int64_t>(std::static_pointer_cast<arrow::ListArray>(array)->value_length(i));
+				}
+				else
+				{
+					len = std::static_pointer_cast<arrow::LargeListArray>(array)->value_length(i);
+				}
+				// Belt and braces, and deliberately not chased with a fixture: Arrow's own
+				// ListBuilder::AppendNull duplicates the offset, so value_length(i) is already 0
+				// for a null slot and this never changes the answer for any array Arrow built.
+				// A foreign writer is not obliged to leave the offsets equal, though, and a null
+				// row must count as length 0 either way -- confirmed unreachable by removing this
+				// branch and finding every list-width test still passing.
+				if (array->IsNull(i)) // GCOVR_EXCL_START
+				{
+					len = 0;
+				} // GCOVR_EXCL_STOP
+				if (first < 0)
+				{
+					first = len;
+				}
+				else if (len != first)
+				{
+					width = 1;
+					return false;
+				}
+			}
+			width = first;
+			return true;
+		}
+		return true;
+	}
+
+	// Footer-only screen: see the section comment above. Returns a candidate uniform width, 1 when
+	// no uniform width above 1 can exist, or 0 for a column with no rows at all -- which is what
+	// get_col_size has always reported for an empty list column, and is preserved here rather than
+	// collapsed into 1 so parquet_get_col_size's answer does not change. Reads no column data.
+	static int64_t list_width_candidate(
+		ParquetReaderHandle *reader_handle, const char *name, int64_t rg_lo, int64_t rg_hi)
+	{
+		auto resolved = resolve_struct_path(reader_handle->schema, name);
+		auto idx = get_column_index(reader_handle, resolved.top_level_name.c_str());
+		auto leaf_idx = resolve_single_leaf_index(reader_handle, static_cast<int>(idx), resolved.child_path);
+		auto *file_metadata = reader_handle->reader->parquet_reader()->metadata().get();
+		int64_t lo = rg_lo > 0 ? rg_lo : 1;
+		int64_t hi = rg_hi > 0 ? rg_hi : reader_handle->num_row_groups;
+		int64_t candidate = -1;
+		for (int64_t rg = lo; rg <= hi; ++rg)
+		{
+			auto row_group = file_metadata->RowGroup(static_cast<int>(rg - 1));
+			int64_t nr = row_group->num_rows();
+			if (nr <= 0)
+			{
+				continue;
+			}
+			// num_values counts LEAF slots, and a null or empty list occupies exactly one slot
+			// (confirmed empirically, not assumed) -- so such a row inflates the mean and the
+			// column gets screened out here, which is the right answer for a vector column.
+			int64_t nv = row_group->ColumnChunk(static_cast<int>(leaf_idx))->num_values();
+			if (nv % nr != 0)
+			{
+				return 1;
+			}
+			int64_t w = nv / nr;
+			if (candidate < 0)
+			{
+				candidate = w;
+			}
+			else if (w != candidate)
+			{
+				return 1;
+			}
+		}
+		// candidate < 0 means every row group in range was empty, i.e. the column has no rows.
+		return candidate >= 0 ? candidate : 0;
+	}
+
+	// One row group's leaf array, deliberately NOT via get_row_group_chunk_array: that one also
+	// records the row group as read (parquet_reader_check_complete) and runs per-row-group qc,
+	// neither of which a width measurement should cause -- measuring a column must not make the
+	// reader think it was read, nor emit qc warnings for data the caller never asked for.
+	static std::shared_ptr<arrow::Array> read_row_group_array_for_measuring(
+		ParquetReaderHandle *reader_handle, const char *name, int64_t row_group)
+	{
+		auto resolved = resolve_struct_path(reader_handle->schema, name);
+		auto idx = get_column_index(reader_handle, resolved.top_level_name.c_str());
+		auto leaf_idx = resolve_single_leaf_index(reader_handle, static_cast<int>(idx), resolved.child_path);
+		auto result = reader_handle->reader->ReadRowGroup(static_cast<int>(row_group - 1), {static_cast<int>(leaf_idx)});
+		if (!result.ok())
+		{ // GCOVR_EXCL_START -- I/O backstop: the row-group range is derived from the footer.
+			throw std::runtime_error(result.status().ToString());
+		}
+		// GCOVR_EXCL_STOP
+		std::shared_ptr<arrow::Table> table = result.ValueOrDie();
+		auto array = combine_column_chunks(table->column(0), resolved.top_level_name);
+		if (!resolved.child_path.empty())
+		{
+			array = unwrap_struct_path(array, resolved.child_path);
+		}
+		return array;
+	}
+
+	// Screen, then prove -- see the section comment above. Returns the proven uniform width, or 1
+	// when the column is not a uniform vector column. Never holds more than one row group.
+	static int64_t list_width_verified(
+		ParquetReaderHandle *reader_handle, const char *name, int64_t rg_lo, int64_t rg_hi)
+	{
+		int64_t candidate = list_width_candidate(reader_handle, name, rg_lo, rg_hi);
+		if (candidate <= 1)
+		{
+			// 0 (no rows) is passed through untouched; 1 is already the settled answer.
+			return candidate;
+		}
+		// A filter mask has no row-group structure of its own (see get_row_group_chunk_array's
+		// comment), so with one active the only meaningful notion of "the rows" is the filtered
+		// array -- which means the whole-column path, exactly as the row/element-mode reads do.
+		if (reader_handle->filter_mask)
+		{
+			int64_t width = 1;
+			auto array = get_single_chunk_array(reader_handle, name);
+			if (!list_uniform_width(array, width) || width < 0)
+			{
+				return 1;
+			}
+			return width == candidate ? width : 1;
+		}
+		int64_t lo = rg_lo > 0 ? rg_lo : 1;
+		int64_t hi = rg_hi > 0 ? rg_hi : reader_handle->num_row_groups;
+		for (int64_t rg = lo; rg <= hi; ++rg)
+		{
+			auto array = read_row_group_array_for_measuring(reader_handle, name, rg);
+			int64_t width = 1;
+			if (!list_uniform_width(array, width))
+			{
+				return 1;
+			}
+			if (width < 0)
+			{
+				continue;
+			}
+			if (width != candidate)
+			{
+				return 1;
+			}
+		}
+		return candidate;
 	}
 
 	// context identifies the calling extern "C" entry point (parquet_read_*_array_column/
@@ -3453,8 +3670,55 @@ extern "C"
 		{
 			return 1;
 		}
-		auto array = get_single_chunk_array(reader_handle, name);
-		return get_col_size(array);
+		// A plain LIST/LARGE_LIST: screened from the footer, then proven one row group at a time,
+		// so answering this never materializes the whole column (see the "Measuring a plain LIST
+		// column's width" section above).
+		return list_width_verified(reader_handle, name, 0, 0);
+	}
+
+	// Whether `name`'s width can only be determined by looking at its data -- i.e. whether it is a
+	// plain LIST/LARGE_LIST. Schema-only, and the question parquet_table's open-time classification
+	// asks so it can DEFER such a column's kind and width to first use instead of reading it at
+	// open (see table_classify in parquet_tables_read.f90). Every other column, scalar or
+	// FIXED_SIZE_LIST, is classified from the schema there and then.
+	int parquet_reader_column_width_is_deferred(void *handle, const char *name)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto resolved = resolve_struct_path(reader_handle->schema, name);
+		return needs_data_to_measure_col_size(resolved.leaf_field->type()) ? 1 : 0;
+	}
+
+	// The footer screen alone (no column data read): a CANDIDATE uniform width for `name` over the
+	// 1-based inclusive row-group range [rg_lo, rg_hi] (rg_lo <= 0 meaning every row group), or 1
+	// when no uniform width above 1 can exist. A candidate is unproven -- a caller that acts on one
+	// must be able to survive it being wrong. parquet_table uses it on the read path, where the
+	// read itself proves or rejects it (get_uniform_list_values checks every row).
+	int64_t parquet_reader_list_width_candidate(void *handle, const char *name, int64_t rg_lo, int64_t rg_hi)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto resolved = resolve_struct_path(reader_handle->schema, name);
+		if (!needs_data_to_measure_col_size(resolved.leaf_field->type()))
+		{
+			return parquet_reader_get_column_col_size_impl(reader_handle, name);
+		}
+		return list_width_candidate(reader_handle, name, rg_lo, rg_hi);
+	}
+
+	// The PROVEN uniform width of `name` over the 1-based inclusive row-group range [rg_lo, rg_hi]
+	// (rg_lo <= 0 meaning every row group), 1 when the column is not a uniform vector column, or 0
+	// when it has no rows at all.
+	// Screens from the footer first and reads at most one row group at a time, so this is safe to
+	// call on a column far larger than memory. parquet_table uses it for %kind/%width, which must
+	// not answer with an unproven width.
+	int64_t parquet_reader_list_width_verified(void *handle, const char *name, int64_t rg_lo, int64_t rg_hi)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto resolved = resolve_struct_path(reader_handle->schema, name);
+		if (!needs_data_to_measure_col_size(resolved.leaf_field->type()))
+		{
+			return parquet_reader_get_column_col_size_impl(reader_handle, name);
+		}
+		return list_width_verified(reader_handle, name, rg_lo, rg_hi);
 	}
 
 	// Returns the total element count (nrows * col_size) of vector column `name`, without

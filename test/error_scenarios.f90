@@ -54,6 +54,8 @@ program error_scenarios
         call scenario_col_size_overflow()
     case ("col_size_and_row_mode_avoid_whole_column_read")
         call scenario_col_size_and_row_mode_avoid_whole_column_read()
+    case ("list_width_never_reads_whole_column")
+        call scenario_list_width_never_reads_whole_column()
     case ("whole_column_read_forced_error_control")
         call scenario_whole_column_read_forced_error_control()
     case ("read_array_full_bool_type_mismatch")
@@ -3111,6 +3113,56 @@ contains
             "parquet_read_array_row_mode/parquet_read_array_element_mode all avoided a whole-column read, as expected"
     end subroutine scenario_col_size_and_row_mode_avoid_whole_column_read
 
+    !> Resolving a plain LIST column's deferred width must never take the whole-column read path,
+    !> however many columns are asked about.
+    !>
+    !> This is the guarantee that makes parquet_open_table cheap on a file of such columns. The
+    !> width is found from the file footer where possible and otherwise by reading ONE ROW GROUP AT
+    !> A TIME, so `g_debug_force_whole_column_read_error` -- which aborts the instant
+    !> get_single_chunk_array would decode a whole column -- must not fire for any of them. The
+    !> scenario finishing at all is the assertion; it runs with the hook armed from before the table
+    !> is even opened, so an open-time classification read would trip it too.
+    !>
+    !> Its own negative control is scenario_whole_column_read_forced_error_control, which proves the
+    !> hook does fire on a path that genuinely reads a whole column.
+    subroutine scenario_list_width_never_reads_whole_column()
+        interface
+            subroutine parquet_debug_set_force_whole_column_read_error(enable) &
+                bind(C, name="parquet_debug_set_force_whole_column_read_error")
+                use iso_c_binding, only : c_int
+                integer(c_int), value :: enable !! nonzero forces the next whole-column read to abort; 0 restores normal behavior.
+            end subroutine parquet_debug_set_force_whole_column_read_error
+        end interface
+
+        character(len=*), parameter :: f = "test/fixtures/list_widths.parquet"
+        character(len=:), allocatable :: names(:)
+        integer :: i
+
+        call parquet_debug_set_force_whole_column_read_error(1)
+        block
+            type(parquet_table) :: t
+            call parquet_open_table(t, f)
+            call t%column_names(names)
+            do i = 1, size(names)
+                if (.not. t%is_supported(trim(names(i)))) cycle
+                ! Both queries resolve a deferred width for real (proven), so between them they
+                ! exercise the footer screen and the row-group scan across every shape in the
+                ! fixture -- uniform, ragged, integral-mean-but-ragged, late-violation, null and
+                ! empty rows.
+                if (t%kind(trim(names(i))) == 0) error stop "unexpected PK_NONE for a supported column"
+                if (t%width(trim(names(i))) < 1) error stop "unexpected non-positive width"
+            end do
+        end block
+        ! And a slice, whose measurement is scoped to its own row groups.
+        block
+            type(parquet_table) :: t
+            call parquet_open_table(t, f, 1_int64, 12_int64)
+            if (t%width("late") /= 3) error stop "slice-local width mismatch for the late column"
+        end block
+        call parquet_debug_set_force_whole_column_read_error(0)
+        print '(a)', "resolving every deferred LIST width avoided the whole-column read path, as expected"
+    end subroutine scenario_list_width_never_reads_whole_column
+    !
     !> Negative control for scenario_col_size_and_row_mode_avoid_whole_column_read, above: proves
     !> parquet_debug_set_force_whole_column_read_error actually does something, by calling a
     !> function that legitimately still takes get_single_chunk_array's whole-column path

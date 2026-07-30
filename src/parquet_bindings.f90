@@ -43,6 +43,8 @@ module parquet_bindings
     public :: parquet_append_string_column_chunk, parquet_append_string_array_column_chunk
     public :: parquet_write_string_column_chunk_buffers
     public :: parquet_reader_get_nrows, parquet_reader_get_total_nrows, parquet_reader_get_column_col_size
+    public :: parquet_reader_column_width_is_deferred
+    public :: parquet_reader_list_width_candidate, parquet_reader_list_width_verified
     public :: parquet_reader_get_column_total_elements, parquet_reader_get_string_length
     public :: parquet_reader_get_table_metadata_count
     public :: parquet_reader_get_table_metadata_key_length, parquet_reader_get_table_metadata_value_length
@@ -587,6 +589,45 @@ module parquet_bindings
             type(c_ptr), value :: reader
             character(kind=c_char) :: name(*)
             integer(c_long_long) :: col_size
+        end function
+
+        !> Returns 1 when `name`'s width can only be found by reading its data (a plain
+        !> LIST/LARGE_LIST), 0 otherwise. Schema-only; lets parquet_table defer such a column's
+        !> kind and width to first use instead of reading it at open.
+        function parquet_reader_column_width_is_deferred(reader, name) &
+                bind(C, name="parquet_reader_column_width_is_deferred") result(deferred)
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_int) :: deferred
+        end function
+
+        !> Returns a CANDIDATE uniform width for `name` over row groups `rg_lo`..`rg_hi`
+        !> (1-based inclusive; `rg_lo` <= 0 means every row group), from the file footer alone with
+        !> no column data read. Unproven: 1 means no uniform width above 1 can exist, anything
+        !> larger still has to be confirmed by whatever consumes it.
+        function parquet_reader_list_width_candidate(reader, name, rg_lo, rg_hi) &
+                bind(C, name="parquet_reader_list_width_candidate") result(width)
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: rg_lo
+            integer(c_long_long), value :: rg_hi
+            integer(c_long_long) :: width
+        end function
+
+        !> Returns the PROVEN uniform width of `name` over row groups `rg_lo`..`rg_hi` (1-based
+        !> inclusive; `rg_lo` <= 0 means every row group), or 1 when it is not a uniform vector
+        !> column. Reads at most one row group at a time, so it is safe on a column larger than
+        !> memory.
+        function parquet_reader_list_width_verified(reader, name, rg_lo, rg_hi) &
+                bind(C, name="parquet_reader_list_width_verified") result(width)
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: rg_lo
+            integer(c_long_long), value :: rg_hi
+            integer(c_long_long) :: width
         end function
 
         !> Returns the total element count of vector column `name` across every row in `reader`.

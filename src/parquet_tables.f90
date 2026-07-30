@@ -50,7 +50,8 @@ module parquet_tables
         parquet_get_column_names, parquet_get_column_type, parquet_column_exists, &
         parquet_release_column, parquet_read_column, parquet_get_metadata, parquet_get_string_length, &
         parquet_get_num_row_groups, parquet_get_chunk_size, parquet_read_column_chunk, &
-        parquet_open_writer, parquet_write_column, parquet_close_writer, parquet_write_row_mask
+        parquet_open_writer, parquet_write_column, parquet_close_writer, parquet_write_row_mask, &
+        parquet_measure_list_width, parquet_column_width_needs_data
     !
     implicit none
     private
@@ -109,6 +110,13 @@ module parquet_tables
         character(len=:), allocatable :: file_name !! physical name in the file (== name for now).
         integer :: declared_kind = PK_NONE         !! PK_* this slot holds, or PK_NONE if unsupported.
         integer :: width = 1                       !! values per row: 1 scalar, col_size for a *_VEC.
+        !> .true. while this column's kind and width are still UNKNOWN, which happens for exactly
+        !! one column type: a plain LIST/LARGE_LIST from a foreign writer, whose per-row width is
+        !! a property of the data rather than the schema. While set, `declared_kind` is PK_NONE and
+        !! `width` is 0, and anything that needs either must call table_resolve_width first.
+        !! Deferring this is what keeps parquet_open_table schema-only -- measuring at open meant
+        !! decoding every such column just to classify it.
+        logical :: width_pending = .false.
         logical :: file_source = .false.           !! .true. iff a backing file column exists.
         logical :: predefined = .false.            !! reserved: a generated accessor exists for it.
         logical :: user_populated = .false.        !! .true. once user values were written into it.
@@ -683,6 +691,28 @@ module parquet_tables
         module subroutine record_open_thread(cache)
             type(parquet_table_cache), intent(inout) :: cache !! the column store.
         end subroutine record_open_thread
+        !> Resolves a `width_pending` column's kind and width, then clears the flag. A no-op for
+        !! every other column, so callers can invoke it unconditionally.
+        !!
+        !! `proven` is the whole design in one argument. `.true.` (the `%kind`/`%width` path) walks
+        !! the covered row groups to PROVE the width, since answering a metadata query with a
+        !! guess would silently mis-type the column. `.false.` (the read path) takes the footer
+        !! screen's unproven candidate and lets the read itself settle it -- the C++ reader checks
+        !! every row's length against the width it was given and aborts on a mismatch, so a wrong
+        !! candidate fails loudly instead of quietly, and the read that would have happened anyway
+        !! doubles as the proof. That is what keeps `%prefetch` on such a column to ONE pass over
+        !! the data.
+        !!
+        !! Measuring is scoped to the row groups `sc` actually covers, so a slice pays for its own
+        !! rows only -- and a file that is ragged overall may therefore present a uniform width
+        !! within one slice.
+        module subroutine table_resolve_width(cache, sc, idx, proven, proc)
+            type(parquet_table_cache), intent(inout) :: cache !! the column store.
+            type(table_scope), intent(in) :: sc               !! rows this table covers.
+            integer, intent(in) :: idx                        !! slot to resolve.
+            logical, intent(in) :: proven                     !! .true.: prove it; .false.: candidate only.
+            character(len=*), intent(in) :: proc              !! calling procedure, for messages.
+        end subroutine table_resolve_width
         module subroutine table_touch(cache, sc, idx, proc)
             type(parquet_table_cache), intent(inout) :: cache !! the column store.
             type(table_scope), intent(in) :: sc               !! rows this table covers.

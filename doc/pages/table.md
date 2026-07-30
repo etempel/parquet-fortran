@@ -181,6 +181,42 @@ A table a thread **opens for itself inside** the region is a different case: it 
 so its lazy reads are allowed — that is what the [slice regime](#reading-part-of-a-file-the-slice-regime)
 below is for.
 
+
+### A variable-length `LIST` column's width is discovered, not declared
+
+One column type needs a caveat here. Parquet's `LIST` encoding allows a **different number of
+elements in every row**, so unlike the `fixed_size_list` this library always writes, such a column
+carries no width in the file's schema — whether a single width covers every row is a property of the
+data. Only a file from another tool can contain one (any Arrow-based writer preserves
+`fixed_size_list`).
+
+For those columns, and only those, **`%kind` and `%width` count as a read**:
+
+```fortran
+call parquet_open_table(t, "from_another_tool.parquet")
+print *, t%width("spec")     ! may read data, for a variable-length LIST column
+```
+
+Opening still reads nothing at all — the column is left unclassified until something asks. The cost
+is kept down in two tiers: first the file footer alone is checked (per row group, the mean elements
+per row must be a whole number and must agree between row groups), which settles most non-uniform
+columns for free; only a column that survives that is scanned, one row group at a time, stopping at
+the first row that disagrees. The whole column is never held in memory.
+
+Two practical consequences:
+
+- **Order matters if you are going to read the column anyway.** `%prefetch` resolves the width as a
+  side effect of the read it was doing regardless, so `%prefetch` then `%kind` is one pass over the
+  data. `%kind` then `%prefetch` can be two.
+- **Inside an OpenMP region, `%kind`/`%width` on such a column follow the first-touch rule** like any
+  other read — resolve them before the region on a shared table. Every other column, scalar or
+  `fixed_size_list`, is classified at open and stays safe to query from anywhere.
+
+A slice measures over **its own** row groups, so a file that is ragged overall can present a uniform
+width within one slice — and two tables over the same file can legitimately report different widths
+for the same column. That is deliberate: a slice table holds only its own rows, and measuring the
+whole file would defeat the point of opening a slice.
+
 ## Reading part of a file: the slice regime
 
 `parquet_open_table(t, file, row_lo, row_hi)` gives the table a contiguous row range, and only the

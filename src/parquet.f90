@@ -599,6 +599,33 @@ module parquet
         module procedure parquet_get_num_row_groups_int32
     end interface parquet_get_num_row_groups
 
+    !> Measures the uniform element-count-per-row (`width`) of a plain Parquet `LIST`/`LARGE_LIST`
+    !> column, over the 1-based inclusive row-group range `row_group_lo`..`row_group_hi`, without
+    !> ever materializing the whole column. Both bounds are accepted as `integer(int32)` or
+    !> `integer(int64)`; `row_group_lo <= 0` means "every row group in the file".
+    !>
+    !> Such a column may hold a different number of elements in every row, so unlike a
+    !> `FIXED_SIZE_LIST` (this library's own vector layout) its width is a property of the data
+    !> rather than the schema -- see parquet_column_width_needs_data. `width` comes back as 1 when
+    !> no single width above 1 covers every row, which is also the answer for a genuinely scalar
+    !> column or a `FIXED_SIZE_LIST` of width 1, and as 0 for a column with no rows at all --
+    !> matching what parquet_get_col_size reports for an empty list column.
+    !>
+    !> `proven` chooses how much work to do, and the difference matters:
+    !>
+    !> * `.false.` -- decide from the file footer alone, reading no column data at all. Per row
+    !>   group, the mean elements per row is compared against its neighbours; a non-integral or
+    !>   disagreeing mean proves no uniform width exists. A surviving answer is a CANDIDATE only:
+    !>   rows of length 3, 1, 3, 1 average to exactly 2. Use this when a wrong answer is safe
+    !>   because something downstream will reject it.
+    !> * `.true.` -- screen as above, then confirm by reading the covered row groups one at a time,
+    !>   stopping at the first row that disagrees. Peak memory stays at one row group, so this is
+    !>   safe on a column far larger than memory, but it does read data.
+    interface parquet_measure_list_width
+        module procedure parquet_measure_list_width_int32
+        module procedure parquet_measure_list_width_int64
+    end interface parquet_measure_list_width
+
     !> Parses a MAML into a parquet_schema (its %maml, %cinfo and %metadata).
     !> The file form takes a `filename` (.maml file path) and loads it from
     !> disk first; the object form takes only `schema`, whose %maml has
@@ -943,6 +970,7 @@ module parquet
     public :: parquet_get_nrows
     public :: parquet_get_num_row_groups
     public :: parquet_get_col_size
+    public :: parquet_measure_list_width, parquet_column_width_needs_data
     public :: parquet_get_column_total_elements
     public :: parquet_get_string_length
     public :: parquet_column_exists
@@ -2211,6 +2239,37 @@ module parquet
             character(len=*), intent(in) :: name !! column name.
             integer, intent(out) :: col_size !! that column's declared element count.
         end subroutine parquet_get_col_size
+        !> int32 specific of parquet_measure_list_width; see the generic's own doc-comment for
+        !> what `row_group_lo`, `row_group_hi`, `proven` and `width` mean.
+        module subroutine parquet_measure_list_width_int32(reader, name, row_group_lo, row_group_hi, proven, width)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            integer(int32), intent(in) :: row_group_lo !! first row group (1-based); <= 0 means all.
+            integer(int32), intent(in) :: row_group_hi !! last row group (1-based, inclusive).
+            logical, intent(in) :: proven !! .true.: prove it by reading; .false.: footer screen only.
+            integer, intent(out) :: width !! uniform element count per row, or 1 if not uniform.
+        end subroutine parquet_measure_list_width_int32
+        !> int64 specific of parquet_measure_list_width; see the generic's own doc-comment.
+        module subroutine parquet_measure_list_width_int64(reader, name, row_group_lo, row_group_hi, proven, width)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            integer(int64), intent(in) :: row_group_lo !! first row group (1-based); <= 0 means all.
+            integer(int64), intent(in) :: row_group_hi !! last row group (1-based, inclusive).
+            logical, intent(in) :: proven !! .true.: prove it by reading; .false.: footer screen only.
+            integer, intent(out) :: width !! uniform element count per row, or 1 if not uniform.
+        end subroutine parquet_measure_list_width_int64
+        !> Whether `name`'s vector width can only be determined by reading its data.
+        !>
+        !> `.true.` for exactly one case: a plain Parquet `LIST`/`LARGE_LIST` column, whose rows may
+        !> each hold a different number of elements, so no width exists in the schema to read.
+        !> `.false.` for a scalar column (width 1 by construction) and for a `FIXED_SIZE_LIST` -- the
+        !> layout this library always writes, and the one any Arrow-based writer preserves -- whose
+        !> width is a schema constant. Answered from the schema; reads nothing.
+        module function parquet_column_width_needs_data(reader, name) result(needs_data)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            logical :: needs_data !! .true. only for a plain LIST/LARGE_LIST column.
+        end function parquet_column_width_needs_data
         !> int64 specific of parquet_get_column_total_elements.
         module subroutine parquet_get_column_total_elements_int64(reader, name, total_elements)
             type(parquet_reader), intent(in) :: reader !! open reader.

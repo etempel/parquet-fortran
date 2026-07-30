@@ -222,6 +222,27 @@ module parquet_columns
         generic :: set_all => set_all_i32, set_all_i64, set_all_f32, set_all_f64, set_all_bool, set_all_str, &
             set_all_date, set_all_time, set_all_ts, set_all_i32v, set_all_i64v, set_all_f32v, set_all_f64v, &
             set_all_boolv, set_all_strv, set_all_datev, set_all_timev, set_all_tsv
+        ! --- adopt ---
+        procedure, private :: adopt_i32   !! adopt specific for the i32 kind.
+        procedure, private :: adopt_i64   !! adopt specific for the i64 kind.
+        procedure, private :: adopt_f32   !! adopt specific for the f32 kind.
+        procedure, private :: adopt_f64   !! adopt specific for the f64 kind.
+        procedure, private :: adopt_bool   !! adopt specific for the bool kind.
+        procedure, private :: adopt_date   !! adopt specific for the date kind.
+        procedure, private :: adopt_time   !! adopt specific for the time kind.
+        procedure, private :: adopt_ts   !! adopt specific for the ts kind.
+        procedure, private :: adopt_i32v   !! adopt specific for the i32v kind.
+        procedure, private :: adopt_i64v   !! adopt specific for the i64v kind.
+        procedure, private :: adopt_f32v   !! adopt specific for the f32v kind.
+        procedure, private :: adopt_f64v   !! adopt specific for the f64v kind.
+        procedure, private :: adopt_boolv   !! adopt specific for the boolv kind.
+        procedure, private :: adopt_datev   !! adopt specific for the datev kind.
+        procedure, private :: adopt_timev   !! adopt specific for the timev kind.
+        procedure, private :: adopt_tsv   !! adopt specific for the tsv kind.
+        !> Take ownership of an array outright, without copying it.
+        generic :: adopt => adopt_i32, adopt_i64, adopt_f32, adopt_f64, adopt_bool, adopt_date, adopt_time, &
+            adopt_ts, adopt_i32v, adopt_i64v, adopt_f32v, adopt_f64v, adopt_boolv, adopt_datev, adopt_timev, &
+            adopt_tsv
         ! --- data_ptr ---
         procedure, private :: data_ptr_i32   !! data_ptr specific for the i32 kind.
         procedure, private :: data_ptr_i64   !! data_ptr specific for the i64 kind.
@@ -454,6 +475,23 @@ module parquet_columns
             integer(int32), intent(in) :: values(:)      !! exactly the column's own shape.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_all_i32
+        !> Makes `values` this column's storage as a PK_INT32 column, WITHOUT copying it.
+        !!
+        !! `init` + `set_all` is the copying equivalent: it allocates the column's own array and
+        !! then assigns into it, so filling a column from an array you already hold costs a second
+        !! full pass and, transiently, twice the memory. This hands the allocation over instead
+        !! (`move_alloc`), leaving `values` deallocated -- which is why it is `intent(inout)` and not
+        !! `intent(in)`. Prefer it wherever the source array is a temporary the caller is about to
+        !! discard; that is exactly the shape of every `parquet_table` materialize.
+        !!
+        !! The column's kind, width and row count are taken from `values` itself, and any previous
+        !! contents (including the validity bitmap) are cleared, so this replaces `init` rather than
+        !! following it.
+        module subroutine adopt_i32(self, values, unit)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int32), allocatable, intent(inout) :: values(:) !! array to take over; deallocated on return.
+            character(len=*), intent(in), optional :: unit !! unit string to store ("" or absent for none).
+        end subroutine adopt_i32
         !> Zero-copy typed pointer to a PK_INT32 column's storage. The kind must match EXACTLY (no
         !! widening, DD2). Any structural mutation invalidates the pointer.
         module subroutine data_ptr_i32(self, p)
@@ -479,6 +517,23 @@ module parquet_columns
             integer(int64), intent(in) :: values(:)      !! exactly the column's own shape.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_all_i64
+        !> Makes `values` this column's storage as a PK_INT64 column, WITHOUT copying it.
+        !!
+        !! `init` + `set_all` is the copying equivalent: it allocates the column's own array and
+        !! then assigns into it, so filling a column from an array you already hold costs a second
+        !! full pass and, transiently, twice the memory. This hands the allocation over instead
+        !! (`move_alloc`), leaving `values` deallocated -- which is why it is `intent(inout)` and not
+        !! `intent(in)`. Prefer it wherever the source array is a temporary the caller is about to
+        !! discard; that is exactly the shape of every `parquet_table` materialize.
+        !!
+        !! The column's kind, width and row count are taken from `values` itself, and any previous
+        !! contents (including the validity bitmap) are cleared, so this replaces `init` rather than
+        !! following it.
+        module subroutine adopt_i64(self, values, unit)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), allocatable, intent(inout) :: values(:) !! array to take over; deallocated on return.
+            character(len=*), intent(in), optional :: unit !! unit string to store ("" or absent for none).
+        end subroutine adopt_i64
         !> Zero-copy typed pointer to a PK_INT64 column's storage. The kind must match EXACTLY (no
         !! widening, DD2). Any structural mutation invalidates the pointer.
         module subroutine data_ptr_i64(self, p)
@@ -504,6 +559,23 @@ module parquet_columns
             real(real32), intent(in) :: values(:)      !! exactly the column's own shape.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_all_f32
+        !> Makes `values` this column's storage as a PK_FLOAT32 column, WITHOUT copying it.
+        !!
+        !! `init` + `set_all` is the copying equivalent: it allocates the column's own array and
+        !! then assigns into it, so filling a column from an array you already hold costs a second
+        !! full pass and, transiently, twice the memory. This hands the allocation over instead
+        !! (`move_alloc`), leaving `values` deallocated -- which is why it is `intent(inout)` and not
+        !! `intent(in)`. Prefer it wherever the source array is a temporary the caller is about to
+        !! discard; that is exactly the shape of every `parquet_table` materialize.
+        !!
+        !! The column's kind, width and row count are taken from `values` itself, and any previous
+        !! contents (including the validity bitmap) are cleared, so this replaces `init` rather than
+        !! following it.
+        module subroutine adopt_f32(self, values, unit)
+            class(parquet_column), intent(inout) :: self !! the column.
+            real(real32), allocatable, intent(inout) :: values(:) !! array to take over; deallocated on return.
+            character(len=*), intent(in), optional :: unit !! unit string to store ("" or absent for none).
+        end subroutine adopt_f32
         !> Zero-copy typed pointer to a PK_FLOAT32 column's storage. The kind must match EXACTLY (no
         !! widening, DD2). Any structural mutation invalidates the pointer.
         module subroutine data_ptr_f32(self, p)
@@ -529,6 +601,23 @@ module parquet_columns
             real(real64), intent(in) :: values(:)      !! exactly the column's own shape.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_all_f64
+        !> Makes `values` this column's storage as a PK_FLOAT64 column, WITHOUT copying it.
+        !!
+        !! `init` + `set_all` is the copying equivalent: it allocates the column's own array and
+        !! then assigns into it, so filling a column from an array you already hold costs a second
+        !! full pass and, transiently, twice the memory. This hands the allocation over instead
+        !! (`move_alloc`), leaving `values` deallocated -- which is why it is `intent(inout)` and not
+        !! `intent(in)`. Prefer it wherever the source array is a temporary the caller is about to
+        !! discard; that is exactly the shape of every `parquet_table` materialize.
+        !!
+        !! The column's kind, width and row count are taken from `values` itself, and any previous
+        !! contents (including the validity bitmap) are cleared, so this replaces `init` rather than
+        !! following it.
+        module subroutine adopt_f64(self, values, unit)
+            class(parquet_column), intent(inout) :: self !! the column.
+            real(real64), allocatable, intent(inout) :: values(:) !! array to take over; deallocated on return.
+            character(len=*), intent(in), optional :: unit !! unit string to store ("" or absent for none).
+        end subroutine adopt_f64
         !> Zero-copy typed pointer to a PK_FLOAT64 column's storage. The kind must match EXACTLY (no
         !! widening, DD2). Any structural mutation invalidates the pointer.
         module subroutine data_ptr_f64(self, p)
@@ -554,6 +643,23 @@ module parquet_columns
             logical, intent(in) :: values(:)      !! exactly the column's own shape.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_all_bool
+        !> Makes `values` this column's storage as a PK_LOGICAL column, WITHOUT copying it.
+        !!
+        !! `init` + `set_all` is the copying equivalent: it allocates the column's own array and
+        !! then assigns into it, so filling a column from an array you already hold costs a second
+        !! full pass and, transiently, twice the memory. This hands the allocation over instead
+        !! (`move_alloc`), leaving `values` deallocated -- which is why it is `intent(inout)` and not
+        !! `intent(in)`. Prefer it wherever the source array is a temporary the caller is about to
+        !! discard; that is exactly the shape of every `parquet_table` materialize.
+        !!
+        !! The column's kind, width and row count are taken from `values` itself, and any previous
+        !! contents (including the validity bitmap) are cleared, so this replaces `init` rather than
+        !! following it.
+        module subroutine adopt_bool(self, values, unit)
+            class(parquet_column), intent(inout) :: self !! the column.
+            logical, allocatable, intent(inout) :: values(:) !! array to take over; deallocated on return.
+            character(len=*), intent(in), optional :: unit !! unit string to store ("" or absent for none).
+        end subroutine adopt_bool
         !> Zero-copy typed pointer to a PK_LOGICAL column's storage. The kind must match EXACTLY (no
         !! widening, DD2). Any structural mutation invalidates the pointer.
         module subroutine data_ptr_bool(self, p)
@@ -579,6 +685,23 @@ module parquet_columns
             type(parquet_date), intent(in) :: values(:)      !! exactly the column's own shape.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_all_date
+        !> Makes `values` this column's storage as a PK_DATE column, WITHOUT copying it.
+        !!
+        !! `init` + `set_all` is the copying equivalent: it allocates the column's own array and
+        !! then assigns into it, so filling a column from an array you already hold costs a second
+        !! full pass and, transiently, twice the memory. This hands the allocation over instead
+        !! (`move_alloc`), leaving `values` deallocated -- which is why it is `intent(inout)` and not
+        !! `intent(in)`. Prefer it wherever the source array is a temporary the caller is about to
+        !! discard; that is exactly the shape of every `parquet_table` materialize.
+        !!
+        !! The column's kind, width and row count are taken from `values` itself, and any previous
+        !! contents (including the validity bitmap) are cleared, so this replaces `init` rather than
+        !! following it.
+        module subroutine adopt_date(self, values, unit)
+            class(parquet_column), intent(inout) :: self !! the column.
+            type(parquet_date), allocatable, intent(inout) :: values(:) !! array to take over; deallocated on return.
+            character(len=*), intent(in), optional :: unit !! unit string to store ("" or absent for none).
+        end subroutine adopt_date
         !> Zero-copy typed pointer to a PK_DATE column's storage. The kind must match EXACTLY (no
         !! widening, DD2). Any structural mutation invalidates the pointer.
         module subroutine data_ptr_date(self, p)
@@ -604,6 +727,23 @@ module parquet_columns
             type(parquet_time), intent(in) :: values(:)      !! exactly the column's own shape.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_all_time
+        !> Makes `values` this column's storage as a PK_TIME column, WITHOUT copying it.
+        !!
+        !! `init` + `set_all` is the copying equivalent: it allocates the column's own array and
+        !! then assigns into it, so filling a column from an array you already hold costs a second
+        !! full pass and, transiently, twice the memory. This hands the allocation over instead
+        !! (`move_alloc`), leaving `values` deallocated -- which is why it is `intent(inout)` and not
+        !! `intent(in)`. Prefer it wherever the source array is a temporary the caller is about to
+        !! discard; that is exactly the shape of every `parquet_table` materialize.
+        !!
+        !! The column's kind, width and row count are taken from `values` itself, and any previous
+        !! contents (including the validity bitmap) are cleared, so this replaces `init` rather than
+        !! following it.
+        module subroutine adopt_time(self, values, unit)
+            class(parquet_column), intent(inout) :: self !! the column.
+            type(parquet_time), allocatable, intent(inout) :: values(:) !! array to take over; deallocated on return.
+            character(len=*), intent(in), optional :: unit !! unit string to store ("" or absent for none).
+        end subroutine adopt_time
         !> Zero-copy typed pointer to a PK_TIME column's storage. The kind must match EXACTLY (no
         !! widening, DD2). Any structural mutation invalidates the pointer.
         module subroutine data_ptr_time(self, p)
@@ -629,6 +769,23 @@ module parquet_columns
             type(parquet_timestamp), intent(in) :: values(:)      !! exactly the column's own shape.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_all_ts
+        !> Makes `values` this column's storage as a PK_TIMESTAMP column, WITHOUT copying it.
+        !!
+        !! `init` + `set_all` is the copying equivalent: it allocates the column's own array and
+        !! then assigns into it, so filling a column from an array you already hold costs a second
+        !! full pass and, transiently, twice the memory. This hands the allocation over instead
+        !! (`move_alloc`), leaving `values` deallocated -- which is why it is `intent(inout)` and not
+        !! `intent(in)`. Prefer it wherever the source array is a temporary the caller is about to
+        !! discard; that is exactly the shape of every `parquet_table` materialize.
+        !!
+        !! The column's kind, width and row count are taken from `values` itself, and any previous
+        !! contents (including the validity bitmap) are cleared, so this replaces `init` rather than
+        !! following it.
+        module subroutine adopt_ts(self, values, unit)
+            class(parquet_column), intent(inout) :: self !! the column.
+            type(parquet_timestamp), allocatable, intent(inout) :: values(:) !! array to take over; deallocated on return.
+            character(len=*), intent(in), optional :: unit !! unit string to store ("" or absent for none).
+        end subroutine adopt_ts
         !> Zero-copy typed pointer to a PK_TIMESTAMP column's storage. The kind must match EXACTLY (no
         !! widening, DD2). Any structural mutation invalidates the pointer.
         module subroutine data_ptr_ts(self, p)
@@ -654,6 +811,23 @@ module parquet_columns
             integer(int32), intent(in) :: values(:,:)      !! exactly the column's own shape.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_all_i32v
+        !> Makes `values` this column's storage as a PK_INT32_VEC column, WITHOUT copying it.
+        !!
+        !! `init` + `set_all` is the copying equivalent: it allocates the column's own array and
+        !! then assigns into it, so filling a column from an array you already hold costs a second
+        !! full pass and, transiently, twice the memory. This hands the allocation over instead
+        !! (`move_alloc`), leaving `values` deallocated -- which is why it is `intent(inout)` and not
+        !! `intent(in)`. Prefer it wherever the source array is a temporary the caller is about to
+        !! discard; that is exactly the shape of every `parquet_table` materialize.
+        !!
+        !! The column's kind, width and row count are taken from `values` itself, and any previous
+        !! contents (including the validity bitmap) are cleared, so this replaces `init` rather than
+        !! following it.
+        module subroutine adopt_i32v(self, values, unit)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int32), allocatable, intent(inout) :: values(:,:) !! array to take over; deallocated on return.
+            character(len=*), intent(in), optional :: unit !! unit string to store ("" or absent for none).
+        end subroutine adopt_i32v
         !> Zero-copy typed pointer to a PK_INT32_VEC column's storage. The kind must match EXACTLY (no
         !! widening, DD2). Any structural mutation invalidates the pointer.
         module subroutine data_ptr_i32v(self, p)
@@ -679,6 +853,23 @@ module parquet_columns
             integer(int64), intent(in) :: values(:,:)      !! exactly the column's own shape.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_all_i64v
+        !> Makes `values` this column's storage as a PK_INT64_VEC column, WITHOUT copying it.
+        !!
+        !! `init` + `set_all` is the copying equivalent: it allocates the column's own array and
+        !! then assigns into it, so filling a column from an array you already hold costs a second
+        !! full pass and, transiently, twice the memory. This hands the allocation over instead
+        !! (`move_alloc`), leaving `values` deallocated -- which is why it is `intent(inout)` and not
+        !! `intent(in)`. Prefer it wherever the source array is a temporary the caller is about to
+        !! discard; that is exactly the shape of every `parquet_table` materialize.
+        !!
+        !! The column's kind, width and row count are taken from `values` itself, and any previous
+        !! contents (including the validity bitmap) are cleared, so this replaces `init` rather than
+        !! following it.
+        module subroutine adopt_i64v(self, values, unit)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), allocatable, intent(inout) :: values(:,:) !! array to take over; deallocated on return.
+            character(len=*), intent(in), optional :: unit !! unit string to store ("" or absent for none).
+        end subroutine adopt_i64v
         !> Zero-copy typed pointer to a PK_INT64_VEC column's storage. The kind must match EXACTLY (no
         !! widening, DD2). Any structural mutation invalidates the pointer.
         module subroutine data_ptr_i64v(self, p)
@@ -704,6 +895,23 @@ module parquet_columns
             real(real32), intent(in) :: values(:,:)      !! exactly the column's own shape.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_all_f32v
+        !> Makes `values` this column's storage as a PK_FLOAT32_VEC column, WITHOUT copying it.
+        !!
+        !! `init` + `set_all` is the copying equivalent: it allocates the column's own array and
+        !! then assigns into it, so filling a column from an array you already hold costs a second
+        !! full pass and, transiently, twice the memory. This hands the allocation over instead
+        !! (`move_alloc`), leaving `values` deallocated -- which is why it is `intent(inout)` and not
+        !! `intent(in)`. Prefer it wherever the source array is a temporary the caller is about to
+        !! discard; that is exactly the shape of every `parquet_table` materialize.
+        !!
+        !! The column's kind, width and row count are taken from `values` itself, and any previous
+        !! contents (including the validity bitmap) are cleared, so this replaces `init` rather than
+        !! following it.
+        module subroutine adopt_f32v(self, values, unit)
+            class(parquet_column), intent(inout) :: self !! the column.
+            real(real32), allocatable, intent(inout) :: values(:,:) !! array to take over; deallocated on return.
+            character(len=*), intent(in), optional :: unit !! unit string to store ("" or absent for none).
+        end subroutine adopt_f32v
         !> Zero-copy typed pointer to a PK_FLOAT32_VEC column's storage. The kind must match EXACTLY (no
         !! widening, DD2). Any structural mutation invalidates the pointer.
         module subroutine data_ptr_f32v(self, p)
@@ -729,6 +937,23 @@ module parquet_columns
             real(real64), intent(in) :: values(:,:)      !! exactly the column's own shape.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_all_f64v
+        !> Makes `values` this column's storage as a PK_FLOAT64_VEC column, WITHOUT copying it.
+        !!
+        !! `init` + `set_all` is the copying equivalent: it allocates the column's own array and
+        !! then assigns into it, so filling a column from an array you already hold costs a second
+        !! full pass and, transiently, twice the memory. This hands the allocation over instead
+        !! (`move_alloc`), leaving `values` deallocated -- which is why it is `intent(inout)` and not
+        !! `intent(in)`. Prefer it wherever the source array is a temporary the caller is about to
+        !! discard; that is exactly the shape of every `parquet_table` materialize.
+        !!
+        !! The column's kind, width and row count are taken from `values` itself, and any previous
+        !! contents (including the validity bitmap) are cleared, so this replaces `init` rather than
+        !! following it.
+        module subroutine adopt_f64v(self, values, unit)
+            class(parquet_column), intent(inout) :: self !! the column.
+            real(real64), allocatable, intent(inout) :: values(:,:) !! array to take over; deallocated on return.
+            character(len=*), intent(in), optional :: unit !! unit string to store ("" or absent for none).
+        end subroutine adopt_f64v
         !> Zero-copy typed pointer to a PK_FLOAT64_VEC column's storage. The kind must match EXACTLY (no
         !! widening, DD2). Any structural mutation invalidates the pointer.
         module subroutine data_ptr_f64v(self, p)
@@ -754,6 +979,23 @@ module parquet_columns
             logical, intent(in) :: values(:,:)      !! exactly the column's own shape.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_all_boolv
+        !> Makes `values` this column's storage as a PK_LOGICAL_VEC column, WITHOUT copying it.
+        !!
+        !! `init` + `set_all` is the copying equivalent: it allocates the column's own array and
+        !! then assigns into it, so filling a column from an array you already hold costs a second
+        !! full pass and, transiently, twice the memory. This hands the allocation over instead
+        !! (`move_alloc`), leaving `values` deallocated -- which is why it is `intent(inout)` and not
+        !! `intent(in)`. Prefer it wherever the source array is a temporary the caller is about to
+        !! discard; that is exactly the shape of every `parquet_table` materialize.
+        !!
+        !! The column's kind, width and row count are taken from `values` itself, and any previous
+        !! contents (including the validity bitmap) are cleared, so this replaces `init` rather than
+        !! following it.
+        module subroutine adopt_boolv(self, values, unit)
+            class(parquet_column), intent(inout) :: self !! the column.
+            logical, allocatable, intent(inout) :: values(:,:) !! array to take over; deallocated on return.
+            character(len=*), intent(in), optional :: unit !! unit string to store ("" or absent for none).
+        end subroutine adopt_boolv
         !> Zero-copy typed pointer to a PK_LOGICAL_VEC column's storage. The kind must match EXACTLY (no
         !! widening, DD2). Any structural mutation invalidates the pointer.
         module subroutine data_ptr_boolv(self, p)
@@ -779,6 +1021,23 @@ module parquet_columns
             type(parquet_date), intent(in) :: values(:,:)      !! exactly the column's own shape.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_all_datev
+        !> Makes `values` this column's storage as a PK_DATE_VEC column, WITHOUT copying it.
+        !!
+        !! `init` + `set_all` is the copying equivalent: it allocates the column's own array and
+        !! then assigns into it, so filling a column from an array you already hold costs a second
+        !! full pass and, transiently, twice the memory. This hands the allocation over instead
+        !! (`move_alloc`), leaving `values` deallocated -- which is why it is `intent(inout)` and not
+        !! `intent(in)`. Prefer it wherever the source array is a temporary the caller is about to
+        !! discard; that is exactly the shape of every `parquet_table` materialize.
+        !!
+        !! The column's kind, width and row count are taken from `values` itself, and any previous
+        !! contents (including the validity bitmap) are cleared, so this replaces `init` rather than
+        !! following it.
+        module subroutine adopt_datev(self, values, unit)
+            class(parquet_column), intent(inout) :: self !! the column.
+            type(parquet_date), allocatable, intent(inout) :: values(:,:) !! array to take over; deallocated on return.
+            character(len=*), intent(in), optional :: unit !! unit string to store ("" or absent for none).
+        end subroutine adopt_datev
         !> Zero-copy typed pointer to a PK_DATE_VEC column's storage. The kind must match EXACTLY (no
         !! widening, DD2). Any structural mutation invalidates the pointer.
         module subroutine data_ptr_datev(self, p)
@@ -804,6 +1063,23 @@ module parquet_columns
             type(parquet_time), intent(in) :: values(:,:)      !! exactly the column's own shape.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_all_timev
+        !> Makes `values` this column's storage as a PK_TIME_VEC column, WITHOUT copying it.
+        !!
+        !! `init` + `set_all` is the copying equivalent: it allocates the column's own array and
+        !! then assigns into it, so filling a column from an array you already hold costs a second
+        !! full pass and, transiently, twice the memory. This hands the allocation over instead
+        !! (`move_alloc`), leaving `values` deallocated -- which is why it is `intent(inout)` and not
+        !! `intent(in)`. Prefer it wherever the source array is a temporary the caller is about to
+        !! discard; that is exactly the shape of every `parquet_table` materialize.
+        !!
+        !! The column's kind, width and row count are taken from `values` itself, and any previous
+        !! contents (including the validity bitmap) are cleared, so this replaces `init` rather than
+        !! following it.
+        module subroutine adopt_timev(self, values, unit)
+            class(parquet_column), intent(inout) :: self !! the column.
+            type(parquet_time), allocatable, intent(inout) :: values(:,:) !! array to take over; deallocated on return.
+            character(len=*), intent(in), optional :: unit !! unit string to store ("" or absent for none).
+        end subroutine adopt_timev
         !> Zero-copy typed pointer to a PK_TIME_VEC column's storage. The kind must match EXACTLY (no
         !! widening, DD2). Any structural mutation invalidates the pointer.
         module subroutine data_ptr_timev(self, p)
@@ -829,6 +1105,23 @@ module parquet_columns
             type(parquet_timestamp), intent(in) :: values(:,:)      !! exactly the column's own shape.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_all_tsv
+        !> Makes `values` this column's storage as a PK_TIMESTAMP_VEC column, WITHOUT copying it.
+        !!
+        !! `init` + `set_all` is the copying equivalent: it allocates the column's own array and
+        !! then assigns into it, so filling a column from an array you already hold costs a second
+        !! full pass and, transiently, twice the memory. This hands the allocation over instead
+        !! (`move_alloc`), leaving `values` deallocated -- which is why it is `intent(inout)` and not
+        !! `intent(in)`. Prefer it wherever the source array is a temporary the caller is about to
+        !! discard; that is exactly the shape of every `parquet_table` materialize.
+        !!
+        !! The column's kind, width and row count are taken from `values` itself, and any previous
+        !! contents (including the validity bitmap) are cleared, so this replaces `init` rather than
+        !! following it.
+        module subroutine adopt_tsv(self, values, unit)
+            class(parquet_column), intent(inout) :: self !! the column.
+            type(parquet_timestamp), allocatable, intent(inout) :: values(:,:) !! array to take over; deallocated on return.
+            character(len=*), intent(in), optional :: unit !! unit string to store ("" or absent for none).
+        end subroutine adopt_tsv
         !> Zero-copy typed pointer to a PK_TIMESTAMP_VEC column's storage. The kind must match EXACTLY (no
         !! widening, DD2). Any structural mutation invalidates the pointer.
         module subroutine data_ptr_tsv(self, p)

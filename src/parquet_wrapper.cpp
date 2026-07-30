@@ -20,6 +20,9 @@
 #include <parquet/arrow/schema.h>
 #include <parquet/arrow/writer.h>
 #include <parquet/parquet_version.h>
+// For ColumnChunkMetaData::statistics()'s return type: parquet/metadata.h only forward-declares
+// parquet::Statistics, so HasNullCount()/null_count() need the full definition.
+#include <parquet/statistics.h>
 
 // Arrow's vendored copy of Howard Hinnant's date library (date.h only -- deliberately not
 // datetime.h, whose tz.h part would drag in the timezone database): used solely by the
@@ -1988,6 +1991,64 @@ extern "C"
 		return 1;
 	}
 
+	// Whether column `name` contains any Null in the 1-based inclusive row-group range
+	// [rg_lo, rg_hi] (rg_lo <= 0 meaning every row group), answered from the file footer alone.
+	//
+	// Parquet column-chunk statistics carry a null count, so this reads NO column data. That makes
+	// it worth having: every materialize in parquet_tables used to request a per-row validity mask
+	// unconditionally, which costs an O(n) IsValid() scan here, an int8 buffer plus a 4-byte-per-row
+	// Fortran LOGICAL mask, a conversion pass between them, and a per-row replay loop on the Fortran
+	// side -- all to describe a column that, in the overwhelmingly common case, has no Nulls at all.
+	// Asking first lets that entire pipeline be skipped.
+	//
+	// Returns 1 for "has nulls, or cannot be sure". The conservative direction matters: statistics
+	// are optional in the format, so a missing chunk statistic, or one without a null count, must
+	// read as "might have nulls" -- claiming otherwise would make parquet_read_column abort on a
+	// column it was told was clean. A filter or sample being active is safe to ignore, because both
+	// only ever REMOVE rows: a column with no Nulls in the file has none in the filtered result.
+	static int column_has_nulls_from_footer(
+		ParquetReaderHandle *reader_handle, const char *name, int64_t rg_lo, int64_t rg_hi)
+	{
+		auto resolved = resolve_struct_path(reader_handle->schema, name);
+		// A struct leaf's own validity is combined with every ancestor struct's on read
+		// (unwrap_struct_path), so the leaf chunk's own null count does not describe the result.
+		// Rather than reason about each level's statistics, decline to answer for a nested path.
+		if (!resolved.child_path.empty())
+		{
+			return 1;
+		}
+		auto idx = get_column_index(reader_handle, resolved.top_level_name.c_str());
+		auto leaf_idx = resolve_single_leaf_index(reader_handle, static_cast<int>(idx), resolved.child_path);
+		auto *file_metadata = reader_handle->reader->parquet_reader()->metadata().get();
+		int64_t lo = rg_lo > 0 ? rg_lo : 1;
+		int64_t hi = rg_hi > 0 ? rg_hi : reader_handle->num_row_groups;
+		for (int64_t rg = lo; rg <= hi; ++rg)
+		{
+			auto chunk = file_metadata->RowGroup(static_cast<int>(rg - 1))->ColumnChunk(static_cast<int>(leaf_idx));
+			if (!chunk->is_stats_set())
+			{
+				return 1;
+			}
+			// Both this and the is_stats_set() test above are load-bearing as a PAIR, and each masks
+			// the other individually: removing either alone changes nothing (verified by mutation --
+			// every list/null test still passes), while removing both segfaults on
+			// test/fixtures/no_stats.parquet, because statistics() returns null there. Do not drop
+			// one as dead code on the strength of a coverage report. HasNullCount() specifically is
+			// defensive: Arrow always writes a null count when it writes statistics at all, so no
+			// fixture this repository can build reaches it with stats set but no count.
+			auto stats = chunk->statistics();
+			if (!stats || !stats->HasNullCount())
+			{
+				return 1;
+			}
+			if (stats->null_count() > 0)
+			{
+				return 1;
+			}
+		}
+		return 0;
+	}
+
 	// Whether measuring a leaf field's col_size requires reading its data, given that the caller
 	// has already handled FIXED_SIZE_LIST (whose width is a schema constant).
 	//
@@ -3676,6 +3737,16 @@ extern "C"
 		return list_width_verified(reader_handle, name, 0, 0);
 	}
 
+	// Whether `name` contains any Null over row groups `rg_lo`..`rg_hi` (1-based inclusive;
+	// rg_lo <= 0 meaning every row group), from the file footer alone -- no column data is read.
+	// Returns 1 for "has nulls, or cannot be sure"; see column_has_nulls_from_footer for why the
+	// uncertain cases must answer 1.
+	int parquet_reader_column_has_nulls(void *handle, const char *name, int64_t rg_lo, int64_t rg_hi)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		return column_has_nulls_from_footer(reader_handle, name, rg_lo, rg_hi);
+	}
+
 	// Whether `name`'s width can only be determined by looking at its data -- i.e. whether it is a
 	// plain LIST/LARGE_LIST. Schema-only, and the question parquet_table's open-time classification
 	// asks so it can DEFER such a column's kind and width to first use instead of reading it at
@@ -4228,6 +4299,16 @@ extern "C"
 			{
 				report_fatal_error(context, std::string("column contains Null value(s), which is not supported: ") + name);
 			}
+			return;
+		}
+		// Arrow already knows the null count, so a column with none needs no per-element scan at
+		// all -- the mask it would build is uniformly 1. Worth short-circuiting because the callers
+		// that pass a non-null valid_out include every parquet_table materialize, and the scan is
+		// O(n) per column with no other purpose. Kept as a fast path rather than the only path:
+		// a column that genuinely has Nulls still needs the element-by-element answer.
+		if (array->null_count() == 0)
+		{
+			std::memset(valid_out, 1, static_cast<size_t>(array->length()));
 			return;
 		}
 		for (int64_t i = 0; i < array->length(); ++i)

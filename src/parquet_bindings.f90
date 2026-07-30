@@ -43,7 +43,7 @@ module parquet_bindings
     public :: parquet_append_string_column_chunk, parquet_append_string_array_column_chunk
     public :: parquet_write_string_column_chunk_buffers
     public :: parquet_reader_get_nrows, parquet_reader_get_total_nrows, parquet_reader_get_column_col_size
-    public :: parquet_reader_column_width_is_deferred
+    public :: parquet_reader_column_width_is_deferred, parquet_reader_column_has_nulls
     public :: parquet_reader_list_width_candidate, parquet_reader_list_width_verified
     public :: parquet_reader_get_column_total_elements, parquet_reader_get_string_length
     public :: parquet_reader_get_table_metadata_count
@@ -589,6 +589,19 @@ module parquet_bindings
             type(c_ptr), value :: reader
             character(kind=c_char) :: name(*)
             integer(c_long_long) :: col_size
+        end function
+
+        !> Returns 1 when `name` contains any Null over row groups `rg_lo`..`rg_hi` (1-based
+        !> inclusive; `rg_lo` <= 0 means every row group), OR when the file's statistics cannot
+        !> answer. Read from the footer; no column data is touched.
+        function parquet_reader_column_has_nulls(reader, name, rg_lo, rg_hi) &
+                bind(C, name="parquet_reader_column_has_nulls") result(has_nulls)
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: rg_lo
+            integer(c_long_long), value :: rg_hi
+            integer(c_int) :: has_nulls
         end function
 
         !> Returns 1 when `name`'s width can only be found by reading its data (a plain

@@ -64,6 +64,7 @@ working rules).
   - [Running a single test suite/test](#running-a-single-test-suitetest)
   - [Tests run concurrently: never share a fixture file path between two tests](#tests-run-concurrently-never-share-a-fixture-file-path-between-two-tests)
   - [Every `check()` call needs its own message](#every-check-call-needs-its-own-message)
+  - [Verifying a change with mutation testing](#verifying-a-change-with-mutation-testing)
   - [Measuring test coverage](#measuring-test-coverage)
   - [Fortran gcov attribution artifacts](#fortran-gcov-attribution-artifacts)
   - [`src/parquet_wrapper.cpp`: GCC vs Clang gcov attribution](#srcparquet_wrappercpp-gcc-vs-clang-gcov-attribution)
@@ -887,6 +888,14 @@ counterpart. User guide: `doc/pages/date-time.md`.
 - **`transfer(source, mold, size)` into a longer target leaves the trailing bytes undefined**, not
   blank-padded. To place a short string into a longer fixed-length slot, assign normally (which
   blank-pads); reserve `transfer` for exact-size byte moves.
+- **Passing an UNALLOCATED allocatable to an `optional` dummy makes that dummy ABSENT** (F2018
+  15.5.2.12; verified on gfortran before relying on it). This is load-bearing, not a curiosity:
+  `parquet_column%row_validity` and every `mat_*`/`matchunk_*` return or hold an unallocated mask for
+  a null-free column and pass it straight on as `is_valid=`, so the callee sees no argument at all and
+  takes its own no-mask fast path. It means a procedure can decline to supply an optional argument
+  *at runtime*, without the caller writing an `if (present(...))` fork or duplicating the call — but
+  it also means **a caller cannot tell "absent" from "the producer had nothing to say"**, so any
+  procedure returning such an array must document that `allocated()` is part of its contract.
 - **Never write a function that returns `character(len=:), allocatable` — use a subroutine with
   an `intent(out)`/`intent(inout)` allocatable `character` argument instead.** This is a fixed
   project-wide convention, not just advice: gfortran has a confirmed, still-open compiler bug
@@ -986,6 +995,15 @@ which can pick a *stale* binary from an old hash dir — symptom: tests pass whe
 fail under a full `fpm test`. `tools/coverage.sh` runs `fpm clean` up front to avoid this; for a
 plain `fpm test`, `fpm clean --skip` fixes it.
 
+**`tools/run_error_scenarios.sh` resolves its binary the same way** (`find "${FPM_BUILD_DIR:-build}"
+-type f -name error_scenarios | head -n 1`), and there the failure direction is the dangerous one: it
+can print **"All error scenarios behaved as expected"** while running a binary that predates your
+edits entirely. A green error-scenario run is therefore only meaningful when `find build -type f -name
+error_scenarios | wc -l` is 1. Run `fpm clean --skip` first whenever you have built with more than one
+`FPM_FFLAGS` value in a session (a coverage run, an OpenMP run, a release build), and treat a *new*
+scenario that passes first time with suspicion until you have seen it fail against a deliberately
+broken implementation.
+
 ### Keeping `tools/prep_fpm_publish.sh` in sync
 
 `tools/prep_fpm_publish.sh` builds the tarball content for `fpm publish` (see CONTRIBUTING.md's
@@ -1034,6 +1052,27 @@ program; env vars read and forwarded as those flags by the shell wrapper
 the repo root first. Document usage (parameters, defaults, example invocations) in
 CONTRIBUTING.md's "Other tools/ helpers" section, not README.md — this is a contributor/
 maintainer tool, not part of the public library API.
+
+**Three traps when writing one of these, all of which produced a confidently wrong number here
+before being noticed:**
+
+- **Warm the data before timing anything, on any lazy API.** `parquet_open_table` reads no column
+  data, so whichever measured path touches a column *first* silently absorbs the entire decode. This
+  made `%get` look 8.94x `%col`, and `parquet_write_table` look 2.5x a hand-written write loop; both
+  collapsed to roughly parity once the benchmark called `%prefetch`/`%materialize_all` up front. If
+  two paths in one benchmark read the same column, exactly one of them is paying for it.
+- **Warm the result array's pages too.** A freshly allocated large output array pays first-touch page
+  faults on its first pass and never again, so whichever variant runs first absorbs them. This is
+  strong enough to reverse a comparison: the `%col` pointer form measured *25% faster* than plain
+  arrays purely by running second. Write the result once through every path before the timed loop.
+- **Take the best of several rounds, not one measurement.** Single rounds of the `access` mode swung
+  0.96x–1.22x on the same build — wider than the effect being measured. The minimum is the run least
+  disturbed by everything else on the machine, which is what these modes are actually asking about.
+
+**To measure the committed baseline against the working tree**, `git stash push -- src tools`, rebuild,
+measure, then `git stash pop` — this keeps `app/`, `test/` and the fixtures in place, so the benchmark
+program and its input do not change between the two halves of the comparison. Confirm the stash popped
+cleanly (`git status`) before trusting the "after" number.
 
 ### Measuring whether Arrow memory was actually freed: RSS cannot answer, the pool counter can
 
@@ -1107,6 +1146,32 @@ is the condition's own source text as a string (whitespace-normalized, with any 
 doubled per Fortran's escaping rule) — better than nothing, and it at least echoes back exactly
 what was expected without requiring a separate hand-written description. Apply this to every new
 `check()` call from now on, not only when a review flags a gap.
+
+### Verifying a change with mutation testing
+
+A green test suite does not prove a new test covers what it was written for. The cheap check is to
+break the code deliberately — invert a guard, delete a branch, return a constant — and confirm the
+test fails. Worth doing for anything whose failure mode is *silent*: a fast path that skips work, a
+short-circuit, a cache. This repository's recent examples are the validity-mask skip, the
+`col_size` footer screen, and the write-side row-granular null mask; each had at least one mutation
+that a first round of tests did not catch.
+
+Three things about doing it *here* specifically:
+
+- **Detect an abort, not just a failed check.** This library reports almost every error with
+  `error stop`, so a mutation frequently makes a test **crash** rather than fail an assertion —
+  `grep -c '\[FAILED\]'` then reports 0 and the mutation looks survived. Always check the exit
+  status too (`error stop` → nonzero, SIGABRT → 134, SIGSEGV → 139/11 through `fpm run`). Getting
+  this wrong made 3 of 5 mutations look uncaught in one session when they were all caught.
+- **A surviving mutation is not automatically a coverage gap.** It may be *masked*: by a redundant
+  sibling guard (removing either alone changes nothing — see `column_has_nulls_from_footer`'s
+  `is_stats_set()`/`HasNullCount()` pair, where removing both segfaults), or by a later check that
+  catches the same error anyway (the `col_size` footer screen is masked by the row-group scan that
+  follows it). Test the pair, or the tier below, before concluding anything.
+- **If a mutation cannot be caught by any fixture this repository can build, the branch is
+  defensive** — say so in a comment and `GCOVR_EXCL` it rather than deleting it or inventing an
+  unbuildable fixture. `list_uniform_width`'s `IsNull` check is the worked example: Arrow's own
+  `ListBuilder::AppendNull` already leaves `value_length == 0`, so no Arrow-built array reaches it.
 
 ### Measuring test coverage
 
@@ -1344,6 +1409,60 @@ scoped per-row-group rather than per-column-total:
    a tiny fixture) + `test/test_errors.f90` wrapper (`check_scenario_exit_status_and_stderr`,
    asserting the exact stderr message) + `tools/run_error_scenarios.sh` entry + a README
    Limitations bullet describing the ceiling and that it aborts cleanly rather than corrupting.
+
+**A validity mask is expensive, and usually unnecessary — ask the footer before building one.**
+Requesting `is_valid=` from `parquet_read_column` was measured at **+22% to +84%** on the read path,
+and it is not one cost but four: an `int8` buffer allocated by `make_valid_buf`, a Fortran `LOGICAL`
+mask (gfortran's default `LOGICAL` is **32 bits** — four times the buffer it is built from), a
+conversion pass between them (`is_valid = valid_buf /= 0_c_int8_t`), and an O(n) `array->IsValid(i)`
+scan in `check_or_report_nulls`. On the table path there was a fifth: a per-row `set_null` replay.
+
+Parquet records a **null count per column chunk in the footer**, so whether any of that is needed can
+be answered without reading a byte — that is `parquet_column_has_nulls` (public API) over
+`column_has_nulls_from_footer` (C++). Every `mat_*`/`matchunk_*` asks first and omits `is_valid=`
+entirely when the answer is no. Rules to preserve:
+
+- **The uncertain answer must be `.true.`** ("might have nulls"). Statistics are optional in the
+  format; claiming a column is clean when it is not makes `parquet_read_column` abort on the first
+  Null. A dotted **struct path** is declined outright, because a struct leaf's validity is combined
+  with every ancestor struct's by `unwrap_struct_path`, so the leaf chunk's own count does not
+  describe the result.
+- **A filter or sample being active does not invalidate the answer** — both only ever remove rows, so
+  a column with no Nulls in the file has none in the result.
+- **`matchunk_*` scopes the question to its own row group**, or a file with Nulls anywhere would force
+  the mask onto every clean row group.
+- **The `is_stats_set()` and `HasNullCount()` guards are mutually redundant and both load-bearing.**
+  Removing either alone changes no test result; removing both segfaults on
+  `test/fixtures/no_stats.parquet` (statistics-free by construction — the only fixture that reaches
+  this path), because `statistics()` returns null there. Do not delete one as dead code.
+- **Keep the two fallbacks** for when a mask genuinely is needed: `check_or_report_nulls` short-circuits
+  to `memset` when `null_count() == 0`, and the per-row replay sits behind `if (.not. all(valid))`.
+
+**A new reader query that a sibling module needs has to be PUBLIC `parquet` API** — there is no
+internal back door. `parquet_reader`'s components are `private`, so `parquet_tables` (and any future
+sibling module) cannot reach `%handle` and therefore cannot call `parquet_bindings` directly on a
+reader; it must go through a procedure in `parquet` that takes the `parquet_reader` object. That is why
+`parquet_column_has_nulls`, `parquet_measure_list_width` and `parquet_column_width_needs_data` are all
+public rather than internal plumbing, and why each needs the full public treatment (dual int32/int64
+kinds for numeric arguments, `!>`/`!!` docs, a README API-overview entry). Budget for that when a new
+one is needed; do not try to widen `parquet_reader`'s component access instead.
+
+**Fill a `parquet_column` with `%adopt`, not `%init` + `%set_all`, when the source array is a
+temporary.** `set_all` is a full array assignment into storage the column just allocated, so the
+obvious "read into `tmp`, then store it" shape costs an extra full pass and, transiently, a second
+live copy of the column. `%adopt` (generated for all 16 array kinds) hands the allocation over with
+`move_alloc` and takes kind, width and row count from the array itself, so it replaces `init` rather
+than following it. The two string kinds have no `adopt` — they own a `parquet_string_column`, not a
+plain array. Together with the mask skip above this took `materialize_all` on an 8 GB, 16-column
+null-free file from 5.67 s to 3.54 s.
+
+**Beware benchmarking this on one toolchain only.** The report that prompted the work measured
+`materialize_all` at 1.84x a raw read with **Intel `ifx` on a 100+ core, ~800 GB machine**; the same
+comparison with gfortran on a 32 GB laptop showed the table path at *parity or faster*, because
+releasing Arrow's buffers as it goes shrinks the working set enough to pay for the extra passes. The
+per-row loops that dominate under `ifx` are nearly free under gfortran. When a performance claim about
+this layer cannot be reproduced, suspect the compiler before suspecting the report — and record which
+one was used (see feature_materialize.md).
 
 **Measuring a column's width must never materialize it, and only ONE column type needs data at
 all.** `parquet_get_col_size`/`parquet_get_column_total_elements` answer from the schema for every

@@ -137,6 +137,11 @@ call t%get("mass", mass)                       ! now it is read
 print *, t%residency("mass")                   ! RES_FULL
 ```
 
+**Reading a column costs one pass, not two.** The table takes over the array it just read rather than
+copying into storage of its own, and it asks the file's own statistics whether the column contains any
+Null before building a validity mask — for a Null-free column, which is most columns of most files, no
+mask is built at all. `parquet_column_has_nulls` exposes that same question if you want it directly.
+
 Three calls control it explicitly:
 
 | call | does |

@@ -626,6 +626,26 @@ module parquet
         module procedure parquet_measure_list_width_int64
     end interface parquet_measure_list_width
 
+    !> Whether `name` contains any Null over the 1-based inclusive row-group range
+    !> `row_group_lo`..`row_group_hi`, answered from the file's own statistics. Both bounds are
+    !> accepted as `integer(int32)` or `integer(int64)`; `row_group_lo <= 0` means "every row group".
+    !>
+    !> Reads **no column data**: Parquet records a null count per column chunk in the footer. That is
+    !> what makes this worth calling before a read -- a caller that knows a column is Null-free can
+    !> skip building a validity mask for it entirely.
+    !>
+    !> Answers `.true.` when the column has at least one Null **or when the file cannot say**.
+    !> Statistics are optional in the Parquet format, so a chunk without them (or without a null
+    !> count) reads as "might have Nulls"; a dotted struct-field path is declined outright, because a
+    !> struct leaf's validity is combined with every ancestor struct's on read and the leaf's own null
+    !> count therefore does not describe the result. Treat `.false.` as a guarantee and `.true.` as
+    !> "assume the worst" -- that is the direction which keeps a caller that skips a mask on the
+    !> strength of this answer from ever meeting an unexpected Null.
+    interface parquet_column_has_nulls
+        module procedure parquet_column_has_nulls_int32
+        module procedure parquet_column_has_nulls_int64
+    end interface parquet_column_has_nulls
+
     !> Parses a MAML into a parquet_schema (its %maml, %cinfo and %metadata).
     !> The file form takes a `filename` (.maml file path) and loads it from
     !> disk first; the object form takes only `schema`, whose %maml has
@@ -971,6 +991,7 @@ module parquet
     public :: parquet_get_num_row_groups
     public :: parquet_get_col_size
     public :: parquet_measure_list_width, parquet_column_width_needs_data
+    public :: parquet_column_has_nulls
     public :: parquet_get_column_total_elements
     public :: parquet_get_string_length
     public :: parquet_column_exists
@@ -2258,6 +2279,22 @@ module parquet
             logical, intent(in) :: proven !! .true.: prove it by reading; .false.: footer screen only.
             integer, intent(out) :: width !! uniform element count per row, or 1 if not uniform.
         end subroutine parquet_measure_list_width_int64
+        !> int32 specific of parquet_column_has_nulls; see the generic's own doc-comment.
+        module function parquet_column_has_nulls_int32(reader, name, row_group_lo, row_group_hi) result(has_nulls)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            integer(int32), intent(in) :: row_group_lo !! first row group (1-based); <= 0 means all.
+            integer(int32), intent(in) :: row_group_hi !! last row group (1-based, inclusive).
+            logical :: has_nulls !! .true. if it has Nulls, or if the file cannot say.
+        end function parquet_column_has_nulls_int32
+        !> int64 specific of parquet_column_has_nulls; see the generic's own doc-comment.
+        module function parquet_column_has_nulls_int64(reader, name, row_group_lo, row_group_hi) result(has_nulls)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name.
+            integer(int64), intent(in) :: row_group_lo !! first row group (1-based); <= 0 means all.
+            integer(int64), intent(in) :: row_group_hi !! last row group (1-based, inclusive).
+            logical :: has_nulls !! .true. if it has Nulls, or if the file cannot say.
+        end function parquet_column_has_nulls_int64
         !> Whether `name`'s vector width can only be determined by reading its data.
         !>
         !> `.true.` for exactly one case: a plain Parquet `LIST`/`LARGE_LIST` column, whose rows may

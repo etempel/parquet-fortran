@@ -704,6 +704,20 @@ contains
     !> row_group argument (both kind-specifics translate "absent" to 0 before calling in),
     !> resolved here to 1 (the first row group) -- 0 can never be a valid 1-based row_group, so
     !> it is unambiguous as an "absent" sentinel.
+    !> Shared worker behind parquet_column_has_nulls's two kind specifics.
+    function parquet_column_has_nulls_impl(reader, name, row_group_lo, row_group_hi) result(has_nulls)
+        type(parquet_reader), intent(in) :: reader  !! open reader.
+        character(len=*), intent(in) :: name       !! column name.
+        integer(int64), intent(in) :: row_group_lo !! first row group (1-based); <= 0 means all.
+        integer(int64), intent(in) :: row_group_hi !! last row group (1-based, inclusive).
+        logical :: has_nulls                       !! .true. if it has Nulls, or if the file cannot say.
+        !
+        call check_reader_open(reader, "parquet_column_has_nulls")
+        call check_column_exists(reader, name, "parquet_column_has_nulls")
+        has_nulls = parquet_reader_column_has_nulls(reader%handle, trim(name)//char(0), &
+            row_group_lo, row_group_hi) /= 0
+    end function parquet_column_has_nulls_impl
+    !
     !> Shared worker behind parquet_measure_list_width's two kind specifics.
     subroutine parquet_measure_list_width_impl(reader, name, row_group_lo, row_group_hi, proven, width)
         type(parquet_reader), intent(in) :: reader        !! open reader.
@@ -771,6 +785,12 @@ contains
     module procedure parquet_measure_list_width_int64
         call parquet_measure_list_width_impl(reader, name, row_group_lo, row_group_hi, proven, width)
     end procedure parquet_measure_list_width_int64
+    module procedure parquet_column_has_nulls_int32
+        has_nulls = parquet_column_has_nulls_impl(reader, name, int(row_group_lo, int64), int(row_group_hi, int64))
+    end procedure parquet_column_has_nulls_int32
+    module procedure parquet_column_has_nulls_int64
+        has_nulls = parquet_column_has_nulls_impl(reader, name, row_group_lo, row_group_hi)
+    end procedure parquet_column_has_nulls_int64
     module procedure parquet_column_width_needs_data
         call check_reader_open(reader, "parquet_column_width_needs_data")
         call check_column_exists(reader, name, "parquet_column_width_needs_data")

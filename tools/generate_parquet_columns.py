@@ -221,6 +221,7 @@ module parquet_columns
     for gname, doc in (("get_at", "Read element i (or row i's vector) out."),
                        ("set_at", "Write element i (or row i's vector)."),
                        ("set_all", "Replace every value in the column."),
+                       ("adopt", "Take ownership of an array outright, without copying it."),
                        ("data_ptr", "Zero-copy typed pointer to the active storage."),
                        ("append_values", "Append values, growing the column.")):
         tags = [k[0] for k in (KINDS if gname in ("get_at", "set_at", "set_all", "append_values") else ARRAY_KINDS)]
@@ -439,6 +440,23 @@ module parquet_columns
             {decl}, intent(in) :: values{dim2}      !! exactly the column's own shape.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_all_{tag}
+        !> Makes `values` this column's storage as a {pk} column, WITHOUT copying it.
+        !!
+        !! `init` + `set_all` is the copying equivalent: it allocates the column's own array and
+        !! then assigns into it, so filling a column from an array you already hold costs a second
+        !! full pass and, transiently, twice the memory. This hands the allocation over instead
+        !! (`move_alloc`), leaving `values` deallocated -- which is why it is `intent(inout)` and not
+        !! `intent(in)`. Prefer it wherever the source array is a temporary the caller is about to
+        !! discard; that is exactly the shape of every `parquet_table` materialize.
+        !!
+        !! The column's kind, width and row count are taken from `values` itself, and any previous
+        !! contents (including the validity bitmap) are cleared, so this replaces `init` rather than
+        !! following it.
+        module subroutine adopt_{tag}(self, values, unit)
+            class(parquet_column), intent(inout) :: self !! the column.
+            {decl}, allocatable, intent(inout) :: values{dim2} !! array to take over; deallocated on return.
+            character(len=*), intent(in), optional :: unit !! unit string to store ("" or absent for none).
+        end subroutine adopt_{tag}
         !> Zero-copy typed pointer to a {pk} column's storage. The kind must match EXACTLY (no
         !! widening, DD2). Any structural mutation invalidates the pointer.
         module subroutine data_ptr_{tag}(self, p)
@@ -689,6 +707,23 @@ contains""")
             w(f"""        end if
     end procedure set_all_{tag}
     !
+    module procedure adopt_{tag}
+        if (.not. allocated(values)) error stop EP//"adopt: the array to adopt is not allocated"
+        call self%clear()
+        self%kind = {pk}
+        self%width = 1_int32
+        self%nrows = size(values, kind=int64)
+        if (present(unit)) then
+            if (len_trim(unit) > 0) self%unit = trim(unit)
+        end if
+        ! move_alloc, not assignment: the point is that no element is copied and the column
+        ! inherits the caller's allocation outright. `clear` above already dropped any previous
+        ! bitmap, so an adopted column starts with no nulls recorded.
+        call move_alloc(values, self%{comp})""")
+            if temporal:
+                w("        self%nulls_dirty = .true.")
+            w(f"""    end procedure adopt_{tag}
+    !
     module procedure data_ptr_{tag}
         call check_kind(self, {pk}, "data_ptr")
         p => self%{comp}(1:self%nrows)
@@ -747,6 +782,22 @@ contains""")
                 w("            self%nulls_dirty = .true.")
             w(f"""        end if
     end procedure set_all_{tag}
+    !
+    module procedure adopt_{tag}
+        if (.not. allocated(values)) error stop EP//"adopt: the array to adopt is not allocated"
+        if (size(values, 1) < 2) error stop EP//"adopt: a vector kind requires width > 1"
+        call self%clear()
+        self%kind = {pk}
+        self%width = int(size(values, 1), int32)
+        self%nrows = size(values, 2, kind=int64)
+        if (present(unit)) then
+            if (len_trim(unit) > 0) self%unit = trim(unit)
+        end if
+        ! See the scalar sibling: move_alloc hands the allocation over rather than copying it.
+        call move_alloc(values, self%{comp})""")
+            if temporal:
+                w("        self%nulls_dirty = .true.")
+            w(f"""    end procedure adopt_{tag}
     !
     module procedure data_ptr_{tag}
         call check_kind(self, {pk}, "data_ptr")

@@ -170,7 +170,7 @@ module parquet_tables
         parquet_release_column, parquet_read_column, parquet_get_metadata, parquet_get_string_length, &
         parquet_get_num_row_groups, parquet_get_chunk_size, parquet_read_column_chunk, &
         parquet_open_writer, parquet_write_column, parquet_close_writer, parquet_write_row_mask, &
-        parquet_measure_list_width, parquet_column_width_needs_data
+        parquet_measure_list_width, parquet_column_width_needs_data, parquet_column_has_nulls
     !
     implicit none
     private
@@ -1803,15 +1803,19 @@ def mat_impl(k):
         !
         allocate({alloc})
         call parquet_read_column(reader, name, tmp)
-        call col%init({pk}, nrows, wdt, unit)
-        call col%set_all(tmp)
+        ! adopt, not init+set_all: the column takes over `tmp`'s allocation instead of allocating
+        ! its own and copying into it, which saves a full pass over the data and a second live copy
+        ! of the column. `tmp` is a temporary this procedure was about to discard, which is exactly
+        ! what adopt is for.
+        call col%adopt(tmp, unit)
     end procedure mat_{tag}
     !"""
-    alloc = "tmp(nrows), valid(nrows)" if rank == 1 else "tmp(wdt, nrows), valid(wdt, nrows)"
+    tmp_alloc = "tmp(nrows)" if rank == 1 else "tmp(wdt, nrows)"
+    valid_alloc = "valid(nrows)" if rank == 1 else "valid(wdt, nrows)"
     if rank == 1:
-        null_loop = """        do i = 1, nrows
-            if (.not. valid(i)) call col%set_null(i)
-        end do"""
+        null_loop = """                do i = 1, nrows
+                    if (.not. valid(i)) call col%set_null(i)
+                end do"""
         decls = "        integer(int64) :: i"
     else:
         # parquet_column's validity is ROW-granular even for a vector kind: set_null(i) nulls
@@ -1820,20 +1824,36 @@ def mat_impl(k):
         # per-element nulls inside a vector column cannot be represented and are widened to the
         # whole row. Passing a flat (i-1)*width+e index here instead aborts on the row-index
         # bounds check, which is exactly how this was found.
-        null_loop = """        do i = 1, nrows
-            if (.not. all(valid(:, i))) call col%set_null(i)
-        end do"""
+        null_loop = """                do i = 1, nrows
+                    if (.not. all(valid(:, i))) call col%set_null(i)
+                end do"""
         decls = "        integer(int64) :: i"
     return f"""    module procedure mat_{tag}
         {decl}, allocatable :: tmp{dims(rank)}
         logical, allocatable :: valid{dims(rank)}
 {decls}
         !
-        allocate({alloc})
-        call parquet_read_column(reader, name, tmp, is_valid=valid)
-        call col%init({pk}, nrows, wdt, unit)
-        call col%set_all(tmp)
+        allocate({tmp_alloc})
+        ! The file's own statistics answer this from the footer, without reading a byte of the
+        ! column -- and when they say there are no Nulls, the whole validity pipeline is skipped:
+        ! no int8 buffer, no LOGICAL mask (four bytes per row, four times the buffer it is built
+        ! from), no per-element scan in C++, and no replay loop below. That is the common case for
+        ! every column of an ordinary file. parquet_column_has_nulls answers .true. whenever it
+        ! cannot be sure, so the slow path is the safe default.
+        if (parquet_column_has_nulls(reader, name, 0_int64, 0_int64)) then
+            allocate({valid_alloc})
+            call parquet_read_column(reader, name, tmp, is_valid=valid)
+            call col%adopt(tmp, unit)
+            ! Guarded rather than unconditional: statistics describe the FILE, so a column that
+            ! reports Nulls may still have none among the rows actually read (a filter can remove
+            ! them), and one vectorised all() beats nrows type-bound calls that do nothing.
+            if (.not. all(valid)) then
 {null_loop}
+            end if
+        else
+            call parquet_read_column(reader, name, tmp)
+            call col%adopt(tmp, unit)
+        end if
     end procedure mat_{tag}
     !"""
 
@@ -1865,16 +1885,26 @@ def mat_str_impl(k):
         call parquet_get_string_length(reader, name, slen)
         if (slen < 1) slen = 1
         allocate(character(len=slen) :: tmp(wdt, nrows))
-        allocate(valid(wdt, nrows))
-        call parquet_read_column(reader, name, tmp, is_valid=valid)
-        call col%init(PK_STRING_VEC, nrows, wdt, unit)
-        call col%set_all(tmp)
-        ! Row-granular, exactly like every other vector kind: set_null's index is bounded by
-        ! nrows and nulls the whole row, so a per-element null is widened to the row. A flat
-        ! (i-1)*width+e index instead runs straight past nrows and aborts the read.
-        do i = 1, nrows
-            if (.not. all(valid(:, i))) call col%set_null(i)
-        end do
+        ! No adopt for the string kinds (they own a parquet_string_column, not a plain array), but
+        ! the validity work is skipped the same way every other kind skips it -- see mat_f64.
+        if (parquet_column_has_nulls(reader, name, 0_int64, 0_int64)) then
+            allocate(valid(wdt, nrows))
+            call parquet_read_column(reader, name, tmp, is_valid=valid)
+            call col%init(PK_STRING_VEC, nrows, wdt, unit)
+            call col%set_all(tmp)
+            ! Row-granular, exactly like every other vector kind: set_null's index is bounded by
+            ! nrows and nulls the whole row, so a per-element null is widened to the row. A flat
+            ! (i-1)*width+e index instead runs straight past nrows and aborts the read.
+            if (.not. all(valid)) then
+                do i = 1, nrows
+                    if (.not. all(valid(:, i))) call col%set_null(i)
+                end do
+            end if
+        else
+            call parquet_read_column(reader, name, tmp)
+            call col%init(PK_STRING_VEC, nrows, wdt, unit)
+            call col%set_all(tmp)
+        end if
     end procedure mat_strv
     !"""
 
@@ -1911,13 +1941,21 @@ def matchunk_impl(k):
         call parquet_get_string_length(reader, name, slen)
         if (slen < 1) slen = 1
         allocate(character(len=slen) :: tmp(wdt, nrows))
-        allocate(valid(wdt, nrows))
-        call parquet_read_column_chunk(reader, name, rg, tmp, is_valid=valid)
-        call col%init(PK_STRING_VEC, nrows, wdt, unit)
-        call col%set_all(tmp)
-        do i = 1, nrows
-            if (.not. all(valid(:, i))) call col%set_null(i)
-        end do
+        if (parquet_column_has_nulls(reader, name, rg, rg)) then
+            allocate(valid(wdt, nrows))
+            call parquet_read_column_chunk(reader, name, rg, tmp, is_valid=valid)
+            call col%init(PK_STRING_VEC, nrows, wdt, unit)
+            call col%set_all(tmp)
+            if (.not. all(valid)) then
+                do i = 1, nrows
+                    if (.not. all(valid(:, i))) call col%set_null(i)
+                end do
+            end if
+        else
+            call parquet_read_column_chunk(reader, name, rg, tmp)
+            call col%init(PK_STRING_VEC, nrows, wdt, unit)
+            call col%set_all(tmp)
+        end if
     end procedure matchunk_strv
     !"""
     if cat == "tmp":
@@ -1927,27 +1965,37 @@ def matchunk_impl(k):
         !
         allocate({alloc})
         call parquet_read_column_chunk(reader, name, rg, tmp)
-        call col%init({pk}, nrows, wdt, unit)
-        call col%set_all(tmp)
+        call col%adopt(tmp, unit)
     end procedure matchunk_{tag}
     !"""
-    alloc = "tmp(nrows), valid(nrows)" if rank == 1 else "tmp(wdt, nrows), valid(wdt, nrows)"
-    null_loop = ("        do i = 1, nrows\n"
-                 "            if (.not. valid(i)) call col%set_null(i)\n"
-                 "        end do") if rank == 1 else (
-                 "        do i = 1, nrows\n"
-                 "            if (.not. all(valid(:, i))) call col%set_null(i)\n"
-                 "        end do")
+    tmp_alloc = "tmp(nrows)" if rank == 1 else "tmp(wdt, nrows)"
+    valid_alloc = "valid(nrows)" if rank == 1 else "valid(wdt, nrows)"
+    null_loop = ("                do i = 1, nrows\n"
+                 "                    if (.not. valid(i)) call col%set_null(i)\n"
+                 "                end do") if rank == 1 else (
+                 "                do i = 1, nrows\n"
+                 "                    if (.not. all(valid(:, i))) call col%set_null(i)\n"
+                 "                end do")
     return f"""    module procedure matchunk_{tag}
         {decl}, allocatable :: tmp{dims(rank)}
         logical, allocatable :: valid{dims(rank)}
         integer(int64) :: i
         !
-        allocate({alloc})
-        call parquet_read_column_chunk(reader, name, rg, tmp, is_valid=valid)
-        call col%init({pk}, nrows, wdt, unit)
-        call col%set_all(tmp)
+        allocate({tmp_alloc})
+        ! Scoped to THIS row group, unlike mat_{tag}'s whole-file question: a file with Nulls
+        ! somewhere else must not force the mask pipeline onto a clean row group. See mat_{tag}
+        ! for what skipping it saves.
+        if (parquet_column_has_nulls(reader, name, rg, rg)) then
+            allocate({valid_alloc})
+            call parquet_read_column_chunk(reader, name, rg, tmp, is_valid=valid)
+            call col%adopt(tmp, unit)
+            if (.not. all(valid)) then
 {null_loop}
+            end if
+        else
+            call parquet_read_column_chunk(reader, name, rg, tmp)
+            call col%adopt(tmp, unit)
+        end if
     end procedure matchunk_{tag}
     !"""
 

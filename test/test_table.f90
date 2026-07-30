@@ -63,6 +63,10 @@ contains
                 test_deferred_list_width), &
             new_unittest("a slice measures a plain LIST column over its own row groups only", &
                 test_deferred_list_width_slice), &
+            new_unittest("the no-nulls materialize fast path never loses a null", &
+                test_materialize_null_fast_path), &
+            new_unittest("a file without column statistics still reads its nulls", &
+                test_materialize_without_statistics), &
             new_unittest("nulls survive being written back out by parquet_write_table", &
                 test_write_table_nulls), &
             new_unittest("a null in a vector string column is widened to the whole row", &
@@ -571,6 +575,137 @@ contains
         call check(error, t%width("late") == 1, &
             "the whole file has no single width, so the full table should report 1")
     end subroutine test_deferred_list_width_slice
+    !
+    !> Materializing must carry every null across, whichever internal path it takes.
+    !!
+    !! `mat_*` now asks the file's footer statistics whether a column has any Nulls, and skips the
+    !! whole validity pipeline when the answer is no -- no mask is allocated, requested, converted or
+    !! replayed. That is a silent failure mode if it ever gets the question wrong: the column simply
+    !! comes back with every row valid. So this drives both branches over the same table and checks
+    !! the nulls that must survive AND the non-nulls that must not appear.
+    !!
+    !! Both validity dispatch classes that use the mask path are covered (`bitmap` via a numeric
+    !! column, `embedded string column` via a string one), plus a vector column, whose mask is
+    !! row-granular and read per element. The temporal class carries its nulls inside the element
+    !! and never used a mask, so it is covered by test_nulls_roundtrip instead.
+    subroutine test_materialize_null_fast_path(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: NB = 40 !! spans more than one 64-bit validity block boundary at 40.
+        type(error_type), allocatable :: e2
+        type(parquet_writer) :: w
+        type(parquet_table) :: t
+        real(real64) :: dirty(NB), clean(NB), dirtyv(3, NB)
+        real(real64), allocatable :: back(:)
+        character(len=6) :: s6(NB)
+        logical :: vd(NB), vs(NB), vv(3, NB)
+        integer :: i
+        integer, parameter :: nulls(4) = [1, 17, 33, 40]
+        character(len=*), parameter :: f = "test_run/table_mat_nullfast.parquet"
+        !
+        do i = 1, NB
+            dirty(i) = real(i, real64)
+            clean(i) = real(100 + i, real64)
+            dirtyv(:, i) = real(i, real64)
+            write(s6(i), '(a,i0)') "v", i
+        end do
+        vd = .true.
+        vs = .true.
+        vv = .true.
+        do i = 1, size(nulls)
+            vd(nulls(i)) = .false.
+            vs(nulls(i)) = .false.
+            vv(:, nulls(i)) = .false.
+        end do
+        !
+        call parquet_open_writer(w, f)
+        call parquet_write_column(w, "dirty", dirty, is_valid=vd)
+        call parquet_write_column(w, "clean", clean)
+        call parquet_write_column(w, "s", s6, is_valid=vs)
+        call parquet_write_column(w, "dv", dirtyv, is_valid=vv)
+        call parquet_close_writer(w)
+        !
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        ! The slow path: every null must have survived, and no extra null invented.
+        do i = 1, NB
+            call check(e2, t%is_null("dirty", int(i, int64)) .eqv. any(nulls == i), &
+                "a numeric column's nulls must survive materialize exactly")
+            if (allocated(e2)) then
+                call move_alloc(e2, error)
+                return
+            end if
+            call check(e2, t%is_null("s", int(i, int64)) .eqv. any(nulls == i), &
+                "a string column's nulls must survive materialize exactly")
+            if (allocated(e2)) then
+                call move_alloc(e2, error)
+                return
+            end if
+            call check(e2, t%is_null("dv", int(i, int64)) .eqv. any(nulls == i), &
+                "a vector column's nulls must survive materialize exactly")
+            if (allocated(e2)) then
+                call move_alloc(e2, error)
+                return
+            end if
+            ! And the fast path: a clean column must gain no nulls at all.
+            call check(e2, .not. t%is_null("clean", int(i, int64)), &
+                "the no-nulls fast path must not invent a null")
+            if (allocated(e2)) then
+                call move_alloc(e2, error)
+                return
+            end if
+        end do
+        ! Values must survive both paths -- adopt hands the array over rather than copying it, so a
+        ! mistake there shows up as wrong or missing data rather than as wrong validity.
+        call t%get("clean", back)
+        call check(error, all(back == clean), "the fast path must keep its values")
+        if (allocated(error)) return
+        call t%get("dirty", back)
+        call check(error, back(2) == 2.0_real64 .and. back(NB - 1) == real(NB - 1, real64), &
+            "the mask path must keep the values of its non-null rows")
+    end subroutine test_materialize_null_fast_path
+    !
+    !> The fallback when the footer cannot answer: a file written with statistics DISABLED.
+    !!
+    !! `parquet_column_has_nulls` reads a column's null count from Parquet statistics, which are
+    !! optional in the format. When they are missing it must answer "might have Nulls" so the
+    !! validity mask is still requested. Getting that backwards aborts the read outright
+    !! ("column contains Null value(s), which is not supported"), so this is not a silent failure --
+    !! but it is unreachable with any other fixture, since every other one carries statistics.
+    !!
+    !! `test/fixtures/no_stats.parquet` (see tools/generate_fixtures.cpp) has no statistics at all:
+    !! column `v` holds Nulls at rows 2 and 5, column `c` holds none.
+    subroutine test_materialize_without_statistics(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: r
+        type(parquet_table) :: t
+        real(real64), allocatable :: back(:)
+        character(len=*), parameter :: f = "test/fixtures/no_stats.parquet"
+        !
+        ! Without statistics the answer must be the conservative one, for the clean column too.
+        call parquet_open_reader(r, f)
+        call check(error, parquet_column_has_nulls(r, "v", 0, 0), &
+            "a column with no statistics must be reported as possibly holding nulls")
+        if (allocated(error)) return
+        call check(error, parquet_column_has_nulls(r, "c", 0, 0), &
+            "even a genuinely clean column must be reported that way when statistics are absent")
+        if (allocated(error)) return
+        call parquet_close_reader(r)
+        !
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        call check(error, t%is_null("v", 2_int64) .and. t%is_null("v", 5_int64), &
+            "nulls must survive materialize when the footer could not report them")
+        if (allocated(error)) return
+        call check(error, .not. (t%is_null("v", 1_int64) .or. t%is_null("v", 6_int64)), &
+            "and non-null rows must not become null")
+        if (allocated(error)) return
+        call check(error, .not. t%is_null("c", 3_int64), &
+            "the clean column must still come back with no nulls")
+        if (allocated(error)) return
+        call t%get("c", back)
+        call check(error, abs(back(3) - 300.0_real64) < 1.0e-9_real64, &
+            "and with its values intact")
+    end subroutine test_materialize_without_statistics
     !
     !> Nulls must survive being written back out by `parquet_write_table`, not merely read.
     !!

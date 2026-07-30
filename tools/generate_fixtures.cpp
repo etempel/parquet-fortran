@@ -299,6 +299,59 @@ static bool generate_list_widths_fixture()
     return status.ok();
 }
 
+// test/fixtures/no_stats.parquet: a Null-carrying column written with column statistics
+// DISABLED, which is the one case parquet_column_has_nulls cannot answer from the footer.
+//
+// Statistics are optional in the Parquet format. parquet_table asks for a column's null count from
+// them so it can skip building a validity mask for a Null-free column, and when they are absent it
+// must fall back to "might have Nulls" and request the mask anyway. Getting that fallback backwards
+// is not a silent error -- parquet_read_column aborts on an unexpected Null -- but it IS
+// unreachable with any other fixture here, because every other one carries statistics. Hence this
+// file: one column with Nulls, one without, no statistics on either.
+//
+//   v: double, Nulls at rows 2 and 5   -> must still read back with its Nulls intact
+//   c: double, no Nulls                -> the clean control in the same statistics-free file
+//
+// Used by test/test_table.f90's statistics-free fallback test.
+static bool generate_no_stats_fixture()
+{
+    arrow::DoubleBuilder v_builder;
+    arrow::Status st;
+    for (int row = 1; row <= 6; ++row)
+    {
+        if (row == 2 || row == 5)
+        {
+            st = v_builder.AppendNull();
+        }
+        else
+        {
+            st = v_builder.Append(static_cast<double>(row) * 1.5);
+        }
+    }
+    std::shared_ptr<arrow::Array> v_arr;
+    st = v_builder.Finish(&v_arr);
+
+    arrow::DoubleBuilder c_builder;
+    for (int row = 1; row <= 6; ++row)
+    {
+        st = c_builder.Append(static_cast<double>(row) * 100.0);
+    }
+    std::shared_ptr<arrow::Array> c_arr;
+    st = c_builder.Finish(&c_arr);
+
+    auto schema = arrow::schema({arrow::field("v", arrow::float64()), arrow::field("c", arrow::float64())});
+    auto table = arrow::Table::Make(schema, {v_arr, c_arr});
+
+    parquet::WriterProperties::Builder props_builder;
+    props_builder.disable_statistics();
+    auto props = props_builder.build();
+
+    auto maybe_outfile = arrow::io::FileOutputStream::Open("test/fixtures/no_stats.parquet");
+    auto outfile = *maybe_outfile;
+    auto status = parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile, 3, props);
+    return status.ok();
+}
+
 // test/fixtures/extended_types.parquet: exercises the read-time widening
 // support for Arrow physical types this library's own writer never
 // produces (see CONTRIBUTING.md's "Additional scalar types" note and
@@ -1009,6 +1062,7 @@ int main()
         {"test/fixtures/unsupported_type.parquet", generate_unsupported_type_fixture},
         {"test/fixtures/list_vector.parquet", generate_list_vector_fixture},
         {"test/fixtures/list_widths.parquet", generate_list_widths_fixture},
+        {"test/fixtures/no_stats.parquet", generate_no_stats_fixture},
         {"test/fixtures/extended_types.parquet", generate_extended_types_fixture},
         {"test/fixtures/nested_struct.parquet", generate_nested_struct_fixture},
         {"test/fixtures/map_list_types.parquet", generate_map_list_types_fixture},

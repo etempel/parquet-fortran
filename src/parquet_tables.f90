@@ -51,7 +51,7 @@ module parquet_tables
         parquet_release_column, parquet_read_column, parquet_get_metadata, parquet_get_string_length, &
         parquet_get_num_row_groups, parquet_get_chunk_size, parquet_read_column_chunk, &
         parquet_open_writer, parquet_write_column, parquet_close_writer, parquet_write_row_mask, &
-        parquet_measure_list_width, parquet_column_width_needs_data
+        parquet_measure_list_width, parquet_column_width_needs_data, parquet_column_has_nulls
     !
     implicit none
     private

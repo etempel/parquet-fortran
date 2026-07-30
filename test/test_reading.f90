@@ -48,6 +48,8 @@ contains
             new_unittest("read list-encoded vector column", test_read_list_vector_column), &
             new_unittest("the LIST width footer screen and its proof disagree where expected", &
                 test_list_width_screen_and_proof), &
+            new_unittest("is_valid on a null-free column comes back uniformly true", &
+                test_is_valid_on_clean_column), &
             new_unittest("array row-mode read at a row_index beyond the first row group", &
                 test_read_array_row_mode_beyond_first_row_group), &
             new_unittest("null_value on a Null-containing vector column (full/row/element modes, every type)", &
@@ -3264,5 +3266,42 @@ contains
         call check(error, w == 1, "a scalar column should measure as width 1")
         call parquet_close_reader(reader)
     end subroutine test_list_width_screen_and_proof
+
+    !> Requesting `is_valid=` for a column that has no Nulls must fill the mask with `.true.`.
+    !!
+    !! The C++ side short-circuits this: when Arrow already knows the null count is zero it fills the
+    !! buffer in one `memset` instead of testing every element. The output is meant to be identical
+    !! either way, and the failure mode if it is not is a mask that reads as all-INVALID -- which
+    !! would make every row of a perfectly good column look Null. Worth its own test because
+    !! parquet_table no longer requests a mask for a clean column at all, so nothing else reaches
+    !! this path.
+    subroutine test_is_valid_on_clean_column(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: w
+        type(parquet_reader) :: r
+        integer, parameter :: N = 70 !! more than one 64-bit block, so a per-block bug shows up.
+        real(real64) :: v(N)
+        real(real64), allocatable :: back(:)
+        logical, allocatable :: ok(:)
+        integer :: i
+        character(len=*), parameter :: f = "test_run/reading_is_valid_clean.parquet"
+        !
+        do i = 1, N
+            v(i) = real(i, real64)
+        end do
+        call parquet_open_writer(w, f)
+        call parquet_write_column(w, "v", v)
+        call parquet_close_writer(w)
+        !
+        call parquet_open_reader(r, f)
+        allocate(back(N), ok(N))
+        call parquet_read_column(r, "v", back, is_valid=ok)
+        call parquet_close_reader(r)
+        call check(error, all(ok), "every element of a null-free column must report valid")
+        if (allocated(error)) return
+        call check(error, count(ok) == N, "and the mask must be fully populated, not partly")
+        if (allocated(error)) return
+        call check(error, all(back == v), "the values must survive alongside the mask")
+    end subroutine test_is_valid_on_clean_column
 
 end module test_reading

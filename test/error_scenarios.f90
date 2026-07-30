@@ -314,6 +314,46 @@ program error_scenarios
         call scenario_filter_bool_ordering_not_supported()
     case ("filter_unsupported_column_type")
         call scenario_filter_unsupported_column_type()
+    case ("filter_temporal_value_not_quoted")
+        call scenario_filter_temporal_value_not_quoted()
+    case ("filter_unbalanced_parens")
+        call scenario_filter_unbalanced_parens()
+    case ("filter_stray_close_paren")
+        call scenario_filter_stray_close_paren()
+    case ("filter_empty_parens")
+        call scenario_filter_empty_parens()
+    case ("filter_dangling_and")
+        call scenario_filter_dangling_and()
+    case ("filter_leading_or")
+        call scenario_filter_leading_or()
+    case ("filter_not_without_operand")
+        call scenario_filter_not_without_operand()
+    case ("filter_missing_combinator")
+        call scenario_filter_missing_combinator()
+    case ("filter_nesting_too_deep")
+        call scenario_filter_nesting_too_deep()
+    case ("filter_too_many_nodes")
+        call scenario_filter_too_many_nodes()
+    case ("filter_temporal_bad_iso_literal")
+        call scenario_filter_temporal_bad_iso_literal()
+    case ("filter_temporal_literal_too_precise")
+        call scenario_filter_temporal_literal_too_precise()
+    case ("filter_set_filter_after_read")
+        call scenario_filter_set_filter_after_read()
+    case ("filter_set_filter_twice")
+        call scenario_filter_set_filter_twice()
+    case ("filter_unterminated_quote")
+        call scenario_filter_unterminated_quote()
+    case ("filter_empty_rule")
+        call scenario_filter_empty_rule()
+    case ("filter_expected_close_paren")
+        call scenario_filter_expected_close_paren()
+    case ("filter_close_paren_as_clause")
+        call scenario_filter_close_paren_as_clause()
+    case ("filter_leaf_too_long")
+        call scenario_filter_leaf_too_long()
+    case ("filter_too_many_nodes_across_adds")
+        call scenario_filter_too_many_nodes_across_adds()
     case ("sample_negative_fraction")
         call scenario_sample_negative_fraction()
     case ("sample_nan_fraction")
@@ -3918,8 +3958,8 @@ contains
     subroutine scenario_filter_rule_too_long()
         type(parquet_filter) :: filt
 
-        call filt%add(repeat("a", 513))
-        print '(a)', "unexpectedly accepted a filter rule longer than 512 characters"
+        call filt%add(repeat("a", 8193))
+        print '(a)', "unexpectedly accepted a filter rule longer than the supported maximum"
     end subroutine scenario_filter_rule_too_long
 
     !> A rule whose shape is fine ("<column> <op> <value>") but whose value
@@ -4033,18 +4073,42 @@ contains
         print '(a)', "unexpectedly opened a reader with an ordering comparison against a boolean filter column"
     end subroutine scenario_filter_bool_ordering_not_supported
 
-    !> eval_filter_clause's `default:` branch (parquet_wrapper.cpp) --
-    !> a column type filtering doesn't support at all -- had no scenario. A temporal (date)
-    !> column isn't in eval_filter_clause's type switch (only INT*/FLOAT*/UINT64/DECIMAL*/BOOL/
-    !> STRING* are), so filtering on one reaches this fallback. Aborts via a clean Fortran
+    !> eval_filter_clause's `default:` branch (parquet_wrapper.cpp) -- a column type filtering
+    !> doesn't support at all. Every physical type this project has an ordinary fixture for is
+    !> filterable (the nine canonical types plus the extended int/uint/half-float/decimal read
+    !> types), so this scenario writes a BINARY (byte-array) column through the debug hook
+    !> parquet_debug_write_binary_fixture and filters on that. Aborts via a clean Fortran
     !> `error stop` (parquet_apply_filter, parquet_read.f90), not report_fatal_error -- exit
     !> code 1, not SIGABRT.
     subroutine scenario_filter_unsupported_column_type()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_unsupported_column_type.parquet"
+        interface
+            subroutine parquet_debug_write_binary_fixture(path, column_name) &
+                bind(C, name="parquet_debug_write_binary_fixture")
+                use iso_c_binding, only : c_char
+                character(kind=c_char), intent(in) :: path(*) !! null-terminated output file path.
+                character(kind=c_char), intent(in) :: column_name(*) !! null-terminated BINARY column name.
+            end subroutine parquet_debug_write_binary_fixture
+        end interface
+
+        call parquet_debug_write_binary_fixture(out_file//char(0), "blob"//char(0))
+        call filt%add("blob == 1")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with a filter clause against a binary column"
+    end subroutine scenario_filter_unsupported_column_type
+
+    !> A temporal column IS filterable, but only against a double-quoted ISO-8601 literal: a bare
+    !> number would silently mean "days" for one column and "microseconds since the epoch" for
+    !> another, with nothing in the rule to say which. convert_temporal_filter_values
+    !> (parquet_read.f90) rejects the unquoted form before the value ever reaches C++.
+    subroutine scenario_filter_temporal_value_not_quoted()
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
         type(parquet_filter) :: filt
         type(parquet_date) :: day(2)
-        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_unsupported_column_type.parquet"
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_temporal_value_not_quoted.parquet"
 
         call day(1)%set(2024, 1, 1)
         call day(2)%set(2024, 1, 2)
@@ -4054,8 +4118,303 @@ contains
 
         call filt%add("day == 2024")
         call parquet_open_reader(reader, out_file, filter=filt)
-        print '(a)', "unexpectedly opened a reader with a filter clause against a temporal column"
-    end subroutine scenario_filter_unsupported_column_type
+        print '(a)', "unexpectedly opened a reader with an unquoted value against a temporal column"
+    end subroutine scenario_filter_temporal_value_not_quoted
+
+    !> Writes the small int32 fixture every syntax scenario below filters against, so each one
+    !> exercises the parser rather than a missing file. Shared rather than duplicated because the
+    !> file's contents are irrelevant -- the abort always happens before any row is examined.
+    subroutine write_filter_syntax_fixture(out_file)
+        character(len=*), intent(in) :: out_file !! parquet file to (re)create.
+        type(parquet_writer) :: writer
+        integer(int32) :: v(3) = [1, 2, 3]
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+    end subroutine write_filter_syntax_fixture
+
+    !> An expression with more '(' than ')' is rejected by the parser (parquet_read_filter.f90)
+    !> before any column is read.
+    subroutine scenario_filter_unbalanced_parens()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_unbalanced_parens.parquet"
+
+        call write_filter_syntax_fixture(out_file)
+        call filt%add("(v > 1 and v < 3")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with an unbalanced filter expression"
+    end subroutine scenario_filter_unbalanced_parens
+
+    !> A ')' with no matching '(' -- the mirror of the scenario above, and a different parser
+    !> branch (parse_primary's TK_RPAREN arm, not the unterminated-group one).
+    subroutine scenario_filter_stray_close_paren()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_stray_close_paren.parquet"
+
+        call write_filter_syntax_fixture(out_file)
+        call filt%add("v > 1) and v < 3")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with a stray ')' in the filter expression"
+    end subroutine scenario_filter_stray_close_paren
+
+    !> An empty group "()" has no clause to evaluate.
+    subroutine scenario_filter_empty_parens()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_empty_parens.parquet"
+
+        call write_filter_syntax_fixture(out_file)
+        call filt%add("v > 1 and ()")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with an empty group in the filter expression"
+    end subroutine scenario_filter_empty_parens
+
+    !> "and" with nothing after it: the parser runs out of tokens where a clause must start.
+    subroutine scenario_filter_dangling_and()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_dangling_and.parquet"
+
+        call write_filter_syntax_fixture(out_file)
+        call filt%add("v > 1 and")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with a dangling 'and' in the filter expression"
+    end subroutine scenario_filter_dangling_and
+
+    !> "or" with nothing BEFORE it -- a different parser branch from the dangling-and scenario
+    !> above (parse_primary sees the combinator where a clause should begin).
+    subroutine scenario_filter_leading_or()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_leading_or.parquet"
+
+        call write_filter_syntax_fixture(out_file)
+        call filt%add("or v > 1")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with a leading 'or' in the filter expression"
+    end subroutine scenario_filter_leading_or
+
+    !> "not" with no operand at all.
+    subroutine scenario_filter_not_without_operand()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_not_without_operand.parquet"
+
+        call write_filter_syntax_fixture(out_file)
+        call filt%add("v > 1 and not")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with a 'not' that has no operand"
+    end subroutine scenario_filter_not_without_operand
+
+    !> Two clauses with no combinator between them: the first parses, and the leftover tokens are
+    !> reported rather than silently ignored (which would apply half the filter the caller wrote).
+    subroutine scenario_filter_missing_combinator()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_missing_combinator.parquet"
+
+        call write_filter_syntax_fixture(out_file)
+        call filt%add("v > 1 v < 3")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with two filter clauses and no combinator"
+    end subroutine scenario_filter_missing_combinator
+
+    !> Nesting deeper than filter_max_depth (parquet.f90) aborts cleanly instead of overflowing
+    !> the recursive-descent parser's own call stack, which would be a signal with no message.
+    subroutine scenario_filter_nesting_too_deep()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_nesting_too_deep.parquet"
+
+        call write_filter_syntax_fixture(out_file)
+        call filt%add(repeat("(", 40)//"v > 1"//repeat(")", 40))
+        call parquet_open_reader(reader, out_file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with a filter expression nested past the limit"
+    end subroutine scenario_filter_nesting_too_deep
+
+    !> More expression terms than filter_max_nodes (parquet.f90) allows. 700 clauses become 1399
+    !> nodes (700 leaves + 699 'and's), comfortably past the 1024 cap.
+    subroutine scenario_filter_too_many_nodes()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=:), allocatable :: rule
+        integer :: i
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_too_many_nodes.parquet"
+
+        call write_filter_syntax_fixture(out_file)
+        rule = "v > 0"
+        do i = 2, 700
+            rule = rule//" and v > 0"
+        end do
+        call filt%add(rule)
+        call parquet_open_reader(reader, out_file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with a filter expression past the node limit"
+    end subroutine scenario_filter_too_many_nodes
+
+    !> A quoted value that is not a valid ISO-8601 literal for the column's temporal type.
+    subroutine scenario_filter_temporal_bad_iso_literal()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        type(parquet_date) :: day(2)
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_temporal_bad_iso.parquet"
+
+        call day(1)%set(2024, 1, 1)
+        call day(2)%set(2024, 1, 2)
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "day", day)
+        call parquet_close_writer(writer)
+
+        call filt%add('day == "2024-13-99"')
+        call parquet_open_reader(reader, out_file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with an invalid ISO-8601 date literal"
+    end subroutine scenario_filter_temporal_bad_iso_literal
+
+    !> A literal carrying finer precision than the column's stored unit can represent: the
+    !> microsecond digits below cannot be expressed in a timestamp[ms] column, so any answer would
+    !> be a lie about a value the file does not hold. Rejected rather than truncated
+    !> (convert_temporal_filter_values, parquet_read.f90).
+    subroutine scenario_filter_temporal_literal_too_precise()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        type(parquet_schema) :: schema
+        type(parquet_timestamp) :: ts(2)
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_temporal_precise.parquet"
+
+        call ts(1)%set(2024, 1, 31, 12, 30, 0)
+        call ts(2)%set(2024, 1, 31, 12, 30, 1)
+        call schema%init("ts_ms")
+        call schema%add_field("t", "timestamp[ms]")
+        call parquet_parse_maml(schema)
+        call parquet_open_writer(writer, out_file, schema=schema)
+        call parquet_write_column(writer, "t", ts)
+        call parquet_close_writer(writer)
+
+        call filt%add('t > "2024-01-31T12:30:00.123456"')
+        call parquet_open_reader(reader, out_file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with a literal finer than the column's stored unit"
+    end subroutine scenario_filter_temporal_literal_too_precise
+
+    !> parquet_reader_set_filter refuses a reader that has already decoded a column: the data
+    !> already handed back covers the unfiltered rows, so nothing read afterwards could line up
+    !> with it.
+    subroutine scenario_filter_set_filter_after_read()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32) :: v(3)
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_set_after_read.parquet"
+
+        call write_filter_syntax_fixture(out_file)
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "v", v)
+        call filt%add("v > 1")
+        call parquet_reader_set_filter(reader, filt)
+        print '(a)', "unexpectedly applied a filter to a reader that had already read a column"
+    end subroutine scenario_filter_set_filter_after_read
+
+    !> parquet_reader_set_filter refuses a reader that is already filtered: the second mask would
+    !> be indexed by the first one's surviving rows, so the two do not simply AND together.
+    subroutine scenario_filter_set_filter_twice()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: first, second
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_set_twice.parquet"
+
+        call write_filter_syntax_fixture(out_file)
+        call first%add("v > 1")
+        call parquet_open_reader(reader, out_file, filter=first)
+        call second%add("v < 3")
+        call parquet_reader_set_filter(reader, second)
+        print '(a)', "unexpectedly applied a second filter to an already-filtered reader"
+    end subroutine scenario_filter_set_filter_twice
+
+    !> A quoted value whose closing quote is missing: the lexer consumes to the end of the rule
+    !> looking for it and reports the run rather than silently treating the rest as a value.
+    subroutine scenario_filter_unterminated_quote()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_unterminated_quote.parquet"
+
+        call write_filter_syntax_fixture(out_file)
+        call filt%add('v == "abc')
+        call parquet_open_reader(reader, out_file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with an unterminated quoted filter value"
+    end subroutine scenario_filter_unterminated_quote
+
+    !> An empty (or all-whitespace) rule has no clause to evaluate at all.
+    subroutine scenario_filter_empty_rule()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_empty_rule.parquet"
+
+        call write_filter_syntax_fixture(out_file)
+        call filt%add("   ")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with an empty filter rule"
+    end subroutine scenario_filter_empty_rule
+
+    !> A group that parses a clause and then meets something other than ')' -- distinct from the
+    !> unbalanced-'(' scenario, where the group simply runs out of tokens.
+    subroutine scenario_filter_expected_close_paren()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_expected_close.parquet"
+
+        call write_filter_syntax_fixture(out_file)
+        call filt%add("(v > 1 v < 3)")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with a group missing its ')'"
+    end subroutine scenario_filter_expected_close_paren
+
+    !> A ')' where a clause must begin. Unlike scenario_filter_stray_close_paren, which trails a
+    !> complete expression, this one is reached inside the parser's own clause position.
+    subroutine scenario_filter_close_paren_as_clause()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_close_as_clause.parquet"
+
+        call write_filter_syntax_fixture(out_file)
+        call filt%add("v > 1 and ) v < 3")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with a ')' where a clause was expected"
+    end subroutine scenario_filter_close_paren_as_clause
+
+    !> A column name longer than the packed per-leaf width the bind(C) convention allows (64
+    !> characters). Caught Fortran-side, before anything is packed for the C++ evaluator.
+    subroutine scenario_filter_leaf_too_long()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_leaf_too_long.parquet"
+
+        call write_filter_syntax_fixture(out_file)
+        call filt%add(repeat("a", 65)//" > 1")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with an over-long filter column name"
+    end subroutine scenario_filter_leaf_too_long
+
+    !> The node cap counts across every %add call of one filter, including the `and` nodes that
+    !> join them: 512 clauses (1023 nodes) plus one more clause plus the joining `and` is 1025.
+    !> Distinct from scenario_filter_too_many_nodes, where one rule alone exceeds the cap.
+    subroutine scenario_filter_too_many_nodes_across_adds()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=:), allocatable :: rule
+        integer :: i
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_nodes_across_adds.parquet"
+
+        call write_filter_syntax_fixture(out_file)
+        rule = "v > 0"
+        do i = 2, 512
+            rule = rule//" and v > 0"
+        end do
+        call filt%add(rule)
+        call filt%add("v > 0")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        print '(a)', "unexpectedly opened a reader whose combined %add rules exceed the node limit"
+    end subroutine scenario_filter_too_many_nodes_across_adds
 
     !> parquet_open_reader's sample_fraction < 0.0 aborts immediately -- see
     !> parquet_open_reader_base's NaN/negative checks (parquet_read.f90).

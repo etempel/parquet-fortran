@@ -329,7 +329,15 @@ extern "C"
 		// Per-column filter clauses retained solely for parquet_reader_print_stat's
 		// "filter" column: each entry is one clause's operator+value with the
 		// column name stripped (e.g. ">=0.0"), in the order set_filter saw them.
+		// A non-flat expression cannot be decomposed per column ("(a>1 and b<2) or c==3" belongs
+		// to three columns jointly), so this stays a best-effort per-column listing and
+		// filter_expr_text below carries the authoritative form.
 		std::unordered_map<int, std::vector<std::string>> filter_clauses;
+		// The whole filter expression re-rendered in canonical form by
+		// parquet_render_filter_expr (parquet_read_filter.f90) and handed over by
+		// parquet_reader_set_filter. Retained solely for parquet_reader_print_stat's own
+		// "filter:" line -- never parsed here; the evaluator works from the node list.
+		std::string filter_expr_text;
 		// Set once by parquet_reader_set_sample when parquet_open_reader's sample_fraction < 1.0 --
 		// retained solely for parquet_reader_print_stat's own "sample:" line. sample_seed_used is
 		// always the seed the draw actually used, whether caller-supplied (sample_seed > 0) or
@@ -3080,6 +3088,27 @@ extern "C"
 		return reader_handle->filter_mask ? 1 : 0;
 	}
 
+	// True (1) if `handle` has filter CLAUSES installed. Narrower than parquet_reader_has_filter
+	// above, which also reports a sample-only mask: parquet_reader_set_filter (parquet.f90)
+	// refuses an already-filtered reader but accepts a sampled one, and needs to tell those two
+	// states apart. filter_clauses is populated by every successful clause, so it is empty exactly
+	// when no filter has been applied.
+	int64_t parquet_reader_has_filter_clauses(void *handle)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		return reader_handle->filter_clauses.empty() ? 0 : 1;
+	}
+
+	// True (1) if any column of `handle` has already been decoded into column_cache. The guard
+	// parquet_reader_set_filter (parquet.f90) needs before applying a filter post-open: a column
+	// already handed back over the unfiltered row set could not be aligned with anything read
+	// after the filter is installed.
+	int64_t parquet_reader_has_decoded_columns(void *handle)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		return reader_handle->column_cache.empty() ? 0 : 1;
+	}
+
 	// Returns the physical row count of row group `row_group` (1-based; already resolved/
 	// validated by the Fortran caller -- see parquet_get_chunk_size's reader specifics in
 	// parquet_read.f90, which check row_group against parquet_reader_get_num_row_groups first).
@@ -3276,16 +3305,36 @@ extern "C"
 		return out;
 	}
 
-	// Evaluates one filter clause against `array` (the filter column's own,
-	// still-unfiltered decoded array -- filter_mask isn't set on the reader
-	// yet while this runs), AND-ing the per-row result into `combined`
-	// in place. Returns false (with `err` set) on any validation failure
-	// (unknown/unsupported type for the clause's operator, unparseable
-	// value, ...); the caller aborts the whole parquet_reader_set_filter
-	// call in that case, same as an unknown filter column.
+	// Kleene truth values one row of a filter expression can take. Three rather than two because
+	// the combinators need to tell "this comparison is false" from "this comparison had nothing to
+	// compare": under NOT, a Null row must stay excluded rather than flip into the result, and OR
+	// must not resurrect a Null row merely because its other operand was false. kUnknown collapses
+	// to kFalse exactly once, when the BooleanArray is built (see parquet_reader_set_filter), which
+	// is what makes the whole thing agree with SQL's WHERE and with Arrow's own kernels.
+	static constexpr uint8_t kFalse = 0;
+	static constexpr uint8_t kTrue = 1;
+	static constexpr uint8_t kUnknown = 2;
+
+	// kTrue/kFalse from a plain comparison result.
+	static inline uint8_t kleene_of(bool b) { return b ? kTrue : kFalse; }
+
+	// Evaluates one filter clause (one leaf of the expression) against `array` -- the filter
+	// column's own, still-unfiltered decoded array; filter_mask isn't installed on the reader
+	// while this runs. WRITES one Kleene value per row into `out` (pre-sized to the array's
+	// length) rather than combining into a shared accumulator: combining is the stack machine's
+	// job in parquet_reader_set_filter, because which rows a leaf's result combines with depends
+	// on the expression's shape, not on the leaf.
+	//
+	// A Null row is kUnknown for every comparison operator. is_null/is_not_null are the exception
+	// by design -- selecting on nullness is exactly their purpose, so they always answer
+	// kTrue/kFalse and are the only way to let a Null row through.
+	//
+	// Returns false (with `err` set) on any validation failure (unknown/unsupported type for the
+	// clause's operator, unparseable value, ...); the caller then aborts the whole
+	// parquet_reader_set_filter call, same as for an unknown filter column.
 	static bool eval_filter_clause(const std::shared_ptr<arrow::Array> &array, const std::string &colname,
 		const std::string &op, bool is_string, const std::string &value_text,
-		std::vector<uint8_t> &combined, std::string &err)
+		std::vector<uint8_t> &out, std::string &err)
 	{
 		int64_t n = array->length();
 
@@ -3294,8 +3343,7 @@ extern "C"
 			bool want_null = (op == "is_null");
 			for (int64_t i = 0; i < n; ++i)
 			{
-				bool ok = want_null ? array->IsNull(i) : array->IsValid(i);
-				combined[static_cast<size_t>(i)] = combined[static_cast<size_t>(i)] && ok;
+				out[static_cast<size_t>(i)] = kleene_of(want_null ? array->IsNull(i) : array->IsValid(i));
 			}
 			return true;
 		}
@@ -3327,8 +3375,8 @@ extern "C"
 				int32_t v = static_cast<int32_t>(parsed);
 				for (int64_t i = 0; i < n; ++i)
 				{
-					bool ok = !arr->IsNull(i) && compare_op<int32_t>(arr->Value(i), v, op);
-					combined[static_cast<size_t>(i)] = combined[static_cast<size_t>(i)] && ok;
+					out[static_cast<size_t>(i)] = arr->IsNull(i) ? kUnknown
+						: kleene_of(compare_op<int32_t>(arr->Value(i), v, op));
 				}
 			}
 			else if (array->type_id() == arrow::Type::INT64)
@@ -3336,8 +3384,8 @@ extern "C"
 				auto arr = std::static_pointer_cast<arrow::Int64Array>(array);
 				for (int64_t i = 0; i < n; ++i)
 				{
-					bool ok = !arr->IsNull(i) && compare_op<int64_t>(arr->Value(i), parsed, op);
-					combined[static_cast<size_t>(i)] = combined[static_cast<size_t>(i)] && ok;
+					out[static_cast<size_t>(i)] = arr->IsNull(i) ? kUnknown
+						: kleene_of(compare_op<int64_t>(arr->Value(i), parsed, op));
 				}
 			}
 			else
@@ -3347,8 +3395,8 @@ extern "C"
 				// pre-check (same as the plain INT64 branch above).
 				for (int64_t i = 0; i < n; ++i)
 				{
-					bool ok = !array->IsNull(i) && compare_op<int64_t>(small_integer_value_at(array, i), parsed, op);
-					combined[static_cast<size_t>(i)] = combined[static_cast<size_t>(i)] && ok;
+					out[static_cast<size_t>(i)] = array->IsNull(i) ? kUnknown
+						: kleene_of(compare_op<int64_t>(small_integer_value_at(array, i), parsed, op));
 				}
 			}
 			return true;
@@ -3373,8 +3421,8 @@ extern "C"
 			{
 				for (int64_t i = 0; i < n; ++i)
 				{
-					bool ok = !array->IsNull(i) && compare_op<double>(real_family_value_at(array, i), parsed, op);
-					combined[static_cast<size_t>(i)] = combined[static_cast<size_t>(i)] && ok;
+					out[static_cast<size_t>(i)] = array->IsNull(i) ? kUnknown
+						: kleene_of(compare_op<double>(real_family_value_at(array, i), parsed, op));
 				}
 			}
 			else if (array->type_id() == arrow::Type::UINT64)
@@ -3382,8 +3430,8 @@ extern "C"
 				auto arr = std::static_pointer_cast<arrow::UInt64Array>(array);
 				for (int64_t i = 0; i < n; ++i)
 				{
-					bool ok = !arr->IsNull(i) && compare_op<double>(static_cast<double>(arr->Value(i)), parsed, op);
-					combined[static_cast<size_t>(i)] = combined[static_cast<size_t>(i)] && ok;
+					out[static_cast<size_t>(i)] = arr->IsNull(i) ? kUnknown
+						: kleene_of(compare_op<double>(static_cast<double>(arr->Value(i)), parsed, op));
 				}
 			}
 			else
@@ -3391,8 +3439,57 @@ extern "C"
 				// DECIMAL32/64/128/256.
 				for (int64_t i = 0; i < n; ++i)
 				{
-					bool ok = !array->IsNull(i) && compare_op<double>(decimal_value_at(array, i), parsed, op);
-					combined[static_cast<size_t>(i)] = combined[static_cast<size_t>(i)] && ok;
+					out[static_cast<size_t>(i)] = array->IsNull(i) ? kUnknown
+						: kleene_of(compare_op<double>(decimal_value_at(array, i), parsed, op));
+				}
+			}
+			return true;
+		}
+		case arrow::Type::DATE32:
+		case arrow::Type::DATE64:
+		case arrow::Type::TIME32:
+		case arrow::Type::TIME64:
+		case arrow::Type::TIMESTAMP:
+		{
+			// The clause's ISO-8601 literal was already converted, Fortran-side, into the raw
+			// integer this column physically stores -- days for a DATE32, units-of-day for a
+			// TIME32/64, units-since-epoch for a TIMESTAMP (see convert_temporal_filter_values in
+			// parquet_read.f90, which is also where a literal too precise for the column's own
+			// unit is rejected). So there is no ISO parsing and no unit arithmetic to do here:
+			// compare raw stored values, exactly as the integer arms above do.
+			int64_t parsed;
+			if (!parse_int64_strict(value_text, parsed))
+			{ // GCOVR_EXCL_START -- unreachable through the public API: the Fortran side rewrites
+			  // every temporal clause's value into a decimal integer, and rejects anything it
+			  // could not convert, before this is called.
+				err = "value '" + value_text + "' is not a valid " + array->type()->ToString() +
+					" for column '" + colname + "'";
+				return false;
+			}
+			// GCOVR_EXCL_STOP
+			// Read the values buffer directly through ArrayData::GetValues, which applies the
+			// array's own offset (so a sliced array is handled) and works for any of these five
+			// types without a per-type Array subclass cast -- DATE32/TIME32 store int32,
+			// DATE64/TIME64/TIMESTAMP int64.
+			if (array->type_id() == arrow::Type::DATE32 || array->type_id() == arrow::Type::TIME32)
+			{
+				const int32_t *raw = array->data()->GetValues<int32_t>(1);
+				for (int64_t i = 0; i < n; ++i)
+				{
+					out[static_cast<size_t>(i)] = array->IsNull(i) ? kUnknown
+						: kleene_of(compare_op<int64_t>(static_cast<int64_t>(raw[i]), parsed, op));
+				}
+			}
+			else
+			{
+				// DATE64 cannot actually occur -- Arrow's writer always coerces date64() to
+				// date32() (see CLAUDE.md's temporal notes and convert_date_values' own DATE64
+				// branch) -- but it costs nothing to handle alongside the two that can.
+				const int64_t *raw = array->data()->GetValues<int64_t>(1);
+				for (int64_t i = 0; i < n; ++i)
+				{
+					out[static_cast<size_t>(i)] = array->IsNull(i) ? kUnknown
+						: kleene_of(compare_op<int64_t>(raw[i], parsed, op));
 				}
 			}
 			return true;
@@ -3421,8 +3518,8 @@ extern "C"
 			auto arr = std::static_pointer_cast<arrow::BooleanArray>(array);
 			for (int64_t i = 0; i < n; ++i)
 			{
-				bool ok = !arr->IsNull(i) && ((op == "==") ? (arr->Value(i) == bval) : (arr->Value(i) != bval));
-				combined[static_cast<size_t>(i)] = combined[static_cast<size_t>(i)] && ok;
+				out[static_cast<size_t>(i)] = arr->IsNull(i) ? kUnknown
+					: kleene_of((op == "==") ? (arr->Value(i) == bval) : (arr->Value(i) != bval));
 			}
 			return true;
 		}
@@ -3438,8 +3535,8 @@ extern "C"
 			auto acc = make_string_like_accessor(array);
 			for (int64_t i = 0; i < n; ++i)
 			{
-				bool ok = !acc.is_null(i) && compare_op<std::string>(std::string(acc.get_view(i)), value_text, op);
-				combined[static_cast<size_t>(i)] = combined[static_cast<size_t>(i)] && ok;
+				out[static_cast<size_t>(i)] = acc.is_null(i) ? kUnknown
+					: kleene_of(compare_op<std::string>(std::string(acc.get_view(i)), value_text, op));
 			}
 			return true;
 		}
@@ -3449,52 +3546,129 @@ extern "C"
 		}
 	}
 
-	// Validates and applies a set of AND-combined filter clauses to this
-	// reader: every referenced column must exist and be a plain scalar
-	// column (col_size == 1; a vector/list column always fails, regardless
-	// of its size). If parquet_reader_set_sample already ran and deferred its
-	// draw (has_pending_sample), these clauses AND onto that draw instead of
-	// starting all-true. On success, updates nrows to the filtered row count,
-	// stores the resulting mask on the handle (so every column decoded from
-	// here on -- via get_single_chunk_array or parquet_reader_prefetch_columns
-	// -- is filtered to just the matching rows), and re-filters/updates
-	// column_cache for every filter column itself (already decoded above,
-	// as a side effect of evaluating its own clause) so it's consistent with
-	// every other column. Returns 0 on success; on failure, returns 1 and
-	// writes a human-readable reason into err_out (truncated to err_cap).
+	// Combines two Kleene vectors in place: `lhs` becomes (lhs AND rhs) or (lhs OR rhs).
+	//   AND: false if either is false; unknown if either is unknown; else true.
+	//   OR : true  if either is true ; unknown if either is unknown; else false.
+	// Written into lhs rather than a third vector so a long chain of combinators keeps exactly one
+	// row-length vector live per stack slot -- which, for a flat AND-only expression of any length,
+	// is the same single allocation the AND-only implementation used before expressions existed.
+	static void kleene_combine(std::vector<uint8_t> &lhs, const std::vector<uint8_t> &rhs, bool is_and)
+	{
+		size_t n = lhs.size();
+		for (size_t i = 0; i < n; ++i)
+		{
+			uint8_t a = lhs[i];
+			uint8_t b = rhs[i];
+			if (is_and)
+			{
+				if (a == kFalse || b == kFalse) lhs[i] = kFalse;
+				else if (a == kUnknown || b == kUnknown) lhs[i] = kUnknown;
+				else lhs[i] = kTrue;
+			}
+			else
+			{
+				if (a == kTrue || b == kTrue) lhs[i] = kTrue;
+				else if (a == kUnknown || b == kUnknown) lhs[i] = kUnknown;
+				else lhs[i] = kFalse;
+			}
+		}
+	}
+
+	// Negates a Kleene vector in place: false <-> true, unknown unchanged. An unknown row staying
+	// unknown (rather than becoming true) is the whole reason the third state exists -- it is what
+	// keeps "not (x > 5)" from admitting every row where x is Null.
+	static void kleene_negate(std::vector<uint8_t> &v)
+	{
+		for (auto &x : v)
+		{
+			if (x == kFalse) x = kTrue;
+			else if (x == kTrue) x = kFalse;
+		}
+	}
+
+	// Validates and applies one filter EXPRESSION to this reader. The expression arrives as `n`
+	// packed leaves (one per clause) plus `n_nodes` postfix nodes over them (node_kind: 1=leaf,
+	// 2=and, 3=or, 4=not; node_leaf: 1-based leaf index for a leaf, 0 otherwise), built by
+	// parquet_parse_filter_expr (parquet_read_filter.f90). Every referenced column must exist and
+	// be a plain scalar column (col_size == 1; a vector/list column always fails, regardless of
+	// its size).
+	//
+	// Evaluation is a stack machine over the node list, with Kleene three-valued logic per row
+	// (see kFalse/kTrue/kUnknown): each leaf is evaluated once into its own row vector, and the
+	// combinators fold the stack. For a flat AND-only expression over non-null data the result is
+	// bit-identical to the AND-only implementation this replaced, which is what makes every
+	// pre-existing filter test a regression check on the rewrite.
+	//
+	// Two ways the row set can already be narrowed when this runs, both folded in at the END
+	// (never as the starting value of the expression's own evaluation -- a sample zero must not be
+	// indistinguishable from an evaluated false, or an OR could resurrect a non-sampled row):
+	//   - has_pending_sample: parquet_reader_set_sample deferred its draw for this call (the
+	//     parquet_open_reader path -- see pending_sample_mask's own comment).
+	//   - an already-installed sample-only filter_mask: the post-open path
+	//     (parquet_reader_set_filter in parquet.f90), where the sample was installed at open time.
+	//     It is uninstalled here so clause evaluation still reads raw, unmasked columns; safe
+	//     because that path refuses to run once any column has been decoded.
+	//
+	// On success, updates nrows to the filtered row count, stores the resulting mask on the handle
+	// (so every column decoded from here on -- via get_single_chunk_array or
+	// parquet_reader_prefetch_columns -- is filtered to just the matching rows), and
+	// re-filters/updates column_cache for every filter column itself (already decoded above, as a
+	// side effect of evaluating its own clause) so it's consistent with every other column.
+	// Returns 0 on success; on failure, returns 1 and writes a human-readable reason into err_out
+	// (truncated to err_cap).
 	int64_t parquet_reader_set_filter(void *handle,
 		const char *names_packed, int64_t name_len,
 		const char *ops_packed, int64_t op_len,
 		const char *values_packed, int64_t value_len,
 		const int8_t *is_string_flags,
 		int64_t n,
+		const int8_t *node_kind, const int32_t *node_leaf, int64_t n_nodes,
+		const char *expr_text,
 		char *err_out, int64_t err_cap)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		if (n <= 0) return 0;
 
-		std::vector<uint8_t> combined(static_cast<size_t>(reader_handle->total_nrows));
+		size_t total = static_cast<size_t>(reader_handle->total_nrows);
+		// Whatever already narrowed the row set (a sample draw), as one row vector, or empty when
+		// nothing did. Applied once at the very end, after unknown has collapsed to false.
+		std::vector<uint8_t> sample_narrow;
 		if (reader_handle->has_pending_sample)
 		{
 			// parquet_reader_set_sample ran first and deferred its draw here instead of installing
-			// it on filter_mask (see pending_sample_mask's own comment) -- seed from it now, so
-			// these clauses AND onto the sample draw. Every column read below (get_single_chunk_array)
-			// is still raw/unfiltered at this point, since filter_mask itself is still unset. This is
-			// the only way combined can start non-all-true: parquet_reader_set_filter is only ever
-			// called once per reader (from parquet_open_reader_base), and parquet_reader_set_sample
-			// always defers via pending_sample_mask -- never installs filter_mask directly -- whenever
-			// a filter will follow, so filter_mask itself is never already set here.
-			combined = reader_handle->pending_sample_mask;
+			// it on filter_mask (see pending_sample_mask's own comment), precisely so that every
+			// column read below (get_single_chunk_array) is still raw/unfiltered while clauses are
+			// evaluated.
+			sample_narrow = std::move(reader_handle->pending_sample_mask);
 			reader_handle->has_pending_sample = false;
 			reader_handle->pending_sample_mask.clear();
 			reader_handle->pending_sample_mask.shrink_to_fit();
 		}
-		else
+		else if (reader_handle->filter_mask)
 		{
-			std::fill(combined.begin(), combined.end(), 1);
+			// The post-open path: a sample-only mask is already installed (there are no clauses
+			// yet -- parquet_reader_set_filter in parquet.f90 refuses an already-filtered reader).
+			// Convert it back to a plain row vector and uninstall it, so clause evaluation sees
+			// raw columns; nothing has been decoded under it, since that same path refuses to run
+			// after any column has been read.
+			sample_narrow.resize(total);
+			for (size_t i = 0; i < total; ++i)
+			{
+				sample_narrow[i] = reader_handle->filter_mask->Value(static_cast<int64_t>(i)) ? 1 : 0;
+			}
+			reader_handle->filter_mask.reset();
+			reader_handle->nrows = reader_handle->total_nrows;
 		}
 		std::vector<int> touched_indices;
 		std::vector<std::string> touched_names; // every filter clause's own (possibly dotted) name, deduplicated
+		// Each leaf's validated inputs and its already-decoded array, in leaf order. Resolved in
+		// the loop below (so an unknown/vector column is still reported in the order the clauses
+		// were written) and evaluated afterwards in NODE order, which is what the expression's
+		// shape dictates. The arrays are the same objects column_cache holds, so keeping them here
+		// costs no extra memory.
+		std::vector<std::string> leaf_names, leaf_ops, leaf_values;
+		std::vector<bool> leaf_is_string;
+		std::vector<std::shared_ptr<arrow::Array>> leaf_arrays;
 
 		for (int64_t i = 0; i < n; ++i)
 		{
@@ -3559,25 +3733,89 @@ extern "C"
 				touched_names.push_back(name);
 			}
 
-			std::string err;
-			if (!eval_filter_clause(array, name, op, is_string, value, combined, err))
-			{
-				// Tag the clause-level message so it is unambiguously a row-filter
-				// error (vs a read-time qc check, which labels its own messages).
-				// The other set_filter failures (unknown/vector/read-fail column)
-				// already say "filter" themselves, so they aren't tagged again here.
-				std::snprintf(err_out, static_cast<size_t>(err_cap), "filter rule: %s", err.c_str());
-				return 1;
-			}
-
 			// Retain this clause (operator+value, column name stripped) for the
 			// print_stat "filter" column; multiple clauses on one column are kept
 			// in order and joined with ", " at print time. Keyed by the physical
 			// top-level column index -- two clauses on different leaves of the
 			// same struct show up merged under that struct's one print_stat row
 			// (see CLAUDE.md's nested-struct-field design notes; an accepted v1
-			// limitation, same as was_read/output_type_used above).
+			// limitation, same as was_read/output_type_used above). For an
+			// expression that is not a flat AND this per-column view is lossy by
+			// construction, which is what filter_expr_text (printed as its own
+			// line) exists to cover.
 			reader_handle->filter_clauses[idx].push_back(value.empty() ? op : op + value);
+
+			leaf_names.push_back(name);
+			leaf_ops.push_back(op);
+			leaf_values.push_back(value);
+			leaf_is_string.push_back(is_string);
+			leaf_arrays.push_back(array);
+		}
+
+		// Evaluate the postfix node list with a stack of row vectors: a leaf pushes its own
+		// result, `not` negates the top in place, and `and`/`or` fold the top two into one. Peak
+		// memory is (deepest simultaneous operand count) * total_nrows bytes, which the parser's
+		// own nesting cap (filter_max_depth, parquet.f90) bounds; a flat chain of any length keeps
+		// exactly one vector live.
+		std::vector<std::vector<uint8_t>> stack;
+		for (int64_t k = 0; k < n_nodes; ++k)
+		{
+			int kind = static_cast<int>(node_kind[k]);
+			if (kind == 1) // leaf
+			{
+				int li = static_cast<int>(node_leaf[k]) - 1;
+				if (li < 0 || li >= static_cast<int>(leaf_arrays.size()))
+				{ // GCOVR_EXCL_START -- malformed node list; unreachable from
+				  // parquet_parse_filter_expr, which emits the leaf before its own node.
+					std::snprintf(err_out, static_cast<size_t>(err_cap), "filter rule: malformed expression");
+					return 1;
+				}
+				// GCOVR_EXCL_STOP
+				std::vector<uint8_t> leaf_result(total);
+				std::string err;
+				if (!eval_filter_clause(leaf_arrays[static_cast<size_t>(li)], leaf_names[static_cast<size_t>(li)],
+					leaf_ops[static_cast<size_t>(li)], leaf_is_string[static_cast<size_t>(li)],
+					leaf_values[static_cast<size_t>(li)], leaf_result, err))
+				{
+					// Tag the clause-level message so it is unambiguously a row-filter
+					// error (vs a read-time qc check, which labels its own messages).
+					// The other set_filter failures (unknown/vector/read-fail column)
+					// already say "filter" themselves, so they aren't tagged again here.
+					std::snprintf(err_out, static_cast<size_t>(err_cap), "filter rule: %s", err.c_str());
+					return 1;
+				}
+				stack.push_back(std::move(leaf_result));
+			}
+			else if (kind == 4) // not
+			{
+				kleene_negate(stack.back());
+			}
+			else // and (2) / or (3)
+			{
+				std::vector<uint8_t> rhs = std::move(stack.back());
+				stack.pop_back();
+				kleene_combine(stack.back(), rhs, kind == 2);
+			}
+		}
+
+		// One expression always leaves exactly one result on the stack; anything else means the
+		// node list did not come from parquet_parse_filter_expr.
+		if (stack.size() != 1)
+		{ // GCOVR_EXCL_START -- unreachable through the public API, see above.
+			std::snprintf(err_out, static_cast<size_t>(err_cap), "filter rule: malformed expression");
+			return 1;
+		}
+		// GCOVR_EXCL_STOP
+
+		// Collapse unknown to false -- once, here -- and fold in whatever already narrowed the row
+		// set. This is the single point where three-valued logic becomes the two-valued mask Arrow
+		// needs, and it is why a Null row never survives without an explicit is_null clause.
+		std::vector<uint8_t> combined = std::move(stack.front());
+		for (size_t i = 0; i < total; ++i)
+		{
+			bool keep = combined[i] == kTrue;
+			if (keep && !sample_narrow.empty()) keep = sample_narrow[i] != 0;
+			combined[i] = keep ? 1 : 0;
 		}
 
 		arrow::BooleanBuilder mask_builder;
@@ -3597,6 +3835,8 @@ extern "C"
 		}
 		// GCOVR_EXCL_STOP
 		reader_handle->filter_mask = std::static_pointer_cast<arrow::BooleanArray>(mask_array);
+		// Retained for parquet_reader_print_stat's "filter:" line only (never parsed here).
+		if (expr_text != nullptr) reader_handle->filter_expr_text = expr_text;
 
 		int64_t matched = 0;
 		for (uint8_t v : combined) matched += (v != 0);
@@ -4260,6 +4500,13 @@ extern "C"
 		{
 			std::fprintf(stdout, "sample: fraction=%.6g seed=%d\n", reader_handle->sample_fraction,
 				reader_handle->sample_seed_used);
+		}
+		// The whole expression, as re-rendered from the parse tree. The per-column "filter" cell
+		// below can only list the leaves that mention that column, which is lossy the moment an
+		// expression is not a flat AND -- this line is what stays exact.
+		if (!reader_handle->filter_expr_text.empty())
+		{
+			std::fprintf(stdout, "filter: %s\n", reader_handle->filter_expr_text.c_str());
 		}
 		std::fprintf(stdout, "\n");
 
@@ -7545,6 +7792,50 @@ extern "C"
 		auto outfile_result = arrow::io::FileOutputStream::Open(path);
 		if (!outfile_result.ok())
 			throw std::runtime_error("parquet_debug_write_string_view_fixture: failed to open '" + // GCOVR_EXCL_LINE
+				std::string(path) + "': " + outfile_result.status().ToString()); // GCOVR_EXCL_LINE
+		auto outfile = outfile_result.ValueOrDie();
+
+		parquet::ArrowWriterProperties::Builder arrow_writer_builder;
+		arrow_writer_builder.store_schema();
+		auto arrow_writer_properties = arrow_writer_builder.build();
+		auto writer_properties = parquet::WriterProperties::Builder().build();
+
+		auto status = parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile,
+			table->num_rows(), writer_properties, arrow_writer_properties);
+		check(status);
+		check(outfile->Close());
+	}
+
+	// Test-only: writes a tiny fixture file with one BINARY (byte-array) column, a physical type
+	// this library's own writer never produces and its reader deliberately does not support --
+	// same convention as parquet_debug_write_string_view_fixture above.
+	//
+	// It exists for one scenario: the "column has a type that filtering does not support" branch
+	// of eval_filter_clause. Every other physical type this project has a fixture for is now
+	// filterable (the nine canonical types plus the extended int/uint/half-float/decimal read
+	// types), so without a genuinely unsupported column that branch would have no test at all.
+	void parquet_debug_write_binary_fixture(const char *path, const char *column_name)
+	{
+		arrow::BinaryBuilder builder;
+		auto check = [](const arrow::Status &st)
+		{
+			if (!st.ok()) throw std::runtime_error("parquet_debug_write_binary_fixture: " + st.ToString());
+		};
+		check(builder.Append(std::string("\x01\x02\x03", 3)));
+		check(builder.Append(std::string("\xff", 1)));
+		check(builder.AppendNull());
+
+		std::shared_ptr<arrow::Array> array;
+		check(builder.Finish(&array));
+
+		auto field = arrow::field(column_name, arrow::binary());
+		auto schema = arrow::schema({field});
+		auto table = arrow::Table::Make(schema, {array});
+
+		// file-I/O backstop, not fixture-triggerable.
+		auto outfile_result = arrow::io::FileOutputStream::Open(path);
+		if (!outfile_result.ok())
+			throw std::runtime_error("parquet_debug_write_binary_fixture: failed to open '" + // GCOVR_EXCL_LINE
 				std::string(path) + "': " + outfile_result.status().ToString()); // GCOVR_EXCL_LINE
 		auto outfile = outfile_result.ValueOrDie();
 

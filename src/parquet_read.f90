@@ -10,6 +10,77 @@
 submodule (parquet) parquet_read
     use ieee_arithmetic, only: ieee_is_nan
     implicit none
+
+    !> Expression-node kinds in the postfix (RPN) node list a parsed filter becomes: one LEAF per
+    !> clause, plus the boolean combinators. These values are part of the bind(C) contract -- the
+    !> C++ evaluator (parquet_reader_set_filter in parquet_wrapper.cpp) switches on exactly these
+    !> numbers, so changing one means changing both sides.
+    integer, parameter :: ND_LEAF = 1
+    integer, parameter :: ND_AND = 2
+    integer, parameter :: ND_OR = 3
+    integer, parameter :: ND_NOT = 4
+
+    !> Fixed widths of the three packed per-leaf string arrays crossing the bind(C) boundary
+    !> (see pack_fixed_width_strings). Declared once here and host-associated to
+    !> parquet_read_filter, so the parser and the packer cannot disagree about them; the raw rule
+    !> text itself never crosses the boundary, so it is not constrained by these.
+    integer, parameter :: filter_leaf_name_len = 64
+    integer, parameter :: filter_leaf_op_len = 16
+    integer, parameter :: filter_leaf_value_len = 512
+
+    ! ---- Filter expression parsing (parquet_read_filter) ----
+    interface
+        !> Parses one parquet_filter%add rule (a clause, or clauses combined with and/or/not and
+        !> parentheses) and APPENDS its postfix node list plus one packed leaf per clause to the
+        !> accumulators, which several calls therefore build up together. `nnodes`/`nleaves` say
+        !> how much of each (over-allocated) accumulator is in use. Purely syntactic: reports a
+        !> parse failure via ok/errmsg -- never aborts, so the caller can attach the reader's
+        !> file context to the message -- and leaves every schema-dependent check (column exists,
+        !> value suits its type) to the C++ side.
+        module subroutine parquet_parse_filter_expr(rule, node_kind, node_leaf, nnodes, leaf_name, leaf_op, &
+                leaf_value, leaf_is_string, nleaves, ok, errmsg)
+            character(len=*), intent(in) :: rule !! raw filter expression text from one %add call.
+            integer(int8), allocatable, intent(inout) :: node_kind(:) !! ND_* kind per node, appended to.
+            integer(int32), allocatable, intent(inout) :: node_leaf(:) !! 1-based leaf index per ND_LEAF node, else 0.
+            integer, intent(inout) :: nnodes !! nodes in use; grows by this rule's own node count.
+            character(len=filter_leaf_name_len), allocatable, intent(inout) :: leaf_name(:) !! per-leaf column name.
+            character(len=filter_leaf_op_len), allocatable, intent(inout) :: leaf_op(:) !! per-leaf operator.
+            character(len=filter_leaf_value_len), allocatable, intent(inout) :: leaf_value(:) !! per-leaf value, unquoted.
+            integer(int8), allocatable, intent(inout) :: leaf_is_string(:) !! 1 if the value was double-quoted.
+            integer, intent(inout) :: nleaves !! leaves in use; grows by this rule's own clause count.
+            logical, intent(out) :: ok !! .true. if the rule parsed.
+            character(len=:), allocatable, intent(out) :: errmsg !! parse-failure message; "" when ok.
+        end subroutine parquet_parse_filter_expr
+        !> Appends one operator node (ND_AND/ND_OR/ND_NOT) to an already-built node list -- how
+        !> parquet_apply_filter AND-folds several %add rules into one expression without
+        !> re-entering the parser. Reports the node-count cap via ok/errmsg, as above.
+        module subroutine parquet_append_filter_node(kind, node_kind, node_leaf, nnodes, ok, errmsg)
+            integer, intent(in) :: kind !! ND_AND, ND_OR or ND_NOT.
+            integer(int8), allocatable, intent(inout) :: node_kind(:) !! ND_* kind per node, appended to.
+            integer(int32), allocatable, intent(inout) :: node_leaf(:) !! 0 for an operator node.
+            integer, intent(inout) :: nnodes !! nodes in use; incremented on success.
+            logical, intent(out) :: ok !! .true. if the node fit within filter_max_nodes.
+            character(len=:), allocatable, intent(out) :: errmsg !! failure message; "" when ok.
+        end subroutine parquet_append_filter_node
+        !> Re-renders a parsed expression from its node list in canonical form ("(ra > 180 and
+        !> dec <= 0) or id is_null"): one space between tokens, parentheses only where precedence
+        !> needs them, values re-quoted where the source quoted them. Used for
+        !> parquet_reader_print_stat's whole-expression line, which stays meaningful for an
+        !> expression the per-column view cannot represent.
+        module subroutine parquet_render_filter_expr(node_kind, node_leaf, nnodes, leaf_name, leaf_op, &
+                leaf_value, leaf_is_string, nleaves, text)
+            integer(int8), intent(in) :: node_kind(:) !! ND_* kind per node.
+            integer(int32), intent(in) :: node_leaf(:) !! 1-based leaf index per ND_LEAF node, else 0.
+            integer, intent(in) :: nnodes !! nodes in use.
+            character(len=filter_leaf_name_len), intent(in) :: leaf_name(:) !! per-leaf column name.
+            character(len=filter_leaf_op_len), intent(in) :: leaf_op(:) !! per-leaf operator.
+            character(len=filter_leaf_value_len), intent(in) :: leaf_value(:) !! per-leaf value, unquoted.
+            integer(int8), intent(in) :: leaf_is_string(:) !! 1 if the value was double-quoted.
+            integer, intent(in) :: nleaves !! leaves in use.
+            character(len=:), allocatable, intent(out) :: text !! the canonical rendering; "" if nnodes <= 0.
+        end subroutine parquet_render_filter_expr
+    end interface
+
 contains
 
     !> Allocates `valid_buf(n)` and points `valid_ptr` at it via c_loc only when
@@ -339,25 +410,37 @@ contains
     subroutine prefetch_filter_columns(reader, filter)
         type(parquet_reader), intent(inout) :: reader !! open reader whose filter columns are warmed.
         type(parquet_filter), intent(in) :: filter !! filter whose distinct column names are prefetched.
-        character(len=:), allocatable :: name, op, value, errmsg, list
-        logical :: is_string, ok
-        integer :: i
+        integer(int8), allocatable :: node_kind(:), leaf_is_string(:)
+        integer(int32), allocatable :: node_leaf(:)
+        character(len=filter_leaf_name_len), allocatable :: leaf_name(:)
+        character(len=filter_leaf_op_len), allocatable :: leaf_op(:)
+        character(len=filter_leaf_value_len), allocatable :: leaf_value(:)
+        character(len=:), allocatable :: errmsg, list, name
+        logical :: ok
+        integer :: i, nnodes, nleaves
+
+        nnodes = 0
+        nleaves = 0
+        do i = 1, filter%n
+            ! A rule that fails to parse is left for parquet_apply_filter to report; any clause it
+            ! managed to emit before failing is harmless here (an unknown column is skipped below).
+            call parquet_parse_filter_expr(filter%rules(i), node_kind, node_leaf, nnodes, leaf_name, &
+                leaf_op, leaf_value, leaf_is_string, nleaves, ok, errmsg)
+        end do
 
         list = ""
-        do i = 1, filter%n
-            call parquet_tokenize_filter_rule(filter%rules(i), name, op, value, is_string, ok, errmsg)
-            ! A malformed rule is left for parquet_apply_filter to report.
-            if (.not. ok) cycle
+        do i = 1, nleaves
+            name = trim(leaf_name(i))
             ! Unknown columns: skip, so parquet_reader_set_filter owns the error.
-            if (parquet_reader_has_column(reader%handle, trim(name)//char(0)) == 0) cycle
+            if (parquet_reader_has_column(reader%handle, name//char(0)) == 0) cycle
             ! Delimiter-guarded dedup (so "ra" is not matched inside "gal_ra").
             if (len(list) > 0) then
-                if (index(","//list//",", ","//trim(name)//",") > 0) cycle
+                if (index(","//list//",", ","//name//",") > 0) cycle
             end if
             if (len(list) == 0) then
-                list = trim(name)
+                list = name
             else
-                list = list//","//trim(name)
+                list = list//","//name
             end if
         end do
 
@@ -368,54 +451,195 @@ contains
     !> parquet_get_nrows and every column read afterward already reflect the
     !> filtered row set (see parquet_reader_set_filter in parquet_wrapper.cpp
     !> for the actual validation/masking).
-    subroutine parquet_apply_filter(reader, filter)
+    subroutine parquet_apply_filter(reader, filter, context)
         type(parquet_reader), intent(inout) :: reader !! open reader the filter is applied to.
-        type(parquet_filter), intent(in) :: filter !! filter whose rules are tokenized, validated, and applied.
-        character(len=64), allocatable :: names(:)
-        character(len=16), allocatable :: ops(:)
-        character(len=512), allocatable :: values(:)
-        integer(c_int8_t), allocatable :: is_string_flags(:)
+        type(parquet_filter), intent(in) :: filter !! filter whose rules are parsed, validated, and applied.
+        character(len=*), intent(in) :: context !! calling procedure's name, used in every error-stop message.
+        integer(int8), allocatable :: node_kind(:), leaf_is_string(:)
+        integer(int32), allocatable :: node_leaf(:)
+        character(len=filter_leaf_name_len), allocatable :: leaf_name(:)
+        character(len=filter_leaf_op_len), allocatable :: leaf_op(:)
+        character(len=filter_leaf_value_len), allocatable :: leaf_value(:)
         character(kind=c_char), allocatable :: names_packed(:), ops_packed(:), values_packed(:)
-        character(len=:), allocatable :: parsed_name, parsed_op, parsed_value, errmsg
-        logical :: parsed_is_string, ok
+        character(len=:), allocatable :: errmsg, expr_text
+        logical :: ok
         character(len=1024) :: c_err
         integer(c_long_long) :: status
-        integer :: i, n
+        integer :: i, nnodes, nleaves
         character(len=:), allocatable :: name_suffix !! scratch (reader_filename_suffix).
 
-        n = filter%n
-        allocate(names(n), ops(n), values(n), is_string_flags(n))
-
-        do i = 1, n
-            call parquet_tokenize_filter_rule(filter%rules(i), parsed_name, parsed_op, parsed_value, &
-                parsed_is_string, ok, errmsg)
-            call reader_filename_suffix(reader, name_suffix)
-            if (.not. ok) error stop "parquet_open_reader: invalid filter rule: " // errmsg // name_suffix
-            ! GCOVR_EXCL_START -- gcov attribution artifact
-            if (len(parsed_name) > len(names) .or. len(parsed_op) > len(ops) .or. len(parsed_value) > len(values)) then
+        nnodes = 0
+        nleaves = 0
+        do i = 1, filter%n
+            call parquet_parse_filter_expr(filter%rules(i), node_kind, node_leaf, nnodes, leaf_name, &
+                leaf_op, leaf_value, leaf_is_string, nleaves, ok, errmsg)
+            if (.not. ok) then
                 call reader_filename_suffix(reader, name_suffix)
-                error stop "parquet_open_reader: filter rule exceeds an internal length limit: " // trim(filter%rules(i)) // &
-                    name_suffix
+                error stop trim(context) // ": invalid filter rule: " // errmsg // name_suffix
             end if
-            ! GCOVR_EXCL_STOP
-            names(i) = parsed_name
-            ops(i) = parsed_op
-            values(i) = parsed_value
-            is_string_flags(i) = merge(1_c_int8_t, 0_c_int8_t, parsed_is_string)
+            ! Several %add calls are AND-combined -- (expr1) and (expr2) and ... -- so every rule
+            ! after the first folds onto whatever is already on the stack.
+            if (i > 1) then
+                call parquet_append_filter_node(ND_AND, node_kind, node_leaf, nnodes, ok, errmsg)
+                if (.not. ok) then
+                    call reader_filename_suffix(reader, name_suffix)
+                    error stop trim(context) // ": invalid filter rule: " // errmsg // name_suffix
+                end if
+            end if
         end do
+        if (nleaves == 0) return
 
-        call pack_fixed_width_strings(names, names_packed)
-        call pack_fixed_width_strings(ops, ops_packed)
-        call pack_fixed_width_strings(values, values_packed)
+        call convert_temporal_filter_values(reader, context, leaf_name, leaf_op, leaf_value, leaf_is_string, nleaves)
+        call parquet_render_filter_expr(node_kind, node_leaf, nnodes, leaf_name, leaf_op, leaf_value, &
+            leaf_is_string, nleaves, expr_text)
+
+        call pack_fixed_width_strings(leaf_name(1:nleaves), names_packed)
+        call pack_fixed_width_strings(leaf_op(1:nleaves), ops_packed)
+        call pack_fixed_width_strings(leaf_value(1:nleaves), values_packed)
 
         c_err = ""
-        status = parquet_reader_set_filter(reader%handle, names_packed, int(len(names), kind=c_long_long), &
-            ops_packed, int(len(ops), kind=c_long_long), values_packed, int(len(values), kind=c_long_long), &
-            is_string_flags, int(n, kind=c_long_long), c_err, int(len(c_err), kind=c_long_long))
+        status = c_reader_set_filter(reader%handle, names_packed, int(filter_leaf_name_len, kind=c_long_long), &
+            ops_packed, int(filter_leaf_op_len, kind=c_long_long), values_packed, &
+            int(filter_leaf_value_len, kind=c_long_long), leaf_is_string(1:nleaves), &
+            int(nleaves, kind=c_long_long), node_kind(1:nnodes), node_leaf(1:nnodes), &
+            int(nnodes, kind=c_long_long), expr_text//char(0), c_err, int(len(c_err), kind=c_long_long))
 
         call reader_filename_suffix(reader, name_suffix)
-        if (status /= 0) error stop "parquet_open_reader: " // trim(c_err) // name_suffix
+        if (status /= 0) error stop trim(context) // ": " // trim(c_err) // name_suffix
     end subroutine parquet_apply_filter
+    !> Rewrites every temporal (date/time/timestamp) leaf's value from the ISO-8601 text the
+    !> caller wrote into the raw integer that column actually stores, so the C++ evaluator can
+    !> compare it directly against the column's own values -- no ISO parsing and no unit
+    !> arithmetic on that side. Doing the conversion here reuses parquet_temporal's own tested
+    !> parsers (rather than re-deriving days_from_civil in C++), and is the only place the
+    !> column's stored unit and the literal's precision can be compared, which is what makes the
+    !> precision check below possible at all.
+    !>
+    !> Leaves naming a non-temporal column, an unknown column (so the C++ side still reports it
+    !> with its own message) or a column of a type outside the nine canonical tokens are left
+    !> exactly as they were.
+    !>
+    !> Timezones are deliberately not interpreted: a parquet_timestamp holds the stored epoch
+    !> offset verbatim (see parquet_temporal's own module comment), so the literal is read as a
+    !> civil date/time and compared against the same stored instants a read would return.
+    subroutine convert_temporal_filter_values(reader, context, leaf_name, leaf_op, leaf_value, leaf_is_string, nleaves)
+        type(parquet_reader), intent(in) :: reader !! open reader the filter is being applied to.
+        character(len=*), intent(in) :: context !! calling procedure's name, used in error-stop messages.
+        character(len=filter_leaf_name_len), intent(in) :: leaf_name(:) !! per-leaf column name.
+        character(len=filter_leaf_op_len), intent(in) :: leaf_op(:) !! per-leaf operator.
+        character(len=filter_leaf_value_len), intent(inout) :: leaf_value(:) !! per-leaf value; rewritten in place.
+        integer(int8), intent(inout) :: leaf_is_string(:) !! per-leaf "was quoted" flag; cleared once converted.
+        integer, intent(in) :: nleaves !! leaves in use.
+        character(len=:), allocatable :: name, op, type_name, text, name_suffix
+        character(len=32) :: raw_str
+        logical :: recognized, parse_ok
+        integer :: i, unit
+        integer(int64) :: raw
+
+        do i = 1, nleaves
+            name = trim(leaf_name(i))
+            op = trim(leaf_op(i))
+            if (op == "is_null" .or. op == "is_not_null") cycle
+            if (parquet_reader_has_column(reader%handle, name//char(0)) == 0) cycle
+            call resolve_column_type(reader, name, type_name, recognized)
+            if (.not. recognized) cycle
+            if (type_name /= "date" .and. type_name /= "time" .and. type_name /= "timestamp") cycle
+
+            call reader_filename_suffix(reader, name_suffix)
+            if (leaf_is_string(i) == 0_int8) then
+                error stop trim(context) // ": filter rule: value '" // trim(leaf_value(i)) // "' for " // &
+                    type_name // " column '" // name // "' must be a double-quoted ISO-8601 literal (e.g. " // &
+                    '"2024-01-31", "12:30:00", "2024-01-31T12:30:00")' // name_suffix
+            end if
+            text = trim(leaf_value(i))
+            unit = parquet_unit_nanos
+            ! Only a time/timestamp column has a stored unit; a date column is always whole days,
+            ! and asking for its unit aborts inside parquet_reader_get_column_time_unit.
+            if (type_name /= "date") unit = int(parquet_reader_get_column_time_unit(reader%handle, name//char(0)))
+            call temporal_literal_to_raw(type_name, text, unit, raw, parse_ok)
+            if (.not. parse_ok) then
+                error stop trim(context) // ": filter rule: value '" // text // "' is not a valid ISO-8601 " // &
+                    type_name // " for column '" // name // "', or is more precise than that column's " // &
+                    "stored unit can represent" // name_suffix
+            end if
+            write(raw_str, '(i0)') raw
+            leaf_value(i) = trim(raw_str)
+            leaf_is_string(i) = 0_int8
+        end do
+    end subroutine convert_temporal_filter_values
+    !> Parses one ISO-8601 filter literal into the raw integer a `date`/`time`/`timestamp` column
+    !> of stored unit `unit` holds: days since the epoch, unit-of-day, or units since the epoch.
+    !> Reports failure (ok = .false.) both for an unparseable literal and for one carrying finer
+    !> precision than `unit` can represent -- a literal with a time part against a date column,
+    !> or sub-millisecond digits against a timestamp[ms] column. Truncating instead would silently
+    !> answer a question the caller did not ask.
+    subroutine temporal_literal_to_raw(type_name, text, unit, raw, ok)
+        character(len=*), intent(in) :: type_name !! "date", "time" or "timestamp".
+        character(len=*), intent(in) :: text !! the ISO-8601 literal, quotes already stripped.
+        integer, intent(in) :: unit !! the column's stored unit (a parquet_unit_* selector).
+        integer(int64), intent(out) :: raw !! the value as that column stores it.
+        logical, intent(out) :: ok !! .true. if the literal parsed and fits the unit exactly.
+        type(parquet_date) :: d
+        type(parquet_time) :: t
+        type(parquet_timestamp) :: ts
+        integer(int64) :: ns_per_unit, ns, secs
+        integer(int32) :: nanos
+
+        raw = 0_int64
+        ok = .false.
+        select case (type_name)
+        case ("date")
+            ! A date column stores whole days, so any time-of-day in the literal is unrepresentable
+            ! -- parquet_date%parse rejects the "T..." form itself, which is exactly the wanted answer.
+            call d%parse(text, ok)
+            if (ok) raw = int(d%raw(), int64)
+        case ("time")
+            call t%parse(text, ok)
+            if (.not. ok) return
+            ns = t%raw()
+            ns_per_unit = parquet_ns_per_sec/unit_scale_for(unit)
+            ok = mod(ns, ns_per_unit) == 0_int64
+            if (ok) raw = ns/ns_per_unit
+        case ("timestamp")
+            call ts%parse(text, ok)
+            if (.not. ok) then
+                ! A date-only literal is a legal, less-precise way to name an instant: it means
+                ! midnight of that date. (More precision than the column's unit is the case that
+                ! is rejected, below -- less is not.) parquet_timestamp%parse itself requires a
+                ! full date-time, so the date form is re-parsed here rather than there.
+                call d%parse(text, ok)
+                if (.not. ok) return
+                call t%set(0, 0, 0)
+                call ts%set(d, t)
+            end if
+            call ts%get_raw(secs, nanos)
+            ns_per_unit = parquet_ns_per_sec/unit_scale_for(unit)
+            ! Checked here rather than left to %to_unix's own precision abort, so the message can
+            ! name the column and the rule instead of ending the process from inside parquet_temporal.
+            ok = mod(int(nanos, int64), ns_per_unit) == 0_int64
+            if (ok) raw = ts%to_unix(unit)
+        end select
+    end subroutine temporal_literal_to_raw
+    !> Units of one second for a parquet_unit_* selector (1 for seconds, 1000 for millis, ...) --
+    !> the same scale parquet_temporal applies internally, needed here to convert a parsed
+    !> literal into a column's own stored unit.
+    pure integer(int64) function unit_scale_for(unit) result(res)
+        integer, intent(in) :: unit !! a parquet_unit_* selector.
+        select case (unit)
+        case (parquet_unit_seconds) ! GCOVR_EXCL_LINE -- unreachable: a seconds-unit time/timestamp
+            ! column cannot exist. Parquet's physical format has no seconds-resolution TIME or
+            ! TIMESTAMP encoding at all, so apply_temporal_unit_token rejects a time[s]/timestamp[s]
+            ! MAML token outright and no file can present one here. Kept for completeness of the
+            ! parquet_unit_* selector set.
+            res = 1_int64 ! GCOVR_EXCL_LINE
+        case (parquet_unit_millis)
+            res = 1000_int64
+        case (parquet_unit_micros)
+            res = 1000000_int64
+        case default
+            res = 1000000000_int64
+        end select
+    end function unit_scale_for
     !> Called once by parquet_open_reader, right after the handle is created:
     !> copies the file's flat key-value table metadata (whatever add_metadata
     !> wrote on the write side) into reader%metadata, so every later
@@ -499,7 +723,7 @@ contains
         if (present(qc_soft)) qc_soft_value = qc_soft
         if (present(schema) .and. qc_effective) call parquet_apply_qc(reader, schema%maml, qc_soft_value)
 
-        if (filter_will_apply) call parquet_apply_filter(reader, filter)
+        if (filter_will_apply) call parquet_apply_filter(reader, filter, "parquet_open_reader")
 
         ! Must run AFTER parquet_apply_filter: a column cached before the
         ! filter mask exists would stay raw/unfiltered forever, since
@@ -513,6 +737,42 @@ contains
             if (prefetch) call parquet_reader_prefetch_all_columns(reader%handle)
         end if
     end procedure parquet_open_reader_base
+    !> The post-open counterpart of parquet_open_reader(..., filter=): same prefetch-then-apply
+    !> sequence, same validation, same resulting reader state -- only the moment differs. Exists
+    !> because a caller that does not own the parquet_open_reader call (a higher-level type that
+    !> opens its own reader) otherwise has no way to filter at all.
+    !>
+    !> Both refusals below are checked before anything is read or mutated, so a rejected call
+    !> leaves the reader exactly as it was:
+    !>
+    !>  - An already-filtered reader. Its mask is indexed by the file's physical rows, while a
+    !>    second mask built now would be indexed by the surviving rows of the first, so composing
+    !>    them is not a matter of ANDing two vectors of the same length. Several %add calls on one
+    !>    parquet_filter are already AND-combined, which is what a caller wanting both should use.
+    !>  - A reader that has already decoded a column. That column was returned (or cached) over
+    !>    the unfiltered row set, and nothing read afterwards could be aligned with it.
+    !>
+    !> A reader opened with sample_fraction= is accepted: the sample mask is already installed, and
+    !> these clauses AND onto it exactly as they would have at open time.
+    module procedure parquet_reader_set_filter
+        character(len=:), allocatable :: name_suffix
+
+        call check_reader_open(reader, "parquet_reader_set_filter")
+        if (parquet_reader_has_filter_clauses(reader%handle) /= 0) then
+            call reader_filename_suffix(reader, name_suffix)
+            error stop "parquet_reader_set_filter: this reader already has an active filter; combine the " // &
+                "clauses into one parquet_filter instead (several %add calls are AND-combined)" // name_suffix
+        end if
+        if (parquet_reader_has_decoded_columns(reader%handle) /= 0) then
+            call reader_filename_suffix(reader, name_suffix)
+            error stop "parquet_reader_set_filter: a column has already been read on this reader; a filter " // &
+                "must be applied before any column is read" // name_suffix
+        end if
+        if (filter%n == 0) return
+
+        call prefetch_filter_columns(reader, filter)
+        call parquet_apply_filter(reader, filter, "parquet_reader_set_filter")
+    end procedure parquet_reader_set_filter
     module procedure parquet_open_reader_nrows_int64
         call parquet_open_reader_base(reader, filename, use_threads, filter, sample_fraction, sample_seed, schema, qc, &
             qc_soft, prefetch)

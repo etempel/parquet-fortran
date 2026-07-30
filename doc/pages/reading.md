@@ -226,8 +226,7 @@ type(parquet_reader) :: reader
 integer(int32) :: nrows
 integer(int32), allocatable :: ra(:)
 
-call filt%add("ra > 180")
-call filt%add("ra <= 360")
+call filt%add("(ra > 180 and ra <= 360) or ra is_null")
 call filt%add("id is_not_null")
 
 call parquet_open_reader(reader, "data.parquet", filter=filt)
@@ -237,15 +236,77 @@ call parquet_read_column(reader, "ra", ra) ! already just the matching rows
 call parquet_close_reader(reader)
 ```
 
-Each `filt%add(rule)` call adds one clause; multiple clauses always combine with AND (there is no OR/NOT) — call `%add` more than once, as above, to express a range or several independent conditions. A `rule` has the shape `"<column> <op> <value>"` or `"<column> is_null"` / `"<column> is_not_null"`:
+### The rule grammar
 
-- Supported operators: `>`, `>=`, `<`, `<=`, `==`, `/=`, `is_null`, `is_not_null`.
-- `<value>` is a bare number for a numeric column (`ra > 180`), `true`/`false` for a boolean column (`flag == true`), or a **double-quoted** string for a `string` column (`name == "abell_1"`) — quotes are required for strings and not used for anything else.
-- `is_null`/`is_not_null` take no value.
-- **Null values and ordinary comparison operators:** a row whose filtered column is Null never matches `>`, `>=`, `<`, `<=`, `==`, or `/=` — regardless of the value being compared against — the same three-valued-logic behavior SQL's `WHERE` clause has for `NULL`. So `filt%add("colx > 0")` silently excludes every row where `colx` is Null, the same as it would exclude a row that genuinely failed the `> 0` test; it does not raise an error and does not treat Null as satisfying the condition. Use an explicit `is_null`/`is_not_null` clause if you need to test for nullness itself, or to deliberately include/exclude Null rows alongside a comparison (e.g. `filt%add("colx > 0")` plus a separate `filt%add("colx is_not_null")` is redundant since Null already fails the comparison, but `"colx is_null"` combined with other AND'd clauses is how you'd select Null rows explicitly).
-- Only plain scalar columns can be filtered — naming a vector (`col_size > 1`) column in a rule fails immediately with `error stop` when `parquet_open_reader` is called. So does naming a column that doesn't exist in the file, or a rule with invalid syntax (unknown operator, unquoted string value, non-numeric value against a numeric column, etc.) — every rule is fully validated (column existence, type-compatibility, and value parsing) right there in `parquet_open_reader`, before any of your own code runs.
+Each `filt%add(rule)` call contributes one boolean **expression** over the file's columns. An expression is either a single clause or several clauses combined with `and`, `or`, `not` and parentheses:
+
+```
+   expr     := or_expr
+   or_expr  := and_expr { or and_expr }
+   and_expr := not_expr { and not_expr }
+   not_expr := [ not ] not_expr | primary
+   primary  := '(' expr ')' | clause
+   clause   := <column> <op> [ <value> ]
+```
+
+| | |
+|---|---|
+| **Precedence** | `not` binds tightest, then `and`, then `or` — so `a or b and c` means `a or (b and c)`, and `not a and b` means `(not a) and b`. Parentheses override. |
+| **Keywords** | `and` / `or` / `not`, in any case (`AND`, `And`, `and`). Only whole tokens are keywords, so a column named `android` or `nothing` is unaffected. Fortran-style `.and.` and C-style `&&` are *not* accepted. |
+| **Operators** | `>`, `>=`, `<`, `<=`, `==`, `/=`, `is_null`, `is_not_null`. A clause's operator must be surrounded by spaces (`"v > 3"`, not `"v>3"`); parentheses need no surrounding spaces. |
+| **Values** | A bare number for a numeric column (`ra > 180`), `true`/`false` for a boolean column (`flag == true`), a **double-quoted** string for a `string` column (`name == "abell_1"`), or a **double-quoted ISO-8601 literal** for a `date`/`time`/`timestamp` column (see below). `is_null`/`is_not_null` take no value. A quoted value may contain spaces, parentheses, and the keywords themselves — it is read as one token. |
+| **Column names** | May be a dotted struct-leaf path (`main.inner.age > 35`). A column name cannot contain spaces. |
+| **Several `%add` calls** | **AND-combined**: two calls mean `(expr1) and (expr2)`. This keeps every filter written as one clause per call meaning exactly what it always did; write `or` inside a single rule when you want alternatives. |
+| **Limits** | 32 levels of nesting, 1024 expression terms per filter, 8192 characters per rule — each reported as a clean error rather than a crash. |
+
+`in`, `between` and wildcard/`like` matching are deliberately not supported: the first two are shorthand for what the grammar already expresses (`x in (1,2,3)` is `x == 1 or x == 2 or x == 3`; `x between 1 and 9` is `x >= 1 and x <= 9`), and pattern matching is genuinely different work.
+
+### Null values follow SQL's three-valued logic
+
+A comparison against a Null is neither true nor false but **unknown**, and only rows that come out *true* survive:
+
+| expression | a row whose `x` is Null |
+|---|---|
+| `x > 5` | excluded (unknown) |
+| `not x > 5` | **still excluded** — negating unknown is unknown, not true |
+| `x > 5 or y > 5` | survives only if `y > 5` is true |
+| `x is_null` | survives |
+| `not x is_null` | excluded; identical to `x is_not_null` |
+
+`is_null`/`is_not_null` are the only operators that answer true/false for a Null row, so they are the only way to select one. This matches SQL's `WHERE` clause and Arrow's own kernels — in particular, `not` does **not** let Null rows in through the back door.
+
+### Filtering `date`, `time` and `timestamp` columns
+
+A temporal column is compared against a double-quoted ISO-8601 literal, which is converted into the column's own stored unit:
+
+```fortran
+call filt%add('obs_date >= "2024-01-31"')
+call filt%add('obs_time < "12:30:00"')
+call filt%add('obs_ts == "2024-01-31T12:30:00"')
+```
+
+- A **less** precise literal is fine: a date-only literal against a `timestamp` column means midnight of that date.
+- A **more** precise literal is an error, not a silent truncation: `"2024-01-31T12:30:00.123456"` against a `timestamp[ms]` column is rejected, because that column cannot represent the value being asked about. So is any literal with a time part against a `date` column.
+- An **unquoted** value against a temporal column is rejected too — a bare number would mean days for one column and microseconds since the epoch for another, with nothing in the rule to say which.
+- **Timezones are not interpreted.** A `parquet_timestamp` holds the stored epoch offset verbatim (see [Dates and times](date-time.html)), so a literal is read as a civil date/time and compared against the same stored instants a read returns.
+
+### Validation and cost
+
+Only plain scalar columns can be filtered — naming a vector (`col_size > 1`) column in a rule fails immediately with `error stop` when `parquet_open_reader` is called. So does naming a column that doesn't exist in the file, or a rule with invalid syntax (an unbalanced parenthesis, a dangling `and`, an unknown operator, an unquoted string value, a non-numeric value against a numeric column, ...) — every rule is fully parsed and validated (column existence, type-compatibility, and value parsing) right there in `parquet_open_reader`, before any of your own code runs.
 
 Filtering is **not** predicate pushdown: every filter-referenced column, and every column you subsequently read, is still fully read and decoded from disk exactly as without a filter (Parquet row-group statistics are never used to skip I/O). The benefit is entirely downstream: `parquet_get_nrows` and every column you read only ever reflect the matching rows, so your own code loops over, allocates for, and processes far fewer rows when the filter is selective — at the cost of a small transient memory bump while a column's full decoded array and its filtered result briefly coexist, before the unfiltered one is discarded. (The `nrows=` shortcut mentioned [above](#the-nrows-shortcut) works here too — it reflects the post-filter row count.)
+
+### Applying a filter after the reader is open
+
+`parquet_reader_set_filter(reader, filt)` applies a filter to an already-open reader, with exactly the same result as having passed `filter=` to `parquet_open_reader`. It exists for callers that do not own the `parquet_open_reader` call, and for filters that can only be built once the file's schema or metadata has been inspected:
+
+```fortran
+call parquet_open_reader(reader, "data.parquet")
+if (parquet_column_exists(reader, "quality")) call filt%add("quality > 0.9")
+call parquet_reader_set_filter(reader, filt)
+```
+
+It refuses, with `error stop`, in two situations: when the reader **already has a filter** (combine the clauses into one `parquet_filter` instead — several `%add` calls are AND-combined), and when **any column has already been read** on that reader, since data already handed back covers the unfiltered rows and could not be lined up with anything read afterwards. A reader opened with `sample_fraction=` is fine — the filter applies on top of the sample, exactly as passing both to `parquet_open_reader` does.
 
 ## Random downsampling with `sample_fraction`
 

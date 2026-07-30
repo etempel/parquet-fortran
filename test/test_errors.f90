@@ -289,7 +289,7 @@ contains
                 test_filter_vector_column_aborts), &
             new_unittest("filter: malformed rule aborts", &
                 test_filter_malformed_rule_aborts), &
-            new_unittest("filter: rule longer than 512 characters aborts", &
+            new_unittest("filter: rule longer than the supported maximum aborts", &
                 test_filter_rule_too_long_aborts), &
             new_unittest("filter: non-numeric value against a numeric column aborts", &
                 test_filter_bad_numeric_value_aborts), &
@@ -305,8 +305,48 @@ contains
                 test_filter_boolean_value_must_be_unquoted_aborts), &
             new_unittest("filter: ordering comparison against a boolean column aborts", &
                 test_filter_bool_ordering_not_supported_aborts), &
-            new_unittest("filter: filtering an unsupported (temporal) column type aborts", &
+            new_unittest("filter: filtering an unsupported (binary) column type aborts", &
                 test_filter_unsupported_column_type_aborts), &
+            new_unittest("filter: unquoted value against a temporal column aborts", &
+                test_filter_temporal_value_not_quoted_aborts), &
+            new_unittest("filter: unbalanced '(' in an expression aborts", &
+                test_filter_unbalanced_parens_aborts), &
+            new_unittest("filter: stray ')' in an expression aborts", &
+                test_filter_stray_close_paren_aborts), &
+            new_unittest("filter: an empty '()' group aborts", &
+                test_filter_empty_parens_aborts), &
+            new_unittest("filter: a dangling 'and' aborts", &
+                test_filter_dangling_and_aborts), &
+            new_unittest("filter: a leading 'or' aborts", &
+                test_filter_leading_or_aborts), &
+            new_unittest("filter: 'not' with no operand aborts", &
+                test_filter_not_without_operand_aborts), &
+            new_unittest("filter: two clauses with no combinator aborts", &
+                test_filter_missing_combinator_aborts), &
+            new_unittest("filter: nesting past the depth limit aborts", &
+                test_filter_nesting_too_deep_aborts), &
+            new_unittest("filter: more expression terms than the node limit aborts", &
+                test_filter_too_many_nodes_aborts), &
+            new_unittest("filter: an invalid ISO-8601 temporal literal aborts", &
+                test_filter_temporal_bad_iso_literal_aborts), &
+            new_unittest("filter: a temporal literal finer than the column's unit aborts", &
+                test_filter_temporal_literal_too_precise_aborts), &
+            new_unittest("parquet_reader_set_filter after a column was read aborts", &
+                test_filter_set_filter_after_read_aborts), &
+            new_unittest("parquet_reader_set_filter on an already-filtered reader aborts", &
+                test_filter_set_filter_twice_aborts), &
+            new_unittest("filter: an unterminated quoted value aborts", &
+                test_filter_unterminated_quote_aborts), &
+            new_unittest("filter: an empty rule aborts", &
+                test_filter_empty_rule_aborts), &
+            new_unittest("filter: a group missing its ')' aborts", &
+                test_filter_expected_close_paren_aborts), &
+            new_unittest("filter: a ')' where a clause was expected aborts", &
+                test_filter_close_paren_as_clause_aborts), &
+            new_unittest("filter: an over-long column name aborts", &
+                test_filter_leaf_too_long_aborts), &
+            new_unittest("filter: combined %add rules past the node limit abort", &
+                test_filter_too_many_nodes_across_adds_aborts), &
             new_unittest("sample_fraction: negative value aborts", &
                 test_sample_negative_fraction_aborts), &
             new_unittest("sample_fraction: NaN value aborts", &
@@ -2463,7 +2503,7 @@ contains
         type(error_type), allocatable, intent(out) :: error
 
         call check_scenario_exit_status_and_stderr(error, "filter_rule_too_long", expect_abort=.true., &
-            failure_message="adding a filter rule longer than 512 characters was expected to abort", &
+            failure_message="adding a filter rule longer than the supported maximum was expected to abort", &
             required_stderr="parquet_filter%add: rule exceeds the maximum supported length")
     end subroutine test_filter_rule_too_long_aborts
 
@@ -2540,9 +2580,182 @@ contains
         type(error_type), allocatable, intent(out) :: error
 
         call check_scenario_exit_status_and_stderr(error, "filter_unsupported_column_type", expect_abort=.true., &
-            failure_message="filtering a temporal column was expected to abort", &
+            failure_message="filtering a binary column was expected to abort", &
             required_stderr="has a type that filtering does not support")
     end subroutine test_filter_unsupported_column_type_aborts
+
+    !> A temporal column is filterable, but only against a double-quoted ISO-8601 literal -- a
+    !> bare number would mean different things for a date and a timestamp[us] column.
+    subroutine test_filter_temporal_value_not_quoted_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_temporal_value_not_quoted", expect_abort=.true., &
+            failure_message="an unquoted value against a temporal column was expected to abort", &
+            required_stderr="must be a double-quoted ISO-8601 literal")
+    end subroutine test_filter_temporal_value_not_quoted_aborts
+
+    !> The eight syntax scenarios below each exercise one rejection in the recursive-descent
+    !> parser (parquet_read_filter.f90), which reports every one of them as a clean Fortran
+    !> error stop before any column is read.
+    subroutine test_filter_unbalanced_parens_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_unbalanced_parens", expect_abort=.true., &
+            failure_message="an unbalanced '(' was expected to abort", &
+            required_stderr="has an unbalanced '('")
+    end subroutine test_filter_unbalanced_parens_aborts
+
+    subroutine test_filter_stray_close_paren_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_stray_close_paren", expect_abort=.true., &
+            failure_message="a stray ')' was expected to abort", &
+            required_stderr="unexpected ')'")
+    end subroutine test_filter_stray_close_paren_aborts
+
+    subroutine test_filter_empty_parens_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_empty_parens", expect_abort=.true., &
+            failure_message="an empty '()' group was expected to abort", &
+            required_stderr="has an empty '()' group")
+    end subroutine test_filter_empty_parens_aborts
+
+    subroutine test_filter_dangling_and_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_dangling_and", expect_abort=.true., &
+            failure_message="a dangling 'and' was expected to abort", &
+            required_stderr="ends after an operator; a clause is missing")
+    end subroutine test_filter_dangling_and_aborts
+
+    subroutine test_filter_leading_or_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_leading_or", expect_abort=.true., &
+            failure_message="a leading 'or' was expected to abort", &
+            required_stderr="has a dangling 'or'")
+    end subroutine test_filter_leading_or_aborts
+
+    subroutine test_filter_not_without_operand_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_not_without_operand", expect_abort=.true., &
+            failure_message="a 'not' with no operand was expected to abort", &
+            required_stderr="ends after an operator; a clause is missing")
+    end subroutine test_filter_not_without_operand_aborts
+
+    subroutine test_filter_missing_combinator_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_missing_combinator", expect_abort=.true., &
+            failure_message="two clauses with no combinator were expected to abort", &
+            required_stderr="(a missing and/or?)")
+    end subroutine test_filter_missing_combinator_aborts
+
+    subroutine test_filter_nesting_too_deep_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_nesting_too_deep", expect_abort=.true., &
+            failure_message="an over-nested filter expression was expected to abort", &
+            required_stderr="nested deeper than the supported limit")
+    end subroutine test_filter_nesting_too_deep_aborts
+
+    subroutine test_filter_too_many_nodes_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_too_many_nodes", expect_abort=.true., &
+            failure_message="a filter expression past the node limit was expected to abort", &
+            required_stderr="more terms than the supported limit")
+    end subroutine test_filter_too_many_nodes_aborts
+
+    !> A quoted value that is not a valid ISO-8601 literal for the column's own temporal type.
+    subroutine test_filter_temporal_bad_iso_literal_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_temporal_bad_iso_literal", expect_abort=.true., &
+            failure_message="an invalid ISO-8601 temporal literal was expected to abort", &
+            required_stderr="is not a valid ISO-8601 date for column")
+    end subroutine test_filter_temporal_bad_iso_literal_aborts
+
+    !> Sub-millisecond digits against a timestamp[ms] column: rejected rather than truncated,
+    !> since truncating would answer a question about a value the file cannot hold.
+    subroutine test_filter_temporal_literal_too_precise_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_temporal_literal_too_precise", expect_abort=.true., &
+            failure_message="a temporal literal finer than the column's unit was expected to abort", &
+            required_stderr="more precise than that column's stored unit can represent")
+    end subroutine test_filter_temporal_literal_too_precise_aborts
+
+    !> parquet_reader_set_filter's two guards: a reader that already decoded a column, and one
+    !> that is already filtered.
+    subroutine test_filter_set_filter_after_read_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_set_filter_after_read", expect_abort=.true., &
+            failure_message="setting a filter after reading a column was expected to abort", &
+            required_stderr="a column has already been read on this reader")
+    end subroutine test_filter_set_filter_after_read_aborts
+
+    subroutine test_filter_set_filter_twice_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_set_filter_twice", expect_abort=.true., &
+            failure_message="setting a second filter was expected to abort", &
+            required_stderr="already has an active filter")
+    end subroutine test_filter_set_filter_twice_aborts
+
+    !> The six below close the remaining parser/packing rejections: an unterminated quoted value,
+    !> an empty rule, the two distinct ')' failures, a name too long for the packed per-leaf
+    !> width, and the node cap counted across several %add calls rather than within one rule.
+    subroutine test_filter_unterminated_quote_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_unterminated_quote", expect_abort=.true., &
+            failure_message="an unterminated quoted value was expected to abort", &
+            required_stderr="has an unterminated quoted value")
+    end subroutine test_filter_unterminated_quote_aborts
+
+    subroutine test_filter_empty_rule_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_empty_rule", expect_abort=.true., &
+            failure_message="an empty filter rule was expected to abort", &
+            required_stderr="empty filter rule")
+    end subroutine test_filter_empty_rule_aborts
+
+    subroutine test_filter_expected_close_paren_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_expected_close_paren", expect_abort=.true., &
+            failure_message="a group missing its ')' was expected to abort", &
+            required_stderr="expected ')' but found")
+    end subroutine test_filter_expected_close_paren_aborts
+
+    subroutine test_filter_close_paren_as_clause_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_close_paren_as_clause", expect_abort=.true., &
+            failure_message="a ')' where a clause was expected was expected to abort", &
+            required_stderr="has an unbalanced ')'")
+    end subroutine test_filter_close_paren_as_clause_aborts
+
+    subroutine test_filter_leaf_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_leaf_too_long", expect_abort=.true., &
+            failure_message="an over-long filter column name was expected to abort", &
+            required_stderr="filter rule exceeds an internal length limit")
+    end subroutine test_filter_leaf_too_long_aborts
+
+    subroutine test_filter_too_many_nodes_across_adds_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_too_many_nodes_across_adds", expect_abort=.true., &
+            failure_message="combined %add rules past the node limit were expected to abort", &
+            required_stderr="more terms than the supported limit")
+    end subroutine test_filter_too_many_nodes_across_adds_aborts
 
     !> parquet_open_reader's sample_fraction < 0.0 aborts immediately.
     subroutine test_sample_negative_fraction_aborts(error)

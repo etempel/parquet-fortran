@@ -185,6 +185,29 @@ fi
 echo "Cleaning previous C++ coverage build directory: $FPM_BUILD_DIR" >&2
 rm -rf "$FPM_BUILD_DIR"
 
+# ...and remove it again on the way out, however this script exits. The instrumented tree
+# contains its own test binaries, including error_scenarios -- and both
+# tools/run_error_scenarios.sh and test/test_errors.f90 locate that binary with
+# `find build -type f -name error_scenarios | head -1`, which cannot tell an instrumented
+# copy from the ordinary one. Leaving this tree behind therefore makes the NEXT plain
+# `fpm test`/`tools/run_error_scenarios.sh` run a binary it did not build: in the benign
+# direction every scenario reports "scenario name not recognized", and in the dangerous one
+# a stale binary reports "All error scenarios behaved as expected" (see CLAUDE.md, "Stale
+# fpm build cache"). The coverage report is computed from this tree, so cleanup can only
+# happen at exit, not before the report.
+#
+# Set COVERAGE_KEEP_BUILD=1 to keep it -- useful when a run fails and the .gcda/.gcno files
+# themselves need inspecting.
+cleanup_coverage_build() {
+    if [ -n "${COVERAGE_KEEP_BUILD:-}" ]; then
+        echo "COVERAGE_KEEP_BUILD is set: leaving $FPM_BUILD_DIR in place." >&2
+        echo "Delete it before the next plain fpm test/run_error_scenarios.sh run." >&2
+        return
+    fi
+    rm -rf "$FPM_BUILD_DIR"
+}
+trap cleanup_coverage_build EXIT
+
 echo "Building + running run_tester with coverage instrumentation..." >&2
 fpm test run_tester -- "$@"
 

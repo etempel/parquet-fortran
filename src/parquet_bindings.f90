@@ -53,7 +53,7 @@ module parquet_bindings
     public :: parquet_reader_get_column_name, parquet_reader_release_column
     public :: parquet_reader_prefetch_columns, parquet_reader_prefetch_all_columns, parquet_reader_has_column
     public :: parquet_reader_get_column_type_name
-    public :: parquet_reader_set_filter
+    public :: c_reader_set_filter, parquet_reader_has_decoded_columns, parquet_reader_has_filter_clauses
     public :: parquet_reader_set_sample
     public :: parquet_reader_set_qc
     public :: parquet_read_int32_column, parquet_read_int64_column
@@ -515,9 +515,25 @@ module parquet_bindings
         end function
 
         !> Validates and applies a packed row filter to `reader`; returns
-        !> non-zero and writes a message to `err_out` on failure.
-        function parquet_reader_set_filter(reader, names_packed, name_len, ops_packed, op_len, &
-                values_packed, value_len, is_string_flags, n, err_out, err_cap) &
+        !> non-zero and writes a message to `err_out` on failure. The clauses
+        !> arrive as `n` packed leaves (names/ops/values/is_string_flags) plus
+        !> `n_nodes` postfix expression nodes over them (node_kind: 1=leaf,
+        !> 2=and, 3=or, 4=not; node_leaf: 1-based leaf index for a leaf node,
+        !> 0 otherwise) -- see parquet_parse_filter_expr in
+        !> parquet_read_filter.f90, which builds them. `expr_text` is the same
+        !> expression re-rendered in canonical form (NUL-terminated), retained
+        !> on the handle purely so parquet_reader_print_stat can show what was
+        !> applied; the evaluator never parses it.
+        !>
+        !> Deliberately NOT named parquet_reader_set_filter on the Fortran side,
+        !> unlike every other interface here: that name belongs to the public
+        !> API procedure in parquet.f90 (which calls this one via
+        !> parquet_apply_filter), and parquet.f90 imports this module
+        !> unrestricted, so the two would collide. The linked C symbol is
+        !> unchanged.
+        function c_reader_set_filter(reader, names_packed, name_len, ops_packed, op_len, &
+                values_packed, value_len, is_string_flags, n, node_kind, node_leaf, n_nodes, &
+                expr_text, err_out, err_cap) &
                 bind(C, name="parquet_reader_set_filter") result(status)
             import
             type(c_ptr), value :: reader
@@ -529,9 +545,36 @@ module parquet_bindings
             integer(c_long_long), value :: value_len
             integer(c_int8_t) :: is_string_flags(*)
             integer(c_long_long), value :: n
+            integer(c_int8_t) :: node_kind(*)
+            integer(c_int32_t) :: node_leaf(*)
+            integer(c_long_long), value :: n_nodes
+            character(kind=c_char) :: expr_text(*)
             character(kind=c_char) :: err_out(*)
             integer(c_long_long), value :: err_cap
             integer(c_long_long) :: status
+        end function
+
+        !> Whether any column of `reader` has already been decoded into its
+        !> column cache (1) or not (0) -- the guard parquet_reader_set_filter
+        !> (parquet.f90) needs, since applying a filter after a read would
+        !> misalign what was already returned against everything read after.
+        function parquet_reader_has_decoded_columns(reader) &
+                bind(C, name="parquet_reader_has_decoded_columns") result(has_any)
+            import
+            type(c_ptr), value :: reader
+            integer(c_long_long) :: has_any
+        end function
+
+        !> Whether `reader` has filter CLAUSES installed (1) or not (0) --
+        !> narrower than parquet_reader_has_filter, which also reports a
+        !> sample-only mask. parquet_reader_set_filter (parquet.f90) refuses a
+        !> reader that is already filtered but accepts a sampled one, and this
+        !> is the distinction that lets it tell the two apart.
+        function parquet_reader_has_filter_clauses(reader) &
+                bind(C, name="parquet_reader_has_filter_clauses") result(has_any)
+            import
+            type(c_ptr), value :: reader
+            integer(c_long_long) :: has_any
         end function
 
         !> Applies Bernoulli(sample_fraction) row sampling to `reader` (see parquet_reader_set_sample

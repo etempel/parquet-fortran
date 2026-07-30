@@ -574,7 +574,14 @@ Follow these when adding new public API, types, or internal helpers:
   drop the `parquet_` prefix — this is intentional, not an inconsistency to "fix".
 - **C++ bindings** (`parquet_bindings.f90` interfaces, `parquet_wrapper.cpp`) mirror the C++
   side's own naming (still generally `parquet_`-prefixed for the `extern "C"` surface) —
-  don't rename these to match Fortran-side conventions.
+  don't rename these to match Fortran-side conventions. **One exception, and the rule for
+  creating another:** `parquet.f90` does an unrestricted `use parquet_bindings`, so a public API
+  procedure cannot share a name with a binding. When that collides, keep the public name and give
+  the *Fortran-side interface* a `c_`-prefixed one while leaving `bind(C, name="...")` — and thus
+  the linked symbol and `parquet_wrapper.cpp` — untouched; `tools/check_bindc_boundary.py` keys on
+  the `bind(C, name=)` value, so it follows the rename with no change. `c_reader_set_filter`
+  (bound to `parquet_reader_set_filter`, whose Fortran name belongs to the public post-open filter
+  setter) is the existing instance.
 
 - **A new module holding several related element/handle types** (as opposed to one module per
   type) should be named after the *domain* those types belong to, not any single type inside
@@ -1052,6 +1059,11 @@ Building with several different `FPM_FFLAGS` creates multiple `build/gfortran_<h
 which can pick a *stale* binary from an old hash dir — symptom: tests pass when run scoped but
 fail under a full `fpm test`. `tools/coverage.sh` runs `fpm clean` up front to avoid this; for a
 plain `fpm test`, `fpm clean --skip` fixes it.
+
+**`tools/coverage.sh`/`tools/coverage_cpp.sh` clean up after themselves** (they delete their own
+`build/gcov`/`build/gcov-cpp` tree on exit, since an instrumented `error_scenarios` binary left under
+`build/` is indistinguishable to the lookup below) — `COVERAGE_KEEP_BUILD=1` keeps it, and then it is
+yours to delete before the next plain `fpm test`.
 
 **`tools/run_error_scenarios.sh` resolves its binary the same way** (`find "${FPM_BUILD_DIR:-build}"
 -type f -name error_scenarios | head -n 1`), and there the failure direction is the dangerous one: it

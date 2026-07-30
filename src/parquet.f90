@@ -41,6 +41,19 @@ module parquet
     !> schema carrying this value before it becomes usable, so a caller never actually observes it.
     integer, parameter :: size_invalid_sentinel = -2
 
+    !> The three limits on one parquet_filter's rule text, declared here once and reached by
+    !> host association from parquet_read/parquet_read_filter (the same convention
+    !> maml_max_line_len follows in parquet_metadata.f90). All three exist so that adversarial
+    !> or accidentally-huge input fails as a clean error stop rather than as a stack overflow
+    !> (the parser is recursive descent) or an unbounded allocation:
+    !>   filter_max_rule_len   -- characters in one %add rule.
+    !>   filter_max_depth      -- parenthesis/not nesting levels within one rule; also bounds the
+    !>                            C++ evaluator's peak memory, which is (live operands) * nrows bytes.
+    !>   filter_max_nodes      -- expression nodes across every %add call of one filter.
+    integer, parameter :: filter_max_rule_len = 8192
+    integer, parameter :: filter_max_depth = 32
+    integer, parameter :: filter_max_nodes = 1024
+
     !> Canonical single data-type tokens parquet_column_exists/parquet_get_column_type recognize:
     !> valid_maml_data_types plus the three temporal base tokens ("date"/"time"/"timestamp").
     !> parquet_column_exists additionally accepts the group aliases "int" (int32/int64), "float"
@@ -400,17 +413,27 @@ module parquet
         final :: reader_finalize !! Safety-net close if the reader is still open when it goes out of scope.
     end type parquet_reader
 
-    !> A row filter for parquet_open_reader: each %add call is one AND-combined
-    !> clause, "<column> <op> [value]" (e.g. "ra > 180", "id is_not_null"),
+    !> A row filter for parquet_open_reader/parquet_reader_set_filter: each %add
+    !> call contributes one boolean expression over the file's columns, and
+    !> several %add calls are AND-combined, i.e. (expr1) and (expr2). One
+    !> expression is either a single clause, "<column> <op> [value]" (e.g.
+    !> "ra > 180", "id is_not_null"), or clauses combined with and/or/not and
+    !> parentheses, e.g. "(ra > 180 and dec <= 0) or id is_null". Keywords are
+    !> case-insensitive and bind not > and > or. Null rows follow SQL's
+    !> three-valued logic: a comparison against a Null is unknown, unknown never
+    !> survives, and is_null/is_not_null are the only way to select on nullness.
+    !> Rules are unvalidated here -- the expression is parsed, and every clause
     !> validated (column exists, is a scalar column, value is well-formed for
-    !> that column's type) once parquet_open_reader actually applies it --
-    !> %add itself just accumulates the raw rule text. See "Row filtering with
-    !> parquet_filter" in the README for the full rule syntax.
+    !> that column's type), once a reader actually applies the filter. See "Row
+    !> filtering with parquet_filter" in doc/pages/reading.md for the grammar.
     type parquet_filter
-        character(len=512), allocatable :: rules(:) !! Raw, unvalidated "<column> <op> [value]" rule text, one per %add call.
-        integer :: n = 0 !! Number of rules actually in use (rules(:) may be over-allocated).
+        !> Raw, unvalidated rule text, one entry per %add call. Deferred-length: every entry
+        !! shares the length of the longest rule added so far (%add grows it as needed), so a
+        !! parenthesised multi-clause expression is not constrained by a fixed component width.
+        character(len=:), allocatable :: rules(:)
+        integer :: n = 0 !! Number of rules actually in use.
     contains
-        procedure :: add => parquet_filter_add !! Appends one AND-combined "<column> <op> [value]" rule clause.
+        procedure :: add => parquet_filter_add !! Appends one AND-combined filter expression.
     end type parquet_filter
 
     !> Internal plumbing only (not part of the public API): one column's
@@ -985,6 +1008,7 @@ module parquet
     public :: parquet_validate_maml
     public :: parquet_validate_user_maml
     public :: parquet_open_reader
+    public :: parquet_reader_set_filter
     public :: parquet_close_reader
     public :: parquet_prefetch_columns
     public :: parquet_get_nrows
@@ -2104,6 +2128,26 @@ module parquet
 
     ! ---- Reader lifecycle & queries ----
     interface
+        !> Applies `filter` to an already-open `reader`, exactly as
+        !> parquet_open_reader(..., filter=) would have: every column read from
+        !> here on covers only the matching rows, and parquet_get_nrows reports
+        !> the filtered count. Provided for callers that do not own the
+        !> parquet_open_reader call (a higher-level type that opens its reader
+        !> internally, say), and for building a filter from information only
+        !> available once the file's schema/metadata can be inspected.
+        !>
+        !> Refuses, with error stop, in two states: when the reader already has
+        !> an active filter (compose the clauses into one parquet_filter instead
+        !> -- several %add calls are AND-combined), and when any column has
+        !> already been decoded on this reader, since data already returned to
+        !> the caller could not then be aligned with anything read afterwards.
+        !> A reader opened with sample_fraction= is fine: the filter combines
+        !> with the sample draw, the same way passing both to
+        !> parquet_open_reader does.
+        module subroutine parquet_reader_set_filter(reader, filter)
+            type(parquet_reader), intent(inout) :: reader !! open, unfiltered reader with no column decoded yet.
+            type(parquet_filter), intent(in) :: filter !! filter whose rules are parsed, validated, and applied.
+        end subroutine parquet_reader_set_filter
         !> Reader, int32 specific of parquet_get_chunk_size -- see the generic interface above.
         module subroutine parquet_get_chunk_size_reader_int32(reader, chunk_size, row_group)
             type(parquet_reader), intent(in) :: reader !! open reader.
@@ -3378,28 +3422,34 @@ contains
         call parquet_set_thread_pool_capacity(int(n, kind=c_int))
     end subroutine parquet_set_max_threads
 
-    !> Appends one AND-combined filter clause; see parquet_filter's own doc
-    !> comment for the "<column> <op> [value]" rule syntax. Unvalidated here
-    !> -- parquet_open_reader validates every rule when it actually applies
-    !> the filter.
+    !> Appends one AND-combined filter expression; see parquet_filter's own doc
+    !> comment for the rule grammar. Unvalidated here -- the reader parses and
+    !> validates every rule when it actually applies the filter. The stored
+    !> text is deferred-length, so a rule only has to fit filter_max_rule_len
+    !> (a sanity bound against unbounded input, not a design limit): adding a
+    !> longer rule than any so far re-lengthens every stored entry.
     subroutine parquet_filter_add(this, rule)
         class(parquet_filter), intent(inout) :: this !! filter gaining one rule.
-        character(len=*), intent(in) :: rule !! raw "<column> <op> [value]" rule text (max 512 characters).
-        character(len=512), allocatable :: tmp(:)
+        character(len=*), intent(in) :: rule !! raw filter expression text (max filter_max_rule_len characters).
+        character(len=:), allocatable :: tmp(:)
+        character(len=32) :: cap_str
 
-        if (len(rule) > len(this%rules)) then
-            error stop "parquet_filter%add: rule exceeds the maximum supported length (512 characters): " // trim(rule)
+        if (len(rule) > filter_max_rule_len) then
+            write(cap_str, '(i0)') filter_max_rule_len
+            error stop "parquet_filter%add: rule exceeds the maximum supported length (" // trim(cap_str) // &
+                " characters): " // trim(rule)
         end if
 
         if (.not. allocated(this%rules)) then
-            allocate(this%rules(1))
-            this%rules(1) = rule
+            allocate(character(len=len(rule)) :: tmp(1))
+            tmp(1) = rule
+            call move_alloc(tmp, this%rules)
             this%n = 1
             return
         end if
 
-        allocate(tmp(this%n + 1))
-        tmp(1:this%n) = this%rules
+        allocate(character(len=max(len(this%rules), len(rule))) :: tmp(this%n + 1))
+        tmp(1:this%n) = this%rules(1:this%n)
         tmp(this%n + 1) = rule
         call move_alloc(tmp, this%rules)
         this%n = this%n + 1

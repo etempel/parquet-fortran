@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Row filters are now boolean **expressions** over the file's columns, not just AND-combined
+  clauses: `filt%add("(ra > 180 and dec <= 0) or id is_null")`, with `and`/`or`/`not` (any
+  casing), parentheses and `not` > `and` > `or` precedence. Several `%add` calls are still
+  AND-combined, so every filter written against the previous syntax means exactly what it did.
+  Null handling is now genuine SQL three-valued logic — a comparison against a Null is unknown
+  and never survives, in particular under `not`, and `is_null`/`is_not_null` remain the only way
+  to select Null rows. `date`/`time`/`timestamp` columns can now be filtered, against
+  double-quoted ISO-8601 literals (`obs_ts >= "2024-01-31T12:30:00"`), where a literal finer than
+  the column's stored unit is rejected rather than silently truncated. A filter can also be
+  applied to an already-open reader with the new `parquet_reader_set_filter`. Rule text is no
+  longer capped at 512 characters, and `parquet_close_reader(..., print_stat=.true.)` prints the
+  whole expression as applied. See [Row filtering](doc/pages/reading.md#row-filtering-with-parquet_filter).
 - Added `parquet_tables` (`parquet_table`): presents a whole parquet file as one in-memory table
   (`parquet_open_table`), hands columns back as ordinary Fortran arrays through a widening copy
   (`%get`) or a zero-copy typed pointer (`%col`), builds a table from scratch in memory

@@ -18,7 +18,7 @@ before_script:
   - apt-get update -y
   - apt-get upgrade -y
   - apt-get install -y --no-install-recommends ca-certificates lsb-release wget gnupg
-        gfortran gcc g++ make git git-lfs gcovr
+        gfortran-14 gcc-14 g++-14 make git git-lfs gcovr
 
   # Installing FPM (Fortran Package Manager) via pipx
   - apt-get install -y python3-venv

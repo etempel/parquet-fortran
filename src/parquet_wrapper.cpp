@@ -1001,6 +1001,43 @@ extern "C"
 		std::call_once(compute_init_flag, []() { auto st = arrow::compute::Initialize(); (void)st; });
 	}
 
+	// Every no-argument arrow::<type>() factory (arrow::int32(), arrow::utf8(), ...) returns a
+	// reference to a function-local static singleton -- normally safe to call concurrently for
+	// the first time under C++11 "magic statics", but confirmed via ThreadSanitizer (see
+	// CLAUDE.md's Arrow type-singleton race note) to actually race on this project's apt-installed
+	// Arrow build: two OpenMP threads each writing a column of the same type for the very first
+	// time in the process can race on that singleton's construction, corrupting its shared_ptr
+	// control block. The corruption doesn't crash where it happens -- it surfaces later, in
+	// whatever unrelated code next touches the heap, which is what made the original symptom
+	// (a SIGSEGV inside a trivial, unrelated boolean check) so misleading.
+	//
+	// Fixed the same way ensure_compute_initialized() above fixes a different lazy-registry race:
+	// force every singleton this file uses into existence exactly once, from a single thread,
+	// before any OpenMP-parallel code path can reach Arrow at all. After that first call, every
+	// later concurrent call is just a read of an already-published pointer, which is safe. Keep
+	// this list in sync with every bare (no-argument) arrow::<type>() factory used anywhere in
+	// this file -- a parameterized factory (arrow::timestamp(unit), arrow::decimal128(p, s), ...)
+	// is NOT affected, since those construct a fresh object per call rather than caching a
+	// singleton.
+	static void ensure_arrow_type_singletons_initialized()
+	{
+		static std::once_flag type_init_flag;
+		std::call_once(type_init_flag, []() {
+			auto i32 = arrow::int32();
+			auto i64 = arrow::int64();
+			auto f32 = arrow::float32();
+			auto f64 = arrow::float64();
+			auto b = arrow::boolean();
+			auto u8 = arrow::utf8();
+			auto lu8 = arrow::large_utf8();
+			auto u8v = arrow::utf8_view();
+			auto bin = arrow::binary();
+			auto d32 = arrow::date32();
+			(void)i32; (void)i64; (void)f32; (void)f64; (void)b;
+			(void)u8; (void)lu8; (void)u8v; (void)bin; (void)d32;
+		});
+	}
+
 	// arrow::compute::Filter (Arrow 24) has no "array_filter" kernel for arrow::Type::STRING_VIEW
 	// at all -- confirmed via NotImplementedError ("Function 'array_filter' has no kernel
 	// matching input types (string_view, bool)"). Since every read-side call site already treats
@@ -2990,6 +3027,10 @@ extern "C"
 	// Creates filename and returns an opaque handle to a new parquet writer for it.
 	void *create_parquet_writer(const char *filename)
 	{
+		// See ensure_arrow_type_singletons_initialized's own comment: this is one of the two
+		// entry points (with create_parquet_reader) any OpenMP thread can reach FIRST, so this is
+		// where the one-time, single-threaded warm-up has to happen.
+		ensure_arrow_type_singletons_initialized();
 		auto *handle = new ParquetWriterHandle{};
 		auto result = arrow::io::FileOutputStream::Open(filename);
 		if (!result.ok())
@@ -3425,6 +3466,9 @@ extern "C"
 	// specific column is asked for.
 	void *create_parquet_reader(const char *filename, int use_threads)
 	{
+		// See ensure_arrow_type_singletons_initialized's own comment: this is the other of the two
+		// entry points (with create_parquet_writer) any OpenMP thread can reach FIRST.
+		ensure_arrow_type_singletons_initialized();
 		auto *handle = new ParquetReaderHandle{};
 		handle->filename = filename;
 		auto infile_result = arrow::io::ReadableFile::Open(filename);

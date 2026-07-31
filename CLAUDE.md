@@ -58,6 +58,7 @@ working rules).
   - [The `parquet_temporal` module (date/time/timestamp)](#the-parquet_temporal-module-datetimetimestamp)
 - [Build & compiler notes](#build--compiler-notes)
   - [Compiler & language gotchas](#compiler--language-gotchas)
+  - [Arrow's own type-singleton construction is not thread-safe on first concurrent use](#arrows-own-type-singleton-construction-is-not-thread-safe-on-first-concurrent-use)
   - [Verifying the bind(C) boundary](#verifying-the-bindc-boundary)
   - [If `src/parquet_wrapper.cpp` is ever split into multiple translation units](#if-srcparquet_wrappercpp-is-ever-split-into-multiple-translation-units)
   - [Stale `fpm` build cache](#stale-fpm-build-cache)
@@ -1167,6 +1168,63 @@ counterpart. User guide: `doc/pages/date-time.md`.
   Apply the same cap to any new message embedding a rule, a MAML line, a filename, or any other
   value whose length the caller controls; it is better behaviour regardless of compiler, since a
   multi-kilobyte error message is unreadable anyway.
+- **ifx rejects a default structure constructor (`type_name()`) when the type has a component
+  whose OWN type has private components declared in a different module — even when that
+  component isn't touched by the constructor and was already cleared beforehand.** gfortran
+  accepts this without complaint; ifx (confirmed on the Intel compiler active in the qmost
+  environment) rejects it with `error #6053: Structure constructor may not have components with
+  the PRIVATE attribute`, naming the *outer* type even though the private components belong to
+  the nested one. `parquet_table_column` (`parquet_tables.f90`) has a `values` component of type
+  `parquet_column`, whose own components are private to `parquet_columns.f90` — so
+  `parquet_table_column()` used to reset a slot's metadata fields (after `%clear()`-ing `values`
+  itself on the preceding line) fails under ifx despite `values` never being named. Fix: replace
+  the default structure constructor with an explicit field-by-field reset of the type's own
+  metadata components (matching their declared defaults), leaving the private-dependent component
+  untouched (already handled separately, e.g. by `%clear()`). `table_drop_column`
+  (`parquet_tables_mutate.f90`) is the worked example. Any future default structure constructor on
+  a type that embeds a component from another module's private-component type needs the same
+  treatment.
+
+### Arrow's own type-singleton construction is not thread-safe on first concurrent use
+
+Every no-argument `arrow::<type>()` factory (`arrow::int32()`, `arrow::utf8()`, `arrow::boolean()`,
+...) returns a reference to a function-local `static` singleton — the standard C++11 "magic
+statics" pattern, normally safe to construct concurrently for the first time since the compiler
+inserts a one-time-init guard. **Confirmed via ThreadSanitizer, not just inferred from the
+symptom, that this project's apt-installed Arrow build (`.gitlab-ci.yml`'s Arrow apt repository)
+actually races on it**: two independent OpenMP threads each writing/reading a column of the same
+type for the very first time in the process (e.g. two threads both opening their own writer and
+both calling `parquet_write_int32_column` within the same instant, at test-suite/program startup)
+raced on `arrow::int32()`'s singleton construction — a genuine data race on that singleton's
+`shared_ptr` control block, not a false positive. Root cause not chased further than "the apt
+Arrow build behaves this way"; do not assume a from-source Arrow build is affected the same way
+without re-checking.
+
+**Why this was so hard to trace back to its actual cause**: corrupting a process-wide singleton's
+refcount doesn't crash where it happens — it surfaces later, in whatever unrelated code next
+touches the heap. This is exactly what made an earlier investigation (chasing a SIGSEGV inside
+`table_check_not_detached`, a completely unrelated and trivially-simple boolean check) so
+misleading: the actual bug was nowhere near the code the crash pointed at. **If a future
+concurrency bug report shows a clean-looking `error stop`/check failure immediately followed by a
+crash in unrelated code, or a crash whose faulting line changes between runs, suspect heap
+corruption from an early race over something process-global (a lazily-initialized Arrow singleton
+being the confirmed instance, but not necessarily the only possible one) before assuming the crash
+site itself is where the bug lives.**
+
+Fixed in `parquet_wrapper.cpp` (`ensure_arrow_type_singletons_initialized`, `std::call_once`-
+guarded, mirroring `ensure_compute_initialized`'s existing pattern for Arrow's compute-kernel
+registry): every no-argument `arrow::<type>()` factory this file uses is forced into existence
+exactly once, from a single thread, at the top of both `create_parquet_reader` and
+`create_parquet_writer` — the two entry points any OpenMP thread can reach first. After that one
+call, every later concurrent call just reads the already-published pointer, which is safe. **A
+parameterized factory (`arrow::timestamp(unit)`, `arrow::decimal128(p, s)`, ...) is NOT affected**
+— those construct a fresh object per call rather than caching a singleton, so they have nothing to
+warm up. **Keep the warm-up list in sync with `parquet_wrapper.cpp`'s actual usage**: if a future
+change introduces a new bare `arrow::<type>()` call site, add it to
+`ensure_arrow_type_singletons_initialized`'s list too — grep the file for `arrow::` factory calls
+taking no arguments to re-derive the exhaustive list if in doubt. See
+[Thread safety](doc/pages/thread-safety.md#a-note-on-arrows-own-type-singleton-construction) for
+the user-facing writeup.
 
 ### Verifying the bind(C) boundary
 

@@ -127,17 +127,23 @@ test:
     # EXCLUDE_LINE_PATTERNS in sync with this regex if it ever changes.
     - gcovr -r . --filter 'src/*' --exclude 'src/test*' --exclude-lines-by-pattern '\s*report_fatal_error\('
 
-# Two manual, non-gating diagnostic jobs added to chase a SIGSEGV seen only under this runner's
+# Three manual, non-gating diagnostic jobs added to chase a SIGSEGV seen only under this runner's
 # own concurrency (test/test_table.f90's "table" suite, specifically test_sort_matches_read_time
-# -- see the investigation this was added for). It reproduces only occasionally in CI and has not
-# reproduced at all locally across several attempts (plain and -fopenmp, single-suite and full
-# suite), which points at a race rather than a deterministic logic bug -- exactly the class of
-# failure CLAUDE.md's "Tests run concurrently" note describes as invisible to a green run. Neither
-# job is wired into the normal pipeline (`when: manual`, `allow_failure: true`): both are much
-# slower than the plain `test` job and only useful while actively chasing this one issue. Trigger
-# whichever theory needs checking from the pipeline's "Run" button; delete both once the
-# underlying bug is fixed and confirmed gone (they exist to find it, not to guard against it
-# forever -- that job, if still needed after a fix, belongs in `test:` itself, not here).
+# -- see the investigation this was added for). It reproduces reliably in CI and has not
+# reproduced at all locally across many attempts (plain and -fopenmp, single-suite and full suite,
+# single-test loops, and deliberately oversubscribed thread counts), which points at either a race
+# or a compiler-version-dependent codegen issue rather than a deterministic logic bug -- exactly
+# the class of failure CLAUDE.md's "Tests run concurrently" note describes as invisible to a green
+# run. None of the three is wired into the normal pipeline (`when: manual`, `allow_failure: true`):
+# all are much slower than the plain `test` job and only useful while actively chasing this one
+# issue. Trigger whichever theory needs checking from the pipeline's "Run" button; delete all three
+# once the underlying bug is fixed and confirmed gone (they exist to find it, not to guard against
+# it forever -- that job, if still needed after a fix, belongs in `test:` itself, not here).
+# Two real, narrow bugs have already been found and fixed this way (an Arrow type-singleton race,
+# and a `character(len=:), allocatable` function-result race -- see CLAUDE.md's Arrow-singleton and
+# "no character-returning function" notes) without the symptom actually going away, which is why a
+# third, different-shaped job (debug_gcc14_table) was added rather than continuing to assume it's
+# still this project's own source at fault.
 #
 # debug_asan_table: catches a stray out-of-bounds/use-after-free write. This is the leading
 # theory: the CI log showed a genuine ERROR STOP from table_check_not_detached (implying
@@ -193,6 +199,63 @@ debug_tsan_table:
     FPM_LDFLAGS: "-lstdc++ -fsanitize=thread"
     TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1"
   script:
+    - |
+      for i in $(seq 1 50); do
+        echo "=== table suite attempt $i ==="
+        fpm test run_tester -- table
+      done
+
+# debug_gcc14_table: tests a completely different theory from the two jobs above -- not a bug in
+# this project's own source, but a gfortran-13-vintage compiler codegen defect. Two real, narrow
+# races were found and fixed via debug_asan_table/debug_tsan_table above (an Arrow type-singleton
+# race, and a `character(len=:), allocatable` function-result race matching the known, still-open
+# GCC PR113797 -- see CLAUDE.md), yet the exact same SIGSEGV/detached-table symptom kept
+# reproducing on THIS runner afterwards, unchanged. Meanwhile it could not be reproduced even once
+# locally on gfortran 15.2.0, including under deliberately extreme oversubscription (OMP_NUM_THREADS
+# forced to 6-8x the physical core count, well past what CI's own concurrency needs) -- a flat zero
+# that a genuine, hardware-independent race should not produce. That asymmetry (100% on this
+# runner's gfortran 13, 0% on gfortran 15 under hostile conditions) is consistent with a codegen bug
+# that a later gfortran release already narrows or fixes, even though the tracking issue remains
+# nominally open upstream. This job isolates that one variable: identical build/test otherwise,
+# gfortran-14/gcc-14/g++-14 in place of the image's apt-default 13. A clean run here is evidence
+# (not proof) that what's left is compiler-version-dependent, not a remaining bug in this project's
+# own source; a failure here means the compiler-version theory is wrong and the search continues in
+# this project's own code instead.
+debug_gcc14_table:
+  tags:
+    - focal
+  stage: test
+  when: manual
+  allow_failure: true
+  before_script:
+    - apt-get update -y
+    - apt-get upgrade -y
+    - apt-get install -y --no-install-recommends ca-certificates lsb-release wget gnupg
+          gfortran-14 gcc-14 g++-14 make git git-lfs gcovr
+    - git lfs install --skip-repo
+    - git lfs pull
+    - wget "https://packages.apache.org/artifactory/arrow/$(lsb_release --id --short | tr 'A-Z' 'a-z')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb"
+    - apt-get install -y -V ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
+    - apt-get update -y
+    - apt-get install -y -V libarrow-dev libarrow-compute-dev libparquet-dev
+    - apt-get install -y python3-venv
+    - apt-get install -y pipx
+    - pipx ensurepath
+    - pipx install fpm
+    - export PATH=~/.local/bin:$PATH
+  variables:
+    # FPM_FC/FPM_CC/FPM_CXX (not just PATH order) is the only reliable way to pin fpm to the
+    # non-default gcc-14 toolchain -- update-alternatives would also change what plain `gfortran`/
+    # `gcc`/`g++` resolve to for every OTHER job sharing this runner's image, which is exactly the
+    # kind of cross-job side effect a diagnostic-only job must not risk.
+    FPM_FC: "gfortran-14"
+    FPM_CC: "gcc-14"
+    FPM_CXX: "g++-14"
+    FPM_FFLAGS: "-fopenmp"
+    FPM_CXXFLAGS: "-std=c++20"
+    FPM_LDFLAGS: "-lstdc++"
+  script:
+    - gfortran-14 --version
     - |
       for i in $(seq 1 50); do
         echo "=== table suite attempt $i ==="

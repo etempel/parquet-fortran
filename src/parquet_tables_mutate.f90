@@ -102,8 +102,25 @@ contains
         do i = idx, self%cache%ncols - 1
             self%cache%cols(i) = self%cache%cols(i + 1)
         end do
-        call self%cache%cols(self%cache%ncols)%values%clear()
-        self%cache%cols(self%cache%ncols) = parquet_table_column()
+        ! Reset the vacated tail slot field-by-field rather than via `parquet_table_column()`:
+        ! ifx rejects a default structure constructor here (Structure constructor may not have
+        ! components with the PRIVATE attribute) because `values` is a parquet_column, whose own
+        ! components are private to a different module -- even though this constructor never
+        ! specifies `values` explicitly. `values` itself was just cleared above, so only the
+        ! metadata fields need resetting, mirroring their declared defaults in parquet_tables.f90.
+        associate (slot => self%cache%cols(self%cache%ncols))
+            if (allocated(slot%name)) deallocate(slot%name)
+            if (allocated(slot%file_name)) deallocate(slot%file_name)
+            slot%declared_kind = PK_NONE
+            slot%width = 1
+            slot%width_pending = .false.
+            slot%file_source = .false.
+            slot%predefined = .false.
+            slot%user_populated = .false.
+            slot%supported = .true.
+            slot%residency = RES_EMPTY
+            if (allocated(slot%rg_loaded)) deallocate(slot%rg_loaded)
+        end associate
         self%cache%ncols = self%cache%ncols - 1
     end procedure table_drop_column
     !

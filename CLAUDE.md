@@ -715,9 +715,12 @@ one of them is the kind a later simplification would delete:
   and keep the walks structurally identical.
 - **Two guard pairs are individually redundant and jointly load-bearing**, exactly as
   `column_has_nulls_from_footer` records for its own: `is_stats_set()` + a null `statistics()`
-  (removing both segfaults on `test/fixtures/no_stats.parquet`), and `can_use_min_max()` +
-  the `sort_order()` check (removing both mis-reads an unsigned column's bounds as signed). Do not
-  delete either half on the strength of a coverage report.
+  (removing both segfaults on `test/fixtures/no_stats.parquet`), and the `sort_order() ==
+  SortOrder::UNKNOWN` check + the `sort_order()` SIGNED/UNSIGNED check a few lines below it
+  (removing both mis-reads an unsigned column's bounds as signed). Do not delete either half on
+  the strength of a coverage report. (Note: `ColumnDescriptor` has no `can_use_min_max()` method
+  in any Parquet C++ release found on this machine — verified against versions 19, 22, 23, and 24;
+  the first guard reads `sort_order()` directly instead.)
 - **A row group's mask segment is all-false when it is pruned**, which is why nothing downstream
   needs to learn a new concept — a pruned row group simply *is* an empty one, which
   `row_group_effective_rows` and every row-group-scoped operation already handle.

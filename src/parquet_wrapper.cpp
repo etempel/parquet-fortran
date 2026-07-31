@@ -25,8 +25,8 @@
 // subclasses (Int32Statistics/DoubleStatistics/...) the row-group statistics screen casts to, and
 // is_min_value_exact()/is_max_value_exact(), also live here.
 #include <parquet/statistics.h>
-// For ColumnDescriptor::can_use_min_max()/sort_order(), which gate every min/max use in the
-// row-group statistics screen (screen_row_groups).
+// For ColumnDescriptor::sort_order(), which gates every min/max use in the row-group
+// statistics screen (screen_row_groups).
 #include <parquet/schema.h>
 
 // Arrow's vendored copy of Howard Hinnant's date library (date.h only -- deliberately not
@@ -4453,7 +4453,7 @@ extern "C"
 		// verdict, and it is what would catch a legacy file whose column order is UNDEFINED -- a
 		// file parquet-cpp cannot write, hence the missing fixture. Same situation, and the same
 		// resolution, as column_has_nulls_from_footer's is_stats_set()/statistics() pair.
-		if (!descr->can_use_min_max()) return leaf;
+		if (descr->sort_order() == parquet::SortOrder::UNKNOWN) return leaf;
 
 		auto type_id = resolved.leaf_field->type()->id();
 		switch (type_id)

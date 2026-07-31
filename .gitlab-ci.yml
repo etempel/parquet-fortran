@@ -29,8 +29,14 @@ before_script:
   # (24.04 ships 7.0, which cannot parse gcov output for a file at/past 10,000 lines -- see
   # CLAUDE.md's "gcovr <7.1 cannot parse gcov output for a 10,000+ line file" note, confirmed
   # against src/parquet_wrapper.cpp). Pinning >=7.1 here sidesteps relying on the OS package
-  # ever catching up.
-  - pipx install "gcovr>=7.1"
+  # ever catching up. The upper bound <8.4 is equally load-bearing, not just a "latest is best"
+  # default: gcovr 8.4-8.6 has a confirmed upstream regression (gcovr/gcovr#1253) that drops
+  # coverage for every Fortran subroutine/function CONTAINed in a module/submodule -- which is
+  # effectively all of this project's own procedures -- silently reporting most src/*.f90 files
+  # as "0 0 --%" (no data at all, not just 0% covered) while src/parquet_wrapper.cpp and a
+  # handful of unaffected .f90 files still report correctly. See CLAUDE.md's "gcovr <7.1 cannot
+  # parse gcov output" note for the sibling bug this range also has to avoid.
+  - pipx install "gcovr>=7.1,<8.4"
   - export PATH=~/.local/bin:$PATH
 
   # test/fixtures/*.parquet are tracked via git-lfs (see .gitattributes) --

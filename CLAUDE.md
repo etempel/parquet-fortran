@@ -60,6 +60,7 @@ working rules).
   - [Compiler & language gotchas](#compiler--language-gotchas)
   - [Arrow's own type singletons have thread-unsafe lazy state on first concurrent use](#arrows-own-type-singletons-have-thread-unsafe-lazy-state-on-first-concurrent-use)
   - [gcovr <7.1 cannot parse gcov output for a 10,000+ line file](#gcovr-71-cannot-parse-gcov-output-for-a-10000-line-file)
+  - [gcovr 8.4+ drops coverage for module-contained Fortran subroutines](#gcovr-84-drops-coverage-for-module-contained-fortran-subroutines)
   - [Verifying the bind(C) boundary](#verifying-the-bindc-boundary)
   - [If `src/parquet_wrapper.cpp` is ever split into multiple translation units](#if-srcparquet_wrappercpp-is-ever-split-into-multiple-translation-units)
   - [Stale `fpm` build cache](#stale-fpm-build-cache)
@@ -1341,6 +1342,35 @@ assuming it's a new bug in this project. This bound will need revisiting again a
 `src/parquet_wrapper.cpp` keeps growing — the same class of off-by-one could recur at the next
 power-of-ten boundary (100,000 lines) if gcovr's fix has any similar edge case, though nothing
 currently suggests it does.
+
+### gcovr 8.4+ drops coverage for module-contained Fortran subroutines
+
+CI's `gcovr` step ran clean (exit 0, "All error scenarios behaved as expected") but the coverage
+table came back almost empty: most `src/*.f90` files reported `Lines=0 Exec=0 --%` — not 0%
+covered, but **no coverage data associated with the file at all** — while `src/parquet_wrapper.cpp`
+and a small handful of `.f90` files (whichever happened to have no procedures directly `contains`ed
+inside a `module`/`submodule`) reported correctly. Since virtually every procedure in this
+project's `src/*.f90` lives inside a module or submodule's `contains` block (see "Nested submodule
+tree" above), this wiped out nearly the whole Fortran coverage signal while leaving the C++ side
+and the `coverage:` regex mechanism itself looking unremarkable — easy to misdiagnose as a
+`gcovr`-can't-read-Fortran-at-all problem rather than a narrow, version-specific regression.
+
+**Confirmed root cause: [gcovr issue #1253](https://github.com/gcovr/gcovr/issues/1253)**
+("Missing coverage for Fortran module subroutines since gcovr 8.4") — gcovr 8.4 through at least
+8.6 silently drops coverage for any Fortran subroutine/function contained inside a module,
+apparently while filtering out compiler-generated symbols (debug output shows a real
+module-mangled symbol like `__module_help_MOD_help_convert` being discarded as if it were a
+compiler-generated one). Confirmed absent in gcovr 8.3. This is a **second, independent** gcovr
+regression from the 10,000-line parser bug in the section above — one needed a version floor
+(`>=7.1`), this one needs a version ceiling, and both bounds are load-bearing at once.
+
+**Fix: pin `gcovr` to a range that clears the 7.1 floor and stays under the 8.4 ceiling** —
+`.gitlab-ci.yml`'s `before_script` installs `gcovr>=7.1,<8.4` via `pipx` rather than an unbounded
+`gcovr>=7.1`. If a future `gcovr` release fixes #1253, re-test before widening the ceiling; if a
+new regression appears in some future version, check
+[gcovr's own issue tracker](https://github.com/gcovr/gcovr/issues) for "module subroutine" /
+"0 lines" before assuming it's a problem in this project — the symptom (a clean CI run with an
+almost-empty coverage table) looks exactly like this one.
 
 ### Verifying the bind(C) boundary
 

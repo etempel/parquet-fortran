@@ -18,7 +18,7 @@ before_script:
   - apt-get update -y
   - apt-get upgrade -y
   - apt-get install -y --no-install-recommends ca-certificates lsb-release wget gnupg
-        gfortran-14 gcc-14 g++-14 make git git-lfs gcovr
+        gfortran gcc g++ make git git-lfs gcovr
 
   # Installing FPM (Fortran Package Manager) via pipx
   - apt-get install -y python3-venv
@@ -187,6 +187,20 @@ debug_asan_table:
 # than an extra flag on the one above. Worth running if debug_asan_table comes back clean: a
 # clean ASan/UBSan run rules out corruption/UB but says nothing about an unsynchronized read of,
 # say, a parquet_table's cache pointer or detached flag from two OpenMP threads at once.
+#
+# halt_on_error=0 is deliberate, NOT an oversight: with halt_on_error=1 (the first form this job
+# used), every run stopped at the FIRST race TSan found -- which is always `make_output`
+# (test-drive's own output-formatting helper, called from inside `!$omp critical`, so very likely
+# a false positive from TSan's known-incomplete GOMP-critical-section support; see CLAUDE.md) --
+# during test #2-5 of 52, alphabetically/scheduling-early. test_sort_matches_read_time (the one
+# that actually crashes, in every other job here) is #45; the process was aborting before TSan
+# ever got that far, four runs in a row, without ever actually observing whatever happens there.
+# Letting the run continue past that first hit is what might finally surface a second, more
+# relevant race close to #45-52 -- or confirm there genuinely isn't one, which is equally useful:
+# ASan already runs the WHOLE suite cleanly up to the crash every time (no earlier out-of-bounds
+# access, ever), so if TSan also finds nothing new near the real failure, that argues against both
+# "memory corruption from an earlier bad write" and "an ordinary data race on live memory" as the
+# explanation, and points back toward test_sort_matches_read_time's own logic instead.
 debug_tsan_table:
   tags:
     - focal
@@ -197,7 +211,7 @@ debug_tsan_table:
     FPM_FFLAGS: "-fopenmp -g -O1 -fsanitize=thread -fno-omit-frame-pointer"
     FPM_CXXFLAGS: "-std=c++20 -g -O1 -fsanitize=thread -fno-omit-frame-pointer"
     FPM_LDFLAGS: "-lstdc++ -fsanitize=thread"
-    TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1"
+    TSAN_OPTIONS: "halt_on_error=0:second_deadlock_stack=1"
   script:
     - |
       for i in $(seq 1 50); do

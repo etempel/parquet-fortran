@@ -59,6 +59,7 @@ working rules).
 - [Build & compiler notes](#build--compiler-notes)
   - [Compiler & language gotchas](#compiler--language-gotchas)
   - [Arrow's own type singletons have thread-unsafe lazy state on first concurrent use](#arrows-own-type-singletons-have-thread-unsafe-lazy-state-on-first-concurrent-use)
+  - [gcovr <7.1 cannot parse gcov output for a 10,000+ line file](#gcovr-71-cannot-parse-gcov-output-for-a-10000-line-file)
   - [Verifying the bind(C) boundary](#verifying-the-bindc-boundary)
   - [If `src/parquet_wrapper.cpp` is ever split into multiple translation units](#if-srcparquet_wrappercpp-is-ever-split-into-multiple-translation-units)
   - [Stale `fpm` build cache](#stale-fpm-build-cache)
@@ -1121,6 +1122,38 @@ counterpart. User guide: `doc/pages/date-time.md`.
   from the previous use unless the open body is rewritten to unconditionally reset every single
   component itself — a much larger, easier-to-get-subtly-wrong change than it first appears.
   Prefer keeping `intent(out)` and solving misuse-prevention some other way.
+- **The previous bullet's "resets every component for free" is the documented standard behavior,
+  but this project has one confirmed, empirically-reproduced counterexample — don't treat it as an
+  absolute guarantee for a correctness-critical `logical` component.** `parquet_table` (finalizable,
+  `FINAL :: table_finalize`) has an `intent(out)`-reopened `open_table_impl`/`parquet_new_table`
+  where one component, `detached`, was found (via direct thread-tagged instrumentation, gfortran
+  13/14, reproduced identically in both the real GitLab CI image and a from-scratch local
+  Docker rebuild of it) to sometimes still read back `.true.` immediately after a fresh
+  `intent(out)` reopen of a variable that had previously been detached (e.g. by a prior
+  `%sort_by` call) — with no concurrency involved and every other component (`regime`/`row_lo`/
+  `row_hi`/`row_count`/`cache`) behaving correctly. `detached` was the one component in both
+  procedures that relied *solely* on the implicit default-initializer reset, unlike every sibling
+  component, which is explicitly reassigned in the body regardless. Fixed by adding an explicit
+  `table%detached = .false.` as the first executable statement of both `open_table_impl` and
+  `parquet_new_table` (`parquet_tables_lifecycle.f90`) — do not remove it on the assumption that
+  `intent(out)`'s implicit reset alone is sufficient, and apply the same explicit-reset treatment
+  to any new scalar `logical`/default-initialized component added to a finalizable type's
+  `intent(out)`-entry procedure, rather than trusting the implicit reset for it.
+- **A `pointer`-typed intermediate component defeats `-fcheck=bounds`'s trust in a freshly
+  unallocated LHS on intrinsic assignment.** `table_clone` (`parquet_tables_clone.f90`) used to do
+  `out%cache%rg_bounds = self%cache%rg_bounds` to copy an allocatable 2-D array, relying on F2003+
+  automatic reallocation (assigning to an allocatable should reallocate it to match the RHS shape).
+  Under `-fcheck=bounds` (fpm's own default debug profile — NOT enabled by `FPM_FFLAGS="--coverage"`
+  in `.gitlab-ci.yml`, which is why this only ever surfaced via a Docker/local `fpm test` run using
+  fpm's plain default profile, never in the real CI job itself), this raised a spurious "Array bound
+  mismatch for dimension 1 of array 'out' (0/2)" even though `out%cache%rg_bounds` was genuinely,
+  freshly unallocated — `cache` being reached through a `pointer` component rather than a plain
+  allocatable one is what confuses the bounds check here. Fixed by replacing the assignment with an
+  explicit `allocate(out%cache%rg_bounds(size(self%cache%rg_bounds,1), size(self%cache%rg_bounds,2)))`
+  followed by an element-wise `out%cache%rg_bounds(:,:) = self%cache%rg_bounds(:,:)`. If a future
+  `%clone`-style deep copy adds another allocatable array reached through a `pointer` intermediate,
+  prefer this explicit allocate-then-copy shape over a bare intrinsic assignment from the start,
+  rather than rediscovering the same spurious bounds-check failure.
 - **cpp runs over every source file, so `/*` anywhere — including inside a Fortran comment —
   breaks the build.** `fpm.toml` declares `[preprocess.cpp]`, which applies to *all* sources, not
   just `.F90` ones. Writing a glob like `tools/*.sh` in a comment opens a C block comment and the
@@ -1267,6 +1300,46 @@ supported type, single-threaded, in the same `std::call_once` block) instead of 
 enumerate individual private caches by name. See
 [Thread safety](doc/pages/thread-safety.md#a-note-on-arrows-own-type-singleton-construction) for
 the user-facing writeup.
+
+### gcovr <7.1 cannot parse gcov output for a 10,000+ line file
+
+The CI `test:` job's `gcovr` step crashes with `gcovr.formats.gcov.parser.UnknownLineType` on
+`src/parquet_wrapper.cpp`'s coverage data — reported as `<n>:10000-block 0` (then `10001-block N`,
+`10002-block N`, ...). **These are real, valid gcov block-annotation lines for real source lines —
+not corruption.** `src/parquet_wrapper.cpp` has grown to just over 10,000 lines (`wc -l` — this
+supersedes every other mention of "~7,400 lines" elsewhere in this file; treat those as stale
+until corrected), and lines 10000/10001 are genuinely `if (!status.ok())` /
+`throw std::runtime_error(...)`. First suspected as heap/counter corruption (from concurrent
+OpenMP threads racing on GCC's `--coverage` counters, or from stale `.gcda` left over from an
+earlier crashed run, or from the Docker reproduction's QEMU (amd64-on-arm64) emulation) — all
+three were tested and ruled out: the crash reproduces identically on a genuinely fresh build, in
+the real (non-emulated) GitLab CI pipeline itself, and adding `-fprofile-update=atomic` to every
+coverage build changed nothing.
+
+**Confirmed root cause: this is [gcovr issue #882](https://github.com/gcovr/gcovr/issues/882)**
+("UnknownLineType thrown when parsing coverage data from 10K+ line file") — for a source file at
+or past 10,000 lines, gcov drops the space between the block's hit-count field (or a `%%%%%`/
+`$$$$$` exception-only-block marker) and the line number in its `-block N` annotation lines, and
+gcovr's parser regex requires that space, so it throws instead of matching. Fixed upstream in
+[PR #883](https://github.com/gcovr/gcovr/pull/883) ("Add support for more than 9999 lines"),
+merged 2024-02-11, first released in **gcovr 7.1** (this project's CI environment was hitting it
+on gcovr **7.0**, apt-installed from Ubuntu 24.04's package archive, which predates the fix and
+will never receive it via a point release). [Issue #1103](https://github.com/gcovr/gcovr/issues/1103)
+("GCovr on Ubuntu 24.04 Cannot Parse Coverage Reports") is another project hitting this exact
+combination and confirms upgrading gcovr is the resolution — there is no compiler flag, source
+change, or coverage-tool-invocation workaround; the parser itself cannot read this file's gcov
+output below 7.1, full stop.
+
+**Fix: install a `gcovr` version >= 7.1 rather than relying on the OS-packaged one.** Given
+Ubuntu's own apt archive does not reliably track this (24.04 ships a pre-fix 7.0 as of this
+writing, and a future Ubuntu LTS could just as easily ship another pre-fix snapshot), pin a
+known-good version via `pipx` (already used for `fpm` in the same `before_script`) rather than
+`apt-get install gcovr`. If a future `gcovr` release regresses this again, re-check
+[gcovr's own issue tracker](https://github.com/gcovr/gcovr/issues) for "UnknownLineType" before
+assuming it's a new bug in this project. This bound will need revisiting again as
+`src/parquet_wrapper.cpp` keeps growing — the same class of off-by-one could recur at the next
+power-of-ten boundary (100,000 lines) if gcovr's fix has any similar edge case, though nothing
+currently suggests it does.
 
 ### Verifying the bind(C) boundary
 

@@ -1306,10 +1306,11 @@ the user-facing writeup.
 The CI `test:` job's `gcovr` step crashes with `gcovr.formats.gcov.parser.UnknownLineType` on
 `src/parquet_wrapper.cpp`'s coverage data — reported as `<n>:10000-block 0` (then `10001-block N`,
 `10002-block N`, ...). **These are real, valid gcov block-annotation lines for real source lines —
-not corruption.** `src/parquet_wrapper.cpp` has grown to just over 10,000 lines (`wc -l` — this
-supersedes every other mention of "~7,400 lines" elsewhere in this file; treat those as stale
-until corrected), and lines 10000/10001 are genuinely `if (!status.ok())` /
-`throw std::runtime_error(...)`. First suspected as heap/counter corruption (from concurrent
+not corruption.** `src/parquet_wrapper.cpp` has grown to just over 10,000 lines (`wc -l`; it was
+~7,400 when several older notes elsewhere in this file were written, and will keep growing — treat
+any specific line count anywhere in this file as a snapshot, not a promise), and lines 10000/10001
+are genuinely `if (!status.ok())` / `throw std::runtime_error(...)`. First suspected as heap/counter
+corruption (from concurrent
 OpenMP threads racing on GCC's `--coverage` counters, or from stale `.gcda` left over from an
 earlier crashed run, or from the Docker reproduction's QEMU (amd64-on-arm64) emulation) — all
 three were tested and ruled out: the crash reproduces identically on a genuinely fresh build, in
@@ -1360,7 +1361,8 @@ instance of that different class of bug.
 
 ### If `src/parquet_wrapper.cpp` is ever split into multiple translation units
 
-A maintainability review considered splitting this single 7,400+-line file and decided against it
+A maintainability review considered splitting this single (now 10,000+-line, still growing) file and
+decided against it
 (see CONTRIBUTING.md's "Features considered but not implemented" for the full four-cost writeup,
 and `src/parquet_wrapper.cpp`'s own `// ====`-banner comments, added instead, for a cheaper
 navigability improvement). If that decision is ever revisited, the single most important, least

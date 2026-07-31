@@ -392,6 +392,117 @@ call t%set("mass", m)
 
 Pass `modify_nulls=.false.` to leave null rows untouched.
 
+To write a single cell, use `%set_element`:
+
+```fortran
+call t%set_element("mass", 42, 1.75_real64)   ! row 42 of the mass column
+```
+
+The value's kind must match the column's exactly, as it does for `%set`, and writing a value
+**clears that row's null** — a cell cannot be both a value and missing.
+
+## Null values, and changing them
+
+`%is_null(name, i)`, `%set_null(name, i)` and `%clear_null(name, i)` all work a **row** at a
+time, and that is true even for a vector column: `%set_null` on a `float64` column of width 3
+nulls the whole row, all three elements together. A single element of a vector row cannot be null
+on its own — the file format this library reads can express it, but the table cannot represent it,
+so a per-element null read from a file is widened to the whole row.
+
+A column that holds no null at all carries no null bitmap, which is why `%compact_validity(name)`
+exists: it drops the bitmap of a column that once had nulls and no longer does. A whole-column
+`%set` already does this on its own, so `%compact_validity` is only for a column edited cell by
+cell.
+
+## Changing a table
+
+Mutation falls into three classes, and the difference between them matters more than any
+individual procedure:
+
+| class | what it does | detaches? |
+|---|---|---|
+| **cell** — `%set_element`, `%set_null`, `%clear_null` | changes values in place | no |
+| **column** — `%add_column`, `%drop_column`, `%rename_column`, `%cast_column` | changes which columns exist | no |
+| **row** — `%filter_rows`, `%sort_by`, `%delete_rows`, `%truncate`, `%append`, `%append_null_rows` | changes which rows exist | **yes** |
+
+```fortran
+call t%materialize_all()                 ! read everything you want to keep, first
+call t%filter_rows(mass > 1.0e10_real64) ! keep the rows a mask selects
+call t%sort_by(["mass"], descending=[.true.])
+call t%drop_column("scratch")
+```
+
+### What "detaching" means
+
+A table opened from a file reads its columns lazily. Once a **row**-changing operation runs, the
+rows in memory no longer line up with the rows in the file, so any column that had not been read
+by then can never be read at all. The table records this — `%is_detached()` reports it — and every
+later attempt to read from the file says so rather than returning misaligned data.
+
+**So read what you need before changing the row set**, with `%prefetch` or `%materialize_all`.
+Columns you deliberately do not want are simply left behind, which is what keeps a lazy table
+from having to read a whole file before it can drop a single row.
+
+Detaching does not freeze a table: it can still be read, edited and written out, and mutated
+further. What it loses is the file behind it.
+
+### Sorting
+
+`%sort_by` takes one or more key columns, primary first, with optional per-key `descending=` and
+`nulls_first=` arrays:
+
+```fortran
+call t%sort_by(["group", "mass "], descending=[.false., .true.])
+```
+
+Every key column must already be resident — sorting will not read one implicitly, because that
+would make the memory a sort costs depend on which columns happened to have been read. Nulls and
+NaNs are placed absolutely and are never flipped by `descending`; ascending order gives values,
+then NaNs, then nulls. Ties keep their existing order.
+
+This is the same sort engine `parquet_open_reader(..., sort_by=...)` uses, so sorting a table in
+memory and reading the same file sorted give the identical row order.
+
+### Adding rows
+
+The way to add many rows is a batch that structurally cannot have the wrong columns:
+
+```fortran
+call t%clone_structure(batch)     ! same columns, zero rows, no file
+call batch%append_null_rows(n)    ! give it n rows to fill
+call batch%set("id", ids)         ! ... and fill them
+call batch%set("mass", masses)
+call t%append(batch)
+```
+
+`%append` requires the appended table's columns to be a subset of this table's, with matching
+kinds, widths and units. A column this table has and the batch does not is **null-filled**; a
+column the batch has and this table does not is an error rather than being silently dropped; a
+kind mismatch is an error too, and `%cast_column` is the way round it. There is no unit
+conversion, so appending "km/h" rows to an "m/s" column is refused.
+
+`%append(row)` adds one row from a `parquet_table_row` handle. It is convenient but slow in bulk —
+it costs a whole table's machinery per row — so prefer the batch form above for anything large.
+
+### Copying, and going back
+
+Mutation happens in place and there is no undo, so the way to keep a version to return to is to
+copy first:
+
+```fortran
+call t%clone(before)     ! independent deep copy
+call t%filter_rows(keep)
+```
+
+A clone copies the columns already read and leaves the unread ones unread, opening its own reader
+on the same file so it stays lazy. `before` must be declared as the same concrete table type as
+`t`.
+
+> **A pointer from `%col` does not survive a row-changing operation.** `%filter_rows`, `%sort_by`,
+> `%append` and the rest reallocate each column's storage, so a pointer taken before one of them
+> points at freed memory afterwards. Fortran cannot detect this. Take the pointer again after the
+> mutation.
+
 ## Current limitations
 
 This is still a deliberately narrow version of the table layer.
@@ -399,16 +510,22 @@ This is still a deliberately narrow version of the table layer.
 - **A column is all-or-nothing.** Reading one row of a column reads the whole column (across the
   table's row scope). Use the [slice regime](#reading-part-of-a-file-the-slice-regime) to bound
   how much that is.
-- **No filtering or sorting** at open time, and no in-memory row filtering, sorting or row
-  addition.
-- **Nothing is ever dropped.** A column stays resident once read; there is no per-column
-  eviction. Again, the slice regime is what bounds total memory.
-- **Copying a table is not supported.** `b = a` is a hard error rather than a silent alias — the
-  column store lives behind a pointer, and a shallow copy would leave two tables sharing (and
-  double-freeing) one store.
+- **No filtering or sorting at open time.** In-memory `%filter_rows` and `%sort_by` are
+  available (see [Changing a table](#changing-a-table)), but a table cannot yet be opened with a
+  read-time `filter=`/`sort_by=` the way a reader can, so the whole scope is read and then
+  reduced.
+- **Nothing is ever evicted.** A column stays resident once read; there is no per-column
+  eviction, and `%drop_column` is the only way to give a column's memory back. The slice regime
+  is what bounds total memory.
+- **`b = a` is a hard error**, not a silent alias — the column store lives behind a pointer, and
+  a shallow copy would leave two tables sharing (and double-freeing) one store. Use `%clone`.
 - **A table is not thread-safe to mutate.** Reading resident columns from several threads is
-  fine, and each thread may open and read its own table; adding columns and writing are
-  single-threaded operations.
+  fine, and each thread may open and read its own table; every mutation is a single-threaded
+  operation.
+- **`%cast_column` converts only between the numeric scalar kinds**, and refuses any value that
+  would not survive the round trip rather than truncating it.
+- **`%append` null-fills a missing column; a per-column default value is not available.** Fill
+  the batch explicitly if you want something other than nulls.
 - **Units are not read from the file.** `%unit` reports what `%add_column(unit=)` stored, and `""`
   for a column read from a file.
 - **Vector string columns are trimmed.** A rank-2 string column has no compact read path, so it

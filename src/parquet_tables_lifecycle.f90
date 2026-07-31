@@ -150,6 +150,9 @@ contains
         character(len=:), allocatable :: sfx
         !
         call table_check_open(self, "row_group_bounds")
+        ! Checked before the file_backed test below, which detaching also clears: a detached
+        ! table needs the reason it cannot answer, not "it was never opened from a file".
+        call table_check_not_detached(self%cache, table_scope_of(self), "", "row_group_bounds")
         if (.not. self%cache%file_backed) then
             call table_context_suffix(self%cache, "", sfx)
             error stop EP // "row_group_bounds: this table was not opened from a file, so it " // &

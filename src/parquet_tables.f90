@@ -216,7 +216,11 @@ module parquet_tables
         procedure :: width => table_column_width     !! A column's values-per-row (1 if scalar).
         procedure :: unit => table_column_unit       !! Copy out a column's unit string.
         procedure :: residency => table_column_residency !! A column's RES_* residency state.
-        procedure :: is_null => table_is_null        !! Whether row i of a column is null.
+        procedure, private :: is_null_i32 => table_is_null_i32 !! %is_null specific, int32 row index.
+        procedure, private :: is_null_i64 => table_is_null_i64 !! %is_null specific, int64 row index.
+        !> Whether row `i` of a column is null. ROW-granular: on a *_VEC column it answers for the
+        !! whole row, since a single element of a vector row cannot be null on its own.
+        generic :: is_null => is_null_i32, is_null_i64
         procedure :: is_detached => table_is_detached !! Whether the table has left its file behind.
         procedure :: is_supported => table_is_supported !! Whether a column's type can be read.
         procedure :: filename => table_filename      !! Copy out the file this table came from.
@@ -354,6 +358,92 @@ module parquet_tables
         generic :: add_column => add_column_i32, add_column_i64, add_column_f32, add_column_f64, add_column_bool, &
             add_column_date, add_column_time, add_column_ts, add_column_i32v, add_column_i64v, add_column_f32v, add_column_f64v, &
             add_column_boolv, add_column_datev, add_column_timev, add_column_tsv, add_column_chr, add_column_chrv
+        ! --- mutation: one cell at a time (never changes the row set) ---
+        procedure, private :: set_element_i32_i32 !! %set_element specific, i32 kind, i32 row index.
+        procedure, private :: set_element_i32_i64 !! %set_element specific, i32 kind, i64 row index.
+        procedure, private :: set_element_i64_i32 !! %set_element specific, i64 kind, i32 row index.
+        procedure, private :: set_element_i64_i64 !! %set_element specific, i64 kind, i64 row index.
+        procedure, private :: set_element_f32_i32 !! %set_element specific, f32 kind, i32 row index.
+        procedure, private :: set_element_f32_i64 !! %set_element specific, f32 kind, i64 row index.
+        procedure, private :: set_element_f64_i32 !! %set_element specific, f64 kind, i32 row index.
+        procedure, private :: set_element_f64_i64 !! %set_element specific, f64 kind, i64 row index.
+        procedure, private :: set_element_bool_i32 !! %set_element specific, bool kind, i32 row index.
+        procedure, private :: set_element_bool_i64 !! %set_element specific, bool kind, i64 row index.
+        procedure, private :: set_element_date_i32 !! %set_element specific, date kind, i32 row index.
+        procedure, private :: set_element_date_i64 !! %set_element specific, date kind, i64 row index.
+        procedure, private :: set_element_time_i32 !! %set_element specific, time kind, i32 row index.
+        procedure, private :: set_element_time_i64 !! %set_element specific, time kind, i64 row index.
+        procedure, private :: set_element_ts_i32 !! %set_element specific, ts kind, i32 row index.
+        procedure, private :: set_element_ts_i64 !! %set_element specific, ts kind, i64 row index.
+        procedure, private :: set_element_i32v_i32 !! %set_element specific, i32v kind, i32 row index.
+        procedure, private :: set_element_i32v_i64 !! %set_element specific, i32v kind, i64 row index.
+        procedure, private :: set_element_i64v_i32 !! %set_element specific, i64v kind, i32 row index.
+        procedure, private :: set_element_i64v_i64 !! %set_element specific, i64v kind, i64 row index.
+        procedure, private :: set_element_f32v_i32 !! %set_element specific, f32v kind, i32 row index.
+        procedure, private :: set_element_f32v_i64 !! %set_element specific, f32v kind, i64 row index.
+        procedure, private :: set_element_f64v_i32 !! %set_element specific, f64v kind, i32 row index.
+        procedure, private :: set_element_f64v_i64 !! %set_element specific, f64v kind, i64 row index.
+        procedure, private :: set_element_boolv_i32 !! %set_element specific, boolv kind, i32 row index.
+        procedure, private :: set_element_boolv_i64 !! %set_element specific, boolv kind, i64 row index.
+        procedure, private :: set_element_datev_i32 !! %set_element specific, datev kind, i32 row index.
+        procedure, private :: set_element_datev_i64 !! %set_element specific, datev kind, i64 row index.
+        procedure, private :: set_element_timev_i32 !! %set_element specific, timev kind, i32 row index.
+        procedure, private :: set_element_timev_i64 !! %set_element specific, timev kind, i64 row index.
+        procedure, private :: set_element_tsv_i32 !! %set_element specific, tsv kind, i32 row index.
+        procedure, private :: set_element_tsv_i64 !! %set_element specific, tsv kind, i64 row index.
+        procedure, private :: set_element_chr_i32 !! %set_element specific, character chr form, i32 row index.
+        procedure, private :: set_element_chr_i64 !! %set_element specific, character chr form, i64 row index.
+        procedure, private :: set_element_chrv_i32 !! %set_element specific, character chrv form, i32 row index.
+        procedure, private :: set_element_chrv_i64 !! %set_element specific, character chrv form, i64 row index.
+        !> Writes one row's value in place. The kind must match the column's exactly (as
+        !! %set does), and writing a value CLEARS that row's null -- use %set_null to put
+        !! one back. On a *_VEC column the value is that row's whole vector.
+        generic :: set_element => set_element_i32_i32, set_element_i32_i64, set_element_i64_i32, set_element_i64_i64, &
+            set_element_f32_i32, set_element_f32_i64, set_element_f64_i32, set_element_f64_i64, set_element_bool_i32, &
+            set_element_bool_i64, set_element_date_i32, set_element_date_i64, set_element_time_i32, set_element_time_i64, &
+            set_element_ts_i32, set_element_ts_i64, set_element_i32v_i32, set_element_i32v_i64, set_element_i64v_i32, &
+            set_element_i64v_i64, set_element_f32v_i32, set_element_f32v_i64, set_element_f64v_i32, set_element_f64v_i64, &
+            set_element_boolv_i32, set_element_boolv_i64, set_element_datev_i32, set_element_datev_i64, set_element_timev_i32, &
+            set_element_timev_i64, set_element_tsv_i32, set_element_tsv_i64, set_element_chr_i32, set_element_chr_i64, &
+            set_element_chrv_i32, set_element_chrv_i64
+        procedure, private :: set_null_i32   !! %set_null specific taking an int32 row index.
+        procedure, private :: set_null_i64   !! %set_null specific taking an int64 row index.
+        !> Marks row `i` of a column null. ROW-granular even on a *_VEC column, where it nulls
+        !! every element of the row -- a single element of a vector row cannot be nulled.
+        generic :: set_null => set_null_i32, set_null_i64
+        procedure, private :: clear_null_i32 !! %clear_null specific taking an int32 row index.
+        procedure, private :: clear_null_i64 !! %clear_null specific taking an int64 row index.
+        !> Marks row `i` of a column valid without saying what its value is. Only useful when a
+        !! value is already there or is about to be written; %set_element clears the null itself.
+        generic :: clear_null => clear_null_i32, clear_null_i64
+        procedure :: compact_validity => table_compact_validity !! Drop a null bitmap that no longer has nulls.
+        ! --- mutation: whole columns (never changes the row set) ---
+        procedure :: drop_column => table_drop_column     !! Remove a column; force= for a predefined one.
+        procedure :: rename_column => table_rename_column !! Change the name a column is looked up by.
+        procedure :: cast_column => table_cast_column     !! Add a new column of another numeric kind.
+        ! --- mutation: the row set itself -- every one of these DETACHES the table ---
+        procedure :: filter_rows => table_filter_rows !! Keep only the rows a mask selects.
+        procedure :: sort_by => table_sort_by         !! Reorder rows by one or more key columns.
+        procedure, private :: table_delete_rows_i32   !! %delete_rows specific, int32 indices.
+        procedure, private :: table_delete_rows_i64   !! %delete_rows specific, int64 indices.
+        !> Removes the listed rows. A thin convenience over %filter_rows, and like it, detaching.
+        generic :: delete_rows => table_delete_rows_i32, table_delete_rows_i64
+        procedure, private :: table_truncate_i32      !! %truncate specific, int32 count.
+        procedure, private :: table_truncate_i64      !! %truncate specific, int64 count.
+        !> Keeps only the first n rows. Detaching, like every row-structural change.
+        generic :: truncate => table_truncate_i32, table_truncate_i64
+        procedure, private :: table_append_table      !! %append specific taking another table.
+        procedure, private :: table_append_row        !! %append specific taking one row handle.
+        !> Appends rows: a whole table's worth, or one row. Detaching, like every row-structural
+        !! change. The bulk idiom is %clone_structure -> fill -> %append(batch).
+        generic :: append => table_append_table, table_append_row
+        procedure, private :: table_append_null_rows_i32 !! %append_null_rows specific, int32 count.
+        procedure, private :: table_append_null_rows_i64 !! %append_null_rows specific, int64 count.
+        !> Appends n all-null rows, to be filled in afterwards. Detaching.
+        generic :: append_null_rows => table_append_null_rows_i32, table_append_null_rows_i64
+        ! --- copying ---
+        procedure :: clone => table_clone                     !! Independent deep copy of this table.
+        procedure :: clone_structure => table_clone_structure !! Empty table with the same columns.
         ! --- lifecycle ---
         !> Blocks intrinsic assignment: the store lives behind a pointer, so a default `b = a`
         !! would leave two tables sharing one store and double-freeing it.
@@ -572,13 +662,37 @@ module parquet_tables
             character(len=:), allocatable, intent(out) :: value  !! the value, or "".
             logical, intent(out), optional :: found              !! present: report a miss instead of aborting.
         end subroutine table_get_file_metadata
-        !> Whether row `i` of a column is null.
-        module function table_is_null(self, name, i) result(isnull)
+        !> Whether row `i` of a column is null (int32 row index).
+        module function table_is_null_i32(self, name, i) result(isnull)
+            class(parquet_table), intent(in) :: self !! the table.
+            character(len=*), intent(in) :: name     !! column name.
+            integer(int32), intent(in) :: i          !! 1-based row index.
+            logical :: isnull                        !! .true. if that row is null.
+        end function table_is_null_i32
+        !> Whether row `i` of a column is null (int64 row index).
+        module function table_is_null_i64(self, name, i) result(isnull)
             class(parquet_table), intent(in) :: self !! the table.
             character(len=*), intent(in) :: name     !! column name.
             integer(int64), intent(in) :: i          !! 1-based row index.
-            logical :: isnull                        !! .true. if that element is null.
-        end function table_is_null
+            logical :: isnull                        !! .true. if that row is null.
+        end function table_is_null_i64
+        !> error stops unless `i` is a valid 1-based row index for this table. Shared by every
+        !! per-row entry point so they all report the same way.
+        module subroutine table_require_row(self, i, proc)
+            class(parquet_table), intent(in) :: self !! the table.
+            integer(int64), intent(in) :: i          !! the row index to check.
+            character(len=*), intent(in) :: proc     !! calling procedure, for the message.
+        end subroutine table_require_row
+        !> Shared front half of every soft-failing query: resolves `name`, honouring `found=` and
+        !! otherwise aborting. Unlike `table_resolve` this does NOT require the column to hold
+        !! values -- asking a column's kind, or dropping it, must work precisely when it has none.
+        module subroutine table_lookup_or_fail(self, name, proc, idx, found)
+            class(parquet_table), intent(in) :: self !! the table.
+            character(len=*), intent(in) :: name     !! column name.
+            character(len=*), intent(in) :: proc     !! calling procedure, for the message.
+            integer, intent(out) :: idx              !! slot index, or 0 on a reported miss.
+            logical, intent(out), optional :: found  !! present: report a miss instead of aborting.
+        end subroutine table_lookup_or_fail
         !> Resolves `name` to its 1-based slot index, or 0 when absent. The single lookup every
         !! accessor goes through, so a rename or remap only has to change one place.
         module function table_find(self, name) result(idx)
@@ -608,6 +722,19 @@ module parquet_tables
             class(parquet_table), intent(in) :: self !! the table.
             character(len=*), intent(in) :: proc     !! calling procedure, for the message.
         end subroutine table_check_open
+        !> error stops when the table has been detached from its file by a row-structural change.
+        !! The guard every path that would READ from the file runs first: once the row set has
+        !! changed, a column still in the file can never be lined up with the columns already in
+        !! memory, so reading one would hand back silently misaligned data.
+        !!
+        !! Takes the cache and the scope rather than the table, so a `parquet_table_row` handle
+        !! and the internal read helpers can run the identical guard.
+        module subroutine table_check_not_detached(cache, sc, name, proc)
+            type(parquet_table_cache), intent(in) :: cache !! the column store, for the message.
+            type(table_scope), intent(in) :: sc            !! rows this table covers; carries `detached`.
+            character(len=*), intent(in) :: name           !! column name ("" to omit it).
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine table_check_not_detached
         !> error stops unless slot `idx` holds exactly `kind`. The exact-kind rule the pointer
         !! path and the copy-back path both enforce (the copy-OUT path widens instead).
         module subroutine table_require_kind(self, idx, kind, proc)
@@ -665,12 +792,6 @@ module parquet_tables
             type(parquet_table_cache), intent(inout) :: cache !! the column store.
             character(len=*), intent(in) :: name              !! column path to release.
         end subroutine table_release_one
-        !> Makes slot `idx` resident if it is not already: the lazy first touch every value
-        !! accessor goes through. Returns immediately for a column that is already RES_FULL --
-        !! that path takes no lock and is what a parallel loop over resident data runs on.
-        !!
-        !! Takes the cache and the scope rather than the table, so that a `parquet_table_row`
-        !! handle (which holds exactly those two things) triggers an identical first touch.
         !> Whether a lazy first touch on this store would be unsafe right now.
         !!
         !! It is unsafe in exactly one situation: the caller is inside an OpenMP parallel region
@@ -713,6 +834,12 @@ module parquet_tables
             logical, intent(in) :: proven                     !! .true.: prove it; .false.: candidate only.
             character(len=*), intent(in) :: proc              !! calling procedure, for messages.
         end subroutine table_resolve_width
+        !> Makes slot `idx` resident if it is not already: the lazy first touch every value
+        !! accessor goes through. Returns immediately for a column that is already RES_FULL --
+        !! that path takes no lock and is what a parallel loop over resident data runs on.
+        !!
+        !! Takes the cache and the scope rather than the table, so that a `parquet_table_row`
+        !! handle (which holds exactly those two things) triggers an identical first touch.
         module subroutine table_touch(cache, sc, idx, proc)
             type(parquet_table_cache), intent(inout) :: cache !! the column store.
             type(table_scope), intent(in) :: sc               !! rows this table covers.
@@ -1299,6 +1426,483 @@ module parquet_tables
             character(len=*), intent(in), optional :: unit !! unit string to store.
             logical, intent(in), optional :: force        !! .true. replaces an existing same-named column.
         end subroutine add_column_chrv
+    end interface
+    !
+    ! ---- Single-cell mutation (the per-kind writers in ..._access, the rest in ..._mutate) ----
+    interface
+        !> Writes one row of a PK_INT32 column (i32 row index).
+        module subroutine set_element_i32_i32(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int32), intent(in) :: i                 !! 1-based row index.
+            integer(int32), intent(in) :: value             !! the new value.
+        end subroutine set_element_i32_i32
+        !> Writes one row of a PK_INT32 column (i64 row index).
+        module subroutine set_element_i32_i64(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int64), intent(in) :: i                 !! 1-based row index.
+            integer(int32), intent(in) :: value             !! the new value.
+        end subroutine set_element_i32_i64
+        !> Writes one row of a PK_INT64 column (i32 row index).
+        module subroutine set_element_i64_i32(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int32), intent(in) :: i                 !! 1-based row index.
+            integer(int64), intent(in) :: value             !! the new value.
+        end subroutine set_element_i64_i32
+        !> Writes one row of a PK_INT64 column (i64 row index).
+        module subroutine set_element_i64_i64(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int64), intent(in) :: i                 !! 1-based row index.
+            integer(int64), intent(in) :: value             !! the new value.
+        end subroutine set_element_i64_i64
+        !> Writes one row of a PK_FLOAT32 column (i32 row index).
+        module subroutine set_element_f32_i32(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int32), intent(in) :: i                 !! 1-based row index.
+            real(real32), intent(in) :: value               !! the new value.
+        end subroutine set_element_f32_i32
+        !> Writes one row of a PK_FLOAT32 column (i64 row index).
+        module subroutine set_element_f32_i64(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int64), intent(in) :: i                 !! 1-based row index.
+            real(real32), intent(in) :: value               !! the new value.
+        end subroutine set_element_f32_i64
+        !> Writes one row of a PK_FLOAT64 column (i32 row index).
+        module subroutine set_element_f64_i32(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int32), intent(in) :: i                 !! 1-based row index.
+            real(real64), intent(in) :: value               !! the new value.
+        end subroutine set_element_f64_i32
+        !> Writes one row of a PK_FLOAT64 column (i64 row index).
+        module subroutine set_element_f64_i64(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int64), intent(in) :: i                 !! 1-based row index.
+            real(real64), intent(in) :: value               !! the new value.
+        end subroutine set_element_f64_i64
+        !> Writes one row of a PK_LOGICAL column (i32 row index).
+        module subroutine set_element_bool_i32(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int32), intent(in) :: i                 !! 1-based row index.
+            logical, intent(in) :: value                    !! the new value.
+        end subroutine set_element_bool_i32
+        !> Writes one row of a PK_LOGICAL column (i64 row index).
+        module subroutine set_element_bool_i64(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int64), intent(in) :: i                 !! 1-based row index.
+            logical, intent(in) :: value                    !! the new value.
+        end subroutine set_element_bool_i64
+        !> Writes one row of a PK_DATE column (i32 row index).
+        module subroutine set_element_date_i32(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int32), intent(in) :: i                 !! 1-based row index.
+            type(parquet_date), intent(in) :: value         !! the new value.
+        end subroutine set_element_date_i32
+        !> Writes one row of a PK_DATE column (i64 row index).
+        module subroutine set_element_date_i64(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int64), intent(in) :: i                 !! 1-based row index.
+            type(parquet_date), intent(in) :: value         !! the new value.
+        end subroutine set_element_date_i64
+        !> Writes one row of a PK_TIME column (i32 row index).
+        module subroutine set_element_time_i32(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int32), intent(in) :: i                 !! 1-based row index.
+            type(parquet_time), intent(in) :: value         !! the new value.
+        end subroutine set_element_time_i32
+        !> Writes one row of a PK_TIME column (i64 row index).
+        module subroutine set_element_time_i64(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int64), intent(in) :: i                 !! 1-based row index.
+            type(parquet_time), intent(in) :: value         !! the new value.
+        end subroutine set_element_time_i64
+        !> Writes one row of a PK_TIMESTAMP column (i32 row index).
+        module subroutine set_element_ts_i32(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int32), intent(in) :: i                 !! 1-based row index.
+            type(parquet_timestamp), intent(in) :: value    !! the new value.
+        end subroutine set_element_ts_i32
+        !> Writes one row of a PK_TIMESTAMP column (i64 row index).
+        module subroutine set_element_ts_i64(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int64), intent(in) :: i                 !! 1-based row index.
+            type(parquet_timestamp), intent(in) :: value    !! the new value.
+        end subroutine set_element_ts_i64
+        !> Writes one row of a PK_INT32_VEC column (i32 row index).
+        module subroutine set_element_i32v_i32(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int32), intent(in) :: i                 !! 1-based row index.
+            integer(int32), intent(in) :: value(:)          !! that row's whole vector.
+        end subroutine set_element_i32v_i32
+        !> Writes one row of a PK_INT32_VEC column (i64 row index).
+        module subroutine set_element_i32v_i64(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int64), intent(in) :: i                 !! 1-based row index.
+            integer(int32), intent(in) :: value(:)          !! that row's whole vector.
+        end subroutine set_element_i32v_i64
+        !> Writes one row of a PK_INT64_VEC column (i32 row index).
+        module subroutine set_element_i64v_i32(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int32), intent(in) :: i                 !! 1-based row index.
+            integer(int64), intent(in) :: value(:)          !! that row's whole vector.
+        end subroutine set_element_i64v_i32
+        !> Writes one row of a PK_INT64_VEC column (i64 row index).
+        module subroutine set_element_i64v_i64(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int64), intent(in) :: i                 !! 1-based row index.
+            integer(int64), intent(in) :: value(:)          !! that row's whole vector.
+        end subroutine set_element_i64v_i64
+        !> Writes one row of a PK_FLOAT32_VEC column (i32 row index).
+        module subroutine set_element_f32v_i32(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int32), intent(in) :: i                 !! 1-based row index.
+            real(real32), intent(in) :: value(:)            !! that row's whole vector.
+        end subroutine set_element_f32v_i32
+        !> Writes one row of a PK_FLOAT32_VEC column (i64 row index).
+        module subroutine set_element_f32v_i64(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int64), intent(in) :: i                 !! 1-based row index.
+            real(real32), intent(in) :: value(:)            !! that row's whole vector.
+        end subroutine set_element_f32v_i64
+        !> Writes one row of a PK_FLOAT64_VEC column (i32 row index).
+        module subroutine set_element_f64v_i32(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int32), intent(in) :: i                 !! 1-based row index.
+            real(real64), intent(in) :: value(:)            !! that row's whole vector.
+        end subroutine set_element_f64v_i32
+        !> Writes one row of a PK_FLOAT64_VEC column (i64 row index).
+        module subroutine set_element_f64v_i64(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int64), intent(in) :: i                 !! 1-based row index.
+            real(real64), intent(in) :: value(:)            !! that row's whole vector.
+        end subroutine set_element_f64v_i64
+        !> Writes one row of a PK_LOGICAL_VEC column (i32 row index).
+        module subroutine set_element_boolv_i32(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int32), intent(in) :: i                 !! 1-based row index.
+            logical, intent(in) :: value(:)                 !! that row's whole vector.
+        end subroutine set_element_boolv_i32
+        !> Writes one row of a PK_LOGICAL_VEC column (i64 row index).
+        module subroutine set_element_boolv_i64(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int64), intent(in) :: i                 !! 1-based row index.
+            logical, intent(in) :: value(:)                 !! that row's whole vector.
+        end subroutine set_element_boolv_i64
+        !> Writes one row of a PK_DATE_VEC column (i32 row index).
+        module subroutine set_element_datev_i32(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int32), intent(in) :: i                 !! 1-based row index.
+            type(parquet_date), intent(in) :: value(:)      !! that row's whole vector.
+        end subroutine set_element_datev_i32
+        !> Writes one row of a PK_DATE_VEC column (i64 row index).
+        module subroutine set_element_datev_i64(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int64), intent(in) :: i                 !! 1-based row index.
+            type(parquet_date), intent(in) :: value(:)      !! that row's whole vector.
+        end subroutine set_element_datev_i64
+        !> Writes one row of a PK_TIME_VEC column (i32 row index).
+        module subroutine set_element_timev_i32(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int32), intent(in) :: i                 !! 1-based row index.
+            type(parquet_time), intent(in) :: value(:)      !! that row's whole vector.
+        end subroutine set_element_timev_i32
+        !> Writes one row of a PK_TIME_VEC column (i64 row index).
+        module subroutine set_element_timev_i64(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int64), intent(in) :: i                 !! 1-based row index.
+            type(parquet_time), intent(in) :: value(:)      !! that row's whole vector.
+        end subroutine set_element_timev_i64
+        !> Writes one row of a PK_TIMESTAMP_VEC column (i32 row index).
+        module subroutine set_element_tsv_i32(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int32), intent(in) :: i                 !! 1-based row index.
+            type(parquet_timestamp), intent(in) :: value(:) !! that row's whole vector.
+        end subroutine set_element_tsv_i32
+        !> Writes one row of a PK_TIMESTAMP_VEC column (i64 row index).
+        module subroutine set_element_tsv_i64(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int64), intent(in) :: i                 !! 1-based row index.
+            type(parquet_timestamp), intent(in) :: value(:) !! that row's whole vector.
+        end subroutine set_element_tsv_i64
+        !> Writes one row of a PK_STRING column from a character value (i32 row index).
+        module subroutine set_element_chr_i32(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int32), intent(in) :: i                 !! 1-based row index.
+            character(len=*), intent(in) :: value           !! the new value.
+        end subroutine set_element_chr_i32
+        !> Writes one row of a PK_STRING column from a character value (i64 row index).
+        module subroutine set_element_chr_i64(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int64), intent(in) :: i                 !! 1-based row index.
+            character(len=*), intent(in) :: value           !! the new value.
+        end subroutine set_element_chr_i64
+        !> Writes one row of a PK_STRING_VEC column from a character value (i32 row index).
+        module subroutine set_element_chrv_i32(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int32), intent(in) :: i                 !! 1-based row index.
+            character(len=*), intent(in) :: value(:)        !! that row's whole vector.
+        end subroutine set_element_chrv_i32
+        !> Writes one row of a PK_STRING_VEC column from a character value (i64 row index).
+        module subroutine set_element_chrv_i64(self, name, i, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int64), intent(in) :: i                 !! 1-based row index.
+            character(len=*), intent(in) :: value(:)        !! that row's whole vector.
+        end subroutine set_element_chrv_i64
+        !> Marks row `i` of a column null (int32 row index).
+        module subroutine set_null_i32(self, name, i)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int32), intent(in) :: i             !! 1-based row index.
+        end subroutine set_null_i32
+        !> Marks row `i` of a column null (int64 row index).
+        module subroutine set_null_i64(self, name, i)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int64), intent(in) :: i             !! 1-based row index.
+        end subroutine set_null_i64
+        !> Marks row `i` of a column valid, leaving its value unspecified (int32 row index).
+        module subroutine clear_null_i32(self, name, i)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int32), intent(in) :: i             !! 1-based row index.
+        end subroutine clear_null_i32
+        !> Marks row `i` of a column valid, leaving its value unspecified (int64 row index).
+        module subroutine clear_null_i64(self, name, i)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int64), intent(in) :: i             !! 1-based row index.
+        end subroutine clear_null_i64
+        !> Drops a column's null bitmap when it no longer holds any null, so a column that HAD
+        !! nulls and no longer does stops paying for the bitmap. Scans the column, so it is not
+        !! free -- a whole-column %set already compacts on its own and does not need this.
+        !! Idempotent: calling it on an already-compact column is a cheap no-op.
+        module subroutine table_compact_validity(self, name)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+        end subroutine table_compact_validity
+    end interface
+    !
+    ! ---- Column-structural mutation (parquet_tables_mutate) ----
+    interface
+        !> Removes a column from the table. Cheap, and it does NOT detach: dropping a column
+        !! leaves every remaining column the same length, so the table can still read the ones it
+        !! has not read yet. Dropping a column that was never read is the memory-reclaiming case
+        !! and reads nothing.
+        module subroutine table_drop_column(self, name, force)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column to remove.
+            logical, intent(in), optional :: force      !! .true. to drop a PREDEFINED column.
+        end subroutine table_drop_column
+        !> Changes a column's name. Only the name a caller looks it up by changes -- a
+        !! file-backed column that has not been read yet still reads from the same physical
+        !! column afterwards. A predefined column cannot be renamed at all (its accessor is bound
+        !! to the name at compile time), and there is no `force=` for it.
+        module subroutine table_rename_column(self, old_name, new_name)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: old_name    !! the column to rename.
+            character(len=*), intent(in) :: new_name    !! its new name; must not already exist.
+        end subroutine table_rename_column
+        !> Adds a NEW column holding `name`'s values converted to `to_kind`, leaving the source
+        !! column untouched. A column's stored kind is never mutated in place; this is the
+        !! explicit escape hatch when `%append` reports a kind mismatch.
+        !!
+        !! Only the numeric scalar kinds convert. A value that would not survive the round trip
+        !! is an error naming the row and the value, checked over the WHOLE column before
+        !! anything is written, so a rejected cast leaves the table exactly as it was. The unit
+        !! carries over unchanged -- a kind cast is not a unit change.
+        module subroutine table_cast_column(self, name, new_name, to_kind)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! the source column.
+            character(len=*), intent(in) :: new_name    !! the column to create.
+            integer, intent(in) :: to_kind              !! target PK_* kind.
+        end subroutine table_cast_column
+        !> Appends an already-built `parquet_column` as a new column. The kind-generic
+        !! `%add_column` covers every case a user has; this is the internal path for code that
+        !! already holds a column of the right shape and only needs it slotted in.
+        module subroutine table_put_column(self, name, col)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! the new column's name.
+            type(parquet_column), intent(in) :: col     !! the column to copy in.
+        end subroutine table_put_column
+    end interface
+    !
+    ! ---- Row-structural mutation -- ALL of it detaches (parquet_tables_rowmutate) ----
+    interface
+        !> Keeps only the rows whose `keep` entry is .true., dropping the rest from EVERY column.
+        !!
+        !! Row-structural, so it DETACHES the table from its file: after it, a column that was
+        !! never read can never be read, because the file's rows no longer line up with the rows
+        !! in memory. Materialize what you need first (`%prefetch`/`%materialize_all`).
+        module subroutine table_filter_rows(self, keep)
+            class(parquet_table), intent(inout) :: self !! the table.
+            logical, intent(in) :: keep(:)              !! one entry per row; .true. to retain it.
+        end subroutine table_filter_rows
+        !> Reorders every column's rows by one or more key columns, in memory.
+        !!
+        !! Runs the library's own C++ sort engine -- the same one a read-time `sort_by=` uses, so
+        !! the two cannot order the same keys differently. Keys apply in the order given, the
+        !! first being the primary. `descending`/`nulls_first`, when given, carry one entry per
+        !! key. Nulls and NaNs are placed absolutely and are never flipped by `descending`.
+        !!
+        !! Every key column must already be resident: sorting will not read one implicitly.
+        !! Row-structural, so it DETACHES.
+        module subroutine table_sort_by(self, keys, descending, nulls_first)
+            class(parquet_table), intent(inout) :: self       !! the table.
+            character(len=*), intent(in) :: keys(:)           !! key columns, primary first.
+            logical, intent(in), optional :: descending(:)    !! per key: .true. for descending.
+            logical, intent(in), optional :: nulls_first(:)   !! per key: .true. to put nulls first.
+        end subroutine table_sort_by
+        !> Removes the listed rows (int32 indices). Repeats are harmless -- a row named twice is
+        !! removed once. Row-structural, so it DETACHES.
+        module subroutine table_delete_rows_i32(self, indices)
+            class(parquet_table), intent(inout) :: self !! the table.
+            integer(int32), intent(in) :: indices(:)    !! 1-based row indices to remove.
+        end subroutine table_delete_rows_i32
+        !> Removes the listed rows (int64 indices). Row-structural, so it DETACHES.
+        module subroutine table_delete_rows_i64(self, indices)
+            class(parquet_table), intent(inout) :: self !! the table.
+            integer(int64), intent(in) :: indices(:)    !! 1-based row indices to remove.
+        end subroutine table_delete_rows_i64
+        !> Keeps only the first `n` rows (int32 count). `n` beyond the row count is a no-op; 0
+        !! empties the table. Row-structural, so it DETACHES.
+        module subroutine table_truncate_i32(self, n)
+            class(parquet_table), intent(inout) :: self !! the table.
+            integer(int32), intent(in) :: n             !! rows to keep.
+        end subroutine table_truncate_i32
+        !> Keeps only the first `n` rows (int64 count). Row-structural, so it DETACHES.
+        module subroutine table_truncate_i64(self, n)
+            class(parquet_table), intent(inout) :: self !! the table.
+            integer(int64), intent(in) :: n             !! rows to keep.
+        end subroutine table_truncate_i64
+        !> Appends every row of another table. `other`'s columns must be a SUBSET of this
+        !! table's, with matching kinds, widths and units; a column this table has and `other`
+        !! does not is filled with nulls. A column `other` has and this table does not is an
+        !! error rather than being silently dropped. Row-structural, so it DETACHES.
+        module subroutine table_append_table(self, other)
+            class(parquet_table), intent(inout) :: self !! the table to grow.
+            class(parquet_table), intent(in) :: other   !! the table whose rows are appended.
+        end subroutine table_append_table
+        !> Appends one row, taken from a row handle on another (or the same) table. Convenient,
+        !! but slow in bulk -- build a batch with `%clone_structure` and append that instead.
+        !! Row-structural, so it DETACHES.
+        module subroutine table_append_row(self, r)
+            class(parquet_table), intent(inout) :: self !! the table to grow.
+            type(parquet_table_row), intent(in) :: r    !! the row to append.
+        end subroutine table_append_row
+        !> Appends `n` all-null rows (int32 count) to every column, so they can be filled in
+        !! afterwards. Row-structural, so it DETACHES.
+        module subroutine table_append_null_rows_i32(self, n)
+            class(parquet_table), intent(inout) :: self !! the table.
+            integer(int32), intent(in) :: n             !! rows to append.
+        end subroutine table_append_null_rows_i32
+        !> Appends `n` all-null rows (int64 count). Row-structural, so it DETACHES.
+        module subroutine table_append_null_rows_i64(self, n)
+            class(parquet_table), intent(inout) :: self !! the table.
+            integer(int64), intent(in) :: n             !! rows to append.
+        end subroutine table_append_null_rows_i64
+        !> The shared back half of every row-structural mutation: applies `keep` to every
+        !! resident column, updates the row count, and detaches. Private to the implementation.
+        module subroutine table_apply_keep(self, keep, proc)
+            class(parquet_table), intent(inout) :: self !! the table.
+            logical, intent(in) :: keep(:)              !! one entry per row; .true. to retain it.
+            character(len=*), intent(in) :: proc        !! calling procedure, for messages.
+        end subroutine table_apply_keep
+        !> Cuts the table loose from its file: sets `detached`, releases the reader (it can never
+        !! be read from again) and rewrites the row scope, since the surviving rows are no longer
+        !! a contiguous range of file rows. Keeps `source_file`, which `%filename` and `%clone`
+        !! still need.
+        module subroutine table_detach(self)
+            class(parquet_table), intent(inout) :: self !! the table.
+        end subroutine table_detach
+        !> Whether slot `idx` takes part in a row-structural mutation: it must hold values, so a
+        !! column that was never read, or whose type this library cannot read at all, does not.
+        !!
+        !! Such a column is skipped rather than making the mutation an error, which is what makes
+        !! it possible to filter or sort a table without first reading every column it has (the
+        !! whole point of a lazy table). The cost is that the skipped column can never be read
+        !! afterwards -- detaching sees to that -- so it is left behind deliberately, and the
+        !! detach guard is what reports it if anyone reaches for it later.
+        module function table_mutable_column(self, idx) result(ok)
+            class(parquet_table), intent(in) :: self !! the table.
+            integer, intent(in) :: idx               !! slot index.
+            logical :: ok                            !! .true. if the mutation applies to it.
+        end function table_mutable_column
+    end interface
+    !
+    ! ---- Copying a whole table (parquet_tables_clone) ----
+    interface
+        !> Makes `out` an independent deep copy of this table -- the way to keep a version to go
+        !! back to, since mutation is in place and there is no undo.
+        !!
+        !! Columns already read are copied; columns not yet read stay unread, so a clone costs
+        !! what the table actually holds rather than what its file contains. A live file-backed
+        !! table's clone opens its OWN reader on the same file and stays lazy; a detached or
+        !! in-memory table's clone has no reader, like its source.
+        !!
+        !! `out` must be declared as the same concrete type as `self`.
+        module subroutine table_clone(self, out)
+            class(parquet_table), intent(in) :: self  !! the table to copy.
+            class(parquet_table), intent(out) :: out  !! receives the copy.
+        end subroutine table_clone
+        !> Makes `out` an EMPTY table with this table's columns: same names, kinds, widths and
+        !! units, zero rows, no file behind it.
+        !!
+        !! This is the first half of the bulk-append idiom -- `%clone_structure` a batch, fill it
+        !! with `%add_column`/`%set`, then `%append` it -- which is how a program adds many rows
+        !! without appending one at a time. A batch made this way structurally cannot have the
+        !! wrong column set, and abandoning a half-filled one is just a variable going out of
+        !! scope. Columns whose type this library cannot read are left out.
+        module subroutine table_clone_structure(self, out)
+            class(parquet_table), intent(in) :: self  !! the table to take the shape of.
+            class(parquet_table), intent(out) :: out  !! receives the empty table.
+        end subroutine table_clone_structure
+    end interface
+    !
+    ! ---- Sort key extraction (parquet_tables_sort) ----
+    interface
+        !> Builds the 1-based row permutation `keys` implies, without applying it. Split out from
+        !! `%sort_by` so the key extraction and the mutation can be reasoned about separately.
+        module subroutine table_build_sort_permutation(self, keys, descending, nulls_first, perm)
+            class(parquet_table), intent(in) :: self        !! the table.
+            character(len=*), intent(in) :: keys(:)         !! key columns, primary first.
+            logical, intent(in), optional :: descending(:)  !! per key: .true. for descending.
+            logical, intent(in), optional :: nulls_first(:) !! per key: .true. to put nulls first.
+            integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
+        end subroutine table_build_sort_permutation
     end interface
     !
     ! ---- Row selection (parquet_tables_slice, and the per-kind copies in ..._access) ----

@@ -246,6 +246,10 @@ contains
         !
         associate (slot => cache%cols(idx))
             if (.not. slot%width_pending) return
+            ! Resolving reads data, so a detached table cannot do it at all -- and this guard has
+            ! to be here as well as in table_touch, because %kind and %width reach this helper
+            ! directly without going through it.
+            call table_check_not_detached(cache, sc, slot%name, proc)
             ! Resolving reads data, so it is a first touch as far as RF4 is concerned even when it
             ! does not materialize anything -- a shared store must not have it happen concurrently.
             if (unsafe_first_touch(cache)) then
@@ -311,6 +315,11 @@ contains
                 error stop EP // trim(proc) // ": this column holds no values and has no file " // &
                     "column to read them from" // sfx
             end if
+            ! D6: once a row-structural mutation has changed the row set, a column read from the
+            ! file would no longer line up with the columns already in memory. This has to come
+            ! BEFORE table_resolve_width, which reads data itself for a plain-LIST column and
+            ! would do so through a reader detaching has already released.
+            call table_check_not_detached(cache, sc, slot%name, proc)
             ! A deferred-width column has to be classified before it can be materialized, since the
             ! materialize dispatches on the kind. The footer screen's unproven candidate is enough
             ! here on purpose: the read below checks every row's length against the width it was
@@ -318,16 +327,6 @@ contains
             ! wrong candidate fails loudly and the read doubles as the proof -- which is what keeps
             ! this to ONE pass over the data instead of measuring first and then reading.
             call table_resolve_width(cache, sc, idx, .false., proc)
-            if (sc%detached) then
-                ! D6: once a row-structural mutation has changed the row set, a column read from
-                ! the file would no longer line up with the columns already in memory. Not
-                ! reachable yet: no row-structural mutation exists in this milestone, so
-                ! %detached is always .false. -- reserved for when one is added (see
-                ! parquet_tables.f90's %detached component doc).
-                call table_context_suffix(cache, slot%name, sfx) ! GCOVR_EXCL_LINE
-                error stop EP // trim(proc) // ": this table has been detached from its file by " // & ! GCOVR_EXCL_LINE
-                    "a row-structural change; materialize a column before mutating rows" // sfx ! GCOVR_EXCL_LINE
-            end if
         end associate
         call table_materialize(cache, sc, idx)
         ! Release policy for a SINGLE first touch: free the Arrow buffers straight away. For a
@@ -368,6 +367,9 @@ contains
             if (.not. cache%cols(i)%supported) cycle
             if (.not. cache%cols(i)%file_source) cycle
             if (cache%cols(i)%residency == RES_FULL) cycle
+            ! Checked per column rather than once up front, so a detached table whose columns are
+            ! all resident is still a quiet no-op -- which is what %materialize_all means there.
+            call table_check_not_detached(cache, sc, cache%cols(i)%name, "materialize_all")
             call table_materialize(cache, sc, i)
             top = top_level_of(cache%cols(i)%file_name)
             if (len(prev_top) > 0 .and. prev_top /= top) then
@@ -465,11 +467,9 @@ contains
                 "nothing to reload it from" // sfx
         end if
         if (self%detached) then
-            ! Same reserved-for-future-feature guard as table_touch's own %detached check above --
-            ! not reachable yet, since nothing in this milestone ever sets %detached to .true.
-            call table_context_suffix(self%cache, name, sfx) ! GCOVR_EXCL_LINE
-            error stop EP // "reload: this table has been detached from its file by a " // & ! GCOVR_EXCL_LINE
-                "row-structural change, so a re-read would no longer line up" // sfx ! GCOVR_EXCL_LINE
+            call table_context_suffix(self%cache, name, sfx)
+            error stop EP // "reload: this table has been detached from its file by a " // &
+                "row-structural change, so a re-read would no longer line up" // sfx
         end if
         ! Drop what is there and take the first-touch path again, so a reload and a first read
         ! cannot drift apart.

@@ -29,6 +29,7 @@ module test_table
     use parquet_strings, only : parquet_string_column
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp
     use iso_fortran_env, only : int32, int64, real32, real64
+    use ieee_arithmetic, only : ieee_value, ieee_quiet_nan
     use testdrive, only : new_unittest, unittest_type, error_type, check
     !
     implicit none
@@ -108,7 +109,32 @@ contains
                 test_kind_matrix_found), &
             new_unittest("all 18 kinds: add_column builds a table from scratch", test_kind_matrix_add), &
             new_unittest("filename and file metadata are reported back from the source file", &
-                test_filename_and_metadata) &
+                test_filename_and_metadata), &
+            new_unittest("set_element writes one cell, in both row-index kinds", test_set_element), &
+            new_unittest("set_null/clear_null/compact_validity are row-granular", &
+                test_validity_mutation), &
+            new_unittest("drop_column removes a column and leaves the survivors intact", &
+                test_drop_column), &
+            new_unittest("rename_column changes the lookup name, not the file column", &
+                test_rename_column), &
+            new_unittest("cast_column adds a converted column and leaves the source alone", &
+                test_cast_column), &
+            new_unittest("filter_rows keeps the selected rows in every column and detaches", &
+                test_filter_rows), &
+            new_unittest("delete_rows and truncate handle repeats and past-the-end counts", &
+                test_delete_and_truncate), &
+            new_unittest("sort_by orders rows by one or more keys", test_sort_by), &
+            new_unittest("an in-memory sort matches a read-time sort row for row", &
+                test_sort_matches_read_time), &
+            new_unittest("sort_by handles int64 and timestamp keys", test_sort_by_key_kinds), &
+            new_unittest("append concatenates a batch and null-fills the columns it omits", &
+                test_append_table), &
+            new_unittest("append_null_rows supports the extend-fill-append workflow", &
+                test_append_null_rows_workflow), &
+            new_unittest("append takes a single row through a row handle", test_append_row), &
+            new_unittest("a clone is independent, stays lazy and keeps the row scope", test_clone), &
+            new_unittest("a detached table's clone keeps its values and stays detached", &
+                test_clone_of_detached) &
             ]
     end subroutine collect_tests_parquet_table
     !
@@ -2535,5 +2561,656 @@ contains
         call t2%get("v_i64", gv_i64)
         call check(error, gv_i64(2, 1) == 12000000000_int64, "added vector int64 values should survive")
     end subroutine test_kind_matrix_add
+    !
+    ! ==== stage 3c: mutation ================================================================
+    !
+    !> Writing one cell must land in exactly that cell, on every kind, from both row-index
+    !! kinds -- and must clear that row's null, since a value and a null cannot both be true.
+    subroutine test_set_element(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer(int32), allocatable :: gi32(:)
+        real(real64), allocatable :: gf64(:)
+        character(len=:), allocatable :: gs(:)
+        character(len=*), parameter :: f = "test_run/table_setelem.parquet"
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t, f)
+        ! int32 row index (a plain default INTEGER literal) and int64 row index must both work.
+        call t%set_element("i32", 2, 77_int32)
+        call t%set_element("f64", 3_int64, -1.5_real64)
+        call t%set_element("s", 1, "rewritten")
+        call t%get("i32", gi32)
+        call t%get("f64", gf64)
+        call t%get("s", gs)
+        call check(error, gi32(2) == 77_int32, "set_element should write the named cell")
+        if (allocated(error)) return
+        call check(error, gi32(1) == 1_int32 .and. gi32(3) == 3_int32, &
+            "set_element should leave every other row alone")
+        if (allocated(error)) return
+        call check(error, gf64(3) == -1.5_real64, "set_element should write a float64 cell")
+        if (allocated(error)) return
+        call check(error, trim(gs(1)) == "rewritten", "set_element should write a string cell")
+    end subroutine test_set_element
+    !
+    !> The validity trio, including the trap that %set_null is ROW-granular on a vector column.
+    subroutine test_validity_mutation(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        real(real64) :: v(NROW)
+        real(real64) :: vv(NVEC, NROW)
+        integer :: i, e
+        !
+        do i = 1, NROW
+            v(i) = real(i, real64)
+            do e = 1, NVEC
+                vv(e, i) = real(10 * i + e, real64)
+            end do
+        end do
+        call parquet_new_table(t)
+        call t%add_column("x", v)
+        call t%add_column("xv", vv)
+        call check(error, .not. t%is_null("x", 3), "a fresh column should hold no nulls")
+        if (allocated(error)) return
+        call t%set_null("x", 3)
+        call check(error, t%is_null("x", 3_int64), "set_null should mark the row null")
+        if (allocated(error)) return
+        call check(error, .not. t%is_null("x", 2), "set_null should mark only the named row")
+        if (allocated(error)) return
+        ! Writing a value clears the null -- a cell cannot be both.
+        call t%set_element("x", 3, 99.0_real64)
+        call check(error, .not. t%is_null("x", 3), "set_element should clear the row's null")
+        if (allocated(error)) return
+        ! Row-granular on a vector column: nulling row 2 nulls the whole row, not one element.
+        call t%set_null("xv", 2)
+        call check(error, t%is_null("xv", 2), "set_null on a vector column should null the row")
+        if (allocated(error)) return
+        call check(error, .not. t%is_null("xv", 1), "a vector row's null should not spread")
+        if (allocated(error)) return
+        call t%clear_null("xv", 2)
+        call check(error, .not. t%is_null("xv", 2), "clear_null should mark the row valid again")
+        if (allocated(error)) return
+        ! compact_validity drops a bitmap that no longer has anything in it; it is idempotent.
+        call t%compact_validity("xv")
+        call t%compact_validity("xv")
+        call check(error, .not. t%is_null("xv", 2), "compact_validity should not change any answer")
+    end subroutine test_validity_mutation
+    !
+    !> Dropping a column removes it from every view of the table, and leaves the survivors both
+    !! intact and in their original order.
+    subroutine test_drop_column(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        character(len=:), allocatable :: names(:)
+        real(real64), allocatable :: gf64(:)
+        character(len=*), parameter :: f = "test_run/table_drop.parquet"
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t, f)
+        call t%get("f64", gf64)          ! make one column resident before the drop
+        call t%drop_column("f32")
+        call check(error, t%ncols() == 5, "drop_column should shrink the column count")
+        if (allocated(error)) return
+        call check(error, .not. t%has_column("f32"), "the dropped column should be gone")
+        if (allocated(error)) return
+        call t%column_names(names)
+        call check(error, size(names) == 5, "column_names should not list the dropped column")
+        if (allocated(error)) return
+        call check(error, trim(names(1)) == "i32" .and. trim(names(3)) == "f64", &
+            "the surviving columns should keep their order after the shift down")
+        if (allocated(error)) return
+        deallocate(gf64)
+        call t%get("f64", gf64)
+        call check(error, gf64(2) == 4.5_real64, "a survivor's values should be intact after a drop")
+        if (allocated(error)) return
+        call check(error, t%nrows() == NROW, "dropping a column should not change the row count")
+        if (allocated(error)) return
+        ! Dropping a column that was never read is the memory-reclaiming case, and must work.
+        call t%drop_column("b")
+        call check(error, t%ncols() == 4, "dropping an unread column should work too")
+    end subroutine test_drop_column
+    !
+    !> A rename changes only the name the column is looked up by; a file-backed column that has
+    !! not been read yet must still read from the right physical column afterwards.
+    subroutine test_rename_column(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer(int32), allocatable :: gi32(:)
+        character(len=*), parameter :: f = "test_run/table_rename.parquet"
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t, f)
+        call t%rename_column("i32", "counter")
+        call check(error, t%has_column("counter"), "the new name should resolve")
+        if (allocated(error)) return
+        call check(error, .not. t%has_column("i32"), "the old name should not resolve")
+        if (allocated(error)) return
+        call check(error, t%residency("counter") == RES_EMPTY, "a rename should read nothing")
+        if (allocated(error)) return
+        ! The first touch happens now, under the NEW name, and must still find the file column.
+        call t%get("counter", gi32)
+        call check(error, gi32(4) == 4_int32, &
+            "a renamed but unread column should still read from its own file column")
+        if (allocated(error)) return
+        call check(error, t%ncols() == 6, "a rename should not change the column count")
+    end subroutine test_rename_column
+    !
+    !> A cast produces a NEW column, leaves the source alone, carries nulls and the unit over,
+    !! and refuses a value it cannot represent (that refusal is an error scenario).
+    subroutine test_cast_column(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        real(real64) :: v(NROW)
+        integer(int64), allocatable :: gi64(:)
+        integer(int32), allocatable :: gi32(:)
+        real(real64), allocatable :: gf64(:)
+        character(len=:), allocatable :: u
+        integer :: i
+        !
+        do i = 1, NROW
+            v(i) = real(i, real64)
+        end do
+        call parquet_new_table(t)
+        call t%add_column("x", v, unit="m/s")
+        call t%set_null("x", 5)
+        call t%cast_column("x", "xi", PK_INT64)
+        call check(error, t%has_column("xi"), "cast_column should create the new column")
+        if (allocated(error)) return
+        call check(error, t%kind("xi") == PK_INT64, "the new column should hold the target kind")
+        if (allocated(error)) return
+        call check(error, t%kind("x") == PK_FLOAT64, "the source column should keep its own kind")
+        if (allocated(error)) return
+        call t%get("xi", gi64)
+        call check(error, gi64(2) == 2_int64 .and. gi64(6) == 6_int64, &
+            "cast values should convert exactly")
+        if (allocated(error)) return
+        call check(error, t%is_null("xi", 5), "a null should carry over into the cast column")
+        if (allocated(error)) return
+        call t%unit("xi", u)
+        call check(error, u == "m/s", "a kind cast should carry the unit over unchanged")
+        if (allocated(error)) return
+        call t%get("x", gf64)
+        call check(error, gf64(2) == 2.0_real64, "the source column's values should be untouched")
+        if (allocated(error)) return
+        ! Widening the other way, and to a narrower float, both round-trip when exact.
+        call t%cast_column("xi", "xf", PK_FLOAT32)
+        call check(error, t%kind("xf") == PK_FLOAT32, "cast to float32 should produce a float32 column")
+        if (allocated(error)) return
+        call t%cast_column("xi", "xs", PK_INT32)
+        call check(error, t%kind("xs") == PK_INT32, "cast to int32 should produce an int32 column")
+        if (allocated(error)) return
+        call t%get("xs", gi32)
+        call check(error, gi32(2) == 2_int32, "a narrowing cast should keep an exactly representable value")
+    end subroutine test_cast_column
+    !
+    !> Writes a fixture with an id column plus one sortable column of each interesting shape, so
+    !! a sort's result can always be stated as "these ids, in this order".
+    subroutine write_sort_fixture(fname)
+        character(len=*), intent(in) :: fname !! file to write.
+        type(parquet_writer) :: w
+        integer(int32) :: id(NROW)
+        real(real64) :: v(NROW)
+        integer(int32) :: g(NROW)
+        character(len=8) :: s(NROW)
+        integer :: i
+        !
+        do i = 1, NROW
+            id(i) = i
+        end do
+        ! v is deliberately unordered, and g has repeats so a second key has ties to break.
+        v = [30.0_real64, 10.0_real64, 50.0_real64, 20.0_real64, 60.0_real64, 40.0_real64]
+        g = [2_int32, 1_int32, 2_int32, 1_int32, 2_int32, 1_int32]
+        ! First element the shortest (CLAUDE.md).
+        s = ["b       ", "aa      ", "ddd     ", "cccc    ", "e       ", "ff      "]
+        call parquet_open_writer(w, fname)
+        call parquet_write_column(w, "id", id)
+        call parquet_write_column(w, "v", v)
+        call parquet_write_column(w, "g", g)
+        call parquet_write_column(w, "s", s)
+        call parquet_close_writer(w)
+    end subroutine write_sort_fixture
+    !
+    !> Filtering keeps the selected rows in every column at once, and detaches.
+    subroutine test_filter_rows(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        logical :: keep(NROW)
+        integer(int32), allocatable :: id(:)
+        real(real64), allocatable :: v(:)
+        character(len=*), parameter :: f = "test_run/table_filter.parquet"
+        !
+        call write_sort_fixture(f)
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        keep = [.true., .false., .true., .false., .false., .true.]
+        call t%filter_rows(keep)
+        call check(error, t%nrows() == 3, "filter_rows should leave the surviving row count")
+        if (allocated(error)) return
+        call check(error, t%is_detached(), "filter_rows should detach the table")
+        if (allocated(error)) return
+        call t%get("id", id)
+        call t%get("v", v)
+        call check(error, all(id == [1_int32, 3_int32, 6_int32]), &
+            "filter_rows should keep exactly the selected rows, in order")
+        if (allocated(error)) return
+        call check(error, all(v == [30.0_real64, 50.0_real64, 40.0_real64]), &
+            "every column should be filtered by the same mask")
+        if (allocated(error)) return
+        call check(error, t%ncols() == 4, "filter_rows should not change the column count")
+        if (allocated(error)) return
+        call check_every_column_length(error, t, "filter_rows")
+    end subroutine test_filter_rows
+    !
+    !> Asserts that EVERY column really holds the table's row count.
+    !!
+    !! A row-structural mutation has to reach every column, and a loop that misses one leaves a
+    !! table whose columns disagree about how many rows there are -- which no assertion on one or
+    !! two named columns can see. Deliberately checked through the copy path, whose result is
+    !! allocated to the column's own length, and over every kind the fixture has (numeric, string,
+    !! and a column nobody named in the test).
+    subroutine check_every_column_length(error, t, what)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error.
+        type(parquet_table), intent(inout) :: t             !! the mutated table.
+        character(len=*), intent(in) :: what                !! operation name, for the message.
+        character(len=:), allocatable :: names(:)
+        integer(int64), allocatable :: whole(:)
+        real(real64), allocatable :: num(:)
+        character(len=:), allocatable :: txt(:)
+        integer :: c
+        integer(int64) :: n
+        !
+        call t%column_names(names)
+        do c = 1, size(names)
+            ! Read through whichever widened form the column's kind allows, so the result is
+            ! allocated to that column's OWN length rather than to anything this test assumed.
+            select case (t%kind(trim(names(c))))
+            case (PK_INT32, PK_INT64)
+                call t%get(trim(names(c)), whole)
+                n = size(whole, kind=int64)
+            case (PK_FLOAT32, PK_FLOAT64)
+                call t%get(trim(names(c)), num)
+                n = size(num, kind=int64)
+            case default
+                call t%get(trim(names(c)), txt)
+                n = size(txt, kind=int64)
+            end select
+            call check(error, n == t%nrows(), &
+                what // " must leave every column holding the table's row count (" // &
+                trim(names(c)) // ")")
+            if (allocated(error)) return
+        end do
+    end subroutine check_every_column_length
+    !
+    !> delete_rows and truncate are thin wrappers over the same machinery, including their edges:
+    !! a repeated index, and a truncate past the end.
+    subroutine test_delete_and_truncate(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, t2
+        integer(int32), allocatable :: id(:)
+        character(len=*), parameter :: f = "test_run/table_delete.parquet"
+        character(len=*), parameter :: f2 = "test_run/table_truncate.parquet"
+        !
+        call write_sort_fixture(f)
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        call t%delete_rows([2, 4, 2])       ! the repeat must remove row 2 once, not twice
+        call t%get("id", id)
+        call check(error, all(id == [1_int32, 3_int32, 5_int32, 6_int32]), &
+            "delete_rows should remove each named row exactly once")
+        if (allocated(error)) return
+        call check(error, t%is_detached(), "delete_rows should detach the table")
+        if (allocated(error)) return
+        !
+        call write_sort_fixture(f2)
+        call parquet_open_table(t2, f2)
+        call t2%materialize_all()
+        call t2%truncate(999)               ! past the end: a no-op, not an error
+        call check(error, t2%nrows() == NROW, "truncate past the end should keep every row")
+        if (allocated(error)) return
+        call t2%truncate(2_int64)
+        deallocate(id)
+        call t2%get("id", id)
+        call check(error, all(id == [1_int32, 2_int32]), "truncate should keep the first n rows")
+    end subroutine test_delete_and_truncate
+    !
+    !> The in-memory sort, single key and multi key, ascending and descending.
+    subroutine test_sort_by(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, t2, t3
+        integer(int32), allocatable :: id(:), g(:)
+        real(real64), allocatable :: v(:)
+        character(len=:), allocatable :: str(:)
+        character(len=*), parameter :: f = "test_run/table_sort1.parquet"
+        character(len=*), parameter :: f2 = "test_run/table_sort2.parquet"
+        character(len=*), parameter :: f3 = "test_run/table_sort3.parquet"
+        !
+        ! v = [30,10,50,20,60,40] -> ascending order of ids is 2,4,1,6,3,5.
+        call write_sort_fixture(f)
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        call t%sort_by(["v"])
+        call t%get("id", id)
+        call check(error, all(id == [2_int32, 4_int32, 1_int32, 6_int32, 3_int32, 5_int32]), &
+            "sort_by should order rows by the key column, ascending by default")
+        if (allocated(error)) return
+        call check(error, t%is_detached(), "sort_by should detach the table")
+        if (allocated(error)) return
+        !
+        call write_sort_fixture(f2)
+        call parquet_open_table(t2, f2)
+        call t2%materialize_all()
+        call t2%sort_by(["v"], descending=[.true.])
+        deallocate(id)
+        call t2%get("id", id)
+        call check(error, all(id == [5_int32, 3_int32, 6_int32, 1_int32, 4_int32, 2_int32]), &
+            "descending= should reverse the order")
+        if (allocated(error)) return
+        !
+        ! g = [2,1,2,1,2,1], so g ascending then v ascending gives ids 2,4,6 then 1,3,5.
+        call write_sort_fixture(f3)
+        call parquet_open_table(t3, f3)
+        call t3%materialize_all()
+        call t3%sort_by(["g", "v"])
+        deallocate(id)
+        call t3%get("id", id)
+        call check(error, all(id == [2_int32, 4_int32, 6_int32, 1_int32, 3_int32, 5_int32]), &
+            "a second key should break the first key's ties")
+        if (allocated(error)) return
+        call check_every_column_length(error, t3, "sort_by")
+        if (allocated(error)) return
+        ! A sort changes order, not lengths, so a length check cannot see a column the reorder
+        ! missed. Every column's VALUES must therefore be checked against the same permutation --
+        ! including the LAST one, which is where an off-by-one loop bound leaves its evidence.
+        call t3%get("g", g)
+        call check(error, all(g == [1_int32, 1_int32, 1_int32, 2_int32, 2_int32, 2_int32]), &
+            "the key column itself should end up sorted")
+        if (allocated(error)) return
+        call t3%get("v", v)
+        call check(error, all(v == [10.0_real64, 20.0_real64, 40.0_real64, 30.0_real64, &
+            50.0_real64, 60.0_real64]), "every numeric column should follow the permutation")
+        if (allocated(error)) return
+        call t3%get("s", str)
+        call check(error, trim(str(1)) == "aa" .and. trim(str(3)) == "ff" .and. &
+            trim(str(6)) == "e", "the last column must follow the permutation too")
+    end subroutine test_sort_by
+    !
+    !> THE equivalence test: an in-memory %sort_by and a read-time sort_by= run the same C++
+    !! engine, so they must produce the identical row order -- for every key type, and with the
+    !! nulls and NaNs that are the most likely place for two orderings to drift apart.
+    subroutine test_sort_matches_read_time(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        integer(int32), allocatable :: mem(:), disk(:)
+        integer :: k
+        character(len=8), parameter :: keys(3) = ["v       ", "s       ", "g       "]
+        character(len=*), parameter :: f = "test_run/table_sort_equiv.parquet"
+        !
+        call write_sort_equiv_fixture(f)
+        do k = 1, 3
+            ! in memory
+            call parquet_open_table(t, f)
+            call t%materialize_all()
+            call t%sort_by([trim(keys(k))])
+            if (allocated(mem)) deallocate(mem)
+            call t%get("id", mem)
+            ! ... and the same sort applied while reading
+            srt = parquet_sortkey()
+            call srt%add(trim(keys(k))//" asc")
+            call parquet_open_reader(reader, f, sort_by=srt)
+            if (allocated(disk)) deallocate(disk)
+            allocate(disk(NROW))
+            call parquet_read_column(reader, "id", disk)
+            call parquet_close_reader(reader)
+            call check(error, all(mem == disk), &
+                "an in-memory sort must order rows exactly as a read-time sort of the same key")
+            if (allocated(error)) return
+        end do
+    end subroutine test_sort_matches_read_time
+    !
+    !> The equivalence fixture: nulls and a NaN in the float key, so the tier rules are exercised
+    !! rather than just the ordinary values.
+    subroutine write_sort_equiv_fixture(fname)
+        character(len=*), intent(in) :: fname !! file to write.
+        type(parquet_writer) :: w
+        integer(int32) :: id(NROW), g(NROW)
+        real(real64) :: v(NROW)
+        character(len=8) :: s(NROW)
+        logical :: v_ok(NROW), s_ok(NROW)
+        integer :: i
+        !
+        do i = 1, NROW
+            id(i) = i
+        end do
+        v = [30.0_real64, 10.0_real64, 50.0_real64, 20.0_real64, 60.0_real64, 40.0_real64]
+        v(3) = ieee_value(0.0_real64, ieee_quiet_nan)
+        v_ok = .true.
+        v_ok(5) = .false.                       ! a null float, next to the NaN
+        g = [2_int32, 1_int32, 2_int32, 1_int32, 2_int32, 1_int32]
+        s = ["b       ", "aa      ", "ddd     ", "cccc    ", "e       ", "ff      "]
+        s_ok = .true.
+        s_ok(2) = .false.                       ! a null string
+        call parquet_open_writer(w, fname)
+        call parquet_write_column(w, "id", id)
+        call parquet_write_column(w, "v", v, is_valid=v_ok)
+        call parquet_write_column(w, "g", g)
+        call parquet_write_column(w, "s", s, is_valid=s_ok)
+        call parquet_close_writer(w)
+    end subroutine write_sort_equiv_fixture
+    !
+    !> Appending another table concatenates matching columns and null-fills the ones the appended
+    !! table does not have.
+    subroutine test_append_table(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, batch, partial
+        integer(int32), allocatable :: id(:)
+        real(real64), allocatable :: v(:)
+        character(len=*), parameter :: f = "test_run/table_append.parquet"
+        !
+        call write_sort_fixture(f)
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        ! A batch with the same structure is the documented way to append in bulk.
+        call t%clone_structure(batch)
+        call check(error, batch%nrows() == 0, "clone_structure should produce an empty table")
+        if (allocated(error)) return
+        call check(error, batch%ncols() == 4, "clone_structure should carry every column over")
+        if (allocated(error)) return
+        ! The documented bulk idiom: give the batch its rows, then write each column's values.
+        call batch%append_null_rows(2)
+        call batch%set("id", [91_int32, 92_int32])
+        call batch%set("v", [1.5_real64, 2.5_real64])
+        call check(error, .not. batch%is_detached(), &
+            "an in-memory table has no file to lose, so growing it must not mark it detached")
+        if (allocated(error)) return
+        call t%append(batch)
+        call check(error, t%nrows() == NROW + 2, "append should add the batch's rows")
+        if (allocated(error)) return
+        call check(error, t%is_detached(), "append should detach the table")
+        if (allocated(error)) return
+        call t%get("id", id)
+        call t%get("v", v)
+        call check(error, id(NROW + 1) == 91_int32 .and. id(NROW + 2) == 92_int32, &
+            "appended values should land after the existing rows")
+        if (allocated(error)) return
+        call check(error, v(NROW + 1) == 1.5_real64, "every supplied column should be appended")
+        if (allocated(error)) return
+        ! "g" and "s" were not in the batch, so their appended rows are null (the M1 default).
+        call check(error, t%is_null("g", NROW + 1), &
+            "a column the batch did not supply should be null-filled")
+        if (allocated(error)) return
+        call check(error, .not. t%is_null("g", 1), "null-filling should not reach existing rows")
+        if (allocated(error)) return
+        call check_every_column_length(error, t, "append")
+        if (allocated(error)) return
+        ! The batch above came from %clone_structure, so it HAD every column -- the nulls above
+        ! are its own. A batch built from scratch with fewer columns is what actually exercises
+        ! the null-fill rule for a column the source does not mention at all.
+        call parquet_new_table(partial)
+        call partial%add_column("id", [93_int32])
+        call t%append(partial)
+        call check(error, t%nrows() == NROW + 3, "a partial batch should still add its rows")
+        if (allocated(error)) return
+        call check(error, t%is_null("v", NROW + 3), &
+            "a column the appended table does not have at all should be null-filled")
+        if (allocated(error)) return
+        call check_every_column_length(error, t, "append of a partial batch")
+    end subroutine test_append_table
+    !
+    !> The maintainer's stated use case, end to end: take a subset, extend it with blank rows,
+    !! fill them, then append the original table.
+    subroutine test_append_null_rows_workflow(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, work
+        integer(int32), allocatable :: id(:)
+        character(len=*), parameter :: f = "test_run/table_appendnull.parquet"
+        !
+        call write_sort_fixture(f)
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        call t%clone(work)
+        call work%truncate(1)                ! keep row 1 only
+        call work%append_null_rows(2)
+        call check(error, work%nrows() == 3, "append_null_rows should lengthen every column")
+        if (allocated(error)) return
+        call check(error, work%is_null("id", 2) .and. work%is_null("id", 3), &
+            "the appended rows should start out null")
+        if (allocated(error)) return
+        call work%set_element("id", 2, 71_int32)
+        call work%set_element("id", 3, 72_int32)
+        call check(error, .not. work%is_null("id", 2), "filling a blank row should clear its null")
+        if (allocated(error)) return
+        call work%append(t)
+        call check(error, work%nrows() == 3 + NROW, "appending the original should add its rows")
+        if (allocated(error)) return
+        call work%get("id", id)
+        call check(error, id(1) == 1_int32 .and. id(2) == 71_int32 .and. id(4) == 1_int32, &
+            "the filled rows and the appended table should both be in place")
+    end subroutine test_append_null_rows_workflow
+    !
+    !> One row appended through a row handle.
+    subroutine test_append_row(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: src, dst
+        type(parquet_table_row) :: r
+        integer(int32), allocatable :: id(:)
+        character(len=*), parameter :: f = "test_run/table_appendrow.parquet"
+        !
+        call write_sort_fixture(f)
+        call parquet_open_table(src, f)
+        call src%materialize_all()
+        call src%clone(dst)
+        call dst%truncate(2)
+        r = src%row(5)
+        call dst%append(r)
+        call check(error, dst%nrows() == 3, "append(row) should add exactly one row")
+        if (allocated(error)) return
+        call dst%get("id", id)
+        call check(error, id(3) == 5_int32, "the appended row should be the one the handle names")
+    end subroutine test_append_row
+    !
+    !> The key kinds the other sort tests do not reach: an int64 column, and a timestamp, which
+    !! is the one kind that becomes TWO engine keys (seconds, then nanoseconds) because folding
+    !! the pair into a single int64 would overflow outside roughly 1678-2262.
+    subroutine test_sort_by_key_kinds(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer(int64) :: big(4)
+        type(parquet_timestamp) :: ts(4)
+        integer(int32) :: id(4)
+        integer(int32), allocatable :: got(:)
+        !
+        id = [1_int32, 2_int32, 3_int32, 4_int32]
+        big = [30_int64, 10_int64, 40_int64, 20_int64]
+        ! Rows 1 and 2 differ only in the sub-second part, which is exactly what the second
+        ! engine key exists to order -- a single-int64 key would have to round them together.
+        ts(1) = parquet_timestamp(2026, 1, 1, 0, 0, 5, 900000000)
+        ts(2) = parquet_timestamp(2026, 1, 1, 0, 0, 5, 100000000)
+        ts(3) = parquet_timestamp(2020, 6, 15, 12, 0, 0)
+        ts(4) = parquet_timestamp(2030, 6, 15, 12, 0, 0)
+        call parquet_new_table(t)
+        call t%add_column("id", id)
+        call t%add_column("big", big)
+        call t%add_column("when", ts)
+        call t%sort_by(["big"])
+        call t%get("id", got)
+        call check(error, all(got == [2_int32, 4_int32, 1_int32, 3_int32]), &
+            "an int64 column should sort by its values")
+        if (allocated(error)) return
+        call t%sort_by(["when"])
+        deallocate(got)
+        call t%get("id", got)
+        call check(error, all(got == [3_int32, 2_int32, 1_int32, 4_int32]), &
+            "a timestamp sort should order by seconds and then by the sub-second part")
+    end subroutine test_sort_by_key_kinds
+    !
+    !> A clone is independent in both directions, stays lazy, and carries the row scope over.
+    subroutine test_clone(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, c, sl, cs
+        real(real64), allocatable :: v(:)
+        integer(int32), allocatable :: id(:)
+        character(len=*), parameter :: f = "test_run/table_clone.parquet"
+        character(len=*), parameter :: f2 = "test_run/table_clone_slice.parquet"
+        !
+        call write_sort_fixture(f)
+        call parquet_open_table(t, f)
+        call t%prefetch("v")                 ! one column read, three not
+        call t%clone(c)
+        call check(error, c%nrows() == NROW, "a clone should have the same rows")
+        if (allocated(error)) return
+        call check(error, c%ncols() == 4, "a clone should have the same columns")
+        if (allocated(error)) return
+        call check(error, c%residency("v") == RES_FULL, "a read column should be copied as read")
+        if (allocated(error)) return
+        call check(error, c%residency("id") == RES_EMPTY, "an unread column should stay unread")
+        if (allocated(error)) return
+        ! The clone can still read what the source had not read: it has its own reader.
+        call c%get("id", id)
+        call check(error, id(3) == 3_int32, "a clone should still be able to read from the file")
+        if (allocated(error)) return
+        ! Independence, both ways.
+        call c%set_element("v", 1, -7.0_real64)
+        call t%get("v", v)
+        call check(error, v(1) == 30.0_real64, "mutating a clone must not touch the source")
+        if (allocated(error)) return
+        call t%set_element("v", 2, -8.0_real64)
+        deallocate(v)
+        call c%get("v", v)
+        call check(error, v(2) == 10.0_real64, "mutating the source must not touch a clone")
+        if (allocated(error)) return
+        !
+        ! A slice-regime table's clone is a slice-regime table over the same physical rows.
+        call write_slice_fixture(f2, 12, 4)
+        call parquet_open_table(sl, f2, 5, 8)
+        call sl%clone(cs)
+        call check(error, cs%nrows() == 4, "a slice clone should cover the same rows")
+        if (allocated(error)) return
+        deallocate(id)
+        call cs%get("s_i32", id)
+        call check(error, id(1) == 5_int32, "a slice clone should start at the same file row")
+    end subroutine test_clone
+    !
+    !> A detached table's clone keeps its values and stays detached -- there is no file to reopen.
+    subroutine test_clone_of_detached(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, c
+        integer(int32), allocatable :: id(:)
+        character(len=*), parameter :: f = "test_run/table_clone_detached.parquet"
+        !
+        call write_sort_fixture(f)
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        call t%truncate(3)
+        call t%clone(c)
+        call check(error, c%is_detached(), "a detached table's clone should be detached too")
+        if (allocated(error)) return
+        call check(error, c%nrows() == 3, "the clone should keep the mutated row count")
+        if (allocated(error)) return
+        call c%get("id", id)
+        call check(error, all(id == [1_int32, 2_int32, 3_int32]), &
+            "the clone should hold the values the source had after mutating")
+    end subroutine test_clone_of_detached
     !
 end module test_table

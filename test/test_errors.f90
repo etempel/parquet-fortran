@@ -603,6 +603,66 @@ contains
                 test_table_row_unknown_column_aborts), &
             new_unittest("reading through an unattached row handle aborts", &
                 test_table_row_unattached_aborts), &
+            new_unittest("reading a column left behind by a detach aborts", &
+                test_table_detached_read_unmaterialized_aborts), &
+            new_unittest("prefetching on a detached table aborts", &
+                test_table_detached_prefetch_aborts), &
+            new_unittest("materialize_all on a detached table aborts", &
+                test_table_detached_materialize_all_aborts), &
+            new_unittest("reloading a column of a detached table aborts", &
+                test_table_detached_reload_aborts), &
+            new_unittest("row_group_bounds on a detached table aborts", &
+                test_table_detached_row_group_bounds_aborts), &
+            new_unittest("a column stranded by a detach cannot be read afterwards", &
+                test_table_mutate_unmaterialized_column_aborts), &
+            new_unittest("sorting by an unsupported column aborts", &
+                test_table_mutate_unsupported_column_aborts), &
+            new_unittest("filter_rows with a wrong-length mask aborts", &
+                test_table_filter_rows_mask_length_aborts), &
+            new_unittest("delete_rows with an out-of-range index aborts", &
+                test_table_delete_rows_out_of_range_aborts), &
+            new_unittest("truncate to a negative row count aborts", &
+                test_table_truncate_negative_aborts), &
+            new_unittest("append_null_rows with a negative count aborts", &
+                test_table_append_null_rows_negative_aborts), &
+            new_unittest("sort_by with no key aborts", &
+                test_table_sort_by_no_keys_aborts), &
+            new_unittest("sort_by with a short descending= list aborts", &
+                test_table_sort_by_flag_count_mismatch_aborts), &
+            new_unittest("sort_by on a missing column aborts", &
+                test_table_sort_by_unknown_column_aborts), &
+            new_unittest("sort_by on a vector column aborts", &
+                test_table_sort_by_vector_column_aborts), &
+            new_unittest("sort_by on an unread key column aborts", &
+                test_table_sort_by_unmaterialized_key_aborts), &
+            new_unittest("append with an extra column in the source aborts", &
+                test_table_append_unknown_column_aborts), &
+            new_unittest("append with a kind mismatch aborts", &
+                test_table_append_kind_mismatch_aborts), &
+            new_unittest("append with a vector width mismatch aborts", &
+                test_table_append_width_mismatch_aborts), &
+            new_unittest("append with a unit mismatch aborts", &
+                test_table_append_unit_mismatch_aborts), &
+            new_unittest("append(row) with no column in common aborts", &
+                test_table_append_row_no_common_column_aborts), &
+            new_unittest("set_element past the last row aborts", &
+                test_table_set_element_row_out_of_range_aborts), &
+            new_unittest("set_element with the wrong value kind aborts", &
+                test_table_set_element_kind_mismatch_aborts), &
+            new_unittest("set_null on a row that does not exist aborts", &
+                test_table_set_null_row_out_of_range_aborts), &
+            new_unittest("rename_column onto an existing name aborts", &
+                test_table_rename_duplicate_name_aborts), &
+            new_unittest("rename_column to a blank name aborts", &
+                test_table_rename_blank_name_aborts), &
+            new_unittest("cast_column on a non-numeric column aborts", &
+                test_table_cast_unsupported_kind_aborts), &
+            new_unittest("cast_column onto an existing name aborts", &
+                test_table_cast_duplicate_name_aborts), &
+            new_unittest("cast_column on a value that would lose information aborts", &
+                test_table_cast_lossy_value_aborts), &
+            new_unittest("clone into another table type aborts", &
+                test_table_clone_type_mismatch_aborts), &
             new_unittest("a row handle reading an unsupported column aborts", &
                 test_table_row_unsupported_column_aborts), &
             new_unittest("a row handle reading a non-string column into a string aborts", &
@@ -4432,4 +4492,214 @@ contains
     ! here -- same convention as test_writing.f90's test_large_string_column_roundtrip/
     ! test_string_view_column_roundtrip, which also drive an out-of-process debug-hook fixture
     ! via check_scenario_exit_status but live in the suite whose read/write feature they exercise.
+    subroutine test_table_detached_read_unmaterialized_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_detached_read_unmaterialized", expect_abort=.true., &
+            failure_message="reading a column left behind by a detach was expected to abort", &
+            required_stderr="this table has been detached from its file by a row-structural change")
+    end subroutine test_table_detached_read_unmaterialized_aborts
+
+    subroutine test_table_detached_prefetch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_detached_prefetch", expect_abort=.true., &
+            failure_message="prefetching on a detached table was expected to abort", &
+            required_stderr="this table has been detached from its file by a row-structural change")
+    end subroutine test_table_detached_prefetch_aborts
+
+    subroutine test_table_detached_materialize_all_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_detached_materialize_all", expect_abort=.true., &
+            failure_message="materialize_all on a detached table was expected to abort", &
+            required_stderr="this table has been detached from its file by a row-structural change")
+    end subroutine test_table_detached_materialize_all_aborts
+
+    subroutine test_table_detached_reload_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_detached_reload", expect_abort=.true., &
+            failure_message="reloading a column of a detached table was expected to abort", &
+            required_stderr="row-structural change, so a re-read would no longer line up")
+    end subroutine test_table_detached_reload_aborts
+
+    subroutine test_table_detached_row_group_bounds_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_detached_row_group_bounds", expect_abort=.true., &
+            failure_message="row_group_bounds on a detached table was expected to abort", &
+            required_stderr="this table has been detached from its file by a row-structural change")
+    end subroutine test_table_detached_row_group_bounds_aborts
+
+    subroutine test_table_mutate_unmaterialized_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_mutate_unmaterialized_column", expect_abort=.true., &
+            failure_message="reading a column stranded by a detach was expected to abort", &
+            required_stderr="this table has been detached from its file by a row-structural change")
+    end subroutine test_table_mutate_unmaterialized_column_aborts
+
+    subroutine test_table_mutate_unsupported_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_mutate_unsupported_column", expect_abort=.true., &
+            failure_message="sorting by an unsupported column was expected to abort", &
+            required_stderr="this column's type is not supported by parquet_table, so it cannot be a sort key")
+    end subroutine test_table_mutate_unsupported_column_aborts
+
+    subroutine test_table_filter_rows_mask_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_filter_rows_mask_length", expect_abort=.true., &
+            failure_message="filtering with a mask of the wrong length was expected to abort", &
+            required_stderr="the mask has 2 entries but the table has 3 rows")
+    end subroutine test_table_filter_rows_mask_length_aborts
+
+    subroutine test_table_delete_rows_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_delete_rows_out_of_range", expect_abort=.true., &
+            failure_message="deleting a row that does not exist was expected to abort", &
+            required_stderr="row index 9 is outside this table's 1..3 rows")
+    end subroutine test_table_delete_rows_out_of_range_aborts
+
+    subroutine test_table_truncate_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_truncate_negative", expect_abort=.true., &
+            failure_message="truncating to a negative row count was expected to abort", &
+            required_stderr="truncate: cannot keep -1 rows")
+    end subroutine test_table_truncate_negative_aborts
+
+    subroutine test_table_append_null_rows_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_append_null_rows_negative", expect_abort=.true., &
+            failure_message="appending a negative number of rows was expected to abort", &
+            required_stderr="append_null_rows: cannot append -3 rows")
+    end subroutine test_table_append_null_rows_negative_aborts
+
+    subroutine test_table_sort_by_no_keys_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_sort_by_no_keys", expect_abort=.true., &
+            failure_message="sorting with no key was expected to abort", &
+            required_stderr="sort_by: no sort key was given")
+    end subroutine test_table_sort_by_no_keys_aborts
+
+    subroutine test_table_sort_by_flag_count_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_sort_by_flag_count_mismatch", expect_abort=.true., &
+            failure_message="a short descending= list was expected to abort", &
+            required_stderr="descending= has 1 entries but 2 keys were given")
+    end subroutine test_table_sort_by_flag_count_mismatch_aborts
+
+    subroutine test_table_sort_by_unknown_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_sort_by_unknown_column", expect_abort=.true., &
+            failure_message="sorting by a missing column was expected to abort", &
+            required_stderr="sort_by: no column of this name")
+    end subroutine test_table_sort_by_unknown_column_aborts
+
+    subroutine test_table_sort_by_vector_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_sort_by_vector_column", expect_abort=.true., &
+            failure_message="sorting by a vector column was expected to abort", &
+            required_stderr="column cannot be a sort key; there is no defined order on a whole vector row")
+    end subroutine test_table_sort_by_vector_column_aborts
+
+    subroutine test_table_sort_by_unmaterialized_key_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_sort_by_unmaterialized_key", expect_abort=.true., &
+            failure_message="sorting by an unread key column was expected to abort", &
+            required_stderr="this column has not been read yet, and sorting will not read it implicitly")
+    end subroutine test_table_sort_by_unmaterialized_key_aborts
+
+    subroutine test_table_append_unknown_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_append_unknown_column", expect_abort=.true., &
+            failure_message="appending a table with an extra column was expected to abort", &
+            required_stderr="the appended table has a column this table does not")
+    end subroutine test_table_append_unknown_column_aborts
+
+    subroutine test_table_append_kind_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_append_kind_mismatch", expect_abort=.true., &
+            failure_message="appending a column of another kind was expected to abort", &
+            required_stderr="in the appended table; convert it first (%cast_column)")
+    end subroutine test_table_append_kind_mismatch_aborts
+
+    subroutine test_table_append_width_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_append_width_mismatch", expect_abort=.true., &
+            failure_message="appending a vector column of another width was expected to abort", &
+            required_stderr="values per row here but 2 in the appended table")
+    end subroutine test_table_append_width_mismatch_aborts
+
+    subroutine test_table_append_unit_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_append_unit_mismatch", expect_abort=.true., &
+            failure_message="appending rows in another unit was expected to abort", &
+            required_stderr="and this library does not convert units")
+    end subroutine test_table_append_unit_mismatch_aborts
+
+    subroutine test_table_append_row_no_common_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_append_row_no_common_column", expect_abort=.true., &
+            failure_message="appending a row with nothing in common was expected to abort", &
+            required_stderr="the row's table has no column in common with this table")
+    end subroutine test_table_append_row_no_common_column_aborts
+
+    subroutine test_table_set_element_row_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_set_element_row_out_of_range", expect_abort=.true., &
+            failure_message="writing past the last row was expected to abort", &
+            required_stderr="row index 9 is outside this table's 1..2 rows")
+    end subroutine test_table_set_element_row_out_of_range_aborts
+
+    subroutine test_table_set_element_kind_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_set_element_kind_mismatch", expect_abort=.true., &
+            failure_message="writing a value of another kind was expected to abort", &
+            required_stderr="column kind is PK_INT32, not PK_FLOAT64")
+    end subroutine test_table_set_element_kind_mismatch_aborts
+
+    subroutine test_table_set_null_row_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_set_null_row_out_of_range", expect_abort=.true., &
+            failure_message="nulling row 0 was expected to abort", &
+            required_stderr="row index 0 is outside this table's 1..2 rows")
+    end subroutine test_table_set_null_row_out_of_range_aborts
+
+    subroutine test_table_rename_duplicate_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_rename_duplicate_name", expect_abort=.true., &
+            failure_message="renaming onto an existing name was expected to abort", &
+            required_stderr="rename_column: a column of the new name already exists")
+    end subroutine test_table_rename_duplicate_name_aborts
+
+    subroutine test_table_rename_blank_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_rename_blank_name", expect_abort=.true., &
+            failure_message="renaming to a blank name was expected to abort", &
+            required_stderr="rename_column: the new name is blank")
+    end subroutine test_table_rename_blank_name_aborts
+
+    subroutine test_table_cast_unsupported_kind_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_cast_unsupported_kind", expect_abort=.true., &
+            failure_message="casting a string column was expected to abort", &
+            required_stderr="can only cast between the numeric scalar kinds")
+    end subroutine test_table_cast_unsupported_kind_aborts
+
+    subroutine test_table_cast_duplicate_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_cast_duplicate_name", expect_abort=.true., &
+            failure_message="casting onto an existing name was expected to abort", &
+            required_stderr="cast_column: a column of the new name already exists")
+    end subroutine test_table_cast_duplicate_name_aborts
+
+    subroutine test_table_cast_lossy_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_cast_lossy_value", expect_abort=.true., &
+            failure_message="casting a value that cannot be represented was expected to abort", &
+            required_stderr="cannot be represented as PK_INT32, so casting from PK_FLOAT64 would lose information")
+    end subroutine test_table_cast_lossy_value_aborts
+
+    subroutine test_table_clone_type_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_clone_type_mismatch", expect_abort=.true., &
+            failure_message="cloning into another table type was expected to abort", &
+            required_stderr="source and destination must be the same table type")
+    end subroutine test_table_clone_type_mismatch_aborts
+
 end module test_errors

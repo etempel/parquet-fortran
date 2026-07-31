@@ -27,17 +27,10 @@ contains
     end procedure row_at_i32
     !
     module procedure row_at_i64
-        character(len=32) :: got, want
-        !
         call table_check_open(self, "row")
         ! Checked here rather than at the first %get: a handle that can never work should say so
         ! where the mistake was made, not several calls later.
-        if (i < 1_int64 .or. i > self%row_count) then
-            write(got, "(I0)") i
-            write(want, "(I0)") self%row_count
-            error stop EP // "row: row index " // trim(got) // " is outside this table's 1.." // &
-                trim(want) // " rows"
-        end if
+        call table_require_row(self, i, "row")
         r%cache => self%cache
         r%irow = i
         r%scope = table_scope_of(self)

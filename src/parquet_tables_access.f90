@@ -896,6 +896,258 @@ contains
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_arr_chrv
     !
+    module procedure set_element_i32_i32
+        call self%set_element(name, int(i, int64), value)
+    end procedure set_element_i32_i32
+    !
+    module procedure set_element_i32_i64
+        integer :: idx
+        !
+        call table_resolve(self, name, "set_element", idx)
+        call table_require_kind(self, idx, PK_INT32, "set_element")
+        call table_require_row(self, i, "set_element")
+        call self%cache%cols(idx)%values%set_at(i, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_element_i32_i64
+    !
+    module procedure set_element_i64_i32
+        call self%set_element(name, int(i, int64), value)
+    end procedure set_element_i64_i32
+    !
+    module procedure set_element_i64_i64
+        integer :: idx
+        !
+        call table_resolve(self, name, "set_element", idx)
+        call table_require_kind(self, idx, PK_INT64, "set_element")
+        call table_require_row(self, i, "set_element")
+        call self%cache%cols(idx)%values%set_at(i, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_element_i64_i64
+    !
+    module procedure set_element_f32_i32
+        call self%set_element(name, int(i, int64), value)
+    end procedure set_element_f32_i32
+    !
+    module procedure set_element_f32_i64
+        integer :: idx
+        !
+        call table_resolve(self, name, "set_element", idx)
+        call table_require_kind(self, idx, PK_FLOAT32, "set_element")
+        call table_require_row(self, i, "set_element")
+        call self%cache%cols(idx)%values%set_at(i, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_element_f32_i64
+    !
+    module procedure set_element_f64_i32
+        call self%set_element(name, int(i, int64), value)
+    end procedure set_element_f64_i32
+    !
+    module procedure set_element_f64_i64
+        integer :: idx
+        !
+        call table_resolve(self, name, "set_element", idx)
+        call table_require_kind(self, idx, PK_FLOAT64, "set_element")
+        call table_require_row(self, i, "set_element")
+        call self%cache%cols(idx)%values%set_at(i, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_element_f64_i64
+    !
+    module procedure set_element_bool_i32
+        call self%set_element(name, int(i, int64), value)
+    end procedure set_element_bool_i32
+    !
+    module procedure set_element_bool_i64
+        integer :: idx
+        !
+        call table_resolve(self, name, "set_element", idx)
+        call table_require_kind(self, idx, PK_LOGICAL, "set_element")
+        call table_require_row(self, i, "set_element")
+        call self%cache%cols(idx)%values%set_at(i, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_element_bool_i64
+    !
+    module procedure set_element_date_i32
+        call self%set_element(name, int(i, int64), value)
+    end procedure set_element_date_i32
+    !
+    module procedure set_element_date_i64
+        integer :: idx
+        !
+        call table_resolve(self, name, "set_element", idx)
+        call table_require_kind(self, idx, PK_DATE, "set_element")
+        call table_require_row(self, i, "set_element")
+        call self%cache%cols(idx)%values%set_at(i, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_element_date_i64
+    !
+    module procedure set_element_time_i32
+        call self%set_element(name, int(i, int64), value)
+    end procedure set_element_time_i32
+    !
+    module procedure set_element_time_i64
+        integer :: idx
+        !
+        call table_resolve(self, name, "set_element", idx)
+        call table_require_kind(self, idx, PK_TIME, "set_element")
+        call table_require_row(self, i, "set_element")
+        call self%cache%cols(idx)%values%set_at(i, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_element_time_i64
+    !
+    module procedure set_element_ts_i32
+        call self%set_element(name, int(i, int64), value)
+    end procedure set_element_ts_i32
+    !
+    module procedure set_element_ts_i64
+        integer :: idx
+        !
+        call table_resolve(self, name, "set_element", idx)
+        call table_require_kind(self, idx, PK_TIMESTAMP, "set_element")
+        call table_require_row(self, i, "set_element")
+        call self%cache%cols(idx)%values%set_at(i, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_element_ts_i64
+    !
+    module procedure set_element_i32v_i32
+        call self%set_element(name, int(i, int64), value)
+    end procedure set_element_i32v_i32
+    !
+    module procedure set_element_i32v_i64
+        integer :: idx
+        !
+        call table_resolve(self, name, "set_element", idx)
+        call table_require_kind(self, idx, PK_INT32_VEC, "set_element")
+        call table_require_row(self, i, "set_element")
+        call self%cache%cols(idx)%values%set_at(i, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_element_i32v_i64
+    !
+    module procedure set_element_i64v_i32
+        call self%set_element(name, int(i, int64), value)
+    end procedure set_element_i64v_i32
+    !
+    module procedure set_element_i64v_i64
+        integer :: idx
+        !
+        call table_resolve(self, name, "set_element", idx)
+        call table_require_kind(self, idx, PK_INT64_VEC, "set_element")
+        call table_require_row(self, i, "set_element")
+        call self%cache%cols(idx)%values%set_at(i, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_element_i64v_i64
+    !
+    module procedure set_element_f32v_i32
+        call self%set_element(name, int(i, int64), value)
+    end procedure set_element_f32v_i32
+    !
+    module procedure set_element_f32v_i64
+        integer :: idx
+        !
+        call table_resolve(self, name, "set_element", idx)
+        call table_require_kind(self, idx, PK_FLOAT32_VEC, "set_element")
+        call table_require_row(self, i, "set_element")
+        call self%cache%cols(idx)%values%set_at(i, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_element_f32v_i64
+    !
+    module procedure set_element_f64v_i32
+        call self%set_element(name, int(i, int64), value)
+    end procedure set_element_f64v_i32
+    !
+    module procedure set_element_f64v_i64
+        integer :: idx
+        !
+        call table_resolve(self, name, "set_element", idx)
+        call table_require_kind(self, idx, PK_FLOAT64_VEC, "set_element")
+        call table_require_row(self, i, "set_element")
+        call self%cache%cols(idx)%values%set_at(i, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_element_f64v_i64
+    !
+    module procedure set_element_boolv_i32
+        call self%set_element(name, int(i, int64), value)
+    end procedure set_element_boolv_i32
+    !
+    module procedure set_element_boolv_i64
+        integer :: idx
+        !
+        call table_resolve(self, name, "set_element", idx)
+        call table_require_kind(self, idx, PK_LOGICAL_VEC, "set_element")
+        call table_require_row(self, i, "set_element")
+        call self%cache%cols(idx)%values%set_at(i, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_element_boolv_i64
+    !
+    module procedure set_element_datev_i32
+        call self%set_element(name, int(i, int64), value)
+    end procedure set_element_datev_i32
+    !
+    module procedure set_element_datev_i64
+        integer :: idx
+        !
+        call table_resolve(self, name, "set_element", idx)
+        call table_require_kind(self, idx, PK_DATE_VEC, "set_element")
+        call table_require_row(self, i, "set_element")
+        call self%cache%cols(idx)%values%set_at(i, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_element_datev_i64
+    !
+    module procedure set_element_timev_i32
+        call self%set_element(name, int(i, int64), value)
+    end procedure set_element_timev_i32
+    !
+    module procedure set_element_timev_i64
+        integer :: idx
+        !
+        call table_resolve(self, name, "set_element", idx)
+        call table_require_kind(self, idx, PK_TIME_VEC, "set_element")
+        call table_require_row(self, i, "set_element")
+        call self%cache%cols(idx)%values%set_at(i, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_element_timev_i64
+    !
+    module procedure set_element_tsv_i32
+        call self%set_element(name, int(i, int64), value)
+    end procedure set_element_tsv_i32
+    !
+    module procedure set_element_tsv_i64
+        integer :: idx
+        !
+        call table_resolve(self, name, "set_element", idx)
+        call table_require_kind(self, idx, PK_TIMESTAMP_VEC, "set_element")
+        call table_require_row(self, i, "set_element")
+        call self%cache%cols(idx)%values%set_at(i, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_element_tsv_i64
+    !
+    module procedure set_element_chr_i32
+        call self%set_element(name, int(i, int64), value)
+    end procedure set_element_chr_i32
+    !
+    module procedure set_element_chr_i64
+        integer :: idx
+        !
+        call table_resolve(self, name, "set_element", idx)
+        call table_require_kind(self, idx, PK_STRING, "set_element")
+        call table_require_row(self, i, "set_element")
+        call self%cache%cols(idx)%values%set_at(i, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_element_chr_i64
+    !
+    module procedure set_element_chrv_i32
+        call self%set_element(name, int(i, int64), value)
+    end procedure set_element_chrv_i32
+    !
+    module procedure set_element_chrv_i64
+        integer :: idx
+        !
+        call table_resolve(self, name, "set_element", idx)
+        call table_require_kind(self, idx, PK_STRING_VEC, "set_element")
+        call table_require_row(self, i, "set_element")
+        call self%cache%cols(idx)%values%set_at(i, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_element_chrv_i64
+    !
     module procedure row_get_i32
         integer :: idx
         !

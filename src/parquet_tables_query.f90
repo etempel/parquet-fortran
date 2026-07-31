@@ -174,12 +174,27 @@ contains
         end if
     end procedure table_get_file_metadata
     !
-    module procedure table_is_null
+    module procedure table_is_null_i32
+        isnull = self%is_null(name, int(i, int64))
+    end procedure table_is_null_i32
+    !
+    module procedure table_is_null_i64
         integer :: idx
         !
         call table_resolve(self, name, "is_null", idx)
+        call table_require_row(self, i, "is_null")
         isnull = self%cache%cols(idx)%values%is_null(i)
-    end procedure table_is_null
+    end procedure table_is_null_i64
+    !
+    module procedure table_require_row
+        character(len=32) :: got, want
+        !
+        if (i >= 1_int64 .and. i <= self%row_count) return
+        write(got, "(I0)") i
+        write(want, "(I0)") self%row_count
+        error stop EP // trim(proc) // ": row index " // trim(got) // " is outside this " // &
+            "table's 1.." // trim(want) // " rows"
+    end procedure table_require_row
     !
     module procedure table_resolve
         character(len=:), allocatable :: sfx
@@ -216,6 +231,15 @@ contains
         end if
         if (present(found)) found = .true.
     end procedure table_resolve
+    !
+    module procedure table_check_not_detached
+        character(len=:), allocatable :: sfx
+        !
+        if (.not. sc%detached) return
+        call table_context_suffix(cache, name, sfx)
+        error stop EP // trim(proc) // ": this table has been detached from its file by " // &
+            "a row-structural change; materialize a column before mutating rows" // sfx
+    end procedure table_check_not_detached
     !
     module procedure table_require_kind
         character(len=:), allocatable :: sfx, got, want
@@ -269,15 +293,7 @@ contains
         end if
     end procedure table_context_suffix
     !
-    !> Shared front half of every soft-failing query: resolves `name`, honouring `found=` and
-    !! otherwise aborting. Unlike `table_resolve` this does NOT require the column to hold
-    !! values -- asking a column's kind or residency must work precisely when it has none.
-    subroutine table_lookup_or_fail(self, name, proc, idx, found)
-        class(parquet_table), intent(in) :: self !! the table.
-        character(len=*), intent(in) :: name     !! column name.
-        character(len=*), intent(in) :: proc     !! calling procedure, for the message.
-        integer, intent(out) :: idx              !! slot index, or 0 on a reported miss.
-        logical, intent(out), optional :: found  !! present: report a miss instead of aborting.
+    module procedure table_lookup_or_fail
         character(len=:), allocatable :: sfx
         !
         call table_check_open(self, proc)
@@ -291,6 +307,6 @@ contains
             error stop EP // trim(proc) // ": no column of this name" // sfx
         end if
         if (present(found)) found = .true.
-    end subroutine table_lookup_or_fail
+    end procedure table_lookup_or_fail
     !
 end submodule parquet_tables_query

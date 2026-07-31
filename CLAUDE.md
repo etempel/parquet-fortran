@@ -50,6 +50,7 @@ working rules).
   - [Implicit finalizers must never route through a path that can throw/abort](#implicit-finalizers-must-never-route-through-a-path-that-can-throwabort)
   - [Automatic BYTE_STREAM_SPLIT for float columns in the writer](#automatic-byte_stream_split-for-float-columns-in-the-writer)
   - [`parquet_column` validity is ROW-granular, even for the vector kinds](#parquet_column-validity-is-row-granular-even-for-the-vector-kinds)
+  - [A `parquet_table` pointer does not survive a ROW-structural mutation](#a-parquet_table-pointer-does-not-survive-a-row-structural-mutation)
   - [Assembling a `parquet_column` from pieces: preallocate and `%paste`](#assembling-a-parquet_column-from-pieces-preallocate-and-paste)
   - [A `parquet_schema` built in code must be parsed before anything reads its fields](#a-parquet_schema-built-in-code-must-be-parsed-before-anything-reads-its-fields)
 - [Element-domain modules (`parquet_strings`, `parquet_temporal`)](#element-domain-modules-parquet_strings-parquet_temporal)
@@ -814,6 +815,34 @@ happen until some later code path (a write, say) starts asking about validity.
 **Consequence to preserve and document in any new read path:** a *per-element* null in a vector column
 read from a parquet file cannot be represented and must be widened to the whole row (`if any element
 of the row is null, mark the row null`). Do not silently drop it, and do not attempt to store it.
+
+### A `parquet_table` pointer does not survive a ROW-structural mutation
+
+`%col` hands back a live pointer into a column's storage, and `%filter_rows`, `%sort_by`,
+`%delete_rows`, `%truncate`, `%append` and `%append_null_rows` all reallocate that storage
+(`delete_by_mask`, `reindex` and `append` each grow or shrink exact-fit). A pointer taken before
+one of them therefore points at freed memory afterwards, and **Fortran offers no way to detect
+this** — the code compiles, and usually appears to work.
+
+Two consequences for future work here:
+
+- **Any new mutation that changes the row set inherits this**, so it belongs in
+  `parquet_tables_rowmutate.f90` next to the others, and its doc-comment should say it detaches.
+  The file/`%col` split (`..._mutate.f90` never changes the row set, `..._rowmutate.f90` always
+  does) is what keeps the rule checkable by looking at which file a procedure is in.
+- **A row-structural mutation skips a column that is not resident** (`table_mutable_column`)
+  rather than refusing to run, which is what lets a lazy table drop rows without first reading
+  every column it has. The skipped column is then unreadable for good, and the detach guard
+  (`table_check_not_detached`) is the only thing that reports it — so every path that would read
+  from the file after a mutation must run that guard. There are five today (`table_touch`,
+  `table_resolve_width`, `materialize_marked`, `table_reload`, `table_row_group_bounds`);
+  a sixth that forgets it will read through a deallocated reader.
+
+**"Detached" means "had a file and can no longer read it", never simply "was mutated".** A table
+built by `parquet_new_table` has no file to lose, so growing or reordering it must leave
+`%is_detached` answering `.false.` — otherwise every from-scratch table would report itself
+detached the moment it was filled. `table_detach` therefore only sets the flag when
+`cache%file_backed` is still true, and never clears it.
 
 ### Assembling a `parquet_column` from pieces: preallocate and `%paste`
 

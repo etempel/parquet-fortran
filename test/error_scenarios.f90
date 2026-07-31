@@ -20,6 +20,13 @@ program error_scenarios
     !$ use omp_lib, only : omp_get_max_threads, omp_get_thread_num
     implicit none
 
+    !> A second concrete table type, existing only so the %clone same-type guard has something to
+    !! be told apart from. Stands in for what tools/generate_parquet_table.sh will emit later: a
+    !! table extended with predefined-column accessors, which a clone must not silently drop.
+    type, extends(parquet_table) :: extended_table
+        integer :: marker = 0 !! never read; the type's identity is the whole point.
+    end type extended_table
+
     character(len=64) :: scenario
     integer :: nargs
 
@@ -1050,6 +1057,66 @@ program error_scenarios
         call scenario_table_row_unattached()
     case ("table_row_unsupported_column")
         call scenario_table_row_unsupported_column()
+    case ("table_detached_read_unmaterialized")
+        call scenario_table_detached_read_unmaterialized()
+    case ("table_detached_prefetch")
+        call scenario_table_detached_prefetch()
+    case ("table_detached_materialize_all")
+        call scenario_table_detached_materialize_all()
+    case ("table_detached_reload")
+        call scenario_table_detached_reload()
+    case ("table_detached_row_group_bounds")
+        call scenario_table_detached_row_group_bounds()
+    case ("table_mutate_unmaterialized_column")
+        call scenario_table_mutate_unmaterialized_column()
+    case ("table_mutate_unsupported_column")
+        call scenario_table_mutate_unsupported_column()
+    case ("table_filter_rows_mask_length")
+        call scenario_table_filter_rows_mask_length()
+    case ("table_delete_rows_out_of_range")
+        call scenario_table_delete_rows_out_of_range()
+    case ("table_truncate_negative")
+        call scenario_table_truncate_negative()
+    case ("table_append_null_rows_negative")
+        call scenario_table_append_null_rows_negative()
+    case ("table_sort_by_no_keys")
+        call scenario_table_sort_by_no_keys()
+    case ("table_sort_by_flag_count_mismatch")
+        call scenario_table_sort_by_flag_count_mismatch()
+    case ("table_sort_by_unknown_column")
+        call scenario_table_sort_by_unknown_column()
+    case ("table_sort_by_vector_column")
+        call scenario_table_sort_by_vector_column()
+    case ("table_sort_by_unmaterialized_key")
+        call scenario_table_sort_by_unmaterialized_key()
+    case ("table_append_unknown_column")
+        call scenario_table_append_unknown_column()
+    case ("table_append_kind_mismatch")
+        call scenario_table_append_kind_mismatch()
+    case ("table_append_width_mismatch")
+        call scenario_table_append_width_mismatch()
+    case ("table_append_unit_mismatch")
+        call scenario_table_append_unit_mismatch()
+    case ("table_append_row_no_common_column")
+        call scenario_table_append_row_no_common_column()
+    case ("table_set_element_row_out_of_range")
+        call scenario_table_set_element_row_out_of_range()
+    case ("table_set_element_kind_mismatch")
+        call scenario_table_set_element_kind_mismatch()
+    case ("table_set_null_row_out_of_range")
+        call scenario_table_set_null_row_out_of_range()
+    case ("table_rename_duplicate_name")
+        call scenario_table_rename_duplicate_name()
+    case ("table_rename_blank_name")
+        call scenario_table_rename_blank_name()
+    case ("table_cast_unsupported_kind")
+        call scenario_table_cast_unsupported_kind()
+    case ("table_cast_duplicate_name")
+        call scenario_table_cast_duplicate_name()
+    case ("table_cast_lossy_value")
+        call scenario_table_cast_lossy_value()
+    case ("table_clone_type_mismatch")
+        call scenario_table_clone_type_mismatch()
     case ("table_row_string_kind_mismatch")
         call scenario_table_row_string_kind_mismatch()
     case ("table_row_kind_mismatch")
@@ -9171,5 +9238,314 @@ contains
         !$omp end parallel do
         print '(a,i0)', "unexpectedly resolved a deferred column's width inside a parallel region, w=", w
     end subroutine scenario_table_resolve_width_in_parallel
+
+    ! ==== stage 3c: mutation, detach, sort, clone ==========================================
+
+    !> Writes the shared 3c fixture: two scalar columns of three rows.
+    subroutine write_mutate_fixture(fname)
+        character(len=*), intent(in) :: fname !! file to write.
+        call write_table_scenario_fixture(fname)
+    end subroutine write_mutate_fixture
+
+    !> THE detach message. Once a row-structural change has moved the rows, a column still in
+    !! the file can never be lined up with the ones in memory, so reading it is refused rather
+    !! than answered with misaligned data.
+    subroutine scenario_table_detached_read_unmaterialized()
+        type(parquet_table) :: t
+        real(real64), allocatable :: v(:)
+        call write_mutate_fixture("test_run/es_tbl_det_read.parquet")
+        call parquet_open_table(t, "test_run/es_tbl_det_read.parquet")
+        call t%prefetch("id")   ! only "id" is resident; "val" was never read
+        call t%truncate(2)      ! -> detaches, leaving "val" behind for good
+        call t%get("val", v)    ! -> aborts
+        print '(a,i0)', "unexpectedly read from a detached table, size=", size(v)
+    end subroutine scenario_table_detached_read_unmaterialized
+
+    subroutine scenario_table_detached_prefetch()
+        type(parquet_table) :: t
+        call write_mutate_fixture("test_run/es_tbl_det_pre.parquet")
+        call parquet_open_table(t, "test_run/es_tbl_det_pre.parquet")
+        call t%prefetch("id")
+        call t%truncate(2)
+        call t%prefetch("val")   ! -> aborts
+        print '(a,i0)', "unexpectedly prefetched on a detached table, ncols=", t%ncols()
+    end subroutine scenario_table_detached_prefetch
+
+    subroutine scenario_table_detached_materialize_all()
+        type(parquet_table) :: t
+        call write_mutate_fixture("test_run/es_tbl_det_matall.parquet")
+        call parquet_open_table(t, "test_run/es_tbl_det_matall.parquet")
+        call t%prefetch("id")
+        call t%truncate(2)
+        call t%materialize_all()   ! -> aborts
+        print '(a,i0)', "unexpectedly materialized a detached table, ncols=", t%ncols()
+    end subroutine scenario_table_detached_materialize_all
+
+    subroutine scenario_table_detached_reload()
+        type(parquet_table) :: t
+        call write_mutate_fixture("test_run/es_tbl_det_reload.parquet")
+        call parquet_open_table(t, "test_run/es_tbl_det_reload.parquet")
+        call t%materialize_all()
+        call t%truncate(2)
+        call t%reload("id")   ! -> aborts
+        print '(a,i0)', "unexpectedly reloaded a column of a detached table, ncols=", t%ncols()
+    end subroutine scenario_table_detached_reload
+
+    !> Row-group bounds describe FILE rows, which a detached table no longer tracks.
+    subroutine scenario_table_detached_row_group_bounds()
+        type(parquet_table) :: t
+        integer(int64), allocatable :: b(:,:)
+        call write_mutate_fixture("test_run/es_tbl_det_rgb.parquet")
+        call parquet_open_table(t, "test_run/es_tbl_det_rgb.parquet")
+        call t%materialize_all()
+        call t%truncate(2)
+        call t%row_group_bounds(b)   ! -> aborts
+        print '(a,i0)', "unexpectedly reported row-group bounds after detaching, n=", size(b, 2)
+    end subroutine scenario_table_detached_row_group_bounds
+
+    !> A column left unread when the table detached is unreadable for good, and %prefetch says
+    !! so with the detach message rather than trying to read through a reader that is gone.
+    subroutine scenario_table_mutate_unmaterialized_column()
+        type(parquet_table) :: t
+        call write_mutate_fixture("test_run/es_tbl_mut_unmat.parquet")
+        call parquet_open_table(t, "test_run/es_tbl_mut_unmat.parquet")
+        call t%truncate(2)      ! nothing was resident: every column is left behind
+        call t%prefetch("id")   ! -> aborts
+        print '(a,i0)', "unexpectedly read a column stranded by a detach, nrows=", t%nrows()
+    end subroutine scenario_table_mutate_unmaterialized_column
+
+    !> Sorting by a column whose type this library cannot read is refused: there are no values to
+    !! order by, and silently treating every row as equal would be worse than saying so.
+    subroutine scenario_table_mutate_unsupported_column()
+        type(parquet_table) :: t
+        call parquet_open_table(t, "test/fixtures/extended_types.parquet")
+        call t%sort_by(["v_uint32"])   ! a foreign uint32 column -> aborts
+        print '(a,i0)', "unexpectedly sorted by an unsupported column, nrows=", t%nrows()
+    end subroutine scenario_table_mutate_unsupported_column
+
+    subroutine scenario_table_filter_rows_mask_length()
+        type(parquet_table) :: t
+        call write_mutate_fixture("test_run/es_tbl_mask_len.parquet")
+        call parquet_open_table(t, "test_run/es_tbl_mask_len.parquet")
+        call t%materialize_all()
+        call t%filter_rows([.true., .false.])   ! 3 rows, 2 entries -> aborts
+        print '(a,i0)', "unexpectedly filtered with a short mask, nrows=", t%nrows()
+    end subroutine scenario_table_filter_rows_mask_length
+
+    subroutine scenario_table_delete_rows_out_of_range()
+        type(parquet_table) :: t
+        call write_mutate_fixture("test_run/es_tbl_del_range.parquet")
+        call parquet_open_table(t, "test_run/es_tbl_del_range.parquet")
+        call t%materialize_all()
+        call t%delete_rows([1, 9])   ! only 3 rows -> aborts, with nothing deleted
+        print '(a,i0)', "unexpectedly deleted a row that does not exist, nrows=", t%nrows()
+    end subroutine scenario_table_delete_rows_out_of_range
+
+    subroutine scenario_table_truncate_negative()
+        type(parquet_table) :: t
+        call write_mutate_fixture("test_run/es_tbl_trunc_neg.parquet")
+        call parquet_open_table(t, "test_run/es_tbl_trunc_neg.parquet")
+        call t%materialize_all()
+        call t%truncate(-1)   ! -> aborts
+        print '(a,i0)', "unexpectedly truncated to a negative row count, nrows=", t%nrows()
+    end subroutine scenario_table_truncate_negative
+
+    subroutine scenario_table_append_null_rows_negative()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32])
+        call t%append_null_rows(-3)   ! -> aborts
+        print '(a,i0)', "unexpectedly appended a negative number of rows, nrows=", t%nrows()
+    end subroutine scenario_table_append_null_rows_negative
+
+    subroutine scenario_table_sort_by_no_keys()
+        type(parquet_table) :: t
+        character(len=4) :: keys(0)
+        call parquet_new_table(t)
+        call t%add_column("a", [2_int32, 1_int32])
+        call t%sort_by(keys)   ! -> aborts
+        print '(a,i0)', "unexpectedly sorted with no key at all, nrows=", t%nrows()
+    end subroutine scenario_table_sort_by_no_keys
+
+    !> descending=/nulls_first= take ONE entry per key; a shorter or longer array is a mistake
+    !! that would otherwise be read past the end of.
+    subroutine scenario_table_sort_by_flag_count_mismatch()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [2_int32, 1_int32])
+        call t%add_column("b", [1_int32, 2_int32])
+        call t%sort_by(["a", "b"], descending=[.true.])   ! 2 keys, 1 flag -> aborts
+        print '(a,i0)', "unexpectedly sorted with a short descending= list, nrows=", t%nrows()
+    end subroutine scenario_table_sort_by_flag_count_mismatch
+
+    subroutine scenario_table_sort_by_unknown_column()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [2_int32, 1_int32])
+        call t%sort_by(["nope"])   ! -> aborts
+        print '(a,i0)', "unexpectedly sorted by a column that does not exist, nrows=", t%nrows()
+    end subroutine scenario_table_sort_by_unknown_column
+
+    !> There is no defined order on a whole vector row, so a *_VEC column cannot be a sort key.
+    subroutine scenario_table_sort_by_vector_column()
+        type(parquet_table) :: t
+        real(real64) :: v(2, 3)
+        v = 1.0_real64
+        call parquet_new_table(t)
+        call t%add_column("vv", v)
+        call t%sort_by(["vv"])   ! -> aborts
+        print '(a,i0)', "unexpectedly sorted by a vector column, nrows=", t%nrows()
+    end subroutine scenario_table_sort_by_vector_column
+
+    !> A column the appended table has and this one does not is never silently dropped.
+    !> Sorting will not read a key column implicitly (Q3c-6): it would make the memory a
+    !! %sort_by call costs depend on which columns happened to be resident, worst of all on a
+    !! slice of a large file. An explicit %prefetch is one line.
+    subroutine scenario_table_sort_by_unmaterialized_key()
+        type(parquet_table) :: t
+        call write_mutate_fixture("test_run/es_tbl_sort_unmat.parquet")
+        call parquet_open_table(t, "test_run/es_tbl_sort_unmat.parquet")
+        call t%sort_by(["val"])   ! nothing was read -> aborts
+        print '(a,i0)', "unexpectedly sorted by a column that was never read, nrows=", t%nrows()
+    end subroutine scenario_table_sort_by_unmaterialized_key
+
+    subroutine scenario_table_append_unknown_column()
+        type(parquet_table) :: a, b
+        call parquet_new_table(a)
+        call a%add_column("x", [1_int32])
+        call parquet_new_table(b)
+        call b%add_column("x", [2_int32])
+        call b%add_column("y", [3_int32])
+        call a%append(b)   ! -> aborts: "y" would have nowhere to go
+        print '(a,i0)', "unexpectedly appended a table with an extra column, nrows=", a%nrows()
+    end subroutine scenario_table_append_unknown_column
+
+    subroutine scenario_table_append_kind_mismatch()
+        type(parquet_table) :: a, b
+        call parquet_new_table(a)
+        call a%add_column("x", [1_int32])
+        call parquet_new_table(b)
+        call b%add_column("x", [2.0_real64])
+        call a%append(b)   ! -> aborts rather than silently widening
+        print '(a,i0)', "unexpectedly appended a column of another kind, nrows=", a%nrows()
+    end subroutine scenario_table_append_kind_mismatch
+
+    subroutine scenario_table_append_width_mismatch()
+        type(parquet_table) :: a, b
+        real(real64) :: wide(3, 1), narrow(2, 1)
+        wide = 1.0_real64
+        narrow = 2.0_real64
+        call parquet_new_table(a)
+        call a%add_column("v", wide)
+        call parquet_new_table(b)
+        call b%add_column("v", narrow)
+        call a%append(b)   ! -> aborts
+        print '(a,i0)', "unexpectedly appended a vector column of another width, nrows=", a%nrows()
+    end subroutine scenario_table_append_width_mismatch
+
+    !> This library does not convert units, so concatenating "m/s" rows with "km/h" rows would
+    !! make a column whose rows mean different things with nothing recording it.
+    subroutine scenario_table_append_unit_mismatch()
+        type(parquet_table) :: a, b
+        call parquet_new_table(a)
+        call a%add_column("speed", [1.0_real64], unit="m/s")
+        call parquet_new_table(b)
+        call b%add_column("speed", [2.0_real64], unit="km/h")
+        call a%append(b)   ! -> aborts
+        print '(a,i0)', "unexpectedly appended rows in another unit, nrows=", a%nrows()
+    end subroutine scenario_table_append_unit_mismatch
+
+    subroutine scenario_table_append_row_no_common_column()
+        type(parquet_table) :: a, b
+        type(parquet_table_row) :: r
+        call parquet_new_table(a)
+        call a%add_column("x", [1_int32])
+        call parquet_new_table(b)
+        call b%add_column("q", [7_int32])
+        r = b%row(1)
+        call a%append(r)   ! -> aborts: nothing in common to append
+        print '(a,i0)', "unexpectedly appended a row with nothing in common, nrows=", a%nrows()
+    end subroutine scenario_table_append_row_no_common_column
+
+    subroutine scenario_table_set_element_row_out_of_range()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32])
+        call t%set_element("a", 9, 5_int32)   ! -> aborts
+        print '(a,i0)', "unexpectedly wrote past the last row, nrows=", t%nrows()
+    end subroutine scenario_table_set_element_row_out_of_range
+
+    subroutine scenario_table_set_element_kind_mismatch()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32])
+        call t%set_element("a", 1, 5.0_real64)   ! int32 column, float64 value -> aborts
+        print '(a,i0)', "unexpectedly wrote a value of another kind, nrows=", t%nrows()
+    end subroutine scenario_table_set_element_kind_mismatch
+
+    subroutine scenario_table_set_null_row_out_of_range()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32])
+        call t%set_null("a", 0)   ! -> aborts
+        print '(a,i0)', "unexpectedly nulled row 0, nrows=", t%nrows()
+    end subroutine scenario_table_set_null_row_out_of_range
+
+    subroutine scenario_table_rename_duplicate_name()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32])
+        call t%add_column("b", [2_int32])
+        call t%rename_column("a", "b")   ! -> aborts
+        print '(a,i0)', "unexpectedly renamed onto an existing name, ncols=", t%ncols()
+    end subroutine scenario_table_rename_duplicate_name
+
+    subroutine scenario_table_rename_blank_name()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32])
+        call t%rename_column("a", "   ")   ! -> aborts
+        print '(a,i0)', "unexpectedly renamed a column to a blank name, ncols=", t%ncols()
+    end subroutine scenario_table_rename_blank_name
+
+    subroutine scenario_table_cast_unsupported_kind()
+        type(parquet_table) :: t
+        character(len=4) :: s(2)
+        s = ["ab  ", "cd  "]
+        call parquet_new_table(t)
+        call t%add_column("s", s)
+        call t%cast_column("s", "si", PK_INT64)   ! strings do not cast -> aborts
+        print '(a,i0)', "unexpectedly cast a string column, ncols=", t%ncols()
+    end subroutine scenario_table_cast_unsupported_kind
+
+    subroutine scenario_table_cast_duplicate_name()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32])
+        call t%add_column("b", [2_int32])
+        call t%cast_column("a", "b", PK_INT64)   ! -> aborts
+        print '(a,i0)', "unexpectedly cast onto an existing column name, ncols=", t%ncols()
+    end subroutine scenario_table_cast_duplicate_name
+
+    !> A cast the caller asked for by name must not silently truncate: the whole column is
+    !! checked before anything is written, so the table is left exactly as it was.
+    subroutine scenario_table_cast_lossy_value()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [1.5_real64, 2.0_real64])
+        call t%cast_column("a", "ai", PK_INT32)   ! 1.5 is not a whole number -> aborts
+        print '(a,i0)', "unexpectedly cast a value that cannot be represented, ncols=", t%ncols()
+    end subroutine scenario_table_cast_lossy_value
+
+    !> Cloning into a different table type would silently produce a copy without the extended
+    !! type's own accessors, so it is refused.
+    subroutine scenario_table_clone_type_mismatch()
+        type(parquet_table) :: plain
+        type(extended_table) :: ext
+        call parquet_new_table(plain)
+        call plain%add_column("a", [1_int32])
+        call plain%clone(ext)   ! -> aborts
+        print '(a,i0)', "unexpectedly cloned into another table type, ncols=", ext%ncols()
+    end subroutine scenario_table_clone_type_mismatch
 
 end program error_scenarios

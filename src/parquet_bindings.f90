@@ -55,6 +55,9 @@ module parquet_bindings
     public :: parquet_reader_get_column_type_name
     public :: c_reader_set_filter, parquet_reader_has_decoded_columns, parquet_reader_has_filter_clauses
     public :: c_reader_set_sort, parquet_reader_has_sort
+    public :: parquet_sort_builder_new, parquet_sort_builder_add_key_int64
+    public :: parquet_sort_builder_add_key_double, parquet_sort_builder_add_key_string
+    public :: parquet_sort_builder_build, parquet_sort_builder_free
     public :: parquet_reader_set_sample
     public :: parquet_reader_set_qc
     public :: parquet_read_int32_column, parquet_read_int64_column
@@ -594,6 +597,77 @@ module parquet_bindings
             type(c_ptr), value :: reader !! open reader handle.
             integer(c_long_long) :: has_sort !! 1 when a sort is active, 0 otherwise.
         end function
+
+        !> Starts a raw-array sort: allocates a key builder for `nrows` rows and
+        !> returns an opaque handle. Feeds the SAME C++ std::sort permutation
+        !> engine the read-time `sort_by=` uses, so an in-memory sort and a
+        !> read-time sort of the same keys cannot order rows differently.
+        !> The caller must free the handle.
+        function parquet_sort_builder_new(nrows) &
+                bind(C, name="parquet_sort_builder_new") result(builder)
+            import
+            integer(c_long_long), value :: nrows !! rows to sort.
+            type(c_ptr) :: builder !! opaque builder handle.
+        end function
+
+        !> Adds an integer sort key. Boolean and every temporal kind come
+        !> through here too, since their stored values order exactly as the
+        !> values they represent. `valid` may be C_NULL_PTR for a key with no
+        !> nulls at all, which is the engine's own fast path.
+        subroutine parquet_sort_builder_add_key_int64(builder, values, valid, descending, nulls_first) &
+                bind(C, name="parquet_sort_builder_add_key_int64")
+            import
+            type(c_ptr), value :: builder !! builder handle.
+            integer(c_long_long) :: values(*) !! one value per row.
+            type(c_ptr), value :: valid !! int8 per row (1 = valid), or C_NULL_PTR.
+            integer(c_int8_t), value :: descending !! nonzero for descending order.
+            integer(c_int8_t), value :: nulls_first !! nonzero to place nulls before values.
+        end subroutine
+
+        !> Adds a floating-point sort key. NaNs are ordinary values and are
+        !> placed by the engine's own tier rule, not by the caller.
+        subroutine parquet_sort_builder_add_key_double(builder, values, valid, descending, nulls_first) &
+                bind(C, name="parquet_sort_builder_add_key_double")
+            import
+            type(c_ptr), value :: builder !! builder handle.
+            real(c_double) :: values(*) !! one value per row.
+            type(c_ptr), value :: valid !! int8 per row (1 = valid), or C_NULL_PTR.
+            integer(c_int8_t), value :: descending !! nonzero for descending order.
+            integer(c_int8_t), value :: nulls_first !! nonzero to place nulls before values.
+        end subroutine
+
+        !> Adds a string sort key from a packed offsets/data pair: row i is
+        !> `data(offsets(i) .. offsets(i+1)-1)`, so `offsets` has nrows+1
+        !> entries and both are 0-based on the C side. The bytes are copied
+        !> into the builder, so the caller may permute its own storage after.
+        subroutine parquet_sort_builder_add_key_string(builder, offsets, data, valid, descending, &
+                nulls_first) bind(C, name="parquet_sort_builder_add_key_string")
+            import
+            type(c_ptr), value :: builder !! builder handle.
+            integer(c_long_long) :: offsets(*) !! nrows+1 byte offsets into `data`.
+            character(kind=c_char) :: data(*) !! the packed bytes of every row.
+            type(c_ptr), value :: valid !! int8 per row (1 = valid), or C_NULL_PTR.
+            integer(c_int8_t), value :: descending !! nonzero for descending order.
+            integer(c_int8_t), value :: nulls_first !! nonzero to place nulls before values.
+        end subroutine
+
+        !> Builds the permutation over every key added so far, writing it
+        !> 1-based into `perm` (which the caller sized to nrows) so it can be
+        !> handed straight to `parquet_column%reindex`.
+        function parquet_sort_builder_build(builder, perm) &
+                bind(C, name="parquet_sort_builder_build") result(status)
+            import
+            type(c_ptr), value :: builder !! builder handle.
+            integer(c_long_long) :: perm(*) !! receives the 1-based permutation.
+            integer(c_long_long) :: status !! 0 on success, 1 when no key was added.
+        end function
+
+        !> Releases a sort builder and everything it copied.
+        subroutine parquet_sort_builder_free(builder) &
+                bind(C, name="parquet_sort_builder_free")
+            import
+            type(c_ptr), value :: builder !! builder handle.
+        end subroutine
 
         !> Whether any column of `reader` has already been decoded into its
         !> column cache (1) or not (0) -- the guard parquet_reader_set_filter

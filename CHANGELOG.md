@@ -66,8 +66,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `parquet_table_row_group_bounds`/`%row_group_bounds` for finding the natural boundaries to
   split a file on; `parquet_table_row` (`t%row(i)`), a lightweight handle on a single row; and
   `parquet_slice` with `parquet_slice_range`/`parquet_slice_list` and `%get_slice`, which copies
-  a strided or gathered row selection out of a column. See [the guide](doc/pages/table.md) for
-  the current limitations and the OpenMP first-touch rule.
+  a strided or gathered row selection out of a column. A table can also be **changed**: one cell
+  at a time (`%set_element`, `%set_null`, `%clear_null`, `%compact_validity`), a column at a time
+  (`%drop_column`, `%rename_column`, `%cast_column`), or a row at a time (`%filter_rows`,
+  `%sort_by`, `%delete_rows`, `%truncate`, `%append`, `%append_null_rows`) — and `%clone` takes
+  an independent deep copy, which is how a version is kept to go back to, since mutation is in
+  place. Changing the **row set** detaches the table from its file: the rows in memory no longer
+  line up with the rows on disk, so any column not read by then can never be read, `%is_detached`
+  reports it, and every later read from the file is a clear error rather than misaligned data.
+  `%sort_by` runs the same C++ sort engine as the read-time `sort_by=`, so sorting a table in
+  memory and reading the same file sorted give the identical row order. See
+  [the guide](doc/pages/table.md) for the current limitations, the detach rule and the OpenMP
+  first-touch rule.
 - Added `parquet_columns` (`parquet_column`): type-erased, whole-column value storage with sparse
   null tracking, covering 18 scalar/vector kinds plus reserved slots for the future
   list/map/struct column types, with the full value and structural instruction set — including

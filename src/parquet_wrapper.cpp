@@ -46,6 +46,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <limits>
 #include <numeric>
@@ -3375,6 +3376,43 @@ extern "C"
 		return true;
 	}
 
+	// ---- Raw-array binding (no Arrow at all) ----
+
+	// Collects keys handed over as plain typed vectors, so the SAME engine that orders a
+	// read-time sort_by= also orders parquet_table's in-memory %sort_by. An in-memory table's
+	// Arrow buffers are gone by design (the table owns the only Fortran-side copy), so
+	// sort_bind_arrow_key cannot serve it -- and reimplementing the ordering on the Fortran side
+	// would give the library two comparators that could silently disagree, which is exactly the
+	// failure this handle exists to make impossible.
+	//
+	// A handle rather than process-global builder state: two threads each sorting their own table
+	// must not see each other's keys, and a global would have to be serialized instead.
+	struct SortBuilderHandle
+	{
+		int64_t nrows = 0;
+		std::vector<SortKeyData> keys;
+		// Backing storage for the string keys' views. A deque, not a vector, because
+		// SortKeyData::strs holds string_views into these strings and a vector reallocating on
+		// the next add_key would dangle every one of them.
+		std::deque<std::vector<std::string>> string_stores;
+	};
+
+	// Fills the per-row validity vector from Fortran's int8 flags. `valid` may be null, meaning
+	// "no nulls at all" -- the empty-vector fast path the comparator already checks for, and what
+	// parquet_column%row_validity produces for a null-free column.
+	static void sort_builder_set_valid(SortKeyData &key, const int8_t *valid, int64_t n)
+	{
+		if (valid == nullptr) return;
+		bool any_null = false;
+		for (int64_t i = 0; i < n; ++i)
+		{
+			if (valid[i] == 0) { any_null = true; break; }
+		}
+		if (!any_null) return;
+		key.valid.assign(static_cast<size_t>(n), 1);
+		for (int64_t i = 0; i < n; ++i) key.valid[static_cast<size_t>(i)] = valid[i] != 0 ? 1 : 0;
+	}
+
 	// ==== Reader lifecycle (create/prefetch/qc/sample/filter/introspection) ====
 	//
 	// Opens the file and parses its footer/schema only -- no column's actual
@@ -5394,6 +5432,97 @@ extern "C"
 			entry.second = taken.ValueOrDie().make_array();
 		}
 		return 0;
+	}
+
+	// ---- The raw-array sort builder (parquet_table's in-memory %sort_by) ----
+	//
+	// Same engine, same comparator, same null/NaN tiers as parquet_reader_set_sort above -- only
+	// the source of the key values differs. Usage: new -> add_key_* per key, in order of
+	// precedence -> build -> free.
+
+	// Starts a builder for an `nrows`-row sort. Returns an opaque handle; the caller must free it.
+	void *parquet_sort_builder_new(int64_t nrows)
+	{
+		auto *h = new SortBuilderHandle{};
+		h->nrows = nrows;
+		return h;
+	}
+
+	// Adds an integer key. Boolean and every temporal kind arrive here too: their stored values
+	// order exactly as the values they represent, which is the same reduction sort_bind_arrow_key
+	// makes on the Arrow side.
+	void parquet_sort_builder_add_key_int64(void *handle, const int64_t *values, const int8_t *valid,
+		int8_t descending, int8_t nulls_first)
+	{
+		auto *h = static_cast<SortBuilderHandle *>(handle);
+		SortKeyData key;
+		key.kind = SortValueKind::Integer;
+		key.descending = descending != 0;
+		key.nulls_first = nulls_first != 0;
+		key.ints.assign(values, values + h->nrows);
+		sort_builder_set_valid(key, valid, h->nrows);
+		h->keys.push_back(std::move(key));
+	}
+
+	// Adds a floating-point key. NaNs are ordinary values here and are tiered by sort_tier_of,
+	// never by the caller.
+	void parquet_sort_builder_add_key_double(void *handle, const double *values, const int8_t *valid,
+		int8_t descending, int8_t nulls_first)
+	{
+		auto *h = static_cast<SortBuilderHandle *>(handle);
+		SortKeyData key;
+		key.kind = SortValueKind::Real;
+		key.descending = descending != 0;
+		key.nulls_first = nulls_first != 0;
+		key.reals.assign(values, values + h->nrows);
+		sort_builder_set_valid(key, valid, h->nrows);
+		h->keys.push_back(std::move(key));
+	}
+
+	// Adds a string key from a packed (offsets, data) pair: row i is data[offsets[i]
+	// .. offsets[i+1]), so `offsets` has nrows+1 entries. That is the layout parquet_string_column
+	// already stores, so the Fortran side hands over what it has rather than reformatting it.
+	//
+	// The bytes are COPIED into the handle, because the caller's buffers belong to a column the
+	// sort is about to permute -- borrowing views into storage that reindex() is going to
+	// reallocate would dangle exactly when the permutation is applied.
+	void parquet_sort_builder_add_key_string(void *handle, const int64_t *offsets, const char *data,
+		const int8_t *valid, int8_t descending, int8_t nulls_first)
+	{
+		auto *h = static_cast<SortBuilderHandle *>(handle);
+		SortKeyData key;
+		key.kind = SortValueKind::Str;
+		key.descending = descending != 0;
+		key.nulls_first = nulls_first != 0;
+		h->string_stores.emplace_back();
+		auto &store = h->string_stores.back();
+		store.reserve(static_cast<size_t>(h->nrows));
+		key.strs.resize(static_cast<size_t>(h->nrows));
+		for (int64_t i = 0; i < h->nrows; ++i)
+		{
+			int64_t lo = offsets[i], hi = offsets[i + 1];
+			store.emplace_back(data + lo, static_cast<size_t>(hi - lo));
+		}
+		for (int64_t i = 0; i < h->nrows; ++i) key.strs[static_cast<size_t>(i)] = store[static_cast<size_t>(i)];
+		sort_builder_set_valid(key, valid, h->nrows);
+		h->keys.push_back(std::move(key));
+	}
+
+	// Writes the 1-BASED permutation into `perm_out` (which the caller sized to nrows), ready to
+	// feed parquet_column%reindex. The engine works 0-based, so the +1 happens here rather than
+	// being repeated at every Fortran call site.
+	int64_t parquet_sort_builder_build(void *handle, int64_t *perm_out)
+	{
+		auto *h = static_cast<SortBuilderHandle *>(handle);
+		if (h->keys.empty()) return 1;
+		auto perm = sort_build_permutation(h->keys, h->nrows);
+		for (int64_t i = 0; i < h->nrows; ++i) perm_out[i] = perm[static_cast<size_t>(i)] + 1;
+		return 0;
+	}
+
+	void parquet_sort_builder_free(void *handle)
+	{
+		delete static_cast<SortBuilderHandle *>(handle);
 	}
 
 	// 1 when a read-time sort is active on this reader, 0 otherwise. This is what the Fortran side's

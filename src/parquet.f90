@@ -3554,7 +3554,13 @@ contains
             if (len(rule) > 100) then
                 preview = rule(1:100) // "..."
             else
-                preview = trim(rule)
+                ! Unreachable while filter_max_rule_len stays >= 100 (currently 8192): this
+                ! branch needs len(rule) > filter_max_rule_len AND len(rule) <= 100 at once,
+                ! which is a contradiction for any such value -- no fixture can build a rule
+                ! that is simultaneously "too long" and "100 characters or fewer". Kept only
+                ! as a defensive fallback in case filter_max_rule_len is ever lowered below
+                ! 100. Revisit if that constant changes.
+                preview = trim(rule) ! GCOVR_EXCL_LINE
             end if
             error stop "parquet_filter%add: rule exceeds the maximum supported length (" // trim(cap_str) // &
                 " characters): " // preview

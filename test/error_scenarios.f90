@@ -693,6 +693,38 @@ program error_scenarios
         call scenario_columns_init_container_kind()
     case ("columns_init_width_on_scalar_kind")
         call scenario_columns_init_width_on_scalar_kind()
+    case ("columns_adopt_not_allocated_i32")
+        call scenario_columns_adopt_not_allocated_i32()
+    case ("columns_adopt_not_allocated_i64")
+        call scenario_columns_adopt_not_allocated_i64()
+    case ("columns_adopt_not_allocated_f32")
+        call scenario_columns_adopt_not_allocated_f32()
+    case ("columns_adopt_not_allocated_f64")
+        call scenario_columns_adopt_not_allocated_f64()
+    case ("columns_adopt_not_allocated_bool")
+        call scenario_columns_adopt_not_allocated_bool()
+    case ("columns_adopt_not_allocated_date")
+        call scenario_columns_adopt_not_allocated_date()
+    case ("columns_adopt_not_allocated_time")
+        call scenario_columns_adopt_not_allocated_time()
+    case ("columns_adopt_not_allocated_ts")
+        call scenario_columns_adopt_not_allocated_ts()
+    case ("columns_adopt_not_allocated_i32v")
+        call scenario_columns_adopt_not_allocated_i32v()
+    case ("columns_adopt_not_allocated_i64v")
+        call scenario_columns_adopt_not_allocated_i64v()
+    case ("columns_adopt_not_allocated_f32v")
+        call scenario_columns_adopt_not_allocated_f32v()
+    case ("columns_adopt_not_allocated_f64v")
+        call scenario_columns_adopt_not_allocated_f64v()
+    case ("columns_adopt_not_allocated_boolv")
+        call scenario_columns_adopt_not_allocated_boolv()
+    case ("columns_adopt_not_allocated_datev")
+        call scenario_columns_adopt_not_allocated_datev()
+    case ("columns_adopt_not_allocated_timev")
+        call scenario_columns_adopt_not_allocated_timev()
+    case ("columns_adopt_not_allocated_tsv")
+        call scenario_columns_adopt_not_allocated_tsv()
     case ("columns_set_all_length_mismatch")
         call scenario_columns_set_all_length_mismatch()
     case ("columns_get_at_width_mismatch")
@@ -1003,6 +1035,66 @@ program error_scenarios
         call scenario_table_pointer_kind_mismatch()
     case ("table_get_array_kind_mismatch")
         call scenario_table_get_array_kind_mismatch()
+    case ("table_col_ptr_kind_mismatch_i32")
+        call scenario_table_col_ptr_kind_mismatch_i32()
+    case ("table_col_ptr_kind_mismatch_f32")
+        call scenario_table_col_ptr_kind_mismatch_f32()
+    case ("table_col_ptr_kind_mismatch_f64")
+        call scenario_table_col_ptr_kind_mismatch_f64()
+    case ("table_col_ptr_kind_mismatch_bool")
+        call scenario_table_col_ptr_kind_mismatch_bool()
+    case ("table_col_ptr_kind_mismatch_date")
+        call scenario_table_col_ptr_kind_mismatch_date()
+    case ("table_col_ptr_kind_mismatch_time")
+        call scenario_table_col_ptr_kind_mismatch_time()
+    case ("table_col_ptr_kind_mismatch_ts")
+        call scenario_table_col_ptr_kind_mismatch_ts()
+    case ("table_col_ptr_kind_mismatch_i32v")
+        call scenario_table_col_ptr_kind_mismatch_i32v()
+    case ("table_col_ptr_kind_mismatch_i64v")
+        call scenario_table_col_ptr_kind_mismatch_i64v()
+    case ("table_col_ptr_kind_mismatch_f32v")
+        call scenario_table_col_ptr_kind_mismatch_f32v()
+    case ("table_col_ptr_kind_mismatch_f64v")
+        call scenario_table_col_ptr_kind_mismatch_f64v()
+    case ("table_col_ptr_kind_mismatch_boolv")
+        call scenario_table_col_ptr_kind_mismatch_boolv()
+    case ("table_col_ptr_kind_mismatch_datev")
+        call scenario_table_col_ptr_kind_mismatch_datev()
+    case ("table_col_ptr_kind_mismatch_timev")
+        call scenario_table_col_ptr_kind_mismatch_timev()
+    case ("table_col_ptr_kind_mismatch_tsv")
+        call scenario_table_col_ptr_kind_mismatch_tsv()
+    case ("table_get_array_kind_mismatch_i64")
+        call scenario_table_get_array_kind_mismatch_i64()
+    case ("table_get_array_kind_mismatch_f32")
+        call scenario_table_get_array_kind_mismatch_f32()
+    case ("table_get_array_kind_mismatch_f64")
+        call scenario_table_get_array_kind_mismatch_f64()
+    case ("table_get_array_kind_mismatch_bool")
+        call scenario_table_get_array_kind_mismatch_bool()
+    case ("table_get_array_kind_mismatch_date")
+        call scenario_table_get_array_kind_mismatch_date()
+    case ("table_get_array_kind_mismatch_time")
+        call scenario_table_get_array_kind_mismatch_time()
+    case ("table_get_array_kind_mismatch_ts")
+        call scenario_table_get_array_kind_mismatch_ts()
+    case ("table_get_array_kind_mismatch_i32v")
+        call scenario_table_get_array_kind_mismatch_i32v()
+    case ("table_get_array_kind_mismatch_i64v")
+        call scenario_table_get_array_kind_mismatch_i64v()
+    case ("table_get_array_kind_mismatch_f32v")
+        call scenario_table_get_array_kind_mismatch_f32v()
+    case ("table_get_array_kind_mismatch_f64v")
+        call scenario_table_get_array_kind_mismatch_f64v()
+    case ("table_get_array_kind_mismatch_boolv")
+        call scenario_table_get_array_kind_mismatch_boolv()
+    case ("table_get_array_kind_mismatch_datev")
+        call scenario_table_get_array_kind_mismatch_datev()
+    case ("table_get_array_kind_mismatch_timev")
+        call scenario_table_get_array_kind_mismatch_timev()
+    case ("table_get_array_kind_mismatch_tsv")
+        call scenario_table_get_array_kind_mismatch_tsv()
     case ("table_unknown_column")
         call scenario_table_unknown_column()
     case ("table_unsupported_column_read")
@@ -1083,6 +1175,8 @@ program error_scenarios
         call scenario_table_sort_by_no_keys()
     case ("table_sort_by_flag_count_mismatch")
         call scenario_table_sort_by_flag_count_mismatch()
+    case ("table_sort_by_nulls_first_count_mismatch")
+        call scenario_table_sort_by_nulls_first_count_mismatch()
     case ("table_sort_by_unknown_column")
         call scenario_table_sort_by_unknown_column()
     case ("table_sort_by_vector_column")
@@ -1113,6 +1207,8 @@ program error_scenarios
         call scenario_table_cast_unsupported_kind()
     case ("table_cast_duplicate_name")
         call scenario_table_cast_duplicate_name()
+    case ("table_cast_blank_name")
+        call scenario_table_cast_blank_name()
     case ("table_cast_lossy_value")
         call scenario_table_cast_lossy_value()
     case ("table_clone_type_mismatch")
@@ -1127,6 +1223,10 @@ program error_scenarios
         call scenario_table_first_touch_in_parallel()
     case ("table_resolve_width_in_parallel")
         call scenario_table_resolve_width_in_parallel()
+    case ("table_first_touch_in_parallel_single")
+        call scenario_table_first_touch_in_parallel_single()
+    case ("table_resolve_width_in_parallel_single")
+        call scenario_table_resolve_width_in_parallel_single()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -8743,6 +8843,124 @@ contains
         print '(a,i0)', "unexpectedly gave a scalar column a width of ", col%colwidth()
     end subroutine scenario_columns_init_width_on_scalar_kind
 
+    !> %adopt takes over an allocatable array via move_alloc, so an unallocated array has no
+    !! storage to take over -- every one of the 16 adopt_* specifics guards this with its own
+    !! "not allocated" check on its own source line, so each needs its own abort to cover it.
+    !! %adopt is reached through the public `adopt` generic even though every specific behind it
+    !! is a private binding (parquet_columns.f90's "generic :: adopt => ..." has no explicit
+    !! accessibility, so it defaults to public regardless of its specifics).
+    subroutine scenario_columns_adopt_not_allocated_i32()
+        type(parquet_column) :: col
+        integer(int32), allocatable :: v(:)
+        call col%adopt(v)   ! v never allocated -> aborts
+        print '(a,i0)', "unexpectedly adopted an unallocated int32 array, length=", col%length()
+    end subroutine scenario_columns_adopt_not_allocated_i32
+
+    subroutine scenario_columns_adopt_not_allocated_i64()
+        type(parquet_column) :: col
+        integer(int64), allocatable :: v(:)
+        call col%adopt(v)   ! v never allocated -> aborts
+        print '(a,i0)', "unexpectedly adopted an unallocated int64 array, length=", col%length()
+    end subroutine scenario_columns_adopt_not_allocated_i64
+
+    subroutine scenario_columns_adopt_not_allocated_f32()
+        type(parquet_column) :: col
+        real(real32), allocatable :: v(:)
+        call col%adopt(v)   ! v never allocated -> aborts
+        print '(a,i0)', "unexpectedly adopted an unallocated float32 array, length=", col%length()
+    end subroutine scenario_columns_adopt_not_allocated_f32
+
+    subroutine scenario_columns_adopt_not_allocated_f64()
+        type(parquet_column) :: col
+        real(real64), allocatable :: v(:)
+        call col%adopt(v)   ! v never allocated -> aborts
+        print '(a,i0)', "unexpectedly adopted an unallocated float64 array, length=", col%length()
+    end subroutine scenario_columns_adopt_not_allocated_f64
+
+    subroutine scenario_columns_adopt_not_allocated_bool()
+        type(parquet_column) :: col
+        logical, allocatable :: v(:)
+        call col%adopt(v)   ! v never allocated -> aborts
+        print '(a,i0)', "unexpectedly adopted an unallocated logical array, length=", col%length()
+    end subroutine scenario_columns_adopt_not_allocated_bool
+
+    subroutine scenario_columns_adopt_not_allocated_date()
+        type(parquet_column) :: col
+        type(parquet_date), allocatable :: v(:)
+        call col%adopt(v)   ! v never allocated -> aborts
+        print '(a,i0)', "unexpectedly adopted an unallocated date array, length=", col%length()
+    end subroutine scenario_columns_adopt_not_allocated_date
+
+    subroutine scenario_columns_adopt_not_allocated_time()
+        type(parquet_column) :: col
+        type(parquet_time), allocatable :: v(:)
+        call col%adopt(v)   ! v never allocated -> aborts
+        print '(a,i0)', "unexpectedly adopted an unallocated time array, length=", col%length()
+    end subroutine scenario_columns_adopt_not_allocated_time
+
+    subroutine scenario_columns_adopt_not_allocated_ts()
+        type(parquet_column) :: col
+        type(parquet_timestamp), allocatable :: v(:)
+        call col%adopt(v)   ! v never allocated -> aborts
+        print '(a,i0)', "unexpectedly adopted an unallocated timestamp array, length=", col%length()
+    end subroutine scenario_columns_adopt_not_allocated_ts
+
+    subroutine scenario_columns_adopt_not_allocated_i32v()
+        type(parquet_column) :: col
+        integer(int32), allocatable :: v(:,:)
+        call col%adopt(v)   ! v never allocated -> aborts
+        print '(a,i0)', "unexpectedly adopted an unallocated int32_vec array, length=", col%length()
+    end subroutine scenario_columns_adopt_not_allocated_i32v
+
+    subroutine scenario_columns_adopt_not_allocated_i64v()
+        type(parquet_column) :: col
+        integer(int64), allocatable :: v(:,:)
+        call col%adopt(v)   ! v never allocated -> aborts
+        print '(a,i0)', "unexpectedly adopted an unallocated int64_vec array, length=", col%length()
+    end subroutine scenario_columns_adopt_not_allocated_i64v
+
+    subroutine scenario_columns_adopt_not_allocated_f32v()
+        type(parquet_column) :: col
+        real(real32), allocatable :: v(:,:)
+        call col%adopt(v)   ! v never allocated -> aborts
+        print '(a,i0)', "unexpectedly adopted an unallocated float32_vec array, length=", col%length()
+    end subroutine scenario_columns_adopt_not_allocated_f32v
+
+    subroutine scenario_columns_adopt_not_allocated_f64v()
+        type(parquet_column) :: col
+        real(real64), allocatable :: v(:,:)
+        call col%adopt(v)   ! v never allocated -> aborts
+        print '(a,i0)', "unexpectedly adopted an unallocated float64_vec array, length=", col%length()
+    end subroutine scenario_columns_adopt_not_allocated_f64v
+
+    subroutine scenario_columns_adopt_not_allocated_boolv()
+        type(parquet_column) :: col
+        logical, allocatable :: v(:,:)
+        call col%adopt(v)   ! v never allocated -> aborts
+        print '(a,i0)', "unexpectedly adopted an unallocated logical_vec array, length=", col%length()
+    end subroutine scenario_columns_adopt_not_allocated_boolv
+
+    subroutine scenario_columns_adopt_not_allocated_datev()
+        type(parquet_column) :: col
+        type(parquet_date), allocatable :: v(:,:)
+        call col%adopt(v)   ! v never allocated -> aborts
+        print '(a,i0)', "unexpectedly adopted an unallocated date_vec array, length=", col%length()
+    end subroutine scenario_columns_adopt_not_allocated_datev
+
+    subroutine scenario_columns_adopt_not_allocated_timev()
+        type(parquet_column) :: col
+        type(parquet_time), allocatable :: v(:,:)
+        call col%adopt(v)   ! v never allocated -> aborts
+        print '(a,i0)', "unexpectedly adopted an unallocated time_vec array, length=", col%length()
+    end subroutine scenario_columns_adopt_not_allocated_timev
+
+    subroutine scenario_columns_adopt_not_allocated_tsv()
+        type(parquet_column) :: col
+        type(parquet_timestamp), allocatable :: v(:,:)
+        call col%adopt(v)   ! v never allocated -> aborts
+        print '(a,i0)', "unexpectedly adopted an unallocated timestamp_vec array, length=", col%length()
+    end subroutine scenario_columns_adopt_not_allocated_tsv
+
     !> A whole-column set must supply exactly one value per row: a shorter array would leave
     !! part of the column silently stale, a longer one would drop values.
     subroutine scenario_columns_set_all_length_mismatch()
@@ -8877,6 +9095,288 @@ contains
         call t%get("val", v)   ! float64 column into an int32 array -> aborts
         print '(a,i0)', "unexpectedly copied a float64 column into an int32 array, size=", size(v)
     end subroutine scenario_table_get_array_kind_mismatch
+
+    !> scenario_table_pointer_kind_mismatch above only exercises col_ptr_i64's own mismatch
+    !! branch (an int64 pointer into an int32 column). Every other col_ptr_* specific has the
+    !! identical guard on its own source line, so each needs its own abort to cover it -- one
+    !! scenario per remaining kind, all built over the same two-column ("id" int32, "val"
+    !! float64) fixture, picking whichever of the two columns is NOT of the pointer's own kind.
+    subroutine scenario_table_col_ptr_kind_mismatch_i32()
+        type(parquet_table) :: t
+        integer(int32), pointer :: p(:)
+        call write_table_scenario_fixture("test_run/es_table_ptr_i32.parquet")
+        call parquet_open_table(t, "test_run/es_table_ptr_i32.parquet")
+        call t%col("val", p)   ! int32 pointer into a float64 column -> aborts
+        print '(a,i0)', "unexpectedly aliased a float64 column through an int32 pointer, size=", size(p)
+    end subroutine scenario_table_col_ptr_kind_mismatch_i32
+
+    subroutine scenario_table_col_ptr_kind_mismatch_f32()
+        type(parquet_table) :: t
+        real(real32), pointer :: p(:)
+        call write_table_scenario_fixture("test_run/es_table_ptr_f32.parquet")
+        call parquet_open_table(t, "test_run/es_table_ptr_f32.parquet")
+        call t%col("id", p)   ! float32 pointer into an int32 column -> aborts
+        print '(a,i0)', "unexpectedly aliased an int32 column through a float32 pointer, size=", size(p)
+    end subroutine scenario_table_col_ptr_kind_mismatch_f32
+
+    subroutine scenario_table_col_ptr_kind_mismatch_f64()
+        type(parquet_table) :: t
+        real(real64), pointer :: p(:)
+        call write_table_scenario_fixture("test_run/es_table_ptr_f64.parquet")
+        call parquet_open_table(t, "test_run/es_table_ptr_f64.parquet")
+        call t%col("id", p)   ! float64 pointer into an int32 column -> aborts
+        print '(a,i0)', "unexpectedly aliased an int32 column through a float64 pointer, size=", size(p)
+    end subroutine scenario_table_col_ptr_kind_mismatch_f64
+
+    subroutine scenario_table_col_ptr_kind_mismatch_bool()
+        type(parquet_table) :: t
+        logical, pointer :: p(:)
+        call write_table_scenario_fixture("test_run/es_table_ptr_bool.parquet")
+        call parquet_open_table(t, "test_run/es_table_ptr_bool.parquet")
+        call t%col("id", p)   ! logical pointer into an int32 column -> aborts
+        print '(a,i0)', "unexpectedly aliased an int32 column through a logical pointer, size=", size(p)
+    end subroutine scenario_table_col_ptr_kind_mismatch_bool
+
+    subroutine scenario_table_col_ptr_kind_mismatch_date()
+        type(parquet_table) :: t
+        type(parquet_date), pointer :: p(:)
+        call write_table_scenario_fixture("test_run/es_table_ptr_date.parquet")
+        call parquet_open_table(t, "test_run/es_table_ptr_date.parquet")
+        call t%col("id", p)   ! date pointer into an int32 column -> aborts
+        print '(a,i0)', "unexpectedly aliased an int32 column through a date pointer, size=", size(p)
+    end subroutine scenario_table_col_ptr_kind_mismatch_date
+
+    subroutine scenario_table_col_ptr_kind_mismatch_time()
+        type(parquet_table) :: t
+        type(parquet_time), pointer :: p(:)
+        call write_table_scenario_fixture("test_run/es_table_ptr_time.parquet")
+        call parquet_open_table(t, "test_run/es_table_ptr_time.parquet")
+        call t%col("id", p)   ! time pointer into an int32 column -> aborts
+        print '(a,i0)', "unexpectedly aliased an int32 column through a time pointer, size=", size(p)
+    end subroutine scenario_table_col_ptr_kind_mismatch_time
+
+    subroutine scenario_table_col_ptr_kind_mismatch_ts()
+        type(parquet_table) :: t
+        type(parquet_timestamp), pointer :: p(:)
+        call write_table_scenario_fixture("test_run/es_table_ptr_ts.parquet")
+        call parquet_open_table(t, "test_run/es_table_ptr_ts.parquet")
+        call t%col("id", p)   ! timestamp pointer into an int32 column -> aborts
+        print '(a,i0)', "unexpectedly aliased an int32 column through a timestamp pointer, size=", size(p)
+    end subroutine scenario_table_col_ptr_kind_mismatch_ts
+
+    subroutine scenario_table_col_ptr_kind_mismatch_i32v()
+        type(parquet_table) :: t
+        integer(int32), pointer :: p(:,:)
+        call write_table_scenario_fixture("test_run/es_table_ptr_i32v.parquet")
+        call parquet_open_table(t, "test_run/es_table_ptr_i32v.parquet")
+        call t%col("id", p)   ! int32_vec pointer into a scalar int32 column -> aborts
+        print '(a,i0)', "unexpectedly aliased a scalar column through an int32_vec pointer, size=", size(p)
+    end subroutine scenario_table_col_ptr_kind_mismatch_i32v
+
+    subroutine scenario_table_col_ptr_kind_mismatch_i64v()
+        type(parquet_table) :: t
+        integer(int64), pointer :: p(:,:)
+        call write_table_scenario_fixture("test_run/es_table_ptr_i64v.parquet")
+        call parquet_open_table(t, "test_run/es_table_ptr_i64v.parquet")
+        call t%col("id", p)   ! int64_vec pointer into a scalar int32 column -> aborts
+        print '(a,i0)', "unexpectedly aliased a scalar column through an int64_vec pointer, size=", size(p)
+    end subroutine scenario_table_col_ptr_kind_mismatch_i64v
+
+    subroutine scenario_table_col_ptr_kind_mismatch_f32v()
+        type(parquet_table) :: t
+        real(real32), pointer :: p(:,:)
+        call write_table_scenario_fixture("test_run/es_table_ptr_f32v.parquet")
+        call parquet_open_table(t, "test_run/es_table_ptr_f32v.parquet")
+        call t%col("id", p)   ! float32_vec pointer into a scalar int32 column -> aborts
+        print '(a,i0)', "unexpectedly aliased a scalar column through a float32_vec pointer, size=", size(p)
+    end subroutine scenario_table_col_ptr_kind_mismatch_f32v
+
+    subroutine scenario_table_col_ptr_kind_mismatch_f64v()
+        type(parquet_table) :: t
+        real(real64), pointer :: p(:,:)
+        call write_table_scenario_fixture("test_run/es_table_ptr_f64v.parquet")
+        call parquet_open_table(t, "test_run/es_table_ptr_f64v.parquet")
+        call t%col("id", p)   ! float64_vec pointer into a scalar int32 column -> aborts
+        print '(a,i0)', "unexpectedly aliased a scalar column through a float64_vec pointer, size=", size(p)
+    end subroutine scenario_table_col_ptr_kind_mismatch_f64v
+
+    subroutine scenario_table_col_ptr_kind_mismatch_boolv()
+        type(parquet_table) :: t
+        logical, pointer :: p(:,:)
+        call write_table_scenario_fixture("test_run/es_table_ptr_boolv.parquet")
+        call parquet_open_table(t, "test_run/es_table_ptr_boolv.parquet")
+        call t%col("id", p)   ! logical_vec pointer into a scalar int32 column -> aborts
+        print '(a,i0)', "unexpectedly aliased a scalar column through a logical_vec pointer, size=", size(p)
+    end subroutine scenario_table_col_ptr_kind_mismatch_boolv
+
+    subroutine scenario_table_col_ptr_kind_mismatch_datev()
+        type(parquet_table) :: t
+        type(parquet_date), pointer :: p(:,:)
+        call write_table_scenario_fixture("test_run/es_table_ptr_datev.parquet")
+        call parquet_open_table(t, "test_run/es_table_ptr_datev.parquet")
+        call t%col("id", p)   ! date_vec pointer into a scalar int32 column -> aborts
+        print '(a,i0)', "unexpectedly aliased a scalar column through a date_vec pointer, size=", size(p)
+    end subroutine scenario_table_col_ptr_kind_mismatch_datev
+
+    subroutine scenario_table_col_ptr_kind_mismatch_timev()
+        type(parquet_table) :: t
+        type(parquet_time), pointer :: p(:,:)
+        call write_table_scenario_fixture("test_run/es_table_ptr_timev.parquet")
+        call parquet_open_table(t, "test_run/es_table_ptr_timev.parquet")
+        call t%col("id", p)   ! time_vec pointer into a scalar int32 column -> aborts
+        print '(a,i0)', "unexpectedly aliased a scalar column through a time_vec pointer, size=", size(p)
+    end subroutine scenario_table_col_ptr_kind_mismatch_timev
+
+    subroutine scenario_table_col_ptr_kind_mismatch_tsv()
+        type(parquet_table) :: t
+        type(parquet_timestamp), pointer :: p(:,:)
+        call write_table_scenario_fixture("test_run/es_table_ptr_tsv.parquet")
+        call parquet_open_table(t, "test_run/es_table_ptr_tsv.parquet")
+        call t%col("id", p)   ! timestamp_vec pointer into a scalar int32 column -> aborts
+        print '(a,i0)', "unexpectedly aliased a scalar column through a timestamp_vec pointer, size=", size(p)
+    end subroutine scenario_table_col_ptr_kind_mismatch_tsv
+
+    !> scenario_table_get_array_kind_mismatch above only exercises get_arr_i32's own default
+    !! (mismatch) branch. Every other get_arr_* specific has the same guard on its own source
+    !! line -- including, for the two kinds with a widening case (i64/i64v widen from i32/i32v,
+    !! f64/f64v widen from f32/f32v), a SEPARATE default branch below that widening case -- so
+    !! each needs its own abort. All built over the same two-column fixture as the col_ptr
+    !! scenarios above; "val" (float64) is used only where "id" (int32) would hit a widening
+    !! case instead of the mismatch default.
+    subroutine scenario_table_get_array_kind_mismatch_i64()
+        type(parquet_table) :: t
+        integer(int64), allocatable :: v(:)
+        call write_table_scenario_fixture("test_run/es_table_get_arr_i64.parquet")
+        call parquet_open_table(t, "test_run/es_table_get_arr_i64.parquet")
+        call t%get("val", v)   ! float64 column into an int64 array -> aborts
+        print '(a,i0)', "unexpectedly copied a float64 column into an int64 array, size=", size(v)
+    end subroutine scenario_table_get_array_kind_mismatch_i64
+
+    subroutine scenario_table_get_array_kind_mismatch_f32()
+        type(parquet_table) :: t
+        real(real32), allocatable :: v(:)
+        call write_table_scenario_fixture("test_run/es_table_get_arr_f32.parquet")
+        call parquet_open_table(t, "test_run/es_table_get_arr_f32.parquet")
+        call t%get("id", v)   ! int32 column into a float32 array -> aborts
+        print '(a,i0)', "unexpectedly copied an int32 column into a float32 array, size=", size(v)
+    end subroutine scenario_table_get_array_kind_mismatch_f32
+
+    subroutine scenario_table_get_array_kind_mismatch_f64()
+        type(parquet_table) :: t
+        real(real64), allocatable :: v(:)
+        call write_table_scenario_fixture("test_run/es_table_get_arr_f64.parquet")
+        call parquet_open_table(t, "test_run/es_table_get_arr_f64.parquet")
+        call t%get("id", v)   ! int32 column into a float64 array -> aborts
+        print '(a,i0)', "unexpectedly copied an int32 column into a float64 array, size=", size(v)
+    end subroutine scenario_table_get_array_kind_mismatch_f64
+
+    subroutine scenario_table_get_array_kind_mismatch_bool()
+        type(parquet_table) :: t
+        logical, allocatable :: v(:)
+        call write_table_scenario_fixture("test_run/es_table_get_arr_bool.parquet")
+        call parquet_open_table(t, "test_run/es_table_get_arr_bool.parquet")
+        call t%get("id", v)   ! int32 column into a logical array -> aborts
+        print '(a,i0)', "unexpectedly copied an int32 column into a logical array, size=", size(v)
+    end subroutine scenario_table_get_array_kind_mismatch_bool
+
+    subroutine scenario_table_get_array_kind_mismatch_date()
+        type(parquet_table) :: t
+        type(parquet_date), allocatable :: v(:)
+        call write_table_scenario_fixture("test_run/es_table_get_arr_date.parquet")
+        call parquet_open_table(t, "test_run/es_table_get_arr_date.parquet")
+        call t%get("id", v)   ! int32 column into a date array -> aborts
+        print '(a,i0)', "unexpectedly copied an int32 column into a date array, size=", size(v)
+    end subroutine scenario_table_get_array_kind_mismatch_date
+
+    subroutine scenario_table_get_array_kind_mismatch_time()
+        type(parquet_table) :: t
+        type(parquet_time), allocatable :: v(:)
+        call write_table_scenario_fixture("test_run/es_table_get_arr_time.parquet")
+        call parquet_open_table(t, "test_run/es_table_get_arr_time.parquet")
+        call t%get("id", v)   ! int32 column into a time array -> aborts
+        print '(a,i0)', "unexpectedly copied an int32 column into a time array, size=", size(v)
+    end subroutine scenario_table_get_array_kind_mismatch_time
+
+    subroutine scenario_table_get_array_kind_mismatch_ts()
+        type(parquet_table) :: t
+        type(parquet_timestamp), allocatable :: v(:)
+        call write_table_scenario_fixture("test_run/es_table_get_arr_ts.parquet")
+        call parquet_open_table(t, "test_run/es_table_get_arr_ts.parquet")
+        call t%get("id", v)   ! int32 column into a timestamp array -> aborts
+        print '(a,i0)', "unexpectedly copied an int32 column into a timestamp array, size=", size(v)
+    end subroutine scenario_table_get_array_kind_mismatch_ts
+
+    subroutine scenario_table_get_array_kind_mismatch_i32v()
+        type(parquet_table) :: t
+        integer(int32), allocatable :: v(:,:)
+        call write_table_scenario_fixture("test_run/es_table_get_arr_i32v.parquet")
+        call parquet_open_table(t, "test_run/es_table_get_arr_i32v.parquet")
+        call t%get("id", v)   ! scalar int32 column into an int32_vec array -> aborts
+        print '(a,i0)', "unexpectedly copied a scalar column into an int32_vec array, size=", size(v)
+    end subroutine scenario_table_get_array_kind_mismatch_i32v
+
+    subroutine scenario_table_get_array_kind_mismatch_i64v()
+        type(parquet_table) :: t
+        integer(int64), allocatable :: v(:,:)
+        call write_table_scenario_fixture("test_run/es_table_get_arr_i64v.parquet")
+        call parquet_open_table(t, "test_run/es_table_get_arr_i64v.parquet")
+        call t%get("id", v)   ! scalar int32 column into an int64_vec array -> aborts
+        print '(a,i0)', "unexpectedly copied a scalar column into an int64_vec array, size=", size(v)
+    end subroutine scenario_table_get_array_kind_mismatch_i64v
+
+    subroutine scenario_table_get_array_kind_mismatch_f32v()
+        type(parquet_table) :: t
+        real(real32), allocatable :: v(:,:)
+        call write_table_scenario_fixture("test_run/es_table_get_arr_f32v.parquet")
+        call parquet_open_table(t, "test_run/es_table_get_arr_f32v.parquet")
+        call t%get("id", v)   ! scalar int32 column into a float32_vec array -> aborts
+        print '(a,i0)', "unexpectedly copied a scalar column into a float32_vec array, size=", size(v)
+    end subroutine scenario_table_get_array_kind_mismatch_f32v
+
+    subroutine scenario_table_get_array_kind_mismatch_f64v()
+        type(parquet_table) :: t
+        real(real64), allocatable :: v(:,:)
+        call write_table_scenario_fixture("test_run/es_table_get_arr_f64v.parquet")
+        call parquet_open_table(t, "test_run/es_table_get_arr_f64v.parquet")
+        call t%get("id", v)   ! scalar int32 column into a float64_vec array -> aborts
+        print '(a,i0)', "unexpectedly copied a scalar column into a float64_vec array, size=", size(v)
+    end subroutine scenario_table_get_array_kind_mismatch_f64v
+
+    subroutine scenario_table_get_array_kind_mismatch_boolv()
+        type(parquet_table) :: t
+        logical, allocatable :: v(:,:)
+        call write_table_scenario_fixture("test_run/es_table_get_arr_boolv.parquet")
+        call parquet_open_table(t, "test_run/es_table_get_arr_boolv.parquet")
+        call t%get("id", v)   ! scalar int32 column into a logical_vec array -> aborts
+        print '(a,i0)', "unexpectedly copied a scalar column into a logical_vec array, size=", size(v)
+    end subroutine scenario_table_get_array_kind_mismatch_boolv
+
+    subroutine scenario_table_get_array_kind_mismatch_datev()
+        type(parquet_table) :: t
+        type(parquet_date), allocatable :: v(:,:)
+        call write_table_scenario_fixture("test_run/es_table_get_arr_datev.parquet")
+        call parquet_open_table(t, "test_run/es_table_get_arr_datev.parquet")
+        call t%get("id", v)   ! scalar int32 column into a date_vec array -> aborts
+        print '(a,i0)', "unexpectedly copied a scalar column into a date_vec array, size=", size(v)
+    end subroutine scenario_table_get_array_kind_mismatch_datev
+
+    subroutine scenario_table_get_array_kind_mismatch_timev()
+        type(parquet_table) :: t
+        type(parquet_time), allocatable :: v(:,:)
+        call write_table_scenario_fixture("test_run/es_table_get_arr_timev.parquet")
+        call parquet_open_table(t, "test_run/es_table_get_arr_timev.parquet")
+        call t%get("id", v)   ! scalar int32 column into a time_vec array -> aborts
+        print '(a,i0)', "unexpectedly copied a scalar column into a time_vec array, size=", size(v)
+    end subroutine scenario_table_get_array_kind_mismatch_timev
+
+    subroutine scenario_table_get_array_kind_mismatch_tsv()
+        type(parquet_table) :: t
+        type(parquet_timestamp), allocatable :: v(:,:)
+        call write_table_scenario_fixture("test_run/es_table_get_arr_tsv.parquet")
+        call parquet_open_table(t, "test_run/es_table_get_arr_tsv.parquet")
+        call t%get("id", v)   ! scalar int32 column into a timestamp_vec array -> aborts
+        print '(a,i0)', "unexpectedly copied a scalar column into a timestamp_vec array, size=", size(v)
+    end subroutine scenario_table_get_array_kind_mismatch_tsv
 
     !> Without found=, a missing column is fatal rather than quietly empty.
     subroutine scenario_table_unknown_column()
@@ -9239,6 +9739,43 @@ contains
         print '(a,i0)', "unexpectedly resolved a deferred column's width inside a parallel region, w=", w
     end subroutine scenario_table_resolve_width_in_parallel
 
+    !> A deterministic (non-racy) sibling of table_first_touch_in_parallel above: exactly one
+    !! thread performs the guarded first touch (via !$omp single), so it reliably runs the abort's
+    !! own message-building lines rather than racing a second thread into the same abort machinery
+    !! at once -- which is what makes the plain concurrency scenario above only "best-effort" (see
+    !! run_error_scenarios.sh; two threads calling error stop simultaneously has been observed to
+    !! SIGSEGV instead of cleanly aborting, discarding that run's coverage data entirely). A team
+    !! of 2 is still requested so the region is genuinely "active" (omp_in_parallel() answers
+    !! true even though only one thread ever reaches the guarded call) -- without -fopenmp this is
+    !! just an ordinary first touch and exits 0, same fallback as the racy scenario above.
+    subroutine scenario_table_first_touch_in_parallel_single()
+        type(parquet_table) :: t
+        real(real64), allocatable :: v(:)
+        call write_table_scenario_fixture("test_run/es_table_omp_touch_single.parquet")
+        call parquet_open_table(t, "test_run/es_table_omp_touch_single.parquet")
+        !$omp parallel num_threads(2) default(shared)
+        !$omp single
+        call t%get("val", v)   ! sole first touch inside the region -> aborts
+        !$omp end single
+        !$omp end parallel
+        print '(a,i0)', "unexpectedly first-touched a column inside a parallel region, size=", size(v)
+    end subroutine scenario_table_first_touch_in_parallel_single
+
+    !> The deterministic sibling of scenario_table_resolve_width_in_parallel, for the same reason
+    !! scenario_table_first_touch_in_parallel_single is a deterministic sibling of
+    !! scenario_table_first_touch_in_parallel above.
+    subroutine scenario_table_resolve_width_in_parallel_single()
+        type(parquet_table) :: t
+        integer :: w
+        call parquet_open_table(t, "test/fixtures/list_widths.parquet")
+        !$omp parallel num_threads(2) default(shared)
+        !$omp single
+        w = t%width("uniform")   ! sole first resolve inside the region -> aborts
+        !$omp end single
+        !$omp end parallel
+        print '(a,i0)', "unexpectedly resolved a deferred column's width inside a parallel region, w=", w
+    end subroutine scenario_table_resolve_width_in_parallel_single
+
     ! ==== stage 3c: mutation, detach, sort, clone ==========================================
 
     !> Writes the shared 3c fixture: two scalar columns of three rows.
@@ -9377,6 +9914,17 @@ contains
         call t%sort_by(["a", "b"], descending=[.true.])   ! 2 keys, 1 flag -> aborts
         print '(a,i0)', "unexpectedly sorted with a short descending= list, nrows=", t%nrows()
     end subroutine scenario_table_sort_by_flag_count_mismatch
+
+    !> The nulls_first= sibling of the descending= check above: its own guard, on its own
+    !! source line, needs its own abort.
+    subroutine scenario_table_sort_by_nulls_first_count_mismatch()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [2_int32, 1_int32])
+        call t%add_column("b", [1_int32, 2_int32])
+        call t%sort_by(["a", "b"], nulls_first=[.true.])   ! 2 keys, 1 flag -> aborts
+        print '(a,i0)', "unexpectedly sorted with a short nulls_first= list, nrows=", t%nrows()
+    end subroutine scenario_table_sort_by_nulls_first_count_mismatch
 
     subroutine scenario_table_sort_by_unknown_column()
         type(parquet_table) :: t
@@ -9526,6 +10074,16 @@ contains
         call t%cast_column("a", "b", PK_INT64)   ! -> aborts
         print '(a,i0)', "unexpectedly cast onto an existing column name, ncols=", t%ncols()
     end subroutine scenario_table_cast_duplicate_name
+
+    !> Checked AFTER the duplicate-name guard (a blank name can never collide with an existing
+    !! one, so that check alone would never catch it) and before any value is read.
+    subroutine scenario_table_cast_blank_name()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32])
+        call t%cast_column("a", "   ", PK_INT64)   ! -> aborts
+        print '(a,i0)', "unexpectedly cast a column to a blank name, ncols=", t%ncols()
+    end subroutine scenario_table_cast_blank_name
 
     !> A cast the caller asked for by name must not silently truncate: the whole column is
     !! checked before anything is written, so the table is left exactly as it was.

@@ -1412,4 +1412,4 @@ contains
     end subroutine parquet_kind_name
     !
     !
-end module parquet_columns
+end module parquet_columns ! GCOVR_EXCL_LINE

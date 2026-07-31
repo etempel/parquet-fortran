@@ -553,6 +553,8 @@ contains
                 test_columns_init_container_kind_aborts), &
             new_unittest("parquet_column init with a width on a scalar kind aborts", &
                 test_columns_init_width_on_scalar_kind_aborts), &
+            new_unittest("parquet_column adopt of an unallocated array aborts, on every kind", &
+                test_columns_adopt_not_allocated_aborts), &
             new_unittest("parquet_column set_all with a mismatched value count aborts", &
                 test_columns_set_all_length_mismatch_aborts), &
             new_unittest("parquet_column get_at with a mismatched row width aborts", &
@@ -567,6 +569,10 @@ contains
                 test_table_not_opened_aborts), &
             new_unittest("parquet_table %col with a mismatched pointer kind aborts", &
                 test_table_pointer_kind_mismatch_aborts), &
+            new_unittest("parquet_table %col mismatch aborts on every remaining col_ptr_* kind", &
+                test_table_col_ptr_kind_mismatch_aborts), &
+            new_unittest("parquet_table %get mismatch aborts on every remaining get_arr_* kind", &
+                test_table_get_array_kind_mismatch_more_aborts), &
             new_unittest("parquet_table read of an unknown column aborts", &
                 test_table_unknown_column_aborts), &
             new_unittest("parquet_table read of an unsupported column type aborts", &
@@ -629,6 +635,8 @@ contains
                 test_table_sort_by_no_keys_aborts), &
             new_unittest("sort_by with a short descending= list aborts", &
                 test_table_sort_by_flag_count_mismatch_aborts), &
+            new_unittest("sort_by with a short nulls_first= list aborts", &
+                test_table_sort_by_nulls_first_count_mismatch_aborts), &
             new_unittest("sort_by on a missing column aborts", &
                 test_table_sort_by_unknown_column_aborts), &
             new_unittest("sort_by on a vector column aborts", &
@@ -659,6 +667,8 @@ contains
                 test_table_cast_unsupported_kind_aborts), &
             new_unittest("cast_column onto an existing name aborts", &
                 test_table_cast_duplicate_name_aborts), &
+            new_unittest("cast_column to a blank name aborts", &
+                test_table_cast_blank_name_aborts), &
             new_unittest("cast_column on a value that would lose information aborts", &
                 test_table_cast_lossy_value_aborts), &
             new_unittest("clone into another table type aborts", &
@@ -1080,6 +1090,68 @@ contains
             required_stderr="cannot be copied into this array")
     end subroutine test_table_get_array_kind_mismatch_aborts
 
+    !> test_table_pointer_kind_mismatch_aborts above only reaches col_ptr_i64's own mismatch
+    !! branch. Every other col_ptr_* specific (one per PK_* kind) has the identical guard on
+    !! its own source line, so each needs its own subprocess abort to cover it -- driven here
+    !! from one loop over the 15 scenarios in
+    !! scenario_table_col_ptr_kind_mismatch_* (error_scenarios.f90).
+    subroutine test_table_col_ptr_kind_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(error_type), allocatable :: e2
+        character(len=36), parameter :: scenarios(15) = [character(len=36) :: &
+            "table_col_ptr_kind_mismatch_i32", "table_col_ptr_kind_mismatch_f32", &
+            "table_col_ptr_kind_mismatch_f64", "table_col_ptr_kind_mismatch_bool", &
+            "table_col_ptr_kind_mismatch_date", "table_col_ptr_kind_mismatch_time", &
+            "table_col_ptr_kind_mismatch_ts", "table_col_ptr_kind_mismatch_i32v", &
+            "table_col_ptr_kind_mismatch_i64v", "table_col_ptr_kind_mismatch_f32v", &
+            "table_col_ptr_kind_mismatch_f64v", "table_col_ptr_kind_mismatch_boolv", &
+            "table_col_ptr_kind_mismatch_datev", "table_col_ptr_kind_mismatch_timev", &
+            "table_col_ptr_kind_mismatch_tsv"]
+        integer :: k
+        !
+        do k = 1, size(scenarios)
+            call check_scenario_exit_status_and_stderr(e2, trim(scenarios(k)), expect_abort=.true., &
+                failure_message="a %col pointer of a mismatched kind was expected to abort: " // &
+                    trim(scenarios(k)), &
+                required_stderr="col: pointer kind does not match the stored kind")
+            if (allocated(e2)) then
+                call move_alloc(e2, error)
+                return
+            end if
+        end do
+    end subroutine test_table_col_ptr_kind_mismatch_aborts
+
+    !> test_table_get_array_kind_mismatch_aborts above only reaches get_arr_i32's own default
+    !! (mismatch) branch. Every other get_arr_* specific -- including the separate default
+    !! branch each of get_arr_i64v/get_arr_f64v has below their own widening case -- needs its
+    !! own subprocess abort, driven here from one loop over the 15 scenarios in
+    !! scenario_table_get_array_kind_mismatch_* (error_scenarios.f90).
+    subroutine test_table_get_array_kind_mismatch_more_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(error_type), allocatable :: e2
+        character(len=36), parameter :: scenarios(15) = [character(len=36) :: &
+            "table_get_array_kind_mismatch_i64", "table_get_array_kind_mismatch_f32", &
+            "table_get_array_kind_mismatch_f64", "table_get_array_kind_mismatch_bool", &
+            "table_get_array_kind_mismatch_date", "table_get_array_kind_mismatch_time", &
+            "table_get_array_kind_mismatch_ts", "table_get_array_kind_mismatch_i32v", &
+            "table_get_array_kind_mismatch_i64v", "table_get_array_kind_mismatch_f32v", &
+            "table_get_array_kind_mismatch_f64v", "table_get_array_kind_mismatch_boolv", &
+            "table_get_array_kind_mismatch_datev", "table_get_array_kind_mismatch_timev", &
+            "table_get_array_kind_mismatch_tsv"]
+        integer :: k
+        !
+        do k = 1, size(scenarios)
+            call check_scenario_exit_status_and_stderr(e2, trim(scenarios(k)), expect_abort=.true., &
+                failure_message="a %get into a mismatched array kind was expected to abort: " // &
+                    trim(scenarios(k)), &
+                required_stderr="cannot be copied into this array")
+            if (allocated(e2)) then
+                call move_alloc(e2, error)
+                return
+            end if
+        end do
+    end subroutine test_table_get_array_kind_mismatch_more_aborts
+
     subroutine test_table_add_column_duplicate_force_false_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "table_add_column_duplicate_force_false", &
@@ -1290,6 +1362,34 @@ contains
             failure_message="giving a scalar kind a width > 1 was expected to abort", &
             required_stderr="parquet_columns: init: width > 1 requires a vector (*_VEC) kind")
     end subroutine test_columns_init_width_on_scalar_kind_aborts
+
+    !> Every adopt_* specific (one per PK_* kind) has its own "not allocated" guard on its own
+    !! source line, so each needs its own subprocess abort to cover it -- driven here from one
+    !! loop over the 16 scenarios in scenario_columns_adopt_not_allocated_* (error_scenarios.f90).
+    subroutine test_columns_adopt_not_allocated_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(error_type), allocatable :: e2
+        character(len=34), parameter :: scenarios(16) = [character(len=34) :: &
+            "columns_adopt_not_allocated_i32", "columns_adopt_not_allocated_i64", &
+            "columns_adopt_not_allocated_f32", "columns_adopt_not_allocated_f64", &
+            "columns_adopt_not_allocated_bool", "columns_adopt_not_allocated_date", &
+            "columns_adopt_not_allocated_time", "columns_adopt_not_allocated_ts", &
+            "columns_adopt_not_allocated_i32v", "columns_adopt_not_allocated_i64v", &
+            "columns_adopt_not_allocated_f32v", "columns_adopt_not_allocated_f64v", &
+            "columns_adopt_not_allocated_boolv", "columns_adopt_not_allocated_datev", &
+            "columns_adopt_not_allocated_timev", "columns_adopt_not_allocated_tsv"]
+        integer :: k
+        !
+        do k = 1, size(scenarios)
+            call check_scenario_exit_status_and_stderr(e2, trim(scenarios(k)), expect_abort=.true., &
+                failure_message="adopting an unallocated array was expected to abort: " // trim(scenarios(k)), &
+                required_stderr="adopt: the array to adopt is not allocated")
+            if (allocated(e2)) then
+                call move_alloc(e2, error)
+                return
+            end if
+        end do
+    end subroutine test_columns_adopt_not_allocated_aborts
 
     subroutine test_columns_set_all_length_mismatch_aborts(error)
         type(error_type), allocatable, intent(out) :: error
@@ -4583,6 +4683,14 @@ contains
             required_stderr="descending= has 1 entries but 2 keys were given")
     end subroutine test_table_sort_by_flag_count_mismatch_aborts
 
+    subroutine test_table_sort_by_nulls_first_count_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_sort_by_nulls_first_count_mismatch", &
+            expect_abort=.true., &
+            failure_message="a short nulls_first= list was expected to abort", &
+            required_stderr="nulls_first= has 1 entries but 2 keys were given")
+    end subroutine test_table_sort_by_nulls_first_count_mismatch_aborts
+
     subroutine test_table_sort_by_unknown_column_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "table_sort_by_unknown_column", expect_abort=.true., &
@@ -4687,6 +4795,13 @@ contains
             failure_message="casting onto an existing name was expected to abort", &
             required_stderr="cast_column: a column of the new name already exists")
     end subroutine test_table_cast_duplicate_name_aborts
+
+    subroutine test_table_cast_blank_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_cast_blank_name", expect_abort=.true., &
+            failure_message="casting a column to a blank name was expected to abort", &
+            required_stderr="cast_column: the new name is blank")
+    end subroutine test_table_cast_blank_name_aborts
 
     subroutine test_table_cast_lossy_value_aborts(error)
         type(error_type), allocatable, intent(out) :: error

@@ -111,6 +111,8 @@ contains
             new_unittest("filename and file metadata are reported back from the source file", &
                 test_filename_and_metadata), &
             new_unittest("set_element writes one cell, in both row-index kinds", test_set_element), &
+            new_unittest("set_element writes one cell on every remaining kind", &
+                test_set_element_more_kinds), &
             new_unittest("set_null/clear_null/compact_validity are row-granular", &
                 test_validity_mutation), &
             new_unittest("drop_column removes a column and leaves the survivors intact", &
@@ -127,6 +129,8 @@ contains
             new_unittest("an in-memory sort matches a read-time sort row for row", &
                 test_sort_matches_read_time), &
             new_unittest("sort_by handles int64 and timestamp keys", test_sort_by_key_kinds), &
+            new_unittest("sort_by handles logical, date, time and float32 keys", &
+                test_sort_by_more_key_kinds), &
             new_unittest("append concatenates a batch and null-fills the columns it omits", &
                 test_append_table), &
             new_unittest("append_null_rows supports the extend-fill-append workflow", &
@@ -387,7 +391,10 @@ contains
         type(parquet_table) :: t
         integer(int64), allocatable :: g64(:)
         real(real64), allocatable :: r64(:)
+        integer(int64), allocatable :: gv64(:,:)
+        real(real64), allocatable :: rv64(:,:)
         character(len=*), parameter :: f = "test_run/table_widen.parquet"
+        character(len=*), parameter :: fv = "test_run/table_widen_vec.parquet"
         !
         call write_basic_fixture(f)
         call parquet_open_table(t, f)
@@ -403,6 +410,22 @@ contains
         call t%get("f32", r64)
         call check(error, abs(r64(4) - 2.0_real64) < 1.0e-6_real64, &
             "get should widen a float32 column into a float64 array")
+        if (allocated(error)) return
+        ! The vector kinds widen the same way, through their own get_arr_i64v/get_arr_f64v
+        ! specifics -- covered separately from the scalar case above.
+        call write_matrix_fixture(fv)
+        call parquet_open_table(t, fv)
+        call check(error, t%kind("v_i32") == PK_INT32_VEC, "precondition: v_i32 is stored as int32_vec")
+        if (allocated(error)) return
+        call t%get("v_i32", gv64)
+        call check(error, gv64(2, 3) == 32_int64, &
+            "get should widen an int32_vec column into an int64 matrix")
+        if (allocated(error)) return
+        call check(error, t%kind("v_f32") == PK_FLOAT32_VEC, "precondition: v_f32 is stored as float32_vec")
+        if (allocated(error)) return
+        call t%get("v_f32", rv64)
+        call check(error, abs(rv64(2, 3) - 16.0_real64) < 1.0e-6_real64, &
+            "get should widen a float32_vec column into a float64 matrix")
     end subroutine test_widening
     !
     subroutine test_pointer_is_live(error)
@@ -624,14 +647,34 @@ contains
         real(real64), allocatable :: back(:)
         character(len=6) :: s6(NB)
         logical :: vd(NB), vs(NB), vv(3, NB)
+        ! One scalar column per remaining mat_* materializer whose null branch
+        ! test_materialize_null_fast_path did not otherwise reach (int64/float32/logical), plus
+        ! their vector counterparts (int32/int64/float32/logical) -- dirty/dv above already cover
+        ! float64 scalar and vector.
+        integer(int32) :: dirty_i32(NB), dirtyv_i32(3, NB)
+        integer(int64) :: dirty_i64(NB), dirtyv_i64(3, NB)
+        real(real32) :: dirty_f32(NB), dirtyv_f32(3, NB)
+        logical :: dirty_bool(NB), dirtyv_bool(3, NB)
         integer :: i
         integer, parameter :: nulls(4) = [1, 17, 33, 40]
         character(len=*), parameter :: f = "test_run/table_mat_nullfast.parquet"
+        character(len=10), parameter :: dirty_names(6) = &
+            [character(len=10) :: "dirty", "dirty_i32", "dirty_i64", "dirty_f32", "dirty_bool", "s"]
+        character(len=10), parameter :: dirtyv_names(5) = &
+            [character(len=10) :: "dv", "dv_i32", "dv_i64", "dv_f32", "dv_bool"]
         !
         do i = 1, NB
             dirty(i) = real(i, real64)
             clean(i) = real(100 + i, real64)
             dirtyv(:, i) = real(i, real64)
+            dirty_i32(i) = i
+            dirty_i64(i) = int(i, int64)
+            dirty_f32(i) = real(i, real32)
+            dirty_bool(i) = mod(i, 2) == 0
+            dirtyv_i32(:, i) = i
+            dirtyv_i64(:, i) = int(i, int64)
+            dirtyv_f32(:, i) = real(i, real32)
+            dirtyv_bool(:, i) = mod(i, 2) == 0
             write(s6(i), '(a,i0)') "v", i
         end do
         vd = .true.
@@ -648,38 +691,50 @@ contains
         call parquet_write_column(w, "clean", clean)
         call parquet_write_column(w, "s", s6, is_valid=vs)
         call parquet_write_column(w, "dv", dirtyv, is_valid=vv)
+        call parquet_write_column(w, "dirty_i32", dirty_i32, is_valid=vd)
+        call parquet_write_column(w, "dirty_i64", dirty_i64, is_valid=vd)
+        call parquet_write_column(w, "dirty_f32", dirty_f32, is_valid=vd)
+        call parquet_write_column(w, "dirty_bool", dirty_bool, is_valid=vd)
+        call parquet_write_column(w, "dv_i32", dirtyv_i32, is_valid=vv)
+        call parquet_write_column(w, "dv_i64", dirtyv_i64, is_valid=vv)
+        call parquet_write_column(w, "dv_f32", dirtyv_f32, is_valid=vv)
+        call parquet_write_column(w, "dv_bool", dirtyv_bool, is_valid=vv)
         call parquet_close_writer(w)
         !
         call parquet_open_table(t, f)
         call t%materialize_all()
-        ! The slow path: every null must have survived, and no extra null invented.
-        do i = 1, NB
-            call check(e2, t%is_null("dirty", int(i, int64)) .eqv. any(nulls == i), &
-                "a numeric column's nulls must survive materialize exactly")
-            if (allocated(e2)) then
-                call move_alloc(e2, error)
-                return
-            end if
-            call check(e2, t%is_null("s", int(i, int64)) .eqv. any(nulls == i), &
-                "a string column's nulls must survive materialize exactly")
-            if (allocated(e2)) then
-                call move_alloc(e2, error)
-                return
-            end if
-            call check(e2, t%is_null("dv", int(i, int64)) .eqv. any(nulls == i), &
-                "a vector column's nulls must survive materialize exactly")
-            if (allocated(e2)) then
-                call move_alloc(e2, error)
-                return
-            end if
-            ! And the fast path: a clean column must gain no nulls at all.
-            call check(e2, .not. t%is_null("clean", int(i, int64)), &
-                "the no-nulls fast path must not invent a null")
-            if (allocated(e2)) then
-                call move_alloc(e2, error)
-                return
-            end if
-        end do
+        ! The slow path: every null must have survived, and no extra null invented -- across every
+        ! mat_* scalar and vector materializer that takes the mask branch.
+        block
+            integer :: k
+            do i = 1, NB
+                do k = 1, size(dirty_names)
+                    call check(e2, t%is_null(trim(dirty_names(k)), int(i, int64)) .eqv. any(nulls == i), &
+                        "a scalar column's nulls must survive materialize exactly: " // &
+                        trim(dirty_names(k)))
+                    if (allocated(e2)) then
+                        call move_alloc(e2, error)
+                        return
+                    end if
+                end do
+                do k = 1, size(dirtyv_names)
+                    call check(e2, t%is_null(trim(dirtyv_names(k)), int(i, int64)) .eqv. any(nulls == i), &
+                        "a vector column's nulls must survive materialize exactly: " // &
+                        trim(dirtyv_names(k)))
+                    if (allocated(e2)) then
+                        call move_alloc(e2, error)
+                        return
+                    end if
+                end do
+                ! And the fast path: a clean column must gain no nulls at all.
+                call check(e2, .not. t%is_null("clean", int(i, int64)), &
+                    "the no-nulls fast path must not invent a null")
+                if (allocated(e2)) then
+                    call move_alloc(e2, error)
+                    return
+                end if
+            end do
+        end block
         ! Values must survive both paths -- adopt hands the array over rather than copying it, so a
         ! mistake there shows up as wrong or missing data rather than as wrong validity.
         call t%get("clean", back)
@@ -1413,7 +1468,7 @@ contains
         integer(int64), allocatable :: a_i64(:), v_i64(:,:)
         real(real32), allocatable :: a_f32(:), v_f32(:,:)
         real(real64), allocatable :: a_f64(:), v_f64(:,:)
-        logical, allocatable :: a_bool(:), v_bool(:,:), valid(:)
+        logical, allocatable :: a_bool(:), v_bool(:,:), valid(:), valid_v(:,:)
         character(len=8), allocatable :: a_str(:), v_str(:,:)
         type(parquet_date), allocatable :: a_date(:), v_date(:,:)
         type(parquet_time), allocatable :: a_time(:), v_time(:,:)
@@ -1452,23 +1507,29 @@ contains
         valid = .true.
         valid(n / 2) = .false.
         a_date(n / 2 + 1) = parquet_date()
+        ! Every scalar/vector numeric+bool+string column also gets the same null row, so the
+        ! slice regime's row-group materializers (matchunk_*) are exercised on their own mask
+        ! path too -- not just the whole-file mat_* path the unsliced fixtures already cover.
+        allocate(valid_v(NVEC, n))
+        valid_v = .true.
+        valid_v(:, n / 2) = .false.
         !
         call parquet_open_writer(w, fname, chunk_size=chunk)
         call parquet_write_column(w, "s_i32", a_i32, is_valid=valid)
-        call parquet_write_column(w, "s_i64", a_i64)
-        call parquet_write_column(w, "s_f32", a_f32)
-        call parquet_write_column(w, "s_f64", a_f64)
-        call parquet_write_column(w, "s_bool", a_bool)
+        call parquet_write_column(w, "s_i64", a_i64, is_valid=valid)
+        call parquet_write_column(w, "s_f32", a_f32, is_valid=valid)
+        call parquet_write_column(w, "s_f64", a_f64, is_valid=valid)
+        call parquet_write_column(w, "s_bool", a_bool, is_valid=valid)
         call parquet_write_column(w, "s_str", a_str, is_valid=valid)
         call parquet_write_column(w, "s_date", a_date)
         call parquet_write_column(w, "s_time", a_time)
         call parquet_write_column(w, "s_ts", a_ts)
-        call parquet_write_column(w, "v_i32", v_i32)
-        call parquet_write_column(w, "v_i64", v_i64)
-        call parquet_write_column(w, "v_f32", v_f32)
-        call parquet_write_column(w, "v_f64", v_f64)
-        call parquet_write_column(w, "v_bool", v_bool)
-        call parquet_write_column(w, "v_str", v_str)
+        call parquet_write_column(w, "v_i32", v_i32, is_valid=valid_v)
+        call parquet_write_column(w, "v_i64", v_i64, is_valid=valid_v)
+        call parquet_write_column(w, "v_f32", v_f32, is_valid=valid_v)
+        call parquet_write_column(w, "v_f64", v_f64, is_valid=valid_v)
+        call parquet_write_column(w, "v_bool", v_bool, is_valid=valid_v)
+        call parquet_write_column(w, "v_str", v_str, is_valid=valid_v)
         call parquet_write_column(w, "v_date", v_date)
         call parquet_write_column(w, "v_time", v_time)
         call parquet_write_column(w, "v_ts", v_ts)
@@ -1649,13 +1710,23 @@ contains
         if (allocated(error)) return
         !
         ! Nulls have to survive the trim-and-concatenate too: the fixture's null row is inside
-        ! this slice.
-        do i = 1, HI - LO + 1
-            call check(error, sl%is_null("s_i32", int(i, int64)) .eqv. &
-                full%is_null("s_i32", int(LO + i - 1, int64)), &
-                "a null must land on the same row after slicing")
-            if (allocated(error)) return
-        end do
+        ! this slice. Every scalar/vector numeric+bool+string column carries the same null row,
+        ! which drives the row-group materializers' (matchunk_*) own mask path -- the slice
+        ! regime's counterpart to test_materialize_null_fast_path's whole-file mat_* coverage.
+        block
+            character(len=6), parameter :: names(12) = &
+                [character(len=6) :: "s_i32", "s_i64", "s_f32", "s_f64", "s_bool", "s_str", &
+                    "v_i32", "v_i64", "v_f32", "v_f64", "v_bool", "v_str"]
+            integer :: k
+            do k = 1, size(names)
+                do i = 1, HI - LO + 1
+                    call check(error, sl%is_null(trim(names(k)), int(i, int64)) .eqv. &
+                        full%is_null(trim(names(k)), int(LO + i - 1, int64)), &
+                        "a null must land on the same row after slicing: " // trim(names(k)))
+                    if (allocated(error)) return
+                end do
+            end do
+        end block
     end subroutine test_slice_kind_matrix
     !
     !> The four slice shapes that differ in how much trimming they need: wholly inside one row
@@ -2593,6 +2664,130 @@ contains
         call check(error, trim(gs(1)) == "rewritten", "set_element should write a string cell")
     end subroutine test_set_element
     !
+    !> test_set_element above only reaches set_element for int32/float64/string scalar columns.
+    !! Every other kind (int64/float32/logical/date/time/timestamp scalar, all 8 vector kinds,
+    !! and the vector string form) has its own specific pair (an i32 row-index relay plus its
+    !! i64 row-index body), so this drives one on each of them -- using a plain default-INTEGER
+    !! row index throughout, which is what exercises the relay half rather than the i64 body
+    !! directly.
+    subroutine test_set_element_more_kinds(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer(int64), allocatable :: gi64(:)
+        real(real32), allocatable :: gf32(:)
+        logical, allocatable :: gbool(:)
+        type(parquet_date), allocatable :: gdate(:)
+        type(parquet_time), allocatable :: gtime(:)
+        type(parquet_timestamp), allocatable :: gts(:)
+        integer(int32), allocatable :: gv_i32(:,:)
+        integer(int64), allocatable :: gv_i64(:,:)
+        real(real32), allocatable :: gv_f32(:,:)
+        real(real64), allocatable :: gv_f64(:,:)
+        logical, allocatable :: gv_bool(:,:)
+        type(parquet_date), allocatable :: gv_date(:,:)
+        type(parquet_time), allocatable :: gv_time(:,:)
+        type(parquet_timestamp), allocatable :: gv_ts(:,:)
+        character(len=:), allocatable :: gv_str(:,:)
+        character(len=4), parameter :: new_v_str(NVEC) = ["wx  ", "yz  ", "abcd"]
+        character(len=*), parameter :: f = "test_run/table_setelem_more.parquet"
+        ! Named so %raw() can be taken on them: chaining it straight off a structure constructor
+        ! is not valid Fortran (the leftmost part-ref in a data-ref cannot be a function/
+        ! constructor reference).
+        type(parquet_date) :: exp_date, exp_v_date
+        type(parquet_time) :: exp_time, exp_v_time
+        !
+        call write_matrix_fixture(f)
+        call parquet_open_table(t, f)
+        call t%set_element("s_i64", 2, 555000000000_int64)
+        call t%set_element("s_f32", 2, 3.5_real32)
+        call t%set_element("s_bool", 2, .true.)
+        call t%set_element("s_date", 2, parquet_date(2030, 6, 15))
+        call t%set_element("s_time", 2, parquet_time(11, 22, 33))
+        call t%set_element("s_ts", 2, parquet_timestamp(2030, 6, 15, 11, 22, 33))
+        call t%set_element("v_i32", 2, [101_int32, 102_int32, 103_int32])
+        call t%set_element("v_i64", 2, [201_int64, 202_int64, 203_int64])
+        call t%set_element("v_f32", 2, [1.5_real32, 2.5_real32, 3.5_real32])
+        call t%set_element("v_f64", 2, [4.5_real64, 5.5_real64, 6.5_real64])
+        call t%set_element("v_bool", 2, [.true., .false., .true.])
+        call t%set_element("v_date", 2, &
+            [parquet_date(2030, 7, 1), parquet_date(2030, 7, 2), parquet_date(2030, 7, 3)])
+        call t%set_element("v_time", 2, &
+            [parquet_time(1, 1, 1), parquet_time(2, 2, 2), parquet_time(3, 3, 3)])
+        call t%set_element("v_ts", 2, [parquet_timestamp(2030, 7, 1, 1, 1, 1), &
+            parquet_timestamp(2030, 7, 2, 2, 2, 2), parquet_timestamp(2030, 7, 3, 3, 3, 3)])
+        call t%set_element("v_str", 2, new_v_str)
+        exp_date = parquet_date(2030, 6, 15)
+        exp_time = parquet_time(11, 22, 33)
+        exp_v_date = parquet_date(2030, 7, 2)
+        exp_v_time = parquet_time(2, 2, 2)
+        !
+        call t%get("s_i64", gi64)
+        call check(error, gi64(2) == 555000000000_int64, "set_element should write an int64 scalar cell")
+        if (allocated(error)) return
+        call t%get("s_f32", gf32)
+        call check(error, abs(gf32(2) - 3.5_real32) < 1.0e-6_real32, &
+            "set_element should write a float32 scalar cell")
+        if (allocated(error)) return
+        call t%get("s_bool", gbool)
+        call check(error, gbool(2), "set_element should write a logical scalar cell")
+        if (allocated(error)) return
+        call t%get("s_date", gdate)
+        call check(error, gdate(2)%raw() == exp_date%raw(), &
+            "set_element should write a date scalar cell")
+        if (allocated(error)) return
+        call t%get("s_time", gtime)
+        call check(error, gtime(2)%raw() == exp_time%raw(), &
+            "set_element should write a time scalar cell")
+        if (allocated(error)) return
+        call t%get("s_ts", gts)
+        block
+            type(parquet_date) :: got
+            got = gts(2)%get_date()
+            call check(error, got%raw() == exp_date%raw(), &
+                "set_element should write a timestamp scalar cell")
+        end block
+        if (allocated(error)) return
+        !
+        call t%get("v_i32", gv_i32)
+        call check(error, all(gv_i32(:, 2) == [101_int32, 102_int32, 103_int32]), &
+            "set_element should write an int32_vec row")
+        if (allocated(error)) return
+        call t%get("v_i64", gv_i64)
+        call check(error, all(gv_i64(:, 2) == [201_int64, 202_int64, 203_int64]), &
+            "set_element should write an int64_vec row")
+        if (allocated(error)) return
+        call t%get("v_f32", gv_f32)
+        call check(error, all(abs(gv_f32(:, 2) - [1.5_real32, 2.5_real32, 3.5_real32]) < 1.0e-6_real32), &
+            "set_element should write a float32_vec row")
+        if (allocated(error)) return
+        call t%get("v_f64", gv_f64)
+        call check(error, all(abs(gv_f64(:, 2) - [4.5_real64, 5.5_real64, 6.5_real64]) < 1.0e-12_real64), &
+            "set_element should write a float64_vec row")
+        if (allocated(error)) return
+        call t%get("v_bool", gv_bool)
+        call check(error, all(gv_bool(:, 2) .eqv. [.true., .false., .true.]), &
+            "set_element should write a logical_vec row")
+        if (allocated(error)) return
+        call t%get("v_date", gv_date)
+        call check(error, gv_date(2, 2)%raw() == exp_v_date%raw(), &
+            "set_element should write a date_vec row")
+        if (allocated(error)) return
+        call t%get("v_time", gv_time)
+        call check(error, gv_time(2, 2)%raw() == exp_v_time%raw(), &
+            "set_element should write a time_vec row")
+        if (allocated(error)) return
+        call t%get("v_ts", gv_ts)
+        block
+            type(parquet_date) :: got
+            got = gv_ts(2, 2)%get_date()
+            call check(error, got%raw() == exp_v_date%raw(), &
+                "set_element should write a timestamp_vec row")
+        end block
+        if (allocated(error)) return
+        call t%get("v_str", gv_str)
+        call check(error, trim(gv_str(2, 2)) == "yz", "set_element should write a string_vec row")
+    end subroutine test_set_element_more_kinds
+    !
     !> The validity trio, including the trap that %set_null is ROW-granular on a vector column.
     subroutine test_validity_mutation(error)
         type(error_type), allocatable, intent(out) :: error
@@ -2741,6 +2936,17 @@ contains
         if (allocated(error)) return
         call t%get("xs", gi32)
         call check(error, gi32(2) == 2_int32, "a narrowing cast should keep an exactly representable value")
+        if (allocated(error)) return
+        ! cast_read_value's own int32/float32 SOURCE branches: everything above casts FROM a
+        ! float64 or int64 source, never from int32 or float32, so those two branches are still
+        ! untouched -- cast xs (int32) and xf (float32) onward to exercise them.
+        call t%cast_column("xs", "xs_i64", PK_INT64)
+        call t%get("xs_i64", gi64)
+        call check(error, gi64(2) == 2_int64, "casting FROM an int32 source should convert exactly")
+        if (allocated(error)) return
+        call t%cast_column("xf", "xf_f64", PK_FLOAT64)
+        call t%get("xf_f64", gf64)
+        call check(error, gf64(2) == 2.0_real64, "casting FROM a float32 source should convert exactly")
     end subroutine test_cast_column
     !
     !> Writes a fixture with an id column plus one sortable column of each interesting shape, so
@@ -3087,6 +3293,17 @@ contains
         call work%get("id", id)
         call check(error, id(1) == 1_int32 .and. id(2) == 71_int32 .and. id(4) == 1_int32, &
             "the filled rows and the appended table should both be in place")
+        if (allocated(error)) return
+        ! append_null_rows(0) is a no-op on the row count, but it is still a row-set mutation
+        ! (this file's own rule: everything here detaches) -- its own early-return branch calls
+        ! table_detach before returning, rather than skipping the detach because nothing grew.
+        call parquet_open_table(t, f)
+        call check(error, .not. t%is_detached(), "precondition: a freshly opened table is not detached")
+        if (allocated(error)) return
+        call t%append_null_rows(0)
+        call check(error, t%nrows() == int(NROW, int64), "append_null_rows(0) should not change the row count")
+        if (allocated(error)) return
+        call check(error, t%is_detached(), "append_null_rows(0) should still detach the table")
     end subroutine test_append_null_rows_workflow
     !
     !> One row appended through a row handle.
@@ -3144,6 +3361,72 @@ contains
         call check(error, all(got == [3_int32, 2_int32, 1_int32, 4_int32]), &
             "a timestamp sort should order by seconds and then by the sub-second part")
     end subroutine test_sort_by_key_kinds
+    !
+    !> The remaining key kinds sort_extract_integer/sort_extract_real dispatch on that
+    !! test_sort_by_key_kinds above does not reach: logical and date (sort_extract_integer's own
+    !! branches), time (its default branch), and float32 (sort_extract_real's narrower branch,
+    !! widened to real64 the same way get_at already does). Each uses its own fresh table so the
+    !! expected order does not have to account for a previous sort's permutation.
+    subroutine test_sort_by_more_key_kinds(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer(int32) :: id(4)
+        logical :: flag(4)
+        type(parquet_date) :: asof(4)
+        type(parquet_time) :: clock(4)
+        real(real32) :: r32(4)
+        integer(int32), allocatable :: got(:)
+        !
+        id = [1_int32, 2_int32, 3_int32, 4_int32]
+        !
+        flag = [.true., .false., .true., .false.]
+        call parquet_new_table(t)
+        call t%add_column("id", id)
+        call t%add_column("flag", flag)
+        call t%sort_by(["flag"])
+        call t%get("id", got)
+        call check(error, all(got == [2_int32, 4_int32, 1_int32, 3_int32]), &
+            "a logical column should sort false before true")
+        if (allocated(error)) return
+        !
+        asof(1) = parquet_date(2026, 1, 1)
+        asof(2) = parquet_date(2020, 1, 1)
+        asof(3) = parquet_date(2030, 1, 1)
+        asof(4) = parquet_date(2025, 1, 1)
+        call parquet_new_table(t)
+        call t%add_column("id", id)
+        call t%add_column("asof", asof)
+        call t%sort_by(["asof"])
+        deallocate(got)
+        call t%get("id", got)
+        call check(error, all(got == [2_int32, 4_int32, 1_int32, 3_int32]), &
+            "a date column should sort by calendar order")
+        if (allocated(error)) return
+        !
+        clock(1) = parquet_time(12, 0, 0)
+        clock(2) = parquet_time(5, 0, 0)
+        clock(3) = parquet_time(23, 0, 0)
+        clock(4) = parquet_time(0, 0, 1)
+        call parquet_new_table(t)
+        call t%add_column("id", id)
+        call t%add_column("clock", clock)
+        call t%sort_by(["clock"])
+        deallocate(got)
+        call t%get("id", got)
+        call check(error, all(got == [4_int32, 2_int32, 1_int32, 3_int32]), &
+            "a time column should sort by time-of-day order")
+        if (allocated(error)) return
+        !
+        r32 = [3.5_real32, 1.5_real32, 4.5_real32, 2.5_real32]
+        call parquet_new_table(t)
+        call t%add_column("id", id)
+        call t%add_column("r32", r32)
+        call t%sort_by(["r32"])
+        deallocate(got)
+        call t%get("id", got)
+        call check(error, all(got == [2_int32, 4_int32, 1_int32, 3_int32]), &
+            "a float32 column should sort by its widened value")
+    end subroutine test_sort_by_more_key_kinds
     !
     !> A clone is independent in both directions, stays lazy, and carries the row scope over.
     subroutine test_clone(error)

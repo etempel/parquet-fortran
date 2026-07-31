@@ -60,7 +60,8 @@ contains
             new_unittest("row mode returns the SORTED row", test_row_mode_sorted), &
             new_unittest("element mode spans the sorted rows", test_element_mode_sorted), &
             new_unittest("parquet_reader_set_sort matches open-time sorting", test_set_sort_post_open), &
-            new_unittest("a prefetched column comes back sorted", test_prefetch_is_sorted) &
+            new_unittest("a prefetched column comes back sorted", test_prefetch_is_sorted), &
+            new_unittest("an empty sort_by at open time is a no-op", test_open_time_empty_sort_by_is_noop) &
             ]
     end subroutine collect_tests_sort
     !
@@ -625,5 +626,25 @@ contains
         call parquet_close_reader(reader)
         call check(error, all(ids == [2, 4, 1, 6, 3, 5]), "a prefetched column must come back sorted")
     end subroutine test_prefetch_is_sorted
+    !
+    !> A `parquet_sortkey` with no `%add` calls yet is a legal (if pointless) `sort_by=` value --
+    !! `parquet_apply_sort` (parquet_read.f90) short-circuits on `sort_by%n == 0` and installs
+    !! nothing, so the file reads back in ordinary physical order. Only the open-time path can
+    !! reach that short-circuit: `parquet_reader_set_sort` itself already declines an empty
+    !! `sort_by` before ever calling `parquet_apply_sort`.
+    subroutine test_open_time_empty_sort_by_is_noop(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        integer(int32) :: ids(6)
+        character(len=*), parameter :: file = "test_run/sort_open_time_empty.parquet"
+
+        call write_basic_fixture(file)
+        call parquet_open_reader(reader, file, sort_by=srt)
+        call parquet_read_column(reader, "id", ids)
+        call parquet_close_reader(reader)
+        call check(error, all(ids == [1, 2, 3, 4, 5, 6]), &
+            "an empty sort_by must leave the file in its original physical row order")
+    end subroutine test_open_time_empty_sort_by_is_noop
     !
 end module test_sort

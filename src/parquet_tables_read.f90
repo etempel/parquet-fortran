@@ -313,11 +313,23 @@ contains
                 "width can only be found by reading it" // sfx
         end if
         associate (slot => cache%cols(idx))
-            if (.not. slot%file_source) then
+            ! Not reachable yet: every current way to create an in-memory slot (table_new_slot,
+            ! called from %add_column/%cast_column) populates it and sets residency = RES_FULL
+            ! in the same procedure call, with no intervening point where table_touch could see
+            ! it still RES_EMPTY. This guard exists for the predefined/generated-table-type
+            ! columns described elsewhere in this file (parquet_tables_mutate.f90's own
+            ! `predefined` guards on %drop_column/%rename_column) -- a later milestone's
+            ! generated accessor could declare a column before it is ever populated or read from
+            ! a file, and that is exactly the state this checks for.
+            ! gcov attribution artifact: the `if` line itself is evaluated on every call and so
+            ! shows hits, while the body below never runs -- see CLAUDE.md's "Fortran gcov
+            ! attribution artifacts", the guard-clause shape.
+            if (.not. slot%file_source) then ! GCOVR_EXCL_START
                 call table_context_suffix(cache, slot%name, sfx)
                 error stop EP // trim(proc) // ": this column holds no values and has no file " // &
                     "column to read them from" // sfx
             end if
+            ! GCOVR_EXCL_STOP
             ! D6: once a row-structural mutation has changed the row set, a column read from the
             ! file would no longer line up with the columns already in memory. This has to come
             ! BEFORE table_resolve_width, which reads data itself for a plain-LIST column and

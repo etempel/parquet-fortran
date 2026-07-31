@@ -210,6 +210,22 @@ scenarios=(
     "columns_string_column_wrong_kind:1"
     "columns_init_container_kind:1"
     "columns_init_width_on_scalar_kind:1"
+    "columns_adopt_not_allocated_i32:1"
+    "columns_adopt_not_allocated_i64:1"
+    "columns_adopt_not_allocated_f32:1"
+    "columns_adopt_not_allocated_f64:1"
+    "columns_adopt_not_allocated_bool:1"
+    "columns_adopt_not_allocated_date:1"
+    "columns_adopt_not_allocated_time:1"
+    "columns_adopt_not_allocated_ts:1"
+    "columns_adopt_not_allocated_i32v:1"
+    "columns_adopt_not_allocated_i64v:1"
+    "columns_adopt_not_allocated_f32v:1"
+    "columns_adopt_not_allocated_f64v:1"
+    "columns_adopt_not_allocated_boolv:1"
+    "columns_adopt_not_allocated_datev:1"
+    "columns_adopt_not_allocated_timev:1"
+    "columns_adopt_not_allocated_tsv:1"
     "columns_set_all_length_mismatch:1"
     "columns_get_at_width_mismatch:1"
     "columns_delete_by_mask_length_mismatch:1"
@@ -218,6 +234,36 @@ scenarios=(
     "table_not_opened:1"
     "table_pointer_kind_mismatch:1"
     "table_get_array_kind_mismatch:1"
+    "table_col_ptr_kind_mismatch_i32:1"
+    "table_col_ptr_kind_mismatch_f32:1"
+    "table_col_ptr_kind_mismatch_f64:1"
+    "table_col_ptr_kind_mismatch_bool:1"
+    "table_col_ptr_kind_mismatch_date:1"
+    "table_col_ptr_kind_mismatch_time:1"
+    "table_col_ptr_kind_mismatch_ts:1"
+    "table_col_ptr_kind_mismatch_i32v:1"
+    "table_col_ptr_kind_mismatch_i64v:1"
+    "table_col_ptr_kind_mismatch_f32v:1"
+    "table_col_ptr_kind_mismatch_f64v:1"
+    "table_col_ptr_kind_mismatch_boolv:1"
+    "table_col_ptr_kind_mismatch_datev:1"
+    "table_col_ptr_kind_mismatch_timev:1"
+    "table_col_ptr_kind_mismatch_tsv:1"
+    "table_get_array_kind_mismatch_i64:1"
+    "table_get_array_kind_mismatch_f32:1"
+    "table_get_array_kind_mismatch_f64:1"
+    "table_get_array_kind_mismatch_bool:1"
+    "table_get_array_kind_mismatch_date:1"
+    "table_get_array_kind_mismatch_time:1"
+    "table_get_array_kind_mismatch_ts:1"
+    "table_get_array_kind_mismatch_i32v:1"
+    "table_get_array_kind_mismatch_i64v:1"
+    "table_get_array_kind_mismatch_f32v:1"
+    "table_get_array_kind_mismatch_f64v:1"
+    "table_get_array_kind_mismatch_boolv:1"
+    "table_get_array_kind_mismatch_datev:1"
+    "table_get_array_kind_mismatch_timev:1"
+    "table_get_array_kind_mismatch_tsv:1"
     "table_unknown_column:1"
     "table_unsupported_column_read:1"
     "table_prefetch_unknown_column:1"
@@ -257,6 +303,7 @@ scenarios=(
     "table_append_null_rows_negative:1"
     "table_sort_by_no_keys:1"
     "table_sort_by_flag_count_mismatch:1"
+    "table_sort_by_nulls_first_count_mismatch:1"
     "table_sort_by_unknown_column:1"
     "table_sort_by_vector_column:1"
     "table_sort_by_unmaterialized_key:1"
@@ -272,6 +319,7 @@ scenarios=(
     "table_rename_blank_name:1"
     "table_cast_unsupported_kind:1"
     "table_cast_duplicate_name:1"
+    "table_cast_blank_name:1"
     "table_cast_lossy_value:1"
     "table_clone_type_mismatch:1"
     "table_row_unsupported_column:1"
@@ -614,11 +662,23 @@ scenarios=(
 # for the same reason: without a real OpenMP flag there is no parallel region
 # for the RF4 guard to notice, so the scenario simply reads the column and
 # exits 0.
+#
+# table_first_touch_in_parallel_single/table_resolve_width_in_parallel_single
+# are the deterministic (single-touching-thread, via !$omp single) siblings of
+# the two above: they still need a real OpenMP flag for their team of 2 to be
+# an "active" parallel region at all (same skip-and-exit-0 fallback otherwise),
+# so they belong in this same best-effort bucket rather than the strict,
+# exact-stderr-checked list above -- but unlike their racy siblings they do
+# not depend on two threads racing into error stop's abort machinery at once,
+# so they are what actually cover table_touch's/table_resolve_width's guard
+# body lines (parquet_tables_read.f90) reliably under a real -fopenmp build.
 concurrency_scenarios=(
     "concurrent_calls_into_shared_reader"
     "concurrent_calls_into_shared_writer"
     "table_first_touch_in_parallel"
     "table_resolve_width_in_parallel"
+    "table_first_touch_in_parallel_single"
+    "table_resolve_width_in_parallel_single"
 )
 
 echo "Building error_scenarios..."

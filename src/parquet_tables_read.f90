@@ -204,7 +204,10 @@ contains
     end subroutine materialize_slice
     !
     module procedure table_release_one
-        call parquet_release_column(cache%reader, top_level_of(name))
+        character(len=:), allocatable :: top
+        !
+        call top_level_of(name, top)
+        call parquet_release_column(cache%reader, top)
     end procedure table_release_one
     !
     module procedure record_open_thread
@@ -371,7 +374,7 @@ contains
             ! all resident is still a quiet no-op -- which is what %materialize_all means there.
             call table_check_not_detached(cache, sc, cache%cols(i)%name, "materialize_all")
             call table_materialize(cache, sc, i)
-            top = top_level_of(cache%cols(i)%file_name)
+            call top_level_of(cache%cols(i)%file_name, top)
             if (len(prev_top) > 0 .and. prev_top /= top) then
                 call parquet_release_column(cache%reader, prev_top)
             end if
@@ -480,9 +483,15 @@ contains
     !
     !> The part of a (possibly dotted) column path before its first "." -- i.e. the name the
     !! reader caches the decoded array under. A name with no dot is its own top level.
-    function top_level_of(path) result(top)
-        character(len=*), intent(in) :: path      !! column path, dotted or not.
-        character(len=:), allocatable :: top      !! the top-level field name.
+    !!
+    !! A subroutine, not a `character(len=:), allocatable` function, per CLAUDE.md's "no
+    !! character-returning function" rule -- confirmed via ThreadSanitizer that the earlier
+    !! function form raced two OpenMP threads on gfortran's hidden, non-thread-local
+    !! length-tracking temporary (GCC PR113797), corrupting memory that only surfaced later,
+    !! in unrelated code.
+    subroutine top_level_of(path, top)
+        character(len=*), intent(in) :: path                  !! column path, dotted or not.
+        character(len=:), allocatable, intent(out) :: top      !! the top-level field name.
         integer :: dot
         !
         dot = index(path, ".")
@@ -491,6 +500,6 @@ contains
         else
             top = path(1:dot - 1)
         end if
-    end function top_level_of
+    end subroutine top_level_of
     !
 end submodule parquet_tables_read

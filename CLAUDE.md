@@ -1086,6 +1086,24 @@ counterpart. User guide: `doc/pages/date-time.md`.
 
   Already applied throughout `src/*.f90` — apply the same conversion to any new occurrence.
 
+  **This is not a hypothetical risk — it has actually caused silent, hard-to-trace memory
+  corruption in this project.** `top_level_of` (`parquet_tables_read.f90`, added alongside the
+  table-mutation work) was written as exactly this forbidden shape and slipped past review.
+  Confirmed via ThreadSanitizer: two OpenMP threads calling it concurrently (from
+  `table_release_one`/`materialize_marked`, both reachable from ordinary `%prefetch`/
+  `%materialize_all` use) raced on gfortran's hidden length-tracking temporary (TSan named it
+  `slen.49.1`), corrupting memory that then surfaced later as an unrelated-looking `ERROR STOP`
+  immediately followed by a SIGSEGV, in a completely different part of the table code, several
+  investigation rounds later (a ThreadSanitizer-caught Arrow-singleton race — see the next
+  section — was found and fixed FIRST, from a plausible-looking but ultimately secondary TSan
+  report, before this one, the actual dominant cause, was found in a follow-up TSan run). Fixed
+  by converting it to a subroutine per this rule; both call sites updated to
+  `call top_level_of(name, top)`. **Lesson for any future concurrency investigation in this
+  codebase: fixing one TSan-caught race does not mean the reported failure is resolved — rerun
+  the sanitizer after every fix, since more than one independent race can be masking behind the
+  same flaky symptom, and a small, easy-to-miss helper like this one can be the dominant cause
+  even when a more "interesting"-looking external-library race is also genuinely present.**
+
   **Design note for the "assign result back into the input variable" pattern** (e.g.
   `col = schema%get_col_qc(col)`): a subroutine can't alias the same actual argument to separate
   `intent(in)`/`intent(out)` dummies, so make the single argument `intent(inout)` instead — it

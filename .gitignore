@@ -5,3 +5,4 @@ feature_*.md
 __pycache__
 qemu_*.core
 core
+run_ci_test_job_docker_image.sh

@@ -45,8 +45,19 @@ contains
         character(len=32) :: lo_s, hi_s, n_s
         !
         ! `table` is intent(out) on a finalizable type, so table_finalize has already run on any
-        ! previous contents by the time we get here -- that, and not any code below, is what stops
-        ! a reopen from leaking the old cache. Do not "simplify" this to intent(inout).
+        ! previous contents by the time we get here, and every component below is reassigned
+        ! explicitly -- INCLUDING `detached`, deliberately, even though it also has a default
+        ! initializer (`= .false.`) that intent(out) is specified to apply on its own. Confirmed
+        ! by direct instrumentation (thread-tagged prints around this exact reopen, gfortran 13/14,
+        ! both the actual GitLab CI image and a local from-scratch reproduction): reopening a
+        ! `parquet_table` variable that was previously detached (e.g. by a `%sort_by` call) can
+        ! come back from this intent(out) reopen with `%detached` still `.true.`, immediately, with
+        ! no other component affected and no concurrency involved at all -- `detached` was the ONE
+        ! component this procedure never assigned explicitly, unlike `regime`/`row_lo`/`row_hi`/
+        ! `row_count`/`cache` below, all of which ARE explicitly reassigned regardless of intent(out)
+        ! and were never seen to misbehave. This one-line explicit reset is what actually closed the
+        ! bug (see CLAUDE.md); do not remove it on the assumption that intent(out) alone suffices.
+        table%detached = .false.
         allocate(table%cache)
         call record_open_thread(table%cache)
         table%cache%file_backed = .true.
@@ -105,6 +116,9 @@ contains
     end subroutine open_table_impl
     !
     module procedure parquet_new_table
+        ! Explicit, not relied-upon-implicitly, for the same reason as open_table_impl's own
+        ! `table%detached = .false.` -- see that assignment's comment.
+        table%detached = .false.
         allocate(table%cache)
         call record_open_thread(table%cache)
         table%cache%file_backed = .false.

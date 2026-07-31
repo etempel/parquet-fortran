@@ -44,7 +44,19 @@ contains
         out%row_hi = self%row_hi
         out%row_count = self%row_count
         out%cache%reads_started = self%cache%reads_started
-        if (allocated(self%cache%rg_bounds)) out%cache%rg_bounds = self%cache%rg_bounds
+        ! Explicit allocate-then-copy, not `out%cache%rg_bounds = self%cache%rg_bounds`: the plain
+        ! assignment relies on F2003 automatic reallocation, which should be a no-op concern here
+        ! since out%cache%rg_bounds is always freshly unallocated (clone_new_cache just allocated
+        ! out%cache itself) -- but confirmed via a real, reproducible run under gfortran's
+        ! -fcheck=bounds that it instead raises "Array bound mismatch for dimension 1" for this
+        ! exact shape (a rank-2 allocatable array component reached through a POINTER-typed
+        ! intermediate, `out%cache` being `type(parquet_table_cache), pointer`). Sidestepping
+        ! automatic reallocation entirely, the same way this project already does for other
+        ! confirmed compiler-codegen quirks, rather than relying on it.
+        if (allocated(self%cache%rg_bounds)) then
+            allocate(out%cache%rg_bounds(size(self%cache%rg_bounds, 1), size(self%cache%rg_bounds, 2)))
+            out%cache%rg_bounds(:, :) = self%cache%rg_bounds(:, :)
+        end if
         ! A detached source has no file left to reopen, and an in-memory one never had one, so
         ! both produce a clone with no reader. Only a live file-backed table opens its own.
         if (self%cache%file_backed .and. .not. self%detached) call clone_reopen_reader(self, out)

@@ -251,7 +251,7 @@ contains
         end if
 
         select case (trim(op))
-        case ("is_null", "is_not_null")
+        case ("is_null", "is_not_null", "is_nan", "is_not_nan")
             if (len(rest) > 0) then ! GCOVR_EXCL_START -- gcov attribution artifact
                 errmsg = "filter rule '" // t // "': " // trim(op) // " takes no value"
                 return
@@ -398,66 +398,6 @@ contains
             max_texts_packed, int(len(max_texts), kind=c_long_long), &
             null_allowed_flags, int(n, kind=c_long_long), merge(1_c_int8_t, 0_c_int8_t, qc_soft))
     end subroutine parquet_apply_qc
-    !> Batch-prefetches the distinct columns named by `filter` in a single
-    !> (thread-parallel, with use_threads) ReadTable, so parquet_reader_set_filter
-    !> later reads each from column_cache instead of issuing a separate
-    !> single-column ReadColumn per clause (see get_single_chunk_array).
-    !>
-    !> Two deliberate constraints:
-    !>  - Only columns that actually exist are prefetched (checked via the
-    !>    non-throwing parquet_reader_has_column). A filter naming an unknown
-    !>    column is left untouched here so parquet_reader_set_filter still
-    !>    reports it with its exact "unknown column in filter: ..." message
-    !>    rather than this prefetch aborting first with a different one.
-    !>  - Must be called from parquet_open_reader BEFORE parquet_apply_qc: while
-    !>    qc is still disabled, prefetching does not run read-time qc on the
-    !>    (still unfiltered) columns. The qc check for filter columns stays in
-    !>    parquet_reader_set_filter, on the filtered rows, exactly as before.
-    !>
-    !> The column list is built as one comma-separated scalar string and passed
-    !> to the string form of parquet_prefetch_columns, avoiding the fixed-width
-    !> character-array pitfall where a too-short declared length would truncate
-    !> a longer column name. Duplicate columns (same column in two clauses) are
-    !> dropped with a delimiter-guarded membership test.
-    subroutine prefetch_filter_columns(reader, filter)
-        type(parquet_reader), intent(inout) :: reader !! open reader whose filter columns are warmed.
-        type(parquet_filter), intent(in) :: filter !! filter whose distinct column names are prefetched.
-        integer(int8), allocatable :: node_kind(:), leaf_is_string(:)
-        integer(int32), allocatable :: node_leaf(:)
-        character(len=filter_leaf_name_len), allocatable :: leaf_name(:)
-        character(len=filter_leaf_op_len), allocatable :: leaf_op(:)
-        character(len=filter_leaf_value_len), allocatable :: leaf_value(:)
-        character(len=:), allocatable :: errmsg, list, name
-        logical :: ok
-        integer :: i, nnodes, nleaves
-
-        nnodes = 0
-        nleaves = 0
-        do i = 1, filter%n
-            ! A rule that fails to parse is left for parquet_apply_filter to report; any clause it
-            ! managed to emit before failing is harmless here (an unknown column is skipped below).
-            call parquet_parse_filter_expr(filter%rules(i), node_kind, node_leaf, nnodes, leaf_name, &
-                leaf_op, leaf_value, leaf_is_string, nleaves, ok, errmsg)
-        end do
-
-        list = ""
-        do i = 1, nleaves
-            name = trim(leaf_name(i))
-            ! Unknown columns: skip, so parquet_reader_set_filter owns the error.
-            if (parquet_reader_has_column(reader%handle, name//char(0)) == 0) cycle
-            ! Delimiter-guarded dedup (so "ra" is not matched inside "gal_ra").
-            if (len(list) > 0) then
-                if (index(","//list//",", ","//name//",") > 0) cycle
-            end if
-            if (len(list) == 0) then
-                list = name
-            else
-                list = list//","//name
-            end if
-        end do
-
-        if (len(list) > 0) call parquet_prefetch_columns(reader, list)
-    end subroutine prefetch_filter_columns
     !> Tokenizes and applies every rule in `filter` to `reader` -- called from
     !> parquet_open_reader right after the reader itself is created, so
     !> parquet_get_nrows and every column read afterward already reflect the
@@ -619,7 +559,11 @@ contains
         do i = 1, nleaves
             name = trim(leaf_name(i))
             op = trim(leaf_op(i))
-            if (op == "is_null" .or. op == "is_not_null") cycle
+            ! Every valueless operator is skipped, not just the two null tests: is_nan/is_not_nan
+            ! carry no literal to convert, and letting one through here would report a temporal
+            ! column's missing ISO-8601 literal instead of the real reason (the C++ side rejects
+            ! is_nan on any non-floating-point column, with a message naming that).
+            if (op == "is_null" .or. op == "is_not_null" .or. op == "is_nan" .or. op == "is_not_nan") cycle
             if (parquet_reader_has_column(reader%handle, name//char(0)) == 0) cycle
             call resolve_column_type(reader, name, type_name, recognized)
             if (.not. recognized) cycle
@@ -763,8 +707,8 @@ contains
         if (present(filter)) filter_will_apply = (filter%n > 0)
 
         ! Random downsampling (sample_fraction=): applied first, before any filter=/qc setup.
-        ! filter_will_apply tells parquet_apply_sample whether prefetch_filter_columns/
-        ! parquet_apply_filter (below) are about to run right after this, so it can defer
+        ! filter_will_apply tells parquet_apply_sample whether parquet_apply_filter (below) is
+        ! about to run right after this, so it can defer
         ! installing the draw as the reader's active mask until parquet_reader_set_filter folds it
         ! in -- see that subroutine's own doc-comment for why (installing it immediately here would
         ! make the filter's own referenced columns come back already sample-compacted mid-evaluation).
@@ -782,14 +726,6 @@ contains
                 call parquet_apply_sample(reader, sample_fraction, sample_seed, filter_will_apply)
             end if
         end if
-
-        ! Warm the filter's columns in one batched (thread-parallel) read
-        ! BEFORE qc is enabled, so parquet_reader_set_filter reads them from
-        ! cache instead of a serial ReadColumn per clause, and so this prefetch
-        ! does not run read-time qc on the still-unfiltered data -- qc for those
-        ! columns still runs later, in set_filter, on the filtered rows. See
-        ! prefetch_filter_columns for the ordering/error-handling rationale.
-        if (filter_will_apply) call prefetch_filter_columns(reader, filter)
 
         ! qc setup must happen before the filter is applied: the filter's own
         ! clause evaluation already counts as "touching" a column (see
@@ -814,10 +750,9 @@ contains
         ! filter mask exists would stay raw/unfiltered forever, since
         ! set_filter only re-masks the filter clauses' own columns, not the
         ! whole cache (see parquet_reader_prefetch_all_columns's own comment
-        ! in parquet_wrapper.cpp). Filter columns prefetched earlier by
-        ! prefetch_filter_columns are skipped here (already cached and
-        ! correctly re-masked by set_filter), so this only reads the
-        ! remaining columns.
+        ! in parquet_wrapper.cpp). Filter columns are skipped here -- set_filter
+        ! read and cached them itself, over the live row groups, and re-masked
+        ! them -- so this only reads the remaining columns.
         if (present(prefetch)) then
             if (prefetch) call parquet_reader_prefetch_all_columns(reader%handle)
         end if
@@ -871,9 +806,6 @@ contains
         end if
         if (filter%n == 0) return
 
-        ! The batched whole-file warm-up is the unscoped path's fast start; scoping exists
-        ! precisely to avoid reading whole columns, so it must not run there.
-        if (row_group_lo <= 0) call prefetch_filter_columns(reader, filter)
         call parquet_apply_filter(reader, filter, "parquet_reader_set_filter", row_group_lo, row_group_hi)
     end subroutine parquet_reader_set_filter_impl
     module procedure parquet_reader_set_sort

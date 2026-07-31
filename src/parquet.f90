@@ -430,6 +430,9 @@ module parquet
     !> case-insensitive and bind not > and > or. Null rows follow SQL's
     !> three-valued logic: a comparison against a Null is unknown, unknown never
     !> survives, and is_null/is_not_null are the only way to select on nullness.
+    !> A NaN is a value, not a Null: it compares false against >, >=, <, <= and
+    !> ==, so it survives /= and any negated comparison; is_nan/is_not_nan
+    !> (floating-point columns only) select on it directly.
     !> Rules are unvalidated here -- the expression is parsed, and every clause
     !> validated (column exists, is a scalar column, value is well-formed for
     !> that column's type), once a reader actually applies the filter. See "Row

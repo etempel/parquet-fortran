@@ -253,8 +253,8 @@ Each `filt%add(rule)` call contributes one boolean **expression** over the file'
 |---|---|
 | **Precedence** | `not` binds tightest, then `and`, then `or` — so `a or b and c` means `a or (b and c)`, and `not a and b` means `(not a) and b`. Parentheses override. |
 | **Keywords** | `and` / `or` / `not`, in any case (`AND`, `And`, `and`). Only whole tokens are keywords, so a column named `android` or `nothing` is unaffected. Fortran-style `.and.` and C-style `&&` are *not* accepted. |
-| **Operators** | `>`, `>=`, `<`, `<=`, `==`, `/=`, `is_null`, `is_not_null`. A clause's operator must be surrounded by spaces (`"v > 3"`, not `"v>3"`); parentheses need no surrounding spaces. |
-| **Values** | A bare number for a numeric column (`ra > 180`), `true`/`false` for a boolean column (`flag == true`), a **double-quoted** string for a `string` column (`name == "abell_1"`), or a **double-quoted ISO-8601 literal** for a `date`/`time`/`timestamp` column (see below). `is_null`/`is_not_null` take no value. A quoted value may contain spaces, parentheses, and the keywords themselves — it is read as one token. |
+| **Operators** | `>`, `>=`, `<`, `<=`, `==`, `/=`, `is_null`, `is_not_null`, `is_nan`, `is_not_nan`. A clause's operator must be surrounded by spaces (`"v > 3"`, not `"v>3"`); parentheses need no surrounding spaces. `is_nan`/`is_not_nan` are accepted only for a floating-point column (`float32`/`float64`, and a `half_float` column written by some other tool) — any other column type is rejected, since no value of it could ever be a NaN. |
+| **Values** | A bare number for a numeric column (`ra > 180`), `true`/`false` for a boolean column (`flag == true`), a **double-quoted** string for a `string` column (`name == "abell_1"`), or a **double-quoted ISO-8601 literal** for a `date`/`time`/`timestamp` column (see below). `is_null`/`is_not_null`/`is_nan`/`is_not_nan` take no value. A quoted value may contain spaces, parentheses, and the keywords themselves — it is read as one token. An `inf`/`-inf` value is accepted as an ordinary bound (`v < inf`); a bare `nan` is **rejected**, because every comparison against a NaN is false and every `/=` against it is true, so such a clause could only ever match nothing or everything — say `is_nan`/`is_not_nan` instead. |
 | **Column names** | May be a dotted struct-leaf path (`main.inner.age > 35`). A column name cannot contain spaces. |
 | **Several `%add` calls** | **AND-combined**: two calls mean `(expr1) and (expr2)`. This keeps every filter written as one clause per call meaning exactly what it always did; write `or` inside a single rule when you want alternatives. |
 | **Limits** | 32 levels of nesting, 1024 expression terms per filter, 8192 characters per rule — each reported as a clean error rather than a crash. |
@@ -275,6 +275,35 @@ A comparison against a Null is neither true nor false but **unknown**, and only 
 
 `is_null`/`is_not_null` are the only operators that answer true/false for a Null row, so they are the only way to select one. This matches SQL's `WHERE` clause and Arrow's own kernels — in particular, `not` does **not** let Null rows in through the back door.
 
+Two consequences worth stating outright, because filters are usually written assuming them without checking:
+
+- A row whose filter column is Null can never be brought in by a *comparison* on that column — only by an explicit `is_null` on it, or by some other column's clause being true on the other side of an `or`.
+- So a filter that mentions one column and never says `is_null` returns no rows with a Null in that column, whatever operators and negations it uses.
+
+### NaN is a value, not a Null
+
+A NaN in a floating-point column is an ordinary **value** that happens to compare false against everything, so it follows IEEE rules rather than the three-valued rules above — and behaves as almost the *opposite* of a Null:
+
+| expression | a row whose `x` is NaN | a row whose `x` is Null |
+|---|---|---|
+| `x > 5`, `x >= 5`, `x < 5`, `x <= 5`, `x == 5` | excluded (every IEEE comparison against NaN is false) | excluded (unknown) |
+| `x /= 5` | **survives** — `NaN /= 5` is true | excluded (unknown) |
+| `not x > 5` | **survives** — false negates to true | excluded (unknown negates to unknown) |
+| `x is_not_null` | survives — a NaN is not missing | excluded |
+| `x is_nan` | survives | excluded (unknown) |
+| `x is_not_nan` | excluded | excluded (unknown) |
+
+`is_nan`/`is_not_nan` say this directly, on a floating-point column:
+
+```fortran
+call filt%add("flux is_not_nan")             ! only rows whose flux is a real number
+call filt%add("flux is_nan or flux is_null") ! only the rows with no usable value
+```
+
+Both are Kleene-honest about nullness — a Null row is *unknown* for either of them, exactly as it is for a comparison. So `x is_not_nan` means "`x` is a real number", not "`x` is anything other than a NaN": write `x is_not_nan or x is_null` when a missing value should count too. Nullness stays governed solely by `is_null`/`is_not_null`.
+
+Neither operator adds any expressive power the grammar lacked — under Kleene logic `not (x >= 0 or x < 0)` already meant exactly `x is_nan`, since every non-NaN real satisfies precisely one of the two disjuncts — but writing that out is easy to get wrong and hard to read, which is what these two are for.
+
 ### Filtering `date`, `time` and `timestamp` columns
 
 A temporal column is compared against a double-quoted ISO-8601 literal, which is converted into the column's own stored unit:
@@ -294,7 +323,35 @@ call filt%add('obs_ts == "2024-01-31T12:30:00"')
 
 Only plain scalar columns can be filtered — naming a vector (`col_size > 1`) column in a rule fails immediately with `error stop` when `parquet_open_reader` is called. So does naming a column that doesn't exist in the file, or a rule with invalid syntax (an unbalanced parenthesis, a dangling `and`, an unknown operator, an unquoted string value, a non-numeric value against a numeric column, ...) — every rule is fully parsed and validated (column existence, type-compatibility, and value parsing) right there in `parquet_open_reader`, before any of your own code runs.
 
-Filtering is **not** predicate pushdown: every filter-referenced column, and every column you subsequently read, is still fully read and decoded from disk exactly as without a filter (Parquet row-group statistics are never used to skip I/O). The benefit is entirely downstream: `parquet_get_nrows` and every column you read only ever reflect the matching rows, so your own code loops over, allocates for, and processes far fewer rows when the filter is selective — at the cost of a small transient memory bump while a column's full decoded array and its filtered result briefly coexist, before the unfiltered one is discarded. (The `nrows=` shortcut mentioned [above](#the-nrows-shortcut) works here too — it reflects the post-filter row count.)
+The benefit is mostly downstream: `parquet_get_nrows` and every column you read only ever reflect the matching rows, so your own code loops over, allocates for, and processes far fewer rows when the filter is selective — at the cost of a small transient memory bump while a column's decoded array and its filtered result briefly coexist, before the unfiltered one is discarded. (The `nrows=` shortcut mentioned [above](#the-nrows-shortcut) works here too — it reflects the post-filter row count.)
+
+### Row groups a filter cannot match are never read
+
+A filtered reader consults each row group's own **footer statistics** (the per-column-chunk min, max and null count Parquet records) before reading anything, and skips the row groups those statistics prove cannot contain a matching row. The row groups that survive are then read and evaluated exactly, since min/max can only ever prove impossibility, never a match.
+
+This is automatic, has no option to turn it on, and **changes nothing about the result** — the same rows come back in the same order, with the same nulls. The only difference is how much of the file was read to produce them, and it applies to the whole read, not just the filter's own columns: a payload column you read afterwards skips the same row groups.
+
+```fortran
+type(parquet_filter) :: filt
+call filt%add("id == 8123456")
+call parquet_open_reader(reader, "big.parquet", filter=filt)  ! 400 row groups
+call parquet_read_column(reader, "flux", flux)                ! may read 1 of them, not 400
+```
+
+How much this saves depends entirely on how the file is laid out. A column whose values are **clustered by row group** (written in sorted order, or naturally grouped like an observation date) prunes well; one whose values are scattered uniformly gives every row group the same wide min/max, and nothing can be ruled out. Measured on a 4M-row, 9-column file in 40 row groups: a selective `id == …` read went from 0.53 s to 0.10 s, while a filter matching every row was unchanged.
+
+`parquet_close_reader(reader, print_stat=.true.)` reports a `screened:` line when it skipped anything, which is the way to tell whether it engaged on your data.
+
+Some cases can never prune, and fall back to reading everything — correctly, just without the saving:
+
+- a file written **without statistics** (or a column chunk missing them);
+- a column whose min/max this library declines to interpret: an **unsigned** integer, `decimal`, `half_float`, or any column whose declared Parquet sort order is not one of signed or unsigned-byte;
+- `is_nan`/`is_not_nan`, and a **floating-point** column under `not` or `/=` — Parquet excludes NaN from min/max and records no NaN count, so for a float column the statistics can never prove a comparison is false everywhere (see [NaN is a value, not a Null](#nan-is-a-value-not-a-null));
+- a column whose values are longer than Parquet's statistics size limit (4096 bytes by default), for which no bounds are recorded at all.
+
+Two things pruning deliberately does **not** change: `parquet_get_num_row_groups` still reports every row group in the file, and a chunked read still visits every one of them (a skipped row group reads as an empty chunk, exactly as a row group the filter emptied already did). Pruning is an I/O optimization, not a view of the file.
+
+One caveat worth stating: this trusts the file's own footer. A file whose statistics are *wrong* — written by a tool that recorded bounds not matching its data — will give a wrong answer, in the same way `parquet_column_has_nulls` already trusts the recorded null count.
 
 ### Applying a filter after the reader is open
 
@@ -359,7 +416,7 @@ Rows that tie on **every** key keep their original file order (the sort is stabl
 
 Any scalar column can be a sort key: `int32`/`int64`, `float32`/`float64`, `boolean`, `string`, and `date`/`time`/`timestamp`. A **vector** (`col_size > 1`) column has no single value per row to order by and is rejected with `error stop` — from the schema, before any data is read. So is a key naming a column the file doesn't have, or one whose text doesn't parse.
 
-A sort key column is always read **whole**: a global order needs every row, so there is no row-group-scoped equivalent the way there is for filtering. That is the one place sorting costs memory that filtering does not. Sorting is otherwise not predicate pushdown either — the benefit is that your own code receives the rows already ordered.
+A sort key column is always read **whole**: a global order needs every row, so there is no row-group-scoped equivalent the way there is for filtering. That is the one place sorting costs memory that filtering does not. Sorting itself never skips I/O — the benefit is that your own code receives the rows already ordered. (Composed with `filter=`, the key column is read over the surviving row groups only, since the filter's pruning applies to every column read after it.)
 
 ### Sorting composes with filtering and sampling
 
@@ -409,7 +466,7 @@ call parquet_close_reader(reader)
 - `sample_seed` (`integer(int32)`, optional): omitted, or `<= 0`, draws a fresh seed from entropy — a different sample each time you open the file. A positive value makes the draw reproducible: the same `sample_fraction`/`sample_seed` pair always selects the exact same rows. Whichever seed actually gets used (caller-supplied or entropy-drawn) is always reported by `parquet_close_reader(..., print_stat=.true.)` (a `sample: fraction=... seed=...` line) — read it back from there to reproduce a run you didn't originally seed yourself.
 - Bernoulli sampling means the matched row count fluctuates around `sample_fraction * nrows` rather than equaling it exactly (most noticeable on small files) — there is no "select exactly N rows" mode.
 - Sampling and `filter=` share the same underlying mechanism: give both, and the filter is applied on top of the downsample (a row must pass both to be kept). Consequently, `sample_fraction < 1.0` behaves exactly as `filter=` does throughout, even with no `filter=` given at all — `parquet_read_column_chunk`, `parquet_read_array_row_mode` and `parquet_read_array_element_mode` all stay row-group-scoped, with row indices and chunk sizes referring to the surviving rows.
-- Like `filter=`, sampling is **not** predicate pushdown — every column is still fully read and decoded from disk regardless of `sample_fraction`; the benefit is purely to your own code processing fewer rows afterward, not to file I/O.
+- Sampling never skips I/O: every column is fully read and decoded from disk regardless of `sample_fraction`, and unlike `filter=` there are no statistics for a random draw to consult. The benefit is purely to your own code processing fewer rows afterward. (Combining `sample_fraction=` with `filter=` does get the filter's own row-group pruning — the two compose, and a sample only ever removes rows the filter already kept.)
 
 ## Quality control
 

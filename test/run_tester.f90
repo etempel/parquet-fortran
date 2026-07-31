@@ -23,6 +23,7 @@ program tester
     use test_parquet_string, only : collect_tests_parquet_string
     use test_columns, only : collect_tests_parquet_columns
     use test_filter, only : collect_tests_filter
+    use test_filter_screen, only : collect_tests_filter_screen
     use test_sort, only : collect_tests_sort
     use test_temporal, only : collect_tests_parquet_temporal
     use test_table, only : collect_tests_parquet_table
@@ -70,6 +71,7 @@ program tester
         new_testsuite("temporal", collect_tests_parquet_temporal), &
         new_testsuite("columns", collect_tests_parquet_columns), &
         new_testsuite("filter", collect_tests_filter), &
+        new_testsuite("filter_screen", collect_tests_filter_screen), &
         new_testsuite("sort", collect_tests_sort), &
         new_testsuite("table", collect_tests_parquet_table) &
         ]
@@ -116,6 +118,12 @@ program tester
     !
 contains
 
+    !> "filter_screen" is excluded for a different reason from the four below: its two debug hooks
+    !> into the row-group statistics screen (parquet_debug_set_disable_statistics_prescreen /
+    !> parquet_debug_get_row_groups_pruned) are process-global, since parquet_reader's components
+    !> are private and a pruned-row-group count does not belong in the public API. Run concurrently,
+    !> one test would read another's count and disable another's screen mid-run.
+    !>
     !> "writing", "errors", "metadata" and "maml" contain tests that call
     !> execute_command_line (fork()+exec() under the hood) to drive the
     !> error_scenarios helper as a subprocess. test-drive runs the tests
@@ -138,7 +146,8 @@ contains
     !> regression check.
     logical function suite_is_safe_to_parallelize(name) result(safe)
         character(len=*), intent(in) :: name
-        safe = .not. (name == "writing" .or. name == "errors" .or. name == "metadata" .or. name == "maml")
+        safe = .not. (name == "writing" .or. name == "errors" .or. name == "metadata" .or. name == "maml" &
+            .or. name == "filter_screen")
     end function suite_is_safe_to_parallelize
 
 end program tester

@@ -44,6 +44,8 @@ working rules).
   - [MAML fixture directory: `schemas/`](#maml-fixture-directory-schemas)
   - [Reading MAML source files: shared helper, line-length limit, CRLF handling](#reading-maml-source-files-shared-helper-line-length-limit-crlf-handling)
   - [Error stop messages: include file/schema context](#error-stop-messages-include-fileschema-context)
+  - [Filter evaluation: a Null is UNKNOWN, a NaN is a VALUE](#filter-evaluation-a-null-is-unknown-a-nan-is-a-value--the-two-behave-oppositely)
+  - [The row-group statistics screen: every uncertainty must DECLINE](#the-row-group-statistics-screen-every-uncertainty-must-decline)
   - [Guard mutating public procedures against being called twice](#guard-mutating-public-procedures-against-being-called-twice)
   - [Implicit finalizers must never route through a path that can throw/abort](#implicit-finalizers-must-never-route-through-a-path-that-can-throwabort)
   - [Automatic BYTE_STREAM_SPLIT for float columns in the writer](#automatic-byte_stream_split-for-float-columns-in-the-writer)
@@ -655,6 +657,84 @@ file and, where applicable, schema/maml name using the existing helpers — `wri
 identifiable when several readers/writers/schemas are in play at once. These are only
 meaningful once the reader/writer/schema knows its file/name (i.e. post-open), so the
 guard-clause "…has not been opened" messages are exempt.
+
+### Filter evaluation: a Null is UNKNOWN, a NaN is a VALUE — the two behave oppositely
+
+`eval_filter_clause` (`parquet_wrapper.cpp`) gives a Null row `kUnknown` for every comparison and a
+NaN row an ordinary `kTrue`/`kFalse`, and that difference is deliberate in both directions. IEEE
+makes every comparison against a NaN false, so a NaN row is **excluded** by `>`/`>=`/`<`/`<=`/`==`
+but **survives** `/=` and any negated comparison — precisely where a Null row does the opposite
+(`kUnknown` negates to `kUnknown`). Both halves are load-bearing and neither is a rounding error to
+be "harmonized":
+
+- **Nullness is governed solely by `is_null`/`is_not_null`.** They are the only clauses that answer
+  `kTrue`/`kFalse` for a Null row. `is_nan`/`is_not_nan` deliberately do **not** join them — a Null
+  row is `kUnknown` for both, so `x is_not_nan` means "is a real number", not "is not a NaN,
+  whatever else it may be". Making either one two-valued on Null would quietly let Null rows into
+  filters that never mention nullness, which is the back door the Kleene design exists to close.
+- **`is_nan`/`is_not_nan` are restricted to `FLOAT`/`DOUBLE`/`HALF_FLOAT`** and `error stop` on
+  anything else. `DECIMAL*`/`UINT64` also reach the comparison arms as doubles but can never *hold*
+  a NaN, so accepting them would answer a constant for what is almost certainly a mistyped column.
+- **A bare `nan` comparison value is rejected; `inf` is not.** `parse_double_strict` is `strtod`, so
+  both parse — but `x == nan` can only ever match nothing and `x /= nan` everything non-null.
+- **`is_nan` is expressible without the operator**, as `not (x >= 0 or x < 0)` (every non-NaN real
+  satisfies exactly one disjunct; a NaN neither; a Null is unknown for both). `test_filter.f90` uses
+  that equivalence as an independent oracle for the operator — a good pattern to copy for any future
+  operator that is sugar over the existing grammar, and a ready-made expression for exercising the
+  NaN path of anything that reasons about clauses without evaluating them.
+
+**The last point has a sharp consequence for the row-group statistics screen** — see the next
+section, which states the rule as implemented.
+
+### The row-group statistics screen: every uncertainty must DECLINE
+
+`screen_row_groups` (`parquet_wrapper.cpp`) reads each row group's footer statistics and skips the
+row groups a filter provably cannot match. It is the only thing in the reader whose failure mode is
+a **silent wrong answer** rather than an abort: a wrongly pruned row group's rows simply never
+appear, with nothing to notice. Six rules keep the failure direction at "prune nothing", and every
+one of them is the kind a later simplification would delete:
+
+- **Every gate returns `kScreenAnything` (`{may_true, may_false, may_unknown} = all true`), never a
+  guess.** Statistics absent, an unusable ordering, an unsupported type, an unparseable literal —
+  all decline. A declining leaf prunes nothing and, per the combinators, cannot make anything else
+  prune either.
+- **`AND`'s `may_true` is an over-approximation and must stay one.** `a.may_true && b.may_true`
+  says "some row satisfies `a`, and some row satisfies `b`" — not necessarily the *same* row.
+  Row-group statistics are per-column marginals with no joint information, so nothing better is
+  available; tightening it is a bug.
+- **For a `FLOAT`/`DOUBLE` leaf, `may_false` is unconditionally `nn > 0`, and `/=`'s `may_true` is
+  too.** Parquet excludes NaN from min/max and records no NaN count, so the bounds can rule a NaN
+  neither in nor out — and a NaN is an ordinary value that compares *false* (see the previous
+  section), so it makes every comparison false while sitting outside `[min, max]`. `NOT` consumes
+  `may_false`, so the ordering-derived form prunes row groups that do match: `{1.0, 2.0, NaN}` under
+  `not (x > 0.5)` matches the NaN row while `min = 1.0 > 0.5` claims nothing can be false. Reachable
+  without `is_nan` at all, since `not (x >= 0 or x < 0)` *is* `x is_nan`.
+- **The screen walks the SAME postfix node list as `evaluate_nodes`**, with the same stack shape,
+  and takes each leaf's family from the same Arrow schema expression the evaluator dispatches on.
+  Drift between the two is the second-biggest risk after the rules themselves; keep them adjacent
+  and keep the walks structurally identical.
+- **Two guard pairs are individually redundant and jointly load-bearing**, exactly as
+  `column_has_nulls_from_footer` records for its own: `is_stats_set()` + a null `statistics()`
+  (removing both segfaults on `test/fixtures/no_stats.parquet`), and `can_use_min_max()` +
+  the `sort_order()` check (removing both mis-reads an unsigned column's bounds as signed). Do not
+  delete either half on the strength of a coverage report.
+- **A row group's mask segment is all-false when it is pruned**, which is why nothing downstream
+  needs to learn a new concept — a pruned row group simply *is* an empty one, which
+  `row_group_effective_rows` and every row-group-scoped operation already handle.
+
+Two structural notes for anyone extending this. `live_mask` is `filter_mask` restricted to the live
+row groups' rows and is what `apply_row_transform` filters with, because every whole-column decode
+now reads only those row groups; `filter_mask` stays the canonical full-length object everything
+row-group-indexed uses. And **the unpruned path deliberately still calls `ReadColumn`** in
+`get_single_chunk_array` rather than routing through `read_live_row_groups` for symmetry: measured
+at 3.4% of a whole filtered read (reproducible to 0.1%), because `ReadTable` reconstructs a Table
+and its schema per call. Do not "unify" those two branches without re-measuring.
+
+Testing this needs both halves: an **A/B equality** against
+`parquet_debug_set_disable_statistics_prescreen(1)` over the same fixture, *and* an assertion on
+`parquet_debug_get_row_groups_pruned()` — equality alone passes just as happily against a screen
+that never prunes. Both hooks are process-global, which is why `test/run_tester.f90` excludes the
+`filter_screen` suite from its per-test parallelism.
 
 ### Guard mutating public procedures against being called twice
 

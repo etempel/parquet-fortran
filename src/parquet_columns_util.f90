@@ -75,6 +75,9 @@ contains
         ! establishes that the bitmap exists (is_null returns early unless has_nulls, and
         ! gather_validity checks `allocated` itself). Kept so a future caller cannot turn a
         ! missing bitmap into an out-of-bounds read.
+        ! gcov attribution artifact: the condition below is evaluated on every call, so the `if`
+        ! line registers hits even though the branch is never taken -- confirmed by its own body
+        ! (the two lines inside) reliably showing zero.
         if (.not. allocated(map)) then      ! GCOVR_EXCL_START
             res = .false.
             return

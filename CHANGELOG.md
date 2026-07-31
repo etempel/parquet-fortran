@@ -15,12 +15,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   AND-combined, so every filter written against the previous syntax means exactly what it did.
   Null handling is now genuine SQL three-valued logic — a comparison against a Null is unknown
   and never survives, in particular under `not`, and `is_null`/`is_not_null` remain the only way
-  to select Null rows. `date`/`time`/`timestamp` columns can now be filtered, against
-  double-quoted ISO-8601 literals (`obs_ts >= "2024-01-31T12:30:00"`), where a literal finer than
-  the column's stored unit is rejected rather than silently truncated. A filter can also be
-  applied to an already-open reader with the new `parquet_reader_set_filter`. Rule text is no
-  longer capped at 512 characters, and `parquet_close_reader(..., print_stat=.true.)` prints the
-  whole expression as applied. See [Row filtering](doc/pages/reading.md#row-filtering-with-parquet_filter).
+  to select Null rows. A NaN, by contrast, is a value rather than a missing one, so it compares
+  false against `>`/`>=`/`<`/`<=`/`==` but true against `/=` and any negated comparison; two new
+  operators, `is_nan` and `is_not_nan`, select on it directly for a floating-point column (a Null
+  row is unknown for both, so nullness stays governed solely by `is_null`/`is_not_null`). A bare
+  `nan` as a comparison value is rejected in favour of them, while `inf`/`-inf` stay accepted as
+  ordinary bounds. `date`/`time`/`timestamp` columns can now be filtered, against double-quoted
+  ISO-8601 literals (`obs_ts >= "2024-01-31T12:30:00"`), where a literal finer than the column's
+  stored unit is rejected rather than silently truncated. A filter can also be applied to an
+  already-open reader with the new `parquet_reader_set_filter`. Rule text is no longer capped at
+  512 characters, and `parquet_close_reader(..., print_stat=.true.)` prints the whole expression as
+  applied. Finally, a filtered reader now **skips the row groups its filter provably cannot match**:
+  each row group's own footer statistics are consulted before any column data is read, and the
+  row groups ruled out are skipped for every column read afterwards, not just the filter's own — a
+  selective read of a 4M-row, 40-row-group file measured 5x faster, while a filter matching every
+  row was unchanged. Skipping changes no result (same rows, same order, same nulls) and has nothing
+  to switch on; a file written without statistics, an unsigned/`decimal`/`half_float` column, and a
+  floating-point column under `not` or `/=` simply skip nothing, and `print_stat` reports a
+  `screened:` line whenever row groups were skipped. See
+  [Row filtering](doc/pages/reading.md#row-filtering-with-parquet_filter).
 - Read-time sorting: `parquet_open_reader(..., sort_by=srt)` returns a file's rows ordered by one
   or more columns, and every column read afterwards comes back in that order. Keys are added one
   per `srt%add("ra asc")`/`%add("-dec")` call to a `parquet_sortkey` and applied in order, with

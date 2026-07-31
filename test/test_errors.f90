@@ -327,6 +327,12 @@ contains
                 test_filter_boolean_value_must_be_unquoted_aborts), &
             new_unittest("filter: ordering comparison against a boolean column aborts", &
                 test_filter_bool_ordering_not_supported_aborts), &
+            new_unittest("filter: is_nan against a non-floating-point column aborts", &
+                test_filter_is_nan_non_float_column_aborts), &
+            new_unittest("filter: a NaN literal as a comparison value aborts", &
+                test_filter_nan_literal_rejected_aborts), &
+            new_unittest("filter: a clause after is_nan with no combinator aborts", &
+                test_filter_is_nan_missing_combinator_aborts), &
             new_unittest("filter: filtering an unsupported (binary) column type aborts", &
                 test_filter_unsupported_column_type_aborts), &
             new_unittest("filter: unquoted value against a temporal column aborts", &
@@ -2709,6 +2715,36 @@ contains
             failure_message="an ordering comparison against a boolean filter column was expected to abort", &
             required_stderr="ordering comparisons")
     end subroutine test_filter_bool_ordering_not_supported_aborts
+
+    !> is_nan/is_not_nan only mean something for a column that can hold a NaN, so anything outside
+    !> float32/float64/half_float is rejected rather than answered with a constant.
+    subroutine test_filter_is_nan_non_float_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_is_nan_non_float_column", expect_abort=.true., &
+            failure_message="is_nan against an integer filter column was expected to abort", &
+            required_stderr="only supported for floating-point columns")
+    end subroutine test_filter_is_nan_non_float_column_aborts
+
+    !> A bare "nan" parses as a number but can never be a meaningful comparison bound, so it is
+    !> rejected with a pointer at the operators that say what the caller meant.
+    subroutine test_filter_nan_literal_rejected_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_nan_literal_rejected", expect_abort=.true., &
+            failure_message="a NaN literal as a filter comparison value was expected to abort", &
+            required_stderr="use the 'is_nan'/'is_not_nan' operators instead")
+    end subroutine test_filter_nan_literal_rejected_aborts
+
+    !> A valueless operator has to end its clause, so the next bare name is reported as a missing
+    !> combinator rather than swallowed as that operator's value. The message is the assertion.
+    subroutine test_filter_is_nan_missing_combinator_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_is_nan_missing_combinator", expect_abort=.true., &
+            failure_message="a clause following is_nan with no combinator was expected to abort", &
+            required_stderr="(a missing and/or?)")
+    end subroutine test_filter_is_nan_missing_combinator_aborts
 
     !> eval_filter_clause's `default:` branch -- filtering a column type (temporal) it doesn't
     !> support at all.

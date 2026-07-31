@@ -21,8 +21,13 @@
 #include <parquet/arrow/writer.h>
 #include <parquet/parquet_version.h>
 // For ColumnChunkMetaData::statistics()'s return type: parquet/metadata.h only forward-declares
-// parquet::Statistics, so HasNullCount()/null_count() need the full definition.
+// parquet::Statistics, so HasNullCount()/null_count() need the full definition. The typed
+// subclasses (Int32Statistics/DoubleStatistics/...) the row-group statistics screen casts to, and
+// is_min_value_exact()/is_max_value_exact(), also live here.
 #include <parquet/statistics.h>
+// For ColumnDescriptor::can_use_min_max()/sort_order(), which gate every min/max use in the
+// row-group statistics screen (screen_row_groups).
+#include <parquet/schema.h>
 
 // Arrow's vendored copy of Howard Hinnant's date library (date.h only -- deliberately not
 // datetime.h, whose tz.h part would drag in the timezone database): used solely by the
@@ -446,6 +451,28 @@ extern "C"
 		// recomputed because parquet_get_chunk_size and every chunked read ask for it repeatedly,
 		// and a popcount over one row group's mask segment is O(rows in that row group).
 		std::vector<int64_t> row_group_surviving;
+		// Row-group statistics pre-screen (screen_row_groups): which row groups the footer could
+		// NOT rule out, 1-based-indexed as row_group_live[rg-1]. EMPTY means "no screen has run",
+		// i.e. every row group is live -- which is also what it stays for a sample-only mask, for
+		// a file whose statistics are missing, and for any expression the screen declines to
+		// reason about. Never shrinks the answer: a pruned row group is one whose own mask segment
+		// is provably all-false, so the rows it drops are exactly the rows the mask would have
+		// dropped anyway (see live_mask).
+		std::vector<uint8_t> row_group_live;
+		// filter_mask restricted to the live row groups' rows, in file order -- i.e. exactly what
+		// an array read via read_live_row_groups must be filtered with, since such an array only
+		// contains those rows. Equal to filter_mask (and literally the same object) whenever
+		// nothing was pruned, which is why apply_row_transform can use this unconditionally rather
+		// than choosing between the two. Set by every path that sets filter_mask.
+		//
+		// filter_mask itself stays the canonical, full-length (total_nrows) object: everything
+		// row-group-indexed (refresh_row_group_surviving, row_group_mask_segment, the chunked
+		// read's per-row-group slice) keeps using it, and a pruned row group is simply all-false
+		// there.
+		std::shared_ptr<arrow::BooleanArray> live_mask;
+		// How many row groups the last screen ruled out -- parquet_reader_print_stat's "screened:"
+		// line and the test-only parquet_debug_get_row_groups_pruned() hook.
+		int64_t row_groups_pruned = 0;
 		// Pins the most recent array handed out (by pointer, not value) by
 		// parquet_read_string_column_chunk_buffers, whose row-group-scoped array (from
 		// get_row_group_chunk_array) is otherwise never retained anywhere -- unlike a whole-column
@@ -532,6 +559,86 @@ extern "C"
 	{
 		if (reader_handle->row_group_surviving.empty()) return row_group_rows(reader_handle, row_group);
 		return reader_handle->row_group_surviving[static_cast<size_t>(row_group - 1)];
+	}
+
+	// Whether the statistics screen ruled out at least one row group on this reader, i.e. whether
+	// a whole-column read may skip anything. False whenever no screen has run, and false when one
+	// ran and kept everything -- in both cases every read path takes exactly the same Arrow calls
+	// it took before F4 existed.
+	static bool reader_has_pruned_row_groups(ParquetReaderHandle *reader_handle)
+	{
+		return reader_handle->row_groups_pruned > 0;
+	}
+
+	// The live row groups as the 0-based indices Arrow's ReadRowGroups wants, in ascending file
+	// order (which is what makes the concatenated result still physically ordered, and therefore
+	// still alignable with live_mask).
+	static std::vector<int> live_row_group_list(ParquetReaderHandle *reader_handle)
+	{
+		std::vector<int> live;
+		live.reserve(static_cast<size_t>(reader_handle->num_row_groups));
+		for (int64_t rg = 1; rg <= reader_handle->num_row_groups; ++rg)
+		{
+			if (reader_handle->row_group_live.empty() ||
+				reader_handle->row_group_live[static_cast<size_t>(rg - 1)] != 0)
+			{
+				live.push_back(static_cast<int>(rg - 1));
+			}
+		}
+		return live;
+	}
+
+	// Builds live_mask from the full-length filter_mask just installed: the concatenation, in file
+	// order, of filter_mask's segments for the live row groups. Called by every path that installs
+	// a mask, right after refresh_row_group_surviving.
+	//
+	// When nothing was pruned this deliberately stores the SAME object rather than a copy -- both
+	// so the common path costs nothing, and so that a mistake in the pruning arithmetic shows up as
+	// an Arrow length mismatch on a pruned read rather than as a silently wrong answer on every
+	// read.
+	//
+	// THE INVARIANT F4 RESTS ON: for every column, Filter(live_read, live_mask) is element-wise
+	// identical to Filter(full_read, filter_mask). It holds because filter_mask is all-false over
+	// every pruned row group, so the rows dropped by reading less are exactly the rows the mask
+	// would have dropped anyway.
+	static void refresh_live_mask(ParquetReaderHandle *reader_handle)
+	{
+		if (!reader_handle->filter_mask)
+		{ // GCOVR_EXCL_START -- defensive: every caller invokes this immediately after installing a
+		  // mask, so there is no reachable path with none. Kept so a future caller cannot leave a
+		  // stale live_mask behind a mask that was removed.
+			reader_handle->live_mask.reset();
+			return;
+		}
+		// GCOVR_EXCL_STOP
+		if (!reader_has_pruned_row_groups(reader_handle))
+		{
+			reader_handle->live_mask = reader_handle->filter_mask;
+			return;
+		}
+		arrow::BooleanBuilder builder;
+		for (int64_t rg = 1; rg <= reader_handle->num_row_groups; ++rg)
+		{
+			if (reader_handle->row_group_live[static_cast<size_t>(rg - 1)] == 0) continue;
+			auto segment = row_group_mask_segment(reader_handle, rg);
+			for (int64_t i = 0; i < segment->length(); ++i)
+			{
+				auto status = builder.Append(segment->Value(i));
+				if (!status.ok())
+				{ // GCOVR_EXCL_START -- BooleanBuilder allocation backstop, not fixture-triggerable
+					throw std::runtime_error(status.ToString());
+				}
+				// GCOVR_EXCL_STOP
+			}
+		}
+		std::shared_ptr<arrow::Array> mask_array;
+		auto finish_status = builder.Finish(&mask_array);
+		if (!finish_status.ok())
+		{ // GCOVR_EXCL_START -- BooleanBuilder allocation backstop, not fixture-triggerable
+			throw std::runtime_error(finish_status.ToString());
+		}
+		// GCOVR_EXCL_STOP
+		reader_handle->live_mask = std::static_pointer_cast<arrow::BooleanArray>(mask_array);
 	}
 
 	// Prints a diagnostic and aborts, the same way ConcurrencyGuard does. Used
@@ -910,6 +1017,33 @@ extern "C"
 		return cast_datum.make_array();
 	}
 
+	// Reads `leaf_indices` (Parquet's flat leaf-schema indices, the convention ReadTable/
+	// ReadRowGroups use -- NOT ReadColumn's top-level field index) over the LIVE row groups only,
+	// or over the whole file when the statistics screen pruned nothing.
+	//
+	// This is the one primitive F4's I/O saving is built on, and it is the reason pruning saves
+	// more than the filter columns: every whole-column read in this file goes through it, so the
+	// payload columns a caller reads afterwards skip the pruned row groups too.
+	//
+	// The batched, thread-parallel single Arrow call survives pruning unchanged -- ReadRowGroups
+	// takes a LIST of row groups, so the read is issued over the surviving subset rather than
+	// becoming a per-row-group loop. Result rows stay in physical file order (the list is
+	// ascending), which is what lets live_mask line up with them.
+	static std::shared_ptr<arrow::Table> read_live_row_groups(
+		ParquetReaderHandle *reader_handle, const std::vector<int> &leaf_indices)
+	{
+		arrow::Result<std::shared_ptr<arrow::Table>> table_result =
+			reader_has_pruned_row_groups(reader_handle)
+				? reader_handle->reader->ReadRowGroups(live_row_group_list(reader_handle), leaf_indices)
+				: reader_handle->reader->ReadTable(leaf_indices);
+		if (!table_result.ok())
+		{ // GCOVR_EXCL_START -- file-I/O backstop, not fixture-triggerable
+			throw std::runtime_error(table_result.status().ToString());
+		}
+		// GCOVR_EXCL_STOP
+		return table_result.ValueOrDie();
+	}
+
 	// Applies a reader's row transforms to a just-decoded column array: the filter/sample mask
 	// (if set -- see parquet_reader_set_filter), then the sort permutation (if set -- see
 	// parquet_reader_set_sort). A no-op (returns `array` unchanged) if neither is set.
@@ -932,9 +1066,12 @@ extern "C"
 		}
 		// GCOVR_EXCL_STOP
 		arrow::Datum current = coerced.ValueOrDie();
-		if (reader_handle->filter_mask)
+		if (reader_handle->live_mask)
 		{
-			auto filtered = arrow::compute::Filter(current, reader_handle->filter_mask);
+			// live_mask, not filter_mask: every whole-column decode now goes through
+			// read_live_row_groups, so `array` spans the LIVE row groups' rows rather than the
+			// whole file. The two are the same object whenever nothing was pruned.
+			auto filtered = arrow::compute::Filter(current, reader_handle->live_mask);
 			if (!filtered.ok())
 			{ // GCOVR_EXCL_START -- Filter-kernel Status backstop on already-validated input
 				throw std::runtime_error(filtered.status().ToString());
@@ -975,9 +1112,10 @@ extern "C"
 	// load-bearing rather than thorough: prefetching is a different Arrow call (ReadTable, not
 	// ReadColumn) that reads whole columns just the same, so a hook watching only
 	// get_single_chunk_array reports "no whole-column read" for a path that prefetched the whole
-	// file. That gap let a real mutation survive undetected -- removing the row-group-scoped
-	// filter's `if (row_group_lo <= 0)` guard around prefetch_filter_columns (parquet_read.f90),
-	// which makes the scoped path warm every filter column whole-file. Lets
+	// file. That gap let a real mutation survive undetected, back when the unscoped path's filter
+	// columns were warmed from Fortran: removing the guard that kept that warm-up off the SCOPED
+	// path made it read every filter column whole-file, and only the prefetch-side hook noticed.
+	// The read now lives in parquet_reader_set_filter itself, which carries the same hook. Lets
 	// test/error_scenarios.f90's scenario_col_size_and_row_mode_avoid_whole_column_read prove,
 	// on a tiny fixture, that parquet_reader_get_column_col_size/
 	// parquet_reader_get_column_total_elements/read_list_primitive_row (backing
@@ -1030,13 +1168,35 @@ extern "C"
 					std::string("forced debug error: whole-column read attempted for column: ") + name); // GCOVR_EXCL_LINE
 			}
 
+			// A whole-column read must skip the row groups the statistics screen ruled out --
+			// that is where F4's payload saving comes from, and it is the whole reason this is
+			// not simply ReadColumn any more.
+			//
+			// But ReadColumn is KEPT for the unpruned case, rather than routing everything through
+			// read_live_row_groups for symmetry's sake. Measured, on a 4M-row 9-column file with a
+			// filter that prunes nothing: going through ReadTable here costs 3.4% on the whole
+			// filtered read (0.412 s -> 0.426 s, reproducible to 0.1% over three runs), because
+			// ReadTable reconstructs a Table and its schema per call where ReadColumn hands back
+			// the ChunkedArray directly. Paying that on every unfiltered and every unpruned read,
+			// to tidy up an asymmetry no caller can observe, is the wrong trade -- so the default
+			// path stays byte-for-byte what it was before F4.
 			std::shared_ptr<arrow::ChunkedArray> chunked;
-			auto status = reader_handle->reader->ReadColumn(static_cast<int>(idx), &chunked);
-			if (!status.ok())
-			{ // GCOVR_EXCL_START -- file-I/O backstop, not fixture-triggerable
-				throw std::runtime_error(status.ToString());
+			if (reader_has_pruned_row_groups(reader_handle))
+			{
+				std::vector<int> leaf_indices;
+				collect_leaf_indices(reader_handle->manifest.schema_fields[static_cast<size_t>(idx)], leaf_indices);
+				auto table = read_live_row_groups(reader_handle, leaf_indices);
+				chunked = table->column(table->schema()->GetFieldIndex(resolved.top_level_name));
 			}
-			// GCOVR_EXCL_STOP
+			else
+			{
+				auto status = reader_handle->reader->ReadColumn(static_cast<int>(idx), &chunked);
+				if (!status.ok())
+				{ // GCOVR_EXCL_START -- file-I/O backstop, not fixture-triggerable
+					throw std::runtime_error(status.ToString());
+				}
+				// GCOVR_EXCL_STOP
+			}
 
 			array = apply_row_transform(reader_handle, combine_column_chunks(chunked, resolved.top_level_name));
 			reader_handle->column_cache.emplace(static_cast<int>(idx), array);
@@ -3397,13 +3557,7 @@ extern "C"
 				report_fatal_error("parquet_reader_prefetch_columns",
 					"forced debug error: whole-column prefetch attempted"); // GCOVR_EXCL_LINE
 			}
-			auto table_result = reader_handle->reader->ReadTable(leaf_indices);
-			if (!table_result.ok())
-			{ // GCOVR_EXCL_START -- file-I/O backstop, not fixture-triggerable
-				throw std::runtime_error(table_result.status().ToString());
-			}
-			// GCOVR_EXCL_STOP
-			auto table = table_result.ValueOrDie();
+			auto table = read_live_row_groups(reader_handle, leaf_indices);
 
 			for (size_t i = 0; i < indices.size(); ++i)
 			{
@@ -3480,13 +3634,7 @@ extern "C"
 			report_fatal_error("parquet_reader_prefetch_columns_by_index",
 				"forced debug error: whole-column prefetch attempted"); // GCOVR_EXCL_LINE
 		}
-		auto table_result = reader_handle->reader->ReadTable(leaf_indices);
-		if (!table_result.ok())
-		{ // GCOVR_EXCL_START -- file-I/O backstop, not fixture-triggerable
-			throw std::runtime_error(table_result.status().ToString());
-		}
-		// GCOVR_EXCL_STOP
-		auto table = table_result.ValueOrDie();
+		auto table = read_live_row_groups(reader_handle, leaf_indices);
 
 		for (size_t i = 0; i < indices.size(); ++i)
 		{
@@ -3730,6 +3878,10 @@ extern "C"
 		// GCOVR_EXCL_STOP
 		reader_handle->filter_mask = std::static_pointer_cast<arrow::BooleanArray>(mask_array);
 		refresh_row_group_surviving(reader_handle);
+		// No screen runs for a sample-only reader (there is no expression to screen with), so this
+		// just aliases live_mask to filter_mask -- but it must still be called, or every column
+		// read afterwards would go unfiltered.
+		refresh_live_mask(reader_handle);
 
 		int64_t matched = 0;
 		for (uint8_t v : combined) matched += (v != 0);
@@ -3777,6 +3929,13 @@ extern "C"
 	// by design -- selecting on nullness is exactly their purpose, so they always answer
 	// kTrue/kFalse and are the only way to let a Null row through.
 	//
+	// A NaN, by contrast, is an ordinary VALUE, not a missing one, so it is never kUnknown: it
+	// compares kFalse under >, >=, <, <= and == (IEEE says every comparison against NaN is false)
+	// and kTrue under /= -- which means, unlike a Null, a NaN row survives a negated comparison.
+	// is_nan/is_not_nan (floating-point columns only) select on it directly; they are Kleene-honest
+	// about nullness, answering kUnknown for a Null row exactly as a comparison does, so that
+	// nullness stays governed solely by is_null/is_not_null.
+	//
 	// Returns false (with `err` set) on any validation failure (unknown/unsupported type for the
 	// clause's operator, unparseable value, ...); the caller then aborts the whole
 	// parquet_reader_set_filter call, same as for an unknown filter column.
@@ -3792,6 +3951,34 @@ extern "C"
 			for (int64_t i = 0; i < n; ++i)
 			{
 				out[static_cast<size_t>(i)] = kleene_of(want_null ? array->IsNull(i) : array->IsValid(i));
+			}
+			return true;
+		}
+
+		if (op == "is_nan" || op == "is_not_nan")
+		{
+			// Restricted to the three types that can actually hold a NaN. DECIMAL* and UINT64 also
+			// reach the comparison arms below as doubles, but no value of either can ever BE a NaN,
+			// so accepting them would answer a constant (all-false / all-true) for what is almost
+			// certainly a mistyped column name or a misunderstanding -- rejected instead, the same
+			// call this file already makes for an ordering comparison on a boolean column.
+			arrow::Type::type tid = array->type_id();
+			if (tid != arrow::Type::FLOAT && tid != arrow::Type::DOUBLE && tid != arrow::Type::HALF_FLOAT)
+			{
+				err = "'" + op + "' is only supported for floating-point columns, and column '" + colname +
+					"' is " + array->type()->ToString();
+				return false;
+			}
+			bool want_nan = (op == "is_nan");
+			for (int64_t i = 0; i < n; ++i)
+			{
+				if (array->IsNull(i))
+				{
+					out[static_cast<size_t>(i)] = kUnknown;
+					continue;
+				}
+				bool isnan = std::isnan(real_family_value_at(array, i));
+				out[static_cast<size_t>(i)] = kleene_of(want_nan ? isnan : !isnan);
 			}
 			return true;
 		}
@@ -3862,6 +4049,17 @@ extern "C"
 			if (is_string || !parse_double_strict(value_text, parsed))
 			{
 				err = "value '" + value_text + "' is not a valid number for column '" + colname + "'";
+				return false;
+			}
+			// strtod accepts "nan" and "inf" alike, but only one of them is meaningful here. Every
+			// IEEE comparison against NaN is false and every /= against it is true, so "x == nan"
+			// can only ever match nothing and "x /= nan" everything non-null -- never what the
+			// caller meant. Rejected in favour of is_nan/is_not_nan, which say it directly. An
+			// infinity is a genuine, comparable bound and stays accepted.
+			if (std::isnan(parsed))
+			{
+				err = "value '" + value_text + "' for column '" + colname +
+					"' is not a comparable number; use the 'is_nan'/'is_not_nan' operators instead";
 				return false;
 			}
 			if (array->type_id() == arrow::Type::FLOAT || array->type_id() == arrow::Type::DOUBLE ||
@@ -4034,6 +4232,568 @@ extern "C"
 		}
 	}
 
+
+	// ==== Row-group statistics pre-screen (F4) ====
+	//
+	// Consults each row group's own footer statistics and rules out the ones that provably cannot
+	// contain a matching row, so a filtered read skips them entirely -- both when evaluating the
+	// filter and, via read_live_row_groups, for every payload column the caller reads afterwards.
+	//
+	// NOTHING ABOUT THE ANSWER CHANGES. The mask this produces is bit-identical to the mask built
+	// without it; only how much of the file was read to produce it differs. That makes every
+	// failure here a SILENT WRONG ANSWER rather than an abort, which is why every rule below is
+	// written so the failure direction is always "prune nothing":
+	//
+	//   * every uncertainty (statistics absent, unusable ordering, unsupported type, unparseable
+	//     literal) returns kScreenAnything, a leaf that prunes nothing and, per the combinators,
+	//     cannot make anything else prune either;
+	//   * a row group is pruned ONLY if the whole expression's may_true is false.
+	//
+	// It lives next to the evaluator rather than next to column_has_nulls_from_footer (its nearest
+	// structural relative) for one reason: it walks the SAME postfix node list, with the same stack
+	// shape, as evaluate_nodes in parquet_reader_set_filter. Keeping the two adjacent is what makes
+	// a future change to the node kinds hard to apply to one and miss in the other -- the drift
+	// between these two code paths is the second-biggest risk in F4 after the rules themselves.
+
+	// Which Kleene values a node can take SOMEWHERE in one row group -- the powerset lift of the
+	// per-row kFalse/kTrue/kUnknown the evaluator computes. Three flags rather than one value
+	// because the combinators need them; only may_true decides pruning.
+	struct KleenePossible
+	{
+		bool may_true;
+		bool may_false;
+		bool may_unknown;
+	};
+
+	// "This leaf could be anything here" -- the answer every gate below returns when it declines.
+	static const KleenePossible kScreenAnything{true, true, true};
+
+	// The powerset lift of kleene_negate.
+	static KleenePossible screen_negate(const KleenePossible &a)
+	{
+		return KleenePossible{a.may_false, a.may_true, a.may_unknown};
+	}
+
+	// The powerset lift of kleene_combine.
+	//
+	// AND's may_true is an OVER-APPROXIMATION and must stay one: "some row satisfies a, and some
+	// row satisfies b" is not "the same row satisfies both". Row-group statistics are per-column
+	// marginals and carry no joint information, so nothing better is available -- and the
+	// over-approximation is sound, since it can only fail to prune. Tightening it is a bug.
+	static KleenePossible screen_combine(const KleenePossible &a, const KleenePossible &b, bool is_and)
+	{
+		KleenePossible res;
+		if (is_and)
+		{
+			res.may_true = a.may_true && b.may_true;
+			res.may_false = a.may_false || b.may_false;
+			res.may_unknown = (a.may_unknown && !b.may_false) || (b.may_unknown && !a.may_false);
+		}
+		else
+		{
+			res.may_true = a.may_true || b.may_true;
+			res.may_false = a.may_false && b.may_false;
+			res.may_unknown = (a.may_unknown && !b.may_true) || (b.may_unknown && !a.may_true);
+		}
+		return res;
+	}
+
+	// Which comparison family a leaf's column belongs to, decided once from the Arrow schema (no
+	// data read) and paired with the Parquet physical statistics type that carries its bounds.
+	enum class ScreenFamily { kNone, kInt, kReal, kBool, kString };
+
+	// One filter leaf, pre-resolved for the screen: everything that does not vary per row group,
+	// worked out once before the row-group loop. `usable` false means every rule for this leaf
+	// declines -- the leaf then contributes kScreenAnything to every row group.
+	struct ScreenLeaf
+	{
+		bool usable = false;
+		int leaf_index = -1;             // Parquet flat-leaf column index, for ColumnChunk()
+		ScreenFamily family = ScreenFamily::kNone;
+		bool is_null_test = false;       // is_null / is_not_null: needs only the null count
+		bool is_nan_test = false;        // is_nan / is_not_nan: needs only the null count too
+		bool want_null = false;          // for is_null (true) vs is_not_null (false)
+		bool want_nan = false;           // for is_nan (true) vs is_not_nan (false)
+		bool is_float = false;           // FLOAT/DOUBLE: NaN makes the bounds one-directional
+		std::string op;
+		int64_t ival = 0;
+		double dval = 0.0;
+		bool bval = false;
+		std::string sval;
+	};
+
+	// The comparison rules of the screen, over a THREE-WAY comparison of each bound against the
+	// literal rather than over the values themselves: cmp_lo is -1/0/+1 as min is below/equal
+	// to/above the literal, cmp_hi likewise for max. One rule set then serves every family, which
+	// is what keeps the integer, float and string cases from drifting apart (this file cannot use
+	// a template -- it is all inside extern "C").
+	//
+	//   nn    = non-null value count in this chunk (Statistics::num_values)
+	//   nc    = null count
+	//   exact = both bounds are known not to be truncated (see the caller)
+	static KleenePossible screen_compare_from_bounds(const std::string &op, int cmp_lo, int cmp_hi,
+		int64_t nn, int64_t nc, bool exact, bool is_float)
+	{
+		KleenePossible res{true, true, nc > 0};
+		bool constant_at_v = (cmp_lo == 0 && cmp_hi == 0 && exact);
+		if (op == ">")
+		{
+			res.may_true = nn > 0 && cmp_hi > 0;
+			res.may_false = nn > 0 && cmp_lo <= 0;
+		}
+		else if (op == ">=")
+		{
+			res.may_true = nn > 0 && cmp_hi >= 0;
+			res.may_false = nn > 0 && cmp_lo < 0;
+		}
+		else if (op == "<")
+		{
+			res.may_true = nn > 0 && cmp_lo < 0;
+			res.may_false = nn > 0 && cmp_hi >= 0;
+		}
+		else if (op == "<=")
+		{
+			res.may_true = nn > 0 && cmp_lo <= 0;
+			res.may_false = nn > 0 && cmp_hi > 0;
+		}
+		else if (op == "==")
+		{
+			res.may_true = nn > 0 && cmp_lo <= 0 && cmp_hi >= 0;
+			res.may_false = nn > 0 && !constant_at_v;
+		}
+		else if (op == "/=")
+		{
+			res.may_true = nn > 0 && !constant_at_v;
+			res.may_false = nn > 0 && cmp_lo <= 0 && cmp_hi >= 0;
+		}
+		else
+		{ // GCOVR_EXCL_START -- every operator reaching here is one of the six above; the null and
+		  // NaN tests never call this, and an unknown operator is rejected by the Fortran lexer.
+			return kScreenAnything;
+		}
+		// GCOVR_EXCL_STOP
+
+		// The single subtlest rule in F4, in BOTH directions. Parquet excludes NaN from min/max and
+		// records no NaN count anywhere, so for a float column the bounds cannot rule a NaN in or
+		// out -- and a NaN behaves oppositely to a Null, being an ordinary value that compares
+		// false rather than a missing one that compares unknown (see eval_filter_clause).
+		//
+		//   * may_false becomes unconditional: a NaN row makes EVERY comparison false while sitting
+		//     outside [min, max], so the ordering-derived may_false above can say false for a chunk
+		//     that really does contain false rows. may_false is what NOT consumes, so getting this
+		//     wrong prunes a row group that has matching rows -- e.g. {1.0, 2.0, NaN} under
+		//     "not (x > 0.5)", where the NaN row matches but min = 1.0 > 0.5 claims nothing is
+		//     false. Reachable without is_nan too: "not (x >= 0 or x < 0)" is exactly "x is_nan".
+		//   * /= may never prune: NaN /= anything is true, so a chunk whose min == max == v can
+		//     still contain matching rows.
+		//
+		// >, >=, <, <=, == keep their may_true: NaN fails all of them, so excluding NaN from the
+		// bounds can only make the screen less willing to prune.
+		if (is_float)
+		{
+			res.may_false = nn > 0;
+			if (op == "/=") res.may_true = nn > 0;
+		}
+		return res;
+	}
+
+	// Resolves one filter leaf into a ScreenLeaf, or leaves it unusable (declining to prune with
+	// it). This is where §4.3's gates (b), (c) and the type coverage of (§4.4) live: the family
+	// comes from the ARROW schema -- literally the same type test eval_filter_clause dispatches on
+	// -- while the bounds themselves come from Parquet's typed statistics, so the screen and the
+	// evaluator can never disagree about what kind of column this is.
+	static ScreenLeaf resolve_screen_leaf(ParquetReaderHandle *reader_handle, const std::string &name,
+		const std::string &op, bool is_string, const std::string &value_text)
+	{
+		ScreenLeaf leaf;
+		leaf.op = op;
+
+		auto resolved = resolve_struct_path(reader_handle->schema, name);
+		auto idx = get_column_index(reader_handle, resolved.top_level_name.c_str());
+		leaf.leaf_index = static_cast<int>(
+			resolve_single_leaf_index(reader_handle, static_cast<int>(idx), resolved.child_path));
+
+		// A struct leaf is allowed, unlike in column_has_nulls_from_footer, and the two are not
+		// inconsistent. A Parquet leaf's null_count counts every slot whose definition level falls
+		// short of the maximum, which INCLUDES ancestor-struct nulls -- i.e. exactly the rows
+		// unwrap_struct_path produces as null -- so for a scalar leaf (the only kind filtering
+		// accepts) num_values/null_count describe the unwrapped result rather than contradicting
+		// it, and min/max bound only the leaf's own present values either way. Proven by a
+		// dedicated equality test over test/fixtures/nested_struct.parquet rather than assumed.
+
+		if (op == "is_null" || op == "is_not_null")
+		{
+			leaf.usable = true;
+			leaf.is_null_test = true;
+			leaf.want_null = (op == "is_null");
+			return leaf;
+		}
+		if (op == "is_nan" || op == "is_not_nan")
+		{
+			leaf.usable = true;
+			leaf.is_nan_test = true;
+			leaf.want_nan = (op == "is_nan");
+			return leaf;
+		}
+
+		auto *file_metadata = reader_handle->reader->parquet_reader()->metadata().get();
+		const parquet::ColumnDescriptor *descr = file_metadata->schema()->Column(leaf.leaf_index);
+
+		// Gate (b): Parquet's own answer to "are this column's min/max usable at all", folding
+		// together ColumnOrder and SortOrder exactly as the format specifies (including the legacy
+		// undefined-order case, where the deprecated signed-only fields apply). Never hand-roll
+		// the equivalent.
+		//
+		// This and gate (c) below are REDUNDANT AS A PAIR for every fixture this repository can
+		// build, and each masks the other: removing this one alone changes no test result, because
+		// (c) declines the same unsigned columns a few lines later. Removing (c) alone -- or both
+		// -- is caught (test/test_filter_screen.f90's declined-unsigned-type case, whose unsigned
+		// max reads back as -1 if compared signed). The redundancy is deliberate and worth keeping:
+		// (c) only knows the two orderings this screen can read, while this one is the format's own
+		// verdict, and it is what would catch a legacy file whose column order is UNDEFINED -- a
+		// file parquet-cpp cannot write, hence the missing fixture. Same situation, and the same
+		// resolution, as column_has_nulls_from_footer's is_stats_set()/statistics() pair.
+		if (!descr->can_use_min_max()) return leaf;
+
+		auto type_id = resolved.leaf_field->type()->id();
+		switch (type_id)
+		{
+		case arrow::Type::INT8:
+		case arrow::Type::INT16:
+		case arrow::Type::INT32:
+		case arrow::Type::INT64:
+		// The unsigned widths the evaluator also compares as int64_t. They are listed here rather
+		// than left to `default:` on purpose: their bounds are ordered UNSIGNED, so gate (c) below
+		// declines them a few lines later -- and routing them through that gate, instead of past
+		// it, is what makes the gate reachable by a real fixture (test/fixtures/extended_types.
+		// parquet's v_uint32_ovf, whose unsigned max reads back as -1 if compared signed) rather
+		// than defensive code no test can distinguish from a no-op.
+		case arrow::Type::UINT8:
+		case arrow::Type::UINT16:
+		case arrow::Type::UINT32:
+		case arrow::Type::DATE32:
+		case arrow::Type::DATE64:
+		case arrow::Type::TIME32:
+		case arrow::Type::TIME64:
+		case arrow::Type::TIMESTAMP:
+			leaf.family = ScreenFamily::kInt;
+			break;
+		case arrow::Type::FLOAT:
+		case arrow::Type::DOUBLE:
+			leaf.family = ScreenFamily::kReal;
+			leaf.is_float = true;
+			break;
+		case arrow::Type::BOOL:
+			leaf.family = ScreenFamily::kBool;
+			break;
+		case arrow::Type::STRING:
+		case arrow::Type::LARGE_STRING:
+		case arrow::Type::STRING_VIEW:
+			leaf.family = ScreenFamily::kString;
+			break;
+		default:
+			// HALF_FLOAT (no typed statistics), UINT64 and DECIMAL* (the evaluator compares both as
+			// double, while their statistics are unsigned/scale-encoded bytes), INT96 (legacy).
+			// Declining costs only the optimization -- those filters behave exactly as before F4.
+			return leaf;
+		}
+
+		// Gate (c): the bounds were aggregated under the column's declared sort order, and this
+		// screen only knows how to read two of them -- signed for numbers and temporals, unsigned
+		// byte order for strings, which is what compare_op<std::string> itself does. Anything else
+		// (an unsigned integer column, say) declines rather than comparing under the wrong order.
+		// BOOL is exempt: its "min/max" are just false/true, unambiguous under either order, and
+		// only == and /= are legal on it anyway.
+		parquet::SortOrder::type sort_order = descr->sort_order();
+		if (leaf.family == ScreenFamily::kString)
+		{
+			if (sort_order != parquet::SortOrder::UNSIGNED) return leaf;
+		}
+		else if (leaf.family != ScreenFamily::kBool)
+		{
+			if (sort_order != parquet::SortOrder::SIGNED) return leaf;
+		}
+
+		// The literal, parsed exactly as eval_filter_clause parses it (same helpers, deliberately
+		// -- a second parser here would be free to disagree on a boundary value). A literal this
+		// cannot parse is not an error here: the evaluator will report it in a moment, with the
+		// message and the column context that belong to it. Declining is the right response.
+		switch (leaf.family)
+		{
+		case ScreenFamily::kInt:
+			if (is_string || !parse_int64_strict(value_text, leaf.ival)) return leaf;
+			break;
+		case ScreenFamily::kReal:
+			if (is_string || !parse_double_strict(value_text, leaf.dval)) return leaf;
+			// A NaN literal is rejected by the evaluator (use is_nan instead), and comparing
+			// against one here would be meaningless anyway.
+			if (std::isnan(leaf.dval)) return leaf;
+			break;
+		case ScreenFamily::kBool:
+		{
+			if (is_string || (op != "==" && op != "/=")) return leaf;
+			std::string lowered = ascii_to_lower(value_text);
+			if (lowered == "true") leaf.bval = true;
+			else if (lowered == "false") leaf.bval = false;
+			else return leaf;
+			break;
+		}
+		case ScreenFamily::kString:
+			if (!is_string) return leaf;
+			leaf.sval = value_text;
+			break;
+		default: // GCOVR_EXCL_LINE -- kNone returned above; every other value is handled.
+			return leaf; // GCOVR_EXCL_LINE
+		}
+
+		leaf.usable = true;
+		return leaf;
+	}
+
+	// What one resolved leaf can evaluate to somewhere in row group `rg`, from that row group's
+	// column-chunk statistics alone. Reads no column data and cannot fail: every uncertainty is a
+	// decline.
+	static KleenePossible screen_leaf_in_row_group(ParquetReaderHandle *reader_handle,
+		const ScreenLeaf &leaf, int64_t rg)
+	{
+		if (!leaf.usable) return kScreenAnything;
+		auto *file_metadata = reader_handle->reader->parquet_reader()->metadata().get();
+		auto chunk = file_metadata->RowGroup(static_cast<int>(rg - 1))->ColumnChunk(leaf.leaf_index);
+
+		// Gate (a). The is_stats_set() test and the null-statistics() test are load-bearing as a
+		// PAIR and each masks the other individually -- exactly as column_has_nulls_from_footer
+		// records for its own copy: removing either alone changes no test result, while removing
+		// both segfaults on test/fixtures/no_stats.parquet, where statistics() returns null. Do not
+		// drop one on the strength of a coverage report. HasNullCount() is required for every rule
+		// (not just the null tests): every rule below reads num_values/null_count, and a statistics
+		// object missing the count is one this screen has no reason to trust the rest of.
+		if (!chunk->is_stats_set()) return kScreenAnything;
+		auto stats = chunk->statistics();
+		if (!stats || !stats->HasNullCount()) return kScreenAnything;
+
+		int64_t nn = stats->num_values();
+		int64_t nc = stats->null_count();
+
+		if (leaf.is_null_test)
+		{
+			// Never unknown -- matching eval_filter_clause, whose first branch answers true/false
+			// for every row including null ones. That is what makes these two the only way to
+			// select a Null row.
+			KleenePossible res{false, false, false};
+			res.may_true = leaf.want_null ? (nc > 0) : (nn > 0);
+			res.may_false = leaf.want_null ? (nn > 0) : (nc > 0);
+			return res;
+		}
+		if (leaf.is_nan_test)
+		{
+			// Parquet records no NaN count and excludes NaN from min/max, so neither "this chunk
+			// contains a NaN" nor "it contains none" is ever provable. nn > 0 is the only thing
+			// that can be said: a chunk with no non-null values has every row unknown for both
+			// operators, and is prunable for that reason alone.
+			KleenePossible res{nn > 0, nn > 0, nc > 0};
+			return res;
+		}
+
+		if (!stats->HasMinMax()) return kScreenAnything;
+
+		// Gate (d): a writer may truncate a long BYTE_ARRAY min/max. Truncation must preserve
+		// BOUNDEDNESS (a truncated min is still <= every value, a truncated max still >=), so every
+		// range rule stays sound -- what it breaks is the one place a bound is used as a proof of
+		// EQUALITY (min == max == v proving every value equals v), which is the `exact` term in
+		// == and /=. An unset optional means "possibly truncated".
+		//
+		// NO FIXTURE THIS REPOSITORY CAN BUILD REACHES A NON-EXACT BOUND, and that is a property of
+		// the writer, not a gap in the tests: parquet-cpp does not truncate at all. Confirmed in
+		// EncodedStatistics::ApplyStatSizeLimits (parquet/statistics.h), which DROPS a bound longer
+		// than max_statistics_size (4096 by default) -- clearing has_min/has_max and setting the
+		// exact flag to nullopt -- precisely so no consumer can mistake a truncated bound for a
+		// real one. Such a chunk therefore fails HasMinMax() above and declines before reaching
+		// here (covered: the long-string case in test/test_filter_screen.f90). Only a file from a
+		// writer that does truncate (parquet-mr, which sets these flags for exactly this purpose)
+		// can produce one, so this term is here for foreign files and cannot be mutation-tested
+		// with a fixture built here. Do not delete it as dead code on the strength of that.
+		auto min_exact = stats->is_min_value_exact();
+		auto max_exact = stats->is_max_value_exact();
+		bool exact = min_exact.has_value() && max_exact.has_value() && *min_exact && *max_exact;
+
+		int cmp_lo = 0;
+		int cmp_hi = 0;
+		switch (leaf.family)
+		{
+		case ScreenFamily::kInt:
+		{
+			int64_t lo = 0;
+			int64_t hi = 0;
+			if (stats->physical_type() == parquet::Type::INT32)
+			{
+				auto typed = std::static_pointer_cast<parquet::Int32Statistics>(stats);
+				lo = typed->min();
+				hi = typed->max();
+			}
+			else if (stats->physical_type() == parquet::Type::INT64)
+			{
+				auto typed = std::static_pointer_cast<parquet::Int64Statistics>(stats);
+				lo = typed->min();
+				hi = typed->max();
+			}
+			else
+			{ // GCOVR_EXCL_START -- an Arrow integer/temporal leaf is always physically INT32/INT64
+				return kScreenAnything;
+			}
+			// GCOVR_EXCL_STOP
+			cmp_lo = (lo < leaf.ival) ? -1 : (lo > leaf.ival ? 1 : 0);
+			cmp_hi = (hi < leaf.ival) ? -1 : (hi > leaf.ival ? 1 : 0);
+			break;
+		}
+		case ScreenFamily::kReal:
+		{
+			double lo = 0.0;
+			double hi = 0.0;
+			if (stats->physical_type() == parquet::Type::FLOAT)
+			{
+				auto typed = std::static_pointer_cast<parquet::FloatStatistics>(stats);
+				lo = static_cast<double>(typed->min());
+				hi = static_cast<double>(typed->max());
+			}
+			else if (stats->physical_type() == parquet::Type::DOUBLE)
+			{
+				auto typed = std::static_pointer_cast<parquet::DoubleStatistics>(stats);
+				lo = typed->min();
+				hi = typed->max();
+			}
+			else
+			{ // GCOVR_EXCL_START -- an Arrow FLOAT/DOUBLE leaf is always physically FLOAT/DOUBLE
+				return kScreenAnything;
+			}
+			// GCOVR_EXCL_STOP
+			// A NaN bound would mean the writer wrote one despite the format excluding NaN; every
+			// comparison against it is false, which would make both cmp values 0 and read as
+			// "constant at v". Decline instead.
+			if (std::isnan(lo) || std::isnan(hi)) return kScreenAnything; // GCOVR_EXCL_LINE -- gcov attribution artifact under GCC: the condition is evaluated for every float leaf, so the line shows hits, but the return is never taken (no writer records a NaN bound)
+			cmp_lo = (lo < leaf.dval) ? -1 : (lo > leaf.dval ? 1 : 0);
+			cmp_hi = (hi < leaf.dval) ? -1 : (hi > leaf.dval ? 1 : 0);
+			break;
+		}
+		case ScreenFamily::kBool:
+		{
+			if (stats->physical_type() != parquet::Type::BOOLEAN)
+			{ // GCOVR_EXCL_START -- an Arrow BOOL leaf is always physically BOOLEAN
+				return kScreenAnything;
+			}
+			// GCOVR_EXCL_STOP
+			auto typed = std::static_pointer_cast<parquet::BoolStatistics>(stats);
+			int lo = typed->min() ? 1 : 0;
+			int hi = typed->max() ? 1 : 0;
+			int v = leaf.bval ? 1 : 0;
+			cmp_lo = (lo < v) ? -1 : (lo > v ? 1 : 0);
+			cmp_hi = (hi < v) ? -1 : (hi > v ? 1 : 0);
+			break;
+		}
+		case ScreenFamily::kString:
+		{
+			if (stats->physical_type() != parquet::Type::BYTE_ARRAY)
+			{ // GCOVR_EXCL_START -- an Arrow string leaf is always physically BYTE_ARRAY
+				return kScreenAnything;
+			}
+			// GCOVR_EXCL_STOP
+			auto typed = std::static_pointer_cast<parquet::ByteArrayStatistics>(stats);
+			std::string lo(reinterpret_cast<const char *>(typed->min().ptr), typed->min().len);
+			std::string hi(reinterpret_cast<const char *>(typed->max().ptr), typed->max().len);
+			int lo_cmp = lo.compare(leaf.sval);
+			int hi_cmp = hi.compare(leaf.sval);
+			cmp_lo = (lo_cmp < 0) ? -1 : (lo_cmp > 0 ? 1 : 0);
+			cmp_hi = (hi_cmp < 0) ? -1 : (hi_cmp > 0 ? 1 : 0);
+			break;
+		}
+		default: // GCOVR_EXCL_LINE -- kNone leaves are never usable, and returned above.
+			return kScreenAnything; // GCOVR_EXCL_LINE
+		}
+
+		return screen_compare_from_bounds(leaf.op, cmp_lo, cmp_hi, nn, nc, exact, leaf.is_float);
+	}
+
+	// Test-only: forces every row group live, so the same fixture can be read with and without
+	// pruning in one test and the two results compared element for element (the primary F4
+	// correctness test -- equality alone is what proves the optimization changed no answer).
+	// Mirrors parquet_debug_set_disable_sort_counting_path, which exists for exactly the same
+	// reason: a second code path that must produce the same result as the first.
+	static bool g_debug_disable_statistics_prescreen = false;
+
+	// Test-only: how many row groups the most recent screen_row_groups call ruled out -- see
+	// parquet_debug_get_row_groups_pruned, far below, for why this is process-global rather than
+	// read off the handle.
+	static int64_t g_debug_row_groups_pruned = 0;
+
+	// Walks the postfix node list once per row group over KleenePossible triples instead of one
+	// row vector per leaf, and writes reader_handle->row_group_live (plus row_groups_pruned).
+	// Reads no column data, allocates nothing per row, and cannot fail.
+	//
+	// For a SCOPED filter, row groups outside [rg_lo, rg_hi] are marked not-live too: the mask is
+	// all-false there by construction, so a later whole-column read may skip them for the same
+	// reason it may skip a screened-out one.
+	static void screen_row_groups(ParquetReaderHandle *reader_handle,
+		const std::vector<ScreenLeaf> &leaves,
+		const int8_t *node_kind, const int32_t *node_leaf, int64_t n_nodes,
+		int64_t rg_lo, int64_t rg_hi)
+	{
+		reader_handle->row_group_live.assign(static_cast<size_t>(reader_handle->num_row_groups), 1);
+		reader_handle->row_groups_pruned = 0;
+		g_debug_row_groups_pruned = 0;
+		if (g_debug_disable_statistics_prescreen) return;
+
+		for (int64_t rg = 1; rg <= reader_handle->num_row_groups; ++rg)
+		{
+			if (rg_lo > 0 && (rg < rg_lo || rg > rg_hi))
+			{
+				reader_handle->row_group_live[static_cast<size_t>(rg - 1)] = 0;
+				++reader_handle->row_groups_pruned;
+				continue;
+			}
+			// The same postfix walk evaluate_nodes performs, over one triple per stack slot
+			// instead of one row vector. The structural identity is deliberate.
+			std::vector<KleenePossible> stack;
+			bool malformed = false;
+			for (int64_t k = 0; k < n_nodes; ++k)
+			{
+				int kind = static_cast<int>(node_kind[k]);
+				if (kind == 1) // leaf
+				{
+					int li = static_cast<int>(node_leaf[k]) - 1;
+					if (li < 0 || li >= static_cast<int>(leaves.size()))
+					{ // GCOVR_EXCL_START -- malformed node list; unreachable from
+					  // parquet_parse_filter_expr, which emits the leaf before its own node.
+						malformed = true;
+						break;
+					}
+					// GCOVR_EXCL_STOP
+					stack.push_back(screen_leaf_in_row_group(reader_handle, leaves[static_cast<size_t>(li)], rg));
+				}
+				else if (kind == 4) // not
+				{
+					stack.back() = screen_negate(stack.back());
+				}
+				else // and (2) / or (3)
+				{
+					KleenePossible rhs = stack.back();
+					stack.pop_back();
+					stack.back() = screen_combine(stack.back(), rhs, kind == 2);
+				}
+			}
+			if (malformed || stack.size() != 1)
+			{ // GCOVR_EXCL_START -- unreachable through the public API, see above. Declining to
+			  // prune is the right response even here.
+				continue;
+			}
+			// GCOVR_EXCL_STOP
+			if (!stack.front().may_true)
+			{
+				reader_handle->row_group_live[static_cast<size_t>(rg - 1)] = 0;
+				++reader_handle->row_groups_pruned;
+			}
+		}
+		g_debug_row_groups_pruned = reader_handle->row_groups_pruned;
+	}
+
 	// Validates and applies one filter EXPRESSION to this reader. The expression arrives as `n`
 	// packed leaves (one per clause) plus `n_nodes` postfix nodes over them (node_kind: 1=leaf,
 	// 2=and, 3=or, 4=not; node_leaf: 1-based leaf index for a leaf, 0 otherwise), built by
@@ -4081,10 +4841,10 @@ extern "C"
 		// rg_lo/rg_hi = 0 means "whole file"; otherwise the filter is SCOPED to that inclusive,
 		// 1-based row-group range, and the two paths differ in more than which rows they look at:
 		//
-		//   unscoped -- every filter column is read whole-file (already warmed by
-		//     prefetch_filter_columns' one batched, thread-parallel ReadTable) and left decoded in
-		//     column_cache, so a later read of that same column costs nothing. Fastest, and the
-		//     right default; memory is one full copy of each filter column.
+		//   unscoped -- every filter column is read in one batched, thread-parallel call (issued
+		//     here, further below) covering the LIVE row groups, and left decoded in column_cache,
+		//     so a later read of that same column costs nothing. Fastest, and the right default;
+		//     memory is one copy of each filter column's live rows.
 		//
 		//   scoped -- the expression is evaluated row group by row group over the range, reading
 		//     each leaf's chunk with ReadRowGroup and discarding it before moving on. Peak memory
@@ -4135,6 +4895,7 @@ extern "C"
 				sample_narrow[i] = reader_handle->filter_mask->Value(static_cast<int64_t>(i)) ? 1 : 0;
 			}
 			reader_handle->filter_mask.reset();
+			reader_handle->live_mask.reset();
 			reader_handle->nrows = reader_handle->total_nrows;
 		}
 		std::vector<int> touched_indices;
@@ -4164,52 +4925,15 @@ extern "C"
 				return 1;
 			}
 
-			std::shared_ptr<arrow::Array> array;
-			if (scoped)
-			{
-				// No whole-column read here -- that is the entire point of the scoped path. The
-				// vector-column rejection comes from the schema instead of from a decoded array;
-				// every other per-value check (type supported, value parses) happens per row group
-				// inside eval_filter_clause, on data that is read and released as the loop goes.
-				auto leaf_type = resolve_struct_path(reader_handle->schema, name).leaf_field->type()->id();
-				if (leaf_type == arrow::Type::FIXED_SIZE_LIST || leaf_type == arrow::Type::LIST ||
-					leaf_type == arrow::Type::LARGE_LIST)
-				{
-					std::snprintf(err_out, static_cast<size_t>(err_cap),
-						"filter column '%s' is a vector column; filtering only supports scalar columns", name.c_str());
-					return 1;
-				}
-			}
-			else
-			try
-			{
-				array = get_single_chunk_array(reader_handle, name.c_str());
-			}
-			// GCOVR_EXCL_START -- not fixture-triggerable in practice: parquet_read.f90's
-			// prefetch_filter_columns unconditionally prefetches every filter column that
-			// exists in the schema (via a separate ReadTable call) before parquet_apply_filter
-			// ever calls into parquet_reader_set_filter, so this get_single_chunk_array call
-			// always hits an already-cached column -- its own uncached-path ReadColumn failure
-			// (the only throw that could reach here) is itself already excluded as a file-I/O
-			// backstop with no fixture that triggers it (see get_single_chunk_array's own
-			// comment). A debug-hook attempt to force an artificial throw here (to at least
-			// verify the catch itself works) was tried and reverted: even an unconditional throw
-			// placed at function entry, called from directly inside this try block, escaped
-			// uncaught -- reproducing the same C++ exception-unwinding unreliability already
-			// documented on struct_path_exists's own comment for this project's mixed
-			// gfortran-driven static-library link, this time for parquet_reader_set_filter's own
-			// try/catch (otherwise the one demonstrably-working catch block in this file). The
-			// catch clause itself is included in this exclusion (not just its body): under GCC, a
-			// catch clause never entered by any covered test shows uncovered in its own right,
-			// distinct from Clang's gcov.
-			catch (const std::exception &e)
-			{
-				std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to read filter column '%s': %s", name.c_str(), e.what());
-				return 1;
-			}
-			// GCOVR_EXCL_STOP
-
-			if (!scoped && (array->type_id() == arrow::Type::FIXED_SIZE_LIST || array->type_id() == arrow::Type::LIST))
+			// No column data is read anywhere in this loop, on either path -- validation has to
+			// complete before the statistics screen runs, and the screen has to run before
+			// anything is read, or there would be nothing left to prune. The vector-column
+			// rejection therefore comes from the schema rather than from a decoded array; every
+			// other per-value check (type supported, value parses) happens inside
+			// eval_filter_clause, once the data it needs is in hand.
+			auto leaf_type = resolve_struct_path(reader_handle->schema, name).leaf_field->type()->id();
+			if (leaf_type == arrow::Type::FIXED_SIZE_LIST || leaf_type == arrow::Type::LIST ||
+				leaf_type == arrow::Type::LARGE_LIST)
 			{
 				std::snprintf(err_out, static_cast<size_t>(err_cap),
 					"filter column '%s' is a vector column; filtering only supports scalar columns", name.c_str());
@@ -4243,7 +4967,83 @@ extern "C"
 			leaf_ops.push_back(op);
 			leaf_values.push_back(value);
 			leaf_is_string.push_back(is_string);
-			leaf_arrays.push_back(array);
+		}
+
+		// The statistics pre-screen: the first thing that happens after validation and BEFORE any
+		// column data is read, which is what makes the reads below skippable at all. It writes
+		// row_group_live and nothing else, reads no data, and cannot fail -- every uncertainty is
+		// a decline. Everything downstream then treats a pruned row group exactly as a row group
+		// with no surviving rows, which F2/F2b already handle everywhere.
+		{
+			std::vector<ScreenLeaf> screen_leaves;
+			screen_leaves.reserve(leaf_names.size());
+			for (size_t li = 0; li < leaf_names.size(); ++li)
+			{
+				screen_leaves.push_back(resolve_screen_leaf(reader_handle, leaf_names[li], leaf_ops[li],
+					leaf_is_string[li], leaf_values[li]));
+			}
+			screen_row_groups(reader_handle, screen_leaves, node_kind, node_leaf, n_nodes, rg_lo, rg_hi);
+		}
+
+		// The unscoped path's filter-column read, moved here from Fortran (it used to be
+		// prefetch_filter_columns in parquet_read.f90, issued before this call). It has to be here
+		// rather than there: the screen needs the parsed expression, which only reaches C++ in
+		// this call, so a read issued earlier would already have spent the I/O the screen exists
+		// to save. Moving it also removes the double parse that arrangement needed -- every rule
+		// was parsed once to collect the column names and again to build the node list.
+		//
+		// Still ONE batched, thread-parallel Arrow call over every distinct filter column, exactly
+		// as before; read_live_row_groups issues it over the surviving row groups instead of the
+		// whole file. Deliberately NOT parquet_reader_prefetch_columns: that runs read-time qc,
+		// and qc must see the FILTERED rows, which do not exist yet -- it runs at the end of this
+		// function instead, on the columns cached here.
+		if (!scoped && !touched_indices.empty())
+		{
+			if (g_debug_force_whole_column_read_error)
+			{
+				report_fatal_error("parquet_reader_set_filter",
+					"forced debug error: whole-column filter read attempted"); // GCOVR_EXCL_LINE
+			}
+			std::vector<int> filter_leaf_indices;
+			for (int idx : touched_indices)
+			{
+				collect_leaf_indices(reader_handle->manifest.schema_fields[static_cast<size_t>(idx)],
+					filter_leaf_indices);
+			}
+			std::shared_ptr<arrow::Table> table;
+			try
+			{
+				table = read_live_row_groups(reader_handle, filter_leaf_indices);
+			}
+			// GCOVR_EXCL_START -- the only throw reachable here is read_live_row_groups' own
+			// file-I/O backstop, itself excluded for want of a fixture that triggers it. The catch
+			// clause is included in the exclusion (not just its body): under GCC a catch clause no
+			// test enters shows uncovered in its own right, distinct from Clang's gcov.
+			catch (const std::exception &e)
+			{
+				std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to read filter columns: %s", e.what());
+				return 1;
+			}
+			// GCOVR_EXCL_STOP
+			for (int idx : touched_indices)
+			{
+				const std::string &top_name = reader_handle->schema->field(idx)->name();
+				auto result_pos = table->schema()->GetFieldIndex(top_name);
+				// No apply_row_transform: there is no mask yet, and installing one before the
+				// clauses are evaluated is exactly what pending_sample_mask exists to prevent.
+				reader_handle->column_cache[idx] = combine_column_chunks(table->column(result_pos), top_name);
+			}
+		}
+		if (!scoped)
+		{
+			for (const auto &leaf_name : leaf_names)
+			{
+				auto resolved = resolve_struct_path(reader_handle->schema, leaf_name);
+				auto idx = get_column_index(reader_handle, resolved.top_level_name.c_str());
+				auto array = reader_handle->column_cache.at(static_cast<int>(idx));
+				if (!resolved.child_path.empty()) array = unwrap_struct_path(array, resolved.child_path);
+				leaf_arrays.push_back(array);
+			}
 		}
 
 		// Evaluates the postfix node list over one set of per-leaf arrays (all the same length),
@@ -4302,14 +5102,20 @@ extern "C"
 			return true;
 		};
 
-		// All-false to start, so a scoped run leaves every out-of-range row excluded without
-		// having to write them.
+		// All-false to start, so a scoped run -- and every row group the screen pruned -- leaves
+		// its rows excluded without having to write them. This is precisely why a pruned row group
+		// needs no bookkeeping anywhere downstream: it simply IS an all-false row group, which
+		// row_group_effective_rows and every row-group-scoped operation already handle.
 		std::vector<uint8_t> combined(total, kFalse);
 		std::string eval_err;
 		if (scoped)
 		{
 			for (int64_t rg = rg_lo; rg <= rg_hi; ++rg)
 			{
+				// A pruned row group's segment is provably all-false, so evaluating it would read
+				// a row group's worth of every filter column to confirm what the footer already
+				// proved. This is the scoped path's entire share of the F4 saving.
+				if (reader_handle->row_group_live[static_cast<size_t>(rg - 1)] == 0) continue;
 				int64_t rows = row_group_rows(reader_handle, rg);
 				int64_t offset = reader_handle->row_group_offsets[static_cast<size_t>(rg - 1)];
 				// This row group's chunk of every leaf column, read and then released with the
@@ -4335,13 +5141,42 @@ extern "C"
 				}
 			}
 		}
-		else if (!evaluate_nodes(leaf_arrays, total, combined, eval_err))
+		else
 		{
-			// Tag the clause-level message so it is unambiguously a row-filter error (vs a
-			// read-time qc check, which labels its own messages). The other set_filter failures
-			// (unknown/vector/read-fail column) already say "filter" themselves.
-			std::snprintf(err_out, static_cast<size_t>(err_cap), "filter rule: %s", eval_err.c_str());
-			return 1;
+			// The unscoped path evaluates ONCE over the concatenated live rows -- one pass, one
+			// vector per stack slot, exactly as before -- and then scatters the per-row result
+			// back into the full-length mask using each live row group's own offset. The scatter
+			// is the same three lines the scoped path above uses, driven by the live list instead
+			// of a range; when nothing was pruned it walks every row group and is a straight copy.
+			int64_t live_rows = 0;
+			for (int64_t rg = 1; rg <= reader_handle->num_row_groups; ++rg)
+			{
+				if (reader_handle->row_group_live[static_cast<size_t>(rg - 1)] != 0)
+				{
+					live_rows += row_group_rows(reader_handle, rg);
+				}
+			}
+			std::vector<uint8_t> local;
+			if (!evaluate_nodes(leaf_arrays, static_cast<size_t>(live_rows), local, eval_err))
+			{
+				// Tag the clause-level message so it is unambiguously a row-filter error (vs a
+				// read-time qc check, which labels its own messages). The other set_filter
+				// failures (unknown/vector/read-fail column) already say "filter" themselves.
+				std::snprintf(err_out, static_cast<size_t>(err_cap), "filter rule: %s", eval_err.c_str());
+				return 1;
+			}
+			int64_t cursor = 0;
+			for (int64_t rg = 1; rg <= reader_handle->num_row_groups; ++rg)
+			{
+				if (reader_handle->row_group_live[static_cast<size_t>(rg - 1)] == 0) continue;
+				int64_t rows = row_group_rows(reader_handle, rg);
+				int64_t offset = reader_handle->row_group_offsets[static_cast<size_t>(rg - 1)];
+				for (int64_t i = 0; i < rows; ++i)
+				{
+					combined[static_cast<size_t>(offset + i)] = local[static_cast<size_t>(cursor + i)];
+				}
+				cursor += rows;
+			}
 		}
 
 		// Collapse unknown to false -- once, here -- and fold in whatever already narrowed the row
@@ -4372,6 +5207,10 @@ extern "C"
 		// GCOVR_EXCL_STOP
 		reader_handle->filter_mask = std::static_pointer_cast<arrow::BooleanArray>(mask_array);
 		refresh_row_group_surviving(reader_handle);
+		// Must follow the mask install: live_mask is filter_mask restricted to the live row
+		// groups' rows, and it is what every column decoded from here on -- all of which are read
+		// over those same row groups -- gets filtered with.
+		refresh_live_mask(reader_handle);
 		// Retained for parquet_reader_print_stat's "filter:" line only (never parsed here).
 		if (expr_text != nullptr) reader_handle->filter_expr_text = expr_text;
 
@@ -4401,7 +5240,10 @@ extern "C"
 				return 1;
 			}
 			// GCOVR_EXCL_STOP
-			auto filtered = arrow::compute::Filter(coerced.ValueOrDie(), reader_handle->filter_mask);
+			// live_mask, not filter_mask: these cached arrays came from read_live_row_groups above,
+			// so they span the live row groups' rows. Same object as filter_mask when nothing was
+			// pruned.
+			auto filtered = arrow::compute::Filter(coerced.ValueOrDie(), reader_handle->live_mask);
 			if (!filtered.ok())
 			{ // GCOVR_EXCL_START -- Filter-kernel Status backstop on already-validated input
 				std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to apply filter: %s", filtered.status().ToString().c_str());
@@ -5189,6 +6031,15 @@ extern "C"
 		if (!reader_handle->sort_key_text.empty())
 		{
 			std::fprintf(stdout, "sort: %s\n", reader_handle->sort_key_text.c_str());
+		}
+		// What the row-group statistics pre-screen managed to skip. Printed only when it actually
+		// pruned something, so the line is a statement that the optimization engaged rather than
+		// noise on every filtered read -- and it is the only way a user can see that it did.
+		if (reader_handle->row_groups_pruned > 0)
+		{
+			std::fprintf(stdout, "screened: %lld of %lld row groups skipped (statistics)\n",
+				static_cast<long long>(reader_handle->row_groups_pruned),
+				static_cast<long long>(reader_handle->num_row_groups));
 		}
 		std::fprintf(stdout, "\n");
 
@@ -8327,6 +9178,32 @@ extern "C"
 	void parquet_debug_set_disable_sort_counting_path(int enable)
 	{
 		g_debug_disable_sort_counting_path = (enable != 0);
+	}
+
+	// Test-only: forces the row-group statistics pre-screen (screen_row_groups) to keep every row
+	// group live, so the same fixture can be filtered with and without pruning and the two results
+	// compared element for element. That comparison is F4's primary correctness test: pruning must
+	// change how much of the file is read and nothing else, so anything other than element-wise
+	// equality is a bug. Same reason parquet_debug_set_disable_sort_counting_path exists.
+	void parquet_debug_set_disable_statistics_prescreen(int enable)
+	{
+		g_debug_disable_statistics_prescreen = (enable != 0);
+	}
+
+	// Test-only: how many row groups the most recent screen ruled out, in this process. Without it
+	// every equality test would pass just as happily against a screen that never prunes anything,
+	// so the F4 tests assert this alongside the results -- nonzero where pruning is expected, and
+	// zero for every case the screen is supposed to decline.
+	//
+	// Process-global rather than per-reader because parquet_reader's components are private, so a
+	// test cannot pass a handle in (see CLAUDE.md's "A new reader query that a sibling module
+	// needs has to be PUBLIC parquet API" -- and a pruned-row-group count is a diagnostic, not
+	// something to add to the public surface for). The consequence is that the suite asserting on
+	// it must not run its tests concurrently: test/run_tester.f90's suite_is_safe_to_parallelize
+	// excludes "filter_screen" for exactly this reason.
+	int64_t parquet_debug_get_row_groups_pruned(void)
+	{
+		return g_debug_row_groups_pruned;
 	}
 
 	// Test-only: overrides g_debug_force_sample_mask_error (see its own comment, next to

@@ -44,6 +44,8 @@ program error_scenarios
         call scenario_print_stat_default_scalar_type()
     case ("print_stat_filtered_rows")
         call scenario_print_stat_filtered_rows()
+    case ("print_stat_screened_rows")
+        call scenario_print_stat_screened_rows()
     case ("large_string_roundtrip")
         call scenario_large_string_roundtrip()
     case ("string_view_roundtrip")
@@ -310,6 +312,12 @@ program error_scenarios
         call scenario_filter_boolean_value_must_be_unquoted()
     case ("filter_bool_ordering_not_supported")
         call scenario_filter_bool_ordering_not_supported()
+    case ("filter_is_nan_non_float_column")
+        call scenario_filter_is_nan_non_float_column()
+    case ("filter_nan_literal_rejected")
+        call scenario_filter_nan_literal_rejected()
+    case ("filter_is_nan_missing_combinator")
+        call scenario_filter_is_nan_missing_combinator()
     case ("filter_unsupported_column_type")
         call scenario_filter_unsupported_column_type()
     case ("filter_temporal_value_not_quoted")
@@ -2923,6 +2931,33 @@ contains
         print '(a)', "print_stat covered the filtered 'rows: N (of M total)' summary branch"
     end subroutine scenario_print_stat_filtered_rows
 
+    !> parquet_reader_print_stat's "screened:" line, which only appears when the row-group
+    !> statistics pre-screen actually skipped something -- so it needs a MULTI-row-group fixture
+    !> and a filter selective enough to rule some of them out, which the filtered-rows scenario
+    !> above (one row group, five rows) cannot provide.
+    subroutine scenario_print_stat_screened_rows()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32) :: a_values(40), a_back(5)
+        integer :: i
+        character(len=*), parameter :: out_file = "test_run/error_scenario_print_stat_screened_rows.parquet"
+
+        a_values = [(i, i=1,40)]
+
+        call parquet_open_writer(writer, out_file, chunk_size=10)
+        call parquet_write_column(writer, "a", a_values)
+        call parquet_close_writer(writer)
+
+        ! Row groups hold 1..10, 11..20, 21..30, 31..40; "a > 35" can only match in the last one,
+        ! so three of the four are ruled out from the footer alone.
+        call filt%add("a > 35")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        call parquet_read_column(reader, "a", a_back)
+        call parquet_close_reader(reader, print_stat=.true.)
+        print '(a)', "print_stat covered the 'screened: N of M row groups skipped' branch"
+    end subroutine scenario_print_stat_screened_rows
+
     !> Proves the arrow::large_utf8() write/read path (added for a string/string-vector column
     !> whose byte payload would overflow Arrow's real int32 STRING-offset limit, ~2GiB -- see
     !> would_overflow_string_offset_limit in parquet_wrapper.cpp) actually round-trips
@@ -4516,6 +4551,62 @@ contains
         call parquet_open_reader(reader, "test_run/filter_bool_ordering.parquet", filter=filt)
         print '(a)', "unexpectedly opened a reader with an ordering comparison against a boolean filter column"
     end subroutine scenario_filter_bool_ordering_not_supported
+
+    !> is_nan/is_not_nan are restricted to the three column types that can actually hold a NaN
+    !> (float32/float64/half_float). An integer column can never hold one, so the operator would
+    !> answer a constant for every row -- rejected instead, since it is far more likely to be a
+    !> mistyped column name than a deliberate request for "all rows"/"no rows".
+    subroutine scenario_filter_is_nan_non_float_column()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+
+        call parquet_open_writer(writer, "test_run/filter_is_nan_non_float.parquet")
+        call parquet_write_column(writer, "id", [1_int32, 2_int32])
+        call parquet_close_writer(writer)
+
+        call filt%add("id is_nan")
+        call parquet_open_reader(reader, "test_run/filter_is_nan_non_float.parquet", filter=filt)
+        print '(a)', "unexpectedly opened a reader with is_nan against an integer filter column"
+    end subroutine scenario_filter_is_nan_non_float_column
+
+    !> strtod parses "nan" as happily as it parses "inf", but a comparison against a NaN is never
+    !> meaningful -- every IEEE comparison against it is false and every /= is true, so the clause
+    !> can only ever match nothing or everything. Rejected, pointing the caller at is_nan; an
+    !> infinity is a real bound and stays accepted (covered in test_filter.f90, not here).
+    subroutine scenario_filter_nan_literal_rejected()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+
+        call parquet_open_writer(writer, "test_run/filter_nan_literal.parquet")
+        call parquet_write_column(writer, "v", [1.5_real64, 2.5_real64])
+        call parquet_close_writer(writer)
+
+        call filt%add("v == nan")
+        call parquet_open_reader(reader, "test_run/filter_nan_literal.parquet", filter=filt)
+        print '(a)', "unexpectedly opened a reader with a NaN literal as a filter comparison value"
+    end subroutine scenario_filter_nan_literal_rejected
+
+    !> is_nan/is_not_nan take no value, so the clause scanner must end the clause at the operator
+    !> and report the next bare name as a missing combinator -- exactly as it already does for
+    !> is_null. Getting that wrong swallows the name as this clause's value instead, which surfaces
+    !> as a different message ("is_nan takes no value"), so the message asserted by this scenario's
+    !> wrapper is what actually pins the behaviour down.
+    subroutine scenario_filter_is_nan_missing_combinator()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_is_nan_missing_combinator.parquet"
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "x", [1.5_real64, 2.5_real64])
+        call parquet_close_writer(writer)
+
+        call filt%add("x is_nan x > 1")
+        call parquet_open_reader(reader, out_file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with an is_nan clause and no combinator after it"
+    end subroutine scenario_filter_is_nan_missing_combinator
 
     !> eval_filter_clause's `default:` branch (parquet_wrapper.cpp) -- a column type filtering
     !> doesn't support at all. Every physical type this project has an ordinary fixture for is

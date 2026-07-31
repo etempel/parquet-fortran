@@ -28,7 +28,8 @@
 !> another is reading it.
 module test_filter
     use parquet
-    use iso_fortran_env, only : int32, int64, real64
+    use iso_fortran_env, only : int32, int64, real32, real64
+    use ieee_arithmetic, only : ieee_value, ieee_quiet_nan
     use testdrive, only : new_unittest, unittest_type, error_type, check
     !
     implicit none
@@ -82,7 +83,16 @@ contains
                 test_row_and_element_mode_filtered_bool_string), &
             new_unittest("row and element mode, filtered, for a date column", &
                 test_row_and_element_mode_filtered_temporal), &
-            new_unittest("row and element mode on a sampled reader", test_row_and_element_mode_sampled) &
+            new_unittest("row and element mode on a sampled reader", test_row_and_element_mode_sampled), &
+            new_unittest("NaN: a comparison excludes NaN rows, /= admits them", test_nan_under_comparisons), &
+            new_unittest("NaN: a negated comparison admits NaN rows but not Null rows", test_nan_under_not), &
+            new_unittest("is_nan / is_not_nan select on NaN", test_is_nan_selects), &
+            new_unittest("is_nan / is_not_nan answer unknown for a Null row", test_is_nan_null_is_unknown), &
+            new_unittest("is_nan == not (x >= 0 or x < 0)", test_is_nan_matches_comparison_oracle), &
+            new_unittest("not x is_nan == x is_not_nan", test_not_is_nan_is_is_not_nan), &
+            new_unittest("is_nan combines with other clauses", test_is_nan_in_expression), &
+            new_unittest("is_nan on a float32 column", test_is_nan_float32), &
+            new_unittest("is_nan on a half_float column", test_is_nan_half_float) &
             ]
     end subroutine collect_tests_filter
     !
@@ -1189,5 +1199,211 @@ contains
         call check(error, all(elem_back == [(100 * i + 3, i = 1, 12)]), &
             "sampled element 3 must still span every physical row")
     end subroutine test_row_and_element_mode_sampled
+    !
+    !> Writes the NaN fixture the group below filters against: u = 1..6 (never null), and the same
+    !> six rows as a real64 column x and a real32 column y holding a value, a NaN and a Null twice
+    !> over. A NaN and a Null in one fixture is the point -- the two are routinely conflated, and
+    !> every test here turns on their behaving differently.
+    subroutine write_nan_fixture(file)
+        character(len=*), intent(in) :: file !! fixture path (one per test).
+        type(parquet_writer) :: writer
+        integer(int32) :: u(6) = [1, 2, 3, 4, 5, 6]
+        real(real64) :: x(6)
+        real(real32) :: y(6)
+        logical :: valid(6) = [.true., .true., .false., .true., .true., .false.]
+
+        x = [1.0_real64, ieee_value(0.0_real64, ieee_quiet_nan), 0.0_real64, &
+            4.0_real64, ieee_value(0.0_real64, ieee_quiet_nan), 0.0_real64]
+        y = real(x, real32)
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "u", u)
+        call parquet_write_column(writer, "x", x, is_valid=valid)
+        call parquet_write_column(writer, "y", y, is_valid=valid)
+        call parquet_close_writer(writer)
+    end subroutine write_nan_fixture
+    !
+    !> The behaviour the documentation now states outright, and the reason is_nan exists: a NaN is
+    !> a VALUE, not a missing one, so it is never unknown. Every ordering/equality comparison
+    !> against it is false (IEEE), which excludes it -- but /= against it is true, which admits it.
+    !> That asymmetry is the exact opposite of a Null's.
+    subroutine test_nan_under_comparisons(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: got(:)
+        character(len=*), parameter :: file = "test_run/filter_nan_comparisons.parquet"
+
+        call write_nan_fixture(file)
+        call filtered_u(file, "x > 0", got)
+        call check(error, size(got) == 2, "NaN under '>': expected only the two ordinary values")
+        if (allocated(error)) return
+        call check(error, all(got == [1, 4]), "NaN under '>': expected rows 1, 4 (NaN and Null both excluded)")
+        if (allocated(error)) return
+        deallocate(got)
+        call filtered_u(file, "x /= 999", got)
+        call check(error, size(got) == 4, "NaN under '/=': expected the four non-null rows")
+        if (allocated(error)) return
+        call check(error, all(got == [1, 2, 4, 5]), &
+            "NaN under '/=': expected rows 1, 2, 4, 5 -- NaN /= anything is true, so NaN rows survive")
+    end subroutine test_nan_under_comparisons
+    !
+    !> Negation separates the two cleanly: a NaN comparison is false, so negating it yields true
+    !> and the NaN row survives; a Null comparison is unknown, so negating it stays unknown and the
+    !> Null row does not. One expression, both rules.
+    subroutine test_nan_under_not(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: got(:)
+        character(len=*), parameter :: file = "test_run/filter_nan_under_not.parquet"
+
+        call write_nan_fixture(file)
+        call filtered_u(file, "not x > 0", got)
+        call check(error, size(got) == 2, "NaN under 'not': expected the two NaN rows only")
+        if (allocated(error)) return
+        call check(error, all(got == [2, 5]), &
+            "NaN under 'not': expected rows 2, 5 -- the NaN rows come in, the Null rows stay out")
+    end subroutine test_nan_under_not
+    !
+    !> The two new operators doing the job they were added for, without the caller having to know
+    !> any of the above.
+    subroutine test_is_nan_selects(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: got(:)
+        character(len=*), parameter :: file = "test_run/filter_is_nan_selects.parquet"
+
+        call write_nan_fixture(file)
+        call filtered_u(file, "x is_nan", got)
+        call check(error, size(got) == 2, "is_nan: expected 2 surviving rows")
+        if (allocated(error)) return
+        call check(error, all(got == [2, 5]), "is_nan: expected the two NaN rows 2, 5")
+        if (allocated(error)) return
+        deallocate(got)
+        call filtered_u(file, "x is_not_nan", got)
+        call check(error, size(got) == 2, "is_not_nan: expected 2 surviving rows")
+        if (allocated(error)) return
+        call check(error, all(got == [1, 4]), "is_not_nan: expected the two ordinary-value rows 1, 4")
+    end subroutine test_is_nan_selects
+    !
+    !> The deliberate design decision behind the pair: they are Kleene-honest about nullness, so a
+    !> Null row is unknown for BOTH of them -- is_not_nan means "is a real number", not "is not a
+    !> NaN, whatever else it might be". That keeps nullness governed solely by is_null/is_not_null,
+    !> and "a real number or nothing at all" is written by saying so.
+    subroutine test_is_nan_null_is_unknown(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: got(:)
+        character(len=*), parameter :: file = "test_run/filter_is_nan_null.parquet"
+
+        call write_nan_fixture(file)
+        call filtered_u(file, "x is_nan or x is_null", got)
+        call check(error, size(got) == 4, "is_nan or is_null: expected 4 surviving rows")
+        if (allocated(error)) return
+        call check(error, all(got == [2, 3, 5, 6]), "is_nan or is_null: expected rows 2, 3, 5, 6")
+        if (allocated(error)) return
+        deallocate(got)
+        call filtered_u(file, "x is_not_nan or x is_null", got)
+        call check(error, size(got) == 4, "is_not_nan or is_null: expected 4 surviving rows")
+        if (allocated(error)) return
+        call check(error, all(got == [1, 3, 4, 6]), "is_not_nan or is_null: expected rows 1, 3, 4, 6")
+    end subroutine test_is_nan_null_is_unknown
+    !
+    !> The oracle. Under Kleene logic "not (x >= 0 or x < 0)" already meant exactly is_nan before
+    !> the operator existed: every non-NaN real satisfies precisely one of the two disjuncts, a NaN
+    !> satisfies neither, and a Null is unknown for both. Asserting the two agree row for row
+    !> checks the new operator against machinery that was already tested, independently of any
+    !> expectation written by hand here.
+    subroutine test_is_nan_matches_comparison_oracle(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: direct(:), oracle(:)
+        character(len=*), parameter :: file = "test_run/filter_is_nan_oracle.parquet"
+
+        call write_nan_fixture(file)
+        call filtered_u(file, "x is_nan", direct)
+        call filtered_u(file, "not (x >= 0 or x < 0)", oracle)
+        call check(error, size(direct) == size(oracle), &
+            "is_nan vs oracle: expected the same row count as 'not (x >= 0 or x < 0)'")
+        if (allocated(error)) return
+        call check(error, all(direct == oracle), "is_nan vs oracle: expected the same surviving rows")
+        if (allocated(error)) return
+        deallocate(direct, oracle)
+        call filtered_u(file, "x is_not_nan", direct)
+        call filtered_u(file, "x >= 0 or x < 0", oracle)
+        call check(error, size(direct) == size(oracle), &
+            "is_not_nan vs oracle: expected the same row count as 'x >= 0 or x < 0'")
+        if (allocated(error)) return
+        call check(error, all(direct == oracle), "is_not_nan vs oracle: expected the same surviving rows")
+    end subroutine test_is_nan_matches_comparison_oracle
+    !
+    !> Negating either one gives the other -- but only because a Null is unknown for both, so the
+    !> unknown rows stay out from either direction. This is the is_nan counterpart of the
+    !> "not x is_null == x is_not_null" test above.
+    subroutine test_not_is_nan_is_is_not_nan(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: negated(:), direct(:)
+        character(len=*), parameter :: file = "test_run/filter_not_is_nan.parquet"
+
+        call write_nan_fixture(file)
+        call filtered_u(file, "not x is_nan", negated)
+        call filtered_u(file, "x is_not_nan", direct)
+        call check(error, size(negated) == size(direct), &
+            "not is_nan: expected the same row count as is_not_nan")
+        if (allocated(error)) return
+        call check(error, all(negated == direct) .and. all(direct == [1, 4]), &
+            "not is_nan: expected rows 1, 4 either way -- a Null row stays out from both directions")
+    end subroutine test_not_is_nan_is_is_not_nan
+    !
+    !> A valueless operator has to survive the clause scanner's "how many tokens does this clause
+    !> take" logic when a combinator follows it, exactly as is_null already had to.
+    subroutine test_is_nan_in_expression(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: got(:)
+        character(len=*), parameter :: file = "test_run/filter_is_nan_expression.parquet"
+
+        call write_nan_fixture(file)
+        call filtered_u(file, "x is_not_nan and u > 1", got)
+        call check(error, size(got) == 1, "is_nan in an expression: expected 1 surviving row")
+        if (allocated(error)) return
+        call check(error, all(got == [4]), "is_nan in an expression: expected row 4")
+        if (allocated(error)) return
+        deallocate(got)
+        call filtered_u(file, "u == 1 or x is_nan", got)
+        call check(error, size(got) == 3, "is_nan after 'or': expected 3 surviving rows")
+        if (allocated(error)) return
+        call check(error, all(got == [1, 2, 5]), "is_nan after 'or': expected rows 1, 2, 5")
+    end subroutine test_is_nan_in_expression
+    !
+    !> real32 goes through the same accessor as real64 but a different Arrow type id, so the gate
+    !> that decides which columns accept the operator has to admit it too.
+    subroutine test_is_nan_float32(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: got(:)
+        character(len=*), parameter :: file = "test_run/filter_is_nan_float32.parquet"
+
+        call write_nan_fixture(file)
+        call filtered_u(file, "y is_nan", got)
+        call check(error, size(got) == 2, "is_nan on a float32 column: expected 2 surviving rows")
+        if (allocated(error)) return
+        call check(error, all(got == [2, 5]), "is_nan on a float32 column: expected rows 2, 5")
+    end subroutine test_is_nan_float32
+    !
+    !> The third accepted type. This library's writer never emits a half_float column, so the
+    !> fixture is the shared extended-types one -- whose values are all ordinary, making this an
+    !> assertion that the type is ACCEPTED (rather than rejected as a non-floating-point column)
+    !> and answers all-false, not that it finds anything.
+    subroutine test_is_nan_half_float(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: nan_filt, not_nan_filt
+        integer(int64) :: n_nan, n_not_nan
+        character(len=*), parameter :: file = "test/fixtures/extended_types.parquet"
+
+        call nan_filt%add("v_half_float is_nan")
+        call parquet_open_reader(reader, file, filter=nan_filt)
+        call parquet_get_nrows(reader, n_nan)
+        call parquet_close_reader(reader)
+        call not_nan_filt%add("v_half_float is_not_nan")
+        call parquet_open_reader(reader, file, filter=not_nan_filt)
+        call parquet_get_nrows(reader, n_not_nan)
+        call parquet_close_reader(reader)
+        call check(error, n_nan == 0_int64, "is_nan on a half_float column of ordinary values: expected no rows")
+        if (allocated(error)) return
+        call check(error, n_not_nan == 3_int64, "is_not_nan on a half_float column: expected all 3 rows")
+    end subroutine test_is_nan_half_float
     !
 end module test_filter

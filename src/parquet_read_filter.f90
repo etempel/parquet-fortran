@@ -338,7 +338,8 @@ contains
             character(len=*), intent(in) :: clause_text !! the "<name> <op>" text collected so far.
             character(len=:), allocatable :: last
             last = ascii_lower(clause_text(index(clause_text, " ", back=.true.) + 1:))
-            res = last == "is_null" .or. last == "is_not_null"
+            res = last == "is_null" .or. last == "is_not_null" .or. &
+                last == "is_nan" .or. last == "is_not_nan"
         end function is_valueless_op
         !> Counts one nesting level, refusing to go deeper than filter_max_depth. The cap keeps
         !> adversarial input ("((((((...") a clean error stop rather than a stack overflow, and
@@ -515,6 +516,9 @@ contains
                     rendered = rendered // " " // trim(leaf_value(li))
                 end if
                 top = top + 1
+                ! gcov attribution artifact: the condition below is evaluated for every leaf, so the
+                ! `if` line registers hits even though the branch is never taken -- confirmed by its
+                ! own body (the two lines inside) reliably showing zero.
                 if (top > stack_cap) then ! GCOVR_EXCL_START -- assertion: the bound above is
                     ! derived from the parser's own recursion, so exceeding it would mean the
                     ! node list did not come from parquet_parse_filter_expr.

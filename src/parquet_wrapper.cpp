@@ -1181,7 +1181,19 @@ extern "C"
 	// the same top-level struct column (e.g. "main.id" then "main.inner.age") triggers exactly one
 	// real disk read of "main" -- i.e. that struct-path resolution shares get_single_chunk_array's
 	// existing column_cache instead of re-reading per leaf path.
-	static int64_t g_debug_physical_column_read_count = 0;
+	//
+	// UNLIKE every other g_debug_* global in this file, this one is incremented on the ordinary,
+	// always-taken cache-miss path of get_single_chunk_array -- not only from within an isolated,
+	// single-process error-scenario subprocess -- so it is live and incremented by every OpenMP
+	// thread reading any column, all the time, not just while a scenario is deliberately exercising
+	// it. A plain (non-atomic) `int64_t` there is a genuine, ThreadSanitizer-confirmed data race
+	// under this project's own concurrent test suite (two threads' unsynchronized `++` on the same
+	// word): each `++` is a non-atomic read-modify-write, so concurrent increments can silently
+	// lose updates. `std::atomic` is the fix, not a scoping change -- every other g_debug_* global
+	// stays a plain flag/limit precisely because it is only ever touched from one isolated
+	// subprocess at a time (see this file's own notes on that isolation, and CLAUDE.md's "If
+	// src/parquet_wrapper.cpp is ever split into multiple translation units").
+	static std::atomic<int64_t> g_debug_physical_column_read_count{0};
 
 	// ==== Whole-column reads (caching, filter/sample application, qc dispatch) ====
 	//
@@ -9406,14 +9418,14 @@ extern "C"
 	// existing column_cache rather than re-reading per leaf path.
 	int64_t parquet_debug_get_physical_column_read_count()
 	{
-		return g_debug_physical_column_read_count;
+		return g_debug_physical_column_read_count.load();
 	}
 
 	// Test-only: resets g_debug_physical_column_read_count to 0, so a scenario can zero the
 	// counter right before the specific reads it wants to measure.
 	void parquet_debug_reset_physical_column_read_count()
 	{
-		g_debug_physical_column_read_count = 0;
+		g_debug_physical_column_read_count.store(0);
 	}
 
 	// Test-only: writes a tiny fixture file with one arrow::utf8_view() column named `name`,

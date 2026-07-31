@@ -104,7 +104,7 @@ test:
     # -ffree-line-length-none override is needed; FPM_FFLAGS only adds the
     # coverage/OpenMP flags fpm test itself needs. Note it still replaces
     # fpm's default profile flags, same as before.
-    - fpm test --verbose
+    - FPM_FFLAGS="--coverage" fpm test --verbose
     # Runs tools/run_error_scenarios.sh's own scenario list too, so it can't silently drift out
     # of parity with test/error_scenarios.f90's `select case` (see run_error_scenarios.sh's own
     # header comment) -- fpm test above already exercises every scenario via test_errors.f90, but

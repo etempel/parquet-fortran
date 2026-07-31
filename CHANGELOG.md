@@ -127,13 +127,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with an OpenMP critical section.
 - Fixed a documentation error pointing readers at `is_init()` instead of `is_parsed()`, plus
   several stale or broken documentation cross-links and anchors.
-- Fixed a rare heap-corruption race (confirmed via ThreadSanitizer) when two OpenMP threads each
+- Fixed two rare heap-corruption races (confirmed via ThreadSanitizer) when two OpenMP threads each
   opened a `parquet_reader`/`parquet_writer` and touched a column of the same type for the very
-  first time in the process at close to the same moment: Arrow's own type-singleton construction
-  (`arrow::int32()`, `arrow::utf8()`, ...) is not safely concurrent on this project's Arrow build,
-  and racing it could corrupt memory that only surfaced later, in unrelated code. `parquet_open_reader`/
-  `parquet_open_writer` now force every such singleton into existence once, from a single thread,
-  before any concurrent caller can reach Arrow. See
+  first time in the process at close to the same moment: Arrow's own per-type singleton objects
+  (`arrow::int32()`, `arrow::utf8()`, ...) are not safely concurrent on this project's Arrow build,
+  neither their own one-time construction nor a lazily-cached internal "fingerprint" Arrow computes
+  the first time it compares or serializes a type — racing either could corrupt memory that only
+  surfaced later, in unrelated code. `parquet_open_reader`/`parquet_open_writer` now force both
+  into existence once, from a single thread, before any concurrent caller can reach Arrow. See
   [Thread safety](doc/pages/thread-safety.md#a-note-on-arrows-own-type-singleton-construction).
 
 ## [1.0.0] - 2026-07-27

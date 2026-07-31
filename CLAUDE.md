@@ -58,7 +58,7 @@ working rules).
   - [The `parquet_temporal` module (date/time/timestamp)](#the-parquet_temporal-module-datetimetimestamp)
 - [Build & compiler notes](#build--compiler-notes)
   - [Compiler & language gotchas](#compiler--language-gotchas)
-  - [Arrow's own type-singleton construction is not thread-safe on first concurrent use](#arrows-own-type-singleton-construction-is-not-thread-safe-on-first-concurrent-use)
+  - [Arrow's own type singletons have thread-unsafe lazy state on first concurrent use](#arrows-own-type-singletons-have-thread-unsafe-lazy-state-on-first-concurrent-use)
   - [Verifying the bind(C) boundary](#verifying-the-bindc-boundary)
   - [If `src/parquet_wrapper.cpp` is ever split into multiple translation units](#if-srcparquet_wrappercpp-is-ever-split-into-multiple-translation-units)
   - [Stale `fpm` build cache](#stale-fpm-build-cache)
@@ -1185,44 +1185,68 @@ counterpart. User guide: `doc/pages/date-time.md`.
   a type that embeds a component from another module's private-component type needs the same
   treatment.
 
-### Arrow's own type-singleton construction is not thread-safe on first concurrent use
+### Arrow's own type singletons have thread-unsafe lazy state on first concurrent use
 
 Every no-argument `arrow::<type>()` factory (`arrow::int32()`, `arrow::utf8()`, `arrow::boolean()`,
-...) returns a reference to a function-local `static` singleton — the standard C++11 "magic
-statics" pattern, normally safe to construct concurrently for the first time since the compiler
-inserts a one-time-init guard. **Confirmed via ThreadSanitizer, not just inferred from the
-symptom, that this project's apt-installed Arrow build (`.gitlab-ci.yml`'s Arrow apt repository)
-actually races on it**: two independent OpenMP threads each writing/reading a column of the same
-type for the very first time in the process (e.g. two threads both opening their own writer and
-both calling `parquet_write_int32_column` within the same instant, at test-suite/program startup)
-raced on `arrow::int32()`'s singleton construction — a genuine data race on that singleton's
-`shared_ptr` control block, not a false positive. Root cause not chased further than "the apt
-Arrow build behaves this way"; do not assume a from-source Arrow build is affected the same way
-without re-checking.
+...) returns a reference to a **process-wide, function-local `static` singleton** shared by every
+thread. That alone is fine — the problem is that this project's apt-installed Arrow build
+(`.gitlab-ci.yml`'s Arrow apt repository) has **confirmed, ThreadSanitizer-caught data races on
+more than one kind of lazily-populated mutable state hanging off that same shared object**, each
+found independently and each requiring its own fix:
+
+1. **The singleton's own construction** (its `shared_ptr` control block). `arrow::int32()` et al.
+   use the standard C++11 "magic statics" pattern, normally safe to construct concurrently for the
+   first time since the compiler inserts a one-time-init guard — but TSan caught two OpenMP
+   threads racing on `arrow::int32()`'s construction the first time each independently wrote an
+   `int32` column at process/test-suite startup: a genuine race on the `shared_ptr`'s refcount,
+   not a false positive.
+2. **`arrow::detail::Fingerprintable`'s lazily-cached `fingerprint()`/`metadata_fingerprint()`**,
+   which every `DataType` inherits (and which Arrow's own type/field/schema equality checks use
+   internally as a fast path, so it is reachable from far more call paths than an explicit
+   `->fingerprint()` call would suggest — the confirmed instance here was triggered from inside
+   `parquet_close_writer`). Found in a SECOND, separate TSan run, after fixing (1) above did not
+   make the underlying flakiness go away: two threads racing to populate this cache the first time
+   they both touch the same shared singleton type, same underlying pattern as (1) but a
+   completely separate piece of state.
+
+Root cause not chased further than "the apt Arrow build behaves this way for both of these"; do
+not assume a from-source Arrow build is affected the same way without re-checking.
 
 **Why this was so hard to trace back to its actual cause**: corrupting a process-wide singleton's
-refcount doesn't crash where it happens — it surfaces later, in whatever unrelated code next
-touches the heap. This is exactly what made an earlier investigation (chasing a SIGSEGV inside
+state doesn't crash where it happens — it surfaces later, in whatever unrelated code next touches
+the heap. This is exactly what made the original investigation (chasing a SIGSEGV inside
 `table_check_not_detached`, a completely unrelated and trivially-simple boolean check) so
-misleading: the actual bug was nowhere near the code the crash pointed at. **If a future
+misleading, and why fixing race (1) alone looked sufficient locally but did not actually clear the
+CI failure — race (2) was still there, waiting to corrupt something else. **If a future
 concurrency bug report shows a clean-looking `error stop`/check failure immediately followed by a
-crash in unrelated code, or a crash whose faulting line changes between runs, suspect heap
-corruption from an early race over something process-global (a lazily-initialized Arrow singleton
-being the confirmed instance, but not necessarily the only possible one) before assuming the crash
-site itself is where the bug lives.**
+crash in unrelated code, or a crash whose faulting line changes between runs (or between fixes),
+suspect heap corruption from an early race over shared, lazily-initialized Arrow state before
+assuming the crash site itself is where the bug lives — and don't assume fixing one such race
+means there isn't a second, independent one still lurking. Re-run the sanitizer after each fix,
+not just after the first.**
 
 Fixed in `parquet_wrapper.cpp` (`ensure_arrow_type_singletons_initialized`, `std::call_once`-
 guarded, mirroring `ensure_compute_initialized`'s existing pattern for Arrow's compute-kernel
-registry): every no-argument `arrow::<type>()` factory this file uses is forced into existence
-exactly once, from a single thread, at the top of both `create_parquet_reader` and
-`create_parquet_writer` — the two entry points any OpenMP thread can reach first. After that one
-call, every later concurrent call just reads the already-published pointer, which is safe. **A
-parameterized factory (`arrow::timestamp(unit)`, `arrow::decimal128(p, s)`, ...) is NOT affected**
-— those construct a fresh object per call rather than caching a singleton, so they have nothing to
-warm up. **Keep the warm-up list in sync with `parquet_wrapper.cpp`'s actual usage**: if a future
-change introduces a new bare `arrow::<type>()` call site, add it to
-`ensure_arrow_type_singletons_initialized`'s list too — grep the file for `arrow::` factory calls
-taking no arguments to re-derive the exhaustive list if in doubt. See
+registry): every no-argument `arrow::<type>()` factory this file uses is forced into existence,
+AND has `->fingerprint()`/`->metadata_fingerprint()` called on it, exactly once, from a single
+thread, at the top of both `create_parquet_reader` and `create_parquet_writer` — the two entry
+points any OpenMP thread can reach first. After that one call, every later concurrent read is just
+a read of already-published state, which is safe. **A parameterized factory
+(`arrow::timestamp(unit)`, `arrow::decimal128(p, s)`, ...) is NOT affected** — those construct a
+fresh, non-shared object per call rather than caching a singleton, so they have nothing to warm
+up. **Keep the type list in sync with `parquet_wrapper.cpp`'s actual usage**: if a future change
+introduces a new bare `arrow::<type>()` call site, add it to the list in
+`ensure_arrow_type_singletons_initialized` too — grep the file for `arrow::` factory calls taking
+no arguments to re-derive the exhaustive list if in doubt.
+
+**This fix is deliberately NOT an exhaustive guarantee against every possible Arrow-internal lazy
+cache** — enumerating Arrow's private implementation details one race at a time is not a fight
+this project can definitively win. Two are now known and covered. If a THIRD, distinct race
+against one of these same singleton objects ever surfaces, add whatever call reproduces it to the
+same warm-up function rather than treating it as a one-off; if a third instance does show up,
+reconsider a broader warm-up strategy (e.g. a full dummy write+close round-trip exercising every
+supported type, single-threaded, in the same `std::call_once` block) instead of continuing to
+enumerate individual private caches by name. See
 [Thread safety](doc/pages/thread-safety.md#a-note-on-arrows-own-type-singleton-construction) for
 the user-facing writeup.
 

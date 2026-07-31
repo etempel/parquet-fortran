@@ -127,6 +127,10 @@ contains
                 "boolean/qc/filter columns", test_close_reader_print_stat_all_types), &
             new_unittest("parquet_close_reader(print_stat=.true.) covers format_stat_scalar's default " // &
                 "(non-special-cased scalar type) branch", test_close_reader_print_stat_default_scalar_type), &
+            new_unittest("parquet_close_reader(print_stat=.true.) covers a released column's report row", &
+                test_close_reader_print_stat_released_column), &
+            new_unittest("parquet_close_reader(print_stat=.true.) covers the sort: summary line", &
+                test_close_reader_print_stat_sorted_rows), &
             new_unittest("a string/string-vector column too large for arrow::utf8() round-trips via large_utf8()", &
                 test_large_string_column_roundtrip), &
             new_unittest("a STRING_VIEW column (from a file written by another Arrow-based tool) round-trips " // &
@@ -1692,6 +1696,28 @@ contains
             failure_message="parquet_close_reader(print_stat=.true.) over a UINT64 column was expected " // &
             "to exit cleanly")
     end subroutine test_close_reader_print_stat_default_scalar_type
+
+    !> See scenario_print_stat_released_column in error_scenarios.f90 for why this exists
+    !> (parquet_reader_print_stat's "released" branch, for a column read then freed via
+    !> parquet_release_column before print_stat=.true. walks the touched-column list).
+    subroutine test_close_reader_print_stat_released_column(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "print_stat_released_column", expect_abort=.false., &
+            failure_message="parquet_close_reader(print_stat=.true.) over a released column was expected " // &
+            "to exit cleanly")
+    end subroutine test_close_reader_print_stat_released_column
+
+    !> See scenario_print_stat_sorted_rows in error_scenarios.f90 for why this exists
+    !> (parquet_reader_print_stat's "sort: <key text>" summary line, printed only when a
+    !> read-time sort is active).
+    subroutine test_close_reader_print_stat_sorted_rows(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "print_stat_sorted_rows", expect_abort=.false., &
+            failure_message="parquet_close_reader(print_stat=.true.) over a sorted reader was expected " // &
+            "to exit cleanly")
+    end subroutine test_close_reader_print_stat_sorted_rows
 
     !> A string or string-vector column whose byte payload would overflow Arrow's real int32
     !> STRING-offset limit (~2GiB) is written as arrow::large_utf8() instead of arrow::utf8()

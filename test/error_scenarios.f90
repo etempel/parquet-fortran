@@ -307,6 +307,8 @@ program error_scenarios
         call scenario_filter_rule_too_long()
     case ("filter_bad_numeric_value")
         call scenario_filter_bad_numeric_value()
+    case ("filter_bad_numeric_value_scoped")
+        call scenario_filter_bad_numeric_value_scoped()
     case ("filter_int32_value_out_of_range")
         call scenario_filter_int32_value_out_of_range()
     case ("filter_bad_numeric_value_float")
@@ -327,6 +329,8 @@ program error_scenarios
         call scenario_filter_is_nan_missing_combinator()
     case ("filter_unsupported_column_type")
         call scenario_filter_unsupported_column_type()
+    case ("sort_unsupported_column_type")
+        call scenario_sort_unsupported_column_type()
     case ("filter_temporal_value_not_quoted")
         call scenario_filter_temporal_value_not_quoted()
     case ("filter_unbalanced_parens")
@@ -415,6 +419,10 @@ program error_scenarios
         call scenario_sample_nan_fraction()
     case ("print_stat_sampled_rows")
         call scenario_print_stat_sampled_rows()
+    case ("print_stat_released_column")
+        call scenario_print_stat_released_column()
+    case ("print_stat_sorted_rows")
+        call scenario_print_stat_sorted_rows()
     case ("sample_mask_build_error")
         call scenario_sample_mask_build_error()
     case ("string_length_on_non_string_column")
@@ -4623,6 +4631,21 @@ contains
         print '(a)', "unexpectedly opened a reader with a non-numeric value against a numeric filter column"
     end subroutine scenario_filter_bad_numeric_value
 
+    !> The row-group-SCOPED sibling of scenario_filter_bad_numeric_value above: the same bad value
+    !! caught by the SCOPED evaluation path (parquet_reader_set_filter's row_group_lo/row_group_hi
+    !! form) inside its own per-row-group loop, rather than the unscoped, whole-file path every
+    !! other filter-error scenario exercises. See scenario_filter_scoped_reads_no_whole_column above
+    !! for the scoped path's own successful case.
+    subroutine scenario_filter_bad_numeric_value_scoped()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+
+        call parquet_open_reader(reader, "test/fixtures/has_null.parquet")
+        call filt%add("id_with_null > abc")
+        call parquet_reader_set_filter(reader, filt, 1, 1)
+        print '(a)', "unexpectedly applied a scoped filter with a non-numeric value against a numeric column"
+    end subroutine scenario_filter_bad_numeric_value_scoped
+
     !> A filter value that parses as an integer but doesn't fit
     !> int32's range reports a clean error stop -- distinct from scenario_filter_bad_numeric_value
     !> above, which uses a value that fails to parse as a number at all. id_with_null is int32.
@@ -4800,6 +4823,31 @@ contains
         call parquet_open_reader(reader, out_file, filter=filt)
         print '(a)', "unexpectedly opened a reader with a filter clause against a binary column"
     end subroutine scenario_filter_unsupported_column_type
+
+    !> sort_bind_arrow_key's own `return false` fallback (parquet_wrapper.cpp) -- the sort-key
+    !! counterpart of scenario_filter_unsupported_column_type above, same BINARY column, same
+    !! reasoning (every ordinary fixture's physical type is orderable, so a genuinely unsupported
+    !! type needs the same debug hook). A BINARY column is not a vector type, so it passes the
+    !! earlier FIXED_SIZE_LIST/LIST/LARGE_LIST rejection in parquet_reader_set_sort and reaches
+    !! sort_bind_arrow_key itself.
+    subroutine scenario_sort_unsupported_column_type()
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_sort_unsupported_column_type.parquet"
+        interface
+            subroutine parquet_debug_write_binary_fixture(path, column_name) &
+                bind(C, name="parquet_debug_write_binary_fixture")
+                use iso_c_binding, only : c_char
+                character(kind=c_char), intent(in) :: path(*) !! null-terminated output file path.
+                character(kind=c_char), intent(in) :: column_name(*) !! null-terminated BINARY column name.
+            end subroutine parquet_debug_write_binary_fixture
+        end interface
+
+        call parquet_debug_write_binary_fixture(out_file//char(0), "blob"//char(0))
+        call srt%add("blob asc")
+        call parquet_open_reader(reader, out_file, sort_by=srt)
+        print '(a)', "unexpectedly sorted by a binary column"
+    end subroutine scenario_sort_unsupported_column_type
 
     !> A temporal column IS filterable, but only against a double-quoted ISO-8601 literal: a bare
     !> number would silently mean "days" for one column and "microseconds since the epoch" for
@@ -5205,6 +5253,60 @@ contains
         call parquet_close_reader(reader, print_stat=.true.)
         print '(a)', "print_stat covered the sample: fraction=... summary line"
     end subroutine scenario_print_stat_sampled_rows
+
+    !> parquet_reader_print_stat's "released" branch (parquet_wrapper.cpp): a column that was read
+    !! (so it is "touched" and gets a row in the report) but then freed via parquet_release_column
+    !! before the close, so its cached array is gone by the time print_stat walks the touched list.
+    !! Every value-derived cell (col_size/len_str/min/max/...) has to be reported some other way
+    !! than looking the array up -- an unconditional lookup there would be a use of a released
+    !! entry, and reporting nothing at all would silently drop the fact that the column was ever
+    !! touched. Distinct from every other print_stat_* scenario above, none of which release
+    !! anything before closing.
+    subroutine scenario_print_stat_released_column()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: a_values(5), b_values(5)
+        integer :: i
+        character(len=*), parameter :: out_file = "test_run/error_scenario_print_stat_released_column.parquet"
+
+        a_values = [(i, i=1,5)]
+        b_values = [(i*10, i=1,5)]
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "a", a_values)
+        call parquet_write_column(writer, "b", b_values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "a", a_values)
+        call parquet_release_column(reader, "a")
+        call parquet_close_reader(reader, print_stat=.true.)
+        print '(a)', "print_stat covered the released-column row (col_size/len_str left blank, marked released)"
+    end subroutine scenario_print_stat_released_column
+
+    !> parquet_reader_print_stat's "sort: %s\n" line -- the sort-key text as %add received it,
+    !! re-rendered in full, printed only when a sort is active. None of the other print_stat_*
+    !! scenarios apply a sort (scenario_print_stat_sampled_rows is the closest sibling, doing the
+    !! same for "sample:").
+    subroutine scenario_print_stat_sorted_rows()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        integer(int32) :: a_values(5)
+        integer :: i
+        character(len=*), parameter :: out_file = "test_run/error_scenario_print_stat_sorted_rows.parquet"
+
+        a_values = [(6 - i, i=1,5)]
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "a", a_values)
+        call parquet_close_writer(writer)
+
+        call srt%add("a asc")
+        call parquet_open_reader(reader, out_file, sort_by=srt)
+        call parquet_close_reader(reader, print_stat=.true.)
+        print '(a)', "print_stat covered the sort: <key text> summary line"
+    end subroutine scenario_print_stat_sorted_rows
 
     !> parquet_reader_set_sample's failure return (parquet_wrapper.cpp) -- and the Fortran-side
     !> error stop that surfaces it (parquet_apply_sample, parquet_read.f90) -- forced via a
@@ -7722,6 +7824,7 @@ contains
         end interface
         type(parquet_reader) :: reader
         integer :: col_size, large_col_size, strlen_lst, strlen_large_lst
+        integer(int64) :: total_elem, large_total_elem
         character(len=*), parameter :: mismatch_file = "test_run/error_scenario_list_mismatch.parquet"
         character(len=*), parameter :: empty_file = "test_run/error_scenario_list_empty.parquet"
         character(len=*), parameter :: strings_file = "test_run/error_scenario_list_strings.parquet"
@@ -7732,9 +7835,20 @@ contains
         call parquet_open_reader(reader, mismatch_file)
         call parquet_get_col_size(reader, "lst", col_size)
         call parquet_get_col_size(reader, "large_lst", large_col_size)
+        ! parquet_get_col_size (above) is answered by the footer screen alone here, which already
+        ! settles "mismatch" without ever calling get_col_size itself (a non-integral mean rejects
+        ! it for free). parquet_get_column_total_elements has no such screen for a plain LIST/
+        ! LARGE_LIST column -- it always reads the whole column and calls get_col_size directly, so
+        ! this is what actually exercises get_col_size's own heterogeneous-row-width branch (as
+        ! opposed to list_width_candidate's footer-only one) for both list kinds.
+        call parquet_get_column_total_elements(reader, "lst", total_elem)
+        call parquet_get_column_total_elements(reader, "large_lst", large_total_elem)
         call parquet_close_reader(reader)
         if (col_size /= 1) error stop "list fixture: mismatched-width LIST column should report col_size=1"
         if (large_col_size /= 1) error stop "list fixture: mismatched-width LARGE_LIST column should report col_size=1"
+        if (total_elem /= 3) error stop "list fixture: mismatched-width LIST column should report 3 total elements"
+        if (large_total_elem /= 3) &
+            error stop "list fixture: mismatched-width LARGE_LIST column should report 3 total elements"
 
         ! "empty": both columns have zero rows -- get_col_size's whole-array-empty branch, both
         ! list kinds (distinct from an individual row's list being empty, already exercised above).
@@ -7742,9 +7856,16 @@ contains
         call parquet_open_reader(reader, empty_file)
         call parquet_get_col_size(reader, "lst", col_size)
         call parquet_get_col_size(reader, "large_lst", large_col_size)
+        ! Same reasoning as above: get_col_size's own whole-array-empty branch (as opposed to
+        ! list_width_candidate's, already covered by the parquet_get_col_size calls) for both kinds.
+        call parquet_get_column_total_elements(reader, "lst", total_elem)
+        call parquet_get_column_total_elements(reader, "large_lst", large_total_elem)
         call parquet_close_reader(reader)
         if (col_size /= 0) error stop "list fixture: zero-row LIST column should report col_size=0"
         if (large_col_size /= 0) error stop "list fixture: zero-row LARGE_LIST column should report col_size=0"
+        if (total_elem /= 0) error stop "list fixture: zero-row LIST column should report 0 total elements"
+        if (large_total_elem /= 0) &
+            error stop "list fixture: zero-row LARGE_LIST column should report 0 total elements"
 
         ! "strings": uniform-width LIST<utf8>/LARGE_LIST<utf8> with a Null element -- exercises
         ! parquet_get_string_length's LIST/LARGE_LIST branches (longest non-null value is

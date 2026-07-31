@@ -61,7 +61,8 @@ contains
             new_unittest("element mode spans the sorted rows", test_element_mode_sorted), &
             new_unittest("parquet_reader_set_sort matches open-time sorting", test_set_sort_post_open), &
             new_unittest("a prefetched column comes back sorted", test_prefetch_is_sorted), &
-            new_unittest("an empty sort_by at open time is a no-op", test_open_time_empty_sort_by_is_noop) &
+            new_unittest("an empty sort_by at open time is a no-op", test_open_time_empty_sort_by_is_noop), &
+            new_unittest("a TIME32 key and a foreign UINT64 key", test_time32_and_uint64_keys) &
             ]
     end subroutine collect_tests_sort
     !
@@ -646,5 +647,53 @@ contains
         call check(error, all(ids == [1, 2, 3, 4, 5, 6]), &
             "an empty sort_by must leave the file in its original physical row order")
     end subroutine test_open_time_empty_sort_by_is_noop
+    !
+    !> Every other temporal key in this suite (test_temporal_keys) uses a schema-less time column,
+    !! which this library always stores as TIME64 (microseconds) -- so sort_bind_arrow_key's own
+    !! TIME32 branch (parquet_wrapper.cpp) needs a column explicitly declared "time[ms]", which
+    !! forces the TIME32 (milliseconds) physical representation. Paired here with a foreign-file
+    !! UINT64 sort key, which this library's own writer never produces at all (it has no unsigned
+    !! public type) -- test/fixtures/extended_types.parquet's v_uint64 column (values 1000, 0,
+    !! 2000000000, id order 1,2,3 -- see scenario_print_stat_default_scalar_type in
+    !! error_scenarios.f90 for the same fixture used the same way) is the only source of one.
+    subroutine test_time32_and_uint64_keys(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        type(parquet_time) :: clock(4)
+        integer(int32) :: id(4) = [1, 2, 3, 4]
+        integer(int32), allocatable :: ids(:)
+        integer, parameter :: sec(4) = [4, 1, 3, 2]
+        integer :: i
+        character(len=*), parameter :: file = "test_run/sort_time32.parquet"
+
+        call schema%init(table="t")
+        call schema%add_field("id", "int32")
+        call schema%add_field("clock", "time[ms]")
+        call parquet_parse_maml(schema)
+        call parquet_validate_maml(schema%maml)
+        do i = 1, 4
+            call clock(i)%set(0, 0, sec(i))
+        end do
+        call parquet_open_writer(writer, file, schema)
+        call parquet_write_column(writer, "id", id)
+        call parquet_write_column(writer, "clock", clock)
+        call parquet_close_writer(writer)
+
+        call sorted_ids(file, "clock asc", ids)
+        call check(error, all(ids == [2, 4, 3, 1]), "TIME32 key must order the rows 2,4,3,1")
+        if (allocated(error)) return
+
+        block
+            integer(int32) :: uids(3)
+            call srt%add("v_uint64 asc")
+            call parquet_open_reader(reader, "test/fixtures/extended_types.parquet", sort_by=srt)
+            call parquet_read_column(reader, "id", uids)
+            call parquet_close_reader(reader)
+            call check(error, all(uids == [2, 1, 3]), "a foreign UINT64 key must order the rows 2,1,3")
+        end block
+    end subroutine test_time32_and_uint64_keys
     !
 end module test_sort

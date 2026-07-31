@@ -1854,14 +1854,8 @@ extern "C"
 	{
 		switch (vals->type_id())
 		{
-		// GCOVR_EXCL_START -- same reasoning as real_to_int32/64_checked above: only reached via
-		// the extended_real_*_int32/64 error scenarios' FLOAT fixture column, which end in an
-		// abort (discarding that whole process's gcov coverage). The case label itself is included
-		// in this exclusion (not just the body): under GCC, a case label reachable only via an
-		// abort-ending scenario shows uncovered in its own right, distinct from Clang's gcov.
 		case arrow::Type::FLOAT:
 			return static_cast<double>(std::static_pointer_cast<arrow::FloatArray>(vals)->Value(idx));
-			// GCOVR_EXCL_STOP
 		case arrow::Type::HALF_FLOAT:
 		{
 			auto arr = std::static_pointer_cast<arrow::HalfFloatArray>(vals);
@@ -2389,10 +2383,16 @@ extern "C"
 			// defensive: Arrow always writes a null count when it writes statistics at all, so no
 			// fixture this repository can build reaches it with stats set but no count.
 			auto stats = chunk->statistics();
+			// See the comment above: kept as a load-bearing defensive pair with is_stats_set()
+			// (removing both segfaults on test/fixtures/no_stats.parquet), but is_stats_set()
+			// already catches that fixture's own missing statistics first, so no fixture this
+			// repository can build reaches `stats` non-null with HasNullCount() false, nor `stats`
+			// itself null once is_stats_set() is true.
 			if (!stats || !stats->HasNullCount())
-			{
+			{ // GCOVR_EXCL_START
 				return 1;
 			}
+			// GCOVR_EXCL_STOP
 			if (stats->null_count() > 0)
 			{
 				return 1;
@@ -2513,12 +2513,19 @@ extern "C"
 	static bool list_uniform_width(const std::shared_ptr<arrow::Array> &array, int64_t &width)
 	{
 		width = 1;
+		// Defensive completeness, unreachable through the public API: list_uniform_width's only two
+		// call sites (both in list_width_verified) are reached exclusively through the
+		// needs_data_to_measure_col_size gate, which is true only for LIST/LARGE_LIST -- a
+		// FIXED_SIZE_LIST column is always answered from its own schema-level list_size() before
+		// ever reaching this function. Kept for this function's own generality (its name and doc
+		// comment promise an answer for "every row of `array`", not just LIST/LARGE_LIST).
 		if (array->type_id() == arrow::Type::FIXED_SIZE_LIST)
-		{
+		{ // GCOVR_EXCL_START
 			auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
 			width = static_cast<int64_t>(list_arr->value_length());
 			return true;
 		}
+		// GCOVR_EXCL_STOP
 		if (array->type_id() == arrow::Type::LIST || array->type_id() == arrow::Type::LARGE_LIST)
 		{
 			if (array->length() == 0)
@@ -2541,16 +2548,14 @@ extern "C"
 				{
 					len = std::static_pointer_cast<arrow::LargeListArray>(array)->value_length(i);
 				}
-				// Belt and braces, and deliberately not chased with a fixture: Arrow's own
-				// ListBuilder::AppendNull duplicates the offset, so value_length(i) is already 0
-				// for a null slot and this never changes the answer for any array Arrow built.
-				// A foreign writer is not obliged to leave the offsets equal, though, and a null
-				// row must count as length 0 either way -- confirmed unreachable by removing this
-				// branch and finding every list-width test still passing.
-				if (array->IsNull(i)) // GCOVR_EXCL_START
+				// A null row must count as length 0 either way, whether or not Arrow's own
+				// ListBuilder::AppendNull already left value_length(i) at 0 for it -- reached by
+				// list_widths.parquet's null_avg column under a proven (row-group-scanned) width
+				// measurement (test_list_width_screen_and_proof).
+				if (array->IsNull(i))
 				{
 					len = 0;
-				} // GCOVR_EXCL_STOP
+				}
 				if (first < 0)
 				{
 					first = len;
@@ -2564,7 +2569,11 @@ extern "C"
 			width = first;
 			return true;
 		}
-		return true;
+		// Defensive completeness, unreachable for the same reason as the FIXED_SIZE_LIST branch
+		// above: every array list_uniform_width is ever called with comes from a column already
+		// known to be LIST/LARGE_LIST (list_width_verified's only caller path), so this catch-all
+		// for "anything else" never actually executes.
+		return true; // GCOVR_EXCL_LINE
 	}
 
 	// Footer-only screen: see the section comment above. Returns a candidate uniform width, 1 when
@@ -2629,10 +2638,15 @@ extern "C"
 		// GCOVR_EXCL_STOP
 		std::shared_ptr<arrow::Table> table = result.ValueOrDie();
 		auto array = combine_column_chunks(table->column(0), resolved.top_level_name);
+		// Defensive completeness, unreachable through the public API: this function is only ever
+		// called (via list_width_verified) for a LIST/LARGE_LIST leaf, and resolve_struct_path
+		// itself refuses to resolve a dotted struct path onto a LIST/LARGE_LIST leaf (see its own
+		// comment -- "MAP/LIST are not supported" through a struct path), so `name` can never
+		// actually be a dotted path here. child_path is therefore always empty in practice.
 		if (!resolved.child_path.empty())
-		{
+		{ // GCOVR_EXCL_START
 			array = unwrap_struct_path(array, resolved.child_path);
-		}
+		} // GCOVR_EXCL_STOP
 		return array;
 	}
 
@@ -2672,14 +2686,24 @@ extern "C"
 			{
 				return 1;
 			}
+			// Both branches below are defensive completeness, not reachable via any real Parquet
+			// footer + Arrow list data: list_width_candidate already required every row group in
+			// [lo, hi] to agree on nv/nr == candidate before this loop ever runs, and for a row
+			// group array_uniform_width finds genuinely uniform (list_uniform_width returned true
+			// above), num_values == num_rows * width necessarily -- so width cannot come out
+			// negative (that needs num_rows == 0, but list_width_candidate already skips a
+			// zero-row row group with `continue`, so it can never have contributed to a >1
+			// candidate) or different from candidate (candidate for this exact row group was
+			// already nv/nr == width). Kept for robustness against a future change to
+			// list_width_candidate's own invariants.
 			if (width < 0)
-			{
+			{ // GCOVR_EXCL_START
 				continue;
-			}
+			} // GCOVR_EXCL_STOP
 			if (width != candidate)
-			{
+			{ // GCOVR_EXCL_START
 				return 1;
-			}
+			} // GCOVR_EXCL_STOP
 		}
 		return candidate;
 	}
@@ -3371,13 +3395,20 @@ extern "C"
 			key.ints.resize(static_cast<size_t>(n));
 			for (int64_t i = 0; i < n; ++i) key.ints[static_cast<size_t>(i)] = arr->Value(i);
 		}
+		// DATE64 cannot actually occur in a Parquet file this library (or a genuine foreign writer)
+		// produces -- Arrow's writer always coerces a date64() array to date32() on write, and
+		// Parquet has no int64/DATE64 physical representation at all (see CLAUDE.md's temporal
+		// notes and the identical DATE64 exclusion a few hundred lines below in
+		// convert_date_values/temporal_type_token). Kept only for symmetry with the read-side
+		// DATE64 handling, which is itself equally unreachable.
 		else if (id == arrow::Type::DATE64)
-		{
+		{ // GCOVR_EXCL_START
 			auto arr = std::static_pointer_cast<arrow::Date64Array>(array);
 			key.kind = SortValueKind::Integer;
 			key.ints.resize(static_cast<size_t>(n));
 			for (int64_t i = 0; i < n; ++i) key.ints[static_cast<size_t>(i)] = arr->Value(i);
 		}
+		// GCOVR_EXCL_STOP
 		else if (id == arrow::Type::TIME64)
 		{
 			auto arr = std::static_pointer_cast<arrow::Time64Array>(array);
@@ -3775,16 +3806,23 @@ extern "C"
 		return reader_handle->num_row_groups;
 	}
 
-	// True (1) if `handle` was opened with an active row filter -- parquet_read_column_chunk and
-	// parquet_get_chunk_size(reader,...) are both disallowed on such a reader (see
-	// get_row_group_chunk_array's own comment for why filtering doesn't compose with a
-	// row-group-scoped read). Checked on the Fortran side (parquet_read.f90) so the resulting
-	// error stop is clean and names the file, rather than a C++-level report_fatal_error.
-	int parquet_reader_has_filter(void *handle)
+	// True (1) if `handle` was opened with an active row filter.
+	//
+	// Apparently unused: grepping every src/*.f90 file finds no Fortran call site (not even a
+	// local bind(C) interface in test/), and parquet_get_chunk_size (parquet_read.f90) only
+	// guards against an active SORT (check_reader_no_sort) -- a filtered reader can call
+	// parquet_get_chunk_size/parquet_read_column_chunk today, contradicting this function's own
+	// doc comment (kept below for now) that claims both are disallowed on a filtered reader. Most
+	// likely a leftover from a design this function's own guard used to enforce before row-group-
+	// scoped filtering existed; left in place (not deleted) since removing exported surface is a
+	// bigger decision than a coverage pass should make unilaterally -- flag for the maintainer to
+	// confirm before either deleting it or wiring it back into an actual guard.
+	int parquet_reader_has_filter(void *handle) // GCOVR_EXCL_START
 	{
 		auto reader_handle = as_reader_handle(handle);
 		return reader_handle->filter_mask ? 1 : 0;
 	}
+	// GCOVR_EXCL_STOP
 
 	// True (1) if `handle` has filter CLAUSES installed. Narrower than parquet_reader_has_filter
 	// above, which also reports a sample-only mask: parquet_reader_set_filter (parquet.f90)
@@ -5405,11 +5443,19 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		if (n <= 0) return 0;
+		// Defensive backstop, unreachable through the public API: both Fortran callers already
+		// refuse to reach here with a sort already active -- parquet_open_reader calls this only
+		// once, at open time, before any sort_perm could exist, and the post-open
+		// parquet_reader_set_sort (parquet.f90) checks parquet_reader_has_sort itself and aborts
+		// on the Fortran side before ever calling down to this function. Kept in case a future
+		// caller reaches this entry point some other way -- same class of unreachable guard as the
+		// "malformed expression" backstops in evaluate_nodes above.
 		if (reader_handle->sort_perm)
-		{
+		{ // GCOVR_EXCL_START
 			std::snprintf(err_out, static_cast<size_t>(err_cap), "a sort is already active on this reader");
 			return 1;
 		}
+		// GCOVR_EXCL_STOP
 
 		std::vector<SortKeyData> keys;
 		keys.reserve(static_cast<size_t>(n));
@@ -5895,10 +5941,20 @@ extern "C"
 	// OS, so a released column buffer keeps counting toward RSS while no longer counting here.
 	// That difference is what distinguishes "parquet_reader_release_column worked" from "the
 	// buffers are still alive".
-	int64_t parquet_get_arrow_bytes_allocated()
+	//
+	// Not called from anything fpm test runs, and deliberately so: it reads a PROCESS-GLOBAL
+	// counter, and test-drive runs a suite's tests concurrently, so every other test's Arrow
+	// allocations would land in the same number -- see the comment on
+	// scenario_filter_scoped_reads_no_whole_column in test/error_scenarios.f90, which explains why
+	// an earlier version of a check built on this counter had to move out of the ordinary test
+	// suite for exactly that reason. app/benchmark_table.f90 (a manual, never-fpm-test tool -- see
+	// CLAUDE.md's "Manual (never-fpm test) large-scale/benchmark tools") is this function's only
+	// caller, run single-process by a human, where the counter is meaningful.
+	int64_t parquet_get_arrow_bytes_allocated() // GCOVR_EXCL_START
 	{
 		return arrow::default_memory_pool()->bytes_allocated();
 	}
+	// GCOVR_EXCL_STOP
 
 	// Drops column `name`'s decoded Arrow array from column_cache, freeing its buffers, so a
 	// caller that has already copied the values Fortran-side does not keep a second full copy

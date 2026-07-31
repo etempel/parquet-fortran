@@ -385,7 +385,7 @@ contains
         type(error_type), allocatable, intent(out) :: error
         type(parquet_reader) :: reader
         integer(int64) :: nrows, nelem
-        integer :: col_size, strlen_max
+        integer :: col_size, strlen_max, list_w
         logical :: exists
         character(len=*), parameter :: in_file = "test_run/test_parquet.parquet"
 
@@ -459,6 +459,24 @@ contains
         if (allocated(error)) then
             call parquet_close_reader(reader)
             call test_failed(error, "unexpected total element count for arr")
+            return
+        end if
+
+        ! parquet_measure_list_width's own non-data-needing fallback (candidate AND proven), for a
+        ! genuine FIXED_SIZE_LIST vector column -- distinct from every other column above, which
+        ! only ever went through parquet_get_col_size's own separate, direct FIXED_SIZE_LIST branch.
+        call parquet_measure_list_width(reader, "arr", 0, 0, .false., list_w)
+        call check(error, list_w == 5, "the unproven candidate for a FIXED_SIZE_LIST column is its own list_size")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "unexpected candidate list width for FIXED_SIZE_LIST column arr")
+            return
+        end if
+        call parquet_measure_list_width(reader, "arr", 0, 0, .true., list_w)
+        call check(error, list_w == 5, "the proven width for a FIXED_SIZE_LIST column is its own list_size")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            call test_failed(error, "unexpected proven list width for FIXED_SIZE_LIST column arr")
             return
         end if
 
@@ -3254,6 +3272,41 @@ contains
         call parquet_measure_list_width(reader, "late", 4, 4, .true., w)
         call check(error, w == 2, "row group 4 of late is uniformly width 2")
         if (allocated(error)) return
+        call parquet_close_reader(reader)
+        !
+        ! --- with a filter active, list_width_verified takes its whole-column (masked) branch
+        !     instead of the row-group scan, since a mask no longer aligns with row-group boundaries.
+        !     "scalar >= 0" keeps every row, so this exercises the branch itself, not its filtering. ---
+        block
+            type(parquet_filter) :: filt
+            call filt%add("scalar >= 0")
+            call parquet_open_reader(reader, f, filter=filt)
+            call parquet_measure_list_width(reader, "uniform", 0, 0, .true., w)
+            call check(error, w == 3, &
+                "the masked whole-column proof must confirm 3 for a genuinely uniform column")
+            if (allocated(error)) return
+            call parquet_measure_list_width(reader, "avg_ok", 0, 0, .true., w)
+            call check(error, w == 1, &
+                "the masked whole-column proof must reject avg_ok's screen candidate of 2, same as " // &
+                "the unmasked row-group scan does")
+            if (allocated(error)) return
+            call parquet_close_reader(reader)
+        end block
+        !
+        ! --- a filter matching ZERO rows drives the masked whole-column array itself to length 0,
+        !     which list_uniform_width reports as width -1 ("no information") rather than a
+        !     mismatch -- list_width_verified must still settle on 1, not treat -1 as a real width ---
+        block
+            type(parquet_filter) :: filt2
+            call filt2%add("scalar < 0")
+            call parquet_open_reader(reader, f, filter=filt2)
+            call parquet_measure_list_width(reader, "uniform", 0, 0, .true., w)
+            call check(error, w == 1, &
+                "a filter matching zero rows must settle a masked list-width proof at 1, not -1")
+            if (allocated(error)) return
+            call parquet_close_reader(reader)
+        end block
+        call parquet_open_reader(reader, f)
         !
         ! --- and a non-list column is answered from the schema either way ---
         call check(error, .not. parquet_column_width_needs_data(reader, "scalar"), &

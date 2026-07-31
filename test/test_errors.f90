@@ -315,6 +315,8 @@ contains
                 test_filter_rule_too_long_aborts), &
             new_unittest("filter: non-numeric value against a numeric column aborts", &
                 test_filter_bad_numeric_value_aborts), &
+            new_unittest("filter: non-numeric value against a numeric column aborts under a scoped filter", &
+                test_filter_bad_numeric_value_scoped_aborts), &
             new_unittest("filter: int32 value out of range aborts", &
                 test_filter_int32_value_out_of_range_aborts), &
             new_unittest("filter: non-numeric value against a float column aborts", &
@@ -335,6 +337,8 @@ contains
                 test_filter_is_nan_missing_combinator_aborts), &
             new_unittest("filter: filtering an unsupported (binary) column type aborts", &
                 test_filter_unsupported_column_type_aborts), &
+            new_unittest("sort: sorting by an unsupported (binary) column type aborts", &
+                test_sort_unsupported_column_type_aborts), &
             new_unittest("filter: unquoted value against a temporal column aborts", &
                 test_filter_temporal_value_not_quoted_aborts), &
             new_unittest("filter: unbalanced '(' in an expression aborts", &
@@ -2820,6 +2824,18 @@ contains
             required_stderr="filter rule: value 'abc' is not a valid integer for column 'id_with_null'")
     end subroutine test_filter_bad_numeric_value_aborts
 
+    !> See scenario_filter_bad_numeric_value_scoped in error_scenarios.f90 for why this exists
+    !> (the same bad-value abort, caught by the row-group-SCOPED filter evaluation path instead of
+    !> the unscoped, whole-file one every other filter-error scenario exercises).
+    subroutine test_filter_bad_numeric_value_scoped_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_bad_numeric_value_scoped", expect_abort=.true., &
+            failure_message="a non-numeric filter value against a numeric column was expected to abort " // &
+            "under a row-group-scoped filter", &
+            required_stderr="filter rule: value 'abc' is not a valid integer for column 'id_with_null'")
+    end subroutine test_filter_bad_numeric_value_scoped_aborts
+
     subroutine test_filter_int32_value_out_of_range_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
@@ -2915,6 +2931,16 @@ contains
             failure_message="filtering a binary column was expected to abort", &
             required_stderr="has a type that filtering does not support")
     end subroutine test_filter_unsupported_column_type_aborts
+
+    !> sort_bind_arrow_key's own `return false` fallback -- sorting by a column type (binary) it
+    !> doesn't support at all. See scenario_sort_unsupported_column_type in error_scenarios.f90.
+    subroutine test_sort_unsupported_column_type_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sort_unsupported_column_type", expect_abort=.true., &
+            failure_message="sorting by a binary column was expected to abort", &
+            required_stderr="has an unsupported column type")
+    end subroutine test_sort_unsupported_column_type_aborts
 
     !> A temporal column is filterable, but only against a double-quoted ISO-8601 literal -- a
     !> bare number would mean different things for a date and a timestamp[us] column.

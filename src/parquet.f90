@@ -18,7 +18,7 @@ module parquet
     implicit none
     private
     !
-    character(len=*),parameter:: cversion = "v1.1.1 (2026-07-30)" !! version info
+    character(len=*),parameter:: cversion = "v1.2.0 (2026-07-31)" !! version info
 #ifndef RELEASE_VERSION
 #  define RELEASE_VERSION 0.1
 #endif

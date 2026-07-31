@@ -354,6 +354,8 @@ fpm test
 
 `.gitlab-ci.yml` runs the full `fpm test` suite (with OpenMP and coverage) on a GitLab Docker-executor runner. It builds the whole toolchain from scratch in the container's `before_script`, so it also serves as an executable, always-current recipe for building this project on a clean Debian/Ubuntu system.
 
+A separate `lint` stage runs first and needs only `python3` — no Arrow/Parquet/fpm/gfortran/git-lfs setup — so it fails fast on the cheap checks: `tools/check_bindc_boundary.py`, `tools/check_doc_anchors.py`, and `--check` for all three of this project's committed-output generators (`tools/generate_parquet_columns.py`, `tools/generate_parquet_tables.py`, `tools/generate_parquet_maml.sh base`) — see [Some `src/*.f90` files are generated](CLAUDE.md#some-srcf90-files-are-generated--edit-the-generator-never-the-output) for what each one regenerates and why a drifted generator is worth catching in CI rather than only at the next regeneration.
+
 A few choices in that file are load-bearing — each one cost a debugging round when it was wrong, so preserve them if you touch it:
 
 - **Base image `ubuntu:24.04`** (pinned with `image:`, since the runner's own default image is older). 24.04 is the oldest Ubuntu that satisfies *every* toolchain requirement at once: gfortran 13 (gfortran ≤ 11 miscompiles the optional allocatable-character argument in `schema%add_col_qc` — see [README's Prerequisites](README.md#prerequisites)), a g++ new enough for C++20 / `std::span`, `pipx` in the repos (used to install `fpm`), and current Arrow apt packages. Its default `gcov` also matches its default compiler, so `gcovr` needs no `--gcov-executable` override.

@@ -62,8 +62,8 @@ import pyarrow.parquet as pq
 # script's defaults without touching the argparse wiring in main().
 # ---------------------------------------------------------------------------
 OUTPUT_SUFFIX_DEFAULT = ".parquet"    # output path, when omitted: input path with this suffix
-COMPRESSION_DEFAULT = "snappy"
-COMPRESSION_LEVEL_DEFAULT = None      # None = codec's own default level
+COMPRESSION_DEFAULT = "zstd"          # matches this library's own writer default (see writing.md)
+COMPRESSION_LEVEL_DEFAULT = 3         # ditto -- Arrow's own zstd default is level 1, not 3
 HDU_DEFAULT = None                    # None = first binary table HDU found in the file
 OVERWRITE_DEFAULT = False             # False = refuse and exit nonzero if output already exists
 
@@ -372,6 +372,7 @@ def convert(input_path, output_path, compression, compression_level, hdu_arg):
         column_meta = {}
         column_records = []
         not_converted = []
+        float_columns = []
 
         for col_index, col in enumerate(table_hdu.columns, start=1):
             try:
@@ -383,6 +384,8 @@ def convert(input_path, output_path, compression, compression_level, hdu_arg):
             for out_name, arr, meta in converted:
                 fields.append(pa.field(out_name, arr.type))
                 arrays.append(arr)
+                if meta["data_type"] in ("float32", "float64"):
+                    float_columns.append(out_name)
                 for meta_key, meta_val in meta.items():
                     column_meta[f"column.{out_name}.{meta_key}"] = str(meta_val)
                 column_records.append({
@@ -399,10 +402,18 @@ def convert(input_path, output_path, compression, compression_level, hdu_arg):
         schema = pa.schema(fields, metadata={**table_meta, **column_meta})
         table = pa.Table.from_arrays(arrays, schema=schema)
 
+        # Mirrors apply_float_byte_stream_split() in src/parquet_wrapper.cpp: every float32/
+        # float64 column gets BYTE_STREAM_SPLIT with dictionary encoding disabled (dictionary
+        # encoding is a no-op unless disabled for that same column -- see CLAUDE.md's "Automatic
+        # BYTE_STREAM_SPLIT for float columns in the writer"); every other column keeps pyarrow's
+        # normal defaults (dictionary enabled, no BSS).
+        dictionary_columns = [f.name for f in fields if f.name not in float_columns]
         pq.write_table(
             table, output_path,
             compression=COMPRESSION_MAP[compression],
             compression_level=compression_level,
+            use_dictionary=dictionary_columns,
+            use_byte_stream_split=float_columns,
         )
 
         print(f"convert_fits_to_parquet.py: wrote {output_path} "
@@ -419,7 +430,8 @@ def main():
                          choices=sorted(COMPRESSION_MAP),
                          help=f"Parquet compression codec (default: {COMPRESSION_DEFAULT})")
     parser.add_argument("--compression-level", type=int, default=COMPRESSION_LEVEL_DEFAULT,
-                         help="compression level, if the codec supports one (default: codec's own default)")
+                         help=f"compression level, if the codec supports one "
+                              f"(default: {COMPRESSION_LEVEL_DEFAULT})")
     parser.add_argument("--hdu", default=HDU_DEFAULT,
                          help="binary table HDU to convert: an integer index or an EXTNAME "
                               "(default: the first binary table HDU in the file)")

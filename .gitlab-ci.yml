@@ -69,7 +69,11 @@ stages:
 # one-off manual review (see CLAUDE.md's "bind(C)" boundary notes). tools/check_doc_anchors.py
 # validates every #anchor link in this repository's *.md files against the anchors GitHub would
 # actually generate -- previously a manual-only step (see CONTRIBUTING.md), added here too since
-# it is equally free to run on every push.
+# it is equally free to run on every push. The three generate_parquet_*.py/.sh --check calls catch
+# a committed generated file (src/parquet_columns*.f90, src/parquet_tables*.f90,
+# src/parquet_maml_base.f90) drifting from its own generator -- e.g. a hand-edit to the generated
+# file that never made it back into the generator's template (see CLAUDE.md's "Some src/*.f90
+# files are generated" for why this class of bug is easy to introduce silently).
 lint:
   stage: lint
   before_script:
@@ -78,6 +82,9 @@ lint:
   script:
     - python3 tools/check_bindc_boundary.py
     - python3 tools/check_doc_anchors.py
+    - python3 tools/generate_parquet_columns.py --check
+    - python3 tools/generate_parquet_tables.py --check
+    - bash tools/generate_parquet_maml.sh base --check
 
 test:
   # Selects the Docker-executor runner; the image: above overrides its default

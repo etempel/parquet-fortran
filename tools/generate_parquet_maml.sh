@@ -4,12 +4,16 @@ set -euo pipefail
 work_dir="$(pwd)"
 mode=""
 maml_dir="schemas"
+check=""
 
 # --dir=NAME / --dir NAME selects the directory (relative to the project
 # root) to scan for .maml files; may appear before or after the positional
 # mode argument (empty, or "base"). Defaults to "schemas" -- this project's
 # own convention, and the one downstream projects following "Embedding your
 # own MAML schemas" are expected to match unless they have their own.
+# --check compares the regenerated content with the committed file instead of
+# writing it, exiting nonzero on drift -- mirrors generate_parquet_columns.py's
+# own --check. For this project's own base MAML, run as: base --check
 while [ $# -gt 0 ]; do
     case "$1" in
         --dir=*)
@@ -20,6 +24,10 @@ while [ $# -gt 0 ]; do
             maml_dir="${2:?--dir requires a value}"
             shift 2
             ;;
+        --check)
+            check="1"
+            shift
+            ;;
         *)
             mode="$1"
             shift
@@ -27,7 +35,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-python3 - "$work_dir" "$mode" "$maml_dir" <<'PY'
+python3 - "$work_dir" "$mode" "$maml_dir" "$check" <<'PY'
 from pathlib import Path
 import re
 import sys
@@ -35,6 +43,7 @@ import sys
 work_dir = Path(sys.argv[1]).resolve()
 mode = sys.argv[2]
 maml_dir_name = sys.argv[3]
+check = bool(sys.argv[4])
 is_base = (mode == 'base')
 
 maml_source_dir = work_dir / maml_dir_name
@@ -133,7 +142,10 @@ if is_base:
     lines.append('        character(len=:), allocatable :: unit      !! The unit of measurement for the field.')
     lines.append('        character(len=:), allocatable :: info      !! A short description of the field.')
     lines.append('        character(len=:), allocatable :: ucd       !! Unified Content Descriptor for IVOA (can have many).')
-    lines.append('        character(len=:), allocatable :: data_type !! The data type of the field [required].')
+    lines.append('        character(len=:), allocatable :: data_type !! The data type of the field [required]; base token')
+    lines.append('        !! only for a temporal column (unit/utc are in time_unit/is_utc).')
+    lines.append('        integer :: time_unit = 0 !! time/timestamp stored unit (a parquet_unit_* selector; 0 if not temporal).')
+    lines.append('        logical :: is_utc = .false. !! timestamp UTC-adjusted flag.')
     lines.append('        integer :: array_size = 1 !! Maximum length of character strings.')
     lines.append('        integer :: col_size = 1   !! The number of elements in the vector column.')
     lines.append('    end type parquet_maml_missing_column')
@@ -327,6 +339,16 @@ lines.append('')
 lines.append(f'end module {module_name} ! GCOVR_EXCL_LINE')
 lines.append('')
 
-out_path.write_text('\n'.join(lines), encoding='ascii')
-print(f'Generated {out_path} from {len(maml_files)} MAML files (module {module_name})')
+text = '\n'.join(lines)
+
+if check:
+    current = out_path.read_text(encoding='ascii') if out_path.exists() else ''
+    if current != text:
+        print(f'generate_parquet_maml.sh: {out_path.name} is out of date', file=sys.stderr)
+        print('Re-run tools/generate_parquet_maml.sh and commit the result.', file=sys.stderr)
+        sys.exit(1)
+    print(f'generate_parquet_maml.sh: {out_path.name} is up to date (module {module_name})')
+else:
+    out_path.write_text(text, encoding='ascii')
+    print(f'Generated {out_path} from {len(maml_files)} MAML files (module {module_name})')
 PY

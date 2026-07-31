@@ -3,3 +3,5 @@ ford-doc/
 docs.tar.gz
 feature_*.md
 __pycache__
+qemu_*.core
+core

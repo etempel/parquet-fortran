@@ -62,6 +62,12 @@ module parquet
     integer, parameter :: sortkey_max_key_len = 320
     integer, parameter :: sortkey_max_keys = 16
 
+    !> The cap on one parquet_read_qc entry ("col, min, max, miss"), in the same spirit as the
+    !> filter and sort caps above. Generous relative to the grammar -- a column name plus three
+    !> short bounds -- since the point is to reject accidentally-huge input, not to bound a
+    !> reasonable declaration.
+    integer, parameter :: read_qc_max_entry_len = 1024
+
     !> Canonical single data-type tokens parquet_column_exists/parquet_get_column_type recognize:
     !> valid_maml_data_types plus the three temporal base tokens ("date"/"time"/"timestamp").
     !> parquet_column_exists additionally accepts the group aliases "int" (int32/int64), "float"
@@ -506,6 +512,36 @@ module parquet
         !> Renames the column every key orders by, in place: `from(k)` becomes `to(k)`.
         procedure :: remap_column_names => parquet_sortkey_remap_column_names
     end type parquet_sortkey
+
+    !> Read-time quality control declared in CODE rather than in a MAML file: one column per %add
+    !> call, in exactly the compact "col, min, max, miss" string parquet_schema%add_col_qc already
+    !> takes, so there is one read-time-QC grammar in this library rather than two. See
+    !> "Declaring qc in code" in doc/pages/quality-control.md for the field syntax -- the
+    !> operator prefixes (>, >=, <, <=) and the Null/NA/empty miss: convention are inherited from
+    !> %add_col_qc verbatim.
+    !>
+    !>     type(parquet_read_qc) :: qc
+    !>     call qc%add("mass, >0, <=1000, Null")
+    !>     call qc%add("flag, , , NA")
+    !>
+    !> Why this exists alongside %add_col_qc, which can already declare the same thing: %add_col_qc
+    !> emits MAML text into a schema immediately, whereas a caller composing a read may need to
+    !> hold its declarations UNRESOLVED -- so that the column names can be translated, and the
+    !> declarations weighed against a MAML's own, only once the file is known. parquet_table is the
+    !> motivating case; parquet_compose_read_qc is where the two sources are merged.
+    !>
+    !> Entries are unvalidated here -- exactly like parquet_filter%add and parquet_sortkey%add,
+    !> every check happens when the entry is actually composed into a schema.
+    type parquet_read_qc
+        !> Raw, unvalidated entry text, one per %add call. Deferred-length: every entry shares the
+        !! length of the longest added so far, the same way parquet_filter%rules does.
+        character(len=:), allocatable :: entries(:)
+        integer :: n = 0 !! Number of entries actually in use.
+    contains
+        procedure :: add => parquet_read_qc_add !! Appends one "col, min, max, miss" declaration.
+        !> Renames the column each entry declares, in place: `from(k)` becomes `to(k)`.
+        procedure :: remap_column_names => parquet_read_qc_remap_column_names
+    end type parquet_read_qc
 
     !> Internal plumbing only (not part of the public API): one column's
     !> read-time QC declaration, parsed from a qc-maml's fields: entries by
@@ -1051,6 +1087,8 @@ module parquet
     public :: parquet_reader
     public :: parquet_filter
     public :: parquet_sortkey
+    public :: parquet_read_qc
+    public :: parquet_compose_read_qc
     public :: parquet_reader_set_sort
     public :: parquet_column_info
     public :: parquet_column_type
@@ -2629,6 +2667,35 @@ module parquet
             character(len=*), intent(in) :: from(:) !! names to replace; same size as `to`.
             character(len=*), intent(in) :: to(:) !! replacement for each entry of `from`.
         end subroutine parquet_sortkey_remap_column_names
+        !> Rewrites the column each qc entry declares, replacing name `from(k)` with `to(k)`. Backs
+        !> parquet_read_qc%remap_column_names -- see that binding for what it is for. Only the
+        !> entry's first (column-name) field is touched; its bounds are carried across verbatim.
+        module subroutine parquet_read_qc_remap_column_names(this, from, to)
+            class(parquet_read_qc), intent(inout) :: this !! qc declarations rewritten in place.
+            character(len=*), intent(in) :: from(:) !! names to replace; same size as `to`.
+            character(len=*), intent(in) :: to(:) !! replacement for each entry of `from`.
+        end subroutine parquet_read_qc_remap_column_names
+        !> Merges a MAML-declared and a code-declared read-time QC into the single schema
+        !> parquet_open_reader(..., schema=) takes, applying the per-column override rule: for any
+        !> column whose MAML `fields:` entry carries a `qc:` key AT ALL -- even an empty one, which
+        !> already means "no Nulls here" -- the MAML's declaration wins in full and the code's entry
+        !> for that column is dropped entirely, rather than merged bound by bound. A column the MAML
+        !> says nothing about (or names without a `qc:` key) takes the code's entry instead.
+        !>
+        !> `composed` carries ONLY qc-bearing field entries: a MAML entry with no `qc:` key is not
+        !> copied across, because nothing but qc is read from this schema (parquet_open_reader
+        !> passes it to parquet_apply_qc and nowhere else). That is also what keeps the two sources
+        !> from colliding over a column the MAML merely names.
+        !>
+        !> `ncolumns` is how many columns `composed` ends up declaring qc for. Pass `composed` to
+        !> parquet_open_reader only when it is nonzero -- a schema with no rules still switches qc
+        !> on C++-side for no benefit.
+        module subroutine parquet_compose_read_qc(schema, qc, composed, ncolumns)
+            type(parquet_schema), intent(in), optional :: schema !! the MAML's own schema, if there is one.
+            type(parquet_read_qc), intent(in), optional :: qc !! code-declared qc, already in FILE column names.
+            type(parquet_schema), intent(out) :: composed !! the merged qc schema.
+            integer, intent(out) :: ncolumns !! columns `composed` declares qc for; 0 means "pass no schema".
+        end subroutine parquet_compose_read_qc
     end interface
 
     ! ---- Read column specifics (by type x access mode) ----
@@ -3702,5 +3769,40 @@ contains
         call move_alloc(tmp_nf, this%nulls_first)
         this%n = this%n + 1
     end subroutine parquet_sortkey_add
+
+    !> Appends one read-time QC declaration; see parquet_read_qc's own doc
+    !> comment for the "col, min, max, miss" grammar, which is
+    !> parquet_schema%add_col_qc's verbatim. Unvalidated here -- every check
+    !> happens in parquet_compose_read_qc, where the entry becomes a real
+    !> schema. The stored text is deferred-length, exactly as
+    !> parquet_filter%add's is.
+    subroutine parquet_read_qc_add(this, entry)
+        class(parquet_read_qc), intent(inout) :: this !! qc declarations gaining one entry.
+        character(len=*), intent(in) :: entry !! compact "col, min, max, miss" string.
+        character(len=:), allocatable :: tmp(:)
+        character(len=32) :: cap_str
+
+        if (len(entry) > read_qc_max_entry_len) then
+            write(cap_str, '(i0)') read_qc_max_entry_len
+            ! Capped preview, never the whole entry -- see parquet_filter%add's own
+            ! comment for the ifx ERROR STOP message-length hazard this avoids.
+            error stop "parquet_read_qc%add: entry exceeds the maximum supported length (" // &
+                trim(cap_str) // " characters): " // entry(1:100) // "..."
+        end if
+
+        if (.not. allocated(this%entries)) then
+            allocate(character(len=len(entry)) :: tmp(1))
+            tmp(1) = entry
+            call move_alloc(tmp, this%entries)
+            this%n = 1
+            return
+        end if
+
+        allocate(character(len=max(len(this%entries), len(entry))) :: tmp(this%n + 1))
+        tmp(1:this%n) = this%entries(1:this%n)
+        tmp(this%n + 1) = entry
+        call move_alloc(tmp, this%entries)
+        this%n = this%n + 1
+    end subroutine parquet_read_qc_add
 
 end module

@@ -186,11 +186,11 @@ Hitting a build or link error? See [Troubleshooting](doc/pages/troubleshooting.m
 
 A quick index of the public `use parquet` API. For the full per-procedure reference, generate the API docs locally with FORD (see [Contributing](#contributing)); for usage, see the linked how-to sections in the [user guide](doc/pages/index.md).
 
-**Types:** `parquet_writer`, `parquet_reader`, `parquet_schema`, `parquet_filter`, `parquet_sortkey`, `parquet_column_info`, `parquet_column_type`, `parquet_table_metadata`, `parquet_maml_file`, `parquet_string_column`, `parquet_string`, `parquet_date`, `parquet_time`, `parquet_timestamp`, `parquet_column`
+**Types:** `parquet_writer`, `parquet_reader`, `parquet_schema`, `parquet_filter`, `parquet_sortkey`, `parquet_read_qc`, `parquet_column_info`, `parquet_column_type`, `parquet_table_metadata`, `parquet_maml_file`, `parquet_string_column`, `parquet_string`, `parquet_date`, `parquet_time`, `parquet_timestamp`, `parquet_column`
 
 **Utility:** `parquet_get_version` (bare call reports this library's own version; `mode="internal"`/`"arrow"`/`"parquet"` instead report the linked Arrow/Parquet C++ library's own version — useful to include when filing a bug report), `parquet_set_max_threads`
 
-**MAML and metadata:** `parquet_parse_maml`, `parquet_load_maml_file`, `parquet_load_qc_maml_file`, `parquet_validate_maml`, `parquet_validate_user_maml`, `parquet_size_auto` — plus the `parquet_schema` type-bound builders `schema%init` / `schema%is_init` / `schema%is_parsed` / `schema%clear`, `schema%add_field`, `schema%add_field_from`, `schema%add_metadata` / `schema%clear_metadata`, `schema%add_col_qc` / `schema%set_col_qc`, `schema%set_column_available` / `set_column_unavailable`, `schema%set_col_size` / `set_array_size`, `schema%get_column_index` / `is_column_set` / `get_num_fields` / `get_field_name` / `get_field`, `schema%print_schema_info`
+**MAML and metadata:** `parquet_parse_maml`, `parquet_load_maml_file`, `parquet_load_qc_maml_file`, `parquet_validate_maml`, `parquet_validate_user_maml`, `parquet_size_auto`, `parquet_read_qc` (`qc%add`, `qc%remap_column_names`), `parquet_compose_read_qc` — plus the `parquet_schema` type-bound builders `schema%init` / `schema%is_init` / `schema%is_parsed` / `schema%clear`, `schema%add_field`, `schema%add_field_from`, `schema%add_metadata` / `schema%clear_metadata`, `schema%add_col_qc` / `schema%set_col_qc`, `schema%set_column_available` / `set_column_unavailable`, `schema%set_col_size` / `set_array_size`, `schema%get_column_index` / `is_column_set` / `get_num_fields` / `get_field_name` / `get_field`, `schema%print_schema_info`
 
 **Writer:** `parquet_open_writer`, `parquet_write_column`, `parquet_close_writer`, `parquet_get_chunk_size`
 

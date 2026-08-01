@@ -315,6 +315,12 @@ program error_scenarios
         call scenario_sortkey_remap_size_mismatch()
     case ("sortkey_remap_name_too_long")
         call scenario_sortkey_remap_name_too_long()
+    case ("read_qc_entry_too_long")
+        call scenario_read_qc_entry_too_long()
+    case ("read_qc_remap_size_mismatch")
+        call scenario_read_qc_remap_size_mismatch()
+    case ("read_qc_remap_entry_too_long")
+        call scenario_read_qc_remap_entry_too_long()
     case ("filter_bad_numeric_value")
         call scenario_filter_bad_numeric_value()
     case ("filter_bad_numeric_value_scoped")
@@ -4686,6 +4692,34 @@ contains
         call srt%remap_column_names(["v"], [repeat("x", 65)])
         print '(a)', "unexpectedly accepted a sortkey remap to an over-long column name"
     end subroutine scenario_sortkey_remap_name_too_long
+
+    !> The parquet_read_qc counterpart of scenario_filter_rule_too_long: a sanity bound against
+    !> accidentally-huge input, not a design limit on how much qc one column can declare.
+    subroutine scenario_read_qc_entry_too_long()
+        type(parquet_read_qc) :: qc
+
+        call qc%add(repeat("a", 1025))
+        print '(a)', "unexpectedly accepted a read_qc entry longer than the supported maximum"
+    end subroutine scenario_read_qc_entry_too_long
+
+    !> from and to are parallel arrays; a size mismatch has no sensible reading.
+    subroutine scenario_read_qc_remap_size_mismatch()
+        type(parquet_read_qc) :: qc
+
+        call qc%add("mass, >0")
+        call qc%remap_column_names(["mass", "flag"], ["m"])
+        print '(a)', "unexpectedly accepted a read_qc remap with mismatched from/to sizes"
+    end subroutine scenario_read_qc_remap_size_mismatch
+
+    !> An entry that fits read_qc_max_entry_len in its original name but not once renamed. The
+    !> message must name the remapping: the caller's own entry was within the limit.
+    subroutine scenario_read_qc_remap_entry_too_long()
+        type(parquet_read_qc) :: qc
+
+        call qc%add("a," // repeat("0", 1020))
+        call qc%remap_column_names(["a"], [repeat("y", 10)])
+        print '(a)', "unexpectedly accepted a read_qc entry that grew past the cap when remapped"
+    end subroutine scenario_read_qc_remap_entry_too_long
 
     !> A rule whose shape is fine ("<column> <op> <value>") but whose value
     !> isn't a valid number for a numeric column reports a clean error stop

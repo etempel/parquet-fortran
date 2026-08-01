@@ -95,6 +95,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   independent table columns. See
   [the guide](doc/pages/table.md) for the current limitations, the detach rule and the OpenMP
   first-touch rule.
+- Added `parquet_read_qc` and `parquet_compose_read_qc`: read-time quality control declared in
+  code and held **unresolved** until it can be composed against whatever a file's own qc-MAML
+  declares. `qc%add("mass, >0, <=1000, Null")` takes the same compact string
+  `parquet_schema%add_col_qc` already documents, so there is one read-time-QC grammar rather than
+  two, and `qc%remap_column_names(from, to)` renames the column each entry declares (only the
+  entry's first field, so a bound spelling a column name is never rewritten).
+  `parquet_compose_read_qc` merges the two sources into the single schema
+  `parquet_open_reader(..., schema=)` takes, per column rather than per bound: a column whose MAML
+  `fields:` entry carries a `qc:` key at all — including an empty one, which already means "no
+  Nulls here" — keeps the MAML's declaration in full and drops the code's entirely, while a column
+  the MAML never mentions (or merely names, without a `qc:` key) takes the code's. See
+  [Deferring qc declarations](doc/pages/quality-control.md#deferring-qc-declarations-with-parquet_read_qc).
 - Added `parquet_columns` (`parquet_column`): type-erased, whole-column value storage with sparse
   null tracking, covering 18 scalar/vector kinds plus reserved slots for the future
   list/map/struct column types, with the full value and structural instruction set — including

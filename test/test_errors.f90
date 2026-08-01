@@ -323,6 +323,12 @@ contains
                 test_sortkey_remap_size_mismatch_aborts), &
             new_unittest("sortkey: remap_column_names to an over-long column name aborts", &
                 test_sortkey_remap_name_too_long_aborts), &
+            new_unittest("read_qc: an entry longer than the supported maximum aborts", &
+                test_read_qc_entry_too_long_aborts), &
+            new_unittest("read_qc: remap_column_names with mismatched from/to sizes aborts", &
+                test_read_qc_remap_size_mismatch_aborts), &
+            new_unittest("read_qc: an entry that grows past the cap when remapped aborts", &
+                test_read_qc_remap_entry_too_long_aborts), &
             new_unittest("filter: non-numeric value against a numeric column aborts", &
                 test_filter_bad_numeric_value_aborts), &
             new_unittest("filter: non-numeric value against a numeric column aborts under a scoped filter", &
@@ -2882,6 +2888,31 @@ contains
             failure_message="a sortkey remap to an over-long column name was expected to abort", &
             required_stderr="parquet_sortkey%remap_column_names: replacement column name")
     end subroutine test_sortkey_remap_name_too_long_aborts
+
+    subroutine test_read_qc_entry_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "read_qc_entry_too_long", expect_abort=.true., &
+            failure_message="adding a read_qc entry longer than the supported maximum was expected to abort", &
+            required_stderr="parquet_read_qc%add: entry exceeds the maximum supported length")
+    end subroutine test_read_qc_entry_too_long_aborts
+
+    subroutine test_read_qc_remap_size_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "read_qc_remap_size_mismatch", expect_abort=.true., &
+            failure_message="a read_qc remap with mismatched from/to sizes was expected to abort", &
+            required_stderr="parquet_read_qc%remap_column_names: from and to must have the same size")
+    end subroutine test_read_qc_remap_size_mismatch_aborts
+
+    !> As on the filter side, the message must name the REMAPPING, not just the length cap.
+    subroutine test_read_qc_remap_entry_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "read_qc_remap_entry_too_long", expect_abort=.true., &
+            failure_message="a read_qc entry that grew past the cap when remapped was expected to abort", &
+            required_stderr="supported length after remapping its column name")
+    end subroutine test_read_qc_remap_entry_too_long_aborts
 
     !> A non-numeric value against a numeric filter column (rule shape is
     !> fine, the value itself isn't) aborts with a message naming the value

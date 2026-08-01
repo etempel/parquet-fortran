@@ -164,7 +164,19 @@ contains
             new_unittest("set_array_size on an already-resolved column aborts without force=.true.", &
                 test_set_array_size_already_resolved_no_force_aborts), &
             new_unittest("set_array_size(force=.true.) overrides an already-resolved column", &
-                test_set_array_size_force_overrides) &
+                test_set_array_size_force_overrides), &
+            new_unittest("parquet_read_qc: %add stores entries verbatim and %remap renames the column", &
+                test_read_qc_add_and_remap), &
+            new_unittest("compose_read_qc: the MAML wins in full for any column with a qc: block", &
+                test_compose_read_qc_maml_wins), &
+            new_unittest("compose_read_qc: an EMPTY qc: block still wins (Nulls stay banned)", &
+                test_compose_read_qc_empty_qc_block_wins), &
+            new_unittest("compose_read_qc: a column the MAML only names takes the code's rule", &
+                test_compose_read_qc_named_without_qc), &
+            new_unittest("compose_read_qc: either source alone, and neither", &
+                test_compose_read_qc_single_and_empty_sources), &
+            new_unittest("compose_read_qc: the composed schema enforces qc on a real read", &
+                test_compose_read_qc_enforced_on_read) &
             ]
     end subroutine collect_tests_parquet_maml
 
@@ -1796,5 +1808,192 @@ contains
         call check(error, schema%cinfo%col(1)%array_size == 12, &
             "set_array_size(force=.true.) did not override the already-resolved array_size")
     end subroutine test_set_array_size_force_overrides
+    !
+    ! ------------------------------------------------------------------------------
+    ! parquet_read_qc and parquet_compose_read_qc
+    !
+    ! The merge rule under test is per-COLUMN, not per-bound: a column whose MAML
+    ! fields: entry carries a qc: key at all wins in full, and the code's entry for
+    ! it is dropped entirely rather than filled in around. Tests assert on the
+    ! composed schema's own qc-maml text, which is what parquet_open_reader parses.
+    ! ------------------------------------------------------------------------------
+    !
+    !> Whether the composed schema's qc-maml declares `text` on some line -- the usable way to
+    !> state "the merge produced this rule", since the composed object is raw MAML source.
+    logical function composed_has_line(schema, text) result(res)
+        type(parquet_schema), intent(in) :: schema !! composed schema to inspect.
+        character(len=*), intent(in) :: text       !! trimmed line to look for.
+        integer :: i
+        res = .false.
+        if (.not. allocated(schema%maml%lines)) return
+        do i = 1, size(schema%maml%lines)
+            if (trim(adjustl(schema%maml%lines(i))) == text) then
+                res = .true.
+                return
+            end if
+        end do
+    end function composed_has_line
+    !
+    !> %add keeps the entry byte for byte (it validates nothing, like its filter/sort siblings),
+    !> and %remap_column_names rewrites only the column field, leaving the bounds untouched --
+    !> including a bound whose text happens to spell the name being renamed.
+    subroutine test_read_qc_add_and_remap(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_read_qc) :: qc
+
+        call qc%add("mass, >0, <=1000, Null")
+        call qc%add("flag, , , NA")
+        call qc%add("other, >mass")
+        call check(error, trim(qc%entries(1)) == "mass, >0, <=1000, Null" .and. qc%n == 3, &
+            "parquet_read_qc%add did not store the entry verbatim")
+        if (allocated(error)) return
+
+        call qc%remap_column_names(["mass"], ["m_200c"])
+        call check(error, trim(qc%entries(1)) == "m_200c, >0, <=1000, Null", &
+            "remap_column_names did not rename the qc entry's column")
+        if (allocated(error)) return
+        call check(error, trim(qc%entries(2)) == "flag, , , NA", &
+            "remap_column_names altered an entry whose column was not renamed")
+        if (allocated(error)) return
+        call check(error, trim(qc%entries(3)) == "other, >mass", &
+            "remap_column_names rewrote a BOUND that happened to spell the renamed column")
+    end subroutine test_read_qc_add_and_remap
+    !
+    !> The headline rule: a MAML that declares any qc for a column wins for that column IN FULL --
+    !> including the bounds it deliberately left empty -- while a column it says nothing about
+    !> takes the code's declaration.
+    subroutine test_compose_read_qc_maml_wins(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: maml_schema, composed
+        type(parquet_read_qc) :: qc
+        integer :: ncolumns
+
+        call maml_schema%add_col_qc("column_x, , 100")     ! max: only, min:/miss: deliberately empty
+        call qc%add("column_x, 0, 10, Null")               ! must be dropped in full
+        call qc%add("column_y, >=1")                       ! MAML says nothing: this one applies
+
+        call parquet_compose_read_qc(maml_schema, qc, composed, ncolumns)
+        call check(error, ncolumns == 2, "compose_read_qc reported the wrong qc column count")
+        if (allocated(error)) return
+        call check(error, composed_has_line(composed, "max: '100'"), &
+            "the MAML's own max: bound is missing from the composed schema")
+        if (allocated(error)) return
+        call check(error, .not. composed_has_line(composed, "min: '0'"), &
+            "the code's min: bound overrode a column the MAML had already declared")
+        if (allocated(error)) return
+        call check(error, .not. composed_has_line(composed, "miss: Null"), &
+            "the code's miss: value overrode a column the MAML had already declared")
+        if (allocated(error)) return
+        call check(error, composed_has_line(composed, "- name: column_y") .and. &
+            composed_has_line(composed, "min: '>=1'"), &
+            "the code's rule for a column the MAML never mentions did not survive the merge")
+    end subroutine test_compose_read_qc_maml_wins
+    !
+    !> Q9's point: an EMPTY qc: block is not a no-op -- null_values_allowed defaults to .false., so
+    !> it already means "no Nulls in this column" -- and must therefore win like any other
+    !> declaration. Built by hand, since %add_col_qc emits a qc: block only when a bound is given.
+    subroutine test_compose_read_qc_empty_qc_block_wins(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: maml_schema, composed
+        type(parquet_read_qc) :: qc
+        integer :: ncolumns
+
+        maml_schema%maml%lines = [character(len=20) :: "fields:", "- name: column_x", "  qc:"]
+        call qc%add("column_x, 0, 10, Null")
+
+        call parquet_compose_read_qc(maml_schema, qc, composed, ncolumns)
+        call check(error, ncolumns == 1, "an empty qc: block did not count as a declared qc column")
+        if (allocated(error)) return
+        call check(error, .not. composed_has_line(composed, "max: '10'"), &
+            "the code's rule overrode a column whose MAML qc: block was merely empty")
+    end subroutine test_compose_read_qc_empty_qc_block_wins
+    !
+    !> The converse of the rule above, and the reason the composed schema copies only qc-BEARING
+    !> field entries: a MAML that merely NAMES a column (`unit:` but no `qc:`) has declared no qc
+    !> for it, so the code's rule applies -- and must not collide with the MAML's own entry.
+    subroutine test_compose_read_qc_named_without_qc(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: maml_schema, composed
+        type(parquet_read_qc) :: qc
+        integer :: ncolumns
+
+        maml_schema%maml%lines = [character(len=20) :: "fields:", "- name: column_x", &
+            "  unit: Msun", "- name: column_z", "  qc:", "    max: '5'"]
+        call qc%add("column_x, 0, 10")
+
+        call parquet_compose_read_qc(maml_schema, qc, composed, ncolumns)
+        call check(error, ncolumns == 2, "a column the MAML only names should have taken the code's rule")
+        if (allocated(error)) return
+        call check(error, composed_has_line(composed, "max: '10'"), &
+            "the code's rule for a merely-named column did not survive the merge")
+        if (allocated(error)) return
+        call check(error, .not. composed_has_line(composed, "unit: Msun"), &
+            "a field entry with no qc: block was copied into the composed schema")
+        if (allocated(error)) return
+        call check(error, composed_has_line(composed, "max: '5'"), &
+            "the MAML's own qc-bearing entry was lost")
+    end subroutine test_compose_read_qc_named_without_qc
+    !
+    !> Each source on its own, and neither: with nothing to compose, ncolumns is 0 and the caller
+    !> knows not to pass a schema to parquet_open_reader at all.
+    subroutine test_compose_read_qc_single_and_empty_sources(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: maml_schema, composed
+        type(parquet_read_qc) :: qc
+        integer :: ncolumns
+
+        call parquet_compose_read_qc(composed=composed, ncolumns=ncolumns)
+        call check(error, ncolumns == 0, "composing nothing at all did not report zero qc columns")
+        if (allocated(error)) return
+
+        call qc%add("column_y, >=1")
+        call parquet_compose_read_qc(qc=qc, composed=composed, ncolumns=ncolumns)
+        call check(error, ncolumns == 1 .and. composed_has_line(composed, "min: '>=1'"), &
+            "composing code-declared qc with no MAML did not produce the rule")
+        if (allocated(error)) return
+
+        call maml_schema%add_col_qc("column_x, , 100")
+        call parquet_compose_read_qc(schema=maml_schema, composed=composed, ncolumns=ncolumns)
+        call check(error, ncolumns == 1 .and. composed_has_line(composed, "max: '100'"), &
+            "composing a MAML with no code-declared qc did not carry its rule through")
+        if (allocated(error)) return
+
+        ! An entry naming a column but declaring no bound at all is a legal no-op: it adds a
+        ! field with no qc: block, which a reader enforces nothing from, so it must not count.
+        call parquet_compose_read_qc(composed=composed, qc=bare_name_qc(), ncolumns=ncolumns)
+        call check(error, ncolumns == 0, "an entry declaring no bound at all was counted as a qc column")
+    end subroutine test_compose_read_qc_single_and_empty_sources
+    !
+    !> A parquet_read_qc holding one bound-less entry.
+    function bare_name_qc() result(qc)
+        type(parquet_read_qc) :: qc !! one entry, "column_x", with no bounds at all.
+        call qc%add("column_x")
+    end function bare_name_qc
+    !
+    !> End to end: the composed schema is an ordinary qc-maml, so handing it to
+    !> parquet_open_reader enforces exactly the merged rules -- here the MAML's bound, which is
+    !> satisfied, while the code's much tighter bound for the same column was correctly dropped.
+    subroutine test_compose_read_qc_enforced_on_read(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: maml_schema, composed
+        type(parquet_read_qc) :: qc
+        type(parquet_reader) :: reader
+        integer :: ncolumns, nrows
+        real(real64), allocatable :: ra(:)
+
+        call maml_schema%add_col_qc("ra, >=0, <=10")
+        call qc%add("ra, >=100, <=200")      ! would fail the same data, and must be dropped
+        call parquet_compose_read_qc(maml_schema, qc, composed, ncolumns)
+        call check(error, ncolumns == 1, "compose_read_qc reported the wrong qc column count")
+        if (allocated(error)) return
+
+        call parquet_open_reader(reader, "test/fixtures/list_vector.parquet", schema=composed)
+        call parquet_get_nrows(reader, nrows)
+        allocate(ra(nrows))
+        call parquet_read_column(reader, "ra", ra)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 4 .and. abs(ra(1) - 1.5_real64) < 1.0e-12_real64, &
+            "the composed qc schema did not read the column back correctly")
+    end subroutine test_compose_read_qc_enforced_on_read
     !
 end module test_maml

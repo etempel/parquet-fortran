@@ -1015,4 +1015,233 @@ contains
         parquet_qc_numeric_bound = .true.
     end procedure parquet_qc_numeric_bound
 
+    !> Renames the column each parquet_read_qc entry declares. Only the entry's FIRST field is
+    !> touched -- everything from the first comma onwards is carried across byte for byte -- so
+    !> this needs no knowledge of the bound grammar beyond where the column name ends, and a bound
+    !> value that happens to spell a column name cannot be hit. See parquet_read_qc's own doc
+    !> comment for what this is for; it is the qc sibling of parquet_filter%remap_column_names.
+    module procedure parquet_read_qc_remap_column_names
+        character(len=:), allocatable :: name, rest, text, tmp(:)
+        integer :: i, k, comma
+
+        if (size(from) /= size(to)) error stop "parquet_read_qc%remap_column_names: from and to " // &
+            "must have the same size"
+        if (size(from) == 0 .or. this%n == 0) return
+
+        do i = 1, this%n
+            comma = index(this%entries(i), ",")
+            if (comma > 0) then
+                name = trim(adjustl(this%entries(i)(1:comma - 1)))
+                rest = trim(this%entries(i)(comma:))
+            else
+                name = trim(adjustl(this%entries(i)))
+                rest = ""
+            end if
+            ! An entry with no column name at all is left alone, so the real error comes from
+            ! parquet_compose_read_qc's own %add_col_qc call, which says exactly what is wrong.
+            if (len(name) == 0) cycle
+            do k = 1, size(from)
+                if (name /= trim(from(k))) cycle
+                text = trim(to(k)) // rest
+                if (len(text) > read_qc_max_entry_len) then
+                    ! Raised here rather than left to %add_col_qc, whose message would name a
+                    ! limit the caller never exceeded: their own entry fitted.
+                    error stop "parquet_read_qc%remap_column_names: entry exceeds the maximum " // &
+                        "supported length after remapping its column name: " // text(1:100) // "..."
+                end if
+                if (len(text) <= len(this%entries)) then
+                    this%entries(i) = text
+                else
+                    ! Every entry shares one length (the %add convention), so a longer rewritten
+                    ! entry re-lengthens the whole array.
+                    allocate(character(len=len(text)) :: tmp(this%n))
+                    tmp(1:this%n) = this%entries(1:this%n)
+                    tmp(i) = text
+                    call move_alloc(tmp, this%entries)
+                end if
+                exit
+            end do
+        end do
+    end procedure parquet_read_qc_remap_column_names
+
+    !> Merges a MAML-declared and a code-declared read-time QC into one schema. See the interface
+    !> in parquet.f90 for the override rule and why `composed` carries only qc-bearing entries.
+    !>
+    !> The MAML side is copied as raw SOURCE LINES rather than re-emitted from the parsed
+    !> parquet_qc_rule array: a round trip through that representation would have to reconstruct
+    !> the compact "col, min, max, miss" form from min_op/min_text/null_values_allowed, which is a
+    !> third representation of the same thing and one more place for the three to drift.
+    !>
+    !> `parquet_parse_qc_maml` already drops any field with no `qc:` key (see its own tail), so the
+    !> rules it returns ARE exactly the columns the MAML claims under Q9's `has_qc_block` rule --
+    !> there is no separate test to keep in step with it.
+    module procedure parquet_compose_read_qc
+        type(parquet_qc_rule), allocatable :: rules(:)
+        character(len=:), allocatable :: lines(:), name
+        integer :: i, j
+        logical :: claimed
+
+        ncolumns = 0
+        allocate(rules(0))
+        if (present(schema)) then
+            if (allocated(schema%maml%lines)) then
+                ! Validates the MAML as a side effect, which is wanted: a bad qc-maml should fail
+                ! here rather than at parquet_open_reader, where the composed object is all that is
+                ! left to name in the message.
+                call parquet_parse_qc_maml(schema%maml, rules)
+                call parquet_copy_qc_field_lines(schema%maml%lines, lines)
+                if (allocated(lines)) composed%maml%lines = lines
+            end if
+            if (allocated(schema%maml%name)) composed%maml%name = schema%maml%name
+        end if
+
+        if (present(qc)) then
+            do i = 1, qc%n
+                call parquet_read_qc_entry_column(qc%entries(i), name)
+                claimed = .false.
+                do j = 1, size(rules)
+                    if (trim(rules(j)%name) /= name) cycle
+                    claimed = .true.
+                    exit
+                end do
+                if (claimed) cycle
+                ! %add_col_qc is what parses and validates the compact string -- this procedure
+                ! deliberately never does, so there is exactly one implementation of that grammar.
+                call composed%maml%add_col_qc(trim(qc%entries(i)))
+            end do
+        end if
+
+        ! Counted by re-parsing rather than by tallying the loop above, so the answer is exactly
+        ! "what a reader would enforce": an entry naming a column but declaring no bound at all
+        ! ("mass" on its own) is a legal no-op that adds a field with no qc: block, and must not
+        ! count towards it.
+        if (allocated(composed%maml%lines)) then
+            call parquet_parse_qc_maml(composed%maml, rules)
+            ncolumns = size(rules)
+        end if
+    end procedure parquet_compose_read_qc
+
+    !> The column name a compact "col, min, max, miss" entry declares: everything before its first
+    !> comma, trimmed. "" for an entry with no name, which the caller leaves for %add_col_qc to
+    !> reject with its own message.
+    subroutine parquet_read_qc_entry_column(entry, name)
+        character(len=*), intent(in) :: entry            !! one parquet_read_qc entry.
+        character(len=:), allocatable, intent(out) :: name !! the column it declares, or "".
+        integer :: comma
+
+        comma = index(entry, ",")
+        if (comma > 0) then
+            name = trim(adjustl(entry(1:comma - 1)))
+        else
+            name = trim(adjustl(entry))
+        end if
+    end subroutine parquet_read_qc_entry_column
+
+    !> Copies the `fields:` entries that carry a `qc:` key out of a MAML's source lines, header
+    !> included, dropping everything else -- other top-level sections, and any field entry with no
+    !> `qc:` key. `lines` is left unallocated when nothing qualifies.
+    !>
+    !> Entry boundaries are detected exactly as parquet_parse_qc_maml detects them (an UNINDENTED
+    !> dash starts a field; an unindented non-dash key ends the block), deliberately: if the two
+    !> ever disagree about where an entry begins, the composed schema would silently claim a
+    !> different set of columns than the reader enforces.
+    subroutine parquet_copy_qc_field_lines(src, lines)
+        character(len=*), intent(in) :: src(:)                !! the MAML's raw source lines.
+        character(len=:), allocatable, intent(out) :: lines(:) !! the qc-bearing fields: block, or unallocated.
+        integer, allocatable :: lo(:), hi(:)
+        integer :: i, j, k, nentry, nout, width
+
+        call parquet_locate_qc_field_entries(src, lo, hi, nentry)
+        if (nentry == 0) return
+
+        width = len("fields:")
+        nout = 1
+        do k = 1, nentry
+            do j = lo(k), hi(k)
+                nout = nout + 1
+                width = max(width, len_trim(src(j)))
+            end do
+        end do
+
+        allocate(character(len=width) :: lines(nout))
+        ! Blanked element by element, never as `lines = ""` -- see CLAUDE.md: a whole-array
+        ! assignment to a deferred-length allocatable array reallocates it to length zero.
+        do i = 1, nout
+            lines(i) = ""
+        end do
+        lines(1) = "fields:"
+        nout = 1
+        do k = 1, nentry
+            do j = lo(k), hi(k)
+                nout = nout + 1
+                lines(nout) = src(j)
+            end do
+        end do
+    end subroutine parquet_copy_qc_field_lines
+
+    !> Line ranges of the `fields:` entries that carry a `qc:` key, one (lo, hi) pair per entry.
+    !> `nentry` is 0 when the MAML has no fields: block, or none of its entries declares qc.
+    !>
+    !> Entry boundaries are detected exactly as parquet_parse_qc_maml detects them (an UNINDENTED
+    !> dash starts a field; an unindented non-dash key ends the block), deliberately: if the two
+    !> ever disagreed about where an entry begins, the composed schema would silently claim a
+    !> different set of columns than the reader enforces.
+    subroutine parquet_locate_qc_field_entries(src, lo, hi, nentry)
+        character(len=*), intent(in) :: src(:)          !! the MAML's raw source lines.
+        integer, allocatable, intent(out) :: lo(:)      !! first line of each qualifying entry.
+        integer, allocatable, intent(out) :: hi(:)      !! last line of each qualifying entry.
+        integer, intent(out) :: nentry                  !! qualifying entries found.
+        character(len=:), allocatable :: tline, key, cvalue, klow
+        integer :: i, j, start, stop_at
+        logical :: in_fields, has_qc
+
+        allocate(lo(max(size(src), 1)), hi(max(size(src), 1)))
+        nentry = 0
+        in_fields = .false.
+        i = 0
+        do
+            i = i + 1
+            if (i > size(src)) exit
+            tline = trim(adjustl(src(i)))
+            if (len(tline) == 0) cycle
+            if (tline(1:1) == "#") cycle
+            if (.not. in_fields) then
+                if (tline == "fields:") in_fields = .true.
+                cycle
+            end if
+            ! A new unindented top-level key ends the fields: block.
+            if (index(tline, "- ") /= 1 .and. index(tline, ":") > 0 .and. src(i)(1:1) /= " ") exit
+            if (index(tline, "-") /= 1 .or. src(i)(1:1) == " ") cycle
+            ! src(i) starts a field entry; walk its indented sub-lines to find where it ends.
+            start = i
+            stop_at = size(src)
+            do
+                if (i + 1 > size(src)) exit
+                tline = trim(adjustl(src(i + 1)))
+                if (len(tline) > 0 .and. src(i + 1)(1:1) /= " ") then
+                    stop_at = i
+                    exit
+                end if
+                i = i + 1
+            end do
+            has_qc = .false.
+            do j = start, stop_at
+                tline = trim(adjustl(src(j)))
+                if (len(tline) == 0) cycle
+                if (j == start) tline = trim(adjustl(tline(2:)))
+                call parquet_split_key_value(tline, key, cvalue)
+                if (len_trim(key) == 0) cycle
+                call parquet_to_lower(key, klow)
+                if (trim(klow) == "qc") then
+                    has_qc = .true.
+                    exit
+                end if
+            end do
+            if (.not. has_qc) cycle
+            nentry = nentry + 1
+            lo(nentry) = start
+            hi(nentry) = stop_at
+        end do
+    end subroutine parquet_locate_qc_field_entries
+
 end submodule parquet_metadata_maml

@@ -62,6 +62,47 @@ Both forms share the same input format and validation:
 - `qc_soft` is optional `logical`, default `.false.` (hard: a violation aborts the process). It only ever takes effect when qc is active; with `qc=.false.` (or no `schema=`) it is irrelevant.
 - A qc-maml's only required field attribute is `name` — `data_type` and everything else (including `qc:` itself) are optional, unlike a schema-authoring MAML. `qc: min:`/`max:` bounds are parsed against the column's actual Parquet type at read time, not any `data_type` the maml might declare. A qc-maml may declare fields that don't exist in the parquet file at all (they're silently ignored) or that already have a value in the file's own physical type different from the maml — validation only requires that field names not repeat, that a `qc: miss:` value (if present) is `Null`/`NA` (case-insensitive) or empty, and that any `qc: min:`/`max:` operator points the right way (`min:` a lower bound with `>=`/`>`, `max:` an upper bound with `<=`/`<` — the same rule the write side enforces; a reversed operator aborts `parquet_open_reader`).
 
+## Deferring qc declarations with `parquet_read_qc`
+
+`schema%add_col_qc` emits its MAML text immediately, which is exactly what you want when the schema is the final word. It is the wrong shape when the declarations have to be held **unresolved** — when the column names still need translating, or when a MAML that arrives with the file may already have declared qc for some of the same columns and should win.
+
+`type(parquet_read_qc)` is that carrier. It takes the identical `"col, min, max, miss"` string, one column per `%add` call, and validates nothing until the declarations are composed into a real schema:
+
+```fortran
+type(parquet_read_qc) :: qc
+call qc%add("mass, >0, <=1000, Null")
+call qc%add("flag, , , NA")
+```
+
+Two things can then be done with it, in this order:
+
+- **`call qc%remap_column_names(from, to)`** renames the column each entry declares — the qc sibling of [`parquet_filter%remap_column_names`](reading.html#renaming-the-columns-a-filter-or-sort-refers-to), and subject to the same rules. Only the entry's first field is touched, so a *bound* that happens to spell a column name is never rewritten.
+- **`call parquet_compose_read_qc(schema, qc, composed, ncolumns)`** merges a MAML-declared qc (`schema`, optional) and a code-declared one (`qc`, optional) into the single `composed` schema that `parquet_open_reader(..., schema=)` takes. Pass `composed` on only when `ncolumns` is greater than zero — a schema with no rules still switches qc on for no benefit.
+
+### The merge rule: per column, not per bound
+
+**If the MAML's `fields:` entry for a column carries a `qc:` key at all, the MAML wins in full for that column and the code's entry for it is dropped entirely.** Not merged bound by bound — dropped. If the MAML says nothing about a column, or merely *names* it without a `qc:` key, the code's entry applies instead.
+
+```
+MAML declares:              min: <empty>   max: 100        miss: <empty>
+Code declares:              min: 0         max: 10         miss: Null
+
+Active rule:                min: <empty>   max: 100        miss: <empty>
+```
+
+The code's `min:` and `miss:` are **not** filled into the gaps the MAML left. "The file's own description wins the whole column if it says anything at all" is one rule to hold in your head; a bound-by-bound merge would need a rule for each of the eight present/absent combinations across three bounds from two sources, for a benefit nothing here asks for.
+
+An **empty** `qc:` block counts as saying something. `miss:` defaults to "Nulls are not expected", so a bare
+
+```yaml
+- name: column_x
+  qc:
+```
+
+already means "no Nulls in this column" — a real restriction the MAML's author stated, and it wins like any other.
+
+`composed` carries only the qc-bearing field entries: a MAML entry with no `qc:` key is not copied across. Nothing else is read from this schema — `parquet_open_reader` hands it to the qc parser and nowhere else — and it is what keeps the two sources from colliding over a column the MAML merely names.
+
 ## Write-side enforcement
 
 `qc` defaults to `.true.` whenever `parquet_open_writer` is given a `schema=` (pass `qc=.false.` to opt out); it's a no-op without a schema:

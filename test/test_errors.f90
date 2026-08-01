@@ -313,6 +313,16 @@ contains
                 test_filter_malformed_rule_aborts), &
             new_unittest("filter: rule longer than the supported maximum aborts", &
                 test_filter_rule_too_long_aborts), &
+            new_unittest("filter: remap_column_names with mismatched from/to sizes aborts", &
+                test_filter_remap_size_mismatch_aborts), &
+            new_unittest("filter: remap_column_names to an over-long column name aborts", &
+                test_filter_remap_name_too_long_aborts), &
+            new_unittest("filter: a rule that grows past the cap when remapped aborts", &
+                test_filter_remap_rule_too_long_aborts), &
+            new_unittest("sortkey: remap_column_names with mismatched from/to sizes aborts", &
+                test_sortkey_remap_size_mismatch_aborts), &
+            new_unittest("sortkey: remap_column_names to an over-long column name aborts", &
+                test_sortkey_remap_name_too_long_aborts), &
             new_unittest("filter: non-numeric value against a numeric column aborts", &
                 test_filter_bad_numeric_value_aborts), &
             new_unittest("filter: non-numeric value against a numeric column aborts under a scoped filter", &
@@ -2830,6 +2840,48 @@ contains
             failure_message="adding a filter rule longer than the supported maximum was expected to abort", &
             required_stderr="parquet_filter%add: rule exceeds the maximum supported length")
     end subroutine test_filter_rule_too_long_aborts
+
+    subroutine test_filter_remap_size_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_remap_size_mismatch", expect_abort=.true., &
+            failure_message="a filter remap with mismatched from/to sizes was expected to abort", &
+            required_stderr="parquet_filter%remap_column_names: from and to must have the same size")
+    end subroutine test_filter_remap_size_mismatch_aborts
+
+    subroutine test_filter_remap_name_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_remap_name_too_long", expect_abort=.true., &
+            failure_message="a filter remap to an over-long column name was expected to abort", &
+            required_stderr="parquet_filter%remap_column_names: replacement column name")
+    end subroutine test_filter_remap_name_too_long_aborts
+
+    !> The message must name the REMAPPING, not just the length cap: the rule the caller wrote was
+    !> within the limit, and only the rename pushed it over.
+    subroutine test_filter_remap_rule_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_remap_rule_too_long", expect_abort=.true., &
+            failure_message="a filter rule that grew past the cap when remapped was expected to abort", &
+            required_stderr="characters) after remapping its column names")
+    end subroutine test_filter_remap_rule_too_long_aborts
+
+    subroutine test_sortkey_remap_size_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sortkey_remap_size_mismatch", expect_abort=.true., &
+            failure_message="a sortkey remap with mismatched from/to sizes was expected to abort", &
+            required_stderr="parquet_sortkey%remap_column_names: from and to must have the same size")
+    end subroutine test_sortkey_remap_size_mismatch_aborts
+
+    subroutine test_sortkey_remap_name_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sortkey_remap_name_too_long", expect_abort=.true., &
+            failure_message="a sortkey remap to an over-long column name was expected to abort", &
+            required_stderr="parquet_sortkey%remap_column_names: replacement column name")
+    end subroutine test_sortkey_remap_name_too_long_aborts
 
     !> A non-numeric value against a numeric filter column (rule shape is
     !> fine, the value itself isn't) aborts with a message naming the value

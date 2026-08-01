@@ -136,4 +136,59 @@ contains
         write(text, '(i0)') value
     end function int_to_text
     !
+    !> Renames the column each sort key orders by, by parsing the key, substituting the name, and
+    !> re-emitting it in the canonical "<column> asc"/"<column> desc" form. The sort twin of
+    !> parquet_filter%remap_column_names -- see parquet_filter's doc comment for what this is for
+    !> and for the two deliberate non-failures (an unmatched name, an unparseable key).
+    !>
+    !> nulls_first lives in its own component rather than in the key text, so it is untouched here
+    !> by construction. A key whose column did not change keeps its original text, for the same
+    !> reason the filter side does: it keeps the re-render off every key that had no need of it.
+    module procedure parquet_sortkey_remap_column_names
+        character(len=:), allocatable :: name, errmsg, text, tmp(:)
+        character(len=32) :: cap_str
+        logical :: ok, descending
+        integer :: i, k
+
+        if (size(from) /= size(to)) error stop "parquet_sortkey%remap_column_names: from and to " // &
+            "must have the same size"
+        if (size(from) == 0 .or. this%n == 0) return
+
+        do i = 1, this%n
+            call parquet_parse_sort_key(this%keys(i), name, descending, ok, errmsg)
+            ! As on the filter side: the reader that applies this key reports the parse failure
+            ! with the file named, which is the better message.
+            if (.not. ok) cycle
+            do k = 1, size(from)
+                if (trim(name) /= trim(from(k))) cycle
+                if (len_trim(to(k)) > sort_key_name_len) then
+                    write(cap_str, '(i0)') sort_key_name_len
+                    error stop "parquet_sortkey%remap_column_names: replacement column name '" // &
+                        trim(to(k)) // "' exceeds the maximum supported length (" // &
+                        trim(cap_str) // " characters)"
+                end if
+                if (descending) then
+                    text = trim(to(k)) // " desc"
+                else
+                    text = trim(to(k)) // " asc"
+                end if
+                ! No sortkey_max_key_len check here, unlike the filter side's filter_max_rule_len
+                ! one: a rewritten key is at most sort_key_name_len + len(" desc") characters, and
+                ! the name-length check above has already bounded the first term, so it cannot
+                ! reach sortkey_max_key_len (64 + 5 against 320). Revisit if either constant moves.
+                if (len(text) <= len(this%keys)) then
+                    this%keys(i) = text
+                else
+                    ! Every entry shares one length (the %add convention), so a longer rewritten
+                    ! key re-lengthens the whole array.
+                    allocate(character(len=len(text)) :: tmp(this%n))
+                    tmp(1:this%n) = this%keys(1:this%n)
+                    tmp(i) = text
+                    call move_alloc(tmp, this%keys)
+                end if
+                exit
+            end do
+        end do
+    end procedure parquet_sortkey_remap_column_names
+    !
 end submodule parquet_read_sort

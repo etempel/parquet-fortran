@@ -446,6 +446,27 @@ This is **inherent to sorting**, not a limitation to be lifted later: there is n
 
 It refuses, with `error stop`, when the reader **already has a sort** (add every key to one `parquet_sortkey` instead) and when **any column has already been read** on that reader.
 
+## Renaming the columns a filter or sort refers to
+
+`filt%remap_column_names(from, to)` and `srt%remap_column_names(from, to)` rewrite, in place, the columns a filter's rules or a sort's keys refer to: every reference to `from(k)` becomes `to(k)`. The two arrays are parallel and must be the same size.
+
+```fortran
+type(parquet_filter) :: filt
+call filt%add("mass > 1.0e12 and (redshift < 0.5 or flag is_null)")
+call filt%remap_column_names(["mass    ", "redshift"], ["m_200c  ", "z       "])
+! the filter now reads: (m_200c > 1.0e12 and (z < 0.5 or flag is_null))
+```
+
+This exists for callers that build a filter in one column-name vocabulary and must apply it in another. The main user is [`parquet_table`](table.html), which lets a program write filters in the table's own internal names and translates them into the file's physical names — see [Renaming a file's columns for reading](maml-format.html#renaming-columns-for-reading-with-extra-remap) — but any caller with the same split can use it directly.
+
+Three properties are worth knowing:
+
+- **It renames column references only.** The substitution happens on the *parsed* expression, after the parser has already separated column names from operators, keywords, parentheses and quoted literals — so a string value that happens to spell a column name (`name == "mass"`) is never touched. Sort keys keep their direction and their `nulls_first` setting.
+- **It never fails on a name it does not recognize.** A `from` entry that no rule mentions is a no-op, and a rule naming a column absent from `from` is left alone rather than rejected: only the caller knows which names are supposed to exist. A rule that does not parse is also left untouched, so the reader that applies it still reports the parse error, with the file named.
+- **All the renames in one call happen at once.** Passing `from = ["a", "b"]`, `to = ["b", "a"]` swaps the two columns; it does not rename `a` to `b` and then everything named `b` back to `a`.
+
+It does `error stop` in three cases: `from` and `to` differing in size, a replacement name longer than the 64-character column-name limit, and — filters only — a rule that fitted `filter_max_rule_len` in its original names but no longer does once renamed.
+
 ## Random downsampling with `sample_fraction`
 
 `parquet_open_reader(reader, filename, sample_fraction=0.1_real64)` keeps each row independently with probability `sample_fraction` (Bernoulli sampling) — like `filter=`, it narrows what every subsequent call sees (`parquet_get_nrows`, `parquet_read_column`, `parquet_close_reader(..., print_stat=.true.)`, ...), with no separate "sampled count" to track:

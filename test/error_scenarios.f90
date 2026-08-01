@@ -305,6 +305,16 @@ program error_scenarios
         call scenario_filter_malformed_rule()
     case ("filter_rule_too_long")
         call scenario_filter_rule_too_long()
+    case ("filter_remap_size_mismatch")
+        call scenario_filter_remap_size_mismatch()
+    case ("filter_remap_name_too_long")
+        call scenario_filter_remap_name_too_long()
+    case ("filter_remap_rule_too_long")
+        call scenario_filter_remap_rule_too_long()
+    case ("sortkey_remap_size_mismatch")
+        call scenario_sortkey_remap_size_mismatch()
+    case ("sortkey_remap_name_too_long")
+        call scenario_sortkey_remap_name_too_long()
     case ("filter_bad_numeric_value")
         call scenario_filter_bad_numeric_value()
     case ("filter_bad_numeric_value_scoped")
@@ -4619,6 +4629,63 @@ contains
         call filt%add(repeat("a", 8193))
         print '(a)', "unexpectedly accepted a filter rule longer than the supported maximum"
     end subroutine scenario_filter_rule_too_long
+
+    !> from and to are parallel arrays, so a size mismatch cannot be resolved -- there is no
+    !> sensible reading of "rename these three names to these two".
+    subroutine scenario_filter_remap_size_mismatch()
+        type(parquet_filter) :: filt
+
+        call filt%add("v > 5")
+        call filt%remap_column_names(["v", "w"], ["a"])
+        print '(a)', "unexpectedly accepted a filter remap with mismatched from/to sizes"
+    end subroutine scenario_filter_remap_size_mismatch
+
+    !> A replacement longer than filter_leaf_name_len would be silently TRUNCATED into the packed
+    !> leaf-name array, i.e. the filter would quietly apply to a different column than asked for.
+    subroutine scenario_filter_remap_name_too_long()
+        type(parquet_filter) :: filt
+
+        call filt%add("v > 5")
+        call filt%remap_column_names(["v"], [repeat("x", 65)])
+        print '(a)', "unexpectedly accepted a filter remap to an over-long column name"
+    end subroutine scenario_filter_remap_name_too_long
+
+    !> A rule that fits filter_max_rule_len in its original names but not after renaming. The
+    !> message must name the remapping: the caller's own rule was within the limit, so %add's
+    !> generic length error would point at a limit they never exceeded.
+    subroutine scenario_filter_remap_rule_too_long()
+        type(parquet_filter) :: filt
+        character(len=:), allocatable :: rule
+        integer :: i
+
+        ! 200 clauses: about 2 kB in the one-character name, about 15 kB once every name is 64
+        ! characters long -- comfortably either side of the 8192-character cap.
+        rule = "a > 1"
+        do i = 2, 200
+            rule = rule // " and a > 1"
+        end do
+        call filt%add(rule)
+        call filt%remap_column_names(["a"], [repeat("x", 64)])
+        print '(a)', "unexpectedly accepted a filter rule that grew past the cap when remapped"
+    end subroutine scenario_filter_remap_rule_too_long
+
+    !> The sort twin of scenario_filter_remap_size_mismatch.
+    subroutine scenario_sortkey_remap_size_mismatch()
+        type(parquet_sortkey) :: srt
+
+        call srt%add("v asc")
+        call srt%remap_column_names(["v", "w"], ["a"])
+        print '(a)', "unexpectedly accepted a sortkey remap with mismatched from/to sizes"
+    end subroutine scenario_sortkey_remap_size_mismatch
+
+    !> The sort twin of scenario_filter_remap_name_too_long, against sort_key_name_len.
+    subroutine scenario_sortkey_remap_name_too_long()
+        type(parquet_sortkey) :: srt
+
+        call srt%add("v asc")
+        call srt%remap_column_names(["v"], [repeat("x", 65)])
+        print '(a)', "unexpectedly accepted a sortkey remap to an over-long column name"
+    end subroutine scenario_sortkey_remap_name_too_long
 
     !> A rule whose shape is fine ("<column> <op> <value>") but whose value
     !> isn't a valid number for a numeric column reports a clean error stop

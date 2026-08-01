@@ -437,6 +437,16 @@ module parquet
     !> validated (column exists, is a scalar column, value is well-formed for
     !> that column's type), once a reader actually applies the filter. See "Row
     !> filtering with parquet_filter" in doc/pages/reading.md for the grammar.
+    !>
+    !> %remap_column_names(from, to) rewrites the columns the rules refer to, in place, replacing
+    !> from(k) with to(k) throughout every rule's expression. It exists for callers that build a
+    !> filter in one column-name vocabulary and must apply it in another -- parquet_table does
+    !> exactly this, translating a filter written in its own internal names into the file's
+    !> physical names before handing it to a reader. It is a pure text operation with no schema
+    !> access: a name in `from` that no rule mentions is a no-op, and a rule naming a column
+    !> absent from `from` is left alone rather than rejected, since only the caller knows which
+    !> names are supposed to exist. A rule that does not parse is also left untouched, so a
+    !> malformed rule is still reported by the reader that applies it, with the file named.
     type parquet_filter
         !> Raw, unvalidated rule text, one entry per %add call. Deferred-length: every entry
         !! shares the length of the longest rule added so far (%add grows it as needed), so a
@@ -445,6 +455,8 @@ module parquet
         integer :: n = 0 !! Number of rules actually in use.
     contains
         procedure :: add => parquet_filter_add !! Appends one AND-combined filter expression.
+        !> Renames the columns every rule refers to, in place: `from(k)` becomes `to(k)`.
+        procedure :: remap_column_names => parquet_filter_remap_column_names
     end type parquet_filter
 
     !> A read-time sort specification: an ordered list of sort KEYS, each naming one column and
@@ -476,6 +488,11 @@ module parquet
     !>
     !> The type is named for what it holds (the keys), not for the operation; a sorted read is
     !> requested through parquet_open_reader/parquet_reader_set_sort.
+    !>
+    !> %remap_column_names(from, to) rewrites the column each key orders by, in place, replacing
+    !> from(k) with to(k); each key's direction and nulls_first setting are carried across
+    !> unchanged. It is the sort twin of parquet_filter%remap_column_names and follows the same
+    !> rules -- see that type's doc comment.
     type parquet_sortkey
         !> Raw, unvalidated key text, one entry per %add call. Deferred-length, the same way
         !! parquet_filter%rules is: every entry shares the length of the longest key added so far.
@@ -486,6 +503,8 @@ module parquet
         integer :: n = 0 !! Number of keys actually in use.
     contains
         procedure :: add => parquet_sortkey_add !! Appends one sort key, applied after those already added.
+        !> Renames the column every key orders by, in place: `from(k)` becomes `to(k)`.
+        procedure :: remap_column_names => parquet_sortkey_remap_column_names
     end type parquet_sortkey
 
     !> Internal plumbing only (not part of the public API): one column's
@@ -2590,6 +2609,26 @@ module parquet
             type(parquet_reader), intent(in) :: reader !! open reader.
             character(len=*), intent(in) :: name !! column to free (dotted struct-leaf path allowed).
         end subroutine parquet_release_column
+    end interface
+
+    ! ---- Filter/sort column-name remapping (parquet_read_filter / parquet_read_sort) ----
+    interface
+        !> Rewrites every column reference in this filter's rules, replacing name `from(k)` with
+        !> `to(k)`. Backs parquet_filter%remap_column_names -- see that binding, and the type's own
+        !> doc comment, for what it is for.
+        module subroutine parquet_filter_remap_column_names(this, from, to)
+            class(parquet_filter), intent(inout) :: this !! filter whose rules are rewritten in place.
+            character(len=*), intent(in) :: from(:) !! names to replace; same size as `to`.
+            character(len=*), intent(in) :: to(:) !! replacement for each entry of `from`.
+        end subroutine parquet_filter_remap_column_names
+        !> Rewrites every sort key's column, replacing name `from(k)` with `to(k)`. Backs
+        !> parquet_sortkey%remap_column_names -- see that binding for what it is for. Each key's
+        !> direction and its nulls_first setting are carried across unchanged.
+        module subroutine parquet_sortkey_remap_column_names(this, from, to)
+            class(parquet_sortkey), intent(inout) :: this !! sort spec whose keys are rewritten in place.
+            character(len=*), intent(in) :: from(:) !! names to replace; same size as `to`.
+            character(len=*), intent(in) :: to(:) !! replacement for each entry of `from`.
+        end subroutine parquet_sortkey_remap_column_names
     end interface
 
     ! ---- Read column specifics (by type x access mode) ----

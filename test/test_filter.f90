@@ -95,7 +95,19 @@ contains
             new_unittest("not x is_nan == x is_not_nan", test_not_is_nan_is_is_not_nan), &
             new_unittest("is_nan combines with other clauses", test_is_nan_in_expression), &
             new_unittest("is_nan on a float32 column", test_is_nan_float32), &
-            new_unittest("is_nan on a half_float column", test_is_nan_half_float) &
+            new_unittest("is_nan on a half_float column", test_is_nan_half_float), &
+            new_unittest("remap_column_names: every grammar form survives the round trip", &
+                test_remap_round_trip_forms), &
+            new_unittest("remap_column_names: an identity rename changes nothing", test_remap_identity), &
+            new_unittest("remap_column_names: a name no rule mentions is a no-op", test_remap_unmentioned_name), &
+            new_unittest("remap_column_names: two names swap in one call", test_remap_simultaneous_swap), &
+            new_unittest("remap_column_names: a quoted literal spelling a column name is untouched", &
+                test_remap_leaves_literals_alone), &
+            new_unittest("remap_column_names: only whole names match, not prefixes", test_remap_matches_whole_name), &
+            new_unittest("remap_column_names: an unparseable rule is left for the reader to report", &
+                test_remap_keeps_bad_rule), &
+            new_unittest("sortkey remap_column_names: direction and nulls_first survive", &
+                test_sortkey_remap_round_trip) &
             ]
     end subroutine collect_tests_filter
     !
@@ -1479,5 +1491,226 @@ contains
         if (allocated(error)) return
         call check(error, n_not_nan == 3_int64, "is_not_nan on a half_float column: expected all 3 rows")
     end subroutine test_is_nan_half_float
+    !
+    ! ------------------------------------------------------------------------------
+    ! %remap_column_names (parquet_filter / parquet_sortkey)
+    !
+    ! The property under test throughout is EQUIVALENCE, not rendered text: a rule
+    ! written in alias names and then remapped must select exactly the rows the same
+    ! rule written directly in the file's own names selects. That is what makes these
+    ! tests a real check on parquet_render_filter_expr, which %remap_column_names is
+    ! the first caller to depend on semantically rather than for display.
+    ! ------------------------------------------------------------------------------
+    !
+    !> Reads column "v" of `file` under `rule`, after renaming `from` to `to` throughout it.
+    subroutine filtered_v_remapped(file, rule, from, to, values)
+        character(len=*), intent(in) :: file !! fixture to read.
+        character(len=*), intent(in) :: rule !! the filter expression, in the `from` vocabulary.
+        character(len=*), intent(in) :: from(:) !! names to replace.
+        character(len=*), intent(in) :: to(:) !! replacement for each entry of `from`.
+        integer(int32), allocatable, intent(out) :: values(:) !! surviving rows of column "v".
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: nrows
+
+        call filt%add(rule)
+        call filt%remap_column_names(from, to)
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        allocate(values(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "v", values)
+        call parquet_close_reader(reader)
+    end subroutine filtered_v_remapped
+    !
+    !> Every shape the grammar can take -- precedence, parentheses, not, double negation, a
+    !> multi-clause range, a null test -- written once in alias names and remapped, and once in the
+    !> file's own names directly. The two must select the same rows for every one of them.
+    !>
+    !> This is the parse -> rename -> render -> parse fidelity check: the remapped side goes
+    !> through parquet_render_filter_expr and back through the parser, the direct side does not.
+    subroutine test_remap_round_trip_forms(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: got(:), want(:)
+        integer :: i
+        character(len=*), parameter :: file = "test_run/filter_remap_forms.parquet"
+        character(len=48) :: aliased(8), direct(8)
+
+        aliased(1) = "V > 5";                          direct(1) = "v > 5"
+        aliased(2) = "V > 8 or V < 3 and W > 9";       direct(2) = "v > 8 or v < 3 and w > 9"
+        aliased(3) = "(V > 8 or V < 3) and W > 9";     direct(3) = "(v > 8 or v < 3) and w > 9"
+        aliased(4) = "not V > 5";                      direct(4) = "not v > 5"
+        aliased(5) = "not (V > 3 and V < 8)";          direct(5) = "not (v > 3 and v < 8)"
+        aliased(6) = "not not V > 5";                  direct(6) = "not not v > 5"
+        aliased(7) = "V >= 4 and V <= 7";              direct(7) = "v >= 4 and v <= 7"
+        aliased(8) = "V is_not_null or W == 3";        direct(8) = "v is_not_null or w == 3"
+
+        call write_grid_fixture(file)
+        do i = 1, size(aliased)
+            call filtered_v_remapped(file, trim(aliased(i)), ["V", "W"], ["v", "w"], got)
+            call filtered_v(file, trim(direct(i)), want)
+            call check(error, size(got) == size(want) .and. all(got == want), &
+                "remap round trip disagreed with the direct rule: " // trim(aliased(i)))
+            if (allocated(error)) return
+            deallocate(got, want)
+        end do
+    end subroutine test_remap_round_trip_forms
+    !
+    !> Renaming a name to itself must be a no-op end to end. Worth its own test because it is the
+    !> one case where a round-trip defect could not be blamed on the substitution.
+    subroutine test_remap_identity(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: got(:), want(:)
+        character(len=*), parameter :: file = "test_run/filter_remap_identity.parquet"
+
+        call write_grid_fixture(file)
+        call filtered_v_remapped(file, "(v > 8 or v < 3) and w > 9", ["v", "w"], ["v", "w"], got)
+        call filtered_v(file, "(v > 8 or v < 3) and w > 9", want)
+        call check(error, size(got) == size(want) .and. all(got == want), &
+            "an identity remap changed which rows the filter selects")
+    end subroutine test_remap_identity
+    !
+    !> A `from` entry no rule mentions must change nothing -- the rename is total, never an
+    !> assertion that the name occurs.
+    subroutine test_remap_unmentioned_name(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: got(:), want(:)
+        character(len=*), parameter :: file = "test_run/filter_remap_unmentioned.parquet"
+
+        call write_grid_fixture(file)
+        call filtered_v_remapped(file, "v > 5", ["absent_column"], ["also_absent "], got)
+        call filtered_v(file, "v > 5", want)
+        call check(error, size(got) == size(want) .and. all(got == want), &
+            "renaming a column the rule never mentions changed the result")
+    end subroutine test_remap_unmentioned_name
+    !
+    !> Two names exchanged in ONE call. Sequential text substitution would get this wrong (the
+    !> first rename's output would be re-matched by the second); substituting in the parsed leaf
+    !> array, once per leaf, cannot.
+    subroutine test_remap_simultaneous_swap(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: got(:), want(:)
+        character(len=*), parameter :: file = "test_run/filter_remap_swap.parquet"
+
+        call write_grid_fixture(file)
+        call filtered_v_remapped(file, "v > 5 and w > 5", ["v", "w"], ["w", "v"], got)
+        call filtered_v(file, "w > 5 and v > 5", want)
+        call check(error, size(got) == size(want) .and. all(got == want), &
+            "swapping two column names in one call did not produce the swapped filter")
+    end subroutine test_remap_simultaneous_swap
+    !
+    !> A quoted string value that happens to spell the column name being renamed must come through
+    !> untouched. This is the whole reason the substitution works on the parsed leaf array instead
+    !> of the rule text: a text-level rename would corrupt the literal.
+    subroutine test_remap_leaves_literals_alone(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=24) :: names(3)
+        character(len=24) :: got(1)
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_remap_literal.parquet"
+
+        names(1) = "plain"
+        names(2) = "V and (W) or V"
+        names(3) = "other"
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "name", names)
+        call parquet_close_writer(writer)
+
+        ! The column is called V in the rule and `name` in the file; the VALUE also says "V".
+        call filt%add('V == "V and (W) or V"')
+        call filt%remap_column_names(["V"], ["name"])
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 1_int64, &
+            "remap over a literal spelling the column name: expected exactly the one matching row")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+        call parquet_read_column(reader, "name", got)
+        call parquet_close_reader(reader)
+        call check(error, trim(got(1)) == "V and (W) or V", &
+            "remap over a literal spelling the column name: the literal was altered")
+    end subroutine test_remap_leaves_literals_alone
+    !
+    !> "v" must not match the column "vv". A prefix/substring match here would silently rewrite a
+    !> different column's clause, which is a wrong-answer bug with nothing to notice it.
+    subroutine test_remap_matches_whole_name(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32) :: a(4) = [1, 2, 3, 4], b(4) = [40, 30, 20, 10]
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_remap_prefix.parquet"
+
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "vv", a)
+        call parquet_write_column(writer, "vvv", b)
+        call parquet_close_writer(writer)
+
+        ! Renaming "vv" must leave the "vvv" clause alone; if it did not, the rule would name a
+        ! column that does not exist and the open below would abort rather than return 1 row.
+        call filt%add("vv > 3 and vvv > 5")
+        call filt%remap_column_names(["vv"], ["vv"])
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 1_int64, "remap matched a name prefix instead of the whole name")
+    end subroutine test_remap_matches_whole_name
+    !
+    !> A rule that does not parse is deliberately left as-is, so the reader that applies it still
+    !> reports the parse failure with the file named. Checked here through the surviving TEXT (the
+    !> abort itself is covered out of process by the filter_remap_keeps_bad_rule scenario): a
+    !> renamed-away rule would no longer be recognizable.
+    subroutine test_remap_keeps_bad_rule(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_filter) :: filt
+
+        call filt%add("v >")                    ! missing value: does not parse
+        call filt%add("v > 5")                  ! parses, and does get renamed
+        call filt%remap_column_names(["v"], ["w"])
+        call check(error, trim(filt%rules(1)) == "v >", &
+            "an unparseable rule was rewritten instead of being left for the reader to report")
+        if (allocated(error)) return
+        call check(error, index(filt%rules(2), "w") > 0, &
+            "a parseable rule alongside an unparseable one was not renamed")
+    end subroutine test_remap_keeps_bad_rule
+    !
+    !> The sort twin: an aliased key must order rows exactly as the direct key does, for both
+    !> directions and with nulls_first carried across (it lives in its own component, so the check
+    !> is that the rewrite does not disturb it).
+    subroutine test_sortkey_remap_round_trip(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        integer(int32) :: id(6) = [1, 2, 3, 4, 5, 6]
+        integer(int32) :: v(6) = [30, 10, 50, 20, 60, 40]
+        integer(int32) :: got(6)
+        character(len=*), parameter :: file = "test_run/filter_remap_sortkey.parquet"
+
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+
+        call srt%add("-KEY")                       ! '-' shorthand, so direction must survive too
+        call srt%add("ID", nulls_first=.true.)
+        call srt%remap_column_names(["KEY", "ID "], ["v  ", "id "])
+        call check(error, trim(srt%keys(1)) == "v desc", &
+            "sortkey remap did not rewrite the '-' shorthand key as an explicit descending key")
+        if (allocated(error)) return
+        call check(error, srt%nulls_first(2), "sortkey remap did not carry nulls_first across")
+        if (allocated(error)) return
+
+        call parquet_open_reader(reader, file, sort_by=srt)
+        call parquet_read_column(reader, "id", got)
+        call parquet_close_reader(reader)
+        call check(error, all(got == [5, 3, 6, 1, 4, 2]), &
+            "a remapped sort key did not order the rows the way the direct key does")
+    end subroutine test_sortkey_remap_round_trip
     !
 end module test_filter

@@ -563,4 +563,82 @@ contains
         end function wrap
     end procedure parquet_render_filter_expr
 
+    !> Renames the columns a filter's rules refer to, by parsing each rule, substituting names in
+    !> the parsed leaf array, and re-rendering. See parquet_filter's own doc comment for what this
+    !> is for and for the two deliberate non-failures (an unmatched name, an unparseable rule).
+    !>
+    !> Substituting in the PARSED form rather than in the rule text is what makes this safe:
+    !> parquet_parse_filter_expr has already separated column names from operators, keywords,
+    !> parentheses and quoted literals into leaf_name(:), so no second tokenizer is involved and a
+    !> literal that happens to spell a column name cannot be hit by mistake.
+    !>
+    !> A rule none of whose leaves changed keeps its ORIGINAL text, byte for byte, rather than
+    !> being re-rendered into canonical form. That is deliberate: it holds the round trip -- the
+    !> one genuinely new correctness risk this procedure introduces, since it makes
+    !> parquet_render_filter_expr semantically load-bearing for the first time -- to the rules that
+    !> actually had to be rewritten, instead of running every rule of every filter through it.
+    module procedure parquet_filter_remap_column_names
+        integer(int8), allocatable :: node_kind(:), leaf_is_string(:)
+        integer(int32), allocatable :: node_leaf(:)
+        character(len=filter_leaf_name_len), allocatable :: leaf_name(:)
+        character(len=filter_leaf_op_len), allocatable :: leaf_op(:)
+        character(len=filter_leaf_value_len), allocatable :: leaf_value(:)
+        character(len=:), allocatable :: errmsg, text, tmp(:)
+        character(len=32) :: cap_str
+        logical :: ok, changed
+        integer :: i, j, k, nnodes, nleaves
+
+        if (size(from) /= size(to)) error stop "parquet_filter%remap_column_names: from and to " // &
+            "must have the same size"
+        if (size(from) == 0 .or. this%n == 0) return
+
+        do i = 1, this%n
+            nnodes = 0
+            nleaves = 0
+            call parquet_parse_filter_expr(this%rules(i), node_kind, node_leaf, nnodes, leaf_name, &
+                leaf_op, leaf_value, leaf_is_string, nleaves, ok, errmsg)
+            ! Left as-is on purpose: the reader that eventually applies this rule reports the parse
+            ! failure with the file name attached, which is a better message than anything this
+            ! procedure could produce, and renaming a rule nobody can parse has no meaning anyway.
+            if (.not. ok) cycle
+            changed = .false.
+            do j = 1, nleaves
+                do k = 1, size(from)
+                    if (trim(leaf_name(j)) /= trim(from(k))) cycle
+                    if (len_trim(to(k)) > filter_leaf_name_len) then
+                        write(cap_str, '(i0)') filter_leaf_name_len
+                        error stop "parquet_filter%remap_column_names: replacement column name '" // &
+                            trim(to(k)) // "' exceeds the maximum supported length (" // &
+                            trim(cap_str) // " characters)"
+                    end if
+                    leaf_name(j) = trim(to(k))
+                    changed = .true.
+                    exit
+                end do
+            end do
+            if (.not. changed) cycle
+            call parquet_render_filter_expr(node_kind, node_leaf, nnodes, leaf_name, leaf_op, &
+                leaf_value, leaf_is_string, nleaves, text)
+            ! Raised here rather than left to %add's generic length error, which would name a limit
+            ! the caller never wrote: the rule they wrote fitted, and only the renaming pushed it
+            ! over.
+            if (len(text) > filter_max_rule_len) then
+                write(cap_str, '(i0)') filter_max_rule_len
+                error stop "parquet_filter%remap_column_names: rule exceeds the maximum supported " // &
+                    "length (" // trim(cap_str) // " characters) after remapping its column names: " // &
+                    text(1:100) // "..."
+            end if
+            if (len(text) <= len(this%rules)) then
+                this%rules(i) = text
+            else
+                ! Every entry shares one length (the %add convention), so a longer rewritten rule
+                ! re-lengthens the whole array.
+                allocate(character(len=len(text)) :: tmp(this%n))
+                tmp(1:this%n) = this%rules(1:this%n)
+                tmp(i) = text
+                call move_alloc(tmp, this%rules)
+            end if
+        end do
+    end procedure parquet_filter_remap_column_names
+
 end submodule parquet_read_filter

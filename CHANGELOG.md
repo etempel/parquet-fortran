@@ -39,7 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rules at all in that form, letting the range stand on its own. What a filtered reader retains
   now scales with the rows it actually covers rather than with the file's total row count, so a
   scoped filter on a file far larger than its own scope no longer holds a mask sized to the whole
-  file. See [Row filtering](doc/pages/reading.md#row-filtering-with-parquet_filter).
+  file. Finally, the columns a filter's rules — or a sort's keys — refer to can be renamed
+  wholesale with `%remap_column_names(from, to)`, for callers that build a filter in one
+  column-name vocabulary and apply it in another; the substitution works on the parsed expression,
+  so a quoted literal that happens to spell a column name is never touched, and all the renames in
+  one call happen at once. See
+  [Row filtering](doc/pages/reading.md#row-filtering-with-parquet_filter) and
+  [Renaming the columns a filter or sort refers to](doc/pages/reading.md#renaming-the-columns-a-filter-or-sort-refers-to).
 - Read-time sorting: `parquet_open_reader(..., sort_by=srt)` returns a file's rows ordered by one
   or more columns, and every column read afterwards comes back in that order. Keys are added one
   per `srt%add("ra asc")`/`%add("-dec")` call to a `parquet_sortkey` and applied in order, with

@@ -821,6 +821,14 @@ def gen_spec_interfaces():
         !! `internal(i)` is the table-facing name the caller will use, `physical(i)` the column it
         !! actually reads from the file. Both are returned trimmed and unquoted, in declaration
         !! order; `n` is 0 (and the arrays are allocated empty) when the MAML declares no remapping.
+        !! A repeated internal name is rejected here, since that is malformed MAML on its own terms
+        !! and needs no parquet file to detect.
+        !!
+        !! Takes the loaded `parquet_schema` rather than its `%maml%lines` so that callers can pass
+        !! `parquet_load_qc_maml_file(...)` straight in as the actual argument, which is how every
+        !! other consumer of that function in this project uses it -- assigning its (derived-type,
+        !! allocatable-component) result to a local variable first is a shape nothing else here
+        !! relies on.
         !!
         !! A deliberately separate, narrow parser rather than a reuse of the write-side
         !! `parquet_parse_col_map`: that one is validated against a base schema a generic table does
@@ -828,11 +836,12 @@ def gen_spec_interfaces():
         !! for writing). It reads only lines already loaded from disk, so the shared
         !! `parquet_read_maml_source_lines` guarantees (line-length cap, CRLF stripping) come with
         !! them via `parquet_load_qc_maml_file`.
-        module subroutine parse_read_maml_remap(lines, internal, physical, n)
-            character(len=*), intent(in) :: lines(:) !! raw MAML source lines to scan.
+        module subroutine parse_read_maml_remap(schema, internal, physical, n, maml_file)
+            type(parquet_schema), intent(in) :: schema !! the loaded read-in MAML.
             character(len=:), allocatable, intent(out) :: internal(:) !! table-facing names, in order.
             character(len=:), allocatable, intent(out) :: physical(:) !! file column each one reads.
             integer, intent(out) :: n                !! entries found; 0 if there is no remap: block.
+            character(len=*), intent(in) :: maml_file !! the MAML's own path, for error messages.
         end subroutine parse_read_maml_remap
         !> Validates a parsed remap against the file's own column names and fills `cache%cols`
         !! accordingly -- the enumeration that would otherwise be one slot per physical column.

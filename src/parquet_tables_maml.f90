@@ -36,43 +36,57 @@ submodule (parquet_tables) parquet_tables_maml
 contains
     !
     module procedure parse_read_maml_remap
-        integer :: i, nlines, idx_extra, extra_end, idx_remap, count, width
+        integer :: i, j, idx_extra, extra_end, idx_remap, count, width
         character(len=:), allocatable :: tline, key, cvalue
         !
         n = 0
-        nlines = size(lines)
+        allocate(character(len=1) :: internal(0))
+        allocate(character(len=1) :: physical(0))
+        if (.not. allocated(schema%maml%lines)) return
         ! Two passes: one to count and size the deferred-length result, one to fill it. Cheaper
         ! than growing a deferred-length array entry by entry, and a remap: block is tiny.
-        call locate_remap_block(lines, idx_extra, extra_end, idx_remap)
-        if (idx_remap == 0) then
-            allocate(character(len=1) :: internal(0))
-            allocate(character(len=1) :: physical(0))
-            return
-        end if
+        call locate_remap_block(schema%maml%lines, idx_extra, extra_end, idx_remap)
+        if (idx_remap == 0) return
         count = 0
         width = 1
         do i = idx_remap + 1, extra_end
-            if (len_trim(lines(i)) == 0) cycle
-            tline = trim(adjustl(lines(i)))
+            if (len_trim(schema%maml%lines(i)) == 0) cycle
+            tline = trim(adjustl(schema%maml%lines(i)))
             if (tline(1:1) /= "-") exit
             call split_remap_entry(tline, key, cvalue)
             if (len(key) == 0 .or. len(cvalue) == 0) cycle
             count = count + 1
             width = max(width, len(key), len(cvalue))
         end do
-        allocate(character(len=width) :: internal(max(count, 1)))
-        allocate(character(len=width) :: physical(max(count, 1)))
+        if (count == 0) return
+        deallocate(internal)
+        deallocate(physical)
+        allocate(character(len=width) :: internal(count))
+        allocate(character(len=width) :: physical(count))
         internal = ""
         physical = ""
         do i = idx_remap + 1, extra_end
-            if (len_trim(lines(i)) == 0) cycle
-            tline = trim(adjustl(lines(i)))
+            if (len_trim(schema%maml%lines(i)) == 0) cycle
+            tline = trim(adjustl(schema%maml%lines(i)))
             if (tline(1:1) /= "-") exit
             call split_remap_entry(tline, key, cvalue)
             if (len(key) == 0 .or. len(cvalue) == 0) cycle
             n = n + 1
             internal(n) = key
             physical(n) = cvalue
+        end do
+        ! A repeated internal name is ambiguous with no rule that could pick between the entries.
+        ! Checked here rather than alongside the "does that column exist?" rule in validate_remap
+        ! because it is a property of the MAML alone: catching it at parse time means it aborts
+        ! before parquet_open_table has opened the file at all, with no reader (and so no live
+        ! Arrow object) in scope when the process stops.
+        do i = 2, n
+            do j = 1, i - 1
+                if (trim(internal(j)) /= trim(internal(i))) cycle
+                error stop EP // "parquet_open_table: extra: remap: internal name '" // &
+                    trim(internal(i)) // "' is declared more than once (maml '" // &
+                    trim(maml_file) // "')"
+            end do
         end do
     end procedure parse_read_maml_remap
     !
@@ -254,8 +268,12 @@ contains
         end do
     end function remap_targets_physical
     !
-    !> The two hard rules a remap must satisfy, checked before any slot is built so a bad MAML
-    !! fails while the table is still obviously unusable.
+    !> The one remap rule that needs the file: every entry must target a column it actually has.
+    !! Checked before any slot is built, so a bad MAML fails while the table is still obviously
+    !! unusable.
+    !!
+    !! The other rule -- no repeated internal name -- is enforced by `parse_read_maml_remap`
+    !! instead, since it needs no file to detect and is better raised before one is opened.
     !!
     !! Deliberately NOT a rule: two entries targeting the same file column. That is supported --
     !! the two internal names become independent columns over one physical source (see this file's
@@ -282,13 +300,6 @@ contains
                     "' declared for internal name '" // trim(internal(i)) // "' does not exist in " // &
                     "this file (file '" // trim(filename) // "')"
             end if
-            do j = 1, i - 1
-                if (trim(internal(j)) == trim(internal(i))) then
-                    error stop EP // "parquet_open_table: extra: remap: internal name '" // &
-                        trim(internal(i)) // "' is declared more than once (file '" // &
-                        trim(filename) // "')"
-                end if
-            end do
         end do
     end subroutine validate_remap
     !

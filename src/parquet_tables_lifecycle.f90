@@ -44,7 +44,6 @@ contains
         integer(int64) :: file_rows
         character(len=:), allocatable :: names(:)
         character(len=:), allocatable :: remap_internal(:), remap_physical(:)
-        type(parquet_schema) :: read_maml
         character(len=32) :: lo_s, hi_s, n_s
         !
         ! `table` is intent(out) on a finalizable type, so table_finalize has already run on any
@@ -61,6 +60,25 @@ contains
         ! and were never seen to misbehave. This one-line explicit reset is what actually closed the
         ! bug (see CLAUDE.md); do not remove it on the assumption that intent(out) alone suffices.
         table%detached = .false.
+        !
+        ! The read-in MAML is parsed FIRST, before the parquet file is opened at all. Nothing here
+        ! needs the file (the one remap rule that does -- "the column exists" -- stays in
+        ! validate_remap, below), and doing it first means a malformed MAML aborts with no reader,
+        ! and therefore no live Arrow object, anywhere in scope. `extra: remap:` relabels file
+        ! columns for reading -- see parquet_tables_maml. Loading through parquet_load_qc_maml_file
+        ! rather than reading the file here is what gives this the shared reader's line-length cap
+        ! and CRLF handling for free, and it is the same object a later milestone hands to
+        ! parquet_open_reader as its qc schema. It is passed straight in as an actual argument
+        ! rather than assigned to a local first, matching every other use of that function.
+        n_remap = 0
+        if (present(maml)) then
+            call parse_read_maml_remap(parquet_load_qc_maml_file(trim(maml)), &
+                remap_internal, remap_physical, n_remap, trim(maml))
+        else
+            allocate(character(len=1) :: remap_internal(0))
+            allocate(character(len=1) :: remap_physical(0))
+        end if
+        !
         allocate(table%cache)
         call record_open_thread(table%cache)
         table%cache%file_backed = .true.
@@ -95,18 +113,6 @@ contains
         end if
         !
         call parquet_get_column_names(table%cache%reader, names)
-        ! extra: remap: relabels file columns for reading -- see parquet_tables_maml. Loading the
-        ! MAML through parquet_load_qc_maml_file rather than reading the file here is what gives
-        ! this the shared reader's line-length cap and CRLF handling for free, and it is the same
-        ! object a later milestone hands to parquet_open_reader as its qc schema.
-        n_remap = 0
-        if (present(maml)) then
-            read_maml = parquet_load_qc_maml_file(trim(maml))
-            call parse_read_maml_remap(read_maml%maml%lines, remap_internal, remap_physical, n_remap)
-        else
-            allocate(character(len=1) :: remap_internal(0))
-            allocate(character(len=1) :: remap_physical(0))
-        end if
         call table_enumerate_columns(table%cache, names, remap_internal, remap_physical, n_remap, filename)
         ncol = table%cache%ncols
         !

@@ -74,6 +74,9 @@ contains
             new_unittest("filter and sample together, read chunked", test_chunked_read_filter_and_sample), &
             new_unittest("check_complete is satisfied by a filtered chunked pass", test_check_complete_filtered_chunks), &
             new_unittest("a scoped filter covers only its own row groups", test_scoped_filter_row_groups), &
+            new_unittest("a row-bounded filter cuts inside a row group", test_row_bounded_filter), &
+            new_unittest("a row-bounded filter with no rules selects the range alone", &
+                test_row_bounded_filter_no_rules), &
             new_unittest("qc validates the filtered chunk, not the raw one", test_qc_runs_on_filtered_chunk), &
             new_unittest("row mode on a filtered reader addresses the filtered result", test_row_mode_filtered), &
             new_unittest("row mode steps over row groups with no survivors", &
@@ -690,6 +693,77 @@ contains
             call check(error, nrows64 == nrows, "scoped filter: int64 bounds must match int32 bounds")
         end block
     end subroutine test_scoped_filter_row_groups
+    !
+    !> The row-BOUNDED form narrows one step further than the row-group-scoped one: a row-group
+    !> range can only start and end on a row-group boundary, so a caller wanting rows 5..8 of a
+    !> file chunked in threes would otherwise get back every survivor of row groups 2 and 3
+    !> (rows 4..9) with no way to trim them -- only the mask knows which physical rows those are.
+    !> With the row range the answer is exactly the requested rows, and parquet_get_nrows is that
+    !> range's own surviving count.
+    subroutine test_row_bounded_filter(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: nrows
+        integer(int32), allocatable :: back(:)
+        character(len=*), parameter :: file = "test_run/filter_row_bounded.parquet"
+
+        call write_chunked_fixture(file, 12, 3)
+        ! "v > 4" matches rows 5..12; row groups 2-3 cover rows 4..9; the row range then cuts that
+        ! to 5..8, so exactly 5, 6, 7, 8 survive -- one row narrower at each end than the
+        ! row-group scope alone would give.
+        call filt%add("v > 4")
+        call parquet_open_reader(reader, file)
+        call parquet_reader_set_filter(reader, filt, 2, 3, 5, 8)
+        call parquet_get_nrows(reader, nrows)
+        allocate(back(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "v", back)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 4_int64, "row-bounded filter: rows 5..8 of a 3-row-group scope leave 4 rows")
+        if (allocated(error)) return
+        call check(error, all(back == [5, 6, 7, 8]), "row-bounded filter: must yield exactly rows 5, 6, 7, 8")
+        if (allocated(error)) return
+
+        ! Same range in integer(int64) bounds must mean the same thing.
+        block
+            type(parquet_filter) :: wide_filter
+            integer(int64) :: nrows64
+            call wide_filter%add("v > 4")
+            call parquet_open_reader(reader, file)
+            call parquet_reader_set_filter(reader, wide_filter, 2_int64, 3_int64, 5_int64, 8_int64)
+            call parquet_get_nrows(reader, nrows64)
+            call parquet_close_reader(reader)
+            call check(error, nrows64 == nrows, "row-bounded filter: int64 bounds must match int32 bounds")
+        end block
+    end subroutine test_row_bounded_filter
+    !
+    !> A row-bounded call may carry NO rules at all: the range alone then decides which rows match.
+    !> This is how a row scope is installed for its own sake -- a caller that wants only a row
+    !> range (a parquet_table slice carrying sample_fraction= but no filter=, for instance) has no
+    !> clause to hang it on, and a rule-less filter would otherwise be a silent no-op.
+    subroutine test_row_bounded_filter_no_rules(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: empty_filter
+        integer(int64) :: nrows, chunk_rows
+        integer(int32), allocatable :: back(:)
+        character(len=*), parameter :: file = "test_run/filter_row_bounded_no_rules.parquet"
+
+        call write_chunked_fixture(file, 12, 3)
+        call parquet_open_reader(reader, file)
+        call parquet_reader_set_filter(reader, empty_filter, 2, 3, 5, 8)
+        call parquet_get_nrows(reader, nrows)
+        allocate(back(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "v", back)
+        call parquet_get_chunk_size(reader, chunk_rows, row_group=1_int64)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 4_int64, "row-bounded no-rules filter: rows 5..8 leave 4 rows")
+        if (allocated(error)) return
+        call check(error, all(back == [5, 6, 7, 8]), "row-bounded no-rules filter: must yield exactly rows 5, 6, 7, 8")
+        if (allocated(error)) return
+        call check(error, chunk_rows == 0_int64, &
+            "row-bounded no-rules filter: a row group outside the scope must yield no rows")
+    end subroutine test_row_bounded_filter_no_rules
     !
     !> Read-time qc runs AFTER filtering, so a value the filter removed cannot trigger it. The
     !> fixture's row group 1 holds a value far outside the declared qc range; the filter excludes

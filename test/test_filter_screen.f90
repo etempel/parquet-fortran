@@ -56,6 +56,17 @@ module test_filter_screen
             import :: c_long_long
             integer(c_long_long) :: res !! pruned row-group count of the last screen.
         end function parquet_debug_get_row_groups_pruned
+        !> Arrow's own default memory pool's currently-allocated byte count -- the ONLY way to
+        !> observe whether an Arrow-side structure was actually freed or how large it is (RSS
+        !> cannot answer either question; see CLAUDE.md's "Measuring whether Arrow memory was
+        !> actually freed"). A maintainer diagnostic rather than public API, which is why it is
+        !> declared locally here rather than in src/parquet_bindings.f90, exactly as every
+        !> parquet_debug_* hook is.
+        function parquet_get_arrow_bytes_allocated() result(res) &
+            bind(C, name="parquet_get_arrow_bytes_allocated")
+            import :: c_long_long
+            integer(c_long_long) :: res !! bytes currently allocated from Arrow's default pool.
+        end function parquet_get_arrow_bytes_allocated
     end interface
     !
 contains
@@ -94,7 +105,9 @@ contains
             new_unittest("sort_by composes with pruning", test_sort_composes), &
             new_unittest("a scoped filter prunes its out-of-range row groups", test_scoped_filter_prunes), &
             new_unittest("prefetch and a second column read see the pruned row set", test_prefetch_under_pruning), &
-            new_unittest("parquet_get_num_row_groups still reports every row group", test_num_row_groups_unchanged) &
+            new_unittest("parquet_get_num_row_groups still reports every row group", test_num_row_groups_unchanged), &
+            new_unittest("a scoped filter's retained mask scales with its scope, not the file", &
+                test_scoped_mask_memory_scales_with_scope) &
             ]
     end subroutine collect_tests_filter_screen
     !
@@ -1020,5 +1033,73 @@ contains
         call parquet_close_reader(reader)
         call check(error, num_rg == 10_int64, "parquet_get_num_row_groups must still report all 10 row groups")
     end subroutine test_num_row_groups_unchanged
+    !
+    !> The memory property the row-group-segmented mask exists for: what a filtered reader RETAINS
+    !> scales with the rows it actually covers, not with the file's total row count. An excluded
+    !> row group -- pruned by statistics, or outside a scoped filter's range -- holds no mask bits
+    !> at all, where the full-length mask this replaced held a run of all-false ones for it.
+    !>
+    !> Asserted as the DIFFERENCE between two scopes over the SAME file, never as an absolute
+    !> size, and that is what makes it both robust and discriminating. Robust, because the fixture,
+    !> its footer and its schema are identical in both halves, so everything that does not depend
+    !> on the scope cancels -- including a fixed ~85 kB the reader legitimately still holds at
+    !> measurement time (the last row group's decoded chunk, read while the expression was being
+    !> evaluated), which would swamp a ratio test. Discriminating, because under the full-length
+    !> representation this replaced, BOTH scopes retained a mask of total_nrows bits and the
+    !> difference would be approximately zero; under the current one it is the extra row groups'
+    !> own bits and nothing else.
+    !>
+    !> Measured with Arrow's own pool counter, never RSS -- freed pool pages are not returned to
+    !> the OS, so RSS cannot answer this question at all (CLAUDE.md, "Measuring whether Arrow
+    !> memory was actually freed"). Only the RETAINED half is asserted on: the transient vector
+    !> built during evaluation is a plain std::vector the Arrow pool never sees (its disappearance
+    !> is a benchmark-harness observation, not a unit-testable one).
+    !>
+    !> This test lives in the filter_screen suite because the pool counter is process-global, and
+    !> run_tester.f90 excludes exactly this suite from its per-test parallelism -- a concurrently
+    !> allocating sibling test would make the measurement meaningless.
+    subroutine test_scoped_mask_memory_scales_with_scope(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int64) :: narrow_bytes, wide_bytes
+        character(len=*), parameter :: file = "test_run/screen_mask_memory.parquet"
+        ! 20 row groups of 20000 rows: big enough that one row group's worth of mask bits (2.5 kB)
+        ! stands clear of allocator granularity, small enough to stay an ordinary unit test.
+        integer, parameter :: nrows = 400000, chunk = 20000
+
+        call write_screen_fixture(file, nrows, chunk)
+        ! The screen must not prune anything here, or it would narrow the wide scope too and the
+        ! two halves would stop differing in the way this test is about. "id > 0" matches every
+        ! row, so every row group in scope stays live.
+        call retained_mask_bytes(file, "id > 0", 1_int64, 2_int64, narrow_bytes)
+        call retained_mask_bytes(file, "id > 0", 1_int64, 20_int64, wide_bytes)
+
+        ! 18 more row groups in scope, at 20000 rows each, is 45000 more mask bytes. Asserted with
+        ! a wide margin (>30000) rather than exactly, since allocator granularity rounds it up.
+        call check(error, wide_bytes - narrow_bytes > 30000_int64, &
+            "scoped mask memory: 18 more row groups in scope must retain ~45 kB more mask")
+    end subroutine test_scoped_mask_memory_scales_with_scope
+    !
+    !> Arrow-pool bytes retained by an open, scoped-filter reader: measured as the difference
+    !> across the open, with the counter read once before and once after, so whatever the process
+    !> already held drops out. The reader is left open across the measurement deliberately -- the
+    !> point is what it RETAINS while usable, not what it peaked at.
+    subroutine retained_mask_bytes(file, rule, rg_lo, rg_hi, bytes)
+        character(len=*), intent(in) :: file !! fixture to read.
+        character(len=*), intent(in) :: rule !! the filter expression.
+        integer(int64), intent(in) :: rg_lo !! first row group in scope (1-based).
+        integer(int64), intent(in) :: rg_hi !! last row group in scope (inclusive).
+        integer(int64), intent(out) :: bytes !! pool bytes the open reader retains.
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: before, after
+
+        call filt%add(rule)
+        call parquet_open_reader(reader, file)
+        before = parquet_get_arrow_bytes_allocated()
+        call parquet_reader_set_filter(reader, filt, rg_lo, rg_hi)
+        after = parquet_get_arrow_bytes_allocated()
+        call parquet_close_reader(reader)
+        bytes = after - before
+    end subroutine retained_mask_bytes
     !
 end module test_filter_screen

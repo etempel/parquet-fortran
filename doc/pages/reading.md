@@ -542,6 +542,14 @@ call parquet_open_reader(reader, "huge.parquet")
 call parquet_reader_set_filter(reader, filt, 5, 8)   ! only row groups 5..8 are examined
 ```
 
+**Narrowing to an exact row range.** A row-group range can only ever begin and end on a row-group boundary, so a caller interested in an arbitrary row range would get back every survivor of the *covering* row groups with no way to trim them — only the mask knows which physical rows those are. A four-argument form adds the row range itself: `parquet_reader_set_filter(reader, filt, row_group_lo, row_group_hi, row_lo, row_hi)`, where `row_lo`/`row_hi` are 1-based, inclusive, physical file rows. Rows outside them never match, so `parquet_get_nrows` afterwards is that range's own surviving count:
+
+```fortran
+call parquet_reader_set_filter(reader, filt, 2, 3, 5, 8)   ! rows 5..8, which lie inside row groups 2..3
+```
+
+The filter may hold no rules at all in this form, in which case the range alone decides which rows match — that is how a row scope is installed for its own sake, with no expression to hang it on. Both integer kinds are accepted, as for the row-group bounds.
+
 **Read-time qc still runs, scoped to one row group at a time:** if the reader was opened with [`qc=.true.`](quality-control.html#read-side-enforcement), each `parquet_read_column_chunk` call runs the usual `qc: min:`/`max:`/`miss:` checks against just that row group's own data, not the whole column. In hard mode (`qc_soft=.false.`, the default), a violation aborts immediately, naming the offending row group (`qc violation for column 'name [row group N]'...`). In soft mode (`qc_soft=.true.`), a violation prints a `WARNING` — still at most once per column for the reader's whole lifetime (the same throttling `parquet_read_column` already uses), so reading many violating row groups in soft mode doesn't spam one warning per chunk.
 
 **Completeness checks:** pass `check_complete=.true.` to `parquet_close_reader` to verify that every column you read via `parquet_read_column_chunk` had *every* one of the file's row groups read by the time you close — catches a loop that forgot a row group, or exited early by mistake:

@@ -1075,10 +1075,21 @@ module parquet
     !> cached, so a filter column read afterwards is read again. Use it when the file is larger
     !> than memory, or when only part of it is of interest -- typically alongside chunked reads
     !> over the same row groups.
+    !>
+    !> A third form takes a physical ROW range as well (four numeric arguments rather than two):
+    !> only rows row_lo..row_hi, 1-based and inclusive, may match. It exists because a row-group
+    !> range can only ever start and end on a row-group boundary, so a caller working over an
+    !> arbitrary row range -- a parquet_table slice, typically -- would otherwise get back the
+    !> whole covering row groups' survivors and have no way to trim them, the mask being the only
+    !> thing that knows which rows those are. With this form the filter answers for exactly the
+    !> requested rows, and parquet_get_nrows afterwards is that range's own surviving count. The
+    !> filter may hold no rules at all in this form, which installs the range by itself.
     interface parquet_reader_set_filter
         module procedure parquet_reader_set_filter_base
         module procedure parquet_reader_set_filter_scoped_int32
         module procedure parquet_reader_set_filter_scoped_int64
+        module procedure parquet_reader_set_filter_rows_int32
+        module procedure parquet_reader_set_filter_rows_int64
     end interface parquet_reader_set_filter
 
     public :: parquet_open_reader
@@ -2236,6 +2247,31 @@ module parquet
             integer(int64), intent(in) :: row_group_lo !! first row group to evaluate over (1-based).
             integer(int64), intent(in) :: row_group_hi !! last row group to evaluate over (inclusive).
         end subroutine parquet_reader_set_filter_scoped_int64
+        !> Row-BOUNDED form, int32 bounds -- see the generic interface above. Narrows the
+        !> row-group-scoped form one step further: only physical rows row_lo..row_hi (1-based,
+        !> inclusive) may match, so a range that starts or ends INSIDE a row group is expressed
+        !> exactly rather than rounded out to whole row groups.
+        module subroutine parquet_reader_set_filter_rows_int32(reader, filter, row_group_lo, row_group_hi, &
+                row_lo, row_hi)
+            type(parquet_reader), intent(inout) :: reader !! open, unfiltered reader with no column decoded yet.
+            type(parquet_filter), intent(in) :: filter !! filter whose rules are parsed, validated, and applied;
+            !! may hold no rules at all, in which case the row range alone decides which rows match.
+            integer(int32), intent(in) :: row_group_lo !! first row group to evaluate over (1-based).
+            integer(int32), intent(in) :: row_group_hi !! last row group to evaluate over (inclusive).
+            integer(int32), intent(in) :: row_lo !! first physical row that may match (1-based).
+            integer(int32), intent(in) :: row_hi !! last physical row that may match (inclusive).
+        end subroutine parquet_reader_set_filter_rows_int32
+        !> Row-BOUNDED form, int64 bounds -- see parquet_reader_set_filter_rows_int32.
+        module subroutine parquet_reader_set_filter_rows_int64(reader, filter, row_group_lo, row_group_hi, &
+                row_lo, row_hi)
+            type(parquet_reader), intent(inout) :: reader !! open, unfiltered reader with no column decoded yet.
+            type(parquet_filter), intent(in) :: filter !! filter whose rules are parsed, validated, and applied;
+            !! may hold no rules at all, in which case the row range alone decides which rows match.
+            integer(int64), intent(in) :: row_group_lo !! first row group to evaluate over (1-based).
+            integer(int64), intent(in) :: row_group_hi !! last row group to evaluate over (inclusive).
+            integer(int64), intent(in) :: row_lo !! first physical row that may match (1-based).
+            integer(int64), intent(in) :: row_hi !! last physical row that may match (inclusive).
+        end subroutine parquet_reader_set_filter_rows_int64
         !> Applies `sort_by` to an already-open `reader`, exactly as
         !> parquet_open_reader(..., sort_by=) would have: every column read
         !> from here on -- and every column already decoded -- comes back in

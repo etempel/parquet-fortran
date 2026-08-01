@@ -403,12 +403,14 @@ contains
     !> parquet_get_nrows and every column read afterward already reflect the
     !> filtered row set (see parquet_reader_set_filter in parquet_wrapper.cpp
     !> for the actual validation/masking).
-    subroutine parquet_apply_filter(reader, filter, context, row_group_lo, row_group_hi)
+    subroutine parquet_apply_filter(reader, filter, context, row_group_lo, row_group_hi, row_lo, row_hi)
         type(parquet_reader), intent(inout) :: reader !! open reader the filter is applied to.
         type(parquet_filter), intent(in) :: filter !! filter whose rules are parsed, validated, and applied.
         character(len=*), intent(in) :: context !! calling procedure's name, used in every error-stop message.
         integer(int64), intent(in) :: row_group_lo !! first row group to evaluate over, or 0 for the whole file.
         integer(int64), intent(in) :: row_group_hi !! last row group to evaluate over, or 0 for the whole file.
+        integer(int64), intent(in) :: row_lo !! first physical row that may match, or 0 for no row bound.
+        integer(int64), intent(in) :: row_hi !! last physical row that may match, or 0 for no row bound.
         integer(int8), allocatable :: node_kind(:), leaf_is_string(:)
         integer(int32), allocatable :: node_leaf(:)
         character(len=filter_leaf_name_len), allocatable :: leaf_name(:)
@@ -441,7 +443,12 @@ contains
                 end if
             end if
         end do
-        if (nleaves == 0) return
+        ! A rule-less filter still has something to install when a row-group scope or a physical
+        ! row range was given: an all-true-within-range mask, which is how a slice-regime table
+        ! carrying only sample_fraction= expresses its own bounds. With no rules AND no bounds
+        ! there is genuinely nothing to do.
+        if (nleaves == 0 .and. row_group_lo <= 0 .and. row_group_hi <= 0 .and. &
+                row_lo <= 0 .and. row_hi <= 0) return
 
         call convert_temporal_filter_values(reader, context, leaf_name, leaf_op, leaf_value, leaf_is_string, nleaves)
         call parquet_render_filter_expr(node_kind, node_leaf, nnodes, leaf_name, leaf_op, leaf_value, &
@@ -457,7 +464,7 @@ contains
             int(filter_leaf_value_len, kind=c_long_long), leaf_is_string(1:nleaves), &
             int(nleaves, kind=c_long_long), node_kind(1:nnodes), node_leaf(1:nnodes), &
             int(nnodes, kind=c_long_long), expr_text//char(0), row_group_lo, row_group_hi, &
-            c_err, int(len(c_err), kind=c_long_long))
+            row_lo, row_hi, c_err, int(len(c_err), kind=c_long_long))
 
         call reader_filename_suffix(reader, name_suffix)
         if (status /= 0) error stop trim(context) // ": " // trim(c_err) // name_suffix
@@ -739,7 +746,8 @@ contains
         if (present(qc_soft)) qc_soft_value = qc_soft
         if (present(schema) .and. qc_effective) call parquet_apply_qc(reader, schema%maml, qc_soft_value)
 
-        if (filter_will_apply) call parquet_apply_filter(reader, filter, "parquet_open_reader", 0_int64, 0_int64)
+        if (filter_will_apply) call parquet_apply_filter(reader, filter, "parquet_open_reader", &
+            0_int64, 0_int64, 0_int64, 0_int64)
 
         ! Strictly after the filter: the sort orders the SURVIVING rows, so every key column has
         ! to arrive already masked (see parquet_apply_sort). Before the prefetch below, so a
@@ -775,22 +783,33 @@ contains
     !> A reader opened with sample_fraction= is accepted: the sample mask is already installed, and
     !> these clauses AND onto it exactly as they would have at open time.
     module procedure parquet_reader_set_filter_base
-        call parquet_reader_set_filter_impl(reader, filter, 0_int64, 0_int64)
+        call parquet_reader_set_filter_impl(reader, filter, 0_int64, 0_int64, 0_int64, 0_int64)
     end procedure parquet_reader_set_filter_base
     module procedure parquet_reader_set_filter_scoped_int32
-        call parquet_reader_set_filter_impl(reader, filter, int(row_group_lo, int64), int(row_group_hi, int64))
+        call parquet_reader_set_filter_impl(reader, filter, int(row_group_lo, int64), int(row_group_hi, int64), &
+            0_int64, 0_int64)
     end procedure parquet_reader_set_filter_scoped_int32
     module procedure parquet_reader_set_filter_scoped_int64
-        call parquet_reader_set_filter_impl(reader, filter, row_group_lo, row_group_hi)
+        call parquet_reader_set_filter_impl(reader, filter, row_group_lo, row_group_hi, 0_int64, 0_int64)
     end procedure parquet_reader_set_filter_scoped_int64
+    module procedure parquet_reader_set_filter_rows_int32
+        call parquet_reader_set_filter_impl(reader, filter, int(row_group_lo, int64), int(row_group_hi, int64), &
+            int(row_lo, int64), int(row_hi, int64))
+    end procedure parquet_reader_set_filter_rows_int32
+    module procedure parquet_reader_set_filter_rows_int64
+        call parquet_reader_set_filter_impl(reader, filter, row_group_lo, row_group_hi, row_lo, row_hi)
+    end procedure parquet_reader_set_filter_rows_int64
     !> The one implementation behind every parquet_reader_set_filter form. row_group_lo/hi are 0
-    !> for the whole-file form and an inclusive 1-based range otherwise; the range itself is
-    !> validated C++-side, against the file's own row-group count.
-    subroutine parquet_reader_set_filter_impl(reader, filter, row_group_lo, row_group_hi)
+    !> for the whole-file form and an inclusive 1-based range otherwise; row_lo/hi likewise bound
+    !> the PHYSICAL rows that may match, or are 0 for no row bound. Both ranges are validated
+    !> C++-side, against the file's own row-group and row counts.
+    subroutine parquet_reader_set_filter_impl(reader, filter, row_group_lo, row_group_hi, row_lo, row_hi)
         type(parquet_reader), intent(inout) :: reader !! open, unfiltered reader with no column decoded yet.
         type(parquet_filter), intent(in) :: filter !! filter whose rules are parsed, validated, and applied.
         integer(int64), intent(in) :: row_group_lo !! first row group to evaluate over, or 0 for the whole file.
         integer(int64), intent(in) :: row_group_hi !! last row group to evaluate over, or 0 for the whole file.
+        integer(int64), intent(in) :: row_lo !! first physical row that may match, or 0 for no row bound.
+        integer(int64), intent(in) :: row_hi !! last physical row that may match, or 0 for no row bound.
         character(len=:), allocatable :: name_suffix
 
         call check_reader_open(reader, "parquet_reader_set_filter")
@@ -804,9 +823,12 @@ contains
             error stop "parquet_reader_set_filter: a column has already been read on this reader; a filter " // &
                 "must be applied before any column is read" // name_suffix
         end if
-        if (filter%n == 0) return
+        ! A rule-less filter still installs a mask when a row range was given (that range is the
+        ! whole point of the call); with no rules and no range there is nothing to do.
+        if (filter%n == 0 .and. row_lo <= 0 .and. row_hi <= 0) return
 
-        call parquet_apply_filter(reader, filter, "parquet_reader_set_filter", row_group_lo, row_group_hi)
+        call parquet_apply_filter(reader, filter, "parquet_reader_set_filter", row_group_lo, row_group_hi, &
+            row_lo, row_hi)
     end subroutine parquet_reader_set_filter_impl
     module procedure parquet_reader_set_sort
         character(len=:), allocatable :: name_suffix

@@ -32,8 +32,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row was unchanged. Skipping changes no result (same rows, same order, same nulls) and has nothing
   to switch on; a file written without statistics, an unsigned/`decimal`/`half_float` column, and a
   floating-point column under `not` or `/=` simply skip nothing, and `print_stat` reports a
-  `screened:` line whenever row groups were skipped. See
-  [Row filtering](doc/pages/reading.md#row-filtering-with-parquet_filter).
+  `screened:` line whenever row groups were skipped. A scoped filter can also be narrowed to an
+  exact **row** range —
+  `parquet_reader_set_filter(reader, filt, row_group_lo, row_group_hi, row_lo, row_hi)` — for a
+  range that begins or ends inside a row group rather than on a boundary; the filter may hold no
+  rules at all in that form, letting the range stand on its own. What a filtered reader retains
+  now scales with the rows it actually covers rather than with the file's total row count, so a
+  scoped filter on a file far larger than its own scope no longer holds a mask sized to the whole
+  file. See [Row filtering](doc/pages/reading.md#row-filtering-with-parquet_filter).
 - Read-time sorting: `parquet_open_reader(..., sort_by=srt)` returns a file's rows ordered by one
   or more columns, and every column read afterwards comes back in that order. Keys are added one
   per `srt%add("ra asc")`/`%add("-dec")` call to a `parquet_sortkey` and applied in order, with

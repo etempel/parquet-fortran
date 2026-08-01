@@ -322,17 +322,7 @@ extern "C"
 		// _name_length/_name are all O(1) lookups into it and can never disagree with each other.
 		// See collect_column_leaf_paths for exactly which fields become an entry.
 		std::vector<std::string> column_path_cache;
-		// Set by parquet_reader_set_sample and/or parquet_reader_set_filter: a plain (never-null)
-		// boolean mask, one entry per row of the *unfiltered* file, true for rows that pass random
-		// downsampling (parquet_open_reader's sample_fraction=, if given) AND every filter clause
-		// (filter=, if also given). When a filter= will also be applied, parquet_reader_set_sample
-		// deliberately does NOT install its own mask here -- it stashes it in pending_sample_mask
-		// instead (see that field's own comment for why) and lets parquet_reader_set_filter install
-		// the final, combined mask here once it has evaluated its own clauses. get_single_chunk_array
-		// and parquet_reader_prefetch_columns both apply this (via arrow::compute::Filter) to every
-		// column right after decoding it, so every column ever handed back to Fortran -- and every
-		// column_cache entry -- reflects only the matching rows, transparently, once this is set.
-		std::shared_ptr<arrow::BooleanArray> filter_mask;
+		// (The mask itself is declared further down, next to row_group_live_offsets -- see live_mask.)
 		// Per-column filter clauses retained solely for parquet_reader_print_stat's
 		// "filter" column: each entry is one clause's operator+value with the
 		// column name stripped (e.g. ">=0.0"), in the order set_filter saw them.
@@ -368,18 +358,24 @@ extern "C"
 		bool has_sample = false;
 		double sample_fraction = 0.0;
 		int32_t sample_seed_used = 0;
-		// Holds the raw sample draw (see draw_sample_mask), one entry per row of the unfiltered
-		// file, whenever parquet_reader_set_sample was told a filter= will also be applied right
-		// after -- has_pending_sample distinguishes "nothing pending" from a genuine (possibly
-		// empty, on a zero-row file) pending mask. Installing a sample mask onto filter_mask
-		// immediately would make every subsequent column read -- including the filter's own
-		// referenced columns, read while parquet_reader_set_filter evaluates its clauses -- come
-		// back already sample-compacted, breaking the row-index alignment that clause evaluation's
-		// own per-row combined vector depends on (confirmed by a real Arrow "must all be the same
-		// length" crash when this wasn't deferred). parquet_reader_set_filter consumes and clears
-		// both fields once it folds this into the final filter_mask.
+		// Set when parquet_reader_set_sample was told a filter= will also be applied right after:
+		// the draw itself is DEFERRED to parquet_reader_set_filter rather than performed here.
+		// Two independent reasons, both load-bearing:
+		//
+		//   * Correctness. Installing a sample mask immediately would make every subsequent column
+		//     read -- including the filter's own referenced columns, read while
+		//     parquet_reader_set_filter evaluates its clauses -- come back already sample-compacted,
+		//     breaking the row-index alignment clause evaluation depends on (confirmed by a real
+		//     Arrow "must all be the same length" crash when this wasn't deferred).
+		//   * Memory. The filter's statistics screen has not run yet at set_sample time, so which
+		//     row groups survive is not yet known. Drawing later, inside set_filter, means the draw
+		//     only has to be STORED for the rows that survive screening/scoping -- see live_mask.
+		//
+		// The seed is still chosen (and reported back to the caller) here, so a deferred draw is as
+		// reproducible as an immediate one; only the Bernoulli trials themselves are deferred.
 		bool has_pending_sample = false;
-		std::vector<uint8_t> pending_sample_mask;
+		double pending_sample_fraction = 0.0;
+		int32_t pending_sample_seed = 0;
 		// Access bookkeeping for parquet_reader_print_stat only: was_prefetched
 		// is set for every column index named in a parquet_reader_prefetch_columns
 		// call (whether or not it actually triggered a read that time -- see
@@ -439,13 +435,11 @@ extern "C"
 		// first row of row group i+1, and the trailing entry is total_nrows, so row group `rg`
 		// covers [offsets[rg-1], offsets[rg]). Built once at open time from the footer.
 		//
-		// This is what makes a filter mask row-group-addressable. The mask is built by evaluating
-		// clauses against whole-file arrays in physical file order, and row groups partition those
-		// same rows contiguously and in that same order -- so row group rg's own mask is exactly
-		// filter_mask->Slice(offsets[rg-1], offsets[rg] - offsets[rg-1]). Nothing about the mask is
-		// "flat" in a way that prevented this; what was missing was only this offset table and an
-		// answer to "how many rows does row group N have after filtering", which
-		// row_group_surviving below supplies.
+		// This is what makes a filter mask row-group-addressable: the mask is built in physical file
+		// order and row groups partition those same rows contiguously, so each row group's own mask
+		// is a slice of it. The mask covers only the LIVE rows, though, so the offset that indexes
+		// INTO it is row_group_live_offsets below, not this table; this one stays in physical file
+		// rows and is what a row range (parquet_reader_set_filter's row_lo/row_hi) is expressed in.
 		std::vector<int64_t> row_group_offsets;
 		// Surviving (post-mask) row count per row group, 1-based-indexed as [rg-1], filled once
 		// whenever a mask is installed and empty when no mask is active. Cached rather than
@@ -460,17 +454,31 @@ extern "C"
 		// is provably all-false, so the rows it drops are exactly the rows the mask would have
 		// dropped anyway (see live_mask).
 		std::vector<uint8_t> row_group_live;
-		// filter_mask restricted to the live row groups' rows, in file order -- i.e. exactly what
-		// an array read via read_live_row_groups must be filtered with, since such an array only
-		// contains those rows. Equal to filter_mask (and literally the same object) whenever
-		// nothing was pruned, which is why apply_row_transform can use this unconditionally rather
-		// than choosing between the two. Set by every path that sets filter_mask.
+		// THE row mask: set by parquet_reader_set_sample and/or parquet_reader_set_filter, true for
+		// rows that pass every filter clause (filter=), lie inside the requested row range, and
+		// survive random downsampling (sample_fraction=). get_single_chunk_array and
+		// parquet_reader_prefetch_columns apply it (via arrow::compute::Filter) to every column
+		// right after decoding, so every column ever handed back to Fortran -- and every
+		// column_cache entry -- reflects only the matching rows, transparently, once this is set.
 		//
-		// filter_mask itself stays the canonical, full-length (total_nrows) object: everything
-		// row-group-indexed (refresh_row_group_surviving, row_group_mask_segment, the chunked
-		// read's per-row-group slice) keeps using it, and a pruned row group is simply all-false
-		// there.
+		// It covers the LIVE rows only -- every row of every row group that is neither
+		// statistics-pruned nor outside a scoped filter's range -- in file order, which is exactly
+		// what an array read via read_live_row_groups must be filtered with, since such an array
+		// only contains those rows. An excluded row group therefore costs NOTHING here, which is
+		// the whole point: a slice-scoped filter on a huge file holds a mask proportional to its
+		// own slice rather than to total_nrows. When nothing is excluded the live rows are every
+		// row, and this is byte-for-byte the full-length mask it replaced.
+		//
+		// Non-null exactly when a mask is active; a reader whose filter matched nothing still has
+		// one (zero-length, or all-false), so testing this pointer is the "is a mask installed"
+		// predicate. Its length is always row_group_live_offsets' own total.
 		std::shared_ptr<arrow::BooleanArray> live_mask;
+		// Where row group rg begins WITHIN live_mask (0-based), or -1 when rg contributes no rows
+		// to it at all (pruned by statistics, or outside a scoped filter's row-group range). Empty
+		// whenever live_mask is null. This is the live-space counterpart of row_group_offsets, and
+		// the pair is what keeps every row-group-scoped operation a zero-copy slice rather than a
+		// rebuild: row_group_mask_segment slices live_mask at row_group_live_offsets[rg-1].
+		std::vector<int64_t> row_group_live_offsets;
 		// How many row groups the last screen ruled out -- parquet_reader_print_stat's "screened:"
 		// line and the test-only parquet_debug_get_row_groups_pruned() hook.
 		int64_t row_groups_pruned = 0;
@@ -518,37 +526,96 @@ extern "C"
 			reader_handle->row_group_offsets[static_cast<size_t>(row_group - 1)];
 	}
 
-	// Row group `row_group`'s own slice of the active mask, or nullptr when no mask is active.
-	// The mask spans the whole physical file in file order, and row groups partition those same
-	// rows contiguously in that same order, so the slice needs no copy -- Arrow's Slice shares the
-	// underlying buffer.
+	// An all-false BooleanArray of `length` rows. Built only for an EXCLUDED row group's mask
+	// segment (see row_group_mask_segment): live_mask holds no bits for such a row group, but a
+	// caller that reads its chunk from disk anyway still gets a physical-length array back and
+	// needs a same-length mask to filter it with. One row group's worth of bits, allocated only on
+	// that path.
+	static std::shared_ptr<arrow::BooleanArray> all_false_mask(int64_t length)
+	{
+		arrow::BooleanBuilder builder;
+		auto reserve_status = builder.AppendValues(static_cast<int64_t>(length), false);
+		if (!reserve_status.ok())
+		{ // GCOVR_EXCL_START -- BooleanBuilder allocation backstop, not fixture-triggerable
+			throw std::runtime_error(reserve_status.ToString());
+		}
+		// GCOVR_EXCL_STOP
+		std::shared_ptr<arrow::Array> array;
+		auto finish_status = builder.Finish(&array);
+		if (!finish_status.ok())
+		{ // GCOVR_EXCL_START -- BooleanBuilder allocation backstop, not fixture-triggerable
+			throw std::runtime_error(finish_status.ToString());
+		}
+		// GCOVR_EXCL_STOP
+		return std::static_pointer_cast<arrow::BooleanArray>(array);
+	}
+
+	// Row group `row_group`'s own slice of the active mask, or nullptr when NO mask is active.
+	//
+	// THE TWO NULL CASES MUST STAY DISTINGUISHABLE. nullptr means "this reader has no mask at all",
+	// and every caller reads it as "hand the chunk back unfiltered". An EXCLUDED row group -- one
+	// pruned by statistics or outside a scoped filter's range -- is the opposite: none of its rows
+	// survive. live_mask holds no bits for it (that is the memory saving), so this returns a
+	// physical-length ALL-FALSE array for it rather than nullptr. Returning nullptr there instead
+	// would make a chunked read of a pruned row group hand back every one of its rows unfiltered,
+	// silently, with nothing to notice -- see this stage's own mutation test for exactly that.
+	//
+	// For a live row group the slice needs no copy: Arrow's Slice shares the underlying buffer.
 	static std::shared_ptr<arrow::BooleanArray> row_group_mask_segment(
 		ParquetReaderHandle *reader_handle, int64_t row_group)
 	{
-		if (!reader_handle->filter_mask) return nullptr;
-		int64_t offset = reader_handle->row_group_offsets[static_cast<size_t>(row_group - 1)];
+		if (!reader_handle->live_mask) return nullptr;
 		int64_t length = row_group_rows(reader_handle, row_group);
-		return std::static_pointer_cast<arrow::BooleanArray>(reader_handle->filter_mask->Slice(offset, length));
+		int64_t offset = reader_handle->row_group_live_offsets[static_cast<size_t>(row_group - 1)];
+		if (offset < 0) return all_false_mask(length);
+		return std::static_pointer_cast<arrow::BooleanArray>(reader_handle->live_mask->Slice(offset, length));
 	}
 
 	// Fills row_group_surviving from the mask just installed on the handle: one popcount per row
 	// group, done once here rather than per query. Called by every path that installs a mask
-	// (parquet_reader_set_filter, parquet_reader_set_sample).
+	// (parquet_reader_set_filter, parquet_reader_set_sample). An excluded row group contributes 0
+	// without materializing its all-false segment.
 	static void refresh_row_group_surviving(ParquetReaderHandle *reader_handle)
 	{
 		reader_handle->row_group_surviving.clear();
-		if (!reader_handle->filter_mask) return;
+		if (!reader_handle->live_mask) return;
 		reader_handle->row_group_surviving.reserve(static_cast<size_t>(reader_handle->num_row_groups));
 		for (int64_t rg = 1; rg <= reader_handle->num_row_groups; ++rg)
 		{
-			auto segment = row_group_mask_segment(reader_handle, rg);
-			int64_t surviving = 0;
-			for (int64_t i = 0; i < segment->length(); ++i)
+			int64_t offset = reader_handle->row_group_live_offsets[static_cast<size_t>(rg - 1)];
+			if (offset < 0)
 			{
-				if (segment->Value(i)) ++surviving;
+				reader_handle->row_group_surviving.push_back(0);
+				continue;
+			}
+			int64_t rows = row_group_rows(reader_handle, rg);
+			int64_t surviving = 0;
+			for (int64_t i = 0; i < rows; ++i)
+			{
+				if (reader_handle->live_mask->Value(offset + i)) ++surviving;
 			}
 			reader_handle->row_group_surviving.push_back(surviving);
 		}
+	}
+
+	// Fills row_group_live_offsets from row_group_live, and returns the total live row count (the
+	// length live_mask must have). Called by every path that installs a mask, BEFORE the mask is
+	// built, since the offsets are what say where each row group's bits go.
+	static int64_t assign_row_group_live_offsets(ParquetReaderHandle *reader_handle)
+	{
+		reader_handle->row_group_live_offsets.assign(static_cast<size_t>(reader_handle->num_row_groups), -1);
+		int64_t live_rows = 0;
+		for (int64_t rg = 1; rg <= reader_handle->num_row_groups; ++rg)
+		{
+			if (!reader_handle->row_group_live.empty() &&
+				reader_handle->row_group_live[static_cast<size_t>(rg - 1)] == 0)
+			{
+				continue;
+			}
+			reader_handle->row_group_live_offsets[static_cast<size_t>(rg - 1)] = live_rows;
+			live_rows += row_group_rows(reader_handle, rg);
+		}
+		return live_rows;
 	}
 
 	// How many rows row group `row_group` yields to the caller: its physical row count, or its
@@ -589,57 +656,42 @@ extern "C"
 		return live;
 	}
 
-	// Builds live_mask from the full-length filter_mask just installed: the concatenation, in file
-	// order, of filter_mask's segments for the live row groups. Called by every path that installs
-	// a mask, right after refresh_row_group_surviving.
+	// Installs `combined` (one byte per LIVE row, in file order -- the layout
+	// assign_row_group_live_offsets just laid out) as the reader's mask, and refreshes the derived
+	// per-row-group survivor counts. The single place a mask becomes active, shared by
+	// parquet_reader_set_filter and parquet_reader_set_sample.
 	//
-	// When nothing was pruned this deliberately stores the SAME object rather than a copy -- both
-	// so the common path costs nothing, and so that a mistake in the pruning arithmetic shows up as
-	// an Arrow length mismatch on a pruned read rather than as a silently wrong answer on every
-	// read.
-	//
-	// THE INVARIANT F4 RESTS ON: for every column, Filter(live_read, live_mask) is element-wise
-	// identical to Filter(full_read, filter_mask). It holds because filter_mask is all-false over
-	// every pruned row group, so the rows dropped by reading less are exactly the rows the mask
-	// would have dropped anyway.
-	static void refresh_live_mask(ParquetReaderHandle *reader_handle)
+	// THE INVARIANT F4 RESTS ON: for every column, Filter(live_read, live_mask) yields exactly the
+	// surviving rows. It holds by construction now -- an array read via read_live_row_groups spans
+	// the live row groups' rows, and so does this mask, element for element -- where it previously
+	// depended on a full-length mask being all-false over each pruned row group.
+	static bool install_row_mask(ParquetReaderHandle *reader_handle, const std::vector<uint8_t> &combined,
+		char *err_out, int64_t err_cap)
 	{
-		if (!reader_handle->filter_mask)
-		{ // GCOVR_EXCL_START -- defensive: every caller invokes this immediately after installing a
-		  // mask, so there is no reachable path with none. Kept so a future caller cannot leave a
-		  // stale live_mask behind a mask that was removed.
-			reader_handle->live_mask.reset();
-			return;
+		arrow::BooleanBuilder mask_builder;
+		auto append_status = mask_builder.AppendValues(combined.data(), static_cast<int64_t>(combined.size()));
+		if (!append_status.ok())
+		{ // GCOVR_EXCL_START -- BooleanBuilder allocation backstop, not fixture-triggerable
+			std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to build filter mask: %s",
+				append_status.ToString().c_str());
+			return false;
 		}
 		// GCOVR_EXCL_STOP
-		if (!reader_has_pruned_row_groups(reader_handle))
-		{
-			reader_handle->live_mask = reader_handle->filter_mask;
-			return;
-		}
-		arrow::BooleanBuilder builder;
-		for (int64_t rg = 1; rg <= reader_handle->num_row_groups; ++rg)
-		{
-			if (reader_handle->row_group_live[static_cast<size_t>(rg - 1)] == 0) continue;
-			auto segment = row_group_mask_segment(reader_handle, rg);
-			for (int64_t i = 0; i < segment->length(); ++i)
-			{
-				auto status = builder.Append(segment->Value(i));
-				if (!status.ok())
-				{ // GCOVR_EXCL_START -- BooleanBuilder allocation backstop, not fixture-triggerable
-					throw std::runtime_error(status.ToString());
-				}
-				// GCOVR_EXCL_STOP
-			}
-		}
 		std::shared_ptr<arrow::Array> mask_array;
-		auto finish_status = builder.Finish(&mask_array);
+		auto finish_status = mask_builder.Finish(&mask_array);
 		if (!finish_status.ok())
 		{ // GCOVR_EXCL_START -- BooleanBuilder allocation backstop, not fixture-triggerable
-			throw std::runtime_error(finish_status.ToString());
+			std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to build filter mask: %s",
+				finish_status.ToString().c_str());
+			return false;
 		}
 		// GCOVR_EXCL_STOP
 		reader_handle->live_mask = std::static_pointer_cast<arrow::BooleanArray>(mask_array);
+		refresh_row_group_surviving(reader_handle);
+		int64_t matched = 0;
+		for (uint8_t v : combined) matched += (v != 0);
+		reader_handle->nrows = matched;
+		return true;
 	}
 
 	// Prints a diagnostic and aborts, the same way ConcurrencyGuard does. Used
@@ -1105,7 +1157,7 @@ extern "C"
 	// why parquet_reader_set_sort must run after parquet_reader_set_filter.
 	static std::shared_ptr<arrow::Array> apply_row_transform(ParquetReaderHandle *reader_handle, const std::shared_ptr<arrow::Array> &array)
 	{
-		if (!reader_handle->filter_mask && !reader_handle->sort_perm) return array;
+		if (!reader_handle->live_mask && !reader_handle->sort_perm) return array;
 		ensure_compute_initialized();
 		auto coerced = coerce_for_filter_kernel(array);
 		if (!coerced.ok())
@@ -1116,7 +1168,7 @@ extern "C"
 		arrow::Datum current = coerced.ValueOrDie();
 		if (reader_handle->live_mask)
 		{
-			// live_mask, not filter_mask: every whole-column decode now goes through
+			// live_mask covers the LIVE row groups' rows: every whole-column decode goes through
 			// read_live_row_groups, so `array` spans the LIVE row groups' rows rather than the
 			// whole file. The two are the same object whenever nothing was pruned.
 			auto filtered = arrow::compute::Filter(current, reader_handle->live_mask);
@@ -2666,7 +2718,7 @@ extern "C"
 		// Measuring per row group would answer a different question -- the width of rows the
 		// caller has filtered away -- so this deliberately stays a whole-column read. A sort takes
 		// the same path for the stronger reason that row groups mean nothing under a permutation.
-		if (reader_handle->filter_mask || reader_has_sort_permutation(reader_handle))
+		if (reader_handle->live_mask || reader_has_sort_permutation(reader_handle))
 		{
 			int64_t width = 1;
 			auto array = get_single_chunk_array(reader_handle, name);
@@ -3724,7 +3776,7 @@ extern "C"
 	// the schema directly instead of a caller-supplied name list, since
 	// Fortran has no way to enumerate column names itself. Must be called
 	// AFTER parquet_reader_set_filter (if a filter is used): a column cached
-	// here before filter_mask is set would stay raw/unfiltered forever, since
+	// here before the mask is set would stay raw/unfiltered forever, since
 	// set_filter only re-masks the filter clauses' own columns, not the
 	// whole column_cache -- see parquet_open_reader_base in parquet_read.f90
 	// for the call-site ordering this depends on.
@@ -3820,7 +3872,7 @@ extern "C"
 	int parquet_reader_has_filter(void *handle) // GCOVR_EXCL_START
 	{
 		auto reader_handle = as_reader_handle(handle);
-		return reader_handle->filter_mask ? 1 : 0;
+		return reader_handle->live_mask ? 1 : 0;
 	}
 	// GCOVR_EXCL_STOP
 
@@ -3927,48 +3979,82 @@ extern "C"
 	// this library's documented "many threads, each opening its own reader" concurrency pattern
 	// (see doc/pages/thread-safety.md); gfortran's own RANDOM_NUMBER/RANDOM_SEED state has no such
 	// guarantee, which is why this draw is done here rather than on the Fortran side.
-	static void draw_sample_mask(std::vector<uint8_t> &combined, double sample_fraction, int32_t seed, bool has_seed,
-		int32_t *actual_seed_out)
+	static int32_t resolve_sample_seed(int32_t seed, bool has_seed)
 	{
-		int32_t seed_used = seed;
-		if (!has_seed || seed <= 0)
-		{
-			std::random_device rd;
-			std::uniform_int_distribution<int32_t> seed_dist(1, std::numeric_limits<int32_t>::max());
-			seed_used = seed_dist(rd);
-		}
-		*actual_seed_out = seed_used;
-
-		std::mt19937_64 engine(static_cast<uint64_t>(seed_used));
-		std::uniform_real_distribution<double> dist(0.0, 1.0);
-		for (uint8_t &v : combined) v = (dist(engine) <= sample_fraction) ? 1 : 0;
+		if (has_seed && seed > 0) return seed;
+		std::random_device rd;
+		std::uniform_int_distribution<int32_t> seed_dist(1, std::numeric_limits<int32_t>::max());
+		return seed_dist(rd);
 	}
+
+	// One Bernoulli(sample_fraction) trial per PHYSICAL row of the file, streamed rather than
+	// materialized: the caller walks the file's rows in order and calls next() exactly once per
+	// row, storing the answer only where it has somewhere to put it.
+	//
+	// CALL next() ONCE PER PHYSICAL ROW, IN FILE ORDER, INCLUDING FOR ROWS NOTHING WILL KEEP.
+	// The engine advances once per call, so skipping a row group would shift every later row's
+	// draw, and the same seed would then select different rows depending on whether the statistics
+	// screen happened to prune something -- a silent, invisible dependence of a documented
+	// reproducible result on an unrelated optimization. Drawing for every row and discarding the
+	// ones with nowhere to go keeps a deferred, screened draw bit-identical to an immediate,
+	// unscreened one. The cost is arithmetic, not memory; a per-row Bernoulli draw is
+	// O(total_nrows) in time either way (feature_filter.md's counter-based sample RNG is what
+	// would remove even that, and is deliberately out of scope here).
+	//
+	// A default-constructed instance is inactive and answers true for every row, so a caller with
+	// no sample can drive the same loop without branching.
+	//
+	// (A plain struct rather than a callback template: this whole file sits inside one extern "C"
+	// block, where templates are not allowed. Member functions keep C++ linkage regardless.)
+	struct SampleDraw
+	{
+		bool active = false;
+		double fraction = 0.0;
+		std::mt19937_64 engine;
+		std::uniform_real_distribution<double> dist{0.0, 1.0};
+
+		void start(double sample_fraction, int32_t seed)
+		{
+			active = true;
+			fraction = sample_fraction;
+			engine.seed(static_cast<uint64_t>(seed));
+		}
+		// sample_fraction == 0.0 is a guaranteed all-false result (deterministic zero rows) rather
+		// than a near-zero draw probability, and consumes no randomness at all.
+		bool next()
+		{
+			if (!active) return true;
+			if (fraction <= 0.0) return false;
+			return dist(engine) <= fraction;
+		}
+	};
 
 	// Validates nothing (sample_fraction/sample_seed are already fully validated Fortran-side --
 	// see parquet_open_reader_base's NaN/negative checks) and applies a Bernoulli(sample_fraction)
 	// row mask to `handle`, called from parquet_open_reader_base right after the reader is created
 	// and before any filter=/qc setup. sample_fraction is assumed already in [0.0, 1.0) by the
-	// caller; exactly 0.0 short-circuits to a guaranteed all-false mask (deterministic zero rows)
-	// rather than relying on a near-zero draw probability -- see draw_sample_mask for the >0.0 case.
+	// caller; exactly 0.0 yields a guaranteed all-false mask (deterministic zero rows) rather than
+	// relying on a near-zero draw probability -- see stream_sample_draw.
 	//
 	// filter_will_follow (set by the Fortran caller from its own "will parquet_apply_filter run
-	// right after this" check, i.e. present(filter) .and. filter%n > 0): when true, the draw is
-	// stashed in pending_sample_mask instead of being installed on filter_mask -- see that field's
-	// own comment for why (installing it here would make the filter's own referenced columns come
-	// back already sample-compacted while parquet_reader_set_filter is still evaluating clauses
-	// against them, breaking its per-row alignment). nrows is left untouched in that case too;
-	// parquet_reader_set_filter finalizes both once it folds the pending mask into its own. When
-	// false, this installs filter_mask/nrows immediately, exactly as if no filter were ever coming.
+	// right after this" check, i.e. present(filter) .and. filter%n > 0): when true, NOTHING is drawn
+	// here -- only the fraction and the resolved seed are recorded, and parquet_reader_set_filter
+	// performs the draw itself once it knows which row groups survive (see has_pending_sample's own
+	// comment for both reasons). nrows is left untouched in that case too; set_filter finalizes it.
+	// When false, this draws and installs immediately, exactly as if no filter were ever coming --
+	// a sample-only reader has nothing to screen with, so every row group is live and the mask spans
+	// the whole file.
 	//
 	// has_sample/sample_fraction/sample_seed_used (for parquet_reader_print_stat) are always set
-	// immediately either way, regardless of deferral. Returns 0 on success; on the (not
-	// fixture-triggerable in practice on its own) BooleanBuilder allocation failure below, returns 1
-	// and writes a reason into err_out (truncated to err_cap), mirroring parquet_reader_set_filter's
-	// own defensive backstop for the identical construction. g_debug_force_sample_mask_error (see
-	// its own comment, near parquet_debug_set_force_sample_mask_error further down) lets
-	// test/error_scenarios.f90 exercise this failure return -- and the Fortran-side error stop that
-	// surfaces it (parquet_apply_sample, parquet_read.f90) -- without needing a genuine allocation
-	// failure.
+	// immediately either way, regardless of deferral, and *actual_seed_out always reports the seed
+	// the draw will actually use -- so a caller can read back a non-deterministic run's seed and
+	// reuse it for a reproducible repeat whether or not the draw was deferred. Returns 0 on success;
+	// on the (not fixture-triggerable in practice on its own) BooleanBuilder allocation failure
+	// below, returns 1 and writes a reason into err_out (truncated to err_cap).
+	// g_debug_force_sample_mask_error (see its own comment, near
+	// parquet_debug_set_force_sample_mask_error further down) lets test/error_scenarios.f90 exercise
+	// this failure return -- and the Fortran-side error stop that surfaces it (parquet_apply_sample,
+	// parquet_read.f90) -- without needing a genuine allocation failure.
 	static bool g_debug_force_sample_mask_error = false;
 	int64_t parquet_reader_set_sample(void *handle, double sample_fraction, int32_t seed, int8_t has_seed,
 		int8_t filter_will_follow, int32_t *actual_seed_out, char *err_out, int64_t err_cap)
@@ -3981,16 +4067,8 @@ extern "C"
 			return 1;
 		}
 
-		std::vector<uint8_t> combined(static_cast<size_t>(reader_handle->total_nrows), 0);
-		if (sample_fraction > 0.0)
-		{
-			draw_sample_mask(combined, sample_fraction, seed, has_seed != 0, actual_seed_out);
-		}
-		else
-		{
-			*actual_seed_out = 0; // sample_fraction == 0.0: no draw at all, deterministic zero rows.
-		}
-
+		// sample_fraction == 0.0 does no draw at all, so it has no seed to report.
+		*actual_seed_out = (sample_fraction > 0.0) ? resolve_sample_seed(seed, has_seed != 0) : 0;
 		reader_handle->has_sample = true;
 		reader_handle->sample_fraction = sample_fraction;
 		reader_handle->sample_seed_used = *actual_seed_out;
@@ -3998,37 +4076,23 @@ extern "C"
 		if (filter_will_follow != 0)
 		{
 			reader_handle->has_pending_sample = true;
-			reader_handle->pending_sample_mask = std::move(combined);
+			reader_handle->pending_sample_fraction = sample_fraction;
+			reader_handle->pending_sample_seed = *actual_seed_out;
 			return 0;
 		}
 
-		arrow::BooleanBuilder mask_builder;
-		auto append_status = mask_builder.AppendValues(combined.data(), static_cast<int64_t>(combined.size()));
-		if (!append_status.ok())
-		{ // GCOVR_EXCL_START -- BooleanBuilder allocation backstop, not fixture-triggerable
-			std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to build sample mask: %s", append_status.ToString().c_str());
-			return 1;
-		}
-		// GCOVR_EXCL_STOP
-		std::shared_ptr<arrow::Array> mask_array;
-		auto finish_status = mask_builder.Finish(&mask_array);
-		if (!finish_status.ok())
-		{ // GCOVR_EXCL_START -- BooleanBuilder allocation backstop, not fixture-triggerable
-			std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to build sample mask: %s", finish_status.ToString().c_str());
-			return 1;
-		}
-		// GCOVR_EXCL_STOP
-		reader_handle->filter_mask = std::static_pointer_cast<arrow::BooleanArray>(mask_array);
-		refresh_row_group_surviving(reader_handle);
-		// No screen runs for a sample-only reader (there is no expression to screen with), so this
-		// just aliases live_mask to filter_mask -- but it must still be called, or every column
-		// read afterwards would go unfiltered.
-		refresh_live_mask(reader_handle);
+		// No screen runs for a sample-only reader (there is no expression to screen with), so every
+		// row group is live and the live-row layout is just the physical one.
+		reader_handle->row_group_live.clear();
+		reader_handle->row_groups_pruned = 0;
+		int64_t live_rows = assign_row_group_live_offsets(reader_handle);
+		std::vector<uint8_t> combined(static_cast<size_t>(live_rows), 0);
+		SampleDraw draw;
+		draw.start(sample_fraction, *actual_seed_out);
+		// Every row group is live here, so the live-row index and the physical row index coincide.
+		for (int64_t i = 0; i < live_rows; ++i) combined[static_cast<size_t>(i)] = draw.next() ? 1 : 0;
 
-		int64_t matched = 0;
-		for (uint8_t v : combined) matched += (v != 0);
-		reader_handle->nrows = matched;
-
+		if (!install_row_mask(reader_handle, combined, err_out, err_cap)) return 1; // GCOVR_EXCL_LINE
 		return 0;
 	}
 
@@ -4061,7 +4125,7 @@ extern "C"
 	static inline uint8_t kleene_of(bool b) { return b ? kTrue : kFalse; }
 
 	// Evaluates one filter clause (one leaf of the expression) against `array` -- the filter
-	// column's own, still-unfiltered decoded array; filter_mask isn't installed on the reader
+	// column's own, still-unfiltered decoded array; no mask is installed on the reader
 	// while this runs. WRITES one Kleene value per row into `out` (pre-sized to the array's
 	// length) rather than combining into a shared accumulator: combining is the stack machine's
 	// job in parquet_reader_set_filter, because which rows a leaf's result combines with depends
@@ -4891,6 +4955,12 @@ extern "C"
 				++reader_handle->row_groups_pruned;
 				continue;
 			}
+			// A clause-less call (a bare row/row-group range, carrying only a slice's own bounds --
+			// see parquet_reader_set_filter's row_lo/row_hi) has no expression to screen with, so
+			// the scope check above is the whole screen. Explicit rather than falling into the
+			// stack machine below, whose "did not end with exactly one result" arm is a genuine
+			// malformed-input assertion and must stay unreachable.
+			if (n_nodes <= 0) continue;
 			// The same postfix walk evaluate_nodes performs, over one triple per stack slot
 			// instead of one row vector. The structural identity is deliberate.
 			std::vector<KleenePossible> stack;
@@ -4953,8 +5023,8 @@ extern "C"
 	// (never as the starting value of the expression's own evaluation -- a sample zero must not be
 	// indistinguishable from an evaluated false, or an OR could resurrect a non-sampled row):
 	//   - has_pending_sample: parquet_reader_set_sample deferred its draw for this call (the
-	//     parquet_open_reader path -- see pending_sample_mask's own comment).
-	//   - an already-installed sample-only filter_mask: the post-open path
+	//     parquet_open_reader path -- see has_pending_sample's own comment).
+	//   - an already-installed sample-only mask: the post-open path
 	//     (parquet_reader_set_filter in parquet.f90), where the sample was installed at open time.
 	//     It is uninstalled here so clause evaluation still reads raw, unmasked columns; safe
 	//     because that path refuses to run once any column has been decoded.
@@ -4975,10 +5045,10 @@ extern "C"
 		const int8_t *node_kind, const int32_t *node_leaf, int64_t n_nodes,
 		const char *expr_text,
 		int64_t rg_lo, int64_t rg_hi,
+		int64_t row_lo, int64_t row_hi,
 		char *err_out, int64_t err_cap)
 	{
 		auto reader_handle = as_reader_handle(handle);
-		if (n <= 0) return 0;
 
 		// rg_lo/rg_hi = 0 means "whole file"; otherwise the filter is SCOPED to that inclusive,
 		// 1-based row-group range, and the two paths differ in more than which rows they look at:
@@ -4994,8 +5064,15 @@ extern "C"
 		//     what makes a filtered read possible on a file larger than memory. The cost is that
 		//     nothing lands in column_cache, so a filter column read afterwards is read again.
 		//
-		// Rows outside a scoped range never match: the mask is all-false there, so the reader
-		// presents exactly the surviving rows of the chosen row groups and nothing else.
+		// Rows outside a scoped range never match: no bits are held for those row groups at all, so
+		// the reader presents exactly the surviving rows of the chosen row groups and nothing else.
+		//
+		// row_lo/row_hi = 0 means "every row of the chosen row groups"; otherwise rows outside that
+		// inclusive, 1-based PHYSICAL row range never match either. This is a strictly finer cut
+		// than the row-group range, and it is what lets a parquet_table slice whose bounds fall
+		// INSIDE a row group express itself as a filter: without it the reader would hand back the
+		// whole covering row groups' survivors, and the table's own physical-row arithmetic and the
+		// reader's post-filter chunks would be in two different coordinate systems.
 		bool scoped = (rg_lo > 0 || rg_hi > 0);
 		if (scoped)
 		{
@@ -5008,36 +5085,57 @@ extern "C"
 				return 1;
 			}
 		}
+		bool row_ranged = (row_lo > 0 || row_hi > 0);
+		if (row_ranged)
+		{
+			if (row_lo < 1 || row_hi < row_lo || row_hi > reader_handle->total_nrows)
+			{
+				std::snprintf(err_out, static_cast<size_t>(err_cap),
+					"filter row range %lld..%lld is out of range (file has %lld row(s))",
+					static_cast<long long>(row_lo), static_cast<long long>(row_hi),
+					static_cast<long long>(reader_handle->total_nrows));
+				return 1;
+			}
+		}
+		// With no clauses AND nothing to scope to, there is simply nothing to install. With no
+		// clauses but a scope or a row range, there is: an all-true-within-range mask, which is how
+		// a slice-regime table with sample_fraction= but no filter= carries its own row range. The
+		// expression machinery below is skipped entirely in that case (n_nodes is 0, so there is
+		// nothing for the screen or the stack machine to walk).
+		if (n <= 0 && !scoped && !row_ranged) return 0;
 
-		size_t total = static_cast<size_t>(reader_handle->total_nrows);
-		// Whatever already narrowed the row set (a sample draw), as one row vector, or empty when
-		// nothing did. Applied once at the very end, after unknown has collapsed to false.
-		std::vector<uint8_t> sample_narrow;
+		// The sample draw that has to be folded in, if any, and where it comes from. Both forms are
+		// applied once at the very end, after unknown has collapsed to false -- never as the
+		// starting value of the expression's own evaluation, or an OR could resurrect a
+		// non-sampled row.
+		bool draw_sample = false;
+		double sample_fraction = 0.0;
+		int32_t sample_seed = 0;
+		std::shared_ptr<arrow::BooleanArray> prior_mask;
+		std::vector<int64_t> prior_offsets;
 		if (reader_handle->has_pending_sample)
 		{
-			// parquet_reader_set_sample ran first and deferred its draw here instead of installing
-			// it on filter_mask (see pending_sample_mask's own comment), precisely so that every
-			// column read below (get_single_chunk_array) is still raw/unfiltered while clauses are
-			// evaluated.
-			sample_narrow = std::move(reader_handle->pending_sample_mask);
+			// parquet_reader_set_sample ran first and deferred its draw to here (see
+			// has_pending_sample's own comment), both so every column read below is still
+			// raw/unfiltered while clauses are evaluated, and so the draw only has to be stored for
+			// rows the screen below leaves live.
+			draw_sample = true;
+			sample_fraction = reader_handle->pending_sample_fraction;
+			sample_seed = reader_handle->pending_sample_seed;
 			reader_handle->has_pending_sample = false;
-			reader_handle->pending_sample_mask.clear();
-			reader_handle->pending_sample_mask.shrink_to_fit();
 		}
-		else if (reader_handle->filter_mask)
+		else if (reader_handle->live_mask)
 		{
 			// The post-open path: a sample-only mask is already installed (there are no clauses
 			// yet -- parquet_reader_set_filter in parquet.f90 refuses an already-filtered reader).
-			// Convert it back to a plain row vector and uninstall it, so clause evaluation sees
-			// raw columns; nothing has been decoded under it, since that same path refuses to run
-			// after any column has been read.
-			sample_narrow.resize(total);
-			for (size_t i = 0; i < total; ++i)
-			{
-				sample_narrow[i] = reader_handle->filter_mask->Value(static_cast<int64_t>(i)) ? 1 : 0;
-			}
-			reader_handle->filter_mask.reset();
+			// Keep it, with its own live-row layout, and uninstall it from the handle so clause
+			// evaluation sees raw columns; nothing has been decoded under it, since that same path
+			// refuses to run after any column has been read. Retaining the array rather than
+			// expanding it into a flat per-row vector is what keeps this path O(live rows) too.
+			prior_mask = reader_handle->live_mask;
+			prior_offsets = reader_handle->row_group_live_offsets;
 			reader_handle->live_mask.reset();
+			reader_handle->row_group_live_offsets.clear();
 			reader_handle->nrows = reader_handle->total_nrows;
 		}
 		std::vector<int> touched_indices;
@@ -5172,7 +5270,7 @@ extern "C"
 				const std::string &top_name = reader_handle->schema->field(idx)->name();
 				auto result_pos = table->schema()->GetFieldIndex(top_name);
 				// No apply_row_transform: there is no mask yet, and installing one before the
-				// clauses are evaluated is exactly what pending_sample_mask exists to prevent.
+				// clauses are evaluated is exactly what the deferred sample draw exists to prevent.
 				reader_handle->column_cache[idx] = combine_column_chunks(table->column(result_pos), top_name);
 			}
 		}
@@ -5244,13 +5342,23 @@ extern "C"
 			return true;
 		};
 
-		// All-false to start, so a scoped run -- and every row group the screen pruned -- leaves
-		// its rows excluded without having to write them. This is precisely why a pruned row group
-		// needs no bookkeeping anywhere downstream: it simply IS an all-false row group, which
-		// row_group_effective_rows and every row-group-scoped operation already handle.
-		std::vector<uint8_t> combined(total, kFalse);
+		// The live-row layout the mask is about to be built in: one slot per row of every row group
+		// the screen left live, and NOTHING at all for the rest. An excluded row group -- pruned by
+		// statistics, or outside a scoped range -- therefore costs zero bytes here rather than a
+		// run of all-false bits, which is what makes a slice-scoped filter on a huge file hold a
+		// mask proportional to its own slice instead of to total_nrows.
+		int64_t live_rows = assign_row_group_live_offsets(reader_handle);
+		// All-false to start. With clauses, every live row is written below on both paths, so this
+		// is defensive; with none (a bare range) it is the value the range itself overrides.
+		std::vector<uint8_t> combined(static_cast<size_t>(live_rows), n > 0 ? kFalse : kTrue);
 		std::string eval_err;
-		if (scoped)
+		if (n <= 0)
+		{
+			// A clause-less call: nothing to evaluate, and `combined` is already all-true. The row
+			// range (and the row-group scope, already applied by the screen) is folded in below,
+			// exactly as it would be for a call that did have clauses.
+		}
+		else if (scoped)
 		{
 			for (int64_t rg = rg_lo; rg <= rg_hi; ++rg)
 			{
@@ -5259,7 +5367,7 @@ extern "C"
 				// proved. This is the scoped path's entire share of the F4 saving.
 				if (reader_handle->row_group_live[static_cast<size_t>(rg - 1)] == 0) continue;
 				int64_t rows = row_group_rows(reader_handle, rg);
-				int64_t offset = reader_handle->row_group_offsets[static_cast<size_t>(rg - 1)];
+				int64_t offset = reader_handle->row_group_live_offsets[static_cast<size_t>(rg - 1)];
 				// This row group's chunk of every leaf column, read and then released with the
 				// vector when the iteration ends -- read_row_group_array_for_measuring rather than
 				// get_row_group_chunk_array, so measuring the filter does not mark the row group
@@ -5286,18 +5394,9 @@ extern "C"
 		else
 		{
 			// The unscoped path evaluates ONCE over the concatenated live rows -- one pass, one
-			// vector per stack slot, exactly as before -- and then scatters the per-row result
-			// back into the full-length mask using each live row group's own offset. The scatter
-			// is the same three lines the scoped path above uses, driven by the live list instead
-			// of a range; when nothing was pruned it walks every row group and is a straight copy.
-			int64_t live_rows = 0;
-			for (int64_t rg = 1; rg <= reader_handle->num_row_groups; ++rg)
-			{
-				if (reader_handle->row_group_live[static_cast<size_t>(rg - 1)] != 0)
-				{
-					live_rows += row_group_rows(reader_handle, rg);
-				}
-			}
+			// vector per stack slot, exactly as before. Its result is already in live-row order and
+			// live-row length, which is now exactly the mask's own layout, so it moves straight in
+			// rather than being scattered by row-group offset the way it used to be.
 			std::vector<uint8_t> local;
 			if (!evaluate_nodes(leaf_arrays, static_cast<size_t>(live_rows), local, eval_err))
 			{
@@ -5307,61 +5406,49 @@ extern "C"
 				std::snprintf(err_out, static_cast<size_t>(err_cap), "filter rule: %s", eval_err.c_str());
 				return 1;
 			}
-			int64_t cursor = 0;
+			combined = std::move(local);
+		}
+
+		// Collapse unknown to false, apply the row range, and fold in whatever already narrowed the
+		// row set -- once, here, in one walk. This is the single point where three-valued logic
+		// becomes the two-valued mask Arrow needs, and it is why a Null row never survives without
+		// an explicit is_null clause.
+		//
+		// The walk is over PHYSICAL rows, row group by row group, for the sample draw's sake: its
+		// engine must advance once per physical row whether or not that row has a slot in the mask,
+		// or the same seed would pick different rows depending on what the screen pruned (see
+		// stream_sample_draw). Rows in an excluded row group are drawn for and discarded; every
+		// other row's answer lands at its own live-space offset.
+		{
+			SampleDraw draw;
+			if (draw_sample) draw.start(sample_fraction, sample_seed);
 			for (int64_t rg = 1; rg <= reader_handle->num_row_groups; ++rg)
 			{
-				if (reader_handle->row_group_live[static_cast<size_t>(rg - 1)] == 0) continue;
 				int64_t rows = row_group_rows(reader_handle, rg);
-				int64_t offset = reader_handle->row_group_offsets[static_cast<size_t>(rg - 1)];
+				int64_t first_row = reader_handle->row_group_offsets[static_cast<size_t>(rg - 1)];
+				int64_t live_off = reader_handle->row_group_live_offsets[static_cast<size_t>(rg - 1)];
+				int64_t prior_off = prior_mask ? prior_offsets[static_cast<size_t>(rg - 1)] : -1;
 				for (int64_t i = 0; i < rows; ++i)
 				{
-					combined[static_cast<size_t>(offset + i)] = local[static_cast<size_t>(cursor + i)];
+					// Drawn for unconditionally, so the engine advances once per physical row.
+					bool sampled = draw.next();
+					if (live_off < 0) continue; // excluded row group: no slot, draw discarded
+					size_t slot = static_cast<size_t>(live_off + i);
+					bool keep = combined[slot] == kTrue;
+					if (keep && row_ranged) keep = (first_row + i + 1 >= row_lo && first_row + i + 1 <= row_hi);
+					if (keep) keep = sampled;
+					if (keep && prior_mask) keep = prior_mask->Value(prior_off + i);
+					combined[slot] = keep ? 1 : 0;
 				}
-				cursor += rows;
 			}
 		}
 
-		// Collapse unknown to false -- once, here -- and fold in whatever already narrowed the row
-		// set. This is the single point where three-valued logic becomes the two-valued mask Arrow
-		// needs, and it is why a Null row never survives without an explicit is_null clause.
-		for (size_t i = 0; i < total; ++i)
-		{
-			bool keep = combined[i] == kTrue;
-			if (keep && !sample_narrow.empty()) keep = sample_narrow[i] != 0;
-			combined[i] = keep ? 1 : 0;
-		}
-
-		arrow::BooleanBuilder mask_builder;
-		auto append_status = mask_builder.AppendValues(combined.data(), static_cast<int64_t>(combined.size()));
-		if (!append_status.ok())
-		{ // GCOVR_EXCL_START -- BooleanBuilder allocation backstop, not fixture-triggerable
-			std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to build filter mask: %s", append_status.ToString().c_str());
-			return 1;
-		}
-		// GCOVR_EXCL_STOP
-		std::shared_ptr<arrow::Array> mask_array;
-		auto finish_status = mask_builder.Finish(&mask_array);
-		if (!finish_status.ok())
-		{ // GCOVR_EXCL_START -- BooleanBuilder allocation backstop, not fixture-triggerable
-			std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to build filter mask: %s", finish_status.ToString().c_str());
-			return 1;
-		}
-		// GCOVR_EXCL_STOP
-		reader_handle->filter_mask = std::static_pointer_cast<arrow::BooleanArray>(mask_array);
-		refresh_row_group_surviving(reader_handle);
-		// Must follow the mask install: live_mask is filter_mask restricted to the live row
-		// groups' rows, and it is what every column decoded from here on -- all of which are read
-		// over those same row groups -- gets filtered with.
-		refresh_live_mask(reader_handle);
+		if (!install_row_mask(reader_handle, combined, err_out, err_cap)) return 1; // GCOVR_EXCL_LINE
 		// Retained for parquet_reader_print_stat's "filter:" line only (never parsed here).
 		if (expr_text != nullptr) reader_handle->filter_expr_text = expr_text;
 
-		int64_t matched = 0;
-		for (uint8_t v : combined) matched += (v != 0);
-		reader_handle->nrows = matched;
-
 		// Every filter column was decoded (and cached) above, before
-		// filter_mask existed -- re-filter those specific cache entries now
+		// the mask existed -- re-filter those specific cache entries now
 		// so they're consistent with every other column, which will only
 		// ever see the filtered version (via apply_row_transform, from here on).
 		// Re-filtering is keyed by physical top-level index (touched_indices,
@@ -5382,9 +5469,8 @@ extern "C"
 				return 1;
 			}
 			// GCOVR_EXCL_STOP
-			// live_mask, not filter_mask: these cached arrays came from read_live_row_groups above,
-			// so they span the live row groups' rows. Same object as filter_mask when nothing was
-			// pruned.
+			// live_mask: these cached arrays came from read_live_row_groups above, so they span
+			// the live row groups' rows -- exactly the layout the mask itself is built in.
 			auto filtered = arrow::compute::Filter(coerced.ValueOrDie(), reader_handle->live_mask);
 			if (!filtered.ok())
 			{ // GCOVR_EXCL_START -- Filter-kernel Status backstop on already-validated input

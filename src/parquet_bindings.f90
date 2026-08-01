@@ -537,7 +537,7 @@ module parquet_bindings
         !> unchanged.
         function c_reader_set_filter(reader, names_packed, name_len, ops_packed, op_len, &
                 values_packed, value_len, is_string_flags, n, node_kind, node_leaf, n_nodes, &
-                expr_text, rg_lo, rg_hi, err_out, err_cap) &
+                expr_text, rg_lo, rg_hi, row_lo, row_hi, err_out, err_cap) &
                 bind(C, name="parquet_reader_set_filter") result(status)
             import
             type(c_ptr), value :: reader
@@ -555,6 +555,8 @@ module parquet_bindings
             character(kind=c_char) :: expr_text(*)
             integer(c_long_long), value :: rg_lo
             integer(c_long_long), value :: rg_hi
+            integer(c_long_long), value :: row_lo
+            integer(c_long_long), value :: row_hi
             character(kind=c_char) :: err_out(*)
             integer(c_long_long), value :: err_cap
             integer(c_long_long) :: status

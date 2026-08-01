@@ -1062,6 +1062,20 @@ counterpart. User guide: `doc/pages/date-time.md`.
   So an API cannot signal "absent" purely by returning an unallocated result — provide an explicit
   flag/sentinel instead (this is why `parquet_strings`' `allow_null` returns `""`, guarded by
   `is_null()`).
+- **Never blank a deferred-length allocatable character ARRAY with `arr = ""` — assign element by
+  element.** Intrinsic assignment to an allocatable reallocates it whenever the RHS's length
+  differs, and that rule applies to a whole-array assignment from a scalar too: `arr = ""` keeps
+  the shape but reallocates every element to **length zero**. A later `arr(i) = name` then writes
+  the declared width into a zero-length allocation, so the names come back blank *and* the heap is
+  corrupted. **gfortran keeps the length and hides both symptoms; ifx follows the standard and
+  shows them** — as blank strings in an error message ("column '' … for internal name ''"),
+  followed some tests later by `free(): invalid next size (fast)` in unrelated code, which reads
+  like a completely different bug. `parse_read_maml_remap` (`src/parquet_tables_maml.f90`) is the
+  worked example; it blanks with an explicit `do i = 1, count` loop, because an array *element* is
+  not itself an allocatable variable and so only blank-pads. The same hazard does **not** apply to
+  a deferred-length allocatable *scalar* (`suffix = ""` is the intended idiom and is everywhere in
+  `parquet_metadata.f90`), nor to an array assignment whose RHS carries the right length already
+  (`values_c = pack(values, mask)` in `parquet_write_string.f90`).
 - **`-128_int8` trips gfortran's range check** (it parses `128` then negates). Build the high bit
   with `ibset(0_int8, 7)` in constant expressions. Also: an array-constructor implied-do index
   (`[(f(b), b=0,7)]`) has no implicit type under `implicit none` — list the elements explicitly.

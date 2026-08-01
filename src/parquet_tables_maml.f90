@@ -63,8 +63,16 @@ contains
         deallocate(physical)
         allocate(character(len=width) :: internal(count))
         allocate(character(len=width) :: physical(count))
-        internal = ""
-        physical = ""
+        ! Blanked ELEMENT BY ELEMENT, never as `internal = ""`. A whole-array intrinsic assignment
+        ! to a deferred-length allocatable array reallocates it to the RHS's length -- here zero --
+        ! so the fill loop below would then write `width` bytes into a zero-length allocation: every
+        ! name comes back blank AND the heap is corrupted. gfortran happens to keep the length and
+        ! hides both; ifx follows the standard and shows them. An array ELEMENT is not itself an
+        ! allocatable variable, so assigning to one only blank-pads, which is what is wanted.
+        do i = 1, count
+            internal(i) = ""
+            physical(i) = ""
+        end do
         do i = idx_remap + 1, extra_end
             if (len_trim(schema%maml%lines(i)) == 0) cycle
             tline = trim(adjustl(schema%maml%lines(i)))

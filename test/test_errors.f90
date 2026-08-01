@@ -685,6 +685,10 @@ contains
                 test_table_row_kind_mismatch_aborts), &
             new_unittest("get_slice into an incompatible kind aborts", &
                 test_table_get_slice_kind_mismatch_aborts), &
+            new_unittest("extra: remap: naming a nonexistent file column aborts", &
+                test_table_remap_unknown_file_column_aborts), &
+            new_unittest("extra: remap: repeating an internal name aborts", &
+                test_table_remap_duplicate_internal_aborts), &
             new_unittest("get into an incompatible array kind aborts", &
                 test_table_get_array_kind_mismatch_aborts), &
             new_unittest("add_column(force=.false.) on a duplicate name aborts", &
@@ -1086,6 +1090,20 @@ contains
             failure_message="a sliced read into an incompatible kind was expected to abort", &
             required_stderr="cannot be copied into this array")
     end subroutine test_table_get_slice_kind_mismatch_aborts
+
+    subroutine test_table_remap_unknown_file_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_remap_unknown_file_column", expect_abort=.true., &
+            failure_message="a remap naming a column the file does not have was expected to abort", &
+            required_stderr="does not exist in this file")
+    end subroutine test_table_remap_unknown_file_column_aborts
+
+    subroutine test_table_remap_duplicate_internal_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_remap_duplicate_internal", expect_abort=.true., &
+            failure_message="a remap declaring one internal name twice was expected to abort", &
+            required_stderr="is declared more than once")
+    end subroutine test_table_remap_duplicate_internal_aborts
 
     subroutine test_table_get_array_kind_mismatch_aborts(error)
         type(error_type), allocatable, intent(out) :: error

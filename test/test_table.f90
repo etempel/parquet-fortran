@@ -137,12 +137,30 @@ contains
                 test_append_null_rows_workflow), &
             new_unittest("append takes a single row through a row handle", test_append_row), &
             new_unittest("a clone is independent, stays lazy and keeps the row scope", test_clone), &
+            new_unittest("extra: remap: renames a file column for reading", test_remap_basic), &
+            new_unittest("extra: remap: shadows, swaps and duplicates as documented", test_remap_shadow_duplicate), &
+            new_unittest("rename_column on a remapped column keeps its file column", test_remap_then_rename), &
             new_unittest("a detached table's clone keeps its values and stays detached", &
                 test_clone_of_detached) &
             ]
     end subroutine collect_tests_parquet_table
     !
     !> Writes the shared numeric/string fixture used by most tests below.
+    !> Writes `lines` to `fname` verbatim, one per record -- the read-in (Role-B) MAML fixtures the
+    !! remap tests below open a table with. `parquet_open_table(maml=)` takes a FILE PATH, so these
+    !! have to exist on disk rather than being built in memory the way a `parquet_maml_file` can be.
+    subroutine write_maml_file(fname, lines)
+        character(len=*), intent(in) :: fname     !! file to write (one per test).
+        character(len=*), intent(in) :: lines(:)  !! MAML source, one array element per line.
+        integer :: unit, i
+        !
+        open(newunit=unit, file=fname, status="replace", action="write")
+        do i = 1, size(lines)
+            write(unit, "(a)") trim(lines(i))
+        end do
+        close(unit)
+    end subroutine write_maml_file
+    !
     subroutine write_basic_fixture(fname)
         character(len=*), intent(in) :: fname !! file to write.
         type(parquet_writer) :: w
@@ -2867,6 +2885,130 @@ contains
     !
     !> A rename changes only the name the column is looked up by; a file-backed column that has
     !! not been read yet must still read from the right physical column afterwards.
+    !> The basic remap: a read-in MAML relabels a file column, and everything table-facing uses
+    !! the new name while the read still goes to the physical one. The un-remapped columns are
+    !! untouched, and the column count is unchanged (one internal name, one file column).
+    subroutine test_remap_basic(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer(int32), allocatable :: gi32(:)
+        character(len=*), parameter :: f = "test_run/table_remap_basic.parquet"
+        character(len=*), parameter :: m = "test_run/table_remap_basic.maml"
+        integer :: i
+        !
+        call write_basic_fixture(f)
+        call write_maml_file(m, [character(len=40) :: &
+            "table: remap_basic", &
+            "extra:", &
+            "  remap:", &
+            "  - counter: i32" ])
+        call parquet_open_table(t, f, maml=m)
+        call check(error, t%has_column("counter"), "the remapped internal name should resolve")
+        if (allocated(error)) return
+        call check(error, .not. t%has_column("i32"), "the physical name should be shadowed by the remap")
+        if (allocated(error)) return
+        call check(error, t%ncols() == 6, "remapping one column should not change the column count")
+        if (allocated(error)) return
+        call check(error, t%residency("counter") == RES_EMPTY, "a remap should read nothing at open")
+        if (allocated(error)) return
+        ! The first touch happens here, under the INTERNAL name, and must reach the physical column.
+        call t%get("counter", gi32)
+        call check(error, all(gi32 == [(i, i = 1, NROW)]), &
+            "a remapped column must read its physical file column's values")
+        if (allocated(error)) return
+        call check(error, t%has_column("f64"), "an un-remapped column keeps its own name")
+    end subroutine test_remap_basic
+    !
+    !> The three rules that make remapping more than a rename, exercised on the worked example the
+    !! design is written around: a file with columns `i32`, `i64`, `f64` remapped so that
+    !!
+    !!   - `i32` and `i64` SWAP (each internal name equals a physical column name, but neither
+    !!     means itself),
+    !!   - `f64` is a second internal name for physical `i64`, i.e. two internal names share one
+    !!     physical source,
+    !!   - physical `f64` is left unreachable under any internal name -- a deliberate silent shadow.
+    !!
+    !! The duplicated pair must start identical and then diverge independently, which is what makes
+    !! them ordinary table columns rather than two views of one.
+    subroutine test_remap_shadow_duplicate(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer(int32), allocatable :: a(:)
+        integer(int64), allocatable :: b(:), c(:)
+        character(len=*), parameter :: f = "test_run/table_remap_shadow.parquet"
+        character(len=*), parameter :: m = "test_run/table_remap_shadow.maml"
+        integer :: i
+        !
+        call write_basic_fixture(f)
+        call write_maml_file(m, [character(len=40) :: &
+            "table: remap_shadow", &
+            "extra:", &
+            "  remap:", &
+            "  - i32: i64", &
+            "  - i64: i32", &
+            "  - f64: i64" ])
+        call parquet_open_table(t, f, maml=m)
+        ! One extra slot: physical i64 is claimed twice, physical f64 by nobody.
+        call check(error, t%ncols() == 6, "swap plus a duplicate target should keep six slots")
+        if (allocated(error)) return
+        call check(error, t%kind("i32") == PK_INT64, "internal i32 must take its type from physical i64")
+        if (allocated(error)) return
+        call check(error, t%kind("i64") == PK_INT32, "internal i64 must take its type from physical i32")
+        if (allocated(error)) return
+        call check(error, t%kind("f64") == PK_INT64, "internal f64 must take its type from physical i64")
+        if (allocated(error)) return
+        call t%get("i64", a)
+        call t%get("i32", b)
+        call t%get("f64", c)
+        call check(error, all(a == [(i, i = 1, NROW)]), "internal i64 must read physical i32's values")
+        if (allocated(error)) return
+        call check(error, all(b == c), "two internal names over one physical column must start identical")
+        if (allocated(error)) return
+        ! ...and then diverge: they are independent columns, not two views of one.
+        call t%set("f64", [(int(i, int64), i = 1, NROW)])
+        call t%get("i32", b)
+        call t%get("f64", c)
+        call check(error, .not. all(b == c), &
+            "writing one of two internal names over one physical column must not affect the other")
+        if (allocated(error)) return
+        call check(error, all(b == [(int(i, int64) * 1000000000_int64, i = 1, NROW)]), &
+            "the untouched duplicate must keep its own values")
+    end subroutine test_remap_shadow_duplicate
+    !
+    !> Remap and rename are independent, composable operations: renaming a remapped column changes
+    !! its lookup name only, never the physical column it reads, so a reload still goes to the same
+    !! place. Renaming to a name the file itself uses is fine too -- lookup is by internal name.
+    subroutine test_remap_then_rename(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer(int32), allocatable :: gi32(:)
+        character(len=*), parameter :: f = "test_run/table_remap_rename.parquet"
+        character(len=*), parameter :: m = "test_run/table_remap_rename.maml"
+        integer :: i
+        !
+        call write_basic_fixture(f)
+        call write_maml_file(m, [character(len=40) :: &
+            "table: remap_rename", &
+            "extra:", &
+            "  remap:", &
+            "  - counter: i32" ])
+        call parquet_open_table(t, f, maml=m)
+        call t%rename_column("counter", "tally")
+        call check(error, t%has_column("tally"), "the renamed remapped column should resolve")
+        if (allocated(error)) return
+        call check(error, .not. t%has_column("counter"), "the pre-rename internal name should not resolve")
+        if (allocated(error)) return
+        ! Never read before the rename, so this first touch proves the file column survived it.
+        call t%get("tally", gi32)
+        call check(error, all(gi32 == [(i, i = 1, NROW)]), &
+            "a renamed remapped column must still read its original physical column")
+        if (allocated(error)) return
+        call t%reload("tally")
+        call t%get("tally", gi32)
+        call check(error, all(gi32 == [(i, i = 1, NROW)]), &
+            "reloading a renamed remapped column must go back to the same physical column")
+    end subroutine test_remap_then_rename
+    !
     subroutine test_rename_column(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table) :: t

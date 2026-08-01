@@ -105,6 +105,24 @@ fields:
 - `user_maml%col_map` (populated by `parquet_validate_user_maml`) exposes the parsed entries for inspection.
 - Since it lives inside `extra:`, `col_map:` does not produce any table-level metadata entry of its own (nor does `protected_cols:`, `extra:`'s other specifically-parsed key — see [Null values](supported-data-types.html#null-values)); anything else nested inside `extra:` is accepted unvalidated and otherwise unused.
 
+## Renaming columns for reading with `extra: remap:`
+
+`col_map:` above relabels columns on the way OUT (writing). `remap:` is its read-side counterpart, and it is used by `parquet_table` only: a read-in MAML handed to `parquet_open_table(table, file, maml=...)` can give the file's columns table-facing names of its own, so program code never has to know what a column is physically called. Like `col_map:`, it is recognized only nested inside `extra:`.
+
+```yaml
+table: input_table
+extra:
+  remap:
+  - mass: MASS_KG      # internal name `mass` reads the file's MASS_KG column
+  - ra: RA_J2000
+```
+
+- Each item is `<internal_name>: <file_column_name>`, i.e. the **opposite** direction to `col_map:`'s `<internal_name>: <output_name>`. The value must be a column the file actually has, or the open aborts naming it; an internal name may not be declared twice.
+- The internal name is what every table API uses (`%get`, `%col`, `%kind`, `%rename_column`, ...). The file column keeps being what is actually read, so `%reload` goes back to the same place, and `%rename_column` changes the lookup name only — remap and rename compose freely.
+- **An internal name is allowed to equal one of the file's own column names**, and does not then mean "itself": in `- ra: dec`, internal `ra` reads the file's `dec`. The file's own `ra` column simply becomes unreachable unless some other entry points at it. That shadow is deliberate, not an error — a file often carries columns a program does not want, and one of them sharing a name must not make that name unusable.
+- **Two internal names may read the same file column.** They become two ordinary, independent table columns: identical when first read, and free to diverge afterwards, since each holds its own copy.
+- See [Tables](table.html#renaming-a-files-columns-with-a-read-in-maml) for the table-side view.
+
 ## How table-level keys become metadata entries
 
 Table-level keys become parquet metadata entries, with these special mappings:
@@ -118,7 +136,7 @@ Table-level keys become parquet metadata entries, with these special mappings:
 | `keywords:` | A plain-string list, combined into a single `keywords` entry with its items joined by `;`. |
 | any other allowed section, given as a plain-string list (e.g. `survey:`, `author:`, `license:`, ...) | Several entries that all share that key's name (e.g. multiple `list_key` entries with the same name). |
 | any other allowed section, given as a list of *maps* | **Not** specially handled: only its first sub-key ends up captured as a raw, unparsed string, and the rest of that entry's sub-keys are silently dropped. Use `keyarray:` for arbitrary structured metadata instead. |
-| `extra:` | Opaque to table-level metadata (produces no metadata entry of its own), but not ignored: `col_map:` and `protected_cols:` are specifically parsed out of it — see [Renaming columns for output with `col_map:`](#renaming-columns-for-output-with-col_map) and [Null values](supported-data-types.html#null-values). Anything else nested inside `extra:` is accepted unvalidated and otherwise unused. |
+| `extra:` | Opaque to table-level metadata (produces no metadata entry of its own), but not ignored: `col_map:`, `protected_cols:` and (for a read-in table MAML) `remap:` are specifically parsed out of it — see [Renaming columns for output with `col_map:`](#renaming-columns-for-output-with-col_map) [Null values](supported-data-types.html#null-values) and [Renaming columns for reading with `extra: remap:`](#renaming-columns-for-reading-with-extra-remap). Anything else nested inside `extra:` is accepted unvalidated and otherwise unused. |
 
 Every entry in this table is read back on the read side with `parquet_get_metadata` (see
 [Reading table metadata with `parquet_get_metadata`](reading.html#reading-table-metadata-with-parquet_get_metadata)),

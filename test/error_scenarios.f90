@@ -1227,6 +1227,10 @@ program error_scenarios
         call scenario_table_row_kind_mismatch()
     case ("table_get_slice_kind_mismatch")
         call scenario_table_get_slice_kind_mismatch()
+    case ("table_remap_unknown_file_column")
+        call scenario_table_remap_unknown_file_column()
+    case ("table_remap_duplicate_internal")
+        call scenario_table_remap_duplicate_internal()
     case ("table_first_touch_in_parallel")
         call scenario_table_first_touch_in_parallel()
     case ("table_resolve_width_in_parallel")
@@ -9824,6 +9828,52 @@ contains
         call t%get_slice("val", s, v)   ! float64 column into a logical array -> aborts
         print '(a,i0)', "unexpectedly sliced a float64 column into a logical array, size=", size(v)
     end subroutine scenario_table_get_slice_kind_mismatch
+
+    !> Writes `lines` to `fname`, one per record -- the read-in (Role-B) MAML fixtures the remap
+    !! scenarios below open a table with (parquet_open_table(maml=) takes a file path).
+    subroutine write_scenario_maml_file(fname, lines)
+        character(len=*), intent(in) :: fname    !! file to write.
+        character(len=*), intent(in) :: lines(:) !! MAML source, one array element per line.
+        integer :: unit, i
+        open(newunit=unit, file=fname, status="replace", action="write")
+        do i = 1, size(lines)
+            write(unit, "(a)") trim(lines(i))
+        end do
+        close(unit)
+    end subroutine write_scenario_maml_file
+
+    !> extra: remap: must name a column the file actually has. Naming one it does not is a plain
+    !! mistake (a typo, or a MAML written against a different file), and it has to abort at open
+    !! rather than silently producing a column that can never be read.
+    subroutine scenario_table_remap_unknown_file_column()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_table_remap_unknown.parquet")
+        call write_scenario_maml_file("test_run/es_table_remap_unknown.maml", [character(len=40) :: &
+            "table: remap_unknown", &
+            "extra:", &
+            "  remap:", &
+            "  - mass: not_a_real_column" ])
+        call parquet_open_table(t, "test_run/es_table_remap_unknown.parquet", &
+            maml="test_run/es_table_remap_unknown.maml")   ! -> aborts
+        print '(a,i0)', "unexpectedly opened a table remapping a nonexistent file column, ncols=", t%ncols()
+    end subroutine scenario_table_remap_unknown_file_column
+
+    !> Two remap entries claiming the SAME internal name are ambiguous -- there is no rule that
+    !! could pick between them -- so this aborts. Note the opposite case is deliberately ALLOWED:
+    !! two internal names may target one file column (see parquet_tables_maml).
+    subroutine scenario_table_remap_duplicate_internal()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_table_remap_dup.parquet")
+        call write_scenario_maml_file("test_run/es_table_remap_dup.maml", [character(len=40) :: &
+            "table: remap_dup", &
+            "extra:", &
+            "  remap:", &
+            "  - mass: id", &
+            "  - mass: val" ])
+        call parquet_open_table(t, "test_run/es_table_remap_dup.parquet", &
+            maml="test_run/es_table_remap_dup.maml")   ! -> aborts
+        print '(a,i0)', "unexpectedly opened a table with a duplicated remap internal name, ncols=", t%ncols()
+    end subroutine scenario_table_remap_duplicate_internal
 
     !> A lazy first touch inside a parallel region publishes shared state with no ordering
     !! behind it, so it is forbidden outright rather than guarded by a lock on the read path

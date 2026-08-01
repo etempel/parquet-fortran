@@ -81,7 +81,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   line up with the rows on disk, so any column not read by then can never be read, `%is_detached`
   reports it, and every later read from the file is a clear error rather than misaligned data.
   `%sort_by` runs the same C++ sort engine as the read-time `sort_by=`, so sorting a table in
-  memory and reading the same file sorted give the identical row order. See
+  memory and reading the same file sorted give the identical row order. A table can also be opened
+  against a **read-in MAML** (`parquet_open_table(t, file, maml=...)`) whose `extra: remap:` block
+  gives the file's columns table-facing names of the program's own, so code works in one stable
+  vocabulary whatever a particular file calls things; an internal name may deliberately shadow a
+  file column it does not refer to, and two internal names may read one file column as two
+  independent table columns. See
   [the guide](doc/pages/table.md) for the current limitations, the detach rule and the OpenMP
   first-touch rule.
 - Added `parquet_columns` (`parquet_column`): type-erased, whole-column value storage with sparse

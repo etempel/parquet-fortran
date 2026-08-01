@@ -19,29 +19,32 @@ submodule (parquet_tables) parquet_tables_lifecycle
 contains
     !
     module procedure open_table_full
-        call open_table_impl(table, filename, .false., 0_int64, 0_int64)
+        call open_table_impl(table, filename, .false., 0_int64, 0_int64, maml)
     end procedure open_table_full
     !
     module procedure open_table_slice_i32
-        call open_table_impl(table, filename, .true., int(row_lo, int64), int(row_hi, int64))
+        call open_table_impl(table, filename, .true., int(row_lo, int64), int(row_hi, int64), maml)
     end procedure open_table_slice_i32
     !
     module procedure open_table_slice_i64
-        call open_table_impl(table, filename, .true., row_lo, row_hi)
+        call open_table_impl(table, filename, .true., row_lo, row_hi, maml)
     end procedure open_table_slice_i64
     !
     !> The one open path: both regimes differ only in which rows the table claims, and both
     !! classify without reading. Shared rather than duplicated so the slice regime cannot drift
     !! from the full one on anything but its row scope.
-    subroutine open_table_impl(table, filename, sliced, row_lo, row_hi)
+    subroutine open_table_impl(table, filename, sliced, row_lo, row_hi, maml)
         type(parquet_table), intent(out) :: table !! the table to fill.
         character(len=*), intent(in) :: filename  !! parquet file to open.
         logical, intent(in) :: sliced             !! .true. for the slice regime.
         integer(int64), intent(in) :: row_lo      !! first file row (slice regime only).
         integer(int64), intent(in) :: row_hi      !! last file row (slice regime only).
-        integer :: i, ncol
+        character(len=*), intent(in), optional :: maml !! read-in (Role-B) MAML describing `filename`.
+        integer :: i, ncol, n_remap
         integer(int64) :: file_rows
         character(len=:), allocatable :: names(:)
+        character(len=:), allocatable :: remap_internal(:), remap_physical(:)
+        type(parquet_schema) :: read_maml
         character(len=32) :: lo_s, hi_s, n_s
         !
         ! `table` is intent(out) on a finalizable type, so table_finalize has already run on any
@@ -92,14 +95,20 @@ contains
         end if
         !
         call parquet_get_column_names(table%cache%reader, names)
-        ncol = size(names)
-        allocate(table%cache%cols(ncol + COL_HEADROOM))
-        table%cache%ncols = ncol
-        do i = 1, ncol
-            table%cache%cols(i)%name = trim(names(i))
-            table%cache%cols(i)%file_name = trim(names(i))
-            table%cache%cols(i)%file_source = .true.
-        end do
+        ! extra: remap: relabels file columns for reading -- see parquet_tables_maml. Loading the
+        ! MAML through parquet_load_qc_maml_file rather than reading the file here is what gives
+        ! this the shared reader's line-length cap and CRLF handling for free, and it is the same
+        ! object a later milestone hands to parquet_open_reader as its qc schema.
+        n_remap = 0
+        if (present(maml)) then
+            read_maml = parquet_load_qc_maml_file(trim(maml))
+            call parse_read_maml_remap(read_maml%maml%lines, remap_internal, remap_physical, n_remap)
+        else
+            allocate(character(len=1) :: remap_internal(0))
+            allocate(character(len=1) :: remap_physical(0))
+        end if
+        call table_enumerate_columns(table%cache, names, remap_internal, remap_physical, n_remap, filename)
+        ncol = table%cache%ncols
         !
         ! Classify everything up front (schema only, no column data), so %kind/%width/%nrows
         ! answer for every column while none of them is resident.

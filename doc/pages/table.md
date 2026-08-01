@@ -334,6 +334,50 @@ call t%get("main.inner.deep.value", v)
 The bare struct name (`main`) is *not* a column — it is not readable on its own, so it never
 appears in `%column_names`.
 
+## Renaming a file's columns with a read-in MAML
+
+`parquet_open_table` takes an optional `maml=` argument naming a **read-in MAML file** that
+describes the parquet file being opened. Its `extra: remap:` block gives the file's columns
+table-facing names of your own, so program code works in one stable vocabulary regardless of what
+a particular file happens to call things:
+
+```yaml
+# catalogue.maml
+table: input_table
+extra:
+  remap:
+  - mass: MASS_KG
+  - ra: RA_J2000
+```
+
+```fortran
+call parquet_open_table(t, "catalogue.parquet", maml="catalogue.maml")
+call t%get("mass", m)      ! reads the file's MASS_KG column
+```
+
+Only the columns you list are affected; everything else keeps its own name. Nothing is read at
+open, exactly as without a MAML — remapping is a relabelling of the schema, not a read.
+
+Three rules are worth knowing, and they are what make this more than a rename:
+
+* **The lookup name is the internal one, always.** `%get`, `%col`, `%kind`, `%residency` and every
+  other table API take the internal name. The file column is what is actually read, so `%reload`
+  goes back to it, and `%rename_column` changes only the lookup name — remap and rename compose
+  freely and in either order.
+* **An internal name may equal one of the file's own column names, and does not then mean
+  "itself".** With `- ra: dec`, internal `ra` reads the file's `dec` column, and the file's own
+  `ra` becomes unreachable unless another entry points at it. This shadowing is deliberate: a file
+  often carries columns a program does not want, and one of them happening to share a name must
+  not make that name unusable.
+* **Two internal names may read the same file column.** They become two ordinary, independent
+  columns — identical when first read, and free to diverge afterwards, because each holds its own
+  copy. Writing to one never affects the other.
+
+A remap naming a column the file does not have, or declaring one internal name twice, is an error
+at open rather than a surprise later. See
+[the MAML format](maml-format.html#renaming-columns-for-reading-with-extra-remap) for the grammar
+and its write-side counterpart `col_map:`.
+
 ## Building a table in memory and writing it out
 
 `parquet_new_table` starts an empty table; the first `%add_column` fixes the row count and every

@@ -170,7 +170,8 @@ module parquet_tables
         parquet_release_column, parquet_read_column, parquet_get_metadata, parquet_get_string_length, &
         parquet_get_num_row_groups, parquet_get_chunk_size, parquet_read_column_chunk, &
         parquet_open_writer, parquet_write_column, parquet_close_writer, parquet_write_row_mask, &
-        parquet_measure_list_width, parquet_column_width_needs_data, parquet_column_has_nulls
+        parquet_measure_list_width, parquet_column_width_needs_data, parquet_column_has_nulls, &
+        parquet_load_qc_maml_file
     !
     implicit none
     private
@@ -567,23 +568,26 @@ def gen_spec_interfaces():
         !! created and marked unsupported, they still appear in %column_names, and only an
         !! attempt to read one is an error. `table` is intent(out), so reopening the same
         !! variable frees the previous table first.
-        module subroutine open_table_full(table, filename)
+        module subroutine open_table_full(table, filename, maml)
             type(parquet_table), intent(out) :: table !! the table to fill.
             character(len=*), intent(in) :: filename  !! parquet file to open.
+            character(len=*), intent(in), optional :: maml !! read-in (Role-B) MAML file describing `filename`.
         end subroutine open_table_full
         !> Slice-regime open, int32 row bounds -- see the `parquet_open_table` generic above.
-        module subroutine open_table_slice_i32(table, filename, row_lo, row_hi)
+        module subroutine open_table_slice_i32(table, filename, row_lo, row_hi, maml)
             type(parquet_table), intent(out) :: table !! the table to fill.
             character(len=*), intent(in) :: filename  !! parquet file to open.
             integer(int32), intent(in) :: row_lo      !! first file row to cover (1-based).
             integer(int32), intent(in) :: row_hi      !! last file row to cover (inclusive).
+            character(len=*), intent(in), optional :: maml !! read-in (Role-B) MAML file describing `filename`.
         end subroutine open_table_slice_i32
         !> Slice-regime open, int64 row bounds -- see the `parquet_open_table` generic above.
-        module subroutine open_table_slice_i64(table, filename, row_lo, row_hi)
+        module subroutine open_table_slice_i64(table, filename, row_lo, row_hi, maml)
             type(parquet_table), intent(out) :: table !! the table to fill.
             character(len=*), intent(in) :: filename  !! parquet file to open.
             integer(int64), intent(in) :: row_lo      !! first file row to cover (1-based).
             integer(int64), intent(in) :: row_hi      !! last file row to cover (inclusive).
+            character(len=*), intent(in), optional :: maml !! read-in (Role-B) MAML file describing `filename`.
         end subroutine open_table_slice_i64
         !> Prepares an empty in-memory table with no columns and no rows. The first %add_column
         !! fixes the row count; every later one must match it.
@@ -809,6 +813,43 @@ def gen_spec_interfaces():
             integer(int64), intent(in) :: n          !! the caller's array length.
             character(len=*), intent(in) :: proc     !! calling procedure, for the message.
         end subroutine table_require_length
+    end interface
+    !
+    ! ---- Read-in (Role-B) MAML (parquet_tables_maml) ----
+    interface
+        !> Parses a read-in MAML's `extra: remap:` block into two parallel name arrays:
+        !! `internal(i)` is the table-facing name the caller will use, `physical(i)` the column it
+        !! actually reads from the file. Both are returned trimmed and unquoted, in declaration
+        !! order; `n` is 0 (and the arrays are allocated empty) when the MAML declares no remapping.
+        !!
+        !! A deliberately separate, narrow parser rather than a reuse of the write-side
+        !! `parquet_parse_col_map`: that one is validated against a base schema a generic table does
+        !! not have, and the two serve opposite directions (this relabels for READING, `col_map:`
+        !! for writing). It reads only lines already loaded from disk, so the shared
+        !! `parquet_read_maml_source_lines` guarantees (line-length cap, CRLF stripping) come with
+        !! them via `parquet_load_qc_maml_file`.
+        module subroutine parse_read_maml_remap(lines, internal, physical, n)
+            character(len=*), intent(in) :: lines(:) !! raw MAML source lines to scan.
+            character(len=:), allocatable, intent(out) :: internal(:) !! table-facing names, in order.
+            character(len=:), allocatable, intent(out) :: physical(:) !! file column each one reads.
+            integer, intent(out) :: n                !! entries found; 0 if there is no remap: block.
+        end subroutine parse_read_maml_remap
+        !> Validates a parsed remap against the file's own column names and fills `cache%cols`
+        !! accordingly -- the enumeration that would otherwise be one slot per physical column.
+        !!
+        !! Every physical column is visited in file order and expanded into the internal names that
+        !! claim it, so file order (and therefore struct-leaf adjacency, which the batch release
+        !! policy depends on) is preserved and two internal names reading one column land in
+        !! adjacent slots. A physical column whose own name is claimed as an INTERNAL name by some
+        !! remap entry is skipped: that is the deliberate shadow, not an error.
+        module subroutine table_enumerate_columns(cache, names, internal, physical, n_remap, filename)
+            type(parquet_table_cache), intent(inout) :: cache !! the column store to fill.
+            character(len=*), intent(in) :: names(:) !! the file's own column names, in file order.
+            character(len=*), intent(in) :: internal(:) !! remap: table-facing names.
+            character(len=*), intent(in) :: physical(:) !! remap: the file column each one reads.
+            integer, intent(in) :: n_remap           !! live entries in internal/physical.
+            character(len=*), intent(in) :: filename !! source file, for error messages.
+        end subroutine table_enumerate_columns
     end interface
     !
     ! ---- Materialization orchestration (parquet_tables_read) ----

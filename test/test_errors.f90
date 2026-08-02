@@ -3917,16 +3917,23 @@ contains
     function error_scenarios_bin() result(bin)
         character(len=:), allocatable :: bin
         character(len=*), parameter :: path_file = "test_run/.error_scenarios_bin_path"
-        integer :: unit, ios
+        integer :: unit, ios, cstat
         character(len=1024) :: line
 
         if (.not. g_error_scenarios_bin_ready) then
-            call execute_command_line("mkdir -p test_run", wait=.true.)
-            call execute_command_line("fpm build --tests > /dev/null 2>&1", wait=.true.)
+            ! Every call below passes cmdstat= even though its value is never
+            ! inspected: a processor is required to initiate ERROR TERMINATION
+            ! when a condition that would set cmdstat nonzero occurs and the
+            ! argument is absent, and flang classifies "the command exited
+            ! nonzero" as exactly such a condition. Without cmdstat=, a
+            ! non-clean `fpm build` here would kill the whole test binary with
+            ! an opaque runtime message instead of failing a check.
+            call execute_command_line("mkdir -p test_run", wait=.true., cmdstat=cstat)
+            call execute_command_line("fpm build --tests > /dev/null 2>&1", wait=.true., cmdstat=cstat)
             call execute_command_line( &
                 "find ""${FPM_BUILD_DIR:-build}"" -type f -name error_scenarios 2>/dev/null | head -n 1 > "// &
                 path_file, &
-                wait=.true.)
+                wait=.true., cmdstat=cstat)
             line = ""
             open(newunit=unit, file=path_file, status="old", action="read", iostat=ios)
             if (ios == 0) then
@@ -3944,19 +3951,83 @@ contains
     !> use. Centralizes what used to be six near-identical
     !> `execute_command_line("fpm test error_scenarios -- ...")` call sites
     !> (three here, three in test_writing.f90's qc-warning scenario tests).
+    !>
+    !> **The child's status is captured through the shell (`; echo $? > file`)
+    !> rather than read from execute_command_line's own EXITSTAT/CMDSTAT,
+    !> because neither of those two is portable across compilers here.** Every
+    !> scenario this drives is expected either to exit cleanly or to terminate
+    !> abnormally, so the disagreement is not an edge case -- it is the normal
+    !> path:
+    !>
+    !> - **CMDSTAT.** gfortran documents cmdstat == 0 whenever the command line
+    !>   was executed, whatever its exit status was; flang instead treats a
+    !>   nonzero exit as an "error condition" and reports cmdstat 5/6/7
+    !>   (not-found / nonzero exit / killed by signal). Read literally, every
+    !>   `expect_abort=.true.` scenario then looks like a failure to invoke the
+    !>   binary at all.
+    !> - **EXITSTAT.** For a child killed by a signal -- how report_fatal_error's
+    !>   std::abort() ends a scenario -- gfortran reports the signal number
+    !>   while flang reports 0. Trusting it there would silently turn an
+    !>   abort-expecting test into a false PASS, which is worse than the loud
+    !>   cmdstat failure.
+    !>
+    !> `$?` from the shell answers both uniformly: the scenario's own `error
+    !> stop` code, or 128+signo for a signal death, on any compiler. The
+    !> composed command's own exit status is then always that of `echo`, i.e.
+    !> 0, so cmdstat is 0 everywhere and this subroutine's reported cmdstat
+    !> goes back to meaning only what its callers actually test it for -- "the
+    !> helper binary could not be invoked". No new dependency on a POSIX shell
+    !> is introduced: `redirect`, the `${FPM_BUILD_DIR:-build}` expansion and
+    !> the `find | head` pipeline above are already shell syntax.
+    !>
+    !> The status file is keyed on the scenario name, which is unique across
+    !> every call site (the same assumption check_scenario_exit_status_and_stderr
+    !> already makes for its own `<scenario>_stderr.txt` capture) -- so this
+    !> stays safe under test-drive's concurrent execution of a suite.
     subroutine run_error_scenario(scenario, redirect, exitstat, cmdstat)
         character(len=*), intent(in) :: scenario, redirect
         integer, intent(out) :: exitstat, cmdstat
-        character(len=:), allocatable :: bin
+        character(len=:), allocatable :: bin, status_file
+        integer :: unit, ios, ecl_exit, ecl_cmd, status_value
+
+        ! Default to "could not invoke": every success path below has to say so
+        ! explicitly, so a new early return can't accidentally report a pass.
+        exitstat = -1
+        cmdstat = 1
 
         bin = error_scenarios_bin()
-        if (len_trim(bin) == 0) then
-            cmdstat = 1
-            exitstat = -1
-            return
+        if (len_trim(bin) == 0) return
+
+        status_file = "test_run/." // trim(scenario) // "_status.txt"
+
+        ! Drop any status file left behind by an earlier run: if the command
+        ! below fails to execute at all, a stale file would otherwise be read
+        ! back as this run's result.
+        open(newunit=unit, file=status_file, status="old", iostat=ios)
+        if (ios == 0) close(unit, status="delete")
+
+        call execute_command_line( &
+            trim(bin)//" "//trim(scenario)//" "//redirect//" ; echo $? > "//status_file, &
+            wait=.true., exitstat=ecl_exit, cmdstat=ecl_cmd)
+
+        status_value = -1
+        open(newunit=unit, file=status_file, status="old", action="read", iostat=ios)
+        if (ios == 0) then
+            read(unit, *, iostat=ios) status_value
+            close(unit)
+            if (ios /= 0) status_value = -1
         end if
-        call execute_command_line(trim(bin)//" "//trim(scenario)//" "//redirect, &
-            wait=.true., exitstat=exitstat, cmdstat=cmdstat)
+
+        ! No status written -> the shell itself never ran the command.
+        if (status_value < 0) return
+        ! 127 is the shell's own "command not found", i.e. a bad/stale binary
+        ! path rather than a scenario that aborted. No scenario exits 127 --
+        ! error_scenarios.f90 uses only `error stop` (1) and the 97 sentinel --
+        ! so this can be attributed to invocation without ambiguity.
+        if (status_value == 127) return
+
+        exitstat = status_value
+        cmdstat = 0
     end subroutine run_error_scenario
 
     subroutine check_scenario_exit_status(error, scenario, expect_abort, failure_message)

@@ -193,7 +193,7 @@ contains
         end interface
         integer(c_int) :: pid
         real(real64) :: mib !! resident set size, MiB, or -1.
-        integer :: u, ios
+        integer :: u, ios, cstat
         character(len=256) :: line, cmdfile
         real(real64) :: kb
 
@@ -202,7 +202,10 @@ contains
         write(cmdfile, '(a,i0,a)') "/tmp/pf_rss_", pid, ".txt"
         ! `ps` is the one portable-enough route across Linux and macOS; /proc/self/status does
         ! not exist on macOS, and neither does a Fortran intrinsic for this.
-        call execute_command_line("ps -o rss= -p " // itoa(pid) // " > " // trim(cmdfile), wait=.true.)
+        ! cmdstat= is passed but never inspected: a nonzero `ps` exit would otherwise trigger
+        ! ERROR TERMINATION under flang, which reads that as a cmdstat-worthy error condition.
+        call execute_command_line("ps -o rss= -p " // itoa(pid) // " > " // trim(cmdfile), &
+            wait=.true., cmdstat=cstat)
         open(newunit=u, file=trim(cmdfile), status="old", action="read", iostat=ios)
         if (ios /= 0) return
         read(u, '(a)', iostat=ios) line

@@ -30,6 +30,19 @@ program mean_mass
 end program mean_mass
 ```
 
+### What to `use`
+
+The table layer is its own module, and it does not re-export the rest of the library — a program
+that names a kind constant or a schema has to say where it comes from:
+
+| you write | you need |
+|---|---|
+| `parquet_table`, `parquet_open_table`, `parquet_new_table`, `parquet_write_table`, `parquet_table_row`, `parquet_slice`/`parquet_slice_range`/`parquet_slice_list`, `parquet_table_row_group_bounds`, `RES_EMPTY`/`RES_FULL` | `use parquet_tables` |
+| the `PK_*` kind constants, `parquet_kind_name` | `use parquet_columns` |
+| `parquet_schema`, `parquet_parse_maml`, `parquet_filter`, `parquet_sortkey`, `parquet_read_qc` | `use parquet` |
+| `parquet_string_column` | `use parquet_strings` |
+| `parquet_date`, `parquet_time`, `parquet_timestamp` | `use parquet_temporal` |
+
 ## Two ways to reach a column
 
 **`%get` is the one to reach for first.** It copies the column into an allocatable array of
@@ -51,13 +64,17 @@ call t%col("flux", p)
 p = p * 2.0_real64           ! modifies the column in place
 ```
 
-Three things to know about `%col`:
+Four things to know about `%col`:
 
 - **The pointer kind must match the stored kind exactly.** There is no widening on this path — it
   aliases raw storage, so there is nothing to convert through. Ask `%kind` first if you do not
   already know the type (see below). A mismatch is a hard error, not a silent conversion.
 - **Do not keep the pointer across a structural change.** Adding or replacing a column may
   relocate the store. Re-fetch the pointer after any such call.
+- **There is no pointer form for a string column.** `%col` covers the numeric, logical, temporal
+  and vector kinds; `PK_STRING`/`PK_STRING_VEC` are stored as a packed variable-length buffer with
+  no fixed row slots to point a Fortran array at, so a string column is reached by copy only — see
+  [String columns in a table](#string-columns-in-a-table).
 - **Arithmetic through the pointer is a little slower than over an array you own.** Measured with
   `tools/benchmark_table.sh`'s access mode, `z = xp + yp` through two `%col` pointers runs at
   roughly 1.1x the time of the same expression over two allocatables when the columns are large
@@ -114,21 +131,43 @@ dispatch above is only worth it when you need the zero-copy path.
 | `t%residency(name)` | `RES_FULL` once read, `RES_EMPTY` before that (and for an unreadable column) |
 | `t%is_supported(name)` | whether its physical type is one this library can read |
 | `t%is_null(name, i)` | whether row `i` of that column is null |
-| `call t%get_file_metadata(key, value, found)` | one key from the source file's metadata |
+| `t%is_detached()` | whether a row-changing operation has cut the table loose from its file |
+| `call t%filename(f)` | the file this table was opened from, or `""` for one built in memory |
+| `call t%get_file_metadata(key, value, found)` | one key from the source file's metadata — an error on a table built in memory, which has no file to ask |
 
-Every lookup above takes an optional **`found=`**: without it a missing column is a hard error;
-with it, the miss is reported through `found` and the call returns quietly.
+**`found=` is available on the calls that look a column up by name**, and it turns a missing
+column from a hard error into a quiet report: `%kind`, `%width`, `%unit`, `%residency`,
+`%is_supported`, `%get`, `%col`, `%prefetch` and `%reload`.
 
 ```fortran
 call t%get("maybe_absent", v, found=ok)
 if (.not. ok) print *, "column not in this file"
 ```
 
+On a reported miss `%get` leaves a zero-length array and `%col` a null pointer, so a program that
+ignores `found` gets an empty result rather than stale data.
+
+The others do not have it, and it is worth knowing which: `%is_null`, `%set`, `%set_element`,
+`%set_null`, `%clear_null`, `%get_slice`, `%row` and every mutation name a column that must
+exist, so a miss there is an error. `%has_column` answers the question directly instead, and
+`%get_file_metadata`'s `found` reports a missing **key**, not a missing column.
+
+On `%prefetch`'s array form, `found` is the *conjunction*: it comes back `.false.` if any name
+was missing, and the names that do exist are still read. A column whose type this library cannot
+read is an error for `%prefetch` and `%reload` whether or not `found=` is present — asking to read
+it is a mistake rather than a miss.
+
 ## Laziness, and what it costs
 
-A column is read on its first *value* access — `%get`, `%col`, `%set`, `%is_null`, a row handle's
-`%get`, or `%get_slice`. Everything else (`%nrows`, `%ncols`, `%column_names`, `%kind`, `%width`,
-`%has_column`) is answered from the schema and reads nothing.
+A column is read on its first *value* access. That is anything that has to see the values:
+`%get`, `%col`, `%set`, `%is_null`, `%get_slice`, a row handle's `%get`/`%is_null`, the cell
+mutators `%set_element`/`%set_null`/`%clear_null`/`%compact_validity`, and `%copy_column`.
+`parquet_write_table` counts too — it reads whatever its schema names and the table has not read
+yet. `%cast` is the one that can go either way: on a column nothing has read it only records the
+kind to decode into, and the read still happens later (see
+[Changing a column's type](#changing-a-columns-type)). Everything else (`%nrows`, `%ncols`,
+`%column_names`, `%kind`, `%width`, `%unit`, `%has_column`, `%residency`, `%is_supported`,
+`%filename`) is answered from the schema and reads nothing.
 
 ```fortran
 call parquet_open_table(t, "catalogue.parquet")
@@ -158,7 +197,9 @@ and the table frees that array as soon as the column it was asked for is stored 
 never *wrong*, only slower.
 
 `%reload` only applies to a column that came from a file: reloading one built with `%add_column`
-is an error, since there is nothing to reload it from.
+is an error, since there is nothing to reload it from, as is reloading anything once the table has
+[detached](#what-detaching-means). It re-reads into the kind the column currently has, so a
+`%cast` is *not* undone by a reload — only local value edits are.
 
 > `t%prefetch` and the reader-level `parquet_prefetch_columns` are different things. The table's
 > reads a column into the table's own store; the reader's warms Arrow's side of the read.
@@ -331,6 +372,14 @@ row group contributing no rows at all (outside the slice, or filtered away entir
 an **empty range**, `mine(1, rg) > mine(2, rg)`, rather than dropped; dropping it would break the
 alignment that makes the pairing possible.
 
+Some tables cannot answer, and say so rather than inventing an answer: a table built in memory (it
+has no row groups) and a [detached](#what-detaching-means) one (its rows no longer come from any
+row group). **A table opened with `sort=` cannot answer in its own row numbering either** — a
+sorted row can come from any row group, so there is no such mapping to report, and the default
+form aborts. Use the standalone `parquet_table_row_group_bounds(file, bounds)` when what you want
+is the file's own boundaries: it opens its own footer-only reader and is unaffected by whatever
+the table did.
+
 ## One row at a time
 
 `t%row(i)` returns a lightweight, non-owning handle on a single row — the natural thing to hand
@@ -348,8 +397,10 @@ print *, r%index(), r%is_null("mass")
 `%get` on a handle widens exactly as the table's own does, and triggers the same lazy first
 touch, so a handle can reach a column nothing has read yet. The handle resolves the column by
 name and the row by index on every access, so it survives anything that merely reallocates a
-column; it is invalidated by a change to the row set or by the table going out of scope. The
-table it came from does **not** need the `target` attribute.
+column; it is invalidated by a change to the row set, by dropping a column it reads, and by the
+table going out of scope. None of those is detectable from the handle, so treat it as
+short-lived: make it, use it, let it go. The index must be a row the table has, and the table it
+came from does **not** need the `target` attribute.
 
 ## Picking rows out of a column
 
@@ -371,7 +422,41 @@ selected row must exist. `%get_slice` widens like `%get`, and a vector column ke
 `(element, row)` shape. There is no pointer form: a strided or gathered selection is not
 contiguous, so `%col` (the whole column) remains the zero-copy path.
 
+## String columns in a table
+
+A `PK_STRING` column is reached by copy, in either of two shapes, and which one you declare picks
+the specific:
+
+```fortran
+character(len=:), allocatable  :: names(:)   ! fixed width, sized to the longest value present
+type(parquet_string_column)    :: packed     ! compact: offsets + data + validity
+
+call t%get("name", names)      ! a null row comes back blank -- gate on %is_null to tell them apart
+call t%get("name", packed)     ! keeps each value's own length, and its nulls with it
+```
+
+Four things follow from strings having no fixed-width storage:
+
+- **No `%col`.** There is no pointer form for `PK_STRING`/`PK_STRING_VEC` at all.
+- **Writing back takes a character array**, not a `parquet_string_column`: `%set`, `%set_element`
+  and `%add_column` have `character(len=*)` specifics (rank 1, and rank 2 shaped `(element, row)`
+  for a vector column) and no compact-column form. To put a `parquet_string_column` into a table,
+  copy its elements into a character array first.
+- **`%get_slice` offers all three** — `parquet_string_column`, `character(:)` and the
+  `(element, row)` rank-2 form — and a row handle's `%get` hands back a
+  `character(len=:), allocatable` scalar for a `PK_STRING` column, or a rank-1 array of them for a
+  `PK_STRING_VEC` one.
+- **A vector string column is trimmed on read.** It has no compact read path, so it goes through
+  the fixed-width reader, where trailing blanks cannot be told from padding.
+
+See [Compact string columns with `parquet_string_column`](string-columns.html) for the type itself.
+
 ## Columns this library cannot read
+
+A table holds the same column types the rest of the library reads — `int32`, `int64`, `float32`,
+`float64`, `logical`, `string`, `date`, `time` and `timestamp`, each as a scalar column or as a
+fixed-width vector one (18 kinds in all, the `PK_*` constants `%kind` reports) — see
+[Supported data types](supported-data-types.html).
 
 A parquet file may contain a column whose physical type this library does not support — a
 decimal or unsigned integer column written by another tool, or a `LIST`/`MAP` column. **Such a
@@ -459,7 +544,7 @@ Also accepted: `sample_fraction=`/`sample_seed=` for a random subset, `qc_soft=`
 Three consequences worth stating plainly:
 
 - **Every column inherits it, including ones read much later.** A column touched for the first time long after the open still comes back with the same rows in the same order — the transform lives on the table's reader, not on any one column.
-- **`%nrows()` is the post-filter count.** With a filter or a sample active it is *not* the file's row count, and there is no way to ask for the file's original count through the table (open it a second time without the filter if you need both).
+- **`%nrows()` is the post-filter count.** With a filter or a sample active it is *not* the file's row count, and nothing on the table reports that count directly — `call t%row_group_bounds(b, physical=.true.)` gives the file's own row groups, whose last entry ends at the file's last row, and `parquet_table_row_group_bounds(file, b)` answers the same without a table at all.
 - **`%clone` keeps it.** A clone reopens the file for its own lazy reads, and reattaches the identical transform — otherwise a column the source never touched would come back with rows the source had filtered away.
 
 A **slice** takes all of this too, applied within its own row range, with `sort=` the one exception — see [A slice with a filter, a sample or qc](#a-slice-with-a-filter-a-sample-or-qc).
@@ -522,6 +607,11 @@ matching table column is an error; a table column the schema does not name is si
 it must for `parquet_open_writer`. Forgetting it is a clear error rather than a mysterious
 failure.
 
+**Writing a file-backed table reads what it has not read yet.** Every column the schema names is
+materialized as it is written, so `parquet_write_table` on a freshly opened table reads exactly
+the columns the schema asks for — and on a [detached](#what-detaching-means) table, a schema field
+whose column was never read is an error, since there is no longer a file to read it from.
+
 **It costs about what writing the columns yourself costs.** `parquet_write_table` writes straight
 out of the table's store without copying, and a column that holds no nulls is written with no
 validity mask at all — the same call a hand-written loop would make. `tools/benchmark_table.sh`'s
@@ -544,7 +634,9 @@ m = m * 2.0_real64
 call t%set("mass", m)
 ```
 
-Pass `modify_nulls=.false.` to leave null rows untouched.
+By default every row is written and the column's null bitmap is dropped outright — after a plain
+`%set` the column holds no nulls at all. Pass `modify_nulls=.false.` to leave the null rows, and
+their bitmap, exactly as they were.
 
 To write a single cell, use `%set_element`:
 
@@ -585,6 +677,17 @@ call t%filter_rows(mass > 1.0e10_real64) ! keep the rows a mask selects
 call t%sort_by(["mass"], descending=[.true.])
 call t%drop_column("scratch")
 ```
+
+The two simplest column changes are worth a sentence each, because both are cheaper than they
+look:
+
+- **`%drop_column` never reads the column it drops.** Dropping one that was never touched is the
+  memory-reclaiming case and costs nothing; the remaining columns keep their order, so
+  `%column_names` still reads like the file.
+- **`%rename_column` changes only the name you look the column up by.** A file-backed column that
+  has not been read yet still reads from the same physical column afterwards, which is what lets a
+  rename compose with a MAML [remap](#renaming-a-files-columns-with-a-read-in-maml) in either
+  order. The new name must not be blank and must not already be taken.
 
 ### Changing a column's type
 
@@ -653,6 +756,22 @@ from having to read a whole file before it can drop a single row.
 Detaching does not freeze a table: it can still be read, edited and written out, and mutated
 further. What it loses is the file behind it.
 
+### Removing rows
+
+`%filter_rows(keep)` is the general form and takes a mask of exactly `%nrows()` entries.
+`%delete_rows(indices)` and `%truncate(n)` are conveniences over it, in either integer kind:
+
+```fortran
+call t%delete_rows([3, 7, 7, 11])   ! a row named twice is still removed once
+call t%truncate(1000)               ! keep the first 1000 rows
+```
+
+A row index outside `1..nrows` is an error, and so is a negative `n`; both are checked before
+anything is changed, so a rejected call leaves the table as it was. `%truncate(0)` empties the
+table, and a `%truncate` asking to keep more rows than there are returns without touching
+anything — that one case does not even detach, since nothing changed. Every call that does change
+the row set detaches, whether or not the change removed a row.
+
 ### Sorting
 
 `%sort_by` takes one or more key columns, primary first, with optional per-key `descending=` and
@@ -666,6 +785,12 @@ Every key column must already be resident — sorting will not read one implicit
 would make the memory a sort costs depend on which columns happened to have been read. Nulls and
 NaNs are placed absolutely and are never flipped by `descending`; ascending order gives values,
 then NaNs, then nulls. Ties keep their existing order.
+
+**Any scalar column can be a key** — numeric, logical, string, date, time or timestamp. A vector
+column cannot: there is no defined order on a whole vector row, so naming one is an error, as are
+an empty key list and a `descending=`/`nulls_first=` array whose length does not match the keys.
+Every key is validated before a single column is touched, so a rejected `%sort_by` leaves the
+table exactly as it was.
 
 This is the same sort engine `parquet_open_reader(..., sort_by=...)` uses, so sorting a table in
 memory and reading the same file sorted give the identical row order.
@@ -702,8 +827,10 @@ call t%filter_rows(keep)
 ```
 
 A clone copies the columns already read and leaves the unread ones unread, opening its own reader
-on the same file so it stays lazy. `before` must be declared as the same concrete table type as
-`t`.
+on the same file so it stays lazy — with the same read-time transform reattached, so a column the
+source never touched still comes back with the source's rows. Cloning a **detached** table copies
+the values it holds and leaves the copy detached too: there is no file left to reopen, for either
+of them. `before` must be declared as the same concrete table type as `t`.
 
 > **A pointer from `%col` does not survive a row-changing operation.** `%filter_rows`, `%sort_by`,
 > `%append` and the rest reallocate each column's storage, so a pointer taken before one of them
@@ -717,10 +844,10 @@ This is still a deliberately narrow version of the table layer.
 - **A column is all-or-nothing.** Reading one row of a column reads the whole column (across the
   table's row scope). Use the [slice regime](#reading-part-of-a-file-the-slice-regime) to bound
   how much that is.
-- **No filtering or sorting at open time.** In-memory `%filter_rows` and `%sort_by` are
-  available (see [Changing a table](#changing-a-table)), but a table cannot yet be opened with a
-  read-time `filter=`/`sort_by=` the way a reader can, so the whole scope is read and then
-  reduced.
+- **A slice cannot be opened with `sort=`.** Every other read-time transform applies to a slice as
+  it does to a whole file (see [A slice with a filter, a sample or
+  qc](#a-slice-with-a-filter-a-sample-or-qc)); a sort reorders rows across the whole file, so it is
+  refused there and has to be done in memory afterwards with `%sort_by`.
 - **Nothing is ever evicted.** A column stays resident once read; there is no per-column
   eviction, and `%drop_column` is the only way to give a column's memory back. The slice regime
   is what bounds total memory.
@@ -738,6 +865,9 @@ This is still a deliberately narrow version of the table layer.
   for a column read from a file.
 - **Vector string columns are trimmed.** A rank-2 string column has no compact read path, so it
   goes through the fixed-width reader, where trailing blanks cannot be told from padding.
+- **String columns are copy-only.** There is no `%col` pointer form for them, and `%set`/
+  `%add_column` take a character array rather than a `parquet_string_column` — see [String columns
+  in a table](#string-columns-in-a-table).
 
 ## Memory
 

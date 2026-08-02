@@ -10,6 +10,9 @@ Concurrent use (e.g. from an OpenMP parallel region) is supported.
 - Never call into the same reader/writer instance from two threads at once.
 - Independent readers may open/read the same parquet file concurrently.
 - Never write to the same output file path from two threads at the same time.
+- A shared `parquet_table` may be **read** from many threads once its columns are resident, but a
+  first touch inside a parallel region is a hard error and every mutation is single-threaded — see
+  [Reading a table from several threads](table.html#reading-a-table-from-several-threads).
 
 ## Practical cases
 

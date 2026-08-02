@@ -172,7 +172,7 @@ module parquet_tables
         parquet_open_writer, parquet_write_column, parquet_close_writer, parquet_write_row_mask, &
         parquet_measure_list_width, parquet_column_width_needs_data, parquet_column_has_nulls, &
         parquet_load_qc_maml_file, parquet_filter, parquet_sortkey, parquet_read_qc, &
-        parquet_compose_read_qc
+        parquet_compose_read_qc, parquet_reader_set_filter
     !
     implicit none
     private
@@ -209,6 +209,18 @@ module parquet_tables
     !! memory is worked through, and how a parallel program gives each thread its own share
     !! (`parquet_table_row_group_bounds` reports where the natural boundaries are). Row indices
     !! everywhere else, `%row(i)` included, are then relative to the slice, not to the file.
+    !!
+    !! A slice accepts the same read-time transform the whole-file form does, with ONE exception:
+    !! there is no `sort` argument on the slice forms at all. A sort reorders rows across the whole
+    !! file, so "the 1000th row" would no longer name anything a slice could be cut along -- and
+    !! omitting the argument makes that a compile error rather than a runtime one. (A `maml=` whose
+    !! `extra: sort:` list is non-empty is the same rejection, necessarily at runtime.)
+    !!
+    !! **A filtered or sampled slice does not have `row_hi - row_lo + 1` rows.** `%nrows()` is the
+    !! number of rows of `[row_lo, row_hi]` that survive the transform, and every row index the
+    !! table takes or reports counts those survivors -- row 1 is the first surviving row, not file
+    !! row `row_lo`. Without a filter and without `sample_fraction=` nothing changes: the slice is
+    !! trimmed out of the covering row groups in memory, exactly as it always was.
     interface parquet_open_table
         module procedure open_table_full
         module procedure open_table_slice_i32
@@ -263,7 +275,21 @@ module parquet_tables
         logical :: reads_started = .false.                 !! .true. once any column has been read.
         logical :: file_backed = .false.                   !! .true. if opened from a parquet file.
         character(len=:), allocatable :: source_file       !! the file this table was opened from.
-        integer(int64), allocatable :: rg_bounds(:,:)      !! (2, nrg) row-group row ranges; slice only.
+        ! --- row-group geometry, slice regime only. TWO coordinate systems, and which one a given
+        !     array is in is the whole reason there are two of them:
+        !
+        !     `rg_bounds` is always in the coordinates `row_lo`/`row_hi`/`%row(i)` use, i.e. the
+        !     TABLE's own row numbering, because that is what materialize_slice and
+        !     resolve_width_row_groups compare their scope against. On an unfiltered slice those
+        !     ARE the file's rows, so it holds physical bounds and `rg_bounds_physical` stays
+        !     unallocated. On a filtered or sampled slice the table counts survivors instead, so
+        !     `rg_bounds` holds each row group's surviving rows and the file's own numbering is
+        !     kept separately -- captured before the mask is attached, since afterwards the reader
+        !     reports survivors and the physical numbering is simply no longer askable.
+        integer(int64), allocatable :: rg_bounds(:,:)      !! (2, nrg) row-group ranges, TABLE rows.
+        integer(int64), allocatable :: rg_bounds_physical(:,:) !! the same, FILE rows; masked slice only.
+        integer(int64) :: slice_row_lo = 0                 !! slice's first FILE row (0 = not a slice).
+        integer(int64) :: slice_row_hi = 0                 !! slice's last FILE row (0 = not a slice).
         logical :: opened_in_parallel = .false.            !! .true. if opened inside a parallel region.
         integer :: owner_thread = -1                       !! OpenMP thread that opened it (-1 if serial).
         ! --- read-time transform, composed ONCE at parquet_open_table time and retained only so
@@ -611,21 +637,37 @@ def gen_spec_interfaces():
             real(real64), intent(in), optional :: sample_fraction !! keep each row with this probability.
             integer(int32), intent(in), optional :: sample_seed !! seed for that draw; omitted = nondeterministic.
         end subroutine open_table_full
-        !> Slice-regime open, int32 row bounds -- see the `parquet_open_table` generic above.
-        module subroutine open_table_slice_i32(table, filename, row_lo, row_hi, maml)
+        !> Slice-regime open, int32 row bounds -- see the `parquet_open_table` generic above, which
+        !! also explains why there is no `sort` argument here and what `filter=`/`sample_fraction=`
+        !! do to the slice's row count.
+        module subroutine open_table_slice_i32(table, filename, row_lo, row_hi, maml, filter, qc, &
+                qc_soft, use_threads, sample_fraction, sample_seed)
             type(parquet_table), intent(out) :: table !! the table to fill.
             character(len=*), intent(in) :: filename  !! parquet file to open.
             integer(int32), intent(in) :: row_lo      !! first file row to cover (1-based).
             integer(int32), intent(in) :: row_hi      !! last file row to cover (inclusive).
             character(len=*), intent(in), optional :: maml !! read-in (Role-B) MAML file describing `filename`.
+            type(parquet_filter), intent(in), optional :: filter !! row filter, in INTERNAL column names.
+            type(parquet_read_qc), intent(in), optional :: qc !! read-time qc, in INTERNAL column names.
+            logical, intent(in), optional :: qc_soft !! warn on a qc violation instead of aborting.
+            logical, intent(in), optional :: use_threads !! forwarded to parquet_open_reader.
+            real(real64), intent(in), optional :: sample_fraction !! keep each row with this probability.
+            integer(int32), intent(in), optional :: sample_seed !! seed for that draw; omitted = nondeterministic.
         end subroutine open_table_slice_i32
         !> Slice-regime open, int64 row bounds -- see the `parquet_open_table` generic above.
-        module subroutine open_table_slice_i64(table, filename, row_lo, row_hi, maml)
+        module subroutine open_table_slice_i64(table, filename, row_lo, row_hi, maml, filter, qc, &
+                qc_soft, use_threads, sample_fraction, sample_seed)
             type(parquet_table), intent(out) :: table !! the table to fill.
             character(len=*), intent(in) :: filename  !! parquet file to open.
             integer(int64), intent(in) :: row_lo      !! first file row to cover (1-based).
             integer(int64), intent(in) :: row_hi      !! last file row to cover (inclusive).
             character(len=*), intent(in), optional :: maml !! read-in (Role-B) MAML file describing `filename`.
+            type(parquet_filter), intent(in), optional :: filter !! row filter, in INTERNAL column names.
+            type(parquet_read_qc), intent(in), optional :: qc !! read-time qc, in INTERNAL column names.
+            logical, intent(in), optional :: qc_soft !! warn on a qc violation instead of aborting.
+            logical, intent(in), optional :: use_threads !! forwarded to parquet_open_reader.
+            real(real64), intent(in), optional :: sample_fraction !! keep each row with this probability.
+            integer(int32), intent(in), optional :: sample_seed !! seed for that draw; omitted = nondeterministic.
         end subroutine open_table_slice_i64
         !> Opens `table%cache%reader` on `filename` with whatever read-time transform the table
         !! carries in its `read_*` components already attached. One helper rather than two open
@@ -635,11 +677,33 @@ def gen_spec_interfaces():
         !! empty: an unallocated allocatable actual makes an optional dummy absent (F2018
         !! 15.5.2.12), so one unconditional call covers every combination -- and a table with no
         !! transform at all reaches parquet_open_reader with exactly the arguments it always did.
+        !!
+        !! **A masked slice is the one case where the filter is NOT a constructor argument**: it
+        !! carries the slice's own row range, which only `parquet_reader_set_filter` can express,
+        !! so it is attached immediately after the open instead. That whole sequence lives here
+        !! rather than in the caller for the same reason the rest does -- so `%clone`'s reopen
+        !! cannot produce a reader in a different state from the one `parquet_open_table` built.
+        !! Requires `cache%slice_row_lo`/`slice_row_hi` and `cache%rg_bounds_physical` to be set
+        !! already, and leaves `cache%rg_bounds` holding the resulting per-row-group survivor
+        !! counts.
         module subroutine table_open_reader_with_transform(table, filename, use_threads)
             type(parquet_table), intent(inout) :: table !! table whose (allocated) reader is opened.
             character(len=*), intent(in) :: filename    !! parquet file to open.
             logical, intent(in), optional :: use_threads !! forwarded to parquet_open_reader.
         end subroutine table_open_reader_with_transform
+        !> The inclusive 1-based row-group range covering rows `row_lo..row_hi` of `bounds`, or
+        !! 0/0 when no row group intersects that range at all.
+        !!
+        !! One helper rather than a scan written out at each site: the same walk decides which row
+        !! groups a slice's filter is scoped to and which ones a deferred column's width is
+        !! measured over, and the two must agree.
+        module subroutine rg_covering_range(bounds, row_lo, row_hi, rg_lo, rg_hi)
+            integer(int64), intent(in) :: bounds(:,:) !! (2, nrg) row ranges, in the same coordinates as row_lo/hi.
+            integer(int64), intent(in) :: row_lo      !! first row wanted.
+            integer(int64), intent(in) :: row_hi      !! last row wanted.
+            integer(int64), intent(out) :: rg_lo      !! first covering row group, or 0 for none.
+            integer(int64), intent(out) :: rg_hi      !! last covering row group, or 0 for none.
+        end subroutine rg_covering_range
         !> Prepares an empty in-memory table with no columns and no rows. The first %add_column
         !! fixes the row count; every later one must match it.
         module subroutine parquet_new_table(table)
@@ -944,8 +1008,9 @@ def gen_spec_interfaces():
         !! Doing this before the reader opens is what lets the full regime hand everything to
         !! parquet_open_reader as constructor arguments, and it means a malformed MAML aborts with
         !! no reader -- and so no live Arrow object -- anywhere in scope.
-        module subroutine compose_read_transform(maml_file, filter, sort, qc, internal, physical, &
+        module subroutine compose_read_transform(sliced, maml_file, filter, sort, qc, internal, physical, &
                 n_remap, out_filter, out_sort, out_qc, n_qc)
+            logical, intent(in) :: sliced          !! .true. for a slice-regime open, which forbids sorting.
             character(len=*), intent(in), optional :: maml_file !! read-in MAML path, if one was given.
             type(parquet_filter), intent(in), optional :: filter !! code filter, INTERNAL names.
             type(parquet_sortkey), intent(in), optional :: sort  !! code sort keys, INTERNAL names.

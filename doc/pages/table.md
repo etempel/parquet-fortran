@@ -272,6 +272,37 @@ own row count and each covering row group is written straight into its place, so
 quarter of a file costs roughly a quarter of reading all of it, however many row groups the
 slice spans.
 
+### A slice with a filter, a sample or qc
+
+A slice takes the same read-time transform the whole-file form does — `filter=`, `qc=`,
+`qc_soft=`, `sample_fraction=`, `sample_seed=` and `maml=` — and applies it *within* the slice:
+
+```fortran
+call filt%add("mass > 1.0e10")
+call parquet_open_table(t, "big.parquet", 1000001_int64, 2000000_int64, filter=filt)
+print *, t%nrows()          ! however many of those million rows match -- NOT 1000000
+```
+
+Two consequences worth stating plainly:
+
+- **The row count is no longer the slice's length.** `%nrows()` is the number of rows of
+  `[row_lo, row_hi]` that survive, and every row index the table takes or reports counts those
+  survivors: row 1 is the first surviving row of the slice, not file row `row_lo`. Rows outside
+  the slice never appear, however well they match.
+- **`%row_group_bounds` keeps answering in the file's own row numbering**, which is what makes it
+  the planning call — it is how the *next* slice gets chosen, so it has to stay in the
+  coordinates a slice is expressed in.
+
+Without a filter and without `sample_fraction=` nothing changes at all: the slice is trimmed out
+of the covering row groups in memory, exactly as it always was, and `%nrows()` is
+`row_hi - row_lo + 1`.
+
+**There is no `sort` argument on the slice forms.** A sort reorders rows across the whole file, so
+"rows 1000001 to 2000000" would no longer name the rows the caller chose — supplying one is a
+compile error rather than something to discover at runtime. A `maml=` whose `extra: sort:` list is
+non-empty is the same rejection, necessarily as an `error stop`. Sort the whole file instead, or
+sort the slice in memory afterwards with `%sort_by`.
+
 ## One row at a time
 
 `t%row(i)` returns a lightweight, non-owning handle on a single row — the natural thing to hand
@@ -402,6 +433,8 @@ Three consequences worth stating plainly:
 - **Every column inherits it, including ones read much later.** A column touched for the first time long after the open still comes back with the same rows in the same order — the transform lives on the table's reader, not on any one column.
 - **`%nrows()` is the post-filter count.** With a filter or a sample active it is *not* the file's row count, and there is no way to ask for the file's original count through the table (open it a second time without the filter if you need both).
 - **`%clone` keeps it.** A clone reopens the file for its own lazy reads, and reattaches the identical transform — otherwise a column the source never touched would come back with rows the source had filtered away.
+
+A **slice** takes all of this too, applied within its own row range, with `sort=` the one exception — see [A slice with a filter, a sample or qc](#a-slice-with-a-filter-a-sample-or-qc).
 
 ### Column names: yours, not the file's
 

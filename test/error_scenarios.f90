@@ -1249,6 +1249,8 @@ program error_scenarios
         call scenario_table_remap_duplicate_internal()
     case ("table_qc_violation")
         call scenario_table_qc_violation()
+    case ("table_slice_maml_sort")
+        call scenario_table_slice_maml_sort()
     case ("table_filter_unknown_column")
         call scenario_table_filter_unknown_column()
     case ("table_first_touch_in_parallel")
@@ -9997,6 +9999,26 @@ contains
         call t%get("id", ids)   ! -> aborts: first touch is where qc runs
         print '(a,i0)', "unexpectedly read a column whose data violates its qc bound, n=", size(ids)
     end subroutine scenario_table_qc_violation
+
+    !> Sorting is not available in the slice regime: a sort reorders rows across the whole file,
+    !! so [row_lo, row_hi] would name a different set of rows than the caller chose it to.
+    !!
+    !! A code-supplied `sort=` cannot even be written -- the slice specifics of parquet_open_table
+    !! have no such argument, so it is a compile error rather than an abort. A MAML's own
+    !! `extra: sort:` list is the case that has to be caught at runtime, which is this one. It
+    !! aborts on the OPEN, before the file is read, unlike the qc scenario above.
+    subroutine scenario_table_slice_maml_sort()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_table_slice_sort.parquet")
+        call write_scenario_maml_file("test_run/es_table_slice_sort.maml", [character(len=40) :: &
+            "table: slice_sort", &
+            "extra:", &
+            "  sort:", &
+            '  - "id desc"' ])
+        call parquet_open_table(t, "test_run/es_table_slice_sort.parquet", 1_int64, 2_int64, &
+            maml="test_run/es_table_slice_sort.maml")   ! -> aborts
+        print '(a,i0)', "unexpectedly opened a sorted slice-regime table, ncols=", t%ncols()
+    end subroutine scenario_table_slice_maml_sort
 
     !> A filter naming a column the table does not have aborts at open. The message comes from the
     !! reader and names the column in FILE terms, since the internal name has already been

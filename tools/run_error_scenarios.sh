@@ -329,6 +329,7 @@ scenarios=(
     "table_remap_unknown_file_column:1"
     "table_remap_duplicate_internal:1"
     "table_qc_violation:1"
+    "table_slice_maml_sort:1"
     "table_filter_unknown_column:1"
     "col_size_overflow:1"
     "col_size_and_row_mode_avoid_whole_column_read:0"

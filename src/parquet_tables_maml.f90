@@ -232,6 +232,16 @@ contains
             deallocate(maml_rules, maml_keys)
             call parse_read_maml_string_list(read_maml, "filter:", maml_rules, n_rules)
             call parse_read_maml_string_list(read_maml, "sort:", maml_keys, n_keys)
+            ! The code-facing half of this rule needs no check at all -- the slice specifics of
+            ! parquet_open_table have no `sort` argument, so supplying one does not compile. A
+            ! MAML's own list cannot be caught that way, so it is caught here, before the file is
+            ! opened: a sort reorders rows across the whole file, which would leave the slice's
+            ! [row_lo, row_hi] naming a different set of rows than the caller chose it to.
+            if (sliced .and. n_keys > 0) then
+                error stop EP // "parquet_open_table: sort is not allowed in the slice regime; " // &
+                    "remove extra: sort: from this maml or open the whole file (maml '" // &
+                    trim(maml_file) // "')"
+            end if
         end if
         !
         ! Filter: the caller's rules, translated out of internal names, then the MAML's own (already

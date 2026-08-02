@@ -102,8 +102,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   describes the physical file. Both sources compose: filters AND, the MAML's sort keys lead and
   the caller's break ties, and qc is a per-column override. `extra: sort:` entries additionally
   accept a trailing `nulls_first`/`nulls_last` token, which a plain YAML string list has nowhere
-  else to carry. Note qc is enforced when a column is actually read, so on a lazy table it lands on
-  first touch rather than at open. See
+  else to carry. A **slice** takes the same transform, applied within its own row range, so a
+  filtered or sampled slice holds the rows of `[row_lo, row_hi]` that survive and never one from
+  outside it — meaning `%nrows()` is then no longer `row_hi - row_lo + 1`, and row 1 is the slice's
+  first surviving row. Without a filter or a sample a slice behaves exactly as it always did.
+  Sorting is the one exception: the slice forms have no `sort` argument at all (a sort reorders
+  rows across the whole file, so a row range would no longer name the rows that were asked for),
+  and a read-in MAML whose `extra: sort:` is non-empty is refused on a slice open.
+  `%row_group_bounds` keeps answering in the file's own row numbering throughout, since that is
+  what the next slice has to be chosen in. Note qc is enforced when a column is actually read, so
+  on a lazy table it lands on first touch rather than at open. See
   [the guide](doc/pages/table.md) for the current limitations, the detach rule and the OpenMP
   first-touch rule.
 - Added `parquet_read_qc` and `parquet_compose_read_qc`: read-time quality control declared in

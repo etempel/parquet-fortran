@@ -23,12 +23,18 @@ contains
             qc_soft, use_threads, sample_fraction, sample_seed)
     end procedure open_table_full
     !
+    ! Both slice specifics pass no `sort` at all -- there is no argument to pass, which is how the
+    ! slice regime's "no sorting" rule is enforced (see the parquet_open_table generic's own doc).
     module procedure open_table_slice_i32
-        call open_table_impl(table, filename, .true., int(row_lo, int64), int(row_hi, int64), maml)
+        call open_table_impl(table, filename, .true., int(row_lo, int64), int(row_hi, int64), maml, &
+            filter, qc=qc, qc_soft=qc_soft, use_threads=use_threads, &
+            sample_fraction=sample_fraction, sample_seed=sample_seed)
     end procedure open_table_slice_i32
     !
     module procedure open_table_slice_i64
-        call open_table_impl(table, filename, .true., row_lo, row_hi, maml)
+        call open_table_impl(table, filename, .true., row_lo, row_hi, maml, &
+            filter, qc=qc, qc_soft=qc_soft, use_threads=use_threads, &
+            sample_fraction=sample_fraction, sample_seed=sample_seed)
     end procedure open_table_slice_i64
     !
     !> The one open path: both regimes differ only in which rows the table claims, and both
@@ -51,12 +57,12 @@ contains
         integer(int32), intent(in), optional :: sample_seed !! seed for that draw.
         integer :: i, ncol, n_remap, n_qc
         integer(int64) :: file_rows
+        logical :: masked
         character(len=:), allocatable :: names(:)
         character(len=:), allocatable :: remap_internal(:), remap_physical(:)
         type(parquet_filter) :: comp_filter
         type(parquet_sortkey) :: comp_sort
         type(parquet_schema) :: comp_qc
-        character(len=32) :: lo_s, hi_s, n_s
         !
         ! `table` is intent(out) on a finalizable type, so table_finalize has already run on any
         ! previous contents by the time we get here, and every component below is reassigned
@@ -81,7 +87,7 @@ contains
         ! lets the full regime hand everything to parquet_open_reader as constructor arguments,
         ! and means a malformed MAML aborts with no reader -- and so no live Arrow object -- in
         ! scope. See compose_read_transform (parquet_tables_maml) for the composition rules.
-        call compose_read_transform(maml, filter, sort, qc, remap_internal, remap_physical, &
+        call compose_read_transform(sliced, maml, filter, sort, qc, remap_internal, remap_physical, &
             n_remap, comp_filter, comp_sort, comp_qc, n_qc)
         !
         allocate(table%cache)
@@ -100,28 +106,52 @@ contains
         if (n_qc > 0) table%cache%read_qc_schema = comp_qc
         if (present(sample_fraction)) table%cache%read_sample_fraction = sample_fraction
         if (present(sample_seed)) table%cache%read_sample_seed = sample_seed
+        if (sliced) then
+            table%cache%slice_row_lo = row_lo
+            table%cache%slice_row_hi = row_hi
+        end if
+        !
+        ! Which of the two slice paths this is (see parquet_table_cache's own note on the two
+        ! coordinate systems). The fast path is the common one and stays exactly what it was: no
+        ! mask, physical bounds, the slice trimmed out of the covering row groups in memory.
+        masked = table_slice_is_masked(table%cache)
+        if (masked) then
+            ! The file's own row-group geometry, which this table's reader will not be able to
+            ! answer for once it opens: a sample_fraction= draw installs itself at open, and
+            ! parquet_get_chunk_size then reports survivors. Hence its own footer-only reader --
+            ! the same cheap call a caller makes to plan a slice in the first place. Only this
+            ! path pays for it.
+            call parquet_table_row_group_bounds(filename, table%cache%rg_bounds_physical)
+            call check_slice_range(row_lo, row_hi, &
+                table%cache%rg_bounds_physical(2, size(table%cache%rg_bounds_physical, 2, kind=int64)), &
+                filename)
+        end if
         !
         allocate(table%cache%reader)
         call table_open_reader_with_transform(table, trim(filename), use_threads)
         call parquet_get_nrows(table%cache%reader, file_rows)
         if (sliced) then
-            ! Validated before anything else is set up, so a bad slice fails while the table is
-            ! still obviously unusable rather than half-built.
-            if (row_lo < 1_int64 .or. row_hi > file_rows .or. row_lo > row_hi) then
-                write(lo_s, "(I0)") row_lo
-                write(hi_s, "(I0)") row_hi
-                write(n_s, "(I0)") file_rows
-                error stop EP // "parquet_open_table: row slice [" // trim(lo_s) // ", " // &
-                    trim(hi_s) // "] is not inside this file's 1.." // trim(n_s) // " rows " // &
-                    "(file '" // trim(filename) // "')"
-            end if
             table%regime = REGIME_SLICE
-            table%row_lo = row_lo
-            table%row_hi = row_hi
-            table%row_count = row_hi - row_lo + 1_int64
-            ! Every column's read walks these, so they are worked out once here rather than
-            ! per column.
-            call reader_row_group_bounds(table%cache%reader, table%cache%rg_bounds)
+            if (masked) then
+                ! The reader was handed the slice's own row range as part of its filter, so what it
+                ! reports IS the slice: `file_rows` here is the number of rows of [row_lo, row_hi]
+                ! that survived, and the table counts those from 1. Nothing downstream needs to
+                ! know -- rg_bounds (built by the open helper) counts survivors too, so
+                ! materialize_slice's arithmetic lands on exactly the same rows it always did.
+                table%row_lo = 1_int64
+                table%row_hi = file_rows
+                table%row_count = file_rows
+            else
+                ! Validated only now, because on this path the reader is the cheapest thing that
+                ! knows how many rows the file has.
+                call check_slice_range(row_lo, row_hi, file_rows, filename)
+                table%row_lo = row_lo
+                table%row_hi = row_hi
+                table%row_count = row_hi - row_lo + 1_int64
+                ! Every column's read walks these, so they are worked out once here rather than
+                ! per column.
+                call reader_row_group_bounds(table%cache%reader, table%cache%rg_bounds)
+            end if
         else
             table%regime = REGIME_FULL
             table%row_lo = 1
@@ -147,13 +177,85 @@ contains
         end do
     end subroutine open_table_impl
     !
+    !> error stops unless `[row_lo, row_hi]` is a non-empty range inside `1..file_rows`.
+    !!
+    !! Raised before the table is usable either way, so a bad slice fails while the table is still
+    !! obviously unusable rather than half-built. Shared by the two slice paths, which learn the
+    !! file's row count at different moments but must reject the same ranges with the same words.
+    subroutine check_slice_range(row_lo, row_hi, file_rows, filename)
+        integer(int64), intent(in) :: row_lo     !! first file row asked for.
+        integer(int64), intent(in) :: row_hi     !! last file row asked for.
+        integer(int64), intent(in) :: file_rows  !! rows the file physically has.
+        character(len=*), intent(in) :: filename !! the file, for the message.
+        character(len=32) :: lo_s, hi_s, n_s
+        !
+        if (row_lo >= 1_int64 .and. row_hi <= file_rows .and. row_lo <= row_hi) return
+        write(lo_s, "(I0)") row_lo
+        write(hi_s, "(I0)") row_hi
+        write(n_s, "(I0)") file_rows
+        error stop EP // "parquet_open_table: row slice [" // trim(lo_s) // ", " // &
+            trim(hi_s) // "] is not inside this file's 1.." // trim(n_s) // " rows " // &
+            "(file '" // trim(filename) // "')"
+    end subroutine check_slice_range
+    !
+    !> .true. when this table is a slice whose row range has to be carried in the reader's mask.
+    !!
+    !! The condition is the presence of a row-narrowing transform, and nothing else -- in
+    !! particular a slice that cuts through the middle of a row group is NOT a reason to mask.
+    !! Trimming such a slice in memory is what `materialize_slice` already does, with no reader
+    !! involvement at all; masking it instead would replace a working sub-range copy with a bitmap
+    !! plus an Arrow filter pass per column, for nothing.
+    !!
+    logical function table_slice_is_masked(cache) result(masked)
+        type(parquet_table_cache), intent(in) :: cache !! the table's store, with its transform stored.
+        !
+        masked = cache%slice_row_lo > 0_int64 .and. table_transform_narrows(cache)
+    end function table_slice_is_masked
+    !
+    !> .true. when this table's read-time transform removes rows, so that the reader's own row
+    !! numbering is the surviving rows rather than the file's.
+    !!
+    !! A sort does not count: it reorders rows without removing any. `sample_fraction >= 1` keeps
+    !! every row, and `parquet_open_reader` installs no draw for it, so it is not narrowing either.
+    !! A negative or NaN fraction is not judged here at all: it reaches `parquet_open_reader`,
+    !! which rejects it with the message that names the argument.
+    logical function table_transform_narrows(cache) result(narrows)
+        type(parquet_table_cache), intent(in) :: cache !! the table's store, with its transform stored.
+        !
+        narrows = .false.
+        if (allocated(cache%read_filter)) then
+            narrows = .true.
+        else if (allocated(cache%read_sample_fraction)) then
+            narrows = cache%read_sample_fraction < 1.0_real64
+        end if
+    end function table_transform_narrows
+    !
+    module procedure rg_covering_range
+        integer(int64) :: rg
+        !
+        rg_lo = 0_int64
+        rg_hi = 0_int64
+        do rg = 1_int64, size(bounds, 2, kind=int64)
+            ! An empty row group (bounds(1) > bounds(2), which is how a row group contributing
+            ! nothing is spelled) fails both tests and is stepped over.
+            if (bounds(2, rg) < row_lo .or. bounds(1, rg) > row_hi) cycle
+            if (rg_lo == 0_int64) rg_lo = rg
+            rg_hi = rg
+        end do
+    end procedure rg_covering_range
+    !
     module procedure table_open_reader_with_transform
         type(parquet_filter), allocatable :: pass_filter
         type(parquet_sortkey), allocatable :: pass_sort
         type(parquet_schema), allocatable :: pass_schema
         logical, allocatable :: pass_qc_soft
+        logical :: masked
+        integer(int64) :: rg_lo, rg_hi
         !
-        if (allocated(table%cache%read_filter)) pass_filter = table%cache%read_filter
+        masked = table_slice_is_masked(table%cache)
+        ! On the masked path the filter is attached after the open instead, because only
+        ! parquet_reader_set_filter can carry the slice's row range with it -- see below.
+        if (allocated(table%cache%read_filter) .and. .not. masked) pass_filter = table%cache%read_filter
         if (allocated(table%cache%read_sort)) pass_sort = table%cache%read_sort
         ! qc_soft only ever matters when a qc schema is actually attached, and passing it on its
         ! own would be a no-op the reader still has to reason about -- so it travels with the
@@ -166,6 +268,34 @@ contains
             sort_by=pass_sort, schema=pass_schema, qc_soft=pass_qc_soft, use_threads=use_threads, &
             sample_fraction=table%cache%read_sample_fraction, &
             sample_seed=table%cache%read_sample_seed)
+        if (.not. masked) return
+        !
+        ! The slice's own row range becomes part of the reader's mask, so that everything the
+        ! reader hands back afterwards -- row counts, per-row-group chunk sizes, the chunks
+        ! themselves -- is already restricted to [slice_row_lo, slice_row_hi] and the table can
+        ! work in one coordinate system instead of two. Without this the reader would return the
+        ! covering row groups' survivors in full, and there is no way back from a filtered chunk to
+        ! "which of these rows were inside the slice": that needs the per-row mask, which is not
+        ! exposed. The row-GROUP range scopes the evaluation itself, so no row group outside the
+        ! slice is even read; the row range is the finer cut inside them.
+        !
+        ! An unallocated read_filter here is the sample-only case, and the empty local below is
+        ! deliberate rather than a missing branch: a rule-less filter carrying a row range installs
+        ! an all-true-within-range mask, which is exactly what that case needs, and folds the
+        ! already-installed sample draw into it.
+        call rg_covering_range(table%cache%rg_bounds_physical, table%cache%slice_row_lo, &
+            table%cache%slice_row_hi, rg_lo, rg_hi)
+        block
+            type(parquet_filter) :: attach
+            if (allocated(table%cache%read_filter)) attach = table%cache%read_filter
+            call parquet_reader_set_filter(table%cache%reader, attach, rg_lo, rg_hi, &
+                table%cache%slice_row_lo, table%cache%slice_row_hi)
+        end block
+        ! Rebuilt from the reader now that it is masked, so these count each row group's SURVIVING
+        ! rows within the slice -- the table's own coordinates. Row groups outside the slice
+        ! contribute nothing and come back as empty ranges, which materialize_slice's existing
+        ! skip test steps over unchanged.
+        call reader_row_group_bounds(table%cache%reader, table%cache%rg_bounds)
     end procedure table_open_reader_with_transform
     !
     module procedure parquet_new_table
@@ -225,8 +355,18 @@ contains
             error stop EP // "row_group_bounds: this table was not opened from a file, so it " // &
                 "has no row groups" // sfx
         end if
-        if (allocated(self%cache%rg_bounds)) then
+        ! In the file's own row numbering, which on a masked slice is the second array rather than
+        ! the one the read path uses (see parquet_table_cache). This call's whole purpose is
+        ! planning the NEXT slice, so it has to stay in the coordinates a slice is expressed in.
+        if (allocated(self%cache%rg_bounds_physical)) then
+            bounds = self%cache%rg_bounds_physical
+        else if (allocated(self%cache%rg_bounds)) then
             bounds = self%cache%rg_bounds
+        else if (table_transform_narrows(self%cache)) then
+            ! A whole-file table with a filter or a sample: its reader would answer in surviving
+            ! rows, so the answer comes from a footer-only reader of its own instead. Cheap, and
+            ! only on this path.
+            call parquet_table_row_group_bounds(self%cache%source_file, bounds)
         else
             call reader_row_group_bounds(self%cache%reader, bounds)
         end if

@@ -281,17 +281,14 @@ contains
         type(table_scope), intent(in) :: sc            !! rows this table covers.
         integer(int64), intent(out) :: rg_lo           !! first row group, or 0 for all.
         integer(int64), intent(out) :: rg_hi           !! last row group, or 0 for all.
-        integer(int64) :: rg
         !
         rg_lo = 0_int64
         rg_hi = 0_int64
         if (sc%regime /= REGIME_SLICE) return
         if (.not. allocated(cache%rg_bounds)) return
-        do rg = 1_int64, size(cache%rg_bounds, 2, kind=int64)
-            if (cache%rg_bounds(2, rg) < sc%row_lo .or. cache%rg_bounds(1, rg) > sc%row_hi) cycle
-            if (rg_lo == 0_int64) rg_lo = rg
-            rg_hi = rg
-        end do
+        ! Both sides of this comparison are in the table's own coordinates, on a masked slice as
+        ! much as an unmasked one -- which is what lets the same scan serve both.
+        call rg_covering_range(cache%rg_bounds, sc%row_lo, sc%row_hi, rg_lo, rg_hi)
     end subroutine resolve_width_row_groups
     !
     module procedure table_touch

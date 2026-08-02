@@ -150,7 +150,17 @@ contains
             new_unittest("open with sample_fraction= keeps a subset, reproducibly by seed", test_open_sample), &
             new_unittest("a clone of a transformed table reattaches the same transform", test_clone_keeps_transform), &
             new_unittest("a detached table's clone keeps its values and stays detached", &
-                test_clone_of_detached) &
+                test_clone_of_detached), &
+            new_unittest("an unfiltered slice cutting through row groups installs no mask", &
+                test_slice_fast_path), &
+            new_unittest("a slice opened with filter= counts and returns only its survivors", &
+                test_slice_filter), &
+            new_unittest("a slice's filter comes from its maml too, and qc applies", &
+                test_slice_maml_filter_qc), &
+            new_unittest("a slice opened with sample_fraction= keeps a seeded subset of itself", &
+                test_slice_sample), &
+            new_unittest("a clone of a filtered slice reattaches the same scoped filter", &
+                test_slice_clone) &
             ]
     end subroutine collect_tests_parquet_table
     !
@@ -3873,5 +3883,214 @@ contains
         call check(error, abs(f64(1) - 13.5_real64) < 1.0e-12_real64, &
             "the clone's lazily-read column did not line up with its sorted key column")
     end subroutine test_clone_keeps_transform
+    !
+    !> Three plain columns over several row groups, with no nulls anywhere: the slice-regime
+    !! transform tests below are about which ROWS come back, so every expectation should be
+    !! readable off the row number alone.
+    subroutine write_slice_xform_fixture(fname, n, chunk)
+        character(len=*), intent(in) :: fname !! file to write (one per test).
+        integer, intent(in) :: n              !! rows to write.
+        integer, intent(in) :: chunk          !! rows per row group.
+        type(parquet_writer) :: w
+        integer(int32), allocatable :: k(:)
+        real(real64), allocatable :: x(:)
+        character(len=8), allocatable :: s(:)
+        integer :: i
+        !
+        allocate(k(n), x(n), s(n))
+        do i = 1, n
+            k(i) = i
+            x(i) = real(i, real64) * 1.5_real64
+            write(s(i), '(a,i0)') "r", i
+        end do
+        ! Deliberately the shortest first, so a "sized from the first element" bug shows up.
+        s(1) = "a"
+        call parquet_open_writer(w, fname, chunk_size=chunk)
+        call parquet_write_column(w, "k", k)
+        call parquet_write_column(w, "x", x)
+        call parquet_write_column(w, "s", s)
+        call parquet_close_writer(w)
+    end subroutine write_slice_xform_fixture
+    !
+    !> An unfiltered, unsampled slice keeps the fast path even when its bounds fall INSIDE row
+    !! groups: the trim happens in memory, with no reader-side mask involved.
+    !!
+    !! `%nrows()` being exactly the slice's own length is a necessary condition, not a sufficient
+    !! one: a mask carrying only the slice's range and no clauses would also keep every row, so
+    !! this test proves the ANSWER is right without proving no mask was installed to get it. The
+    !! discriminator arrives with `%row_group_bounds(physical=)`, where the two coordinate systems
+    !! must be IDENTICAL on this path and differ under a mask -- add that assertion here then.
+    subroutine test_slice_fast_path(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, full
+        integer, parameter :: N = 20, CH = 7, LO = 6, HI = 16
+        integer(int32), allocatable :: k(:), fk(:)
+        real(real64), allocatable :: x(:)
+        character(len=*), parameter :: f = "test_run/table_slice_fast.parquet"
+        integer :: i
+        !
+        call write_slice_xform_fixture(f, N, CH)
+        ! LO and HI both sit inside a row group (the groups are 1-7, 8-14, 15-20), so both the
+        ! head and the tail trim run.
+        call parquet_open_table(t, f, LO, HI)
+        call check(error, t%nrows() == int(HI - LO + 1, int64), &
+            "an unfiltered slice must have exactly its own length as its row count")
+        if (allocated(error)) return
+        call t%get("k", k)
+        call check(error, all(k == [(int(i, int32), i = LO, HI)]), &
+            "an unfiltered slice should return exactly its own file rows")
+        if (allocated(error)) return
+        call t%get("x", x)
+        call check(error, all(abs(x - real(k, real64) * 1.5_real64) < 1.0e-12_real64), &
+            "a lazily-read column of an unfiltered slice should line up with its key column")
+        if (allocated(error)) return
+        call parquet_open_table(full, f)
+        call full%get("k", fk)
+        call check(error, all(k == fk(LO:HI)), &
+            "the slice's rows should be the same rows the whole-file table reports")
+    end subroutine test_slice_fast_path
+    !
+    !> A slice opened with `filter=`: the slice's own row range and the filter compose, so the
+    !! table holds the rows of [row_lo, row_hi] that match -- and nothing from outside it, even
+    !! though rows past `row_hi` match the filter too.
+    subroutine test_slice_filter(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_filter) :: filt
+        integer, parameter :: N = 20, CH = 7, LO = 6, HI = 16
+        integer(int32), allocatable :: k(:)
+        real(real64), allocatable :: x(:)
+        character(len=:), allocatable :: sv(:)
+        integer(int64), allocatable :: tbounds(:,:), fbounds(:,:)
+        character(len=*), parameter :: f = "test_run/table_slice_filter.parquet"
+        integer :: i
+        !
+        call write_slice_xform_fixture(f, N, CH)
+        call filt%add("k > 8")
+        call parquet_open_table(t, f, LO, HI, filter=filt)
+        ! Rows 17..20 satisfy the filter as well; the slice is what keeps them out.
+        call check(error, t%nrows() == int(HI - 8, int64), &
+            "a filtered slice's row count should be its own surviving rows, not its length")
+        if (allocated(error)) return
+        call t%get("k", k)
+        call check(error, all(k == [(int(i, int32), i = 9, HI)]), &
+            "a filtered slice should return the matching rows of its own range only")
+        if (allocated(error)) return
+        ! Read well after the open, and from a row group the slice only partly covers, so a
+        ! coordinate mix-up between the table's rows and the file's would show up as shifted data.
+        call t%get("x", x)
+        call check(error, all(abs(x - real(k, real64) * 1.5_real64) < 1.0e-12_real64), &
+            "a lazily-read column of a filtered slice did not line up with its key column")
+        if (allocated(error)) return
+        call t%get("s", sv)
+        call check(error, trim(sv(1)) == "r9" .and. trim(sv(size(sv))) == "r16", &
+            "a string column of a filtered slice did not line up with its key column")
+        if (allocated(error)) return
+        ! The planning call has to stay in the file's own numbering, which on this path is no
+        ! longer the numbering the table itself works in.
+        call t%row_group_bounds(tbounds)
+        call parquet_table_row_group_bounds(f, fbounds)
+        call check(error, all(tbounds == fbounds), &
+            "a filtered slice should still report the file's own row-group bounds")
+    end subroutine test_slice_filter
+    !
+    !> The same masked path reached from a read-in MAML's own `extra: filter:` rather than a code
+    !! argument, with a satisfied `qc=` bound alongside it -- qc needs no scoping, so a slice
+    !! carries it exactly as the whole-file form does.
+    subroutine test_slice_maml_filter_qc(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_read_qc) :: qc
+        integer, parameter :: N = 20, CH = 7, LO = 6, HI = 16
+        integer(int32), allocatable :: k(:)
+        real(real64), allocatable :: x(:)
+        character(len=*), parameter :: f = "test_run/table_slice_mamlf.parquet"
+        character(len=*), parameter :: m = "test_run/table_slice_mamlf.maml"
+        integer :: i
+        !
+        call write_slice_xform_fixture(f, N, CH)
+        call write_maml_file(m, [character(len=40) :: &
+            "table: slice_xform", &
+            "extra:", &
+            "  filter:", &
+            '  - "k >= 10"'])
+        call qc%add("k, >=1, <=20")
+        call parquet_open_table(t, f, LO, HI, maml=m, qc=qc)
+        call check(error, t%nrows() == int(HI - 9, int64), &
+            "a maml filter on a slice should narrow the slice's own row count")
+        if (allocated(error)) return
+        call t%get("k", k)
+        call check(error, all(k == [(int(i, int32), i = 10, HI)]), &
+            "a maml filter on a slice should return the matching rows of its own range only")
+        if (allocated(error)) return
+        call t%get("x", x)
+        call check(error, all(abs(x - real(k, real64) * 1.5_real64) < 1.0e-12_real64), &
+            "a lazily-read column did not line up after a maml filter on a slice")
+    end subroutine test_slice_maml_filter_qc
+    !
+    !> `sample_fraction=` with no filter at all takes the same masked path: there are no clauses to
+    !! carry the slice's row range, so the range is installed on its own and the draw folds into it.
+    subroutine test_slice_sample(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, again
+        integer, parameter :: N = 20, CH = 7, LO = 6, HI = 16
+        integer(int32), allocatable :: k(:), k2(:)
+        character(len=*), parameter :: f = "test_run/table_slice_sample.parquet"
+        !
+        call write_slice_xform_fixture(f, N, CH)
+        call parquet_open_table(t, f, LO, HI, sample_fraction=0.5_real64, sample_seed=20260802_int32)
+        call check(error, t%nrows() > 0_int64 .and. t%nrows() < int(HI - LO + 1, int64), &
+            "a sampled slice should keep some but not all of its own rows")
+        if (allocated(error)) return
+        call t%get("k", k)
+        call check(error, all(k >= int(LO, int32) .and. k <= int(HI, int32)), &
+            "a sampled slice must not return a row from outside its own range")
+        if (allocated(error)) return
+        ! The draw is seeded, so the same slice asked twice is the same rows -- which also confirms
+        ! the range is applied to the draw rather than the draw being redone per open.
+        call parquet_open_table(again, f, LO, HI, sample_fraction=0.5_real64, sample_seed=20260802_int32)
+        call again%get("k", k2)
+        call check(error, size(k2) == size(k), "the same seed should keep the same number of rows")
+        if (allocated(error)) return
+        call check(error, all(k2 == k), "the same seed should keep the same rows")
+    end subroutine test_slice_sample
+    !
+    !> A clone of a masked slice reopens its own reader, and has to put it in exactly the state
+    !! the source's is in -- scoped filter, same row range and all. A bare reopen would give the
+    !! clone's lazily-read columns the whole covering row groups instead, which is a silently
+    !! wrong answer rather than an error.
+    subroutine test_slice_clone(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, c
+        type(parquet_filter) :: filt
+        integer, parameter :: N = 20, CH = 7, LO = 6, HI = 16
+        integer(int32), allocatable :: k(:)
+        real(real64), allocatable :: x(:)
+        integer(int64), allocatable :: cbounds(:,:), fbounds(:,:)
+        character(len=*), parameter :: f = "test_run/table_slice_clone.parquet"
+        integer :: i
+        !
+        call write_slice_xform_fixture(f, N, CH)
+        call filt%add("k > 8")
+        call parquet_open_table(t, f, LO, HI, filter=filt)
+        ! Nothing is read before the clone, so every column below is read through the CLONE's own
+        ! reader -- the one this test is about.
+        call t%clone(c)
+        call check(error, c%nrows() == int(HI - 8, int64), &
+            "a clone of a filtered slice should keep its row count")
+        if (allocated(error)) return
+        call c%get("k", k)
+        call check(error, all(k == [(int(i, int32), i = 9, HI)]), &
+            "a clone of a filtered slice returned different rows from its source")
+        if (allocated(error)) return
+        call c%get("x", x)
+        call check(error, all(abs(x - real(k, real64) * 1.5_real64) < 1.0e-12_real64), &
+            "a clone's lazily-read column did not line up with its key column")
+        if (allocated(error)) return
+        call c%row_group_bounds(cbounds)
+        call parquet_table_row_group_bounds(f, fbounds)
+        call check(error, all(cbounds == fbounds), &
+            "a clone of a filtered slice should still report the file's own row-group bounds")
+    end subroutine test_slice_clone
     !
 end module test_table

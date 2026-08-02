@@ -331,6 +331,8 @@ contains
                 test_read_qc_remap_entry_too_long_aborts), &
             new_unittest("table: a code-declared qc bound the data violates aborts", &
                 test_table_qc_violation_aborts), &
+            new_unittest("table: a maml extra: sort: on a slice-regime open aborts", &
+                test_table_slice_maml_sort_aborts), &
             new_unittest("table: a filter naming a column the file lacks aborts", &
                 test_table_filter_unknown_column_aborts), &
             new_unittest("filter: non-numeric value against a numeric column aborts", &
@@ -2925,6 +2927,14 @@ contains
             failure_message="a table opened with a violated qc= bound was expected to abort", &
             required_stderr="qc violation for column")
     end subroutine test_table_qc_violation_aborts
+
+    subroutine test_table_slice_maml_sort_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "table_slice_maml_sort", expect_abort=.true., &
+            failure_message="a slice-regime open whose maml declares extra: sort: was expected to abort", &
+            required_stderr="sort is not allowed in the slice regime")
+    end subroutine test_table_slice_maml_sort_aborts
 
     subroutine test_table_filter_unknown_column_aborts(error)
         type(error_type), allocatable, intent(out) :: error

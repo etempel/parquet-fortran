@@ -69,6 +69,17 @@ contains
             allocate(out%cache%rg_bounds(size(self%cache%rg_bounds, 1), size(self%cache%rg_bounds, 2)))
             out%cache%rg_bounds(:, :) = self%cache%rg_bounds(:, :)
         end if
+        ! The slice's own file-row range and the physical geometry it was resolved against. Both
+        ! are what clone_reopen_reader needs to put the clone's reader in the same state: the
+        ! source's own row_lo/row_hi copied above are TABLE rows on a masked slice, so they cannot
+        ! stand in for the physical range the filter has to be scoped to.
+        out%cache%slice_row_lo = self%cache%slice_row_lo
+        out%cache%slice_row_hi = self%cache%slice_row_hi
+        if (allocated(self%cache%rg_bounds_physical)) then
+            allocate(out%cache%rg_bounds_physical(size(self%cache%rg_bounds_physical, 1), &
+                size(self%cache%rg_bounds_physical, 2)))
+            out%cache%rg_bounds_physical(:, :) = self%cache%rg_bounds_physical(:, :)
+        end if
         ! A detached source has no file left to reopen, and an in-memory one never had one, so
         ! both produce a clone with no reader. Only a live file-backed table opens its own.
         if (self%cache%file_backed .and. .not. self%detached) call clone_reopen_reader(self, out)

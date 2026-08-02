@@ -48,12 +48,14 @@ contains
         ! reattaches exactly what the source was opened with. Copied rather than re-derived: it is
         ! already translated to file names and already merged with the MAML's own, and the clone
         ! opens the same file, so re-deriving it could only drift.
-        out%read_qc_soft = self%read_qc_soft
-        if (allocated(self%read_filter)) out%read_filter = self%read_filter
-        if (allocated(self%read_sort)) out%read_sort = self%read_sort
-        if (allocated(self%read_qc_schema)) out%read_qc_schema = self%read_qc_schema
-        if (allocated(self%read_sample_fraction)) out%read_sample_fraction = self%read_sample_fraction
-        if (allocated(self%read_sample_seed)) out%read_sample_seed = self%read_sample_seed
+        out%cache%read_qc_soft = self%cache%read_qc_soft
+        if (allocated(self%cache%read_filter)) out%cache%read_filter = self%cache%read_filter
+        if (allocated(self%cache%read_sort)) out%cache%read_sort = self%cache%read_sort
+        if (allocated(self%cache%read_qc_schema)) out%cache%read_qc_schema = self%cache%read_qc_schema
+        if (allocated(self%cache%read_sample_fraction)) &
+            out%cache%read_sample_fraction = self%cache%read_sample_fraction
+        if (allocated(self%cache%read_sample_seed)) &
+            out%cache%read_sample_seed = self%cache%read_sample_seed
         ! Explicit allocate-then-copy, not `out%cache%rg_bounds = self%cache%rg_bounds`: the plain
         ! assignment relies on F2003 automatic reallocation, which should be a no-op concern here
         ! since out%cache%rg_bounds is always freshly unallocated (clone_new_cache just allocated
@@ -173,8 +175,8 @@ contains
     !! through the same `table_open_reader_with_transform` `parquet_open_table` itself uses, so the
     !! clone's reader carries the identical filter/sort/qc/sample. Without that, the clone's
     !! lazily-read columns would come back with rows the source had filtered away -- two different
-    !! lengths inside one table, with nothing to report it. `table_clone` copies the `read_*`
-    !! components across before calling this, which is what that helper reads.
+    !! lengths inside one table, with nothing to report it. `table_clone` copies the cache's
+    !! `read_*` components across before calling this, which is what that helper reads.
     subroutine clone_reopen_reader(self, out)
         class(parquet_table), intent(in) :: self    !! the source table.
         class(parquet_table), intent(inout) :: out  !! the destination table.

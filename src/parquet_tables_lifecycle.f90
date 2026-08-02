@@ -83,21 +83,23 @@ contains
         ! scope. See compose_read_transform (parquet_tables_maml) for the composition rules.
         call compose_read_transform(maml, filter, sort, qc, remap_internal, remap_physical, &
             n_remap, comp_filter, comp_sort, comp_qc, n_qc)
-        ! Retained only so %clone can reattach the SAME transform when it reopens the file. Stored
-        ! as the composed, already-translated values rather than the caller's originals: a clone
-        ! opens the same file, so re-deriving them would only risk the two drifting.
-        table%read_qc_soft = .false.
-        if (present(qc_soft)) table%read_qc_soft = qc_soft
-        if (comp_filter%n > 0) table%read_filter = comp_filter
-        if (comp_sort%n > 0) table%read_sort = comp_sort
-        if (n_qc > 0) table%read_qc_schema = comp_qc
-        if (present(sample_fraction)) table%read_sample_fraction = sample_fraction
-        if (present(sample_seed)) table%read_sample_seed = sample_seed
         !
         allocate(table%cache)
         call record_open_thread(table%cache)
         table%cache%file_backed = .true.
         table%cache%source_file = trim(filename)
+        ! Retained only so %clone can reattach the SAME transform when it reopens the file. Stored
+        ! as the composed, already-translated values rather than the caller's originals: a clone
+        ! opens the same file, so re-deriving them would only risk the two drifting. They live on
+        ! the CACHE, not on `table` -- see parquet_table_cache's own comment for why that placement
+        ! is load-bearing rather than incidental.
+        table%cache%read_qc_soft = .false.
+        if (present(qc_soft)) table%cache%read_qc_soft = qc_soft
+        if (comp_filter%n > 0) table%cache%read_filter = comp_filter
+        if (comp_sort%n > 0) table%cache%read_sort = comp_sort
+        if (n_qc > 0) table%cache%read_qc_schema = comp_qc
+        if (present(sample_fraction)) table%cache%read_sample_fraction = sample_fraction
+        if (present(sample_seed)) table%cache%read_sample_seed = sample_seed
         !
         allocate(table%cache%reader)
         call table_open_reader_with_transform(table, trim(filename), use_threads)
@@ -151,27 +153,25 @@ contains
         type(parquet_schema), allocatable :: pass_schema
         logical, allocatable :: pass_qc_soft
         !
-        if (allocated(table%read_filter)) pass_filter = table%read_filter
-        if (allocated(table%read_sort)) pass_sort = table%read_sort
+        if (allocated(table%cache%read_filter)) pass_filter = table%cache%read_filter
+        if (allocated(table%cache%read_sort)) pass_sort = table%cache%read_sort
         ! qc_soft only ever matters when a qc schema is actually attached, and passing it on its
         ! own would be a no-op the reader still has to reason about -- so it travels with the
         ! schema or not at all.
-        if (allocated(table%read_qc_schema)) then
-            pass_schema = table%read_qc_schema
-            pass_qc_soft = table%read_qc_soft
+        if (allocated(table%cache%read_qc_schema)) then
+            pass_schema = table%cache%read_qc_schema
+            pass_qc_soft = table%cache%read_qc_soft
         end if
         call parquet_open_reader(table%cache%reader, filename, filter=pass_filter, &
             sort_by=pass_sort, schema=pass_schema, qc_soft=pass_qc_soft, use_threads=use_threads, &
-            sample_fraction=table%read_sample_fraction, sample_seed=table%read_sample_seed)
+            sample_fraction=table%cache%read_sample_fraction, &
+            sample_seed=table%cache%read_sample_seed)
     end procedure table_open_reader_with_transform
     !
     module procedure parquet_new_table
         ! Explicit, not relied-upon-implicitly, for the same reason as open_table_impl's own
-        ! `table%detached = .false.` -- see that assignment's comment. `read_qc_soft` gets the same
-        ! treatment for the same reason: it is the other scalar component with nothing but its
-        ! default initializer behind it.
+        ! `table%detached = .false.` -- see that assignment's comment.
         table%detached = .false.
-        table%read_qc_soft = .false.
         allocate(table%cache)
         call record_open_thread(table%cache)
         table%cache%file_backed = .false.

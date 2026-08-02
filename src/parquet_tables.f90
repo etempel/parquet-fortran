@@ -147,6 +147,29 @@ module parquet_tables
         integer(int64), allocatable :: rg_bounds(:,:)      !! (2, nrg) row-group row ranges; slice only.
         logical :: opened_in_parallel = .false.            !! .true. if opened inside a parallel region.
         integer :: owner_thread = -1                       !! OpenMP thread that opened it (-1 if serial).
+        ! --- read-time transform, composed ONCE at parquet_open_table time and retained only so
+        !     %clone can reattach the same one when it reopens the file. Already translated to
+        !     FILE names and already merged with whatever the read-in MAML declared, so nothing
+        !     downstream has to redo either step. Each stays unallocated when nothing was supplied,
+        !     which is how a clone tells "nothing to reattach" from "an empty filter was composed".
+        !
+        !     THESE BELONG HERE, NOT ON parquet_table ITSELF, and that is not a filing decision:
+        !     `parquet_table` is deliberately five scalars and one pointer, with NO allocatable
+        !     components at all, so its intent(out) entry and its FINAL do no recursive walk over
+        !     nested derived types. Hanging a `type(parquet_schema), allocatable` off it (maml +
+        !     cinfo + metadata, each holding allocatable arrays of derived types with their own
+        !     allocatable components) makes every `parquet_open_table` entry perform exactly such a
+        !     walk -- and this project already has two confirmed compiler bugs in that machinery on
+        !     this very type (an OpenMP private() copy left uninitialized, and %detached surviving
+        !     an intent(out) reset; see parquet_tables_lifecycle.f90 and CLAUDE.md). Doing it
+        !     anyway segfaulted ifx inside the RTL's own recursive descriptor walker, on a
+        !     block-local table opened inside a parallel region. Keep new transform state here.
+        type(parquet_filter), allocatable :: read_filter    !! composed row filter, file names.
+        type(parquet_sortkey), allocatable :: read_sort     !! composed sort keys, file names.
+        type(parquet_schema), allocatable :: read_qc_schema !! merged qc schema, file names.
+        logical :: read_qc_soft = .false.                   !! qc_soft as given at open.
+        real(real64), allocatable :: read_sample_fraction   !! sample_fraction as given at open.
+        integer(int32), allocatable :: read_sample_seed     !! sample_seed as given at open.
     end type parquet_table_cache
     !
     !> Which rows to pick out of a column: `1:`, `1:10`, `1:10:2` or an explicit list.
@@ -208,17 +231,6 @@ module parquet_tables
         integer(int64) :: row_hi = -1               !! last row of the scope (nrows in the full regime).
         integer(int64) :: row_count = 0             !! rows every column in this table holds.
         type(parquet_table_cache), pointer :: cache => null() !! the column store (see its own doc).
-        ! --- read-time transform, composed ONCE at parquet_open_table time and retained only so
-        !     %clone can reattach the same one when it reopens the file. Already translated to
-        !     FILE names and already merged with whatever the read-in MAML declared, so nothing
-        !     downstream has to redo either step. All stay unallocated when nothing was supplied,
-        !     which is how a clone tells "nothing to reattach" from "an empty filter was composed".
-        type(parquet_filter), allocatable :: read_filter    !! composed row filter, file names.
-        type(parquet_sortkey), allocatable :: read_sort     !! composed sort keys, file names.
-        type(parquet_schema), allocatable :: read_qc_schema !! merged qc schema, file names.
-        logical :: read_qc_soft = .false.                   !! qc_soft as given at open.
-        real(real64), allocatable :: read_sample_fraction   !! sample_fraction as given at open.
-        integer(int32), allocatable :: read_sample_seed     !! sample_seed as given at open.
     contains
         ! --- introspection ---
         procedure :: nrows => table_nrows            !! Number of rows every column holds.

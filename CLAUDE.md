@@ -51,6 +51,7 @@ working rules).
   - [Automatic BYTE_STREAM_SPLIT for float columns in the writer](#automatic-byte_stream_split-for-float-columns-in-the-writer)
   - [`parquet_column` validity is ROW-granular, even for the vector kinds](#parquet_column-validity-is-row-granular-even-for-the-vector-kinds)
   - [A `parquet_table` pointer does not survive a ROW-structural mutation](#a-parquet_table-pointer-does-not-survive-a-row-structural-mutation)
+  - [New `parquet_table` state goes on the CACHE](#new-parquet_table-state-goes-on-the-cache--never-as-an-allocatable-component-of-the-type)
   - [Assembling a `parquet_column` from pieces: preallocate and `%paste`](#assembling-a-parquet_column-from-pieces-preallocate-and-paste)
   - [A `parquet_schema` built in code must be parsed before anything reads its fields](#a-parquet_schema-built-in-code-must-be-parsed-before-anything-reads-its-fields)
 - [Element-domain modules (`parquet_strings`, `parquet_temporal`)](#element-domain-modules-parquet_strings-parquet_temporal)
@@ -846,6 +847,36 @@ built by `parquet_new_table` has no file to lose, so growing or reordering it mu
 `%is_detached` answering `.false.` — otherwise every from-scratch table would report itself
 detached the moment it was filled. `table_detach` therefore only sets the flag when
 `cache%file_backed` is still true, and never clears it.
+
+### New `parquet_table` state goes on the CACHE — never as an allocatable component of the type
+
+`parquet_table` itself is deliberately **five scalars and one pointer, with no allocatable
+components at all**; every piece of real state (`reader`, `cols`, `rg_bounds`, `source_file`, the
+read-time transform) lives in `parquet_table_cache`, behind that pointer. The file header of
+`parquet_tables_lifecycle.f90` states this for the column store and gives one reason (a `%col`
+pointer must outlive the dummy argument). There is a second, sharper reason, and it applies to
+*any* component, not just the column store:
+
+**`parquet_table` is FINALIZABLE, so every allocatable component it gains makes the compiler
+generate a deeper recursive walk for its `intent(out)` entry and its `FINAL` — and this project has
+three confirmed compiler bugs in exactly that machinery on exactly this type.** Two are documented
+above and in `parquet_tables_lifecycle.f90` (gfortran leaving an OpenMP `private()` copy
+uninitialized; `%detached` surviving an `intent(out)` reset). The third: hanging a
+`type(parquet_schema), allocatable` off `parquet_table` — for the composed read-time transform,
+which really is per-table state — **segfaulted ifx inside its own runtime**, in a block-local table
+opened inside an `!$omp parallel do`, at the `intent(out)` entry of `parquet_open_table`. The
+backtrace named no library code at all: unnamed RTL frames with a self-recursive PC, bottoming out
+in libc, i.e. the runtime's own nested-derived-type descriptor walker following a bad descriptor
+into `free()`. `parquet_schema` is the deep one (`maml` + `cinfo` + `metadata`, each holding
+allocatable arrays of derived types with their own allocatable components), but the rule is not
+about that type specifically.
+
+So: **put new table-level state on `parquet_table_cache`**, where it costs nothing structurally —
+the cache is a plain, non-finalizable type reached through a pointer, freshly `allocate`d per open,
+so its default initializers are reliable and nothing walks it on procedure entry. Reserve
+`parquet_table`'s own body for plain scalars (`regime`, `row_lo`, `row_hi`, `row_count`,
+`detached`). Note the ordering consequence in `open_table_impl`: anything stored on the cache has to
+be assigned *after* `allocate(table%cache)`, not before.
 
 ### Assembling a `parquet_column` from pieces: preallocate and `%paste`
 

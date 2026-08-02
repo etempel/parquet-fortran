@@ -104,6 +104,7 @@ REMOVE_PATHS=(
     tools/prep_github_mirroring.sh
     tools/run_error_scenarios.sh
     tools/run_generate_fixtures.sh
+    tools/run_lint_check.sh
     tools/test_large_scale.sh
 )
 

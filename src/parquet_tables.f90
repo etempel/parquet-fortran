@@ -52,7 +52,8 @@ module parquet_tables
         parquet_get_num_row_groups, parquet_get_chunk_size, parquet_read_column_chunk, &
         parquet_open_writer, parquet_write_column, parquet_close_writer, parquet_write_row_mask, &
         parquet_measure_list_width, parquet_column_width_needs_data, parquet_column_has_nulls, &
-        parquet_load_qc_maml_file
+        parquet_load_qc_maml_file, parquet_filter, parquet_sortkey, parquet_read_qc, &
+        parquet_compose_read_qc
     !
     implicit none
     private
@@ -207,6 +208,17 @@ module parquet_tables
         integer(int64) :: row_hi = -1               !! last row of the scope (nrows in the full regime).
         integer(int64) :: row_count = 0             !! rows every column in this table holds.
         type(parquet_table_cache), pointer :: cache => null() !! the column store (see its own doc).
+        ! --- read-time transform, composed ONCE at parquet_open_table time and retained only so
+        !     %clone can reattach the same one when it reopens the file. Already translated to
+        !     FILE names and already merged with whatever the read-in MAML declared, so nothing
+        !     downstream has to redo either step. All stay unallocated when nothing was supplied,
+        !     which is how a clone tells "nothing to reattach" from "an empty filter was composed".
+        type(parquet_filter), allocatable :: read_filter    !! composed row filter, file names.
+        type(parquet_sortkey), allocatable :: read_sort     !! composed sort keys, file names.
+        type(parquet_schema), allocatable :: read_qc_schema !! merged qc schema, file names.
+        logical :: read_qc_soft = .false.                   !! qc_soft as given at open.
+        real(real64), allocatable :: read_sample_fraction   !! sample_fraction as given at open.
+        integer(int32), allocatable :: read_sample_seed     !! sample_seed as given at open.
     contains
         ! --- introspection ---
         procedure :: nrows => table_nrows            !! Number of rows every column holds.
@@ -510,10 +522,24 @@ module parquet_tables
         !! created and marked unsupported, they still appear in %column_names, and only an
         !! attempt to read one is an error. `table` is intent(out), so reopening the same
         !! variable frees the previous table first.
-        module subroutine open_table_full(table, filename, maml)
+        !!
+        !! `filter=`, `sort=` and `qc=` name columns in the table's own INTERNAL vocabulary -- the
+        !! names %col/%get use -- which for a remapped column is NOT what the file calls it. They
+        !! are translated to file names, and merged with whatever `maml=` declares, before the
+        !! reader is opened. A MAML's own `extra: filter:`/`extra: sort:`/`fields: qc:` are in FILE
+        !! names, because a read-in MAML describes the physical file and travels with it.
+        module subroutine open_table_full(table, filename, maml, filter, sort, qc, qc_soft, use_threads, &
+                sample_fraction, sample_seed)
             type(parquet_table), intent(out) :: table !! the table to fill.
             character(len=*), intent(in) :: filename  !! parquet file to open.
             character(len=*), intent(in), optional :: maml !! read-in (Role-B) MAML file describing `filename`.
+            type(parquet_filter), intent(in), optional :: filter !! row filter, in INTERNAL column names.
+            type(parquet_sortkey), intent(in), optional :: sort !! sort keys, in INTERNAL column names.
+            type(parquet_read_qc), intent(in), optional :: qc !! read-time qc, in INTERNAL column names.
+            logical, intent(in), optional :: qc_soft !! warn on a qc violation instead of aborting.
+            logical, intent(in), optional :: use_threads !! forwarded to parquet_open_reader.
+            real(real64), intent(in), optional :: sample_fraction !! keep each row with this probability.
+            integer(int32), intent(in), optional :: sample_seed !! seed for that draw; omitted = nondeterministic.
         end subroutine open_table_full
         !> Slice-regime open, int32 row bounds -- see the `parquet_open_table` generic above.
         module subroutine open_table_slice_i32(table, filename, row_lo, row_hi, maml)
@@ -531,6 +557,19 @@ module parquet_tables
             integer(int64), intent(in) :: row_hi      !! last file row to cover (inclusive).
             character(len=*), intent(in), optional :: maml !! read-in (Role-B) MAML file describing `filename`.
         end subroutine open_table_slice_i64
+        !> Opens `table%cache%reader` on `filename` with whatever read-time transform the table
+        !! carries in its `read_*` components already attached. One helper rather than two open
+        !! calls, so that %clone's reopen cannot drift from parquet_open_table's own.
+        !!
+        !! Each half is passed through an ALLOCATABLE local left unallocated when that half is
+        !! empty: an unallocated allocatable actual makes an optional dummy absent (F2018
+        !! 15.5.2.12), so one unconditional call covers every combination -- and a table with no
+        !! transform at all reaches parquet_open_reader with exactly the arguments it always did.
+        module subroutine table_open_reader_with_transform(table, filename, use_threads)
+            type(parquet_table), intent(inout) :: table !! table whose (allocated) reader is opened.
+            character(len=*), intent(in) :: filename    !! parquet file to open.
+            logical, intent(in), optional :: use_threads !! forwarded to parquet_open_reader.
+        end subroutine table_open_reader_with_transform
         !> Prepares an empty in-memory table with no columns and no rows. The first %add_column
         !! fixes the row count; every later one must match it.
         module subroutine parquet_new_table(table)
@@ -793,6 +832,62 @@ module parquet_tables
         !! policy depends on) is preserved and two internal names reading one column land in
         !! adjacent slots. A physical column whose own name is claimed as an INTERNAL name by some
         !! remap entry is skipped: that is the deliberate shadow, not an error.
+        !> Parses one plain YAML string list nested under the MAML's `extra:` section -- the shape
+        !! both `extra: filter:` and `extra: sort:` have -- into `items(1:n)`, unquoted and in list
+        !! order. `n` is 0 (and `items` is allocated empty) when the MAML has no such key.
+        !!
+        !! One parser for both keys rather than one each: the two differ only in what the strings
+        !! MEAN, and neither this procedure nor the MAML format cares. Every string is passed on to
+        !! parquet_filter%add / parquet_sortkey%add verbatim, so both grammars stay defined in
+        !! exactly one place.
+        module subroutine parse_read_maml_string_list(schema, key, items, n)
+            type(parquet_schema), intent(in) :: schema !! the loaded read-in MAML.
+            character(len=*), intent(in) :: key        !! nested key to read, with its colon ("filter:").
+            character(len=:), allocatable, intent(out) :: items(:) !! the list's entries, in order.
+            integer, intent(out) :: n                  !! entries found; 0 if the key is absent.
+        end subroutine parse_read_maml_string_list
+        !> Splits an `extra: sort:` entry into the key text parquet_sortkey%add takes and the
+        !! per-key null placement, consuming an optional trailing `nulls_first`/`nulls_last` word
+        !! (case-insensitive). Absent, it defaults to `nulls_last`, matching %add's own default.
+        !!
+        !! This trailing token is the one place this stage EXTENDS an existing text grammar rather
+        !! than reusing it verbatim, and it is deliberately MAML-only: a plain YAML string list has
+        !! nowhere else to carry what the Fortran API expresses as %add(key, nulls_first=.true.).
+        !! Anything else in that position is left in `key_text` for %add to reject with its own
+        !! message, so there is still only one implementation of the direction grammar.
+        module subroutine split_sort_nulls_token(entry, key_text, nulls_first)
+            character(len=*), intent(in) :: entry !! one raw extra: sort: list entry.
+            character(len=:), allocatable, intent(out) :: key_text !! "<column> [asc|desc]", token removed.
+            logical, intent(out) :: nulls_first   !! .true. if the entry asked for nulls first.
+        end subroutine split_sort_nulls_token
+        !> Composes the whole read-time transform, ONCE, before the parquet file is opened: loads
+        !! the read-in MAML (if any), parses its `extra: remap:`/`filter:`/`sort:` blocks, translates
+        !! the caller's internal-name `filter`/`sort`/`qc` into file names using that remap, and
+        !! merges each with its MAML counterpart.
+        !!
+        !! Composition rules, all from the stage design: filter is AND (code rules first, then the
+        !! MAML's -- order is immaterial for AND); sort is ORDER-SENSITIVE, MAML keys first as the
+        !! primary ones and code keys appended as tie-breakers; qc is a per-COLUMN override handled
+        !! by parquet_compose_read_qc. `out_filter%n`/`out_sort%n`/`n_qc` are zero when that half of
+        !! the transform is empty, which is the caller's signal not to pass it to the reader at all.
+        !!
+        !! Doing this before the reader opens is what lets the full regime hand everything to
+        !! parquet_open_reader as constructor arguments, and it means a malformed MAML aborts with
+        !! no reader -- and so no live Arrow object -- anywhere in scope.
+        module subroutine compose_read_transform(maml_file, filter, sort, qc, internal, physical, &
+                n_remap, out_filter, out_sort, out_qc, n_qc)
+            character(len=*), intent(in), optional :: maml_file !! read-in MAML path, if one was given.
+            type(parquet_filter), intent(in), optional :: filter !! code filter, INTERNAL names.
+            type(parquet_sortkey), intent(in), optional :: sort  !! code sort keys, INTERNAL names.
+            type(parquet_read_qc), intent(in), optional :: qc    !! code qc, INTERNAL names.
+            character(len=:), allocatable, intent(out) :: internal(:) !! remap: table-facing names.
+            character(len=:), allocatable, intent(out) :: physical(:) !! remap: file column each one reads.
+            integer, intent(out) :: n_remap        !! live remap entries.
+            type(parquet_filter), intent(out) :: out_filter !! composed filter, FILE names.
+            type(parquet_sortkey), intent(out) :: out_sort  !! composed sort keys, FILE names.
+            type(parquet_schema), intent(out) :: out_qc     !! merged qc schema, FILE names.
+            integer, intent(out) :: n_qc           !! columns `out_qc` declares qc for.
+        end subroutine compose_read_transform
         module subroutine table_enumerate_columns(cache, names, internal, physical, n_remap, filename)
             type(parquet_table_cache), intent(inout) :: cache !! the column store to fill.
             character(len=*), intent(in) :: names(:) !! the file's own column names, in file order.

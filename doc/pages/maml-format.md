@@ -123,6 +123,26 @@ extra:
 - **Two internal names may read the same file column.** They become two ordinary, independent table columns: identical when first read, and free to diverge afterwards, since each holds its own copy.
 - See [Tables](table.html#renaming-a-files-columns-with-a-read-in-maml) for the table-side view.
 
+## Filtering and sorting on read with `extra: filter:` and `extra: sort:`
+
+A read-in MAML can also say which rows to keep and what order to return them in — again `parquet_table` only, and again recognized only nested inside `extra:`. Both are plain YAML string lists, and both name the **file's own** columns (a read-in MAML describes the physical file, so `remap:` above is the only place its internal names appear at all).
+
+```yaml
+table: input_table
+extra:
+  filter:
+  - "(ra > 180 and ra <= 360) or ra is_null"
+  - "id is_not_null"
+  sort:
+  - "ra asc"
+  - "quality desc nulls_first"
+```
+
+- Each `filter:` entry is one rule in the existing [`parquet_filter` grammar](reading.html#the-rule-grammar), unchanged. Entries are AND-combined with each other, exactly as several `filt%add` calls are, and then with any `filter=` the caller passed.
+- Each `sort:` entry is one key in the existing [`parquet_sortkey` grammar](reading.html#sort-keys) — `"<column> [asc|desc]"`, or a leading `-` for descending — plus **one MAML-only extension: an optional trailing `nulls_first` or `nulls_last`** (case-insensitive; omitted means `nulls_last`, matching `%add`'s own default). It spells out in text what the Fortran API expresses as `%add(key, nulls_first=.true.)`, since a plain string list has nowhere else to carry a per-key flag.
+- Keys apply in list order, and the MAML's keys come **before** any the caller passed in `sort=`, so the MAML's are the primary ones and the caller's break its ties.
+- See [Tables](table.html#filtering-sorting-and-checking-rows-as-the-file-is-opened) for the table-side view and the composition rules.
+
 ## How table-level keys become metadata entries
 
 Table-level keys become parquet metadata entries, with these special mappings:
@@ -136,7 +156,7 @@ Table-level keys become parquet metadata entries, with these special mappings:
 | `keywords:` | A plain-string list, combined into a single `keywords` entry with its items joined by `;`. |
 | any other allowed section, given as a plain-string list (e.g. `survey:`, `author:`, `license:`, ...) | Several entries that all share that key's name (e.g. multiple `list_key` entries with the same name). |
 | any other allowed section, given as a list of *maps* | **Not** specially handled: only its first sub-key ends up captured as a raw, unparsed string, and the rest of that entry's sub-keys are silently dropped. Use `keyarray:` for arbitrary structured metadata instead. |
-| `extra:` | Opaque to table-level metadata (produces no metadata entry of its own), but not ignored: `col_map:`, `protected_cols:` and (for a read-in table MAML) `remap:` are specifically parsed out of it — see [Renaming columns for output with `col_map:`](#renaming-columns-for-output-with-col_map) [Null values](supported-data-types.html#null-values) and [Renaming columns for reading with `extra: remap:`](#renaming-columns-for-reading-with-extra-remap). Anything else nested inside `extra:` is accepted unvalidated and otherwise unused. |
+| `extra:` | Opaque to table-level metadata (produces no metadata entry of its own), but not ignored: `col_map:`, `protected_cols:` and (for a read-in table MAML) `remap:`, `filter:` and `sort:` are specifically parsed out of it — see [Renaming columns for output with `col_map:`](#renaming-columns-for-output-with-col_map) [Null values](supported-data-types.html#null-values) [Renaming columns for reading with `extra: remap:`](#renaming-columns-for-reading-with-extra-remap) and [Filtering and sorting on read](#filtering-and-sorting-on-read-with-extra-filter-and-extra-sort). Anything else nested inside `extra:` is accepted unvalidated and otherwise unused. |
 
 Every entry in this table is read back on the read side with `parquet_get_metadata` (see
 [Reading table metadata with `parquet_get_metadata`](reading.html#reading-table-metadata-with-parquet_get_metadata)),

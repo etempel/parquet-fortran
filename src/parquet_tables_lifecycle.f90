@@ -19,7 +19,8 @@ submodule (parquet_tables) parquet_tables_lifecycle
 contains
     !
     module procedure open_table_full
-        call open_table_impl(table, filename, .false., 0_int64, 0_int64, maml)
+        call open_table_impl(table, filename, .false., 0_int64, 0_int64, maml, filter, sort, qc, &
+            qc_soft, use_threads, sample_fraction, sample_seed)
     end procedure open_table_full
     !
     module procedure open_table_slice_i32
@@ -33,17 +34,28 @@ contains
     !> The one open path: both regimes differ only in which rows the table claims, and both
     !! classify without reading. Shared rather than duplicated so the slice regime cannot drift
     !! from the full one on anything but its row scope.
-    subroutine open_table_impl(table, filename, sliced, row_lo, row_hi, maml)
+    subroutine open_table_impl(table, filename, sliced, row_lo, row_hi, maml, filter, sort, qc, &
+            qc_soft, use_threads, sample_fraction, sample_seed)
         type(parquet_table), intent(out) :: table !! the table to fill.
         character(len=*), intent(in) :: filename  !! parquet file to open.
         logical, intent(in) :: sliced             !! .true. for the slice regime.
         integer(int64), intent(in) :: row_lo      !! first file row (slice regime only).
         integer(int64), intent(in) :: row_hi      !! last file row (slice regime only).
         character(len=*), intent(in), optional :: maml !! read-in (Role-B) MAML describing `filename`.
-        integer :: i, ncol, n_remap
+        type(parquet_filter), intent(in), optional :: filter !! row filter, in INTERNAL column names.
+        type(parquet_sortkey), intent(in), optional :: sort !! sort keys, in INTERNAL column names.
+        type(parquet_read_qc), intent(in), optional :: qc !! read-time qc, in INTERNAL column names.
+        logical, intent(in), optional :: qc_soft  !! warn on a qc violation instead of aborting.
+        logical, intent(in), optional :: use_threads !! forwarded to parquet_open_reader.
+        real(real64), intent(in), optional :: sample_fraction !! keep each row with this probability.
+        integer(int32), intent(in), optional :: sample_seed !! seed for that draw.
+        integer :: i, ncol, n_remap, n_qc
         integer(int64) :: file_rows
         character(len=:), allocatable :: names(:)
         character(len=:), allocatable :: remap_internal(:), remap_physical(:)
+        type(parquet_filter) :: comp_filter
+        type(parquet_sortkey) :: comp_sort
+        type(parquet_schema) :: comp_qc
         character(len=32) :: lo_s, hi_s, n_s
         !
         ! `table` is intent(out) on a finalizable type, so table_finalize has already run on any
@@ -61,23 +73,26 @@ contains
         ! bug (see CLAUDE.md); do not remove it on the assumption that intent(out) alone suffices.
         table%detached = .false.
         !
-        ! The read-in MAML is parsed FIRST, before the parquet file is opened at all. Nothing here
-        ! needs the file (the one remap rule that does -- "the column exists" -- stays in
-        ! validate_remap, below), and doing it first means a malformed MAML aborts with no reader,
-        ! and therefore no live Arrow object, anywhere in scope. `extra: remap:` relabels file
-        ! columns for reading -- see parquet_tables_maml. Loading through parquet_load_qc_maml_file
-        ! rather than reading the file here is what gives this the shared reader's line-length cap
-        ! and CRLF handling for free, and it is the same object a later milestone hands to
-        ! parquet_open_reader as its qc schema. It is passed straight in as an actual argument
-        ! rather than assigned to a local first, matching every other use of that function.
-        n_remap = 0
-        if (present(maml)) then
-            call parse_read_maml_remap(parquet_load_qc_maml_file(trim(maml)), &
-                remap_internal, remap_physical, n_remap, trim(maml))
-        else
-            allocate(character(len=1) :: remap_internal(0))
-            allocate(character(len=1) :: remap_physical(0))
-        end if
+        ! The whole read-time transform is composed FIRST, before the parquet file is opened at
+        ! all: the read-in MAML is loaded and its extra: remap:/filter:/sort: parsed, the caller's
+        ! internal-name filter/sort/qc are translated to file names through that remap, and each is
+        ! merged with its MAML counterpart. Nothing here needs the file (the one remap rule that
+        ! does -- "the column exists" -- stays in validate_remap, below), and doing it first is what
+        ! lets the full regime hand everything to parquet_open_reader as constructor arguments,
+        ! and means a malformed MAML aborts with no reader -- and so no live Arrow object -- in
+        ! scope. See compose_read_transform (parquet_tables_maml) for the composition rules.
+        call compose_read_transform(maml, filter, sort, qc, remap_internal, remap_physical, &
+            n_remap, comp_filter, comp_sort, comp_qc, n_qc)
+        ! Retained only so %clone can reattach the SAME transform when it reopens the file. Stored
+        ! as the composed, already-translated values rather than the caller's originals: a clone
+        ! opens the same file, so re-deriving them would only risk the two drifting.
+        table%read_qc_soft = .false.
+        if (present(qc_soft)) table%read_qc_soft = qc_soft
+        if (comp_filter%n > 0) table%read_filter = comp_filter
+        if (comp_sort%n > 0) table%read_sort = comp_sort
+        if (n_qc > 0) table%read_qc_schema = comp_qc
+        if (present(sample_fraction)) table%read_sample_fraction = sample_fraction
+        if (present(sample_seed)) table%read_sample_seed = sample_seed
         !
         allocate(table%cache)
         call record_open_thread(table%cache)
@@ -85,7 +100,7 @@ contains
         table%cache%source_file = trim(filename)
         !
         allocate(table%cache%reader)
-        call parquet_open_reader(table%cache%reader, trim(filename))
+        call table_open_reader_with_transform(table, trim(filename), use_threads)
         call parquet_get_nrows(table%cache%reader, file_rows)
         if (sliced) then
             ! Validated before anything else is set up, so a bad slice fails while the table is
@@ -130,10 +145,33 @@ contains
         end do
     end subroutine open_table_impl
     !
+    module procedure table_open_reader_with_transform
+        type(parquet_filter), allocatable :: pass_filter
+        type(parquet_sortkey), allocatable :: pass_sort
+        type(parquet_schema), allocatable :: pass_schema
+        logical, allocatable :: pass_qc_soft
+        !
+        if (allocated(table%read_filter)) pass_filter = table%read_filter
+        if (allocated(table%read_sort)) pass_sort = table%read_sort
+        ! qc_soft only ever matters when a qc schema is actually attached, and passing it on its
+        ! own would be a no-op the reader still has to reason about -- so it travels with the
+        ! schema or not at all.
+        if (allocated(table%read_qc_schema)) then
+            pass_schema = table%read_qc_schema
+            pass_qc_soft = table%read_qc_soft
+        end if
+        call parquet_open_reader(table%cache%reader, filename, filter=pass_filter, &
+            sort_by=pass_sort, schema=pass_schema, qc_soft=pass_qc_soft, use_threads=use_threads, &
+            sample_fraction=table%read_sample_fraction, sample_seed=table%read_sample_seed)
+    end procedure table_open_reader_with_transform
+    !
     module procedure parquet_new_table
         ! Explicit, not relied-upon-implicitly, for the same reason as open_table_impl's own
-        ! `table%detached = .false.` -- see that assignment's comment.
+        ! `table%detached = .false.` -- see that assignment's comment. `read_qc_soft` gets the same
+        ! treatment for the same reason: it is the other scalar component with nothing but its
+        ! default initializer behind it.
         table%detached = .false.
+        table%read_qc_soft = .false.
         allocate(table%cache)
         call record_open_thread(table%cache)
         table%cache%file_backed = .false.

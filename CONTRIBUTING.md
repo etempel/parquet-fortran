@@ -163,6 +163,15 @@ The `clang++` invocation is unconditional, with no `FPM_CXX`/`CXX` override — 
 
 A few more `tools/` scripts, unrelated to fixtures and not part of the build or test flow:
 
+`tools/run_lint_check.sh` runs the same checks as `.gitlab-ci.yml`'s `lint` stage, locally — `tools/check_bindc_boundary.py`, `tools/check_doc_anchors.py`, and the three generated-file `--check` calls (`generate_parquet_columns.py`, `generate_parquet_tables.py`, `generate_parquet_maml.sh base`). It needs nothing but `python3` and `bash` — no fpm, no gfortran, no Arrow — and finishes in well under a second, so it is worth running before every push:
+
+```bash
+tools/run_lint_check.sh              # run every check, then list any that failed
+tools/run_lint_check.sh --fail-fast  # stop at the first failure, like CI does
+```
+
+By default it runs every check even after one fails and lists the failures together at the end, which differs deliberately from CI (whose `script:` stops at the first nonzero command): locally it is more useful to see every problem in one pass. The verdict is the same either way — it exits nonzero if anything failed. **Its `CHECKS` list is kept in sync with the CI job by hand**, so a check added to one must be added to the other; nothing enforces it. Maintainer-only (stripped from the fpm-published package, see `tools/prep_fpm_publish.sh`).
+
 `tools/generate_parquet_tables.py` regenerates the per-kind blocks of the `parquet_tables` table layer: `src/parquet_tables.f90` (the module spec), `src/parquet_tables_access.f90`, `src/parquet_tables_addcol.f90` and `src/parquet_tables_materialize.f90`. It **imports its kind table from `tools/generate_parquet_columns.py`** rather than keeping a second copy, so a new column kind is declared in exactly one place and the two layers cannot drift apart. Output is committed and `--check` verifies it, exactly as for the columns generator. The other four `parquet_tables_*.f90` files (`lifecycle`, `query`, `read`, `write`) are hand-written and the script never touches them. Maintainer-only (stripped from the fpm-published package).
 
 `tools/generate_parquet_columns.py` regenerates the per-kind blocks of the `parquet_columns` foundation module: `src/parquet_columns.f90` (the module spec), `src/parquet_columns_access.f90` and `src/parquet_columns_mutate.f90`. Its output is **committed**, exactly like `tools/generate_parquet_maml.sh`'s, so nothing is generated at build time and the fpm build stays dependency-free. Re-run it after editing the kind table at the top of the script — for example when a new column kind is added — and commit the regenerated files; `tools/generate_parquet_columns.py --check` re-derives the output and fails if the committed files have drifted, which is the cheap way to catch a forgotten regeneration. The other four `parquet_columns_*.f90` files (`util`, `validity`, `structural`, `string`) are hand-written and the script never touches them. Maintainer-only (stripped from the fpm-published package, see `tools/prep_fpm_publish.sh`).

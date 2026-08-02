@@ -80,6 +80,11 @@ stages:
 # src/parquet_maml_base.f90) drifting from its own generator -- e.g. a hand-edit to the generated
 # file that never made it back into the generator's template (see CLAUDE.md's "Some src/*.f90
 # files are generated" for why this class of bug is easy to introduce silently).
+#
+# `tools/run_lint_check.sh` runs this same list locally (see CONTRIBUTING.md's "Other tools/
+# helpers"). Its own CHECKS array is kept in sync with the `script:` below BY HAND -- adding a
+# check here without adding it there means the local script gives false confidence, and vice
+# versa means a pipeline that fails on something no contributor could have caught first.
 lint:
   stage: lint
   before_script:

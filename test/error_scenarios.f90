@@ -1247,6 +1247,10 @@ program error_scenarios
         call scenario_table_remap_unknown_file_column()
     case ("table_remap_duplicate_internal")
         call scenario_table_remap_duplicate_internal()
+    case ("table_qc_violation")
+        call scenario_table_qc_violation()
+    case ("table_filter_unknown_column")
+        call scenario_table_filter_unknown_column()
     case ("table_first_touch_in_parallel")
         call scenario_table_first_touch_in_parallel()
     case ("table_resolve_width_in_parallel")
@@ -9975,6 +9979,37 @@ contains
             maml="test_run/es_table_remap_dup.maml")   ! -> aborts
         print '(a,i0)', "unexpectedly opened a table with a duplicated remap internal name, ncols=", t%ncols()
     end subroutine scenario_table_remap_duplicate_internal
+
+    !> A code-declared qc bound the data violates aborts, exactly as a MAML-declared one does --
+    !! qc= is not a softer kind of declaration, it just names its columns differently.
+    !!
+    !! Note WHERE it aborts: qc runs when a column is actually read, and opening a parquet_table
+    !! reads no column data at all, so the abort lands on the first touch rather than on the open.
+    !! That is the lazy table's normal behaviour applied to qc, not a weaker guarantee -- but it
+    !! does mean a violated bound on a column a program never touches is never reported.
+    subroutine scenario_table_qc_violation()
+        type(parquet_table) :: t
+        type(parquet_read_qc) :: qc
+        integer(int32), allocatable :: ids(:)
+        call write_table_scenario_fixture("test_run/es_table_qc_violation.parquet")
+        call qc%add("id, >=100")
+        call parquet_open_table(t, "test_run/es_table_qc_violation.parquet", qc=qc)
+        call t%get("id", ids)   ! -> aborts: first touch is where qc runs
+        print '(a,i0)', "unexpectedly read a column whose data violates its qc bound, n=", size(ids)
+    end subroutine scenario_table_qc_violation
+
+    !> A filter naming a column the table does not have aborts at open. The message comes from the
+    !! reader and names the column in FILE terms, since the internal name has already been
+    !! translated by then -- for an unremapped column, which is the common case, the two are the
+    !! same string, and for a remapped one the file name is what the caller has to fix anyway.
+    subroutine scenario_table_filter_unknown_column()
+        type(parquet_table) :: t
+        type(parquet_filter) :: filt
+        call write_table_scenario_fixture("test_run/es_table_filter_unknown.parquet")
+        call filt%add("not_a_real_column > 1")
+        call parquet_open_table(t, "test_run/es_table_filter_unknown.parquet", filter=filt)  ! -> aborts
+        print '(a,i0)', "unexpectedly opened a table filtered on a nonexistent column, nrows=", t%nrows()
+    end subroutine scenario_table_filter_unknown_column
 
     !> A lazy first touch inside a parallel region publishes shared state with no ordering
     !! behind it, so it is forbidden outright rather than guarded by a lock on the read path

@@ -329,6 +329,10 @@ contains
                 test_read_qc_remap_size_mismatch_aborts), &
             new_unittest("read_qc: an entry that grows past the cap when remapped aborts", &
                 test_read_qc_remap_entry_too_long_aborts), &
+            new_unittest("table: a code-declared qc bound the data violates aborts", &
+                test_table_qc_violation_aborts), &
+            new_unittest("table: a filter naming a column the file lacks aborts", &
+                test_table_filter_unknown_column_aborts), &
             new_unittest("filter: non-numeric value against a numeric column aborts", &
                 test_filter_bad_numeric_value_aborts), &
             new_unittest("filter: non-numeric value against a numeric column aborts under a scoped filter", &
@@ -2913,6 +2917,22 @@ contains
             failure_message="a read_qc entry that grew past the cap when remapped was expected to abort", &
             required_stderr="supported length after remapping its column name")
     end subroutine test_read_qc_remap_entry_too_long_aborts
+
+    subroutine test_table_qc_violation_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "table_qc_violation", expect_abort=.true., &
+            failure_message="a table opened with a violated qc= bound was expected to abort", &
+            required_stderr="qc violation for column")
+    end subroutine test_table_qc_violation_aborts
+
+    subroutine test_table_filter_unknown_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "table_filter_unknown_column", expect_abort=.true., &
+            failure_message="a table filtered on a nonexistent column was expected to abort", &
+            required_stderr="not_a_real_column")
+    end subroutine test_table_filter_unknown_column_aborts
 
     !> A non-numeric value against a numeric filter column (rule shape is
     !> fine, the value itself isn't) aborts with a message naming the value

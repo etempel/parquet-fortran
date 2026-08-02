@@ -92,7 +92,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gives the file's columns table-facing names of the program's own, so code works in one stable
   vocabulary whatever a particular file calls things; an internal name may deliberately shadow a
   file column it does not refer to, and two internal names may read one file column as two
-  independent table columns. See
+  independent table columns. A table can be filtered, sorted, sampled and qc-checked as it opens,
+  with `parquet_open_table(t, file, filter=, sort=, qc=, qc_soft=, sample_fraction=,
+  sample_seed=)`: every column then covers exactly the surviving rows in exactly that order,
+  including ones read lazily long afterwards, and `%clone` reattaches the same transform to its own
+  reader. `filter=`/`sort=`/`qc=` name columns in the table's own internal vocabulary — the names
+  `%get`/`%col` use, translated through `extra: remap:` for you — while a read-in MAML's own
+  `extra: filter:`/`extra: sort:`/`fields: qc:` name the file's columns, because a read-in MAML
+  describes the physical file. Both sources compose: filters AND, the MAML's sort keys lead and
+  the caller's break ties, and qc is a per-column override. `extra: sort:` entries additionally
+  accept a trailing `nulls_first`/`nulls_last` token, which a plain YAML string list has nowhere
+  else to carry. Note qc is enforced when a column is actually read, so on a lazy table it lands on
+  first touch rather than at open. See
   [the guide](doc/pages/table.md) for the current limitations, the detach rule and the OpenMP
   first-touch rule.
 - Added `parquet_read_qc` and `parquet_compose_read_qc`: read-time quality control declared in

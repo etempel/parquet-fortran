@@ -77,45 +77,76 @@ contains
         !
     end subroutine check_uniform_length
     !
+    subroutine print_string_vector(vec)
+        character(*), intent(in) :: vec(:)
+        integer :: i
+        !
+        print *, "String vector: "
+        do i = 1, size(vec)
+            print *, "Row  ", i, ": ", vec(i)
+        end do
+        !
+    end subroutine print_string_vector
+    !
 end module playground_helpers
 !
 program playground
     use parquet
     use playground_helpers
     implicit none
-    integer,parameter :: nrows = 5
-    real,dimension(:,:),allocatable :: vector_column ! (nelem, nrows)
-    type(my_type), dimension(:), allocatable :: my_array
-    real,dimension(:,:),allocatable :: rmat
-    integer :: i
     !
-    allocate(vector_column(nelem, nrows))
-    allocate(my_array(nrows))
-    !
-    block
-        integer :: j
-        do i = 1, nrows
-            vector_column(:, i) = [(real(j), j=1, nelem)] * i
-            my_array(i)%id = i
-            allocate(my_array(i)%vec(nelem))
-            my_array(i)%vec = [(real(j), j=1, nelem)] * i
-            my_array(i)%vec2 = [(real(j), j=1, nelem)] * i
-            allocate(my_array(i)%vec3(nelem))
-            my_array(i)%vec3 = [(real(j), j=1, nelem)] * i
-        end do
-    end block
-    !
-    call print_vector_column(vector_column)
-    call print_my_array(my_array)
-    !call print_my_array_vec(my_array(:)%vec2) ! not allowed
-    !
-    !call print_test(my_array, "vec2")
-    call my_array_to_matrix(my_array, "vec", rmat)
-    call print_vector_column(rmat)
-    call my_array_to_matrix(my_array, "vec2", rmat)
-    call print_vector_column(rmat)      
+    !call test_vector_column() is a playground for testing the conversions
+    call test_print_string_vector() ! test printing a vector of strings
     !
 contains
+    !
+    subroutine test_print_string_vector()
+        character(len=:), allocatable :: vec(:)
+        character(len=:),allocatable:: fortran
+        integer :: i
+        !
+        fortran = "Fortran"
+        !allocate(character(len=7) :: vec(5))
+        vec = [character(len=6) :: "a", "bb", "ccc", "dddd", fortran]
+        !
+        call print_string_vector(vec)
+        call print_string_vector([character(len=6) :: "a", "bb", "ccc", "dddd", fortran])
+        !
+    end subroutine test_print_string_vector
+    !
+    subroutine test_vector_column()
+        integer,parameter :: nrows = 5
+        real,dimension(:,:),allocatable :: vector_column ! (nelem, nrows)
+        type(my_type), dimension(:), allocatable :: my_array
+        real,dimension(:,:),allocatable :: rmat
+        integer :: i
+        !
+        allocate(vector_column(nelem, nrows))
+        allocate(my_array(nrows))
+        !
+        block
+            integer :: j
+            do i = 1, nrows
+                vector_column(:, i) = [(real(j), j=1, nelem)] * i
+                my_array(i)%id = i
+                allocate(my_array(i)%vec(nelem))
+                my_array(i)%vec = [(real(j), j=1, nelem)] * i
+                my_array(i)%vec2 = [(real(j), j=1, nelem)] * i
+                allocate(my_array(i)%vec3(nelem))
+                my_array(i)%vec3 = [(real(j), j=1, nelem)] * i
+            end do
+        end block
+        !
+        call print_vector_column(vector_column)
+        call print_my_array(my_array)
+        !call print_my_array_vec(my_array(:)%vec2) ! not allowed
+        !
+        !call print_test(my_array, "vec2")
+        call my_array_to_matrix(my_array, "vec", rmat)
+        call print_vector_column(rmat)
+        call my_array_to_matrix(my_array, "vec2", rmat)
+        call print_vector_column(rmat)
+    end subroutine test_vector_column
     !
     subroutine print_vector_column(vec_col)
         real,dimension(:,:), intent(in) :: vec_col

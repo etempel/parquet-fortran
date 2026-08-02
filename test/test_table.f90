@@ -140,6 +140,15 @@ contains
             new_unittest("extra: remap: renames a file column for reading", test_remap_basic), &
             new_unittest("extra: remap: shadows, swaps and duplicates as documented", test_remap_shadow_duplicate), &
             new_unittest("rename_column on a remapped column keeps its file column", test_remap_then_rename), &
+            new_unittest("open with filter= narrows every column, in internal names", test_open_filter), &
+            new_unittest("open with sort= orders every column, in internal names", test_open_sort), &
+            new_unittest("open with qc= enforces a code-declared bound", test_open_qc), &
+            new_unittest("a MAML's extra: filter:/sort: apply, and compose with the code's", &
+                test_open_maml_filter_sort), &
+            new_unittest("extra: sort: takes a trailing nulls_first/nulls_last token", test_maml_sort_nulls_token), &
+            new_unittest("filter=/sort=/qc= are translated through extra: remap:", test_transform_with_remap), &
+            new_unittest("open with sample_fraction= keeps a subset, reproducibly by seed", test_open_sample), &
+            new_unittest("a clone of a transformed table reattaches the same transform", test_clone_keeps_transform), &
             new_unittest("a detached table's clone keeps its values and stays detached", &
                 test_clone_of_detached) &
             ]
@@ -3637,5 +3646,232 @@ contains
         call check(error, all(id == [1_int32, 2_int32, 3_int32]), &
             "the clone should hold the values the source had after mutating")
     end subroutine test_clone_of_detached
+    !
+    ! ------------------------------------------------------------------------------
+    ! Read-time transform on parquet_open_table (full regime)
+    !
+    ! The vocabulary split is the thing under test throughout: filter=/sort=/qc= name
+    ! columns the way %col/%get do (INTERNAL names), while a read-in MAML's own
+    ! extra: filter:/sort: and fields: qc: name the physical file's columns. A test
+    ! that never remaps cannot tell the two apart, which is what
+    ! test_transform_with_remap is for.
+    ! ------------------------------------------------------------------------------
+    !
+    !> filter= narrows the table itself: %nrows drops, and every column -- including ones read
+    !! lazily long after the open -- covers exactly the surviving rows.
+    subroutine test_open_filter(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_filter) :: filt
+        integer(int32), allocatable :: i32(:)
+        real(real64), allocatable :: f64(:)
+        character(len=*), parameter :: f = "test_run/table_xform_filter.parquet"
+        !
+        call write_basic_fixture(f)
+        call filt%add("i32 > 2 and i32 <= 5")
+        call parquet_open_table(t, f, filter=filt)
+        call check(error, t%nrows() == 3, "filter= did not narrow the table's row count")
+        if (allocated(error)) return
+        call t%get("i32", i32)
+        call check(error, all(i32 == [3_int32, 4_int32, 5_int32]), &
+            "filter= did not return the surviving rows of the filtered column")
+        if (allocated(error)) return
+        ! A column touched only now, well after the open, must see the same row set.
+        call t%get("f64", f64)
+        call check(error, size(f64) == 3 .and. abs(f64(1) - 6.75_real64) < 1.0e-12_real64, &
+            "a lazily-read column did not inherit the filter the table was opened with")
+    end subroutine test_open_filter
+    !
+    !> sort= reorders every column, so a companion column read later still lines up row for row
+    !! with the key column.
+    subroutine test_open_sort(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_sortkey) :: srt
+        integer(int32), allocatable :: i32(:)
+        character(len=:), allocatable :: sv(:)
+        character(len=*), parameter :: f = "test_run/table_xform_sort.parquet"
+        !
+        call write_basic_fixture(f)
+        call srt%add("-i32")
+        call parquet_open_table(t, f, sort=srt)
+        call check(error, t%nrows() == NROW, "sort= must not change how many rows the table has")
+        if (allocated(error)) return
+        call t%get("i32", i32)
+        call check(error, all(i32 == [6_int32, 5_int32, 4_int32, 3_int32, 2_int32, 1_int32]), &
+            "sort= did not order the key column descending")
+        if (allocated(error)) return
+        call t%get("s", sv)
+        call check(error, trim(sv(1)) == "p" .and. trim(sv(6)) == "a", &
+            "a companion column did not come back in the sorted order")
+    end subroutine test_open_sort
+    !
+    !> qc= reaches the reader: a bound the data satisfies opens cleanly and reads normally. The
+    !! violating direction aborts, so it lives out of process (scenario table_qc_violation).
+    subroutine test_open_qc(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_read_qc) :: qc
+        integer(int32), allocatable :: i32(:)
+        character(len=*), parameter :: f = "test_run/table_xform_qc.parquet"
+        !
+        call write_basic_fixture(f)
+        call qc%add("i32, >=1, <=6")
+        call parquet_open_table(t, f, qc=qc)
+        call t%get("i32", i32)
+        call check(error, size(i32) == NROW .and. i32(1) == 1_int32, &
+            "a satisfied qc= bound should have read the column unchanged")
+    end subroutine test_open_qc
+    !
+    !> A MAML's own extra: filter:/extra: sort: apply on their own, and AND/append with a
+    !! code-supplied filter/sort respectively.
+    subroutine test_open_maml_filter_sort(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_filter) :: filt
+        integer(int32), allocatable :: i32(:)
+        character(len=*), parameter :: f = "test_run/table_xform_mamlfs.parquet"
+        character(len=*), parameter :: m = "test_run/table_xform_mamlfs.maml"
+        !
+        call write_basic_fixture(f)
+        call write_maml_file(m, [character(len=40) :: &
+            "table: xform", &
+            "extra:", &
+            "  filter:", &
+            '  - "i32 >= 2"', &
+            "  sort:", &
+            '  - "i32 desc"'])
+        call parquet_open_table(t, f, maml=m)
+        call t%get("i32", i32)
+        call check(error, all(i32 == [6_int32, 5_int32, 4_int32, 3_int32, 2_int32]), &
+            "a MAML's own extra: filter:/sort: did not apply")
+        if (allocated(error)) return
+
+        ! The code filter AND-combines with the MAML's, leaving 2..4 in the MAML's descending order.
+        call filt%add("i32 <= 4")
+        call parquet_open_table(t, f, maml=m, filter=filt)
+        call t%get("i32", i32)
+        call check(error, all(i32 == [4_int32, 3_int32, 2_int32]), &
+            "a code filter did not AND-combine with the MAML's own")
+    end subroutine test_open_maml_filter_sort
+    !
+    !> The one grammar extension this stage makes: an extra: sort: entry may end in
+    !! nulls_first/nulls_last, which a plain YAML string list has nowhere else to carry.
+    subroutine test_maml_sort_nulls_token(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_writer) :: w
+        integer(int32) :: id(4) = [1_int32, 2_int32, 3_int32, 4_int32]
+        real(real64) :: v(4) = [3.0_real64, 1.0_real64, 0.0_real64, 2.0_real64]
+        logical :: valid(4) = [.true., .true., .false., .true.]
+        integer(int32), allocatable :: got(:)
+        character(len=*), parameter :: f = "test_run/table_xform_nulls.parquet"
+        character(len=*), parameter :: m1 = "test_run/table_xform_nulls_first.maml"
+        character(len=*), parameter :: m2 = "test_run/table_xform_nulls_last.maml"
+        !
+        call parquet_open_writer(w, f)
+        call parquet_write_column(w, "id", id)
+        call parquet_write_column(w, "v", v, is_valid=valid)
+        call parquet_close_writer(w)
+
+        call write_maml_file(m1, [character(len=40) :: &
+            "table: xform", "extra:", "  sort:", '  - "v asc nulls_first"'])
+        call parquet_open_table(t, f, maml=m1)
+        call t%get("id", got)
+        call check(error, got(1) == 3_int32, "nulls_first did not place the null row first")
+        if (allocated(error)) return
+
+        call write_maml_file(m2, [character(len=40) :: &
+            "table: xform", "extra:", "  sort:", '  - "v asc NULLS_LAST"'])
+        call parquet_open_table(t, f, maml=m2)
+        call t%get("id", got)
+        call check(error, got(4) == 3_int32, &
+            "nulls_last (and its case-insensitivity) did not place the null row last")
+    end subroutine test_maml_sort_nulls_token
+    !
+    !> The vocabulary split, stated as a test: `mass` exists only as an INTERNAL name, and only the
+    !! code-facing arguments may use it -- the MAML's own filter would have to say `f64`, the
+    !! file's name. Nothing here would fail if the translation were skipped for only one of the
+    !! three, so all three are exercised over the same remapped column.
+    subroutine test_transform_with_remap(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_filter) :: filt
+        type(parquet_sortkey) :: srt
+        type(parquet_read_qc) :: qc
+        real(real64), allocatable :: mass(:)
+        character(len=*), parameter :: f = "test_run/table_xform_remap.parquet"
+        character(len=*), parameter :: m = "test_run/table_xform_remap.maml"
+        !
+        call write_basic_fixture(f)
+        call write_maml_file(m, [character(len=40) :: &
+            "table: xform", "extra:", "  remap:", "  - mass: f64"])
+        call filt%add("mass > 4.0")
+        call srt%add("-mass")
+        call qc%add("mass, >=0")
+        call parquet_open_table(t, f, maml=m, filter=filt, sort=srt, qc=qc)
+        call t%get("mass", mass)
+        ! f64 is i*2.25 for i = 1..6, so "> 4.0" keeps five rows.
+        call check(error, size(mass) == 5, &
+            "a filter written in internal names did not narrow the remapped column")
+        if (allocated(error)) return
+        call check(error, mass(1) > mass(5), &
+            "a sort key written in internal names did not order the remapped column")
+    end subroutine test_transform_with_remap
+    !
+    !> sample_fraction= narrows the table, and the same seed gives the same rows twice -- which is
+    !! also what tells this apart from a filter that happens to keep the same count.
+    subroutine test_open_sample(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer(int32), allocatable :: a(:), b(:)
+        character(len=*), parameter :: f = "test_run/table_xform_sample.parquet"
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t, f, sample_fraction=0.5_real64, sample_seed=1234_int32)
+        call check(error, t%nrows() < int(NROW, int64) .and. t%nrows() > 0_int64, &
+            "sample_fraction= should keep some but not all of the rows")
+        if (allocated(error)) return
+        call t%get("i32", a)
+
+        call parquet_open_table(t, f, sample_fraction=0.5_real64, sample_seed=1234_int32)
+        call t%get("i32", b)
+        call check(error, size(a) == size(b) .and. all(a == b), &
+            "the same sample_seed did not reproduce the same sample")
+    end subroutine test_open_sample
+    !
+    !> A clone reopens the file for its own lazy reads, so it must reattach the same transform --
+    !! otherwise a column the source never touched comes back with rows the source had filtered
+    !! away, two different lengths inside one table.
+    subroutine test_clone_keeps_transform(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, c
+        type(parquet_filter) :: filt
+        type(parquet_sortkey) :: srt
+        integer(int32), allocatable :: i32(:)
+        real(real64), allocatable :: f64(:)
+        character(len=*), parameter :: f = "test_run/table_xform_clone.parquet"
+        !
+        call write_basic_fixture(f)
+        call filt%add("i32 >= 3")
+        call srt%add("-i32")
+        call parquet_open_table(t, f, filter=filt, sort=srt)
+        call t%prefetch("i32")          ! resident in the source, so it is deep-copied
+        call t%clone(c)
+        call check(error, c%nrows() == 4, "the clone lost the source's filtered row count")
+        if (allocated(error)) return
+        ! f64 was never touched in the source, so the clone must read it through its OWN reader --
+        ! the one place a missing transform would show up.
+        call c%get("f64", f64)
+        call c%get("i32", i32)
+        call check(error, size(f64) == 4, &
+            "a column read lazily through the clone's own reader ignored the transform")
+        if (allocated(error)) return
+        call check(error, all(i32 == [6_int32, 5_int32, 4_int32, 3_int32]), &
+            "the clone did not keep the source's sort order")
+        if (allocated(error)) return
+        call check(error, abs(f64(1) - 13.5_real64) < 1.0e-12_real64, &
+            "the clone's lazily-read column did not line up with its sorted key column")
+    end subroutine test_clone_keeps_transform
     !
 end module test_table

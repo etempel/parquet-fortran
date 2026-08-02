@@ -378,6 +378,55 @@ at open rather than a surprise later. See
 [the MAML format](maml-format.html#renaming-columns-for-reading-with-extra-remap) for the grammar
 and its write-side counterpart `col_map:`.
 
+## Filtering, sorting and checking rows as the file is opened
+
+`parquet_open_table` takes the same read-time transform `parquet_open_reader` does, applied once as the file is opened, so the table simply *is* the filtered/sorted/sampled result — there is no separate step and nothing downstream has to know a transform was applied:
+
+```fortran
+type(parquet_filter)  :: filt
+type(parquet_sortkey) :: srt
+type(parquet_read_qc) :: qc
+
+call filt%add("mass > 1.0e12 and quality is_not_null")
+call srt%add("-mass")
+call qc%add("mass, >0")
+
+call parquet_open_table(t, "catalogue.parquet", filter=filt, sort=srt, qc=qc)
+print *, t%nrows()          ! rows that SURVIVED the filter
+```
+
+Also accepted: `sample_fraction=`/`sample_seed=` for a random subset, `qc_soft=` to warn instead of aborting on a qc violation, and `use_threads=`. All of them mean exactly what they mean on `parquet_open_reader`.
+
+Three consequences worth stating plainly:
+
+- **Every column inherits it, including ones read much later.** A column touched for the first time long after the open still comes back with the same rows in the same order — the transform lives on the table's reader, not on any one column.
+- **`%nrows()` is the post-filter count.** With a filter or a sample active it is *not* the file's row count, and there is no way to ask for the file's original count through the table (open it a second time without the filter if you need both).
+- **`%clone` keeps it.** A clone reopens the file for its own lazy reads, and reattaches the identical transform — otherwise a column the source never touched would come back with rows the source had filtered away.
+
+### Column names: yours, not the file's
+
+**`filter=`, `sort=` and `qc=` name columns the way `%col`/`%get` do — in the table's own internal names.** For a column renamed by a read-in MAML's [`extra: remap:`](#renaming-a-files-columns-with-a-read-in-maml), that is *not* what the file calls it, and the translation is done for you:
+
+```fortran
+! the MAML says:  remap:  - mass: MASS_KG
+call filt%add("mass > 1.0e12")          ! your name, not MASS_KG
+call parquet_open_table(t, "catalogue.parquet", maml="read.maml", filter=filt)
+```
+
+A **read-in MAML's own** `extra: filter:`, `extra: sort:` and `fields: qc:` are the other way round: they name the **file's** columns, because a read-in MAML describes the physical file and travels with it. See [the MAML format](maml-format.html#filtering-and-sorting-on-read-with-extra-filter-and-extra-sort) for that grammar.
+
+When both sources are given, they compose:
+
+| | rule |
+|---|---|
+| **filter** | AND — the same way two `%add` calls on one filter already combine. Order does not matter. |
+| **sort** | the MAML's keys first (so they are the primary ones), then yours as tie-breakers. Order *does* matter here. |
+| **qc** | per **column**: if the MAML declares `qc:` for a column at all, the MAML wins in full for that column and your entry for it is dropped. See [Quality control](quality-control.html#the-merge-rule-per-column-not-per-bound). |
+
+### qc is checked on first touch, not at open
+
+Opening a table reads no column data, so a `qc=` bound is enforced when the column is actually read — on its first `%get`/`%col`, or at `%prefetch`/`%materialize_all`. This is the lazy table's normal behaviour applied to qc, not a weaker guarantee, but it has one consequence to be aware of: **a violated bound on a column the program never touches is never reported.** Call `%materialize_all` if you want every declared bound checked up front.
+
 ## Building a table in memory and writing it out
 
 `parquet_new_table` starts an empty table; the first `%add_column` fixes the row count and every

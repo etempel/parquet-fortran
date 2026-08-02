@@ -45,7 +45,7 @@ contains
         if (.not. allocated(schema%maml%lines)) return
         ! Two passes: one to count and size the deferred-length result, one to fill it. Cheaper
         ! than growing a deferred-length array entry by entry, and a remap: block is tiny.
-        call locate_remap_block(schema%maml%lines, idx_extra, extra_end, idx_remap)
+        call locate_extra_block(schema%maml%lines, "remap:", idx_extra, extra_end, idx_remap)
         if (idx_remap == 0) return
         count = 0
         width = 1
@@ -98,25 +98,26 @@ contains
         end do
     end procedure parse_read_maml_remap
     !
-    !> Finds the `remap:` key nested inside the MAML's own `extra:` section, reporting the block
-    !! bounds the caller then walks. `idx_remap` is 0 when there is no `extra:` section at all, or
-    !! none with a `remap:` key in it.
+    !> Finds `key` nested inside the MAML's own `extra:` section, reporting the block bounds the
+    !! caller then walks. `idx_key` is 0 when there is no `extra:` section at all, or none with
+    !! that key in it.
     !!
-    !! `remap:` is only meaningful nested under `extra:` -- exactly as `col_map:` is on the write
-    !! side -- because `extra:` is the one MAML section whose contents the core validator accepts
-    !! unexamined. A stray top-level `remap:` is therefore correctly rejected by that validator as
-    !! an unknown section, and never reaches here.
-    subroutine locate_remap_block(lines, idx_extra, extra_end, idx_remap)
+    !! `remap:`/`filter:`/`sort:` are only meaningful nested under `extra:` -- exactly as
+    !! `col_map:` is on the write side -- because `extra:` is the one MAML section whose contents
+    !! the core validator accepts unexamined. A stray top-level `remap:` is therefore correctly
+    !! rejected by that validator as an unknown section, and never reaches here.
+    subroutine locate_extra_block(lines, key, idx_extra, extra_end, idx_key)
         character(len=*), intent(in) :: lines(:) !! raw MAML source lines.
+        character(len=*), intent(in) :: key      !! nested key to find, with its colon ("remap:").
         integer, intent(out) :: idx_extra        !! line index of "extra:", or 0.
         integer, intent(out) :: extra_end        !! last line belonging to the extra: block.
-        integer, intent(out) :: idx_remap        !! line index of "remap:", or 0.
+        integer, intent(out) :: idx_key          !! line index of `key`, or 0.
         integer :: i, nlines
         !
         nlines = size(lines)
         idx_extra = 0
         extra_end = nlines
-        idx_remap = 0
+        idx_key = 0
         do i = 1, nlines
             if (len(lines(i)) == 0) cycle
             if (lines(i)(1:1) /= " " .and. trim(adjustl(lines(i))) == "extra:") then
@@ -135,12 +136,138 @@ contains
         end do
         do i = idx_extra + 1, extra_end
             if (len_trim(lines(i)) == 0) cycle
-            if (trim(adjustl(lines(i))) == "remap:") then
-                idx_remap = i
+            if (trim(adjustl(lines(i))) == key) then
+                idx_key = i
                 exit
             end if
         end do
-    end subroutine locate_remap_block
+    end subroutine locate_extra_block
+    !
+    module procedure parse_read_maml_string_list
+        integer :: i, idx_extra, extra_end, idx_key, count, width
+        character(len=:), allocatable :: tline, item
+        !
+        n = 0
+        allocate(character(len=1) :: items(0))
+        if (.not. allocated(schema%maml%lines)) return
+        call locate_extra_block(schema%maml%lines, key, idx_extra, extra_end, idx_key)
+        if (idx_key == 0) return
+        ! Two passes, as in parse_read_maml_remap: one to size the deferred-length result, one to
+        ! fill it.
+        count = 0
+        width = 1
+        do i = idx_key + 1, extra_end
+            if (len_trim(schema%maml%lines(i)) == 0) cycle
+            tline = trim(adjustl(schema%maml%lines(i)))
+            if (tline(1:1) /= "-") exit
+            call unquote_trimmed(tline(2:), item)
+            if (len(item) == 0) cycle
+            count = count + 1
+            width = max(width, len(item))
+        end do
+        if (count == 0) return
+        deallocate(items)
+        allocate(character(len=width) :: items(count))
+        ! Blanked element by element -- see parse_read_maml_remap's own comment for why never
+        ! `items = ""`.
+        do i = 1, count
+            items(i) = ""
+        end do
+        do i = idx_key + 1, extra_end
+            if (len_trim(schema%maml%lines(i)) == 0) cycle
+            tline = trim(adjustl(schema%maml%lines(i)))
+            if (tline(1:1) /= "-") exit
+            call unquote_trimmed(tline(2:), item)
+            if (len(item) == 0) cycle
+            n = n + 1
+            items(n) = item
+        end do
+    end procedure parse_read_maml_string_list
+    !
+    module procedure split_sort_nulls_token
+        integer :: sep
+        character(len=:), allocatable :: tail, lowered
+        integer :: i
+        !
+        nulls_first = .false.
+        key_text = trim(adjustl(entry))
+        ! The token is the LAST blank-separated word, and only when it is one of the two spellings
+        ! -- so an ordinary two-word key ("ra asc") and a bare column name are both left alone, and
+        ! anything else is handed to parquet_sortkey%add to reject with its own message.
+        sep = index(trim(key_text), " ", back=.true.)
+        if (sep == 0) return
+        tail = trim(adjustl(key_text(sep + 1:)))
+        lowered = tail
+        do i = 1, len(lowered)
+            if (lowered(i:i) >= "A" .and. lowered(i:i) <= "Z") lowered(i:i) = achar(iachar(lowered(i:i)) + 32)
+        end do
+        if (lowered == "nulls_first") then
+            nulls_first = .true.
+        else if (lowered /= "nulls_last") then
+            return
+        end if
+        key_text = trim(key_text(1:sep - 1))
+    end procedure split_sort_nulls_token
+    !
+    module procedure compose_read_transform
+        type(parquet_schema), allocatable :: read_maml
+        type(parquet_read_qc), allocatable :: qc_local
+        type(parquet_sortkey) :: sort_local
+        character(len=:), allocatable :: maml_rules(:), maml_keys(:), key_text
+        integer :: i, n_rules, n_keys
+        logical :: nulls_first
+        !
+        n_remap = 0
+        n_qc = 0
+        n_rules = 0
+        n_keys = 0
+        allocate(character(len=1) :: internal(0))
+        allocate(character(len=1) :: physical(0))
+        allocate(character(len=1) :: maml_rules(0))
+        allocate(character(len=1) :: maml_keys(0))
+        if (present(maml_file)) then
+            read_maml = parquet_load_qc_maml_file(trim(maml_file))
+            deallocate(internal, physical)
+            call parse_read_maml_remap(read_maml, internal, physical, n_remap, trim(maml_file))
+            deallocate(maml_rules, maml_keys)
+            call parse_read_maml_string_list(read_maml, "filter:", maml_rules, n_rules)
+            call parse_read_maml_string_list(read_maml, "sort:", maml_keys, n_keys)
+        end if
+        !
+        ! Filter: the caller's rules, translated out of internal names, then the MAML's own (already
+        ! file names) appended. AND is commutative, so the order is a documentation choice only.
+        if (present(filter)) then
+            out_filter = filter
+            call out_filter%remap_column_names(internal(1:n_remap), physical(1:n_remap))
+        end if
+        do i = 1, n_rules
+            call out_filter%add(trim(maml_rules(i)))
+        end do
+        !
+        ! Sort: MAML keys FIRST, because the first key is the primary one -- this half genuinely is
+        ! order-sensitive, unlike the filter above.
+        do i = 1, n_keys
+            call split_sort_nulls_token(maml_keys(i), key_text, nulls_first)
+            call out_sort%add(key_text, nulls_first=nulls_first)
+        end do
+        if (present(sort)) then
+            sort_local = sort
+            call sort_local%remap_column_names(internal(1:n_remap), physical(1:n_remap))
+            do i = 1, sort_local%n
+                call out_sort%add(trim(sort_local%keys(i)), nulls_first=sort_local%nulls_first(i))
+            end do
+        end if
+        !
+        ! qc: translated the same way, then merged per column by parquet_compose_read_qc. Both of
+        ! its sources are passed as ALLOCATABLE locals left unallocated when absent -- an
+        ! unallocated allocatable actual makes an optional dummy absent (F2018 15.5.2.12), which is
+        ! what lets one call cover all four present/absent combinations without branching.
+        if (present(qc)) then
+            qc_local = qc
+            call qc_local%remap_column_names(internal(1:n_remap), physical(1:n_remap))
+        end if
+        call parquet_compose_read_qc(read_maml, qc_local, out_qc, n_qc)
+    end procedure compose_read_transform
     !
     !> Splits one `- internal: physical` list item (leading dash already the first character) into
     !! its two unquoted halves. Both come back empty for a line that is not a well-formed entry,

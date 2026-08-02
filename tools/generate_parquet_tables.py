@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the per-kind blocks of the `parquet_tables` table layer.
 
-`parquet_table` (see feature_table.md §4 and feature_table_stage3a_table_core.md) exposes the
+`parquet_table` exposes the
 same handful of operations over all 18 column kinds -- a zero-copy pointer accessor, a
 widening copy-out, a copy-back, a from-scratch column add, and "read one file column into a
 parquet_column". Written by hand that is several hundred near-identical procedures, each
@@ -9,7 +9,7 @@ needing its own `!>`/`!!` doc-comments, so they are emitted from the kind table 
 
 The kind table itself is IMPORTED from tools/generate_parquet_columns.py rather than copied:
 one list of kinds serves both generators, so adding a kind cannot leave the two layers
-disagreeing about what exists (feature_table_stage3a_table_core.md §12b).
+disagreeing about what exists.
 
 Emitted (all COMMITTED to the repository, exactly like the parquet_columns generator's own
 output -- nothing is generated at build time, so the fpm build stays dependency-free):
@@ -250,6 +250,14 @@ module parquet_tables
         !! Deferring this is what keeps parquet_open_table schema-only -- measuring at open meant
         !! decoding every such column just to classify it.
         logical :: width_pending = .false.
+        !> .true. while a `%cast` on a column nothing has read yet is still waiting for the read
+        !! that will carry it out. `%cast` on a non-resident file-backed column only rewrites
+        !! `declared_kind` and sets this, so the first touch decodes STRAIGHT into the target
+        !! kind -- one pass instead of read-then-convert, using the reader's own numeric
+        !! conversions. Cleared by `table_materialize`, and by anything that gives the slot values
+        !! some other way. A second `%cast` while it is set materializes first, so that a chain of
+        !! casts cannot silently forget the intermediate one (see `table_cast`).
+        logical :: cast_pending = .false.
         logical :: file_source = .false.           !! .true. iff a backing file column exists.
         logical :: predefined = .false.            !! reserved: a generated accessor exists for it.
         logical :: user_populated = .false.        !! .true. once user values were written into it.
@@ -512,7 +520,8 @@ def gen_table_type():
         ! --- mutation: whole columns (never changes the row set) ---
         procedure :: drop_column => table_drop_column     !! Remove a column; force= for a predefined one.
         procedure :: rename_column => table_rename_column !! Change the name a column is looked up by.
-        procedure :: cast_column => table_cast_column     !! Add a new column of another numeric kind.
+        procedure :: copy_column => table_copy_column     !! Add a copy of a column, optionally of another kind.
+        procedure :: cast => table_cast                   !! Convert a column to another kind, in place.
         ! --- mutation: the row set itself -- every one of these DETACHES the table ---
         procedure :: filter_rows => table_filter_rows !! Keep only the rows a mask selects.
         procedure :: sort_by => table_sort_by         !! Reorder rows by one or more key columns.
@@ -1270,20 +1279,46 @@ def gen_spec_interfaces():
             character(len=*), intent(in) :: old_name    !! the column to rename.
             character(len=*), intent(in) :: new_name    !! its new name; must not already exist.
         end subroutine table_rename_column
-        !> Adds a NEW column holding `name`'s values converted to `to_kind`, leaving the source
-        !! column untouched. A column's stored kind is never mutated in place; this is the
-        !! explicit escape hatch when `%append` reports a kind mismatch.
+        !> Adds a NEW column holding a copy of `name`'s values, leaving the source column
+        !! untouched. With `to_kind` absent it is a plain deep copy and works for EVERY kind the
+        !! library can read -- string, temporal, logical and the vector kinds included. With
+        !! `to_kind` given it copies and converts, and the conversion rules are `%cast`'s.
         !!
-        !! Only the numeric scalar kinds convert. A value that would not survive the round trip
-        !! is an error naming the row and the value, checked over the WHOLE column before
-        !! anything is written, so a rejected cast leaves the table exactly as it was. The unit
-        !! carries over unchanged -- a kind cast is not a unit change.
-        module subroutine table_cast_column(self, name, new_name, to_kind)
+        !! `exact` defaults to `.true.` here, the opposite of `%cast`: a copy is usually taken to
+        !! keep something, so a value that would not survive the round trip is an error naming the
+        !! row and the value rather than a silent truncation. Every value is checked before
+        !! anything is written, so a rejected copy leaves the table exactly as it was. The unit
+        !! carries over unchanged -- a kind conversion is not a unit change.
+        module subroutine table_copy_column(self, name, new_name, to_kind, exact)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! the source column.
             character(len=*), intent(in) :: new_name    !! the column to create.
+            integer, intent(in), optional :: to_kind    !! target PK_* kind; absent keeps the source's.
+            logical, intent(in), optional :: exact      !! .false. to allow lossy narrowing (default .true.).
+        end subroutine table_copy_column
+        !> Converts a column to `to_kind` IN PLACE, so that `%col` can be called with a kind the
+        !! calling code has decided on rather than the one the file happens to hold. A column
+        !! already of `to_kind` is left alone.
+        !!
+        !! The conversions allowed are exactly those the reader and writer already perform
+        !! between numeric kinds: int32 <-> int64, float32 <-> float64, and either integer kind
+        !! to or from either real kind, scalar or vector, never changing a column's width. An
+        !! integer overflow, and a real value with a fractional part converted to an integer
+        !! kind, are errors naming the row and the value. Anything else -- logical, string,
+        !! temporal, or a conversion that would change a column's rank -- is refused outright.
+        !!
+        !! `exact` defaults to `.false.`: precision loss (real64 to real32, or a large integer to
+        !! a real kind) is silent, exactly as it is on the read path. Pass `.true.` to make any
+        !! value that would not survive the round trip an error instead.
+        !!
+        !! **This invalidates any pointer previously taken from `%col`** for this column, which
+        !! Fortran cannot detect -- take the pointer again afterwards.
+        module subroutine table_cast(self, name, to_kind, exact)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! the column to convert.
             integer, intent(in) :: to_kind              !! target PK_* kind.
-        end subroutine table_cast_column
+            logical, intent(in), optional :: exact      !! .true. to refuse any precision loss.
+        end subroutine table_cast
         !> Appends an already-built `parquet_column` as a new column. The kind-generic
         !! `%add_column` covers every case a user has; this is the internal path for code that
         !! already holds a column of the right shape and only needs it slotted in.

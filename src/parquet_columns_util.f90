@@ -18,8 +18,8 @@
 !! scanned. Bit `b` (1-based) lives in block `(b-1)/64 + 1` at position `mod(b-1, 64)`. It is
 !! indexed per ELEMENT, not per row, so a vector column needs `nrows*width` bits (RF8).
 !! Measured against stdlib's `bitset_large`, this is 1.6-2x faster on random set/test and on the
-!! reindex rebuild at identical memory, and it has no int32 bit-index ceiling — see
-!! feature_table_stage1_columns.md, "Spike results".
+!! reindex rebuild at identical memory, and it has no int32 bit-index ceiling — which is why this
+!! library takes no stdlib dependency for it.
 submodule (parquet_columns) parquet_columns_util
     implicit none
 contains

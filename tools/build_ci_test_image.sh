@@ -23,8 +23,8 @@
 #
 # Run this once, and again whenever this script's install steps or .gitlab-ci.yml's
 # "test" job before_script changes -- NOT before every test run. Once built, use
-# tools/run_ci_test_job_docker_image.sh to actually run `fpm test` against it,
-# which skips this whole install step and starts testing in seconds.
+# tools/run_ci_test_image.sh to run something against it, which skips this whole
+# install step and starts in seconds.
 #
 # Usage: tools/build_ci_test_image.sh
 # Run from the parquet-fortran repo root (or anywhere -- it cds to the repo root itself).
@@ -50,7 +50,26 @@ docker run \
     apt-get update -y
     apt-get upgrade -y
     apt-get install -y --no-install-recommends ca-certificates lsb-release wget gnupg \
-      gfortran gcc g++ make git git-lfs flang
+      gfortran gcc g++ make git git-lfs
+
+    # Prefer a newer Flang on Ubuntu 24.04 amd64 when available.
+    if apt-get install -y --no-install-recommends flang-20; then
+      echo "Installed flang-20"
+    elif apt-get install -y --no-install-recommends flang-19; then
+      echo "Installed flang-19"
+    else
+      apt-get install -y --no-install-recommends flang
+      echo "Installed distro default flang"
+    fi
+
+    # Normalize command name so callers can always run `flang`.
+    if command -v flang-20 >/dev/null 2>&1; then
+      ln -sf "$(command -v flang-20)" /usr/local/bin/flang
+    elif command -v flang-19 >/dev/null 2>&1; then
+      ln -sf "$(command -v flang-19)" /usr/local/bin/flang
+    elif command -v flang-new >/dev/null 2>&1; then
+      ln -sf "$(command -v flang-new)" /usr/local/bin/flang
+    fi
 
     apt-get install -y python3-venv python3-pip
     python3 -m pip install --no-cache-dir --break-system-packages pipx
@@ -70,7 +89,11 @@ docker run \
     ACCEPT_EULA=accept apt-get install -y intel-oneapi-compiler-fortran
 
     # Load full oneAPI environment in this build shell.
+    # oneAPI setvars.sh reads optional vars that may be unset, which is
+    # incompatible with nounset (-u). Relax -u only for this call.
+    set +u
     source /opt/intel/oneapi/setvars.sh
+    set -u
 
     # Auto-load full oneAPI environment in future interactive bash sessions.
     printf "%s\n" "source /opt/intel/oneapi/setvars.sh" >/etc/profile.d/oneapi.sh

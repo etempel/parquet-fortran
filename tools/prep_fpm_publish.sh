@@ -103,6 +103,7 @@ REMOVE_PATHS=(
     tools/generate_logo_svg.py
     tools/mirror_to_github.sh
     tools/prep_github_mirroring.sh
+    tools/run_ci_test_image.sh
     tools/run_error_scenarios.sh
     tools/run_generate_fixtures.sh
     tools/run_lint_check.sh

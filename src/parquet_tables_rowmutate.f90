@@ -279,8 +279,8 @@ contains
     !!
     !! A kind mismatch is a hard error rather than a silent widen. The widening rule elsewhere in
     !! this type is a READ rule -- it chooses the type a caller receives -- whereas an append
-    !! would have to change the destination column's stored kind, which is never done in place.
-    !! `%cast_column` is the explicit way round it.
+    !! would have to change the destination column's stored kind behind the caller's back.
+    !! `%cast` is the explicit way round it.
     !!
     !! A unit mismatch is an error for a sharper reason: there is no unit conversion in this
     !! library, so concatenating "m/s" rows with "km/h" rows would produce a column whose rows
@@ -300,7 +300,7 @@ contains
             call parquet_kind_name(other%cache%cols(j)%values%kindof(), theirs)
             call table_context_suffix(self%cache, self%cache%cols(i)%name, sfx)
             error stop EP // "append: this column is " // mine // " here but " // theirs // &
-                " in the appended table; convert it first (%cast_column)" // sfx
+                " in the appended table; convert it first (%cast)" // sfx
         end if
         if (self%cache%cols(i)%values%colwidth() /= other%cache%cols(j)%values%colwidth()) then
             write(want, "(I0)") self%cache%cols(i)%values%colwidth()

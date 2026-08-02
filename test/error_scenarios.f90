@@ -1227,14 +1227,28 @@ program error_scenarios
         call scenario_table_rename_duplicate_name()
     case ("table_rename_blank_name")
         call scenario_table_rename_blank_name()
-    case ("table_cast_unsupported_kind")
-        call scenario_table_cast_unsupported_kind()
-    case ("table_cast_duplicate_name")
-        call scenario_table_cast_duplicate_name()
-    case ("table_cast_blank_name")
-        call scenario_table_cast_blank_name()
-    case ("table_cast_lossy_value")
-        call scenario_table_cast_lossy_value()
+    case ("table_copy_unsupported_kind")
+        call scenario_table_copy_unsupported_kind()
+    case ("table_copy_duplicate_name")
+        call scenario_table_copy_duplicate_name()
+    case ("table_copy_blank_name")
+        call scenario_table_copy_blank_name()
+    case ("table_copy_lossy_value")
+        call scenario_table_copy_lossy_value()
+    case ("table_cast_non_numeric")
+        call scenario_table_cast_non_numeric()
+    case ("table_cast_rank_change")
+        call scenario_table_cast_rank_change()
+    case ("table_cast_int_overflow")
+        call scenario_table_cast_int_overflow()
+    case ("table_cast_fractional")
+        call scenario_table_cast_fractional()
+    case ("table_cast_float_overflow")
+        call scenario_table_cast_float_overflow()
+    case ("table_cast_exact_precision")
+        call scenario_table_cast_exact_precision()
+    case ("table_cast_unsupported_column")
+        call scenario_table_cast_unsupported_column()
     case ("table_clone_type_mismatch")
         call scenario_table_clone_type_mismatch()
     case ("table_row_string_kind_mismatch")
@@ -8933,7 +8947,7 @@ contains
 
     !> append requires identical kinds: silently widening an int32 source into a float64 target
     !! would change the target column's storage kind, which section E of feature_table.md rules
-    !! out (use cast_column instead).
+    !! out (use %copy_column instead).
     subroutine scenario_columns_append_kind_mismatch()
         type(parquet_column) :: a, b
         call a%init(PK_FLOAT64, 2_int64)
@@ -10385,44 +10399,115 @@ contains
         print '(a,i0)', "unexpectedly renamed a column to a blank name, ncols=", t%ncols()
     end subroutine scenario_table_rename_blank_name
 
-    subroutine scenario_table_cast_unsupported_kind()
+    subroutine scenario_table_copy_unsupported_kind()
         type(parquet_table) :: t
         character(len=4) :: s(2)
         s = ["ab  ", "cd  "]
         call parquet_new_table(t)
         call t%add_column("s", s)
-        call t%cast_column("s", "si", PK_INT64)   ! strings do not cast -> aborts
-        print '(a,i0)', "unexpectedly cast a string column, ncols=", t%ncols()
-    end subroutine scenario_table_cast_unsupported_kind
+        call t%copy_column("s", "si", PK_INT64)   ! strings do not cast -> aborts
+        print '(a,i0)', "unexpectedly copied a string column, ncols=", t%ncols()
+    end subroutine scenario_table_copy_unsupported_kind
 
-    subroutine scenario_table_cast_duplicate_name()
+    subroutine scenario_table_copy_duplicate_name()
         type(parquet_table) :: t
         call parquet_new_table(t)
         call t%add_column("a", [1_int32])
         call t%add_column("b", [2_int32])
-        call t%cast_column("a", "b", PK_INT64)   ! -> aborts
-        print '(a,i0)', "unexpectedly cast onto an existing column name, ncols=", t%ncols()
-    end subroutine scenario_table_cast_duplicate_name
+        call t%copy_column("a", "b", PK_INT64)   ! -> aborts
+        print '(a,i0)', "unexpectedly copied onto an existing column name, ncols=", t%ncols()
+    end subroutine scenario_table_copy_duplicate_name
 
     !> Checked AFTER the duplicate-name guard (a blank name can never collide with an existing
     !! one, so that check alone would never catch it) and before any value is read.
-    subroutine scenario_table_cast_blank_name()
+    subroutine scenario_table_copy_blank_name()
         type(parquet_table) :: t
         call parquet_new_table(t)
         call t%add_column("a", [1_int32])
-        call t%cast_column("a", "   ", PK_INT64)   ! -> aborts
-        print '(a,i0)', "unexpectedly cast a column to a blank name, ncols=", t%ncols()
-    end subroutine scenario_table_cast_blank_name
+        call t%copy_column("a", "   ", PK_INT64)   ! -> aborts
+        print '(a,i0)', "unexpectedly copied a column to a blank name, ncols=", t%ncols()
+    end subroutine scenario_table_copy_blank_name
 
     !> A cast the caller asked for by name must not silently truncate: the whole column is
     !! checked before anything is written, so the table is left exactly as it was.
-    subroutine scenario_table_cast_lossy_value()
+    subroutine scenario_table_copy_lossy_value()
         type(parquet_table) :: t
         call parquet_new_table(t)
         call t%add_column("a", [1.5_real64, 2.0_real64])
-        call t%cast_column("a", "ai", PK_INT32)   ! 1.5 is not a whole number -> aborts
+        call t%copy_column("a", "ai", PK_INT32)   ! 1.5 is not a whole number -> aborts
         print '(a,i0)', "unexpectedly cast a value that cannot be represented, ncols=", t%ncols()
-    end subroutine scenario_table_cast_lossy_value
+    end subroutine scenario_table_copy_lossy_value
+
+    !> %cast is restricted to the kinds the reader and writer already convert between, so a
+    !! string column has no conversion to offer and the request is refused outright.
+    subroutine scenario_table_cast_non_numeric()
+        type(parquet_table) :: t
+        character(len=4) :: s(2)
+        s = ["ab  ", "cd  "]
+        call parquet_new_table(t)
+        call t%add_column("s", s)
+        call t%cast("s", PK_INT64)   ! strings do not convert -> aborts
+        print '(a,i0)', "unexpectedly cast a string column, kind=", t%kind("s")
+    end subroutine scenario_table_cast_non_numeric
+
+    !> Scalar and vector kinds differ in how many values a row holds, so converting one into the
+    !! other is a reshape rather than a conversion and is refused.
+    subroutine scenario_table_cast_rank_change()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32])
+        call t%cast("a", PK_INT32_VEC)   ! -> aborts
+        print '(a,i0)', "unexpectedly reshaped a column by casting, width=", t%width("a")
+    end subroutine scenario_table_cast_rank_change
+
+    !> An integer that does not fit the target width aborts rather than wrapping -- the same rule
+    !! the reader and the writer both apply to an int64 narrowed to int32.
+    subroutine scenario_table_cast_int_overflow()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int64, 3000000000_int64])
+        call t%cast("a", PK_INT32)   ! 3e9 does not fit int32 -> aborts
+        print '(a,i0)', "unexpectedly narrowed an out-of-range integer, kind=", t%kind("a")
+    end subroutine scenario_table_cast_int_overflow
+
+    !> A real with a fractional part converted to an integer kind aborts even under the default
+    !! (lossy-allowed) rules: rounding a caller's data silently is never the intent.
+    subroutine scenario_table_cast_fractional()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [1.5_real64, 2.0_real64])
+        call t%cast("a", PK_INT32)   ! 1.5 is not a whole number -> aborts
+        print '(a,i0)', "unexpectedly cast a fractional value to an integer kind, kind=", t%kind("a")
+    end subroutine scenario_table_cast_fractional
+
+    !> A FINITE real64 too large for real32 aborts rather than quietly becoming infinity. Losing
+    !! digits is what the default rules allow; losing the number itself is not.
+    subroutine scenario_table_cast_float_overflow()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [1.0_real64, 1.0e300_real64])
+        call t%cast("a", PK_FLOAT32)   ! 1e300 overflows real32 -> aborts
+        print '(a,i0)', "unexpectedly overflowed a float32 cast, kind=", t%kind("a")
+    end subroutine scenario_table_cast_float_overflow
+
+    !> exact=.true. additionally refuses the precision loss the default makes silently.
+    subroutine scenario_table_cast_exact_precision()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [1.0_real64, 0.1_real64])
+        call t%cast("a", PK_FLOAT32, exact=.true.)   ! 0.1 has no exact real32 form -> aborts
+        print '(a,i0)', "unexpectedly accepted a lossy exact= cast, kind=", t%kind("a")
+    end subroutine scenario_table_cast_exact_precision
+
+    !> A column whose physical type the table layer cannot read holds no values to convert, and
+    !! %cast has to say so itself: it looks the column up WITHOUT resolving it, precisely so that
+    !! the deferred path can decide before any read happens.
+    subroutine scenario_table_cast_unsupported_column()
+        type(parquet_table) :: t
+        call parquet_open_table(t, "test/fixtures/extended_types.parquet")
+        call t%cast("v_uint32", PK_FLOAT64)   ! -> aborts
+        print '(a,i0)', "unexpectedly cast an unsupported column, ncols=", t%ncols()
+    end subroutine scenario_table_cast_unsupported_column
 
     !> Cloning into a different table type would silently produce a copy without the extended
     !! type's own accessors, so it is refused.

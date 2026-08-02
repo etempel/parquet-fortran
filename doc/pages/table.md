@@ -576,7 +576,7 @@ individual procedure:
 | class | what it does | detaches? |
 |---|---|---|
 | **cell** — `%set_element`, `%set_null`, `%clear_null` | changes values in place | no |
-| **column** — `%add_column`, `%drop_column`, `%rename_column`, `%cast_column` | changes which columns exist | no |
+| **column** — `%add_column`, `%drop_column`, `%rename_column`, `%copy_column`, `%cast` | changes which columns exist, or a column's kind | no |
 | **row** — `%filter_rows`, `%sort_by`, `%delete_rows`, `%truncate`, `%append`, `%append_null_rows` | changes which rows exist | **yes** |
 
 ```fortran
@@ -585,6 +585,59 @@ call t%filter_rows(mass > 1.0e10_real64) ! keep the rows a mask selects
 call t%sort_by(["mass"], descending=[.true.])
 call t%drop_column("scratch")
 ```
+
+### Changing a column's type
+
+`%col` hands back a typed pointer and insists on the exact stored kind, which is awkward when the
+code knows what type it wants to work in but not what type the file happens to hold. `%cast`
+settles that: it converts the column itself, so the `%col` call afterwards is the one the code was
+written for.
+
+```fortran
+call t%cast("mass", PK_FLOAT64)   ! whatever it was stored as, it is float64 now
+call t%col("mass", mass)          ! ... so this pointer is the right kind by construction
+```
+
+A column already of the requested kind is left alone, so this is safe to call unconditionally.
+
+**The conversions allowed are exactly those the reader and the writer already perform** between
+numeric kinds — see [Reading a column into a different numeric
+kind](supported-data-types.html#reading-a-column-into-a-different-numeric-kind). In short:
+`int32` ↔ `int64`, `float32` ↔ `float64`, and either integer kind to or from either real kind,
+scalar or vector. Anything else is refused: there is no conversion between a logical, string or
+temporal column and a numeric one, and none between a scalar column and a vector one (that would
+change the column's width, which is a reshape rather than a conversion).
+
+Two kinds of loss are treated differently, again matching the read path:
+
+- **An integer that does not fit, and a real with a fractional part converted to an integer kind,
+  are errors** naming the row and the value. So is a finite `float64` too large for `float32`,
+  which would otherwise quietly become infinity.
+- **Losing digits is silent.** `float64` → `float32`, and a large integer into a real kind, round
+  the way a plain Fortran conversion would. Pass `exact=.true.` to make those an error too.
+
+`%cast` keeps the column's nulls, its unit and its row count. It does **not** keep a pointer:
+
+> **A pointer from `%col` does not survive a `%cast` of that column.** The conversion replaces the
+> column's storage, so take the pointer again afterwards. Fortran cannot detect this.
+
+A cast asked for **before anything has read the column** is carried out by the read itself: the
+column is decoded straight into the target kind in one pass, rather than being read and then
+converted. This is invisible except for one thing worth knowing — the reader performs the
+conversion in that case, and the reader does not check for the precision loss described above, so
+`exact=.true.` reads the column first rather than deferring.
+
+To keep the original column as well, copy instead of casting:
+
+```fortran
+call t%copy_column("mass", "mass_f32", PK_FLOAT32)   ! adds a column, leaves "mass" alone
+call t%copy_column("mass", "mass_backup")           ! no target kind: a plain copy
+```
+
+`%copy_column` with no `to_kind` copies **any** column — string, temporal and vector columns
+included — and with one, converts by `%cast`'s rules. It differs in one deliberate way: `exact`
+defaults to `.true.` here, because a copy is usually taken in order to keep something, so a value
+that would not survive the round trip is refused rather than truncated.
 
 ### What "detaching" means
 
@@ -632,7 +685,7 @@ call t%append(batch)
 `%append` requires the appended table's columns to be a subset of this table's, with matching
 kinds, widths and units. A column this table has and the batch does not is **null-filled**; a
 column the batch has and this table does not is an error rather than being silently dropped; a
-kind mismatch is an error too, and `%cast_column` is the way round it. There is no unit
+kind mismatch is an error too, and `%cast` is the way round it. There is no unit
 conversion, so appending "km/h" rows to an "m/s" column is refused.
 
 `%append(row)` adds one row from a `parquet_table_row` handle. It is convenient but slow in bulk —
@@ -676,8 +729,9 @@ This is still a deliberately narrow version of the table layer.
 - **A table is not thread-safe to mutate.** Reading resident columns from several threads is
   fine, and each thread may open and read its own table; every mutation is a single-threaded
   operation.
-- **`%cast_column` converts only between the numeric scalar kinds**, and refuses any value that
-  would not survive the round trip rather than truncating it.
+- **`%cast` and `%copy_column` convert only between the numeric kinds** (`%copy_column` with no
+  target kind copies any kind at all). Logical, string and temporal columns have no conversion,
+  and a conversion never changes a column's width.
 - **`%append` null-fills a missing column; a per-column default value is not available.** Fill
   the batch explicitly if you want something other than nulls.
 - **Units are not read from the file.** `%unit` reports what `%add_column(unit=)` stored, and `""`

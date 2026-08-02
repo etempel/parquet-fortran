@@ -38,6 +38,9 @@ module test_table
     !
     !> Row count every fixture in this suite uses.
     integer, parameter :: NROW = 6
+    !> An int64 real32 cannot hold exactly (needs more than 24 mantissa bits), used by the
+    !! cast tests to make a trip through float32 observable.
+    integer(int64), parameter :: WIDE_INT = 1234567891234_int64
     !> Vector width every vector fixture in this suite uses.
     integer, parameter :: NVEC = 3
     !
@@ -119,8 +122,20 @@ contains
                 test_drop_column), &
             new_unittest("rename_column changes the lookup name, not the file column", &
                 test_rename_column), &
-            new_unittest("cast_column adds a converted column and leaves the source alone", &
-                test_cast_column), &
+            new_unittest("copy_column adds a converted column and leaves the source alone", &
+                test_copy_column), &
+            new_unittest("copy_column with no target kind copies any column kind", &
+                test_copy_column_same_kind), &
+            new_unittest("cast converts a column in place across the numeric kinds", &
+                test_cast_in_place), &
+            new_unittest("cast on a vector column converts every element", &
+                test_cast_vector), &
+            new_unittest("cast before a first touch reads straight into the target kind", &
+                test_cast_deferred), &
+            new_unittest("cast keeps nulls, unit and row count, and is a no-op on the same kind", &
+                test_cast_preserves), &
+            new_unittest("cast(exact=.true.) refuses a loss that the default allows", &
+                test_cast_exact_flag), &
             new_unittest("filter_rows keeps the selected rows in every column and detaches", &
                 test_filter_rows), &
             new_unittest("delete_rows and truncate handle repeats and past-the-end counts", &
@@ -3060,7 +3075,7 @@ contains
     !
     !> A cast produces a NEW column, leaves the source alone, carries nulls and the unit over,
     !! and refuses a value it cannot represent (that refusal is an error scenario).
-    subroutine test_cast_column(error)
+    subroutine test_copy_column(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table) :: t
         real(real64) :: v(NROW)
@@ -3076,8 +3091,8 @@ contains
         call parquet_new_table(t)
         call t%add_column("x", v, unit="m/s")
         call t%set_null("x", 5)
-        call t%cast_column("x", "xi", PK_INT64)
-        call check(error, t%has_column("xi"), "cast_column should create the new column")
+        call t%copy_column("x", "xi", PK_INT64)
+        call check(error, t%has_column("xi"), "copy_column should create the new column")
         if (allocated(error)) return
         call check(error, t%kind("xi") == PK_INT64, "the new column should hold the target kind")
         if (allocated(error)) return
@@ -3096,26 +3111,308 @@ contains
         call check(error, gf64(2) == 2.0_real64, "the source column's values should be untouched")
         if (allocated(error)) return
         ! Widening the other way, and to a narrower float, both round-trip when exact.
-        call t%cast_column("xi", "xf", PK_FLOAT32)
+        call t%copy_column("xi", "xf", PK_FLOAT32)
         call check(error, t%kind("xf") == PK_FLOAT32, "cast to float32 should produce a float32 column")
         if (allocated(error)) return
-        call t%cast_column("xi", "xs", PK_INT32)
+        call t%copy_column("xi", "xs", PK_INT32)
         call check(error, t%kind("xs") == PK_INT32, "cast to int32 should produce an int32 column")
         if (allocated(error)) return
         call t%get("xs", gi32)
         call check(error, gi32(2) == 2_int32, "a narrowing cast should keep an exactly representable value")
         if (allocated(error)) return
-        ! cast_read_value's own int32/float32 SOURCE branches: everything above casts FROM a
-        ! float64 or int64 source, never from int32 or float32, so those two branches are still
-        ! untouched -- cast xs (int32) and xf (float32) onward to exercise them.
-        call t%cast_column("xs", "xs_i64", PK_INT64)
+        ! The int32 and float32 SOURCE arms: everything above converts FROM a float64 or int64
+        ! source, never from int32 or float32, so those two arms are still untouched -- copy xs
+        ! (int32) and xf (float32) onward to exercise them.
+        call t%copy_column("xs", "xs_i64", PK_INT64)
         call t%get("xs_i64", gi64)
         call check(error, gi64(2) == 2_int64, "casting FROM an int32 source should convert exactly")
         if (allocated(error)) return
-        call t%cast_column("xf", "xf_f64", PK_FLOAT64)
+        call t%copy_column("xf", "xf_f64", PK_FLOAT64)
         call t%get("xf_f64", gf64)
         call check(error, gf64(2) == 2.0_real64, "casting FROM a float32 source should convert exactly")
-    end subroutine test_cast_column
+    end subroutine test_copy_column
+    !
+    !> %copy_column with no `to_kind` is a plain deep copy, and unlike the converting form it is
+    !! not restricted to the numeric kinds -- every kind the library can read copies.
+    subroutine test_copy_column_same_kind(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        character(len=8) :: s(NROW)
+        type(parquet_date) :: d(NROW)
+        integer(int32) :: v(NVEC, NROW)
+        character(len=:), allocatable :: gs(:)
+        integer(int32), pointer :: p(:,:)
+        integer :: i, e
+        !
+        ! First element deliberately the shortest (CLAUDE.md).
+        s = ["a       ", "bcd     ", "ef      ", "ghijklm ", "no      ", "p       "]
+        do i = 1, NROW
+            d(i) = parquet_date(2026, 3, i)
+            do e = 1, NVEC
+                v(e, i) = int(i * 10 + e, int32)
+            end do
+        end do
+        call parquet_new_table(t)
+        call t%add_column("s", s)
+        call t%add_column("d", d)
+        call t%add_column("v", v, unit="km")
+        call t%set_null("s", 2)
+        !
+        call t%copy_column("s", "s2")
+        call check(error, t%kind("s2") == PK_STRING, "a string column should copy as a string column")
+        if (allocated(error)) return
+        call t%get("s2", gs)
+        call check(error, trim(gs(4)) == "ghijklm", "a copied string column should keep its values")
+        if (allocated(error)) return
+        call check(error, t%is_null("s2", 2), "a copied string column should keep its nulls")
+        if (allocated(error)) return
+        call t%copy_column("d", "d2")
+        call check(error, t%kind("d2") == PK_DATE, "a date column should copy as a date column")
+        if (allocated(error)) return
+        call t%copy_column("v", "v2")
+        call check(error, t%kind("v2") == PK_INT32_VEC .and. t%width("v2") == NVEC, &
+            "a vector column should copy with its kind and width")
+        if (allocated(error)) return
+        ! The copy must be independent: writing through it must not reach the source.
+        call t%col("v2", p)
+        p(1, 1) = -99_int32
+        call t%col("v", p)
+        call check(error, p(1, 1) == 11_int32, "a copy should not share storage with its source")
+    end subroutine test_copy_column_same_kind
+    !
+    !> %cast rewrites a column's own storage, so %col afterwards takes the TARGET kind's pointer.
+    !! Walks every conversion between the four numeric scalar kinds in both directions.
+    subroutine test_cast_in_place(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer(int32) :: a(NROW)
+        integer(int64), pointer :: p_i64(:)
+        integer(int32), pointer :: p_i32(:)
+        real(real32), pointer :: p_f32(:)
+        real(real64), pointer :: p_f64(:)
+        integer :: i
+        !
+        do i = 1, NROW
+            a(i) = int(i, int32)
+        end do
+        call parquet_new_table(t)
+        call t%add_column("a", a)
+        ! int32 -> int64 -> float64 -> float32 -> int32, back where it started.
+        call t%cast("a", PK_INT64)
+        call check(error, t%kind("a") == PK_INT64, "cast should change the column's reported kind")
+        if (allocated(error)) return
+        call t%col("a", p_i64)
+        call check(error, all(p_i64 == [(int(i, int64), i = 1, NROW)]), &
+            "int32 -> int64 should convert every value exactly")
+        if (allocated(error)) return
+        call t%cast("a", PK_FLOAT64)
+        call t%col("a", p_f64)
+        call check(error, all(p_f64 == [(real(i, real64), i = 1, NROW)]), &
+            "int64 -> float64 should convert every value exactly")
+        if (allocated(error)) return
+        call t%cast("a", PK_FLOAT32)
+        call t%col("a", p_f32)
+        call check(error, all(p_f32 == [(real(i, real32), i = 1, NROW)]), &
+            "float64 -> float32 should convert every value exactly")
+        if (allocated(error)) return
+        call t%cast("a", PK_INT32)
+        call t%col("a", p_i32)
+        call check(error, all(p_i32 == a), "float32 -> int32 should return the original values")
+        if (allocated(error)) return
+        ! The remaining direct pairs the ring above does not cover.
+        call t%cast("a", PK_FLOAT32)
+        call t%cast("a", PK_INT64)
+        call t%col("a", p_i64)
+        call check(error, all(p_i64 == [(int(i, int64), i = 1, NROW)]), &
+            "float32 -> int64 should convert every value exactly")
+        if (allocated(error)) return
+        call t%cast("a", PK_FLOAT32)
+        call t%cast("a", PK_FLOAT64)
+        call t%cast("a", PK_INT32)
+        call t%cast("a", PK_FLOAT64)
+        call t%col("a", p_f64)
+        call check(error, all(p_f64 == [(real(i, real64), i = 1, NROW)]), &
+            "int32 -> float64 should convert every value exactly")
+        if (allocated(error)) return
+        call t%cast("a", PK_INT64)
+        call t%cast("a", PK_INT32)
+        call t%col("a", p_i32)
+        call check(error, all(p_i32 == a), "int64 -> int32 should keep an in-range value")
+        if (allocated(error)) return
+        call t%cast("a", PK_FLOAT32)
+        call t%cast("a", PK_FLOAT64)
+        call t%col("a", p_f64)
+        call check(error, all(p_f64 == [(real(i, real64), i = 1, NROW)]), &
+            "float32 -> float64 should convert every value exactly")
+    end subroutine test_cast_in_place
+    !
+    !> A vector column casts element by element, keeping its width.
+    subroutine test_cast_vector(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer(int32) :: v(NVEC, NROW)
+        real(real64) :: w(NVEC, NROW)
+        integer(int64), pointer :: p_i64v(:,:)
+        integer(int32), pointer :: p_i32v(:,:)
+        integer :: i, e
+        !
+        do i = 1, NROW
+            do e = 1, NVEC
+                v(e, i) = int(i * 10 + e, int32)
+                w(e, i) = real(i * 10 + e, real64)
+            end do
+        end do
+        call parquet_new_table(t)
+        call t%add_column("v", v, unit="km")
+        call t%add_column("w", w)
+        call t%set_null("v", 3)
+        !
+        call t%cast("v", PK_INT64_VEC)
+        call check(error, t%kind("v") == PK_INT64_VEC, "a vector cast should give the vector target kind")
+        if (allocated(error)) return
+        call check(error, t%width("v") == NVEC, "a vector cast should keep the column's width")
+        if (allocated(error)) return
+        call t%col("v", p_i64v)
+        call check(error, p_i64v(2, 5) == 52_int64, "a vector cast should convert every element")
+        if (allocated(error)) return
+        call check(error, t%is_null("v", 3), "a vector cast should keep the row's null")
+        if (allocated(error)) return
+        ! float64 vector down to an int32 vector: whole numbers, so nothing is refused.
+        call t%cast("w", PK_INT32_VEC)
+        call t%col("w", p_i32v)
+        call check(error, p_i32v(3, 6) == 63_int32, &
+            "a float64 -> int32 vector cast should convert every element")
+    end subroutine test_cast_vector
+    !
+    !> A cast asked for before anything has read the column is carried out BY the read: the slot
+    !! stays empty until first touch, and then arrives already holding the target kind.
+    subroutine test_cast_deferred(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        character(len=*), parameter :: fname = "test_run/table_cast_deferred.parquet"
+        character(len=*), parameter :: wide_fname = "test_run/table_cast_deferred_wide.parquet"
+        real(real64), pointer :: p_f64(:)
+        integer(int64), pointer :: p_i64(:)
+        integer :: i
+        !
+        call write_basic_fixture(fname)
+        call parquet_open_table(t, fname)
+        call check(error, t%kind("i32") == PK_INT32, "the file column should start as int32")
+        if (allocated(error)) return
+        call t%cast("i32", PK_FLOAT64)
+        call check(error, t%kind("i32") == PK_FLOAT64, "a deferred cast should report the target kind")
+        if (allocated(error)) return
+        call check(error, t%residency("i32") == RES_EMPTY, &
+            "a deferred cast should not have read the column")
+        if (allocated(error)) return
+        call t%col("i32", p_f64)
+        call check(error, all(p_f64 == [(real(i, real64), i = 1, NROW)]), &
+            "the first touch should decode straight into the cast kind")
+        if (allocated(error)) return
+        call check(error, t%residency("i32") == RES_FULL, "the first touch should have read the column")
+        if (allocated(error)) return
+        ! A SECOND cast while the first is still pending has to materialize rather than simply
+        ! overwrite the pending kind, or the first cast's loss would be silently skipped. The
+        ! fixture's value needs more than real32's 24 mantissa bits, so going through float32
+        ! and on to float64 lands somewhere int64 -> float64 (exact below 2**53) never would.
+        call write_wide_int_fixture(wide_fname)
+        call parquet_open_table(t, wide_fname)
+        call t%cast("big", PK_FLOAT32)
+        call t%cast("big", PK_FLOAT64)
+        call t%col("big", p_f64)
+        call check(error, p_f64(1) == real(real(WIDE_INT, real32), real64), &
+            "a chained cast should apply the intermediate conversion, not skip it")
+        if (allocated(error)) return
+        call check(error, p_f64(1) /= real(WIDE_INT, real64), &
+            "skipping the intermediate cast would have kept the value exact -- it must not")
+        if (allocated(error)) return
+        ! And the ordinary case: cast after the column is already resident.
+        call parquet_open_table(t, fname)
+        call t%prefetch("i32")
+        call t%cast("i32", PK_INT64)
+        call t%col("i32", p_i64)
+        call check(error, all(p_i64 == [(int(i, int64), i = 1, NROW)]), &
+            "an eager cast should convert the values already read")
+    end subroutine test_cast_deferred
+    !
+    !> An int64 needing more than real32's 24 mantissa bits, so that a trip through float32 is
+    !! observable in the result rather than being an exact round trip.
+    subroutine write_wide_int_fixture(fname)
+        character(len=*), intent(in) :: fname !! file to write.
+        type(parquet_writer) :: w
+        integer(int64) :: big(NROW)
+        integer :: i
+        !
+        do i = 1, NROW
+            big(i) = WIDE_INT + int(i - 1, int64)
+        end do
+        call parquet_open_writer(w, fname)
+        call parquet_write_column(w, "big", big)
+        call parquet_close_writer(w)
+    end subroutine write_wide_int_fixture
+    !
+    !> Nulls, the unit and the row count all survive a cast, and a cast to the kind a column
+    !! already holds does nothing at all.
+    subroutine test_cast_preserves(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        real(real64) :: v(NROW)
+        real(real32), pointer :: p_f32(:)
+        character(len=:), allocatable :: u
+        integer :: i
+        !
+        do i = 1, NROW
+            v(i) = real(i, real64) * 0.5_real64
+        end do
+        call parquet_new_table(t)
+        call t%add_column("x", v, unit="m/s")
+        call t%set_null("x", 4)
+        call t%cast("x", PK_FLOAT32)
+        call check(error, t%nrows() == int(NROW, int64), "a cast should not change the row count")
+        if (allocated(error)) return
+        call t%unit("x", u)
+        call check(error, u == "m/s", "a cast should carry the unit over unchanged")
+        if (allocated(error)) return
+        call check(error, t%is_null("x", 4), "a cast should keep the column's nulls")
+        if (allocated(error)) return
+        call t%col("x", p_f32)
+        call check(error, p_f32(2) == 1.0_real32, "a cast should keep the values it converts")
+        if (allocated(error)) return
+        ! Casting to the kind already held is a no-op, including the pointer staying usable.
+        call t%cast("x", PK_FLOAT32)
+        call check(error, t%kind("x") == PK_FLOAT32 .and. t%is_null("x", 4), &
+            "a cast to the kind already held should change nothing")
+    end subroutine test_cast_preserves
+    !
+    !> `exact=` decides whether a loss the read path makes silently is refused instead. Only the
+    !! ACCEPTING side can be tested here -- the refusal aborts, so it lives in error_scenarios.
+    subroutine test_cast_exact_flag(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        real(real64) :: v(NROW), whole(NROW)
+        real(real32), pointer :: p_f32(:)
+        integer :: i
+        !
+        ! 0.1 has no exact real32 form; the halves next to it do.
+        v = [(real(i, real64) * 0.5_real64, i = 1, NROW)]
+        v(3) = 0.1_real64
+        whole = [(real(i, real64), i = 1, NROW)]
+        call parquet_new_table(t)
+        call t%add_column("x", v)
+        call t%add_column("y", whole)
+        ! Default (exact absent) truncates, exactly as reading a float64 column into a real32
+        ! array does.
+        call t%cast("x", PK_FLOAT32)
+        call t%col("x", p_f32)
+        call check(error, p_f32(3) == real(0.1_real64, real32), &
+            "the default cast should truncate a value real32 cannot hold exactly")
+        if (allocated(error)) return
+        ! exact=.true. accepts a column whose every value DOES survive the round trip.
+        call t%cast("y", PK_INT32, exact=.true.)
+        call t%cast("y", PK_FLOAT32, exact=.true.)
+        call check(error, t%kind("y") == PK_FLOAT32, &
+            "exact=.true. should accept a conversion that loses nothing")
+    end subroutine test_cast_exact_flag
     !
     !> Writes a fixture with an id column plus one sortable column of each interesting shape, so
     !! a sort's result can always be stated as "these ids, in this order".

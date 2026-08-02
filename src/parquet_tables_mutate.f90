@@ -4,7 +4,7 @@
 !
 !> Mutation that leaves a `parquet_table`'s ROW SET alone: the single-cell validity writers
 !! (`%set_null`, `%clear_null`, `%compact_validity`) and the column-structural operations
-!! (`%drop_column`, `%rename_column`, `%cast_column`).
+!! (`%drop_column`, `%rename_column`, `%copy_column`, `%cast`).
 !!
 !! **Nothing in this file detaches the table** (F-mut-7). That is the whole reason it is a
 !! separate file from `parquet_tables_rowmutate.f90`: adding a column, dropping one, renaming one
@@ -16,6 +16,7 @@
 !! The per-kind `%set_element` writers are generated rather than written here; they live in
 !! `parquet_tables_access.f90` alongside `%set`, whose shape they follow.
 submodule (parquet_tables) parquet_tables_mutate
+    use ieee_arithmetic, only: ieee_is_nan, ieee_is_finite
     implicit none
     !
 contains
@@ -114,6 +115,7 @@ contains
             slot%declared_kind = PK_NONE
             slot%width = 1
             slot%width_pending = .false.
+            slot%cast_pending = .false.
             slot%file_source = .false.
             slot%predefined = .false.
             slot%user_populated = .false.
@@ -156,157 +158,625 @@ contains
         self%cache%cols(idx)%name = trim(new_name)
     end procedure table_rename_column
     !
-    module procedure table_cast_column
-        integer :: idx, new_idx
-        integer(int64) :: n, k
-        integer :: from_kind
-        character(len=:), allocatable :: sfx, from_txt, to_txt, unit
-        real(real64), allocatable :: buf(:)
-        logical, allocatable :: was_null(:)
+    module procedure table_copy_column
+        integer :: idx, new_idx, want_kind
+        logical :: strict
+        character(len=:), allocatable :: sfx
         !
-        call table_resolve(self, name, "cast_column", idx)
-        from_kind = self%cache%cols(idx)%values%kindof()
-        call parquet_kind_name(from_kind, from_txt)
-        call parquet_kind_name(to_kind, to_txt)
-        if (.not. (cast_is_numeric(from_kind) .and. cast_is_numeric(to_kind))) then
+        ! table_resolve, not table_lookup_or_fail: a copy has to have the values in hand, so an
+        ! unread column is read here. There is no deferred form of a copy -- unlike %cast, which
+        ! can hand its conversion to the read that has not happened yet, a copy needs a second
+        ! column's worth of values now.
+        call table_resolve(self, name, "copy_column", idx)
+        if (len_trim(new_name) == 0) then
             call table_context_suffix(self%cache, name, sfx)
-            error stop EP // "cast_column: can only cast between the numeric scalar kinds, " // &
-                "not from " // from_txt // " to " // to_txt // sfx
+            error stop EP // "copy_column: the new name is blank" // sfx
         end if
         if (table_find(self, new_name) > 0) then
             call table_context_suffix(self%cache, new_name, sfx)
-            error stop EP // "cast_column: a column of the new name already exists" // sfx
+            error stop EP // "copy_column: a column of the new name already exists" // sfx
         end if
-        if (len_trim(new_name) == 0) then
-            call table_context_suffix(self%cache, name, sfx)
-            error stop EP // "cast_column: the new name is blank" // sfx
+        want_kind = self%cache%cols(idx)%values%kindof()
+        if (present(to_kind)) want_kind = to_kind
+        strict = .true.
+        if (present(exact)) strict = exact
+        ! Validate and check BEFORE the new slot exists, so a copy that cannot be represented
+        ! leaves the table exactly as it was rather than adding a half-converted column.
+        if (want_kind /= self%cache%cols(idx)%values%kindof()) then
+            call cast_check_pair(self%cache, name, "copy_column", &
+                self%cache%cols(idx)%values%kindof(), want_kind)
+            call cast_zero_null_rows(self%cache%cols(idx)%values)
+            call cast_check_values(self%cache, name, "copy_column", &
+                self%cache%cols(idx)%values, want_kind, strict)
         end if
-        n = self%cache%cols(idx)%values%length()
-        ! Read the whole source through real64 first and check EVERY value before allocating the
-        ! destination, so a cast that cannot be represented leaves the table exactly as it was
-        ! rather than half-converted.
-        allocate(buf(max(n, 1_int64)))
-        allocate(was_null(max(n, 1_int64)))
-        buf = 0.0_real64
-        was_null = .false.
-        do k = 1_int64, n
-            was_null(k) = self%cache%cols(idx)%values%is_null(k)
-            if (was_null(k)) cycle
-            call cast_read_value(self%cache%cols(idx)%values, k, buf(k))
-            call cast_check_value(self%cache, name, buf(k), k, to_kind, from_txt, to_txt)
-        end do
         call table_new_slot(self, new_name, .false., new_idx)
-        call self%cache%cols(idx)%values%unit_string(unit)
-        call cast_fill_column(self%cache%cols(new_idx)%values, to_kind, n, buf, was_null, unit)
-        self%cache%cols(new_idx)%declared_kind = to_kind
-        self%cache%cols(new_idx)%width = 1_int32
+        call self%cache%cols(idx)%values%deep_copy(self%cache%cols(new_idx)%values)
+        if (want_kind /= self%cache%cols(new_idx)%values%kindof()) then
+            call cast_apply(self%cache%cols(new_idx)%values, want_kind)
+        end if
+        self%cache%cols(new_idx)%declared_kind = self%cache%cols(new_idx)%values%kindof()
+        self%cache%cols(new_idx)%width = self%cache%cols(new_idx)%values%colwidth()
         self%cache%cols(new_idx)%residency = RES_FULL
         self%cache%cols(new_idx)%user_populated = .true.
-    end procedure table_cast_column
+    end procedure table_copy_column
     !
-    !> Whether a PK_* kind is one `%cast_column` can convert between: the four numeric SCALAR
-    !! kinds. Logical, string, temporal and every *_VEC kind are excluded -- each would need its
-    !! own semantics (what is a null date as an integer?), and none is needed by the one caller
-    !! this exists for, which is `%append`'s kind-mismatch escape hatch (RF14).
+    module procedure table_cast
+        integer :: idx
+        logical :: strict, deferred
+        character(len=:), allocatable :: sfx
+        !
+        strict = .false.
+        if (present(exact)) strict = exact
+        call table_check_open(self, "cast")
+        ! Deliberately table_lookup_or_fail, not table_resolve: resolving TOUCHES, and the whole
+        ! point of the deferred path below is to decide before the read happens. The two guards
+        ! table_resolve would have applied on the way past are applied here instead.
+        call table_lookup_or_fail(self, name, "cast", idx)
+        if (.not. self%cache%cols(idx)%supported) then
+            call table_context_suffix(self%cache, name, sfx)
+            error stop EP // "cast: this column's type is not supported by parquet_table, so " // &
+                "its values were never read" // sfx
+        end if
+        ! A plain LIST/LARGE_LIST from a foreign writer has no kind yet, and its kind is what
+        ! decides whether this cast is legal at all -- so settle it first. That reads the column,
+        ! which is why such a column never takes the deferred path below.
+        if (self%cache%cols(idx)%width_pending) then
+            call table_resolve_width(self%cache, table_scope_of(self), idx, .false., "cast")
+        end if
+        if (self%cache%cols(idx)%declared_kind == to_kind) return
+        call cast_check_pair(self%cache, name, "cast", self%cache%cols(idx)%declared_kind, to_kind)
+        !
+        ! The deferred path: a file-backed column nothing has read yet does not need to be read
+        ! and then converted. Rewriting `declared_kind` is enough, because table_materialize reads
+        ! into whatever kind the slot declares -- so the first touch decodes STRAIGHT into the
+        ! target kind, in one pass, through the reader's own numeric conversions (the same set
+        ! this procedure allows).
+        !
+        ! Two things disqualify it. `exact=` asks for precision checks the reader does not
+        ! perform, so it must have the values in hand. And a cast on a column that is ALREADY
+        ! waiting for one has to materialize first: otherwise `%cast(x, PK_INT32)` followed by
+        ! `%cast(x, PK_FLOAT64)` would silently forget the rounding the first one asked for.
+        deferred = self%cache%cols(idx)%file_source .and. &
+            self%cache%cols(idx)%residency /= RES_FULL .and. &
+            .not. self%cache%cols(idx)%cast_pending .and. &
+            .not. self%cache%cols(idx)%width_pending .and. &
+            .not. self%detached .and. .not. strict
+        if (deferred) then
+            self%cache%cols(idx)%declared_kind = to_kind
+            self%cache%cols(idx)%cast_pending = .true.
+            self%cache%cols(idx)%user_populated = .true.
+            return
+        end if
+        !
+        call table_touch(self%cache, table_scope_of(self), idx, "cast")
+        ! Re-check against the kind actually READ. A width_pending column only learned its kind
+        ! above, and a cast_pending one is now holding the kind an earlier deferred cast asked
+        ! for -- either can have turned this into a no-op.
+        if (self%cache%cols(idx)%values%kindof() == to_kind) then
+            self%cache%cols(idx)%declared_kind = to_kind
+            self%cache%cols(idx)%cast_pending = .false.
+            return
+        end if
+        call cast_check_pair(self%cache, name, "cast", self%cache%cols(idx)%values%kindof(), to_kind)
+        call cast_zero_null_rows(self%cache%cols(idx)%values)
+        call cast_check_values(self%cache, name, "cast", self%cache%cols(idx)%values, to_kind, strict)
+        call cast_apply(self%cache%cols(idx)%values, to_kind)
+        self%cache%cols(idx)%declared_kind = to_kind
+        self%cache%cols(idx)%cast_pending = .false.
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure table_cast
+    !
+    ! ---- conversion between numeric kinds, shared by %cast and %copy_column ------------------
+    !
+    !> Whether a PK_* kind is one the conversion path can produce or consume: the four numeric
+    !! kinds, scalar or vector. Logical, string and temporal are excluded because neither the
+    !! reader nor the writer converts them either -- there is no answer to "what is a null date
+    !! as an integer?" that would not have to be invented here.
     pure logical function cast_is_numeric(kind) result(ok)
         integer, intent(in) :: kind !! the PK_* discriminator to test.
-        ok = kind == PK_INT32 .or. kind == PK_INT64 .or. kind == PK_FLOAT32 .or. kind == PK_FLOAT64
+        ok = kind == PK_INT32 .or. kind == PK_INT64 .or. kind == PK_FLOAT32 .or. kind == PK_FLOAT64 &
+            .or. kind == PK_INT32_VEC .or. kind == PK_INT64_VEC .or. kind == PK_FLOAT32_VEC &
+            .or. kind == PK_FLOAT64_VEC
     end function cast_is_numeric
     !
-    !> Reads element `k` of a numeric scalar column as a real64, whatever its stored kind.
+    !> Whether a PK_* kind is one of the vector (per-row width > 1) numeric kinds.
+    pure logical function cast_is_vector(kind) result(ok)
+        integer, intent(in) :: kind !! the PK_* discriminator to test.
+        ok = kind == PK_INT32_VEC .or. kind == PK_INT64_VEC .or. kind == PK_FLOAT32_VEC &
+            .or. kind == PK_FLOAT64_VEC
+    end function cast_is_vector
+    !
+    !> error stops unless `from_kind` can be converted to `to_kind` at all.
     !!
-    !! real64 is the one type that holds every value the four source kinds can produce without
-    !! loss: int32 and float32 fit outright, and an int64 beyond 2**53 is caught by
-    !! `cast_check_value`'s exact-round-trip test rather than being silently rounded here.
-    subroutine cast_read_value(col, k, value)
-        type(parquet_column), intent(in) :: col  !! the source column.
-        integer(int64), intent(in) :: k          !! 1-based row index.
-        real(real64), intent(out) :: value       !! the value, widened to real64.
-        integer(int32) :: v32
-        integer(int64) :: v64
-        real(real32) :: r32
+    !! Rank is part of the answer, not an afterthought: a scalar column and a vector one differ in
+    !! how many values each row holds, so turning one into the other is a reshape rather than a
+    !! conversion, and a caller who asked for it has confused a column's kind with its width.
+    subroutine cast_check_pair(cache, name, proc, from_kind, to_kind)
+        type(parquet_table_cache), intent(in) :: cache !! the store, for the message context.
+        character(len=*), intent(in) :: name           !! column name, for the message.
+        character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        integer, intent(in) :: from_kind               !! the column's current PK_* kind.
+        integer, intent(in) :: to_kind                 !! the requested PK_* kind.
+        character(len=:), allocatable :: sfx, from_txt, to_txt
         !
+        call parquet_kind_name(from_kind, from_txt)
+        call parquet_kind_name(to_kind, to_txt)
+        if (.not. (cast_is_numeric(from_kind) .and. cast_is_numeric(to_kind))) then
+            call table_context_suffix(cache, name, sfx)
+            error stop EP // trim(proc) // ": only the numeric kinds convert, not from " // &
+                from_txt // " to " // to_txt // sfx
+        end if
+        if (cast_is_vector(from_kind) .neqv. cast_is_vector(to_kind)) then
+            call table_context_suffix(cache, name, sfx)
+            error stop EP // trim(proc) // ": converting from " // from_txt // " to " // to_txt // &
+                " would change the column's width, which is a reshape rather than a conversion" // sfx
+        end if
+    end subroutine cast_check_pair
+    !
+    !> Writes a zero into the storage of every NULL row, in place.
+    !!
+    !! This is what lets the two passes that follow work on whole arrays with no null mask at
+    !! all. A null row's stored value is unspecified by `parquet_column`'s own contract, and it
+    !! really can be uninitialized memory (`init` allocates without filling); left alone it would
+    !! fail the range and fractional-part checks for reasons that have nothing to do with the
+    !! caller's data, and -- worse -- an out-of-range real converted to an integer is undefined
+    !! behaviour, not merely a wrong number. Zero converts cleanly into every kind here, so
+    !! writing one first makes both passes unconditional.
+    !!
+    !! It does mean a later `%clear_null` on such a row exposes 0 rather than whatever happened to
+    !! be there. That is exactly what "the value behind it is unspecified until written" allows.
+    subroutine cast_zero_null_rows(col)
+        type(parquet_column), intent(inout) :: col !! the column whose null rows are zeroed.
+        logical, allocatable :: rowvalid(:)
+        integer(int32), pointer :: p_i32(:), p_i32v(:,:)
+        integer(int64), pointer :: p_i64(:), p_i64v(:,:)
+        real(real32), pointer :: p_f32(:), p_f32v(:,:)
+        real(real64), pointer :: p_f64(:), p_f64v(:,:)
+        integer(int64) :: r
+        !
+        ! Unallocated means the column has no nulls at all, which is the common case and costs
+        ! nothing beyond the query itself.
+        call col%row_validity(rowvalid)
+        if (.not. allocated(rowvalid)) return
         select case (col%kindof())
         case (PK_INT32)
-            call col%get_at(k, v32)
-            value = real(v32, real64)
+            call col%data_ptr(p_i32)
+            do r = 1_int64, col%length()
+                if (.not. rowvalid(r)) p_i32(r) = 0_int32
+            end do
         case (PK_INT64)
-            call col%get_at(k, v64)
-            value = real(v64, real64)
+            call col%data_ptr(p_i64)
+            do r = 1_int64, col%length()
+                if (.not. rowvalid(r)) p_i64(r) = 0_int64
+            end do
         case (PK_FLOAT32)
-            call col%get_at(k, r32)
-            value = real(r32, real64)
-        case default
-            call col%get_at(k, value)
+            call col%data_ptr(p_f32)
+            do r = 1_int64, col%length()
+                if (.not. rowvalid(r)) p_f32(r) = 0.0_real32
+            end do
+        case (PK_FLOAT64)
+            call col%data_ptr(p_f64)
+            do r = 1_int64, col%length()
+                if (.not. rowvalid(r)) p_f64(r) = 0.0_real64
+            end do
+        case (PK_INT32_VEC)
+            call col%data_ptr(p_i32v)
+            do r = 1_int64, col%length()
+                if (.not. rowvalid(r)) p_i32v(:, r) = 0_int32
+            end do
+        case (PK_INT64_VEC)
+            call col%data_ptr(p_i64v)
+            do r = 1_int64, col%length()
+                if (.not. rowvalid(r)) p_i64v(:, r) = 0_int64
+            end do
+        case (PK_FLOAT32_VEC)
+            call col%data_ptr(p_f32v)
+            do r = 1_int64, col%length()
+                if (.not. rowvalid(r)) p_f32v(:, r) = 0.0_real32
+            end do
+        case (PK_FLOAT64_VEC)
+            call col%data_ptr(p_f64v)
+            do r = 1_int64, col%length()
+                if (.not. rowvalid(r)) p_f64v(:, r) = 0.0_real64
+            end do
         end select
-    end subroutine cast_read_value
+    end subroutine cast_zero_null_rows
     !
-    !> error stops unless `value` survives the trip into `to_kind` unchanged (Q3c-3).
+    !> error stops on the first value that cannot be converted into `to_kind`, naming the row and
+    !! the value. Reads only -- nothing is written until `cast_apply`, so a rejected conversion
+    !! leaves the column exactly as it was.
     !!
-    !! A cast the caller asked for by name is exactly where a silent truncation is most expensive
-    !! to find later, so a value that would not come back the same aborts, naming the row and the
-    !! value. Integral targets additionally require the value to be a whole number, mirroring the
-    !! `value == anint(value)` test the numeric writer already applies.
-    subroutine cast_check_value(cache, name, value, k, to_kind, from_txt, to_txt)
+    !! `strict` is the whole difference between `%cast`'s default and `%copy_column`'s. Either way
+    !! an integer overflow and a fractional value converted to an integer kind are errors, because
+    !! both are errors on the read and write paths too. `strict` additionally rejects the losses
+    !! those paths make silently: real64 narrowed to real32, and an integer too large for a real
+    !! kind to hold exactly.
+    subroutine cast_check_values(cache, name, proc, col, to_kind, strict)
         type(parquet_table_cache), intent(in) :: cache !! the store, for the message context.
-        character(len=*), intent(in) :: name           !! source column name, for the message.
-        real(real64), intent(in) :: value              !! the value to check.
-        integer(int64), intent(in) :: k                !! its 1-based row index.
+        character(len=*), intent(in) :: name           !! column name, for the message.
+        character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        type(parquet_column), intent(in), target :: col !! the column to check.
         integer, intent(in) :: to_kind                 !! the target PK_* kind.
-        character(len=*), intent(in) :: from_txt       !! source kind name, for the message.
-        character(len=*), intent(in) :: to_txt         !! target kind name, for the message.
-        character(len=:), allocatable :: sfx
-        character(len=64) :: vs, ks
-        logical :: ok
+        logical, intent(in) :: strict                  !! .true. to reject precision loss too.
+        integer(int32), pointer :: p_i32(:), p_i32v(:,:)
+        integer(int64), pointer :: p_i64(:), p_i64v(:,:)
+        real(real32), pointer :: p_f32(:), p_f32v(:,:)
+        real(real64), pointer :: p_f64(:), p_f64v(:,:)
+        integer(int64) :: r
         !
-        ok = .true.
-        select case (to_kind)
+        ! An empty column has no storage allocated to point at, and no values to reject.
+        if (col%length() == 0_int64) return
+        ! Scalar kinds check the whole array in one call and let the element index BE the row
+        ! (row = 0 says so); vector kinds hand one row's slice to the same checker at a time, so
+        ! the numeric rules below exist once rather than once per rank.
+        select case (col%kindof())
         case (PK_INT32)
-            ok = value == anint(value) .and. abs(value) <= real(huge(0_int32), real64)
+            call col%data_ptr(p_i32)
+            call chk_from_i32(cache, name, proc, p_i32, 0_int64, to_kind, strict)
         case (PK_INT64)
-            ok = value == anint(value) .and. abs(value) <= real(huge(0_int64), real64)
+            call col%data_ptr(p_i64)
+            call chk_from_i64(cache, name, proc, p_i64, 0_int64, to_kind, strict)
         case (PK_FLOAT32)
-            ok = abs(value) <= real(huge(0.0_real32), real64) .or. .not. (value == value)
-            if (ok) ok = real(real(value, real32), real64) == value
+            call col%data_ptr(p_f32)
+            call chk_from_f32(cache, name, proc, p_f32, 0_int64, to_kind, strict)
+        case (PK_FLOAT64)
+            call col%data_ptr(p_f64)
+            call chk_from_f64(cache, name, proc, p_f64, 0_int64, to_kind, strict)
+        case (PK_INT32_VEC)
+            call col%data_ptr(p_i32v)
+            do r = 1_int64, col%length()
+                call chk_from_i32(cache, name, proc, p_i32v(:, r), r, to_kind, strict)
+            end do
+        case (PK_INT64_VEC)
+            call col%data_ptr(p_i64v)
+            do r = 1_int64, col%length()
+                call chk_from_i64(cache, name, proc, p_i64v(:, r), r, to_kind, strict)
+            end do
+        case (PK_FLOAT32_VEC)
+            call col%data_ptr(p_f32v)
+            do r = 1_int64, col%length()
+                call chk_from_f32(cache, name, proc, p_f32v(:, r), r, to_kind, strict)
+            end do
+        case (PK_FLOAT64_VEC)
+            call col%data_ptr(p_f64v)
+            do r = 1_int64, col%length()
+                call chk_from_f64(cache, name, proc, p_f64v(:, r), r, to_kind, strict)
+            end do
         end select
-        if (ok) return
-        write(vs, "(ES23.15E3)") value
-        write(ks, "(I0)") k
-        call table_context_suffix(cache, name, sfx)
-        error stop EP // "cast_column: the value at row " // trim(ks) // " (" // trim(adjustl(vs)) // &
-            ") cannot be represented as " // to_txt // ", so casting from " // from_txt // &
-            " would lose information" // sfx
-    end subroutine cast_check_value
+    end subroutine cast_check_values
     !
-    !> Fills a freshly created column of `to_kind` from the checked real64 buffer, restoring the
-    !! source's nulls row for row. `unit` carries over unchanged: a kind cast is not a unit change
-    !! (RF14), and inventing one would pre-empt the deferred unit-conversion feature.
-    subroutine cast_fill_column(col, to_kind, n, buf, was_null, unit)
-        type(parquet_column), intent(inout) :: col !! the destination column.
-        integer, intent(in) :: to_kind             !! target PK_* kind.
-        integer(int64), intent(in) :: n            !! row count.
-        real(real64), intent(in) :: buf(:)         !! the checked values.
-        logical, intent(in) :: was_null(:)         !! per row: .true. where the source was null.
-        character(len=*), intent(in) :: unit       !! the source's unit string.
-        integer(int64) :: k
+    !> Checks one contiguous run of int32 values against `to_kind`. Widening to int64 or real64 is
+    !! exact by construction and checks nothing; only real32 can lose an int32 (24 mantissa bits
+    !! against 31 value bits), and only when `strict` asks about it.
+    subroutine chk_from_i32(cache, name, proc, v, row, to_kind, strict)
+        type(parquet_table_cache), intent(in) :: cache !! the store, for the message context.
+        character(len=*), intent(in) :: name           !! column name, for the message.
+        character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        integer(int32), intent(in) :: v(:)             !! the values to check.
+        integer(int64), intent(in) :: row              !! the row they belong to, or 0 for "index = row".
+        integer, intent(in) :: to_kind                 !! the target PK_* kind.
+        logical, intent(in) :: strict                  !! .true. to reject precision loss too.
+        integer(int64) :: j
         !
-        call col%init(to_kind, n, 1_int32, unit)
-        do k = 1_int64, n
-            if (was_null(k)) then
-                call col%set_null(k)
-                cycle
-            end if
+        if (.not. strict) return
+        select case (to_kind)
+        case (PK_FLOAT32, PK_FLOAT32_VEC)
+            do j = 1_int64, size(v, kind=int64)
+                ! real32 -> real64 is exact, so this compares the round trip without ever
+                ! converting a real back into an integer (which could be out of range).
+                if (real(real(v(j), real32), real64) /= real(v(j), real64)) then
+                    call cast_reject(cache, name, proc, cast_row_of(row, j), PK_INT32, to_kind, &
+                        .true., ival=int(v(j), int64))
+                end if
+            end do
+        end select
+    end subroutine chk_from_i32
+    !
+    !> Checks one contiguous run of int64 values against `to_kind`. Narrowing to int32 is range
+    !! checked ALWAYS -- the reader and writer both do -- while the mantissa loss of a large
+    !! integer put into a real kind is only reported when `strict` asks.
+    subroutine chk_from_i64(cache, name, proc, v, row, to_kind, strict)
+        type(parquet_table_cache), intent(in) :: cache !! the store, for the message context.
+        character(len=*), intent(in) :: name           !! column name, for the message.
+        character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        integer(int64), intent(in) :: v(:)             !! the values to check.
+        integer(int64), intent(in) :: row              !! the row they belong to, or 0 for "index = row".
+        integer, intent(in) :: to_kind                 !! the target PK_* kind.
+        logical, intent(in) :: strict                  !! .true. to reject precision loss too.
+        integer(int64) :: j
+        !
+        select case (to_kind)
+        case (PK_INT32, PK_INT32_VEC)
+            do j = 1_int64, size(v, kind=int64)
+                if (v(j) < -huge(0_int32) - 1_int64 .or. v(j) > huge(0_int32)) then
+                    call cast_reject(cache, name, proc, cast_row_of(row, j), PK_INT64, to_kind, &
+                        .false., ival=v(j))
+                end if
+            end do
+        case (PK_FLOAT32, PK_FLOAT32_VEC)
+            if (.not. strict) return
+            do j = 1_int64, size(v, kind=int64)
+                if (.not. int64_survives_real(real(real(v(j), real32), real64), v(j))) then
+                    call cast_reject(cache, name, proc, cast_row_of(row, j), PK_INT64, to_kind, &
+                        .true., ival=v(j))
+                end if
+            end do
+        case (PK_FLOAT64, PK_FLOAT64_VEC)
+            if (.not. strict) return
+            do j = 1_int64, size(v, kind=int64)
+                if (.not. int64_survives_real(real(v(j), real64), v(j))) then
+                    call cast_reject(cache, name, proc, cast_row_of(row, j), PK_INT64, to_kind, &
+                        .true., ival=v(j))
+                end if
+            end do
+        end select
+    end subroutine chk_from_i64
+    !
+    !> Checks one contiguous run of real32 values against `to_kind`. Widening to real64 is exact;
+    !! an integer target demands a whole number in range, which is what the reader and the writer
+    !! both demand of a real column written to an integer one.
+    subroutine chk_from_f32(cache, name, proc, v, row, to_kind, strict)
+        type(parquet_table_cache), intent(in) :: cache !! the store, for the message context.
+        character(len=*), intent(in) :: name           !! column name, for the message.
+        character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        real(real32), intent(in) :: v(:)               !! the values to check.
+        integer(int64), intent(in) :: row              !! the row they belong to, or 0 for "index = row".
+        integer, intent(in) :: to_kind                 !! the target PK_* kind.
+        logical, intent(in) :: strict                  !! accepted for symmetry; real32 has no strict-only rule.
+        integer(int64) :: j
+        !
+        ! No `strict` branch here on purpose: real32 -> real64 is exact, and the integer targets
+        ! are checked unconditionally below, so there is no loss left for `strict` to catch.
+        select case (to_kind)
+        case (PK_INT32, PK_INT32_VEC, PK_INT64, PK_INT64_VEC)
+            do j = 1_int64, size(v, kind=int64)
+                if (.not. real_fits_integer(real(v(j), real64), to_kind)) then
+                    call cast_reject(cache, name, proc, cast_row_of(row, j), PK_FLOAT32, to_kind, &
+                        .false., rval=real(v(j), real64))
+                end if
+            end do
+        end select
+    end subroutine chk_from_f32
+    !
+    !> Checks one contiguous run of real64 values against `to_kind`. An integer target demands a
+    !! whole number in range. A real32 target rejects a FINITE value too large for real32 --
+    !! overflowing to infinity is a bigger surprise than losing digits -- and, under `strict`,
+    !! any value that would not come back the same.
+    subroutine chk_from_f64(cache, name, proc, v, row, to_kind, strict)
+        type(parquet_table_cache), intent(in) :: cache !! the store, for the message context.
+        character(len=*), intent(in) :: name           !! column name, for the message.
+        character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        real(real64), intent(in) :: v(:)               !! the values to check.
+        integer(int64), intent(in) :: row              !! the row they belong to, or 0 for "index = row".
+        integer, intent(in) :: to_kind                 !! the target PK_* kind.
+        logical, intent(in) :: strict                  !! .true. to reject precision loss too.
+        integer(int64) :: j
+        !
+        select case (to_kind)
+        case (PK_INT32, PK_INT32_VEC, PK_INT64, PK_INT64_VEC)
+            do j = 1_int64, size(v, kind=int64)
+                if (.not. real_fits_integer(v(j), to_kind)) then
+                    call cast_reject(cache, name, proc, cast_row_of(row, j), PK_FLOAT64, to_kind, &
+                        .false., rval=v(j))
+                end if
+            end do
+        case (PK_FLOAT32, PK_FLOAT32_VEC)
+            do j = 1_int64, size(v, kind=int64)
+                ! NaN and +-Infinity carry across unchanged and are not overflow: a stored
+                ! infinity IS representable in real32, and only a finite value that no longer
+                ! fits has been lost. ieee_is_nan rather than v /= v, per the project convention.
+                if (ieee_is_nan(v(j))) cycle
+                if (ieee_is_finite(v(j)) .and. abs(v(j)) > real(huge(0.0_real32), real64)) then
+                    call cast_reject(cache, name, proc, cast_row_of(row, j), PK_FLOAT64, to_kind, &
+                        .false., rval=v(j))
+                end if
+                if (.not. strict) cycle
+                if (real(real(v(j), real32), real64) /= v(j)) then
+                    call cast_reject(cache, name, proc, cast_row_of(row, j), PK_FLOAT64, to_kind, &
+                        .true., rval=v(j))
+                end if
+            end do
+        end select
+    end subroutine chk_from_f64
+    !
+    !> The row a checked value belongs to: `row` when the caller handed over one row's slice of a
+    !! vector column, and the element index itself when it handed over a whole scalar column.
+    pure integer(int64) function cast_row_of(row, j) result(r)
+        integer(int64), intent(in) :: row !! the row, or 0 for "the index is the row".
+        integer(int64), intent(in) :: j   !! 1-based index within the slice handed over.
+        r = row
+        if (row == 0_int64) r = j
+    end function cast_row_of
+    !
+    !> Whether `d`, the real form of `v`, converts back to exactly `v`.
+    !!
+    !! Deliberately compared through int64 rather than through real64: `real(v, real64)` is itself
+    !! inexact past 2**53, so comparing two real64s would report a loss that the real64 comparison
+    !! introduced. Converting the real back to an integer is only safe below 2**63, so a magnitude
+    !! at or beyond that is simply reported as lost -- the only values affected sit within one ulp
+    !! of int64's own ceiling.
+    pure logical function int64_survives_real(d, v) result(ok)
+        real(real64), intent(in) :: d  !! the value converted to real (and back to real64 exactly).
+        integer(int64), intent(in) :: v !! the integer it came from.
+        ok = .false.
+        if (abs(d) >= 9223372036854775808.0_real64) return
+        ok = int(d, int64) == v
+    end function int64_survives_real
+    !
+    !> Whether real64 `d` is a whole number that fits the integer kind `to_kind`. NaN fails the
+    !! whole-number test (`anint` of a NaN is a NaN, which equals nothing), which is the answer
+    !! wanted: there is no integer a NaN could become.
+    pure logical function real_fits_integer(d, to_kind) result(ok)
+        real(real64), intent(in) :: d  !! the value to test.
+        integer, intent(in) :: to_kind !! PK_INT32/PK_INT64 or their _VEC forms.
+        ok = .false.
+        if (d /= anint(d)) return
+        if (to_kind == PK_INT32 .or. to_kind == PK_INT32_VEC) then
+            ok = d >= -2147483648.0_real64 .and. d <= 2147483647.0_real64
+        else
+            ! The upper bound is written as 2**63 with a strict <, because huge(int64) itself is
+            ! not representable in real64 and rounds UP to 2**63 -- comparing <= against it would
+            ! admit exactly the one value that overflows.
+            ok = d >= -9223372036854775808.0_real64 .and. d < 9223372036854775808.0_real64
+        end if
+    end function real_fits_integer
+    !
+    !> error stops naming the offending row, its value and the conversion that cannot carry it.
+    !!
+    !! The value arrives as `ival` or `rval`, whichever the source kind actually holds, rather
+    !! than as text: formatting it here keeps every rejection message identical in shape, and
+    !! keeps the checkers free of the `character(len=:), allocatable` locals they would otherwise
+    !! each need (a plain character-returning helper is not an option -- see CLAUDE.md).
+    subroutine cast_reject(cache, name, proc, row, from_kind, to_kind, precision_only, ival, rval)
+        type(parquet_table_cache), intent(in) :: cache !! the store, for the message context.
+        character(len=*), intent(in) :: name           !! column name, for the message.
+        character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        integer(int64), intent(in) :: row              !! the 1-based row that failed.
+        integer, intent(in) :: from_kind               !! the column's current PK_* kind.
+        integer, intent(in) :: to_kind                 !! the requested PK_* kind.
+        logical, intent(in) :: precision_only          !! .true. when only exactness was lost.
+        integer(int64), intent(in), optional :: ival   !! the offending value, integer source.
+        real(real64), intent(in), optional :: rval     !! the offending value, real source.
+        character(len=:), allocatable :: sfx, from_txt, to_txt, word
+        character(len=64) :: ks, vs
+        !
+        call parquet_kind_name(from_kind, from_txt)
+        call parquet_kind_name(to_kind, to_txt)
+        word = " "
+        if (precision_only) word = " exactly "
+        vs = "?"
+        if (present(ival)) write(vs, "(I0)") ival
+        if (present(rval)) write(vs, "(ES23.15E3)") rval
+        write(ks, "(I0)") row
+        call table_context_suffix(cache, name, sfx)
+        error stop EP // trim(proc) // ": the value at row " // trim(adjustl(ks)) // " (" // &
+            trim(adjustl(vs)) // ") cannot be represented" // trim(word) // " as " // to_txt // &
+            ", so converting from " // from_txt // " would lose information" // sfx
+    end subroutine cast_reject
+    !
+    !> Rewrites `col`'s storage as `to_kind`, in place. Every value has already been checked by
+    !! `cast_check_values` and every null row zeroed by `cast_zero_null_rows`, so each arm below
+    !! is a single whole-array expression with nothing to guard against.
+    !!
+    !! `%adopt` rather than `%init` + `%set_all`: the converted array is a temporary that the
+    !! column can simply take over, which halves the copying. Adopting drops the unit and the null
+    !! bitmap, so both are captured first and put back afterwards -- the nulls one row at a time,
+    !! which is the only per-row work here and only happens for a column that has nulls at all.
+    !!
+    !! Peak memory is the old array plus the new one: an in-place conversion still has to build
+    !! the result before it can release the source.
+    subroutine cast_apply(col, to_kind)
+        type(parquet_column), intent(inout) :: col !! the column to convert.
+        integer, intent(in) :: to_kind             !! the target PK_* kind.
+        integer(int32), pointer :: p_i32(:), p_i32v(:,:)
+        integer(int64), pointer :: p_i64(:), p_i64v(:,:)
+        real(real32), pointer :: p_f32(:), p_f32v(:,:)
+        real(real64), pointer :: p_f64(:), p_f64v(:,:)
+        integer(int32), allocatable :: d_i32(:), d_i32v(:,:)
+        integer(int64), allocatable :: d_i64(:), d_i64v(:,:)
+        real(real32), allocatable :: d_f32(:), d_f32v(:,:)
+        real(real64), allocatable :: d_f64(:), d_f64v(:,:)
+        logical, allocatable :: rowvalid(:)
+        character(len=:), allocatable :: unit
+        integer(int64) :: n, r
+        integer(int32) :: w
+        !
+        n = col%length()
+        w = col%colwidth()
+        call col%unit_string(unit)
+        call col%row_validity(rowvalid)
+        ! An empty column has no storage allocated at all, so there is nothing to point at and
+        ! nothing to convert -- just re-declare it as the target kind.
+        if (n == 0_int64) then
+            call col%init(to_kind, 0_int64, w, unit)
+            return
+        end if
+        select case (col%kindof())
+        case (PK_INT32)
+            call col%data_ptr(p_i32)
+            select case (to_kind)
+            case (PK_INT64)
+                allocate(d_i64(n)); d_i64 = int(p_i32, int64); call col%adopt(d_i64, unit)
+            case (PK_FLOAT32)
+                allocate(d_f32(n)); d_f32 = real(p_i32, real32); call col%adopt(d_f32, unit)
+            case default
+                allocate(d_f64(n)); d_f64 = real(p_i32, real64); call col%adopt(d_f64, unit)
+            end select
+        case (PK_INT64)
+            call col%data_ptr(p_i64)
             select case (to_kind)
             case (PK_INT32)
-                call col%set_at(k, int(anint(buf(k)), int32))
-            case (PK_INT64)
-                call col%set_at(k, int(anint(buf(k)), int64))
+                allocate(d_i32(n)); d_i32 = int(p_i64, int32); call col%adopt(d_i32, unit)
             case (PK_FLOAT32)
-                call col%set_at(k, real(buf(k), real32))
+                allocate(d_f32(n)); d_f32 = real(p_i64, real32); call col%adopt(d_f32, unit)
             case default
-                call col%set_at(k, buf(k))
+                allocate(d_f64(n)); d_f64 = real(p_i64, real64); call col%adopt(d_f64, unit)
             end select
+        case (PK_FLOAT32)
+            call col%data_ptr(p_f32)
+            select case (to_kind)
+            case (PK_INT32)
+                allocate(d_i32(n)); d_i32 = int(anint(p_f32), int32); call col%adopt(d_i32, unit)
+            case (PK_INT64)
+                allocate(d_i64(n)); d_i64 = int(anint(p_f32), int64); call col%adopt(d_i64, unit)
+            case default
+                allocate(d_f64(n)); d_f64 = real(p_f32, real64); call col%adopt(d_f64, unit)
+            end select
+        case (PK_FLOAT64)
+            call col%data_ptr(p_f64)
+            select case (to_kind)
+            case (PK_INT32)
+                allocate(d_i32(n)); d_i32 = int(anint(p_f64), int32); call col%adopt(d_i32, unit)
+            case (PK_INT64)
+                allocate(d_i64(n)); d_i64 = int(anint(p_f64), int64); call col%adopt(d_i64, unit)
+            case default
+                allocate(d_f32(n)); d_f32 = real(p_f64, real32); call col%adopt(d_f32, unit)
+            end select
+        case (PK_INT32_VEC)
+            call col%data_ptr(p_i32v)
+            select case (to_kind)
+            case (PK_INT64_VEC)
+                allocate(d_i64v(w, n)); d_i64v = int(p_i32v, int64); call col%adopt(d_i64v, unit)
+            case (PK_FLOAT32_VEC)
+                allocate(d_f32v(w, n)); d_f32v = real(p_i32v, real32); call col%adopt(d_f32v, unit)
+            case default
+                allocate(d_f64v(w, n)); d_f64v = real(p_i32v, real64); call col%adopt(d_f64v, unit)
+            end select
+        case (PK_INT64_VEC)
+            call col%data_ptr(p_i64v)
+            select case (to_kind)
+            case (PK_INT32_VEC)
+                allocate(d_i32v(w, n)); d_i32v = int(p_i64v, int32); call col%adopt(d_i32v, unit)
+            case (PK_FLOAT32_VEC)
+                allocate(d_f32v(w, n)); d_f32v = real(p_i64v, real32); call col%adopt(d_f32v, unit)
+            case default
+                allocate(d_f64v(w, n)); d_f64v = real(p_i64v, real64); call col%adopt(d_f64v, unit)
+            end select
+        case (PK_FLOAT32_VEC)
+            call col%data_ptr(p_f32v)
+            select case (to_kind)
+            case (PK_INT32_VEC)
+                allocate(d_i32v(w, n)); d_i32v = int(anint(p_f32v), int32); call col%adopt(d_i32v, unit)
+            case (PK_INT64_VEC)
+                allocate(d_i64v(w, n)); d_i64v = int(anint(p_f32v), int64); call col%adopt(d_i64v, unit)
+            case default
+                allocate(d_f64v(w, n)); d_f64v = real(p_f32v, real64); call col%adopt(d_f64v, unit)
+            end select
+        case default
+            call col%data_ptr(p_f64v)
+            select case (to_kind)
+            case (PK_INT32_VEC)
+                allocate(d_i32v(w, n)); d_i32v = int(anint(p_f64v), int32); call col%adopt(d_i32v, unit)
+            case (PK_INT64_VEC)
+                allocate(d_i64v(w, n)); d_i64v = int(anint(p_f64v), int64); call col%adopt(d_i64v, unit)
+            case default
+                allocate(d_f32v(w, n)); d_f32v = real(p_f64v, real32); call col%adopt(d_f32v, unit)
+            end select
+        end select
+        if (.not. allocated(rowvalid)) return
+        do r = 1_int64, n
+            if (.not. rowvalid(r)) call col%set_null(r)
         end do
-    end subroutine cast_fill_column
+    end subroutine cast_apply
     !
 end submodule parquet_tables_mutate

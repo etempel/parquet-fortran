@@ -125,6 +125,12 @@ contains
                     slot%values, sc%nrows, int(slot%width, int32), "")
             end if
             slot%residency = RES_FULL
+            ! A deferred %cast is carried out by this read and by nothing else: `declared_kind`
+            ! was rewritten when it was asked for, and the per-kind readers above have just
+            ! decoded the file column straight into that kind. Clearing the flag here is what
+            ! makes the deferral invisible -- the slot is now in exactly the state an eager cast
+            ! would have left it in.
+            slot%cast_pending = .false.
         end associate
         cache%reads_started = .true.
     end procedure table_materialize
@@ -311,7 +317,7 @@ contains
         end if
         associate (slot => cache%cols(idx))
             ! Not reachable yet: every current way to create an in-memory slot (table_new_slot,
-            ! called from %add_column/%cast_column) populates it and sets residency = RES_FULL
+            ! called from %add_column/%copy_column) populates it and sets residency = RES_FULL
             ! in the same procedure call, with no intervening point where table_touch could see
             ! it still RES_EMPTY. This guard exists for the predefined/generated-table-type
             ! columns described elsewhere in this file (parquet_tables_mutate.f90's own

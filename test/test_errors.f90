@@ -689,14 +689,28 @@ contains
                 test_table_rename_duplicate_name_aborts), &
             new_unittest("rename_column to a blank name aborts", &
                 test_table_rename_blank_name_aborts), &
-            new_unittest("cast_column on a non-numeric column aborts", &
-                test_table_cast_unsupported_kind_aborts), &
-            new_unittest("cast_column onto an existing name aborts", &
-                test_table_cast_duplicate_name_aborts), &
-            new_unittest("cast_column to a blank name aborts", &
-                test_table_cast_blank_name_aborts), &
-            new_unittest("cast_column on a value that would lose information aborts", &
-                test_table_cast_lossy_value_aborts), &
+            new_unittest("copy_column on a non-numeric column aborts", &
+                test_table_copy_unsupported_kind_aborts), &
+            new_unittest("copy_column onto an existing name aborts", &
+                test_table_copy_duplicate_name_aborts), &
+            new_unittest("copy_column to a blank name aborts", &
+                test_table_copy_blank_name_aborts), &
+            new_unittest("copy_column on a value that would lose information aborts", &
+                test_table_copy_lossy_value_aborts), &
+            new_unittest("cast of a non-numeric column aborts", &
+                test_table_cast_non_numeric_aborts), &
+            new_unittest("cast between a scalar and a vector kind aborts", &
+                test_table_cast_rank_change_aborts), &
+            new_unittest("cast narrowing an out-of-range integer aborts", &
+                test_table_cast_int_overflow_aborts), &
+            new_unittest("cast of a fractional value to an integer kind aborts", &
+                test_table_cast_fractional_aborts), &
+            new_unittest("cast overflowing float32 aborts", &
+                test_table_cast_float_overflow_aborts), &
+            new_unittest("cast(exact=.true.) on a value that loses precision aborts", &
+                test_table_cast_exact_precision_aborts), &
+            new_unittest("cast of an unsupported column aborts", &
+                test_table_cast_unsupported_column_aborts), &
             new_unittest("clone into another table type aborts", &
                 test_table_clone_type_mismatch_aborts), &
             new_unittest("a row handle reading an unsupported column aborts", &
@@ -4951,7 +4965,7 @@ contains
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "table_append_kind_mismatch", expect_abort=.true., &
             failure_message="appending a column of another kind was expected to abort", &
-            required_stderr="in the appended table; convert it first (%cast_column)")
+            required_stderr="in the appended table; convert it first (%cast)")
     end subroutine test_table_append_kind_mismatch_aborts
 
     subroutine test_table_append_width_mismatch_aborts(error)
@@ -5010,33 +5024,82 @@ contains
             required_stderr="rename_column: the new name is blank")
     end subroutine test_table_rename_blank_name_aborts
 
-    subroutine test_table_cast_unsupported_kind_aborts(error)
+    subroutine test_table_copy_unsupported_kind_aborts(error)
         type(error_type), allocatable, intent(out) :: error
-        call check_scenario_exit_status_and_stderr(error, "table_cast_unsupported_kind", expect_abort=.true., &
+        call check_scenario_exit_status_and_stderr(error, "table_copy_unsupported_kind", expect_abort=.true., &
+            failure_message="copying a string column into an integer kind was expected to abort", &
+            required_stderr="copy_column: only the numeric kinds convert")
+    end subroutine test_table_copy_unsupported_kind_aborts
+
+    subroutine test_table_copy_duplicate_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_copy_duplicate_name", expect_abort=.true., &
+            failure_message="copying onto an existing name was expected to abort", &
+            required_stderr="copy_column: a column of the new name already exists")
+    end subroutine test_table_copy_duplicate_name_aborts
+
+    subroutine test_table_copy_blank_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_copy_blank_name", expect_abort=.true., &
+            failure_message="copying a column to a blank name was expected to abort", &
+            required_stderr="copy_column: the new name is blank")
+    end subroutine test_table_copy_blank_name_aborts
+
+    subroutine test_table_copy_lossy_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_copy_lossy_value", expect_abort=.true., &
+            failure_message="copying a value that cannot be represented was expected to abort", &
+            required_stderr="cannot be represented as PK_INT32, so converting from PK_FLOAT64 would lose information")
+    end subroutine test_table_copy_lossy_value_aborts
+
+    subroutine test_table_cast_non_numeric_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_cast_non_numeric", expect_abort=.true., &
             failure_message="casting a string column was expected to abort", &
-            required_stderr="can only cast between the numeric scalar kinds")
-    end subroutine test_table_cast_unsupported_kind_aborts
+            required_stderr="cast: only the numeric kinds convert, not from PK_STRING to PK_INT64")
+    end subroutine test_table_cast_non_numeric_aborts
 
-    subroutine test_table_cast_duplicate_name_aborts(error)
+    subroutine test_table_cast_rank_change_aborts(error)
         type(error_type), allocatable, intent(out) :: error
-        call check_scenario_exit_status_and_stderr(error, "table_cast_duplicate_name", expect_abort=.true., &
-            failure_message="casting onto an existing name was expected to abort", &
-            required_stderr="cast_column: a column of the new name already exists")
-    end subroutine test_table_cast_duplicate_name_aborts
+        call check_scenario_exit_status_and_stderr(error, "table_cast_rank_change", expect_abort=.true., &
+            failure_message="casting a scalar column to a vector kind was expected to abort", &
+            required_stderr="would change the column's width, which is a reshape rather than a conversion")
+    end subroutine test_table_cast_rank_change_aborts
 
-    subroutine test_table_cast_blank_name_aborts(error)
+    subroutine test_table_cast_int_overflow_aborts(error)
         type(error_type), allocatable, intent(out) :: error
-        call check_scenario_exit_status_and_stderr(error, "table_cast_blank_name", expect_abort=.true., &
-            failure_message="casting a column to a blank name was expected to abort", &
-            required_stderr="cast_column: the new name is blank")
-    end subroutine test_table_cast_blank_name_aborts
+        call check_scenario_exit_status_and_stderr(error, "table_cast_int_overflow", expect_abort=.true., &
+            failure_message="narrowing an out-of-range integer was expected to abort", &
+            required_stderr="cast: the value at row 2 (3000000000) cannot be represented as PK_INT32")
+    end subroutine test_table_cast_int_overflow_aborts
 
-    subroutine test_table_cast_lossy_value_aborts(error)
+    subroutine test_table_cast_fractional_aborts(error)
         type(error_type), allocatable, intent(out) :: error
-        call check_scenario_exit_status_and_stderr(error, "table_cast_lossy_value", expect_abort=.true., &
-            failure_message="casting a value that cannot be represented was expected to abort", &
-            required_stderr="cannot be represented as PK_INT32, so casting from PK_FLOAT64 would lose information")
-    end subroutine test_table_cast_lossy_value_aborts
+        call check_scenario_exit_status_and_stderr(error, "table_cast_fractional", expect_abort=.true., &
+            failure_message="casting a fractional value to an integer kind was expected to abort", &
+            required_stderr="cast: the value at row 1")
+    end subroutine test_table_cast_fractional_aborts
+
+    subroutine test_table_cast_float_overflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_cast_float_overflow", expect_abort=.true., &
+            failure_message="overflowing a float32 cast was expected to abort", &
+            required_stderr="cannot be represented as PK_FLOAT32, so converting from PK_FLOAT64")
+    end subroutine test_table_cast_float_overflow_aborts
+
+    subroutine test_table_cast_exact_precision_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_cast_exact_precision", expect_abort=.true., &
+            failure_message="an exact= cast that loses precision was expected to abort", &
+            required_stderr="cannot be represented exactly as PK_FLOAT32")
+    end subroutine test_table_cast_exact_precision_aborts
+
+    subroutine test_table_cast_unsupported_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_cast_unsupported_column", expect_abort=.true., &
+            failure_message="casting an unsupported column was expected to abort", &
+            required_stderr="cast: this column's type is not supported by parquet_table")
+    end subroutine test_table_cast_unsupported_column_aborts
 
     subroutine test_table_clone_type_mismatch_aborts(error)
         type(error_type), allocatable, intent(out) :: error

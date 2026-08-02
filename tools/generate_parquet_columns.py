@@ -168,7 +168,7 @@ module parquet_columns
     !> Bits per validity-bitmap block. The bitmap is a hand-rolled `integer(int64)` array
     !! (1 = null, 0 = valid): measured 1.6-2x faster than stdlib's `bitset_large` on random
     !! set/test and on the reindex rebuild, at identical memory, with no int32 bit-index
-    !! ceiling -- see feature_table_stage1_columns.md "Spike results".
+    !! ceiling, which is why this library takes no stdlib dependency for it.
     integer(int64), parameter :: BITS_PER_BLOCK = 64_int64
     !""")
     w("    ! ---- Column kind discriminators ----")

@@ -445,8 +445,13 @@ template inside the script — and re-run it. Currently generated: `src/parquet_
 `tools/generate_parquet_maml.sh` + the `.maml` files under `schemas/`), and `src/parquet_columns.f90`,
 `src/parquet_columns_access.f90`, `src/parquet_columns_mutate.f90` (from
 `tools/generate_parquet_columns.py`, whose kind table is the single place a supported column kind is
-declared). Treat this list as a snapshot — trust the banner, not the list, and add new generated files
-here when they appear.
+declared), and `src/parquet_tables.f90`, `src/parquet_tables_access.f90`,
+`src/parquet_tables_addcol.f90`, `src/parquet_tables_materialize.f90` (from
+`tools/generate_parquet_tables.py`, which imports that same kind table). **`src/parquet_tables.f90` is
+the one most likely to be edited by mistake**, because it is the table layer's module spec — every
+type-bound binding and every interface body lives there, so adding a `parquet_table` procedure means
+editing the generator's literal template text, not the file it emits. Treat this list as a snapshot —
+trust the banner, not the list, and add new generated files here when they appear.
 
 Working rules for this class of file:
 

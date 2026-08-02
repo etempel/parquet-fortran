@@ -80,7 +80,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `parquet_slice` with `parquet_slice_range`/`parquet_slice_list` and `%get_slice`, which copies
   a strided or gathered row selection out of a column. A table can also be **changed**: one cell
   at a time (`%set_element`, `%set_null`, `%clear_null`, `%compact_validity`), a column at a time
-  (`%drop_column`, `%rename_column`, `%cast_column`), or a row at a time (`%filter_rows`,
+  (`%drop_column`, `%rename_column`, `%copy_column`, and `%cast`, which converts a column to
+  another numeric kind in place so that `%col` can be called with the kind the calling code wants
+  rather than the one the file holds), or a row at a time (`%filter_rows`,
   `%sort_by`, `%delete_rows`, `%truncate`, `%append`, `%append_null_rows`) — and `%clone` takes
   an independent deep copy, which is how a version is kept to go back to, since mutation is in
   place. Changing the **row set** detaches the table from its file: the rows in memory no longer

@@ -284,7 +284,7 @@ module parquet_tables
         generic :: prefetch => prefetch_one, prefetch_many
         procedure :: materialize_all => table_materialize_every !! Read every column not yet read.
         procedure :: reload => table_reload           !! Re-read one column, discarding local edits.
-        procedure :: row_group_bounds => table_row_group_bounds !! The source file's row-group row ranges.
+        procedure :: row_group_bounds => table_row_group_bounds !! Row-group row ranges, this table's rows or the file's.
         ! --- row view ---
         procedure, private :: row_at_i32 !! %row specific taking an int32 index.
         procedure, private :: row_at_i64 !! %row specific taking an int64 index.
@@ -662,12 +662,25 @@ module parquet_tables
             character(len=*), intent(in) :: filename                     !! parquet file to inspect.
             integer(int64), allocatable, intent(out) :: bounds(:,:)      !! (2, num_row_groups).
         end subroutine parquet_table_row_group_bounds
-        !> The same row ranges for an already-open table, without reopening the file. Always in
-        !! the FILE's own row numbering, even in the slice regime, so it stays usable for
-        !! planning the next slice.
-        module subroutine table_row_group_bounds(self, bounds)
+        !> The same row ranges for an already-open table, without reopening the file, in THIS
+        !! TABLE's own row numbering -- or, with `physical=.true.`, in the file's.
+        !!
+        !! The two differ only when the table does not hold every row of the file: a slice, a
+        !! filter, a sample. Then `bounds(1, rg)`/`bounds(2, rg)` are the rows OF THIS TABLE that
+        !! came from row group `rg`, which is what relates a row index in hand to the row group it
+        !! was read from; `physical=.true.` answers in the file's numbering instead, which is what
+        !! `parquet_table_row_group_bounds` and every slice bound are expressed in, and so is what
+        !! to use for planning the next slice.
+        !!
+        !! Both forms have ONE ENTRY PER PHYSICAL ROW GROUP and are index-aligned, so the two can be
+        !! read side by side ("row group 7 holds file rows A..B, which are my rows C..D"). A row
+        !! group contributing no rows to this table -- outside the slice, or filtered away entirely
+        !! -- is reported as an EMPTY range, `bounds(1, rg) > bounds(2, rg)`, rather than dropped;
+        !! dropping it would break the alignment that makes the pairing possible.
+        module subroutine table_row_group_bounds(self, bounds, physical)
             class(parquet_table), intent(in) :: self                     !! the table.
             integer(int64), allocatable, intent(out) :: bounds(:,:)      !! (2, num_row_groups).
+            logical, intent(in), optional :: physical                    !! .true. for the file's own row numbering.
         end subroutine table_row_group_bounds
         !> Fills `bounds` from an open reader: the shared walk both public forms sit on.
         module subroutine reader_row_group_bounds(reader, bounds)

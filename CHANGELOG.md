@@ -109,8 +109,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Sorting is the one exception: the slice forms have no `sort` argument at all (a sort reorders
   rows across the whole file, so a row range would no longer name the rows that were asked for),
   and a read-in MAML whose `extra: sort:` is non-empty is refused on a slice open.
-  `%row_group_bounds` keeps answering in the file's own row numbering throughout, since that is
-  what the next slice has to be chosen in. Note qc is enforced when a column is actually read, so
+  `%row_group_bounds` gained a `physical=` argument for exactly this: it answers in the table's own
+  row numbering by default, relating a row index in hand to the row group it came from, and in the
+  file's with `physical=.true.`, which is what the next slice has to be chosen in. Both forms have
+  one entry per physical row group and are index-aligned, so they can be read side by side; a row
+  group contributing no rows to the table is an empty range rather than a dropped entry. Note qc is enforced when a column is actually read, so
   on a lazy table it lands on first touch rather than at open. See
   [the guide](doc/pages/table.md) for the current limitations, the detach rule and the OpenMP
   first-touch rule.

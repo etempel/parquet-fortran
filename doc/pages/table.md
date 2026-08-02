@@ -236,8 +236,10 @@ print *, t%nrows()          ! 1000000
 `parquet_table_row_group_bounds(file, bounds)` reports where the natural boundaries are, without
 opening a table at all — `bounds(1, rg)` and `bounds(2, rg)` are row group `rg`'s first and last
 rows. It is the planning call: a thread cannot open its slice until it knows which rows to ask
-for. `call t%row_group_bounds(bounds)` answers the same for an open table, always in the file's
-own row numbering.
+for. `call t%row_group_bounds(bounds, physical=.true.)` answers the same for an open table. Without
+`physical=` it answers in *that table's* own row numbering instead, which for a whole-file
+unfiltered table is the same thing — see
+[Which rows a row group holds](#which-rows-a-row-group-holds) once a filter or a slice is in play.
 
 Putting the two together gives the per-thread pattern, where each thread reads only its own
 share of the file:
@@ -289,9 +291,10 @@ Two consequences worth stating plainly:
   `[row_lo, row_hi]` that survive, and every row index the table takes or reports counts those
   survivors: row 1 is the first surviving row of the slice, not file row `row_lo`. Rows outside
   the slice never appear, however well they match.
-- **`%row_group_bounds` keeps answering in the file's own row numbering**, which is what makes it
-  the planning call — it is how the *next* slice gets chosen, so it has to stay in the
-  coordinates a slice is expressed in.
+- **`%row_group_bounds(physical=.true.)` keeps answering in the file's own row numbering**, which
+  is what makes it the planning call — it is how the *next* slice gets chosen, so it has to be
+  available in the coordinates a slice is expressed in. Without `physical=` it answers in the
+  table's own rows; see [Which rows a row group holds](#which-rows-a-row-group-holds).
 
 Without a filter and without `sample_fraction=` nothing changes at all: the slice is trimmed out
 of the covering row groups in memory, exactly as it always was, and `%nrows()` is
@@ -302,6 +305,31 @@ of the covering row groups in memory, exactly as it always was, and `%nrows()` i
 compile error rather than something to discover at runtime. A `maml=` whose `extra: sort:` list is
 non-empty is the same rejection, necessarily as an `error stop`. Sort the whole file instead, or
 sort the slice in memory afterwards with `%sort_by`.
+
+### Which rows a row group holds
+
+`%row_group_bounds` answers in **this table's** row numbering by default, and in the **file's** with
+`physical=.true.`:
+
+```fortran
+call t%row_group_bounds(mine)                    ! rows OF THIS TABLE, per row group
+call t%row_group_bounds(theirs, physical=.true.) ! the file's own rows, per row group
+```
+
+The two differ only when the table does not hold every row of the file — a slice, a filter, a
+sample. For a whole-file table with no transform they are the same array, and both match
+`parquet_table_row_group_bounds`.
+
+Which one to reach for follows from what the answer is *for*: the default relates a row index you
+already have back to the row group it was read from (`mine(1, rg) .. mine(2, rg)` are rows of `%get`'s
+output); `physical=.true.` is the planning form, in the coordinates `parquet_open_table`'s own
+`row_lo`/`row_hi` are expressed in.
+
+Both have **one entry per physical row group and are index-aligned**, so they can be read side by
+side — row group `rg` holds file rows `theirs(:, rg)`, which are this table's rows `mine(:, rg)`. A
+row group contributing no rows at all (outside the slice, or filtered away entirely) is reported as
+an **empty range**, `mine(1, rg) > mine(2, rg)`, rather than dropped; dropping it would break the
+alignment that makes the pairing possible.
 
 ## One row at a time
 

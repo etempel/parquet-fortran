@@ -160,7 +160,9 @@ contains
             new_unittest("a slice opened with sample_fraction= keeps a seeded subset of itself", &
                 test_slice_sample), &
             new_unittest("a clone of a filtered slice reattaches the same scoped filter", &
-                test_slice_clone) &
+                test_slice_clone), &
+            new_unittest("row_group_bounds answers in table rows by default and file rows with physical=", &
+                test_row_group_bounds_physical) &
             ]
     end subroutine collect_tests_parquet_table
     !
@@ -1601,11 +1603,16 @@ contains
             if (allocated(error)) return
         end do
         !
-        ! The table-level form answers the same thing, in FILE row numbering, even for a slice.
+        ! The table-level form, on an UNFILTERED slice: its rows are the file's rows, so both
+        ! coordinate systems are the same array and physical= changes nothing.
         call parquet_open_table(t, f, 9, 12)
+        call t%row_group_bounds(tbounds, physical=.true.)
+        call check(error, all(tbounds == bounds), &
+            "an unfiltered slice should report the file's own row groups under physical=.true.")
+        if (allocated(error)) return
         call t%row_group_bounds(tbounds)
         call check(error, all(tbounds == bounds), &
-            "a slice table should report the file's own row groups, not the slice's")
+            "an unfiltered slice's own coordinates are the file's, so the default should match")
         if (allocated(error)) return
         !
         ! A full-regime table never precomputes rg_bounds at open time (only the slice regime
@@ -3915,17 +3922,18 @@ contains
     !> An unfiltered, unsampled slice keeps the fast path even when its bounds fall INSIDE row
     !! groups: the trim happens in memory, with no reader-side mask involved.
     !!
-    !! `%nrows()` being exactly the slice's own length is a necessary condition, not a sufficient
-    !! one: a mask carrying only the slice's range and no clauses would also keep every row, so
-    !! this test proves the ANSWER is right without proving no mask was installed to get it. The
-    !! discriminator arrives with `%row_group_bounds(physical=)`, where the two coordinate systems
-    !! must be IDENTICAL on this path and differ under a mask -- add that assertion here then.
+    !! `%nrows()` being exactly the slice's own length is a necessary condition but not a
+    !! sufficient one: a mask carrying only the slice's range and no clauses would also keep every
+    !! row. `%row_group_bounds`'s two coordinate systems are what actually discriminate -- under a
+    !! mask the table's own numbering restarts at 1 and the row groups before the slice collapse to
+    !! empty ranges, so the two arrays being IDENTICAL is only possible with no mask installed.
     subroutine test_slice_fast_path(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table) :: t, full
         integer, parameter :: N = 20, CH = 7, LO = 6, HI = 16
         integer(int32), allocatable :: k(:), fk(:)
         real(real64), allocatable :: x(:)
+        integer(int64), allocatable :: tbounds(:,:), pbounds(:,:), fbounds(:,:)
         character(len=*), parameter :: f = "test_run/table_slice_fast.parquet"
         integer :: i
         !
@@ -3935,6 +3943,17 @@ contains
         call parquet_open_table(t, f, LO, HI)
         call check(error, t%nrows() == int(HI - LO + 1, int64), &
             "an unfiltered slice must have exactly its own length as its row count")
+        if (allocated(error)) return
+        ! The actual no-mask assertion: see this test's own doc-comment for why the row count
+        ! above cannot make it on its own.
+        call t%row_group_bounds(tbounds)
+        call t%row_group_bounds(pbounds, physical=.true.)
+        call check(error, all(tbounds == pbounds), &
+            "an unfiltered slice's two coordinate systems must be identical, i.e. no mask")
+        if (allocated(error)) return
+        call parquet_table_row_group_bounds(f, fbounds)
+        call check(error, all(tbounds == fbounds), &
+            "an unfiltered slice's row groups must be the file's own, untouched")
         if (allocated(error)) return
         call t%get("k", k)
         call check(error, all(k == [(int(i, int32), i = LO, HI)]), &
@@ -3986,12 +4005,12 @@ contains
         call check(error, trim(sv(1)) == "r9" .and. trim(sv(size(sv))) == "r16", &
             "a string column of a filtered slice did not line up with its key column")
         if (allocated(error)) return
-        ! The planning call has to stay in the file's own numbering, which on this path is no
-        ! longer the numbering the table itself works in.
-        call t%row_group_bounds(tbounds)
+        ! physical=.true. is the planning form, and has to stay in the file's own numbering --
+        ! which on this path is no longer the numbering the table itself works in.
+        call t%row_group_bounds(tbounds, physical=.true.)
         call parquet_table_row_group_bounds(f, fbounds)
         call check(error, all(tbounds == fbounds), &
-            "a filtered slice should still report the file's own row-group bounds")
+            "a filtered slice should report the file's own row-group bounds under physical=.true.")
     end subroutine test_slice_filter
     !
     !> The same masked path reached from a read-in MAML's own `extra: filter:` rather than a code
@@ -4087,10 +4106,81 @@ contains
         call check(error, all(abs(x - real(k, real64) * 1.5_real64) < 1.0e-12_real64), &
             "a clone's lazily-read column did not line up with its key column")
         if (allocated(error)) return
-        call c%row_group_bounds(cbounds)
+        call c%row_group_bounds(cbounds, physical=.true.)
         call parquet_table_row_group_bounds(f, fbounds)
         call check(error, all(cbounds == fbounds), &
             "a clone of a filtered slice should still report the file's own row-group bounds")
     end subroutine test_slice_clone
+    !
+    !> `%row_group_bounds`'s two coordinate systems, on both the tables where they differ: a
+    !! filtered slice and a filtered whole file.
+    !!
+    !! Three rules are checked, and each fails differently. The default form must TILE `1..%nrows()`
+    !! exactly, in order and with no gap, or a row index in hand cannot be related to the row group
+    !! it came from. `physical=.true.` must reproduce the pre-open planning call exactly, or a
+    !! caller cannot choose the next slice from an open table. And both must have ONE ENTRY PER
+    !! PHYSICAL ROW GROUP so the two can be read side by side -- which is what forces a row group
+    !! contributing nothing to be an empty range rather than a dropped entry.
+    subroutine test_row_group_bounds_physical(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_filter) :: filt
+        integer, parameter :: N = 20, CH = 7, LO = 6, HI = 16
+        integer(int64), allocatable :: tb(:,:), pb(:,:), fb(:,:)
+        integer(int64) :: rg, next, empties
+        character(len=*), parameter :: f = "test_run/table_rgbounds_physical.parquet"
+        !
+        call write_slice_xform_fixture(f, N, CH)
+        call parquet_table_row_group_bounds(f, fb)
+        !
+        ! A filtered slice: row groups are 1-7, 8-14, 15-20; the slice is 6..16 and the filter
+        ! keeps k > 8, so only row groups 2 and 3 contribute and row group 1 contributes nothing.
+        call filt%add("k > 8")
+        call parquet_open_table(t, f, LO, HI, filter=filt)
+        call t%row_group_bounds(tb)
+        call t%row_group_bounds(pb, physical=.true.)
+        call check(error, size(tb, 2) == size(fb, 2) .and. size(pb, 2) == size(fb, 2), &
+            "both forms should have one entry per PHYSICAL row group, contributing or not")
+        if (allocated(error)) return
+        call check(error, all(pb == fb), &
+            "physical=.true. should reproduce parquet_table_row_group_bounds exactly")
+        if (allocated(error)) return
+        ! The default form tiles the table's own rows, skipping the entries that contribute none.
+        next = 1_int64
+        empties = 0_int64
+        do rg = 1_int64, size(tb, 2, kind=int64)
+            if (tb(1, rg) > tb(2, rg)) then
+                empties = empties + 1_int64
+                cycle
+            end if
+            call check(error, tb(1, rg) == next, &
+                "a contributing row group should start where the previous one left off")
+            if (allocated(error)) return
+            next = tb(2, rg) + 1_int64
+        end do
+        call check(error, next - 1_int64 == t%nrows(), &
+            "the table-coordinate bounds should tile 1..nrows() exactly")
+        if (allocated(error)) return
+        call check(error, empties == 1_int64, &
+            "the row group the slice and filter exclude entirely should be an empty range")
+        if (allocated(error)) return
+        ! ...and the two are index-aligned, so row group 2's table rows really are the rows read
+        ! from row group 2's file rows.
+        call check(error, tb(1, 2) == 1_int64 .and. pb(1, 2) == 8_int64, &
+            "the first contributing row group should supply the table's first row")
+        if (allocated(error)) return
+        !
+        ! A filtered WHOLE-FILE table: no rg_bounds is precomputed at open, so both forms are
+        ! worked out on demand -- the default from the (masked) reader, physical= from a
+        ! footer-only reader of its own.
+        call parquet_open_table(t, f, filter=filt)
+        call t%row_group_bounds(tb)
+        call t%row_group_bounds(pb, physical=.true.)
+        call check(error, all(pb == fb), &
+            "a filtered whole-file table should still report the file's own bounds under physical=")
+        if (allocated(error)) return
+        call check(error, tb(1, 1) == 1_int64 .and. tb(2, size(tb, 2)) == t%nrows(), &
+            "a filtered whole-file table's default bounds should tile its own rows")
+    end subroutine test_row_group_bounds_physical
     !
 end module test_table

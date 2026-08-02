@@ -345,7 +345,10 @@ contains
     !
     module procedure table_row_group_bounds
         character(len=:), allocatable :: sfx
+        logical :: want_physical
         !
+        want_physical = .false.
+        if (present(physical)) want_physical = physical
         call table_check_open(self, "row_group_bounds")
         ! Checked before the file_backed test below, which detaching also clears: a detached
         ! table needs the reason it cannot answer, not "it was never opened from a file".
@@ -355,19 +358,33 @@ contains
             error stop EP // "row_group_bounds: this table was not opened from a file, so it " // &
                 "has no row groups" // sfx
         end if
-        ! In the file's own row numbering, which on a masked slice is the second array rather than
-        ! the one the read path uses (see parquet_table_cache). This call's whole purpose is
-        ! planning the NEXT slice, so it has to stay in the coordinates a slice is expressed in.
-        if (allocated(self%cache%rg_bounds_physical)) then
-            bounds = self%cache%rg_bounds_physical
+        ! Four sources, and which one answers depends on both the coordinate system asked for and
+        ! how the table was opened. The two coincide for a table that holds every row of the file,
+        ! which is why an unsliced, unfiltered table takes the same branch either way.
+        if (want_physical) then
+            if (allocated(self%cache%rg_bounds_physical)) then
+                ! Masked slice: the only case where the file's numbering was captured separately,
+                ! because the reader stopped being able to answer for it the moment it opened.
+                bounds = self%cache%rg_bounds_physical
+            else if (table_transform_narrows(self%cache)) then
+                ! Whole file with a filter or a sample: its reader would answer in surviving rows,
+                ! so the file's own numbering comes from a footer-only reader instead. Cheap, and
+                ! only on this path.
+                call parquet_table_row_group_bounds(self%cache%source_file, bounds)
+            else if (allocated(self%cache%rg_bounds)) then
+                ! Unmasked slice: its bounds ARE the file's, so there is nothing else to consult.
+                bounds = self%cache%rg_bounds
+            else
+                call reader_row_group_bounds(self%cache%reader, bounds)
+            end if
         else if (allocated(self%cache%rg_bounds)) then
+            ! Either slice path: rg_bounds is in this table's coordinates by construction.
             bounds = self%cache%rg_bounds
-        else if (table_transform_narrows(self%cache)) then
-            ! A whole-file table with a filter or a sample: its reader would answer in surviving
-            ! rows, so the answer comes from a footer-only reader of its own instead. Cheap, and
-            ! only on this path.
-            call parquet_table_row_group_bounds(self%cache%source_file, bounds)
         else
+            ! Whole file. The reader answers in the table's coordinates already -- surviving rows
+            ! when a transform narrows them, every row when nothing does -- so one call covers
+            ! both, and a row group filtered away entirely comes back as the empty range the
+            ! cumulative walk produces for a zero-row group.
             call reader_row_group_bounds(self%cache%reader, bounds)
         end if
     end procedure table_row_group_bounds

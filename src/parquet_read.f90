@@ -450,6 +450,14 @@ contains
         if (nleaves == 0 .and. row_group_lo <= 0 .and. row_group_hi <= 0 .and. &
                 row_lo <= 0 .and. row_hi <= 0) return
 
+        ! A rule-less filter (nleaves == nnodes == 0) never enters the loop above, so
+        ! parquet_parse_filter_expr never gets a chance to allocate these -- but the row-bound-only
+        ! path above still falls through to the array-section references below, and referencing
+        ! even a zero-trip section of an unallocated allocatable is invalid (ifx's runtime checks
+        ! catch this; gfortran silently tolerates it).
+        if (.not. allocated(node_kind)) allocate(node_kind(0), node_leaf(0))
+        if (.not. allocated(leaf_name)) allocate(leaf_name(0), leaf_op(0), leaf_value(0), leaf_is_string(0))
+
         call convert_temporal_filter_values(reader, context, leaf_name, leaf_op, leaf_value, leaf_is_string, nleaves)
         call parquet_render_filter_expr(node_kind, node_leaf, nnodes, leaf_name, leaf_op, leaf_value, &
             leaf_is_string, nleaves, expr_text)

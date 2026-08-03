@@ -53,7 +53,7 @@ module parquet_tables
         parquet_open_writer, parquet_write_column, parquet_close_writer, parquet_write_row_mask, &
         parquet_measure_list_width, parquet_column_width_needs_data, parquet_column_has_nulls, &
         parquet_load_qc_maml_file, parquet_filter, parquet_sortkey, parquet_read_qc, &
-        parquet_compose_read_qc, parquet_reader_set_filter
+        parquet_compose_read_qc, parquet_reader_set_filter, parquet_parse_maml
     !
     implicit none
     private
@@ -1127,6 +1127,10 @@ module parquet_tables
         !! under its own output name (a col_map: rename is honoured automatically). A schema field
         !! with no matching table column is an error; a table column the schema does not name is
         !! simply not written. `row_mask` writes a row subset without changing the table.
+        !!
+        !! A schema built with `%init`/`%add_field` and never parsed is parsed here, so calling
+        !! `parquet_parse_maml` first is optional. That is why `schema` is `intent(inout)`: the
+        !! caller's schema is parsed on return.
         module subroutine parquet_write_table(table, filename, schema, row_mask)
             type(parquet_table), intent(in) :: table   !! the table to write.
             character(len=*), intent(in) :: filename   !! output parquet file.
@@ -2030,13 +2034,14 @@ module parquet_tables
         end subroutine table_put_column
     end interface
     !
-    ! ---- Row-structural mutation -- ALL of it detaches (parquet_tables_rowmutate) ----
+    ! ---- Row-structural mutation -- detaches whenever it changes the row set (parquet_tables_rowmutate) ----
     interface
         !> Keeps only the rows whose `keep` entry is .true., dropping the rest from EVERY column.
         !!
         !! Row-structural, so it DETACHES the table from its file: after it, a column that was
         !! never read can never be read, because the file's rows no longer line up with the rows
-        !! in memory. Materialize what you need first (`%prefetch`/`%materialize_all`).
+        !! in memory. Materialize what you need first (`%prefetch`/`%materialize_all`). An
+        !! all-`.true.` mask removes no row, so it changes nothing and does not detach.
         module subroutine table_filter_rows(self, keep)
             class(parquet_table), intent(inout) :: self !! the table.
             logical, intent(in) :: keep(:)              !! one entry per row; .true. to retain it.
@@ -2049,7 +2054,8 @@ module parquet_tables
         !! key. Nulls and NaNs are placed absolutely and are never flipped by `descending`.
         !!
         !! Every key column must already be resident: sorting will not read one implicitly.
-        !! Row-structural, so it DETACHES.
+        !! Row-structural, so it DETACHES -- unless the rows were already in that order, in which
+        !! case nothing moves and nothing is detached.
         module subroutine table_sort_by(self, keys, descending, nulls_first)
             class(parquet_table), intent(inout) :: self       !! the table.
             character(len=*), intent(in) :: keys(:)           !! key columns, primary first.
@@ -2057,23 +2063,26 @@ module parquet_tables
             logical, intent(in), optional :: nulls_first(:)   !! per key: .true. to put nulls first.
         end subroutine table_sort_by
         !> Removes the listed rows (int32 indices). Repeats are harmless -- a row named twice is
-        !! removed once. Row-structural, so it DETACHES.
+        !! removed once. Row-structural, so it DETACHES; an empty index list removes nothing and
+        !! does not.
         module subroutine table_delete_rows_i32(self, indices)
             class(parquet_table), intent(inout) :: self !! the table.
             integer(int32), intent(in) :: indices(:)    !! 1-based row indices to remove.
         end subroutine table_delete_rows_i32
-        !> Removes the listed rows (int64 indices). Row-structural, so it DETACHES.
+        !> Removes the listed rows (int64 indices). Row-structural, so it DETACHES; an empty
+        !! index list removes nothing and does not.
         module subroutine table_delete_rows_i64(self, indices)
             class(parquet_table), intent(inout) :: self !! the table.
             integer(int64), intent(in) :: indices(:)    !! 1-based row indices to remove.
         end subroutine table_delete_rows_i64
-        !> Keeps only the first `n` rows (int32 count). `n` beyond the row count is a no-op; 0
-        !! empties the table. Row-structural, so it DETACHES.
+        !> Keeps only the first `n` rows (int32 count). `n` beyond the row count is a no-op and
+        !! does not detach; 0 empties the table. Row-structural otherwise, so it DETACHES.
         module subroutine table_truncate_i32(self, n)
             class(parquet_table), intent(inout) :: self !! the table.
             integer(int32), intent(in) :: n             !! rows to keep.
         end subroutine table_truncate_i32
-        !> Keeps only the first `n` rows (int64 count). Row-structural, so it DETACHES.
+        !> Keeps only the first `n` rows (int64 count). Row-structural, so it DETACHES, unless
+        !! `n` is at least the row count, which keeps every row and changes nothing.
         module subroutine table_truncate_i64(self, n)
             class(parquet_table), intent(inout) :: self !! the table.
             integer(int64), intent(in) :: n             !! rows to keep.
@@ -2081,7 +2090,9 @@ module parquet_tables
         !> Appends every row of another table. `other`'s columns must be a SUBSET of this
         !! table's, with matching kinds, widths and units; a column this table has and `other`
         !! does not is filled with nulls. A column `other` has and this table does not is an
-        !! error rather than being silently dropped. Row-structural, so it DETACHES.
+        !! error rather than being silently dropped. Row-structural, so it DETACHES -- but a
+        !! zero-row `other` adds no row, so it is still checked for compatibility and then does
+        !! nothing at all.
         module subroutine table_append_table(self, other)
             class(parquet_table), intent(inout) :: self !! the table to grow.
             class(parquet_table), intent(in) :: other   !! the table whose rows are appended.
@@ -2094,18 +2105,20 @@ module parquet_tables
             type(parquet_table_row), intent(in) :: r    !! the row to append.
         end subroutine table_append_row
         !> Appends `n` all-null rows (int32 count) to every column, so they can be filled in
-        !! afterwards. Row-structural, so it DETACHES.
+        !! afterwards. Row-structural, so it DETACHES; `n = 0` appends nothing and does not.
         module subroutine table_append_null_rows_i32(self, n)
             class(parquet_table), intent(inout) :: self !! the table.
             integer(int32), intent(in) :: n             !! rows to append.
         end subroutine table_append_null_rows_i32
-        !> Appends `n` all-null rows (int64 count). Row-structural, so it DETACHES.
+        !> Appends `n` all-null rows (int64 count). Row-structural, so it DETACHES; `n = 0`
+        !! appends nothing and does not.
         module subroutine table_append_null_rows_i64(self, n)
             class(parquet_table), intent(inout) :: self !! the table.
             integer(int64), intent(in) :: n             !! rows to append.
         end subroutine table_append_null_rows_i64
         !> The shared back half of every row-structural mutation: applies `keep` to every
-        !! resident column, updates the row count, and detaches. Private to the implementation.
+        !! resident column, updates the row count, and detaches. Returns without touching
+        !! anything when `keep` retains every row. Private to the implementation.
         module subroutine table_apply_keep(self, keep, proc)
             class(parquet_table), intent(inout) :: self !! the table.
             logical, intent(in) :: keep(:)              !! one entry per row; .true. to retain it.

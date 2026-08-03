@@ -115,7 +115,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row numbering by default, relating a row index in hand to the row group it came from, and in the
   file's with `physical=.true.`, which is what the next slice has to be chosen in. Both forms have
   one entry per physical row group and are index-aligned, so they can be read side by side; a row
-  group contributing no rows to the table is an empty range rather than a dropped entry. Note qc is enforced when a column is actually read, so
+  group contributing no rows to the table is an empty range rather than a dropped entry, and
+  `physical=.true.` answers for every file-backed table whatever transform it carries — a sorted
+  table, which cannot answer in its own row numbering at all, included. A **row mutation that
+  changes no row does not detach**: `%truncate(n)` with `n` at or above the row count,
+  `%filter_rows` with an all-`.true.` mask, `%delete_rows` with no indices, `%append` of a zero-row
+  table, `%append_null_rows(0)` and a `%sort_by` whose rows were already in that order all return
+  without touching a column, without invalidating a `%col` pointer and with the file still
+  attached. `parquet_write_table` parses a schema built with `%init`/`%add_field` itself, so
+  calling `parquet_parse_maml` beforehand is optional (the schema is left parsed afterwards).
+  Note qc is enforced when a column is actually read, so
   on a lazy table it lands on first touch rather than at open. See
   [the guide](doc/pages/table.md) for the current limitations, the detach rule and the OpenMP
   first-touch rule.

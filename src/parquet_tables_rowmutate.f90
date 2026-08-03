@@ -5,11 +5,20 @@
 !> Mutation that changes a `parquet_table`'s ROW SET: `%filter_rows`, `%sort_by`,
 !! `%delete_rows`, `%truncate`, `%append` and `%append_null_rows`.
 !!
-!! **Everything in this file detaches the table** (F-mut-7), and that is why it is a separate
-!! file from `parquet_tables_mutate.f90`. Once the row set has changed, a column still sitting in
-!! the file can never be lined up with the columns already in memory again -- so rather than hand
-!! back silently misaligned data later, the table records that it has left its file behind and
-!! every later read from that file is a named error.
+!! **Everything in this file detaches the table when it actually changes the row set** (F-mut-7),
+!! and that is why it is a separate file from `parquet_tables_mutate.f90`. Once the row set has
+!! changed, a column still sitting in the file can never be lined up with the columns already in
+!! memory again -- so rather than hand back silently misaligned data later, the table records that
+!! it has left its file behind and every later read from that file is a named error.
+!!
+!! **A call that changes nothing changes nothing at all** -- it does not touch a column, does not
+!! invalidate a `%col` pointer, and does not detach. Detaching costs the caller their file, so it
+!! is only ever paid for when something actually required it. Five calls reach this file with
+!! nothing to do, all decided by the caller's own arguments (`%truncate(n)` with `n >= %nrows()`,
+!! `%filter_rows` with an all-`.true.` mask, `%delete_rows` with no indices, `%append` of a
+!! zero-row table, `%append_null_rows(0)`), plus one decided by the data (`%sort_by` whose
+!! permutation moves no row, which includes every table of fewer than two rows). Each returns
+!! early, AFTER its own validation -- a no-op still rejects a bad argument.
 !!
 !! **Two rules hold this together, and a new operation added here must follow both:**
 !!
@@ -71,6 +80,12 @@ contains
     module procedure table_apply_keep
         integer :: i
         !
+        ! Keeping every row removes none, so there is nothing to rewrite and nothing to detach
+        ! for: `delete_by_mask` would reallocate every column's storage to the same contents,
+        ! invalidating every %col pointer, and the table would lose its file for a call that did
+        ! not change a single row. This covers %filter_rows with an all-.true. mask,
+        ! %delete_rows() with no indices, and a filter of a zero-row table.
+        if (all(keep)) return
         do i = 1, self%cache%ncols
             if (.not. table_mutable_column(self, i)) cycle
             call self%cache%cols(i)%values%delete_by_mask(keep)
@@ -172,14 +187,33 @@ contains
         end if
         ! Builds (and so validates every key) before a single column is touched.
         call table_build_sort_permutation(self, keys, descending, nulls_first, perm)
-        if (self%row_count > 0_int64) then
-            do i = 1, self%cache%ncols
-                if (.not. table_mutable_column(self, i)) cycle
-                call self%cache%cols(i)%values%reindex(perm(1:self%row_count))
-            end do
-        end if
+        ! A permutation that moves no row leaves the table exactly as it was, so it costs neither
+        ! a reindex (which reallocates every column) nor the file. Unlike the other early returns
+        ! in this file this one depends on the DATA, not on the arguments: sorting an
+        ! already-ordered column keeps the table attached, sorting the same column after an edit
+        ! may not. Fewer than two rows always lands here.
+        if (permutation_moves_nothing(perm(1:self%row_count))) return
+        do i = 1, self%cache%ncols
+            if (.not. table_mutable_column(self, i)) cycle
+            call self%cache%cols(i)%values%reindex(perm(1:self%row_count))
+        end do
         call table_detach(self)
     end procedure table_sort_by
+    !
+    !> .true. when a sort permutation sends every row to its own position, i.e. the sort is a
+    !! no-op. A zero- or one-row table always answers .true.
+    logical function permutation_moves_nothing(perm) result(still)
+        integer(int64), intent(in) :: perm(:) !! the permutation, one destination row per source row.
+        integer(int64) :: k
+        !
+        still = .true.
+        do k = 1_int64, size(perm, kind=int64)
+            if (perm(k) /= k) then
+                still = .false.
+                return
+            end if
+        end do
+    end function permutation_moves_nothing
     !
     ! ---- append -----------------------------------------------------------------------------
     !
@@ -212,6 +246,10 @@ contains
             call append_check_compatible(self, i, other, j)
         end do
         added = other%row_count
+        ! Appending no rows adds nothing, so the table keeps its columns' storage and its file --
+        ! but only after the compatibility checks above have run, so an incompatible zero-row
+        ! table is still refused rather than quietly accepted.
+        if (added == 0_int64) return
         do i = 1, self%cache%ncols
             if (.not. table_mutable_column(self, i)) cycle
             j = cache_find(other%cache, self%cache%cols(i)%name)
@@ -250,10 +288,9 @@ contains
             write(got, "(I0)") n
             error stop EP // "append_null_rows: cannot append " // trim(got) // " rows"
         end if
-        if (n == 0_int64) then
-            call table_detach(self)
-            return
-        end if
+        ! Appending no rows leaves the row set exactly as it was, so it does not detach: the
+        ! table keeps its file, and a later touch can still read a column it has not read yet.
+        if (n == 0_int64) return
         do i = 1, self%cache%ncols
             if (.not. table_mutable_column(self, i)) cycle
             call self%cache%cols(i)%values%append_nulls(n)

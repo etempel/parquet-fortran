@@ -1149,8 +1149,8 @@ program error_scenarios
         call scenario_table_write_missing_column()
     case ("table_write_unsupported_column")
         call scenario_table_write_unsupported_column()
-    case ("table_write_unparsed_schema")
-        call scenario_table_write_unparsed_schema()
+    case ("table_write_unbuilt_schema")
+        call scenario_table_write_unbuilt_schema()
     case ("table_slice_below_first_row")
         call scenario_table_slice_below_first_row()
     case ("table_slice_past_last_row")
@@ -1183,6 +1183,8 @@ program error_scenarios
         call scenario_table_detached_reload()
     case ("table_detached_row_group_bounds")
         call scenario_table_detached_row_group_bounds()
+    case ("table_row_group_bounds_sorted")
+        call scenario_table_row_group_bounds_sorted()
     case ("table_mutate_unmaterialized_column")
         call scenario_table_mutate_unmaterialized_column()
     case ("table_mutate_unsupported_column")
@@ -9784,19 +9786,20 @@ contains
         print '(a)', "unexpectedly wrote a table's unsupported column"
     end subroutine scenario_table_write_unsupported_column
 
-    !> A schema built with %init/%add_field holds only MAML text until parquet_parse_maml runs;
-    !! writing with it unparsed would otherwise read uninitialized state and run away.
-    subroutine scenario_table_write_unparsed_schema()
+    !> A schema that was never built at all cannot be parsed into anything, and writing with it
+    !! would otherwise read uninitialized state and run away. Reported as its own mistake rather
+    !! than as a parse failure of MAML text that does not exist.
+    subroutine scenario_table_write_unbuilt_schema()
         type(parquet_table) :: t
         type(parquet_schema) :: s
-        call write_table_scenario_fixture("test_run/es_table_unparsed_in.parquet")
-        call parquet_open_table(t, "test_run/es_table_unparsed_in.parquet")
-        call s%init("unparsed")
-        call s%add_field("id", "int32")
-        ! deliberately NO parquet_parse_maml(s) here
-        call parquet_write_table(t, "test_run/es_table_unparsed_out.parquet", s)   ! -> aborts
-        print '(a)', "unexpectedly wrote a table with an unparsed schema"
-    end subroutine scenario_table_write_unparsed_schema
+        call write_table_scenario_fixture("test_run/es_table_unbuilt_in.parquet")
+        call parquet_open_table(t, "test_run/es_table_unbuilt_in.parquet")
+        ! Never %init'd, so there is no MAML text to parse and nothing naming a column. An
+        ! unparsed but BUILT schema is not an error at all any more -- parquet_write_table parses
+        ! it itself (test_write_table_parses_schema).
+        call parquet_write_table(t, "test_run/es_table_unbuilt_out.parquet", s)   ! -> aborts
+        print '(a)', "unexpectedly wrote a table with a schema that was never built"
+    end subroutine scenario_table_write_unbuilt_schema
 
     !> A slice starting before row 1 cannot be satisfied, and quietly clamping it would hand
     !! back a table whose row 1 is not the row the caller asked for.
@@ -10182,6 +10185,22 @@ contains
         call t%row_group_bounds(b)   ! -> aborts
         print '(a,i0)', "unexpectedly reported row-group bounds after detaching, n=", size(b, 2)
     end subroutine scenario_table_detached_row_group_bounds
+
+    !> A sort leaves the table's own rows with no row-group structure at all -- row 5 can come
+    !! from any row group -- so the default form of %row_group_bounds refuses. The refusal is the
+    !! table's own: before it existed this surfaced from parquet_get_chunk_size, naming a
+    !! procedure and a reader the caller never used. (physical=.true. still answers, and that half
+    !! is tested in process -- test_row_group_bounds_sorted.)
+    subroutine scenario_table_row_group_bounds_sorted()
+        type(parquet_table) :: t
+        type(parquet_sortkey) :: srt
+        integer(int64), allocatable :: b(:,:)
+        call write_table_scenario_fixture("test_run/es_tbl_rgb_sorted.parquet")
+        call srt%add("-id")
+        call parquet_open_table(t, "test_run/es_tbl_rgb_sorted.parquet", sort=srt)
+        call t%row_group_bounds(b)   ! -> aborts
+        print '(a,i0)', "unexpectedly reported row-group bounds for a sorted table, n=", size(b, 2)
+    end subroutine scenario_table_row_group_bounds_sorted
 
     !> A column left unread when the table detached is unreadable for good, and %prefetch says
     !! so with the detach message rather than trying to read through a reader that is gone.

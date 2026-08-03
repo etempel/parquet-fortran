@@ -23,11 +23,20 @@ contains
         call table_check_open(table, "parquet_write_table")
         ! A schema built in code with %init/%add_field only has MAML *text* until
         ! parquet_parse_maml populates %cinfo -- and %get_num_fields on an unpopulated %cinfo
-        ! reads uninitialized state, which turns the loop below into a runaway allocation and
-        ! an OOM kill rather than any kind of diagnosable failure. Catch it here instead.
+        ! reads uninitialized state, which turns the loop below into a runaway allocation and an
+        ! OOM kill rather than any kind of diagnosable failure. There is no reason to make the
+        ! caller say so themselves, though: a schema that has been built but not parsed is parsed
+        ! here. It is a visible side effect (the caller's schema stays parsed afterwards, which is
+        ! what they wanted anyway), which is why `schema` is intent(inout).
+        !
+        ! A schema that was never built at all is a different mistake and still an error: parsing
+        ! empty MAML text would report something about the text rather than about the call.
         if (.not. schema%is_parsed()) then
-            error stop EP // "parquet_write_table: this schema has not been parsed; call " // &
-                "parquet_parse_maml(schema) after building it with %init/%add_field"
+            if (.not. schema%is_init()) then
+                error stop EP // "parquet_write_table: this schema has not been built; call " // &
+                    "schema%init/%add_field (or load a MAML file) before writing with it"
+            end if
+            call parquet_parse_maml(schema)
         end if
         nfields = schema%get_num_fields()
         !

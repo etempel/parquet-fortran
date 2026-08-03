@@ -358,6 +358,20 @@ contains
             error stop EP // "row_group_bounds: this table was not opened from a file, so it " // &
                 "has no row groups" // sfx
         end if
+        ! A sort is the one transform that leaves NO row-group structure in this table's own
+        ! numbering: it reorders rows across the whole file, so row 5 of the table can come from
+        ! any row group and no range of table rows belongs to one. The file's own geometry is
+        ! untouched by it, though, so physical=.true. still answers -- see below. The refusal is
+        ! made here, at the table level, because otherwise it surfaced from
+        ! parquet_get_chunk_size's own guard, naming a procedure and a reader the caller never
+        ! used. (A sort implies a whole-file table: the slice forms have no `sort` argument, and a
+        ! maml= sort list is rejected for a slice at open.)
+        if (allocated(self%cache%read_sort) .and. .not. want_physical) then
+            call table_context_suffix(self%cache, "", sfx)
+            error stop EP // "row_group_bounds: this table was opened with a sort, so a row of " // &
+                "it can come from any row group and its rows have no row-group ranges; ask for " // &
+                "the file's own row groups instead (physical=.true.)" // sfx
+        end if
         ! Four sources, and which one answers depends on both the coordinate system asked for and
         ! how the table was opened. The two coincide for a table that holds every row of the file,
         ! which is why an unsliced, unfiltered table takes the same branch either way.
@@ -366,10 +380,13 @@ contains
                 ! Masked slice: the only case where the file's numbering was captured separately,
                 ! because the reader stopped being able to answer for it the moment it opened.
                 bounds = self%cache%rg_bounds_physical
-            else if (table_transform_narrows(self%cache)) then
-                ! Whole file with a filter or a sample: its reader would answer in surviving rows,
-                ! so the file's own numbering comes from a footer-only reader instead. Cheap, and
-                ! only on this path.
+            else if (table_transform_narrows(self%cache) .or. allocated(self%cache%read_sort)) then
+                ! Whole file with a filter, a sample or a sort: its own reader would answer in
+                ! surviving rows (or, under a sort, refuse), so the file's own numbering comes from
+                ! a footer-only reader instead. Cheap, and only on this path. physical=.true.
+                ! therefore answers for EVERY file-backed table, whatever transform it carries --
+                ! which of them happens to be present must not decide whether the question is
+                ! answerable.
                 call parquet_table_row_group_bounds(self%cache%source_file, bounds)
             else if (allocated(self%cache%rg_bounds)) then
                 ! Unmasked slice: its bounds ARE the file's, so there is nothing else to consult.

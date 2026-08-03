@@ -177,7 +177,13 @@ contains
             new_unittest("a clone of a filtered slice reattaches the same scoped filter", &
                 test_slice_clone), &
             new_unittest("row_group_bounds answers in table rows by default and file rows with physical=", &
-                test_row_group_bounds_physical) &
+                test_row_group_bounds_physical), &
+            new_unittest("row_group_bounds with physical= answers under a sort too", &
+                test_row_group_bounds_sorted), &
+            new_unittest("a row mutation that changes no row does not detach", &
+                test_noop_mutation_keeps_file), &
+            new_unittest("parquet_write_table parses a schema the caller left unparsed", &
+                test_write_table_parses_schema) &
             ]
     end subroutine collect_tests_parquet_table
     !
@@ -3759,16 +3765,16 @@ contains
         call check(error, id(1) == 1_int32 .and. id(2) == 71_int32 .and. id(4) == 1_int32, &
             "the filled rows and the appended table should both be in place")
         if (allocated(error)) return
-        ! append_null_rows(0) is a no-op on the row count, but it is still a row-set mutation
-        ! (this file's own rule: everything here detaches) -- its own early-return branch calls
-        ! table_detach before returning, rather than skipping the detach because nothing grew.
+        ! append_null_rows(0) appends nothing, so it does nothing at all -- no row count change
+        ! and, per the "no rows changed => no detach" rule, no detach either. The wider check for
+        ! that rule across every row mutation is test_noop_mutation_keeps_file.
         call parquet_open_table(t, f)
         call check(error, .not. t%is_detached(), "precondition: a freshly opened table is not detached")
         if (allocated(error)) return
         call t%append_null_rows(0)
         call check(error, t%nrows() == int(NROW, int64), "append_null_rows(0) should not change the row count")
         if (allocated(error)) return
-        call check(error, t%is_detached(), "append_null_rows(0) should still detach the table")
+        call check(error, .not. t%is_detached(), "append_null_rows(0) should not detach the table")
     end subroutine test_append_null_rows_workflow
     !
     !> One row appended through a row handle.
@@ -4479,5 +4485,156 @@ contains
         call check(error, tb(1, 1) == 1_int64 .and. tb(2, size(tb, 2)) == t%nrows(), &
             "a filtered whole-file table's default bounds should tile its own rows")
     end subroutine test_row_group_bounds_physical
+    !
+    !> `parquet_write_table` parses a schema the caller built but never parsed.
+    !!
+    !! A schema built with `%init`/`%add_field` carries only MAML text until `parquet_parse_maml`
+    !! populates `%cinfo`; writing with it used to be an error telling the caller to make that call
+    !! themselves. There is no reason for them to: the write does it. The side effect is visible
+    !! and is part of the contract -- the caller's schema is parsed on return -- so that is checked
+    !! too. (A schema that was never built at all is still an error: scenario
+    !! `table_write_unbuilt_schema`.)
+    subroutine test_write_table_parses_schema(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, t2
+        type(parquet_schema) :: s
+        integer(int32), allocatable :: i32(:)
+        character(len=*), parameter :: f = "test_run/table_autoparse_in.parquet"
+        character(len=*), parameter :: fo = "test_run/table_autoparse_out.parquet"
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t, f)
+        call s%init("autoparse")
+        call s%add_field("i32", "int32")
+        call check(error, .not. s%is_parsed(), "precondition: the schema should not be parsed yet")
+        if (allocated(error)) return
+        ! No parquet_parse_maml(s) here on purpose.
+        call parquet_write_table(t, fo, s)
+        call check(error, s%is_parsed(), &
+            "parquet_write_table should leave the caller's schema parsed")
+        if (allocated(error)) return
+        call parquet_open_table(t2, fo)
+        call check(error, t2%ncols() == 1 .and. t2%nrows() == NROW, &
+            "the file written from an unparsed schema should hold that schema's one column")
+        if (allocated(error)) return
+        call t2%get("i32", i32)
+        call check(error, all(i32 == [1_int32, 2_int32, 3_int32, 4_int32, 5_int32, 6_int32]), &
+            "the values written from an unparsed schema should round-trip")
+    end subroutine test_write_table_parses_schema
+    !
+    !> A row mutation that changes no row must change nothing at all -- including the file.
+    !!
+    !! Detaching costs the caller every column they have not read yet, permanently, so it is only
+    !! paid for when the row set actually moved. Each case below is a call that does nothing, and
+    !! the check is not merely `%is_detached()`: a column that was never resident is read AFTER the
+    !! call, which is precisely what a detach would have made impossible. `%sort_by` is included
+    !! because its no-op case is decided by the data (the rows were already in that order) rather
+    !! than by the arguments.
+    subroutine test_noop_mutation_keeps_file(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, empty
+        integer(int32), allocatable :: i32(:)
+        integer(int64), allocatable :: i64(:)
+        real(real64), allocatable :: f64(:)
+        logical :: keep(NROW)
+        integer(int64) :: none(0)
+        character(len=*), parameter :: f = "test_run/table_noop_mutation.parquet"
+        !
+        call write_basic_fixture(f)
+        !
+        call parquet_open_table(t, f)
+        call t%truncate(NROW + 5)
+        call check(error, .not. t%is_detached(), "%truncate beyond the row count should not detach")
+        if (allocated(error)) return
+        keep = .true.
+        call t%filter_rows(keep)
+        call check(error, .not. t%is_detached(), "%filter_rows keeping every row should not detach")
+        if (allocated(error)) return
+        call t%delete_rows(none)
+        call check(error, .not. t%is_detached(), "%delete_rows with no indices should not detach")
+        if (allocated(error)) return
+        call t%append_null_rows(0)
+        call check(error, .not. t%is_detached(), "%append_null_rows(0) should not detach")
+        if (allocated(error)) return
+        ! The point of all four: a column nobody has read yet is still readable.
+        call check(error, t%nrows() == NROW, "a no-op mutation should not change the row count")
+        if (allocated(error)) return
+        call t%get("i32", i32)
+        call check(error, all(i32 == [1_int32, 2_int32, 3_int32, 4_int32, 5_int32, 6_int32]), &
+            "a column left in the file should still be readable after four no-op mutations")
+        if (allocated(error)) return
+        !
+        ! Appending a table with no rows: checked for compatibility, then does nothing.
+        ! (The batch is cloned from a materialized table because %clone_structure takes each
+        ! column's shape from its VALUES, which a column that has never been read does not have.)
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        call t%clone_structure(empty)
+        call parquet_open_table(t, f)
+        call t%append(empty)
+        call check(error, .not. t%is_detached() .and. t%nrows() == NROW, &
+            "appending a zero-row table should not detach or change the row count")
+        if (allocated(error)) return
+        call t%get("f64", f64)
+        !
+        ! Sorting rows that are already in that order moves nothing.
+        call parquet_open_table(t, f)
+        call t%prefetch("i32")
+        call t%sort_by(["i32"])
+        call check(error, .not. t%is_detached(), &
+            "%sort_by on an already-ordered key should not detach")
+        if (allocated(error)) return
+        call t%get("i64", i64)
+        !
+        ! ...whereas a sort that DOES move rows still detaches, which is the rule this is an
+        ! exception to.
+        call parquet_open_table(t, f)
+        call t%prefetch("i32")
+        call t%sort_by(["i32"], descending=[.true.])
+        call check(error, t%is_detached(), "%sort_by that reorders rows must still detach")
+    end subroutine test_noop_mutation_keeps_file
+    !
+    !> `physical=.true.` answers for EVERY file-backed table, whatever transform it carries.
+    !!
+    !! A sort is the case that used to decide it: the table's own numbering has no row-group
+    !! structure left under one, and asking for it reached `parquet_get_chunk_size`'s guard and
+    !! aborted -- which also took `physical=.true.` down with it, since both forms went through the
+    !! same reader. The file's row groups are not affected by a sort at all, so `physical=.true.`
+    !! must reproduce the pre-open planning call here exactly as it does anywhere else. The three
+    !! combinations are checked together because the old behaviour depended on WHICH transforms
+    !! happened to be present, not on what was asked for. (The default form under a sort aborts, so
+    !! it lives out of process -- scenario `table_row_group_bounds_sorted`.)
+    subroutine test_row_group_bounds_sorted(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_filter) :: filt
+        type(parquet_sortkey) :: srt
+        integer, parameter :: N = 20, CH = 7
+        integer(int64), allocatable :: pb(:,:), fb(:,:)
+        character(len=*), parameter :: f = "test_run/table_rgbounds_sorted.parquet"
+        !
+        call write_slice_xform_fixture(f, N, CH)
+        call parquet_table_row_group_bounds(f, fb)
+        call srt%add("-k")
+        !
+        call parquet_open_table(t, f, sort=srt)
+        call t%row_group_bounds(pb, physical=.true.)
+        call check(error, all(pb == fb), &
+            "a sorted table should still report the file's own row-group bounds under physical=")
+        if (allocated(error)) return
+        !
+        ! ...and it does not depend on a filter being there too, which is exactly what it used to.
+        call filt%add("k > 8")
+        call parquet_open_table(t, f, filter=filt, sort=srt)
+        call t%row_group_bounds(pb, physical=.true.)
+        call check(error, all(pb == fb), &
+            "a sorted AND filtered table should report the file's own row-group bounds")
+        if (allocated(error)) return
+        !
+        call parquet_open_table(t, f, sort=srt, sample_fraction=1.0_real64)
+        call t%row_group_bounds(pb, physical=.true.)
+        call check(error, all(pb == fb), &
+            "a sorted, fully-sampled table should report the file's own row-group bounds")
+    end subroutine test_row_group_bounds_sorted
     !
 end module test_table

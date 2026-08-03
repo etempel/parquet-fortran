@@ -238,6 +238,13 @@ Working rules:
   into cross-file `doc/pages/<page>.md#…` / `README.md#…` links — repoint them, and fix
   now-stale relative wording ("above", "below", "this README"). Re-run `tools/check_doc_anchors.py`
   afterward (see "Checking documentation links" below).
+- **Optional arguments are shown in square brackets** when a signature is written out in prose or
+  in a table — `call t%get_file_metadata(key, value, [found])`, `%ncols([resident_only])`. This
+  applies to *descriptions* of a call, never to a runnable code example inside a ```fortran fence,
+  where brackets would not compile. Adopted after the fact rather than in one sweep: apply it to
+  any signature you write or edit, and retrofit a whole page the next time that page is touched
+  for another reason (`doc/pages/table.md` is retrofitted; the others are not yet). The first
+  bracketed signature on a page should carry a one-line note saying what the brackets mean.
 - **Diagrams: plain text, not Mermaid.** This project's GitLab does not reliably render Mermaid
   diagrams, so draw flows as plain-text/ASCII inside a normal code fence (renders identically
   everywhere) — see the MAML→header flow in `doc/pages/maml-format.md`'s "The MAML metadata format".

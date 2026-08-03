@@ -613,8 +613,8 @@ contains
                 test_table_write_missing_column_aborts), &
             new_unittest("parquet_write_table with a schema naming an unsupported column aborts", &
                 test_table_write_unsupported_column_aborts), &
-            new_unittest("parquet_write_table with an unparsed schema aborts", &
-                test_table_write_unparsed_schema_aborts), &
+            new_unittest("parquet_write_table with a schema that was never built aborts", &
+                test_table_write_unbuilt_schema_aborts), &
             new_unittest("opening a table slice starting before row 1 aborts", &
                 test_table_slice_below_first_row_aborts), &
             new_unittest("opening a table slice past the last row aborts", &
@@ -645,6 +645,8 @@ contains
                 test_table_detached_reload_aborts), &
             new_unittest("row_group_bounds on a detached table aborts", &
                 test_table_detached_row_group_bounds_aborts), &
+            new_unittest("row_group_bounds on a sorted table aborts with the table's own message", &
+                test_table_row_group_bounds_sorted_aborts), &
             new_unittest("a column stranded by a detach cannot be read afterwards", &
                 test_table_mutate_unmaterialized_column_aborts), &
             new_unittest("sorting by an unsupported column aborts", &
@@ -1022,12 +1024,12 @@ contains
             required_stderr="the schema declares a column that holds no values")
     end subroutine test_table_write_unsupported_column_aborts
 
-    subroutine test_table_write_unparsed_schema_aborts(error)
+    subroutine test_table_write_unbuilt_schema_aborts(error)
         type(error_type), allocatable, intent(out) :: error
-        call check_scenario_exit_status_and_stderr(error, "table_write_unparsed_schema", expect_abort=.true., &
-            failure_message="writing with an unparsed schema was expected to abort", &
-            required_stderr="this schema has not been parsed; call parquet_parse_maml(schema)")
-    end subroutine test_table_write_unparsed_schema_aborts
+        call check_scenario_exit_status_and_stderr(error, "table_write_unbuilt_schema", expect_abort=.true., &
+            failure_message="writing with a schema that was never built was expected to abort", &
+            required_stderr="this schema has not been built")
+    end subroutine test_table_write_unbuilt_schema_aborts
 
     subroutine test_table_slice_below_first_row_aborts(error)
         type(error_type), allocatable, intent(out) :: error
@@ -4868,6 +4870,13 @@ contains
             failure_message="row_group_bounds on a detached table was expected to abort", &
             required_stderr="this table has been detached from its file by a row-structural change")
     end subroutine test_table_detached_row_group_bounds_aborts
+
+    subroutine test_table_row_group_bounds_sorted_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_row_group_bounds_sorted", expect_abort=.true., &
+            failure_message="row_group_bounds on a sorted table was expected to abort", &
+            required_stderr="row_group_bounds: this table was opened with a sort")
+    end subroutine test_table_row_group_bounds_sorted_aborts
 
     subroutine test_table_mutate_unmaterialized_column_aborts(error)
         type(error_type), allocatable, intent(out) :: error

@@ -1363,6 +1363,16 @@ contains
         end do
     end procedure parquet_get_column_names
     !
+    module procedure parquet_get_physical_row_indices
+        integer(c_long_long) :: n
+        !
+        call check_reader_open(reader, "parquet_get_physical_row_indices")
+        n = parquet_reader_get_nrows(reader%handle)
+        allocate(rows(n))
+        if (n == 0) return
+        call parquet_reader_physical_row_indices(reader%handle, rows, n)
+    end procedure parquet_get_physical_row_indices
+    !
     module procedure parquet_get_metadata_items
         integer :: n, i, klen, vlen
         !

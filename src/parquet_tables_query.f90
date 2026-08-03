@@ -31,6 +31,16 @@ contains
         n = self%row_count
     end procedure table_nrows
     !
+    module procedure table_nrows_unfiltered
+        call table_check_open(self, "nrows_unfiltered")
+        n = self%cache%unfiltered_rows
+    end procedure table_nrows_unfiltered
+    !
+    module procedure table_row_group_extent
+        call table_check_open(self, "row_group_extent")
+        n = self%cache%rg_extent_rows
+    end procedure table_row_group_extent
+    !
     module procedure table_ncols
         integer :: i
         !
@@ -74,6 +84,12 @@ contains
     module procedure table_has_column
         call table_check_open(self, "has_column")
         found = table_find(self, name) > 0
+        ! The automatic row-index column exists whether or not it has been asked for yet, so this
+        ! answers .true. for it while it is still virtual. That is the ONE place %has_column and
+        ! %column_names disagree, and deliberately: %has_column asks "can I use this name?", which
+        ! is yes, while %column_names lists what the table is holding, which does not include a
+        ! column nobody has asked for.
+        if (.not. found .and. name == PARQUET_ROW_INDEX) found = self%cache%file_backed
     end procedure table_has_column
     !
     module procedure table_find
@@ -293,6 +309,17 @@ contains
         character(len=:), allocatable :: sfx
         !
         call table_check_open(self, proc)
+        ! The reserved name resolves to the automatic column, materializing it on this first use.
+        ! Done here, in the one lookup every value accessor goes through, so every one of them
+        ! reaches it without knowing it exists.
+        if (name == PARQUET_ROW_INDEX .and. table_find(self, name) == 0) then
+            ! `meta_keys` is allocated for every table that was opened from a file and stays so
+            ! after a detach, which is exactly the question here: a table that HAD a file gets the
+            ! row index (or, once detached, the message explaining why it can no longer have it),
+            ! while one built in memory never had a file row to name and falls through to the
+            ! ordinary "no column of this name".
+            if (allocated(self%cache%meta_keys)) call table_make_row_index(self)
+        end if
         idx = table_find(self, name)
         if (idx == 0) then
             if (present(found)) then

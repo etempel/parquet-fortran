@@ -280,6 +280,7 @@ scenarios=(
     "table_write_missing_column:1"
     "table_write_unsupported_column:1"
     "table_write_unbuilt_schema:1"
+    "table_row_index_after_detach:1"
     "table_evict_in_memory:1"
     "table_evict_detached:1"
     "table_set_is_valid_length:1"

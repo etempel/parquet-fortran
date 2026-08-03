@@ -520,6 +520,51 @@ contains
         if (present(found)) found = .true.
     end subroutine table_prefetch_resolve
     !
+    module procedure table_make_row_index
+        integer(int64), allocatable :: rows(:)
+        integer(int64) :: i
+        integer :: idx
+        type(parquet_column) :: col
+        character(len=:), allocatable :: sfx
+        !
+        if (self%cache%row_index_live) return
+        if (.not. self%cache%file_backed .or. self%detached) then
+            call table_context_suffix(self%cache, PARQUET_ROW_INDEX, sfx)
+            error stop EP // "the " // PARQUET_ROW_INDEX // " column says which row of the " // &
+                "source file each row came from, so it is only available while the table still " // &
+                "has that file; materialize it BEFORE the mutation that detaches" // sfx
+        end if
+        allocate(rows(self%row_count))
+        if (self%regime == REGIME_SLICE .and. .not. table_transform_narrows(self%cache) .and. &
+                .not. allocated(self%cache%read_sort)) then
+            ! An unfiltered slice is pure arithmetic: its rows are a contiguous run of file rows.
+            do i = 1_int64, self%row_count
+                rows(i) = self%row_lo + i - 1_int64
+            end do
+        else if (self%regime == REGIME_FULL .and. .not. table_transform_narrows(self%cache) .and. &
+                .not. allocated(self%cache%read_sort)) then
+            do i = 1_int64, self%row_count
+                rows(i) = i
+            end do
+        else
+            ! Filtered, sampled or sorted: which file rows survived, and in what order, lives in
+            ! the reader's own mask and permutation. A masked SLICE is covered by the same call,
+            ! since its reader is scoped to the slice's rows already.
+            call parquet_get_physical_row_indices(self%cache%reader, rows)
+        end if
+        ! The slot is made directly rather than through %add_column, which would call
+        ! table_fix_nrows and mark the column user_populated: nobody wrote these values, the table
+        ! derived them, and %print_stat and %clone both care about the difference.
+        call table_new_slot(self, PARQUET_ROW_INDEX, .false., idx)
+        call col%adopt(rows)
+        call self%cache%cols(idx)%values%move_from(col)
+        self%cache%cols(idx)%declared_kind = PK_INT64
+        self%cache%cols(idx)%width = 1
+        self%cache%cols(idx)%residency = RES_FULL
+        self%cache%cols(idx)%user_populated = .false.
+        self%cache%row_index_live = .true.
+    end procedure table_make_row_index
+    !
     module procedure table_validate_qc
         character(len=:), allocatable :: qc_cols(:)
         logical, allocatable :: want(:), was_resident(:)

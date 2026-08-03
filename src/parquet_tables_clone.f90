@@ -75,6 +75,14 @@ contains
         ! stand in for the physical range the filter has to be scoped to.
         out%cache%slice_row_lo = self%cache%slice_row_lo
         out%cache%slice_row_hi = self%cache%slice_row_hi
+        ! Physical geometry travels with the clone as data. A clone of a DETACHED table has no
+        ! file to re-derive it from, and it is no less true of where those rows came from.
+        out%cache%unfiltered_rows = self%cache%unfiltered_rows
+        out%cache%rg_extent_rows = self%cache%rg_extent_rows
+        ! Whether the automatic row-index column has been given a real slot travels with the copy:
+        ! %clone copies the slots themselves, so the flag has to agree with what is there.
+        out%cache%row_index_live = self%cache%row_index_live
+        out%cache%row_index_shadowed = self%cache%row_index_shadowed
         if (allocated(self%cache%rg_bounds_physical)) then
             allocate(out%cache%rg_bounds_physical(size(self%cache%rg_bounds_physical, 1), &
                 size(self%cache%rg_bounds_physical, 2)))

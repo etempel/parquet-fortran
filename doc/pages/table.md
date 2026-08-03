@@ -186,6 +186,8 @@ column is numeric at all.
 | call | answer |
 |---|---|
 | `t%nrows()` | rows every column holds |
+| `t%nrows_unfiltered()` | rows before `filter=`/`sample_fraction=` — the slice's length, or the file's |
+| `t%row_group_extent()` | rows in the row groups this table covers, i.e. what reading it decodes |
 | `t%ncols([resident_only])` | number of columns; `resident_only=.true.` counts only the ones already read |
 | `call t%column_names(names [, resident_only])` | every column name, in file order; `resident_only=.true.` lists only the ones already read |
 | `t%has_column(name)` | whether a column of that name exists |
@@ -1128,6 +1130,51 @@ of them. `before` must be declared as the same concrete table type as `t`.
 > `%append` and the rest reallocate each column's storage, so a pointer taken before one of them
 > points at freed memory afterwards. Fortran cannot detect this. Take the pointer again after the
 > mutation.
+
+## Which row of the file is this?
+
+A file-backed table has one column it did not read from the file: **`parquet_row_index`**, holding
+each row's 1-based physical row number in the source parquet file.
+
+```fortran
+use parquet_tables, only: PARQUET_ROW_INDEX
+integer(int64), allocatable :: src(:)
+
+call parquet_open_table(t, "big.parquet", filter=filt)
+call t%get(PARQUET_ROW_INDEX, src)     ! which file rows survived the filter, in order
+```
+
+It answers for every regime, and each is a different question:
+
+| the table is | `parquet_row_index` holds |
+|---|---|
+| the whole file, untransformed | `1, 2, 3, ...` |
+| an unfiltered slice | the slice's own file rows — `row_lo` onwards, not `1..%nrows()` |
+| filtered or sampled | the file rows that survived, in file order |
+| sorted | the file rows, in the sorted order |
+
+The last two are the reason it exists: which rows survived and what order they ended up in lives
+inside the reader and is not otherwise visible.
+
+Four things to know:
+
+- **It is virtual until you ask for it.** It costs 8 bytes a row — 8 GB at a billion rows — so it
+  is not built at open. `%has_column(PARQUET_ROW_INDEX)` answers `.true.` before the first use,
+  while `%ncols`/`%column_names` do not list it; asking for it once gives it a real slot, listed
+  last. That is the one place those two queries disagree, and deliberately: `%has_column` answers
+  "can I use this name?", `%column_names` lists what the table is holding.
+- **Materialize it before changing the row set.** It names rows of a file, so a
+  [detached](#what-detaching-means) table cannot produce it any more — asking then is an error
+  saying so. Ask for it *first* and it becomes an ordinary column: `%sort_by` reorders it with
+  everything else, and it still says where each row came from.
+- **A file column of that name is unreachable.** The reserved name belongs to the automatic
+  column, so a file that has its own `parquet_row_index` gets a warning at open and that column is
+  dropped from the table. A read-in MAML's [`extra: remap:`](#renaming-a-files-columns-with-a-read-in-maml)
+  is how to reach it, by giving it another internal name.
+- **A table built in memory has no such column** — it was not read from anywhere.
+
+`parquet_get_physical_row_indices(reader, rows)` is the same answer at the reader level, if you
+are not using a table.
 
 ## Seeing what a table holds
 

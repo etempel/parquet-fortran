@@ -54,7 +54,7 @@ module parquet_tables
         parquet_measure_list_width, parquet_column_width_needs_data, parquet_column_has_nulls, &
         parquet_load_qc_maml_file, parquet_filter, parquet_sortkey, parquet_read_qc, &
         parquet_compose_read_qc, parquet_reader_set_filter, parquet_parse_maml, &
-        parquet_get_metadata_items, parquet_get_qc_columns
+        parquet_get_metadata_items, parquet_get_qc_columns, parquet_get_physical_row_indices
     !
     implicit none
     private
@@ -68,6 +68,7 @@ module parquet_tables
     public :: parquet_new_table
     public :: parquet_write_table
     public :: parquet_table_row_group_bounds
+    public :: PARQUET_ROW_INDEX
     public :: REGIME_FULL, REGIME_SLICE
     public :: RES_EMPTY, RES_PARTIAL, RES_FULL
     !
@@ -108,6 +109,11 @@ module parquet_tables
         module procedure open_table_slice_i32
         module procedure open_table_slice_i64
     end interface parquet_open_table
+    !
+    !> The name of the automatic column holding each row's PHYSICAL row number in the source
+    !! parquet file. Declared as a constant so a program can name it without hard-coding the
+    !! string, and so a collision test has something to compare against.
+    character(len=*), parameter :: PARQUET_ROW_INDEX = "parquet_row_index"
     !
     ! ---- Column residency (D14/RF20) ----
     integer, parameter :: RES_EMPTY = 0   !! no values held (never read, or an unsupported type).
@@ -200,6 +206,22 @@ module parquet_tables
         !     reports survivors and the physical numbering is simply no longer askable.
         integer(int64), allocatable :: rg_bounds(:,:)      !! (2, nrg) row-group ranges, TABLE rows.
         integer(int64), allocatable :: rg_bounds_physical(:,:) !! the same, FILE rows; masked slice only.
+        ! --- physical row geometry, captured at open so both survive a detach. `%nrows()` counts
+        !     what the table HOLDS; these two count what it came from, which no other query can
+        !     answer once a filter is active (the reader then reports survivors) or once the
+        !     table has cut its file loose.
+        !> .true. once the automatic parquet_row_index column has been asked for and given a real
+        !! slot. Until then the column is VIRTUAL: %has_column answers for it, but it occupies no
+        !! slot, is not listed by %column_names or counted by %ncols, and costs nothing -- 8 bytes
+        !! a row is 8 GB at a billion rows, so materializing it at open would undo the laziness
+        !! the whole type is built on.
+        logical :: row_index_live = .false.
+        !> .true. when the source file has its own column called parquet_row_index that a read-in
+        !! MAML did NOT remap. That column is unreachable (the reserved name resolves to the
+        !! automatic one), which parquet_open_table warns about at open.
+        logical :: row_index_shadowed = .false.
+        integer(int64) :: unfiltered_rows = 0              !! rows before filter/sample: the slice's length, or the file's.
+        integer(int64) :: rg_extent_rows = 0               !! summed length of the row groups this table covers.
         integer(int64) :: slice_row_lo = 0                 !! slice's first FILE row (0 = not a slice).
         integer(int64) :: slice_row_hi = 0                 !! slice's last FILE row (0 = not a slice).
         logical :: opened_in_parallel = .false.            !! .true. if opened inside a parallel region.
@@ -321,6 +343,8 @@ module parquet_tables
         procedure :: evict_column => table_evict_column !! Drop a column's VALUES, keeping the slot.
         procedure :: validate_qc => table_validate_qc !! Check every qc-declaring column, holding none.
         procedure :: print_stat => table_print_stat  !! Print what the table holds, to stdout.
+        procedure :: nrows_unfiltered => table_nrows_unfiltered !! Rows before filter=/sample_fraction=.
+        procedure :: row_group_extent => table_row_group_extent !! Rows in the row groups this table covers.
         procedure :: row_group_bounds => table_row_group_bounds !! Row-group row ranges, this table's rows or the file's.
         ! --- row view ---
         procedure, private :: row_at_i32 !! %row specific taking an int32 index.
@@ -877,7 +901,11 @@ module parquet_tables
         !> Appends an empty slot named `name` and returns its index, growing `cols(:)` if the
         !! headroom is used up. error stops if the name is already taken and `force` is absent.
         module subroutine table_new_slot(self, name, force, idx)
-            class(parquet_table), intent(inout) :: self !! the table.
+            !> Deliberately `intent(in)`, not `intent(inout)`: every change it makes is to
+            !! `self%cache`, which is a POINTER component, so it needs no more than this -- and
+            !! the automatic `parquet_row_index` column has to be created from the lazy read
+            !! path, where `self` is `intent(in)` like every other first-touch entry point.
+            class(parquet_table), intent(in) :: self
             character(len=*), intent(in) :: name        !! the new column's name.
             logical, intent(in), optional :: force      !! .true. replaces an existing same-named column.
             integer, intent(out) :: idx                 !! 1-based index of the slot to fill.
@@ -903,6 +931,32 @@ module parquet_tables
             class(parquet_table), intent(in) :: self !! the table.
             integer(int64) :: n                      !! row count.
         end function table_nrows
+        !> Rows this table covers BEFORE `filter=`/`sample_fraction=` removed any -- the slice's
+        !! own length in the slice regime, and the file's row count for a whole-file table.
+        !!
+        !! `%nrows()` is what the table holds; this is what it was cut from, which nothing else
+        !! can report once a transform is active: a filtered reader answers in survivors, so
+        !! asking it afterwards gives the same number `%nrows()` already gave. Captured when the
+        !! table opens, so it keeps answering after a row mutation has detached the table.
+        !!
+        !! Equal to `%nrows()` when no filter or sample is in play. 0 for a table built in memory,
+        !! which was not cut from anything.
+        module function table_nrows_unfiltered(self) result(n)
+            class(parquet_table), intent(in) :: self !! the table.
+            integer(int64) :: n                      !! rows before the transform.
+        end function table_nrows_unfiltered
+        !> Rows in the row groups this table covers, which is what reading it actually costs.
+        !!
+        !! A slice is read by row group, so a slice of 10 rows straddling two 100k-row groups
+        !! decodes 200k rows to produce them. This reports that number, so a caller choosing
+        !! slice boundaries can see when a slice is not paying for itself.
+        !!
+        !! Equal to `%nrows_unfiltered()` when the slice lines up with row-group boundaries, and
+        !! for a whole-file table always. 0 for a table built in memory.
+        module function table_row_group_extent(self) result(n)
+            class(parquet_table), intent(in) :: self !! the table.
+            integer(int64) :: n                      !! rows in the covering row groups.
+        end function table_row_group_extent
         !> Number of columns this table has, or only the resident ones with `resident_only`.
         module function table_ncols(self, resident_only) result(n)
             class(parquet_table), intent(in) :: self !! the table.
@@ -1415,6 +1469,28 @@ module parquet_tables
             class(parquet_table), intent(in) :: self !! the table.
             logical, intent(in), optional :: all     !! .true.: list every column, not just the resident ones.
         end subroutine table_print_stat
+        !> .true. when this table's read-time transform REMOVES rows, so the reader's own row
+        !! numbering is the surviving rows rather than the file's.
+        !!
+        !! A sort does not count: it reorders rows without removing any. Declared here rather than
+        !! kept private to one submodule because more than one needs it, and two copies of "does
+        !! this transform narrow?" would be exactly the kind of predicate that drifts apart.
+        module function table_transform_narrows(cache) result(narrows)
+            type(parquet_table_cache), intent(in) :: cache !! the table's store, with its transform.
+            logical :: narrows                             !! .true. if rows are removed.
+        end function table_transform_narrows
+        !> Gives the automatic `parquet_row_index` column a real slot and fills it.
+        !!
+        !! Where the values come from depends only on what the table is: `i` for a whole file with
+        !! no transform, `row_lo + i - 1` for an unfiltered slice, and -- for a filtered, sampled
+        !! or sorted table -- the reader's own account of which file rows survived and in what
+        !! order, which nothing else can reconstruct.
+        !!
+        !! Private: reached through the ordinary column API, which resolves the reserved name to
+        !! this on first use.
+        module subroutine table_make_row_index(self)
+            class(parquet_table), intent(in) :: self !! the table (fills through %cache).
+        end subroutine table_make_row_index
         !> Checks this table's read-time qc against the file, WITHOUT leaving the columns resident.
         !!
         !! qc is enforced when a column is read, so on a lazy table a declared bound is only

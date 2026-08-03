@@ -615,6 +615,8 @@ contains
                 test_table_write_unsupported_column_aborts), &
             new_unittest("parquet_write_table with a schema that was never built aborts", &
                 test_table_write_unbuilt_schema_aborts), &
+            new_unittest("asking for the row index after a detach aborts", &
+                test_table_row_index_after_detach_aborts), &
             new_unittest("evicting an in-memory column aborts", &
                 test_table_evict_in_memory_aborts), &
             new_unittest("evicting a column of a detached table aborts", &
@@ -1035,6 +1037,13 @@ contains
             failure_message="writing a schema-named unsupported column was expected to abort", &
             required_stderr="the schema declares a column that holds no values")
     end subroutine test_table_write_unsupported_column_aborts
+
+    subroutine test_table_row_index_after_detach_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_row_index_after_detach", expect_abort=.true., &
+            failure_message="the row index after a detach was expected to abort", &
+            required_stderr="materialize it BEFORE the mutation that detaches")
+    end subroutine test_table_row_index_after_detach_aborts
 
     subroutine test_table_evict_in_memory_aborts(error)
         type(error_type), allocatable, intent(out) :: error

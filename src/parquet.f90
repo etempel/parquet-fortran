@@ -1167,6 +1167,7 @@ module parquet
     public :: parquet_release_column
     public :: parquet_get_metadata
     public :: parquet_get_metadata_items
+    public :: parquet_get_physical_row_indices
     public :: parquet_read_column
     public :: parquet_read_column_chunk
     public :: parquet_read_array_row_mode
@@ -2646,6 +2647,19 @@ module parquet
             type(parquet_reader), intent(in) :: reader !! open reader.
             character(len=:), allocatable, intent(out) :: names(:) !! one entry per column, schema order.
         end subroutine parquet_get_column_names
+        !> The 1-based PHYSICAL file row index of each row this reader currently returns, in the
+        !> order it returns them.
+        !>
+        !> Without a `filter=`/`sample_fraction=`/`sort_by=` this is simply `1, 2, 3, ...`, and
+        !> with one it is the only way to find out which file rows survived and in what order --
+        !> that lives in the reader's own mask and permutation and is not otherwise visible.
+        !> `rows` comes back with one entry per row the reader reports (`parquet_get_nrows`).
+        !>
+        !> This is what `parquet_table`'s automatic `parquet_row_index` column is built on.
+        module subroutine parquet_get_physical_row_indices(reader, rows)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            integer(int64), allocatable, intent(out) :: rows(:) !! one physical row index per returned row.
+        end subroutine parquet_get_physical_row_indices
         !> Every key/value metadata entry the file carries, in the order it is stored.
         !>
         !> parquet_get_metadata answers for a key you already know; this reports what is there at

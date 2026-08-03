@@ -5963,6 +5963,78 @@ extern "C"
 		return max_len;
 	}
 
+	// Fills `out` with the 1-based PHYSICAL file row index of each row this reader currently
+	// returns, in the order it returns them. `n` must be the reader's own row count
+	// (parquet_get_nrows), which is what every caller already has.
+	//
+	// This is the one thing a caller cannot work out for itself once a transform is active: which
+	// file rows survived a filter is inside live_mask, and what order a sort put them in is inside
+	// sort_perm, and neither is otherwise visible. Without a transform it is plain arithmetic and
+	// this function is simply the general form of it.
+	//
+	// The walk is deliberately the same shape as every other mask-aware walk in this file: row
+	// groups in file order, each row group's own mask segment, skipping the ones the statistics
+	// screen or a scoped range excluded (row_group_live_offsets[rg] < 0), because live_mask holds
+	// no bits at all for those -- that is the memory saving it exists for.
+	void parquet_reader_physical_row_indices(void *handle, int64_t *out, int64_t n)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		if (n != reader_handle->nrows)
+		{
+			report_fatal_error("parquet_reader_physical_row_indices",
+				"row count does not match the reader's own");
+		}
+		if (n == 0) return;
+		// Live, surviving rows in FILE order first; the sort permutation (if any) reorders this
+		// afterwards, exactly as apply_row_transform applies filter-then-sort.
+		std::vector<int64_t> physical;
+		physical.reserve(static_cast<size_t>(n));
+		if (!reader_handle->live_mask)
+		{
+			for (int64_t i = 0; i < reader_handle->total_nrows; ++i)
+			{
+				physical.push_back(i + 1);
+			}
+		}
+		else
+		{
+			const int64_t nrg = static_cast<int64_t>(reader_handle->row_group_live_offsets.size());
+			for (int64_t rg = 0; rg < nrg; ++rg)
+			{
+				const int64_t live_at = reader_handle->row_group_live_offsets[rg];
+				if (live_at < 0) continue;
+				const int64_t first = reader_handle->row_group_offsets[rg];
+				const int64_t rows = reader_handle->row_group_offsets[rg + 1] - first;
+				for (int64_t i = 0; i < rows; ++i)
+				{
+					if (!reader_handle->live_mask->Value(live_at + i)) continue;
+					physical.push_back(first + i + 1);
+				}
+			}
+		}
+		if (static_cast<int64_t>(physical.size()) != n)
+		{
+			report_fatal_error("parquet_reader_physical_row_indices",
+				"surviving row count does not match the reader's own");
+		}
+		if (!reader_has_sort_permutation(reader_handle))
+		{
+			for (int64_t i = 0; i < n; ++i) out[i] = physical[static_cast<size_t>(i)];
+			return;
+		}
+		auto perm = std::static_pointer_cast<arrow::Int64Array>(reader_handle->sort_perm);
+		for (int64_t i = 0; i < n; ++i)
+		{
+			const int64_t src = perm->Value(i);
+			if (src < 0 || src >= n)
+			{
+				report_fatal_error("parquet_reader_physical_row_indices",
+					"sort permutation entry out of range");
+			}
+			out[i] = physical[static_cast<size_t>(src)];
+		}
+	}
+
 	// parquet_get_metadata (parquet_metadata.f90) reads the whole
 	// table_metadata_cache once, right after parquet_open_reader, via these
 	// four accessors -- length-then-copy, the same two-step convention

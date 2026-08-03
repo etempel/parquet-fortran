@@ -46,6 +46,7 @@ module parquet_bindings
     public :: parquet_reader_column_width_is_deferred, parquet_reader_column_has_nulls
     public :: parquet_reader_list_width_candidate, parquet_reader_list_width_verified
     public :: parquet_reader_get_column_total_elements, parquet_reader_get_string_length
+    public :: parquet_reader_physical_row_indices
     public :: parquet_reader_get_table_metadata_count
     public :: parquet_reader_get_table_metadata_key_length, parquet_reader_get_table_metadata_value_length
     public :: parquet_reader_get_table_metadata_key, parquet_reader_get_table_metadata_value
@@ -822,6 +823,15 @@ module parquet_bindings
         end function
 
         !> Returns the number of flat key-value table metadata entries in `reader`.
+        !> Fills `indices` with the 1-based physical FILE row index of each row the reader
+        !! currently returns, in that order. `n` must be the reader's own row count.
+        subroutine parquet_reader_physical_row_indices(reader, indices, n) &
+                bind(C, name="parquet_reader_physical_row_indices")
+            import :: c_ptr, c_long_long
+            type(c_ptr), value :: reader                     !! opaque reader handle.
+            integer(c_long_long), intent(out) :: indices(*)  !! receives one index per row.
+            integer(c_long_long), value :: n                 !! rows the reader returns.
+        end subroutine parquet_reader_physical_row_indices
         function parquet_reader_get_table_metadata_count(reader) &
                 bind(C, name="parquet_reader_get_table_metadata_count") result(count)
             import

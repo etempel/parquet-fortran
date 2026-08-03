@@ -100,6 +100,10 @@ contains
             new_unittest("validate_qc checks every declaring column and holds none", &
                 test_validate_qc), &
             new_unittest("print_stat reports without reading anything", test_print_stat), &
+            new_unittest("nrows_unfiltered and row_group_extent report the physical geometry", &
+                test_row_geometry_queries), &
+            new_unittest("the automatic parquet_row_index column names each row's file row", &
+                test_row_index_column), &
             new_unittest("parquet_new_table plus add_column builds a table and writes it", &
                 test_from_scratch), &
             new_unittest("add_column(force=) replaces a column of the same name", &
@@ -4828,6 +4832,171 @@ contains
         call check(error, size(i32) == NROW .and. i32(1) == 1_int32, &
             "a satisfied qc= bound should have read the column unchanged")
     end subroutine test_open_qc
+    !
+    !> The automatic `parquet_row_index` column: which row of the source file each row came from.
+    !!
+    !! Four mappings, and each is a different mechanism: `i` for a whole file, `row_lo + i - 1`
+    !! for an unfiltered slice, and -- for a filtered or sorted table -- the reader's own account
+    !! of which file rows survived and in what order, which nothing else can reconstruct. The
+    !! column is VIRTUAL until asked for: it costs 8 bytes a row, so materializing it at open
+    !! would undo the laziness the whole type is built on.
+    subroutine test_row_index_column(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_filter) :: filt
+        type(parquet_sortkey) :: srt
+        integer(int64), allocatable :: ri(:)
+        integer(int32), allocatable :: k(:)
+        character(len=:), allocatable :: names(:)
+        integer :: ncols0
+        integer, parameter :: N = 20, CH = 7
+        character(len=*), parameter :: f = "test_run/table_row_index.parquet"
+        !
+        call write_slice_xform_fixture(f, N, CH)
+        !
+        ! Virtual until asked for: %has_column sees it, %ncols and %column_names do not.
+        call parquet_open_table(t, f)
+        ncols0 = t%ncols()
+        call check(error, t%has_column(PARQUET_ROW_INDEX), &
+            "%has_column should answer for the row-index column before it is asked for")
+        if (allocated(error)) return
+        call t%column_names(names)
+        call check(error, size(names) == ncols0, &
+            "%column_names should not list the row-index column while it is virtual")
+        if (allocated(error)) return
+        !
+        ! Whole file, no transform: 1..nrows, and the column becomes real.
+        call t%get(PARQUET_ROW_INDEX, ri)
+        call check(error, size(ri) == N .and. ri(1) == 1_int64 .and. ri(N) == int(N, int64), &
+            "a whole-file table's row index should be 1..nrows")
+        if (allocated(error)) return
+        call check(error, t%ncols() == ncols0 + 1, &
+            "the row-index column should be counted once it has been asked for")
+        if (allocated(error)) return
+        call t%column_names(names)
+        call check(error, trim(names(size(names))) == PARQUET_ROW_INDEX, &
+            "the row-index column should be listed last, after the file's own columns")
+        if (allocated(error)) return
+        !
+        ! An unfiltered slice: the FILE's row numbers, not the slice's own 1..n.
+        call parquet_open_table(t, f, 6, 16)
+        call t%get(PARQUET_ROW_INDEX, ri)
+        call check(error, size(ri) == 11 .and. ri(1) == 6_int64 .and. ri(11) == 16_int64, &
+            "a slice's row index should be its FILE rows, not 1..nrows")
+        if (allocated(error)) return
+        !
+        ! A filter: exactly the file rows that survived, which only the reader knows.
+        call filt%add("k > 8")
+        call parquet_open_table(t, f, filter=filt)
+        call t%get(PARQUET_ROW_INDEX, ri)
+        call t%get("k", k)
+        call check(error, size(ri) == size(k), "the row index should have one entry per surviving row")
+        if (allocated(error)) return
+        call check(error, all(ri == int(k, int64)), &
+            "in this fixture k equals the file row, so the row index should reproduce it")
+        if (allocated(error)) return
+        !
+        ! A sort: the file rows in the sorted order.
+        call srt%add("-k")
+        call parquet_open_table(t, f, sort=srt)
+        call t%get(PARQUET_ROW_INDEX, ri)
+        call t%get("k", k)
+        call check(error, all(ri == int(k, int64)), &
+            "a sorted table's row index should follow the sorted order")
+        if (allocated(error)) return
+        call check(error, ri(1) == int(N, int64), "the largest key should come first under -k")
+        if (allocated(error)) return
+        !
+        ! Materialized before a mutation, it survives it and reports where each row came from.
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        call t%get(PARQUET_ROW_INDEX, ri)
+        call t%delete_rows([1, 2, 3])
+        call t%get(PARQUET_ROW_INDEX, ri)
+        call check(error, ri(1) == 4_int64, &
+            "a materialized row index should survive a row mutation and still name the file row")
+        if (allocated(error)) return
+        !
+        ! A table built in memory was not read from a file, so it has no row index at all.
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32])
+        call check(error, .not. t%has_column(PARQUET_ROW_INDEX), &
+            "an in-memory table should have no row-index column")
+    end subroutine test_row_index_column
+    !
+    !> %nrows_unfiltered and %row_group_extent report what the table was cut FROM.
+    !!
+    !! `%nrows()` answers what it holds; these two answer what it came from, and nothing else can
+    !! once a filter is active -- a filtered reader counts survivors, so asking it later just
+    !! repeats `%nrows()`. Both are captured at open, which is also what lets them keep answering
+    !! after a row mutation has detached the table.
+    subroutine test_row_geometry_queries(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_filter) :: filt
+        integer, parameter :: N = 20, CH = 7
+        character(len=*), parameter :: f = "test_run/table_row_geometry.parquet"
+        !
+        call write_slice_xform_fixture(f, N, CH)
+        !
+        ! Whole file, no transform: all three agree.
+        call parquet_open_table(t, f)
+        call check(error, t%nrows() == 20_int64 .and. t%nrows_unfiltered() == 20_int64 .and. &
+            t%row_group_extent() == 20_int64, &
+            "an untransformed whole-file table should report the same count three ways")
+        if (allocated(error)) return
+        !
+        ! Whole file with a filter: %nrows drops, the other two do not.
+        call filt%add("k > 8")
+        call parquet_open_table(t, f, filter=filt)
+        call check(error, t%nrows() == 12_int64, "precondition: the filter should keep 12 rows")
+        if (allocated(error)) return
+        call check(error, t%nrows_unfiltered() == 20_int64, &
+            "%nrows_unfiltered should report the file's own row count under a filter")
+        if (allocated(error)) return
+        call check(error, t%row_group_extent() == 20_int64, &
+            "%row_group_extent should cover the whole file for a whole-file table")
+        if (allocated(error)) return
+        !
+        ! A slice straddling row groups: the extent is what reading it actually decodes. Row
+        ! groups are 1-7, 8-14, 15-20; the slice 6..16 spans all three.
+        call parquet_open_table(t, f, 6, 16)
+        call check(error, t%nrows() == 11_int64 .and. t%nrows_unfiltered() == 11_int64, &
+            "an unfiltered slice holds exactly its own length")
+        if (allocated(error)) return
+        call check(error, t%row_group_extent() == 20_int64, &
+            "a slice straddling every row group decodes all of them")
+        if (allocated(error)) return
+        !
+        ! A slice on a row-group boundary pays for exactly that row group.
+        call parquet_open_table(t, f, 8, 14)
+        call check(error, t%row_group_extent() == 7_int64, &
+            "a slice matching a row group should decode only that row group")
+        if (allocated(error)) return
+        !
+        ! A filtered slice: the slice's own length, not the survivors.
+        call parquet_open_table(t, f, 6, 16, filter=filt)
+        call check(error, t%nrows_unfiltered() == 11_int64, &
+            "a filtered slice's unfiltered count is the slice's length")
+        if (allocated(error)) return
+        call check(error, t%nrows() < t%nrows_unfiltered(), &
+            "precondition: the filter should have removed rows from the slice")
+        if (allocated(error)) return
+        !
+        ! Both survive a detach, which is the reason they are captured at open.
+        call t%materialize_all()
+        call t%truncate(2)
+        call check(error, t%is_detached() .and. t%nrows_unfiltered() == 11_int64 .and. &
+            t%row_group_extent() == 20_int64, &
+            "both counts should survive the table detaching from its file")
+        if (allocated(error)) return
+        !
+        ! A table built in memory was not cut from anything.
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32])
+        call check(error, t%nrows_unfiltered() == 0_int64 .and. t%row_group_extent() == 0_int64, &
+            "an in-memory table should report no physical geometry")
+    end subroutine test_row_geometry_queries
     !
     !> %print_stat reports what the table holds -- and, crucially, reads nothing to do it.
     !!

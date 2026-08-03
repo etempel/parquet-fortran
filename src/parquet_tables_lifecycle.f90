@@ -165,8 +165,13 @@ contains
         ! when that happens. Costs a copy of what parquet_open_reader already holds in memory.
         call parquet_get_metadata_items(table%cache%reader, table%cache%meta_keys, table%cache%meta_values)
         !
+        ! Physical row geometry, captured now because it stops being askable later: a filtered
+        ! reader reports survivors, and a detached table has no reader at all.
+        call capture_row_geometry(table, sliced, row_lo, row_hi, file_rows)
+        !
         call parquet_get_column_names(table%cache%reader, names)
         call table_enumerate_columns(table%cache, names, remap_internal, remap_physical, n_remap, filename)
+        call drop_shadowed_row_index(table%cache, filename)
         ncol = table%cache%ncols
         !
         ! Classify everything up front (schema only, no column data), so %kind/%width/%nrows
@@ -195,6 +200,84 @@ contains
             call table_release_one(table%cache, table%cache%cols(i)%file_name)
         end do
     end subroutine open_table_impl
+    !
+    !> Removes a file column that would occupy the reserved `parquet_row_index` name, with a
+    !! warning.
+    !!
+    !! The reserved name belongs to the automatic row-index column, so a file column that would
+    !! answer to it is unreachable -- and leaving it in place would be worse than removing it,
+    !! because `%get("parquet_row_index")` would then quietly return the file's values where the
+    !! caller expected row numbers. A read-in MAML's `extra: remap:` is the way to reach such a
+    !! column: it is matched on the INTERNAL name, so a remapped one has already been renamed by
+    !! the time this runs and is left alone.
+    !!
+    !! A warning rather than an abort, because the caller may not own the file -- the same choice
+    !! `parquet_get_metadata` makes for a missing key.
+    subroutine drop_shadowed_row_index(cache, filename)
+        type(parquet_table_cache), intent(inout) :: cache !! the column store, freshly enumerated.
+        character(len=*), intent(in) :: filename          !! the file, for the warning.
+        integer :: i, k
+        !
+        do i = 1, cache%ncols
+            if (cache%cols(i)%name /= PARQUET_ROW_INDEX) cycle
+            cache%row_index_shadowed = .true.
+            print "(a)", "WARNING: parquet_open_table: this file has a column called '" // &
+                PARQUET_ROW_INDEX // "', which is the reserved name of the automatic row-index " // &
+                "column; the file's own column is unreachable unless a read-in MAML remaps it " // &
+                "(file '" // trim(filename) // "')"
+            do k = i, cache%ncols - 1
+                call move_table_column(cache%cols(k), cache%cols(k + 1))
+            end do
+            cache%ncols = cache%ncols - 1
+            return
+        end do
+    end subroutine drop_shadowed_row_index
+    !
+    !> Records how many physical rows this table was cut from, and how many its row groups hold.
+    !!
+    !! Both are answered from what the open has already established rather than by asking the
+    !! reader again, which is the point: once a filter or a sample is attached the reader counts
+    !! survivors, so the same question put to it later returns `%nrows()`. A whole-file table with
+    !! a narrowing transform is the one case with nothing to hand, and it takes the file's own
+    !! footer -- the same cheap footer-only read `%row_group_bounds(physical=.true.)` makes.
+    subroutine capture_row_geometry(table, sliced, row_lo, row_hi, file_rows)
+        type(parquet_table), intent(inout) :: table !! the table being opened.
+        logical, intent(in) :: sliced               !! .true. for a slice-regime open.
+        integer(int64), intent(in) :: row_lo        !! slice's first FILE row.
+        integer(int64), intent(in) :: row_hi        !! slice's last FILE row.
+        integer(int64), intent(in) :: file_rows     !! what the reader reported at open.
+        integer(int64), allocatable :: bounds(:,:)
+        integer(int64) :: rg, rg_lo, rg_hi
+        !
+        if (sliced) then
+            table%cache%unfiltered_rows = row_hi - row_lo + 1_int64
+            ! The covering row groups, in the file's own numbering. rg_bounds is already physical
+            ! on the unmasked path; the masked one captured rg_bounds_physical before the mask
+            ! went on, for exactly this reason.
+            if (allocated(table%cache%rg_bounds_physical)) then
+                bounds = table%cache%rg_bounds_physical
+            else
+                bounds = table%cache%rg_bounds
+            end if
+            call rg_covering_range(bounds, row_lo, row_hi, rg_lo, rg_hi)
+            table%cache%rg_extent_rows = 0_int64
+            do rg = rg_lo, rg_hi
+                if (rg < 1_int64) cycle
+                table%cache%rg_extent_rows = table%cache%rg_extent_rows + &
+                    bounds(2, rg) - bounds(1, rg) + 1_int64
+            end do
+            return
+        end if
+        ! Whole file: every row group is covered, so the two answers coincide -- but `file_rows`
+        ! is only the file's own count when nothing narrowed it.
+        if (table_transform_narrows(table%cache)) then
+            call parquet_table_row_group_bounds(table%cache%source_file, bounds)
+            table%cache%unfiltered_rows = bounds(2, size(bounds, 2, kind=int64))
+        else
+            table%cache%unfiltered_rows = file_rows
+        end if
+        table%cache%rg_extent_rows = table%cache%unfiltered_rows
+    end subroutine capture_row_geometry
     !
     !> error stops unless `[row_lo, row_hi]` is a non-empty range inside `1..file_rows`.
     !!
@@ -231,23 +314,17 @@ contains
         masked = cache%slice_row_lo > 0_int64 .and. table_transform_narrows(cache)
     end function table_slice_is_masked
     !
-    !> .true. when this table's read-time transform removes rows, so that the reader's own row
-    !! numbering is the surviving rows rather than the file's.
-    !!
-    !! A sort does not count: it reorders rows without removing any. `sample_fraction >= 1` keeps
-    !! every row, and `parquet_open_reader` installs no draw for it, so it is not narrowing either.
-    !! A negative or NaN fraction is not judged here at all: it reaches `parquet_open_reader`,
-    !! which rejects it with the message that names the argument.
-    logical function table_transform_narrows(cache) result(narrows)
-        type(parquet_table_cache), intent(in) :: cache !! the table's store, with its transform stored.
-        !
+    module procedure table_transform_narrows
+        ! `sample_fraction >= 1` keeps every row, and parquet_open_reader installs no draw for it,
+        ! so it is not narrowing either. A negative or NaN fraction is not judged here at all: it
+        ! reaches parquet_open_reader, which rejects it with the message that names the argument.
         narrows = .false.
         if (allocated(cache%read_filter)) then
             narrows = .true.
         else if (allocated(cache%read_sample_fraction)) then
             narrows = cache%read_sample_fraction < 1.0_real64
         end if
-    end function table_transform_narrows
+    end procedure table_transform_narrows
     !
     module procedure rg_covering_range
         integer(int64) :: rg

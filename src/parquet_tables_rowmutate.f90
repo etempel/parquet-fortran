@@ -36,9 +36,13 @@
 !! detaching sees to that -- so a caller who wants it must `%prefetch` it BEFORE mutating, and the
 !! detach guard is what says so if they did not.
 !!
-!! `%append` is deliberately split into a public wrapper and a private worker even though there
-!! is no lock yet: the lock arrives in the next milestone and goes in the wrapper alone, and an
-!! OpenMP simple lock is not recursive, so the internal callers must already bypass it.
+!! **`%append` is the one mutation a SHARED table permits**, and the split between its two public
+!! entry points and the private `append_table_worker` is what makes that safe: each entry point
+!! takes the table's own lock exactly once and then calls the worker, and neither calls the other.
+!! An OpenMP simple lock is not recursive, so a second acquisition on one thread deadlocks rather
+!! than failing to build -- any future internal caller must come to the worker, never to
+!! `table_append_table`. Everything else in this file is refused outright on a shared table
+!! (`table_check_not_shared`), because it would pull storage out from under another thread.
 submodule (parquet_tables) parquet_tables_rowmutate
     implicit none
     !
@@ -100,6 +104,7 @@ contains
     module procedure table_filter_rows
         character(len=32) :: got, want
         !
+        call table_check_not_shared(self, "filter_rows")
         call table_check_open(self, "filter_rows")
         if (size(keep, kind=int64) /= self%row_count) then
             write(got, "(I0)") size(keep, kind=int64)
@@ -119,6 +124,7 @@ contains
         integer(int64) :: k
         character(len=32) :: got, want
         !
+        call table_check_not_shared(self, "delete_rows")
         call table_check_open(self, "delete_rows")
         ! Every index is checked before any is used, so a bad one aborts with the table intact.
         do k = 1_int64, size(indices, kind=int64)
@@ -147,6 +153,7 @@ contains
         logical, allocatable :: keep(:)
         character(len=32) :: got
         !
+        call table_check_not_shared(self, "truncate")
         call table_check_open(self, "truncate")
         if (n < 0_int64) then
             write(got, "(I0)") n
@@ -168,6 +175,7 @@ contains
         integer :: i
         character(len=32) :: got, want
         !
+        call table_check_not_shared(self, "sort_by")
         call table_check_open(self, "sort_by")
         if (size(keys) < 1) error stop EP // "sort_by: no sort key was given"
         if (present(descending)) then
@@ -220,16 +228,64 @@ contains
     ! ---- append -----------------------------------------------------------------------------
     !
     module procedure table_append_table
+        call table_check_open(self, "append")
+        call table_lock(self%cache)
+        call append_begin(self)
         call append_table_worker(self, other)
+        call append_end(self)
+        call table_unlock(self%cache)
     end procedure table_append_table
+    !
+    !> Marks an append as in progress, and refuses to start one while a read is in flight.
+    !!
+    !! Called with the table's lock already held, by each of the two public %append entry points.
+    !! Reading the table while any thread appends to it is forbidden, so an append starting while
+    !! a read is in flight is the same violation seen from the other side -- caught here, under the
+    !! lock, where the count cannot change for the duration of the check.
+    !!
+    !! Best-effort in the same way `table_check_no_append` is: a read that begins between this
+    !! check and the append's first reallocation is not seen. That is why the append-only rule
+    !! stays a documented contract with these two checks as its safety net rather than its
+    !! mechanism. Note also that only the COARSE read entry points maintain `readers_active` --
+    !! a per-element accessor cannot afford two atomics per cell, so an element-by-element read
+    !! racing an append is caught by the reader's own `table_check_no_append`, not by this.
+    subroutine append_begin(self)
+        class(parquet_table), intent(in) :: self !! the table about to be appended to.
+        integer :: active
+        !
+        active = 0
+        !$omp atomic read
+        active = self%cache%readers_active
+        if (active /= 0) then
+            error stop EP // "append: another thread is reading this table right now. A parallel " // &
+                "append region is append-only -- no thread may read the table while any thread " // &
+                "is appending to it, because the append reallocates every column's storage."
+        end if
+        !$omp atomic update
+        self%cache%append_active = self%cache%append_active + 1
+    end subroutine append_begin
+    !
+    !> Ends an append started by `append_begin`. Must run on every exit path from it.
+    subroutine append_end(self)
+        class(parquet_table), intent(in) :: self !! the table that was appended to.
+        !
+        !$omp atomic update
+        self%cache%append_active = self%cache%append_active - 1
+    end subroutine append_end
     !
     !> The unlocked body of `%append`.
     !!
-    !! Split out from the binding even though nothing takes a lock yet: the next milestone adds
-    !! the table's lock to `table_append_table` alone, and an OpenMP simple lock is not recursive,
-    !! so every INTERNAL caller must already bypass the public entry point. `%append(row)` is that
-    !! caller today. Getting this shape wrong shows up as a self-deadlock rather than a compile
-    !! error, so it is worth having before the lock exists rather than after.
+    !! **Both public %append entry points take the table's lock themselves and then call this;
+    !! neither calls the other.** That is exactly one acquisition per public call, which is what an
+    !! OpenMP simple lock requires -- it is not recursive, so a second acquisition on one thread
+    !! deadlocks rather than failing to build. Any future internal caller must come here, never to
+    !! `table_append_table`, and must already hold the lock if it can be reached concurrently.
+    !!
+    !! The lock covers the validation passes as well as the mutation, so a half-appended table is
+    !! never visible to another thread, and `table_detach`/the `generation` bump happen under it
+    !! too. `other` is deliberately NOT locked: it is the appending thread's own private table by
+    !! construction, and locking two tables in one operation would introduce a lock-ordering
+    !! problem (A appends B while B appends A) for no gain.
     subroutine append_table_worker(self, other)
         class(parquet_table), intent(inout) :: self !! the table to grow.
         class(parquet_table), intent(in) :: other   !! the table whose rows are appended.
@@ -272,10 +328,16 @@ contains
         type(parquet_table) :: one
         !
         call table_check_open(self, "append")
+        ! This is a public entry point, not an internal caller, so it takes the lock itself and
+        ! goes to the worker -- never to table_append_table, which would acquire a second time and
+        ! deadlock. Building the one-row table happens inside the lock as well: it reads `self`'s
+        ! column list, which a concurrent append is in the middle of changing.
+        call table_lock(self%cache)
+        call append_begin(self)
         call append_row_as_table(self, r, one)
-        ! The worker, not self%append: see append_table_worker's own note on why an internal
-        ! caller must not re-enter the public entry point.
         call append_table_worker(self, one)
+        call append_end(self)
+        call table_unlock(self%cache)
     end procedure table_append_row
     !
     module procedure table_append_null_rows_i32
@@ -286,6 +348,7 @@ contains
         integer :: i
         character(len=32) :: got
         !
+        call table_check_not_shared(self, "append_null_rows")
         call table_check_open(self, "append_null_rows")
         if (n < 0_int64) then
             write(got, "(I0)") n

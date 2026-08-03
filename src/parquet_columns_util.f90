@@ -119,6 +119,32 @@ contains
     !!
     !! This is the lazy allocation R2 requires: a column that never sees a null never calls this
     !! and never pays for a map.
+    module procedure has_validity_storage
+        ! The three validity mechanisms, in the order feature_table.md's "three dispatch classes"
+        ! lists them. Only the first two allocate anything, so only they can be raced on.
+        if (is_temporal_kind(self%kind)) then
+            res = .true.
+        else if (is_string_kind(self%kind)) then
+            res = .false.
+            if (allocated(self%str)) res = self%str%has_validity()
+        else
+            res = allocated(self%validity)
+        end if
+    end procedure has_validity_storage
+    !
+    module procedure ensure_validity
+        if (is_temporal_kind(self%kind)) return
+        if (is_string_kind(self%kind)) then
+            if (allocated(self%str)) call self%str%reserve_validity()
+            return
+        end if
+        ! PK_NONE has no storage to give validity to, and ensure_bitmap would size a bitmap from
+        ! a zero-width column. A column with no kind cannot be nulled either, so there is nothing
+        ! to pre-empt.
+        if (self%kind == PK_NONE) return
+        call ensure_bitmap(self)
+    end procedure ensure_validity
+    !
     module procedure ensure_bitmap
         integer(int64) :: need, have
         integer(int64), allocatable :: tmp(:)

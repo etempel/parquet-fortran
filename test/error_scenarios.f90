@@ -1299,6 +1299,14 @@ program error_scenarios
         call scenario_table_first_touch_in_parallel_single()
     case ("table_resolve_width_in_parallel_single")
         call scenario_table_resolve_width_in_parallel_single()
+    case ("table_mutate_shared_in_parallel")
+        call scenario_table_mutate_shared_in_parallel()
+    case ("table_add_column_shared_in_parallel")
+        call scenario_table_add_column_shared_in_parallel()
+    case ("table_set_null_no_validity_in_parallel")
+        call scenario_table_set_null_no_validity_in_parallel()
+    case ("table_string_write_shared_in_parallel")
+        call scenario_table_string_write_shared_in_parallel()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -10309,6 +10317,80 @@ contains
         !$omp end parallel
         print '(a,i0)', "unexpectedly resolved a deferred column's width inside a parallel region, w=", w
     end subroutine scenario_table_resolve_width_in_parallel_single
+
+    !> A structural change to a table another thread may be using is refused.
+    !!
+    !! The table is opened OUTSIDE the region and every column made resident there, so nothing
+    !! here is a first touch -- this reaches the mutation guard specifically, not
+    !! `unsafe_first_touch`. `!$omp single` for the same determinism reason as the `_single`
+    !! scenarios above: exactly one thread runs the abort.
+    subroutine scenario_table_mutate_shared_in_parallel()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_table_omp_mutate.parquet")
+        call parquet_open_table(t, "test_run/es_table_omp_mutate.parquet")
+        call t%materialize_all()
+        !$omp parallel num_threads(2) default(shared)
+        !$omp single
+        call t%drop_column("val")   ! structural change to a shared table -> aborts
+        !$omp end single
+        !$omp end parallel
+        print '(a,i0)', "unexpectedly dropped a column of a shared table in a region, ncols=", t%ncols()
+    end subroutine scenario_table_mutate_shared_in_parallel
+
+    !> %add_column reallocates cols(:), so it is guarded at table_new_slot -- the choke point every
+    !! per-kind specific goes through, which is why one scenario covers all 18 of them.
+    subroutine scenario_table_add_column_shared_in_parallel()
+        type(parquet_table) :: t
+        real(real64) :: extra(3)
+        call write_table_scenario_fixture("test_run/es_table_omp_addcol.parquet")
+        call parquet_open_table(t, "test_run/es_table_omp_addcol.parquet")
+        call t%materialize_all()
+        extra = [1.0_real64, 2.0_real64, 3.0_real64]
+        !$omp parallel num_threads(2) default(shared)
+        !$omp single
+        call t%add_column("extra", extra)   ! reallocates cols(:) on a shared table -> aborts
+        !$omp end single
+        !$omp end parallel
+        print '(a,i0)', "unexpectedly added a column to a shared table in a region, ncols=", t%ncols()
+    end subroutine scenario_table_add_column_shared_in_parallel
+
+    !> Nulling an element of a column with no validity storage yet ALLOCATES that storage, and two
+    !! threads doing it race with no diagnostic. Refused, naming %ensure_validity -- which is the
+    !! way to make the allocation happen up front so concurrent nulling is safe.
+    subroutine scenario_table_set_null_no_validity_in_parallel()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_table_omp_setnull.parquet")
+        call parquet_open_table(t, "test_run/es_table_omp_setnull.parquet")
+        call t%materialize_all()
+        !$omp parallel num_threads(2) default(shared)
+        !$omp single
+        call t%set_null("val", 1)   ! first null on a shared column -> would allocate -> aborts
+        !$omp end single
+        !$omp end parallel
+        print '(a,l1)', "unexpectedly nulled a shared column with no validity storage, is_null=", &
+            t%is_null("val", 1)
+    end subroutine scenario_table_set_null_no_validity_in_parallel
+
+    !> A string column's rows share one packed store, so writing any element can move the whole
+    !! payload -- "disjoint row ranges" is not a meaningful division of it, and any write to one on
+    !! a shared table is refused whether or not it creates a null.
+    subroutine scenario_table_string_write_shared_in_parallel()
+        type(parquet_table) :: t
+        type(parquet_writer) :: w
+        character(len=8) :: names(3)
+        names = ["aa      ", "bbb     ", "c       "]
+        call parquet_open_writer(w, "test_run/es_table_omp_strwrite.parquet")
+        call parquet_write_column(w, "name", names)
+        call parquet_close_writer(w)
+        call parquet_open_table(t, "test_run/es_table_omp_strwrite.parquet")
+        call t%materialize_all()
+        !$omp parallel num_threads(2) default(shared)
+        !$omp single
+        call t%set_element("name", 1, "zz")   ! packed store on a shared table -> aborts
+        !$omp end single
+        !$omp end parallel
+        print '(a)', "unexpectedly wrote a string element of a shared table inside a region"
+    end subroutine scenario_table_string_write_shared_in_parallel
 
     ! ==== stage 3c: mutation, detach, sort, clone ==========================================
 

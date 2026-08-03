@@ -7,7 +7,7 @@
 module test_openmp
     use parquet
     use parquet_maml_base, only : parquet_maml_file, get_parquet_maml
-    use iso_fortran_env, only : real64, int32
+    use iso_fortran_env, only : real64, int32, int64
     use testdrive, only : new_unittest, unittest_type, error_type, check, test_failed
     !$ use omp_lib, only : omp_get_max_threads
     !
@@ -56,7 +56,15 @@ contains
             new_unittest("mixed read/write of different files in parallel", test_mixed_read_write_parallel), &
             new_unittest("parse MAML files concurrently", test_maml_parallel), &
             new_unittest("repeatedly open/close readers on a shared file in parallel", test_shared_file_read_parallel), &
-            new_unittest("stress: many threads, many files", test_stress_parallel) &
+            new_unittest("stress: many threads, many files", test_stress_parallel), &
+            new_unittest("a shared table's resident columns are read by many threads at once", &
+                test_table_shared_read_parallel), &
+            new_unittest("per-thread slice tables append into one shared table", &
+                test_table_parallel_append), &
+            new_unittest("materialize_all reads columns in parallel and agrees with the serial path", &
+                test_table_parallel_prefetch_agrees), &
+            new_unittest("a thread-private table may still be mutated inside a parallel region", &
+                test_table_private_mutation_allowed) &
             ]
     end subroutine collect_tests_parquet_openmp
 
@@ -424,5 +432,216 @@ contains
             end if
         end do
     end subroutine test_stress_parallel
+
+    ! ---- parquet_table concurrency (milestone 3d) ------------------------------------------
+    !
+    !> Writes the multi-column fixture the table concurrency tests below read.
+    !>
+    !> Each of them writes its OWN file rather than sharing one: testdrive runs the tests in a
+    !> collection concurrently, and two tests writing one path truncate it under each other (see
+    !> CLAUDE.md, "Tests run concurrently").
+    subroutine write_table_fixture(filename, nrows)
+        character(len=*), intent(in) :: filename
+        integer, intent(in) :: nrows
+        type(parquet_writer) :: writer
+        real(real64), allocatable :: a(:), b(:), c(:)
+        integer(int32), allocatable :: id(:)
+        integer :: j
+
+        allocate(a(nrows), b(nrows), c(nrows), id(nrows))
+        do j = 1, nrows
+            id(j) = j
+            a(j) = real(j, real64)
+            b(j) = real(j, real64)*2.0_real64
+            c(j) = real(j, real64)*3.0_real64
+        end do
+        call parquet_open_writer(writer, filename)
+        call parquet_write_column(writer, "id", id)
+        call parquet_write_column(writer, "a", a)
+        call parquet_write_column(writer, "b", b)
+        call parquet_write_column(writer, "c", c)
+        call parquet_close_writer(writer)
+    end subroutine write_table_fixture
+
+    !> Use case A: one thread makes the columns resident, then many threads read them at once.
+    !>
+    !> This is the shape the whole design protects -- a read of a resident column takes no lock
+    !> and no atomic -- so the test is that it produces the right answer under real concurrency,
+    !> not that it is fast.
+    subroutine test_table_shared_read_parallel(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: fname = "test_run/test_openmp_table_read.parquet"
+        integer, parameter :: nrows = 500
+        type(parquet_table) :: t
+        real(real64), pointer :: pa(:)
+        real(real64) :: total, expect
+        integer :: i
+
+        call write_table_fixture(fname, nrows)
+        call parquet_open_table(t, fname)
+        ! Before the region, exactly as the contract requires: a first touch inside one is a hard
+        ! error on a shared table.
+        call t%prefetch(["a", "b"])
+        call t%col("a", pa)
+
+        total = 0.0_real64
+        !$omp parallel do default(shared) private(i) reduction(+:total)
+        do i = 1, nrows
+            total = total + pa(i)
+        end do
+        !$omp end parallel do
+
+        expect = real(nrows, real64)*real(nrows + 1, real64)/2.0_real64
+        call check(error, abs(total - expect) < 1.0e-6_real64, &
+            "a shared table's resident column must read the same from many threads as from one")
+    end subroutine test_table_shared_read_parallel
+
+    !> Use case B: each thread opens its own slice table, then appends into one shared table.
+    !>
+    !> The shared table's lock is what makes the append safe; nothing here writes an !$omp
+    !> critical. Arrival order is non-deterministic, so the assertions are on the row count and
+    !> on the SET of values, never on their order.
+    subroutine test_table_parallel_append(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: fname = "test_run/test_openmp_table_append.parquet"
+        integer, parameter :: nrows = 400, nchunk = 8
+        type(parquet_table) :: out
+        real(real64), allocatable :: got(:)
+        real(real64) :: total, expect
+        real(real64) :: empty(0)
+        integer :: g, i
+
+        call write_table_fixture(fname, nrows)
+        ! The destination needs the column before the region: %append refuses a batch carrying a
+        ! column the destination does not have (it will not silently drop one), and adding a
+        ! column is itself a structural change the shared-table guard would refuse inside the
+        ! region -- which is exactly the "prepare before the region" shape the contract asks for.
+        call parquet_new_table(out)
+        call out%add_column("a", empty)
+
+        !$omp parallel do default(shared) private(g) schedule(dynamic)
+        do g = 1, nchunk
+            block
+                ! Declared in a block, NOT in a private() clause: parquet_table is finalizable and
+                ! gfortran does not reliably default-initialise a private copy of such a type.
+                type(parquet_table) :: mine, batch
+                real(real64), allocatable :: vals(:)
+                integer(int64) :: lo, hi
+                lo = int((g - 1)*(nrows/nchunk) + 1, int64)
+                hi = int(g*(nrows/nchunk), int64)
+                call parquet_open_table(mine, fname, lo, hi)
+                ! A first touch on a table THIS thread opened inside the region is permitted --
+                ! that is the whole point of the ownership-keyed guard.
+                call mine%get("a", vals)
+                call parquet_new_table(batch)
+                call batch%add_column("a", vals)
+                ! Serialized by the shared table's own lock.
+                call out%append(batch)
+            end block
+        end do
+        !$omp end parallel do
+
+        call check(error, out%nrows() == int(nrows, int64), &
+            "every appended batch's rows must survive a concurrent append")
+        if (allocated(error)) return
+        call out%get("a", got)
+        total = 0.0_real64
+        do i = 1, nrows
+            total = total + got(i)
+        end do
+        expect = real(nrows, real64)*real(nrows + 1, real64)/2.0_real64
+        call check(error, abs(total - expect) < 1.0e-6_real64, &
+            "a concurrent append must lose and duplicate no rows, whatever order they arrive in")
+    end subroutine test_table_parallel_append
+
+    !> Use case C: %materialize_all reads its columns on several threads internally.
+    !>
+    !> An A/B equality against the serial path, which is what a "same answer, just faster" claim
+    !> actually needs -- the parallel path is only reachable with several columns and no read-time
+    !> transform, so the serial half deliberately opens with a filter to force the other branch.
+    subroutine test_table_parallel_prefetch_agrees(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: fname = "test_run/test_openmp_table_prefetch.parquet"
+        integer, parameter :: nrows = 300
+        type(parquet_table) :: par, ser
+        real(real64), allocatable :: pa(:), sa(:), pc(:), sc(:)
+        integer :: i
+        logical :: same
+
+        call write_table_fixture(fname, nrows)
+        ! No transform and four columns: takes the internally-parallel path when more than one
+        ! thread is available, and the ordinary serial one otherwise. Either way the answer must
+        ! match a table materialized one column at a time.
+        call parquet_open_table(par, fname)
+        call par%materialize_all()
+
+        call parquet_open_table(ser, fname)
+        call ser%get("a", sa)     ! one column at a time: the serial first-touch path
+        call ser%get("c", sc)
+
+        call par%get("a", pa)
+        call par%get("c", pc)
+        call check(error, size(pa) == size(sa) .and. size(pc) == size(sc), &
+            "a parallel materialize_all must produce the same row counts as the serial path")
+        if (allocated(error)) return
+        same = .true.
+        do i = 1, nrows
+            if (abs(pa(i) - sa(i)) > 1.0e-9_real64) same = .false.
+            if (abs(pc(i) - sc(i)) > 1.0e-9_real64) same = .false.
+        end do
+        call check(error, same, &
+            "a parallel materialize_all must produce the same values as the serial path")
+    end subroutine test_table_parallel_prefetch_agrees
+
+    !> The negative control for the structural-mutation guard: a table a thread opened itself
+    !> inside the region is thread-private, so mutating it must NOT be refused.
+    !>
+    !> Without this, a guard that fired unconditionally would pass every error scenario written
+    !> for it while making the slice regime unusable.
+    subroutine test_table_private_mutation_allowed(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: fname = "test_run/test_openmp_table_private.parquet"
+        integer, parameter :: nrows = 200, nchunk = 4
+        integer(int64) :: counts(nchunk)
+        integer :: g
+        logical :: ok
+
+        call write_table_fixture(fname, nrows)
+        counts = -1_int64
+
+        !$omp parallel do default(shared) private(g)
+        do g = 1, nchunk
+            block
+                type(parquet_table) :: mine
+                logical, allocatable :: keep(:)
+                integer(int64) :: lo, hi
+                integer :: k
+                lo = int((g - 1)*(nrows/nchunk) + 1, int64)
+                hi = int(g*(nrows/nchunk), int64)
+                call parquet_open_table(mine, fname, lo, hi)
+                call mine%materialize_all()
+                allocate(keep(mine%nrows()))
+                keep = .false.
+                do k = 1, int(mine%nrows())
+                    if (mod(k, 2) == 0) keep(k) = .true.
+                end do
+                ! Every one of these is a structural change, on a table this thread opened inside
+                ! the region: all four must be permitted.
+                call mine%filter_rows(keep)
+                call mine%sort_by(["a"])
+                call mine%rename_column("a", "aa")
+                call mine%drop_column("b")
+                counts(g) = mine%nrows()
+            end block
+        end do
+        !$omp end parallel do
+
+        ok = .true.
+        do g = 1, nchunk
+            if (counts(g) /= int(nrows/nchunk/2, int64)) ok = .false.
+        end do
+        call check(error, ok, &
+            "a thread-private table must still permit filter_rows/sort_by/rename/drop in a region")
+    end subroutine test_table_private_mutation_allowed
 
 end module test_openmp

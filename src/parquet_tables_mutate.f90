@@ -33,6 +33,7 @@ contains
         ! Resolved before anything is written, so found=.false. means nothing changed.
         call table_resolve(self, name, "set_null", idx, found)
         if (idx == 0) return
+        call table_check_shared_write(self, idx, "set_null", nulling=.true.)
         call table_require_row(self, i, "set_null")
         call self%cache%cols(idx)%values%set_null(i)
         self%cache%cols(idx)%user_populated = .true.
@@ -46,6 +47,7 @@ contains
         !
         call table_resolve(self, name, "set_null", idx, found)
         if (idx == 0) return
+        call table_check_shared_write(self, idx, "set_null", nulling=.true.)
         if (size(is_valid, kind=int64) /= self%row_count) then
             write(got, "(I0)") size(is_valid, kind=int64)
             write(want, "(I0)") self%row_count
@@ -70,6 +72,7 @@ contains
         !
         call table_resolve(self, name, "set_null", idx, found)
         if (idx == 0) return
+        call table_check_shared_write(self, idx, "set_null", nulling=.true.)
         call table_require_row(self, i, "set_null")
         call self%cache%cols(idx)%values%set_null(i, e)
         self%cache%cols(idx)%user_populated = .true.
@@ -83,6 +86,7 @@ contains
         !
         call table_resolve(self, name, "set_null", idx, found)
         if (idx == 0) return
+        call table_check_shared_write(self, idx, "set_null", nulling=.true.)
         wdt = self%cache%cols(idx)%values%colwidth()
         if (size(is_valid, 1, kind=int64) /= int(wdt, int64) .or. &
             size(is_valid, 2, kind=int64) /= self%row_count) then
@@ -110,6 +114,7 @@ contains
         !
         call table_resolve(self, name, "clear_null", idx, found)
         if (idx == 0) return
+        call table_check_shared_write(self, idx, "clear_null", nulling=.true.)
         call table_require_row(self, i, "clear_null")
         call self%cache%cols(idx)%values%clear_null(i)
         self%cache%cols(idx)%user_populated = .true.
@@ -124,6 +129,7 @@ contains
         !
         call table_resolve(self, name, "clear_null", idx, found)
         if (idx == 0) return
+        call table_check_shared_write(self, idx, "clear_null", nulling=.true.)
         call table_require_row(self, i, "clear_null")
         call self%cache%cols(idx)%values%clear_null(i, e)
         self%cache%cols(idx)%user_populated = .true.
@@ -132,6 +138,10 @@ contains
     module procedure table_compact_validity
         integer :: idx
         !
+        ! Deallocating the bitmap is a change to the column's storage, not a value write: a
+        ! concurrent %is_null would read through it, and a concurrent %set_null would re-allocate
+        ! it. Refused on a shared table for the same reason every other structural change is.
+        call table_check_not_shared(self, "compact_validity")
         call table_resolve(self, name, "compact_validity", idx, found)
         if (idx == 0) return
         call self%cache%cols(idx)%values%compact_validity()
@@ -190,6 +200,7 @@ contains
         logical :: forced
         character(len=:), allocatable :: sfx
         !
+        call table_check_not_shared(self, "drop_column")
         ! Deliberately table_lookup_or_fail, not table_resolve: dropping a column that was never
         ! read is the cheap memory-reclaiming case, and reading it first to throw it away would
         ! defeat the point.
@@ -251,6 +262,7 @@ contains
         integer :: idx
         character(len=:), allocatable :: sfx
         !
+        call table_check_not_shared(self, "rename_column")
         ! `found` reports a missing SOURCE column only. A NEW name that is already taken is a
         ! different mistake -- the caller named a column that does exist -- and stays fatal.
         call table_lookup_or_fail(self, old_name, "rename_column", idx, found)
@@ -288,6 +300,7 @@ contains
         logical :: strict
         character(len=:), allocatable :: sfx
         !
+        call table_check_not_shared(self, "copy_column")
         ! table_resolve, not table_lookup_or_fail: a copy has to have the values in hand, so an
         ! unread column is read here. There is no deferred form of a copy -- unlike %cast, which
         ! can hand its conversion to the read that has not happened yet, a copy needs a second
@@ -332,6 +345,7 @@ contains
         logical :: strict, deferred
         character(len=:), allocatable :: sfx
         !
+        call table_check_not_shared(self, "cast")
         strict = .false.
         if (present(exact)) strict = exact
         call table_check_open(self, "cast")

@@ -216,6 +216,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `tools/check_bindc_boundary.py`, wired into CI, to catch `bind(C)`/`extern "C"` signature
   mismatches between Fortran and C++.
 
+- **A `parquet_table` can now be used from several threads, with the library enforcing the rules
+  rather than documenting them.** `%append` into a *shared* table is serialised by the table itself,
+  so a parallel producer region needs no `!$omp critical` of its own: each thread analyses its own
+  slice and appends its results to one destination. `%prefetch`/`%materialize_all` now read a wide
+  file's columns **in parallel internally**, with no OpenMP in the calling code at all — measured at
+  3.9x on a 24-column, 900k-row file with 8 threads (it falls back to the ordinary serial read when
+  there is a read-time `filter=`/`sort=`/`qc=`/`sample_fraction=`, since a second reader would have
+  to repeat that work). New `%ensure_validity([name])` materializes a column's validity storage up
+  front, which is what makes nulling elements of one column from several threads safe — validity is
+  allocated lazily, so the *first* null would otherwise allocate, and two threads doing that race.
+  `parquet_string_column` gains the matching `has_validity`/`reserve_validity` pair.
+
+  **Every remaining single-threaded requirement is now a hard `error stop` naming what to do
+  instead, not a documented convention**: changing a shared table's structure inside a parallel
+  region (`%add_column`, `%drop_column`, `%rename_column`, `%copy_column`, `%cast`, `%evict_column`,
+  `%reload`, `%filter_rows`, `%sort_by`, `%delete_rows`, `%truncate`, `%append_null_rows`,
+  `parquet_write_table`), reading a shared table while another thread appends to it, nulling a
+  column whose validity storage does not exist yet, and writing to a string column (whose rows share
+  one packed store, so a write can move the whole payload). A table a thread opened *itself* inside
+  the region is thread-private and is deliberately exempt from all of them, which is what keeps the
+  per-thread slice pattern working. Reading an already-resident column stays completely free — no
+  lock, no atomic, any number of threads. Three cases remain undetectable and are documented as
+  such: a pointer you already hold, threading the library cannot identify (pthreads, coarrays), and
+  the exact instant a violation begins. See
+  [Thread safety](doc/pages/thread-safety.md) for the full per-operation table.
+
 ### Changed
 
 - **One `use parquet` now covers the whole library.** It brings the `parquet_table` container, the

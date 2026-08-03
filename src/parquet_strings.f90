@@ -69,6 +69,8 @@ module parquet_strings
         procedure :: character_size                    !! Total characters stored.
         procedure :: empty => col_empty                !! .true. when no rows are stored.
         procedure :: null_count                        !! Number of null elements.
+        procedure :: has_validity                      !! Whether the validity bitmap exists yet.
+        procedure :: reserve_validity                  !! Materialize the validity bitmap up front.
         procedure :: memory_usage                      !! Total bytes of allocated buffers.
         procedure :: validate                          !! Verify class invariants.
         ! --- access ---
@@ -522,6 +524,33 @@ contains
         class(parquet_string_column), intent(in) :: self !! the column.
         null_count = self%n_null
     end function null_count
+    !
+    !> Whether the validity bitmap has been materialized yet.
+    !!
+    !! A column with no bitmap has every element valid; the bitmap is allocated lazily, the first
+    !! time an element is actually nulled. So this answers "would nulling an element allocate?",
+    !! which is what a caller about to null elements from several threads needs to know -- see
+    !! `reserve_validity`.
+    logical function has_validity(self)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        has_validity = allocated(self%validity)
+    end function has_validity
+    !
+    !> Materializes the validity bitmap now, with every element still valid.
+    !!
+    !! Nothing about the column's contents changes -- the bitmap is initialised to all-ones -- so
+    !! this is purely about *when* the allocation happens. Its reason to exist is concurrency:
+    !! `append_null`/`set_null` allocate the bitmap lazily, so two threads nulling elements of the
+    !! same previously null-free column would race on that allocation with no diagnostic. Calling
+    !! this first leaves them nothing to allocate.
+    !!
+    !! Idempotent: a column that already has a bitmap is untouched, and a zero-row column still
+    !! gets the minimum allocation, so a later append has nothing to grow from scratch either.
+    subroutine reserve_validity(self)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        call ensure_validity_cap(self, max(self%nrows, 1_int64))
+        self%has_nulls = .true.
+    end subroutine reserve_validity
     !
     !> Returns the total bytes of allocated buffers (offsets + data + validity + object overhead).
     integer(int64) function memory_usage(self)

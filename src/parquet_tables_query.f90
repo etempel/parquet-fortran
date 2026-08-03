@@ -347,6 +347,12 @@ contains
         character(len=:), allocatable :: sfx
         !
         call table_check_open(self, proc)
+        ! Every value accessor -- %col, %get, %set, %is_null, %get_element, a row handle's %get,
+        ! %get_slice -- reaches its slot through here, which makes this the one place the cheap
+        ! half of the append/read contract has to be written for all of them to have it, including
+        ! any accessor added later. One atomic read of a counter, against a call that is about to
+        ! copy or point at a whole column.
+        call table_check_no_append(self%cache, proc)
         ! The reserved name resolves to the automatic column, materializing it on this first use.
         ! Done here, in the one lookup every value accessor goes through, so every one of them
         ! reaches it without knowing it exists.
@@ -385,7 +391,23 @@ contains
         ! so residency is settled once, in one place. A column already resident costs the
         ! comparison below and nothing else.
         if (self%cache%cols(idx)%residency /= RES_FULL) then
+            ! Registered as a read in flight for its duration, so a concurrent %append refuses
+            ! rather than reallocating storage underneath it. Only this window is registered, not
+            ! the whole accessor: a first touch reads from the file and takes real time, while the
+            ! copy the accessor performs afterwards is a memcpy over already-resident memory. The
+            ! cheap check above covers that shorter window, and keeping the counter off the
+            ! resident path is what keeps a read of a resident column entirely free of atomics --
+            ! the property this whole design exists to protect. See parquet_table_cache's
+            ! `readers_active` comment.
+            call table_read_enter(self%cache, proc)
             call table_touch(self%cache, table_scope_of(self), idx, proc)
+            call table_read_exit(self%cache)
+        end if
+        ! Checked here, after `idx` is known good, so every %set/%set_element specific inherits
+        ! the string-column rule from one place rather than each carrying its own copy -- and so
+        ! a specific added later gets it by copying its neighbour's table_resolve call.
+        if (present(writing)) then
+            if (writing) call table_check_shared_write(self, idx, proc, nulling=.false.)
         end if
         if (present(found)) found = .true.
     end procedure table_resolve

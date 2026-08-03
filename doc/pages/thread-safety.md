@@ -10,9 +10,54 @@ Concurrent use (e.g. from an OpenMP parallel region) is supported.
 - Never call into the same reader/writer instance from two threads at once.
 - Independent readers may open/read the same parquet file concurrently.
 - Never write to the same output file path from two threads at the same time.
-- A shared `parquet_table` may be **read** from many threads once its columns are resident, but a
-  first touch inside a parallel region is a hard error and every mutation is single-threaded — see
+- A shared `parquet_table` may be **read** from many threads once its columns are resident, and
+  **appended to** from many threads (the table serialises that itself). A first touch inside a
+  parallel region, and every other change to a shared table, is a hard error — see
+  [What a `parquet_table` allows concurrently](#what-a-parquet_table-allows-concurrently) below and
   [Reading a table from several threads](table.html#reading-a-table-from-several-threads).
+
+## What a `parquet_table` allows concurrently
+
+**The library enforces this table, it does not merely document it.** Everything marked "refused"
+below aborts with a message naming what you did and what to do instead, rather than racing. Three
+cases at the end cannot be detected at all, and are called out as such.
+
+The design principle behind the whole table: **reading an already-resident column is free** — no
+lock, no atomic, no bookkeeping, any number of threads. Everything else is arranged around not
+disturbing that.
+
+| what you do | concurrently? | what happens if you break the rule |
+|---|---|---|
+| Read a resident column: `%get`, `%col`, `%get_slice`, `%row`, `%get_element`, `%is_null` | **yes**, unrestricted | — |
+| Read through a `%col`/`%ref` pointer you already hold | **yes**, unrestricted | — |
+| Metadata: `%nrows`, `%ncols`, `%column_names`, `%kind`, `%width`, `%unit`, `%residency` | **yes** | — |
+| First read of a column not yet resident, on a table **another** thread opened | no | hard error; `%prefetch` before the region |
+| First read of a column, on a table **this** thread opened inside the region | **yes** | — (this is the per-thread slice pattern) |
+| `%prefetch` / `%materialize_all` called from one thread | **yes, internally** — the library reads the columns on several threads for you | — |
+| Write values into **different** resident columns | **yes** | — |
+| Write values into **disjoint row ranges** of one resident fixed-width column | **yes** | — |
+| Write values into a **string** column | no | hard error — its rows share one packed store, so a write can move the whole payload |
+| `%set_null`/`%clear_null` when the column **already has** validity storage | **yes** (different columns, or disjoint rows) | — |
+| `%set_null`/`%clear_null` when it does **not** | no | hard error naming `%ensure_validity`; call that before the region |
+| `%set_null`/`%clear_null` on a **date/time/timestamp** column | **yes** | — (the null lives in the element; nothing is allocated) |
+| `%append` into a shared table | **yes** — serialised by the table's own lock | — |
+| **Reading** a shared table while any thread appends to it | no | hard error (best-effort — see below) |
+| Any other change to a shared table: `%add_column`, `%drop_column`, `%rename_column`, `%copy_column`, `%cast`, `%evict_column`, `%reload`, `%filter_rows`, `%sort_by`, `%delete_rows`, `%truncate`, `%append_null_rows`, `parquet_write_table` | no | hard error; do it before or after the region |
+| The same change on a table **this** thread opened inside the region | **yes** | — |
+
+Three things the library cannot see, which stay your responsibility:
+
+- **A pointer you already hold.** `%append` reallocates every column's storage, so a `%col`/`%ref`
+  pointer taken before an append points at freed memory afterwards. Fortran gives no way to detect
+  a dangling pointer; re-fetch after an append, and use `%generation()` if you want to check.
+- **Threads the library cannot identify.** The guards use OpenMP thread identity. If you thread some
+  other way (pthreads through C interop, coarrays), none of them apply.
+- **The exact instant a violation starts.** The read/append checks catch an overlap of any real
+  duration, but a read beginning fractionally before an append publishes itself is not seen. They
+  are a safety net over the append-only rule, not a substitute for it.
+
+**Appended row order is not deterministic** — it depends on which thread got the lock first. Sort
+in memory afterwards (`%sort_by`) if you need a reproducible result.
 
 ## Practical cases
 

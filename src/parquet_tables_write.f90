@@ -30,6 +30,9 @@ contains
         logical :: want_metadata, use_own
         !
         call table_check_open(table, "parquet_write_table")
+        ! release= evicts columns as it writes, which replaces their storage -- so a write is a
+        ! structural change to the table as far as another thread is concerned, not a read.
+        call table_check_not_shared(table, "parquet_write_table")
         if (present(schema)) then
             ! A schema built in code with %init/%add_field only has MAML *text* until
             ! parquet_parse_maml populates %cinfo -- and %get_num_fields on an unpopulated %cinfo

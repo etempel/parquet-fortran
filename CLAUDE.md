@@ -51,6 +51,7 @@ working rules).
   - [Implicit finalizers must never route through a path that can throw/abort](#implicit-finalizers-must-never-route-through-a-path-that-can-throwabort)
   - [Automatic BYTE_STREAM_SPLIT for float columns in the writer](#automatic-byte_stream_split-for-float-columns-in-the-writer)
   - [Validity is per ELEMENT, and a vector row is not one bit](#validity-is-per-element-and-a-vector-row-is-not-one-bit)
+  - [`parquet_table` concurrency: one file owns the OpenMP plumbing](#parquet_table-concurrency-one-file-owns-the-openmp-plumbing-and-guards-key-on-ownership)
   - [A `parquet_table` pointer does not survive a ROW-structural mutation](#a-parquet_table-pointer-does-not-survive-a-row-structural-mutation)
   - [New `parquet_table` state goes on the CACHE](#new-parquet_table-state-goes-on-the-cache--never-as-an-allocatable-component-of-the-type)
   - [Assembling a `parquet_column` from pieces: preallocate and `%paste`](#assembling-a-parquet_column-from-pieces-preallocate-and-paste)
@@ -935,6 +936,53 @@ setter calls), and a table write hands the element mask straight to the writer. 
 in `test/test_table.f90` (`test_element_null_round_trip`) is what catches a regression, in both
 directions at once.
 
+### `parquet_table` concurrency: one file owns the OpenMP plumbing, and guards key on OWNERSHIP
+
+`src/parquet_tables_parallel.f90` holds the table's lock, the append/read counters and the shared
+refusal every structural mutation goes through, so that `#ifdef _OPENMP` and `use omp_lib` appear in
+exactly one file. The two exceptions are `unsafe_first_touch`/`record_open_thread`, which stayed in
+`parquet_tables_read.f90` next to the materialization path they guard. All three implement the SAME
+ownership test and must agree: *a table this very thread opened inside the current parallel region is
+thread-private and exempt; anything else may be shared.*
+
+Rules a change here must not break:
+
+- **Never key a guard on `omp_in_parallel()` alone.** test-drive runs its own tests inside
+  `!$omp parallel do`, so that fires suite-wide (see "Tests run concurrently"). Ownership is the
+  precise question, and refusing a thread-private table would make the whole slice regime unusable.
+- **`table_append_table` and `table_append_row` each take the lock exactly once and then call
+  `append_table_worker`; neither calls the other.** An OpenMP simple lock is not recursive, so a
+  second acquisition on one thread deadlocks rather than failing to build. A new internal caller
+  goes to the worker.
+- **A lock is a HANDLE, not a value.** `%clone` builds a fresh one (`clone_new_cache`), never a copy
+  of the source's, and `table_finalize` destroys it — via `table_destroy_lock`, which validates
+  nothing and cannot abort, because a finalizer must always succeed silently.
+- **The read path stays free of atomics.** `table_check_no_append` (one atomic read) sits in
+  `table_resolve`, the single choke point every value accessor goes through; the `readers_active`
+  counter is taken only around the *long* windows (a lazy first touch, and `materialize_marked`),
+  never around a resident read or a per-element accessor. Two atomics per cell would dominate a
+  `%get_element` loop. That asymmetry is deliberate and is documented on the cache fields.
+- **`table_resolve(..., writing=.true.)` is how a write declares itself**, which is what gives every
+  generated `%set`/`%set_element` specific the string-column rule from one place. A new write
+  specific inherits it by copying its neighbour's call.
+- **Validity is allocated lazily, so the FIRST null races** — guarded at the table layer (where
+  thread ownership is reachable), never in `parquet_columns`, which is a standalone module with no
+  thread knowledge. `%ensure_validity` is the escape hatch. Three dispatch classes, and only two
+  can race: bitmap kinds (`ensure_bitmap`), string kinds (`parquet_string_column`'s own
+  `ensure_validity_cap`), and temporal kinds — which allocate nothing and must NOT be refused.
+- **The internally-parallel `%prefetch` gives each thread its own reader** and is gated by
+  `parallel_prefetch_ok`. Every clause there is a correctness or cost rule, not a tuning knob; the
+  sharpest is that an **unseeded `sample_fraction=` would make each per-thread reader draw a
+  different subset**, so columns read by different threads would hold different rows — a silent
+  wrong answer. Do not relax that gate without re-reading its own comment.
+- **Arrow's own per-column threading is left enabled inside that region.** Measured both ways on a
+  24-column x 900k-row file with 8 OpenMP threads: 0.037-0.040 s nested, 0.046-0.047 s with
+  `use_threads=.false.`. Nesting the two is faster, so the "one level of parallelism only" instinct
+  is wrong here. Re-measure before changing it.
+- **Every new guard needs a NEGATIVE control**, not just an error scenario. A guard that fires
+  unconditionally passes every abort test ever written for it while breaking the permitted case;
+  `test_table_private_mutation_allowed` (`test/test_openmp.f90`) is the pattern.
+
 ### A `parquet_table` pointer does not survive a ROW-structural mutation
 
 `%col` hands back a live pointer into a column's storage, and `%filter_rows`, `%sort_by`,
@@ -1738,9 +1786,15 @@ as an argument, and have each caller pass its own.
 concurrency with its own `!$omp parallel do`, so under a `-fopenmp` build **`omp_in_parallel()`
 returns `.true.` inside every procedure a test calls**. A guard that refuses to do something "inside
 a parallel region" therefore fires during the entire test suite, not just in the test that meant to
-provoke it — and, because a plain non-OpenMP `fpm test` compiles the check out entirely, the suite
-passes locally and fails only in CI (whose `FPM_FFLAGS` includes `-fopenmp`). Two rules follow:
-run any change to such a guard under `FPM_FFLAGS="-fopenmp" fpm test`, not just a plain one; and
+provoke it. **This is NOT avoided by running `fpm test` without `-fopenmp`** — `fpm.toml` declares
+the `openmp = "*"` metapackage, which supplies the OpenMP flag across the whole resolved dependency
+graph, so `_OPENMP` is defined and every `#ifdef _OPENMP` guard is compiled in even for a bare
+`fpm build` with `FPM_FFLAGS` unset entirely (verified directly with a minimal standalone fpm
+project). An earlier version of this note claimed the opposite — that a plain `fpm test` compiles
+such a check out, so the suite would pass locally and fail only in CI — and that has not been true
+since the metapackage was adopted. Two rules follow anyway:
+run any change to such a guard under `FPM_FFLAGS="-fopenmp" fpm test`, since that is the build CI
+runs; and
 prefer a guard keyed on something more precise than "am I in a parallel region" — see
 `unsafe_first_touch` (`parquet_tables_read.f90`), which records at open time *which thread* created
 an object and refuses only when the object could actually be shared, so a thread-private object used

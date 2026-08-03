@@ -470,7 +470,8 @@ same type's accessors, but not specific to it — is covered in the main
 
 | Operation | Complexity |
 |---|---|
-| `size`, `capacity`, `character_size`, `null_count`, `is_null`, `is_empty`, `length`, `view` | O(1) |
+| `size`, `capacity`, `character_size`, `null_count`, `has_validity`, `is_null`, `is_empty`, `length`, `view` | O(1) |
+| `reserve_validity` | O(rows/8) bytes, once |
 | `view_all`, `view_slice` | O(N), O(range length) |
 | `append_string` / `append_null` | amortized O(1) |
 | `append_column(other)` | O(other rows + other chars) |

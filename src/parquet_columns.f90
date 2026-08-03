@@ -144,6 +144,8 @@ module parquet_columns
         procedure :: length                            !! Number of rows stored.
         procedure :: colwidth                          !! Values per row (1 for scalar kinds).
         procedure :: validity_bytes                    !! Bytes the null bitmap occupies (0 when sparse).
+        procedure :: has_validity_storage               !! Whether nulling would still have to allocate.
+        procedure :: ensure_validity                    !! Allocate the validity storage up front.
         procedure :: unit_string                       !! Copy out the unit string ("" when unset).
         procedure :: set_unit                          !! Set (or clear) the unit string.
         procedure :: any_null                          !! Whether the column holds at least one null.
@@ -1443,6 +1445,29 @@ module parquet_columns
         module subroutine ensure_bitmap(self)
             class(parquet_column), intent(inout) :: self !! the column.
         end subroutine ensure_bitmap
+        !> Whether this column's validity storage already exists, i.e. whether nulling an element
+        !! would still have to ALLOCATE something.
+        !!
+        !! The answer depends on which of the three validity mechanisms the kind uses (see
+        !! `set_null`): a bitmap kind answers whether its bitmap is allocated, a string kind asks
+        !! its `parquet_string_column`, and a temporal kind is **always** `.true.` -- its null state
+        !! lives in the element itself, so there is nothing to allocate and never was.
+        !!
+        !! Exists for concurrency: nulling elements of the same column from two threads races on
+        !! that lazy allocation, and this plus `ensure_validity` is how a caller (or the table
+        !! layer's own guard) removes the race rather than detecting it.
+        module function has_validity_storage(self) result(res)
+            class(parquet_column), intent(in) :: self !! the column.
+            logical :: res                            !! .true. when nulling would allocate nothing.
+        end function has_validity_storage
+        !> Materializes this column's validity storage now, leaving every element valid.
+        !!
+        !! Idempotent, and a no-op for a temporal kind (which has nothing to allocate). Changes no
+        !! value and no null state -- only *when* the allocation happens. See
+        !! `has_validity_storage` for why that matters.
+        module subroutine ensure_validity(self)
+            class(parquet_column), intent(inout) :: self !! the column.
+        end subroutine ensure_validity
         !> Releases the bitmap in O(1): every row becomes valid and a null-free column costs one
         !! scalar again (R2).
         module subroutine drop_bitmap(self)

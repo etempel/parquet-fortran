@@ -93,6 +93,9 @@ contains
         !
         allocate(table%cache)
         call record_open_thread(table%cache)
+        ! A lock is a HANDLE, not a value: a clone must build its own rather than copy
+        ! the source's, and every cache must have one before any thread can reach it.
+        call table_init_lock(table%cache)
         table%cache%file_backed = .true.
         table%cache%source_file = trim(filename)
         ! Retained only so %clone can reattach the SAME transform when it reopens the file. Stored
@@ -400,6 +403,9 @@ contains
         table%detached = .false.
         allocate(table%cache)
         call record_open_thread(table%cache)
+        ! A lock is a HANDLE, not a value: a clone must build its own rather than copy
+        ! the source's, and every cache must have one before any thread can reach it.
+        call table_init_lock(table%cache)
         table%cache%file_backed = .false.
         table%cache%source_file = ""
         table%regime = REGIME_FULL
@@ -517,6 +523,11 @@ contains
         ! always succeed silently and validate nothing (CLAUDE.md). Deallocating the cache runs
         ! parquet_reader's own finalizer on the reader, which abandons rather than closes it.
         if (associated(self%cache)) then
+            ! The lock is an OpenMP handle rather than a value, so it has to be destroyed
+            ! explicitly -- deallocating the cache would otherwise leak whatever the runtime
+            ! allocated for it. table_destroy_lock validates nothing and cannot abort, which is
+            ! what makes it safe to call from here.
+            call table_destroy_lock(self%cache)
             deallocate(self%cache)
             nullify(self%cache)
         end if
@@ -528,6 +539,10 @@ contains
         character(len=:), allocatable :: sfx
         type(parquet_table_cache), pointer :: cache
         !
+        ! Adding a column reallocates cols(:), so every descriptor another thread may be holding
+        ! moves. This is the choke point every %add_column specific goes through, which is why the
+        ! guard is here rather than repeated across the generated per-kind entry points.
+        call table_check_not_shared(self, "add_column")
         ! ifx (unlike gfortran) refuses MOVE_ALLOC's TO argument when it is reached through an
         ! intent(in) dummy, even though self%cache%cols is definable (self%cache is a POINTER
         ! component, so its target is a distinct entity from self -- see table_new_slot's own

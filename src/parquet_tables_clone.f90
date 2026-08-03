@@ -157,6 +157,9 @@ contains
         !
         allocate(out%cache)
         call record_open_thread(out%cache)
+        ! A lock is a HANDLE, not a value: a clone must build its own rather than copy
+        ! the source's, and every cache must have one before any thread can reach it.
+        call table_init_lock(out%cache)
         allocate(out%cache%cols(max(self%cache%ncols, 1) + COL_HEADROOM))
         out%cache%ncols = 0
         out%cache%file_backed = .false.

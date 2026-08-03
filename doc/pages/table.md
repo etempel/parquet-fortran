@@ -368,7 +368,83 @@ end do
 
 A table a thread **opens for itself inside** the region is a different case: it cannot be shared,
 so its lazy reads are allowed — that is what the [slice regime](#reading-part-of-a-file-the-slice-regime)
-below is for.
+below is for. That extends to changing it: a thread-private table can be filtered, sorted, renamed
+and dropped from inside the region, because no other thread can see it.
+
+`%prefetch` and `%materialize_all` **read their columns on several threads by themselves**, so a
+wide file is faster to bring into memory without you writing any OpenMP at all:
+
+```fortran
+call parquet_open_table(t, "wide.parquet")
+call t%materialize_all()      ! reads the columns in parallel, internally
+```
+
+Each thread drives its own reader, so nothing is shared and nothing needs a lock. This happens only
+when it is both safe and worth it: at least two columns to read, more than one thread available, no
+read-time transform (a `filter=`/`sort=`/`qc=`/`sample_fraction=` table falls back to the ordinary
+serial read, since a second reader would have to redo that work — and for an unseeded sample would
+select different rows). Measured at **3.9x** on a 24-column, 900k-row file with 8 threads.
+
+### Growing one table from several threads
+
+`%append` into a **shared** table is safe and needs no `!$omp critical` of your own — the table
+serialises it internally:
+
+```fortran
+call parquet_new_table(out)
+call out%add_column("mass", empty)          ! give it its columns BEFORE the region
+
+!$omp parallel do default(shared)
+do g = 1, nchunks
+    block
+        type(parquet_table) :: mine, batch  ! in a block, never in private() -- see below
+        call parquet_open_table(mine, "in.parquet", lo(g), hi(g))
+        call mine%materialize_all()         ! this thread opened it: allowed
+        ...
+        call out%append(batch)              ! serialised for you
+    end block
+end do
+!$omp end parallel do
+
+call out%sort_by(["id"])                    ! arrival order is not deterministic
+```
+
+Three things to know:
+
+- **The region is append-only.** No thread may *read* the shared table while any thread is appending
+  to it — an append reallocates every column's storage. This is checked and aborts, though a read
+  starting at the exact instant an append does may slip past, so treat it as a rule rather than a
+  net.
+- **Every pointer into the shared table dies at an append.** Re-fetch `%col`/`%ref` afterwards.
+- **Prepare it first.** Adding a column is a structural change and is refused inside the region, so
+  the destination needs its columns before the region starts.
+
+Declare per-thread tables inside a `block`, **never** in an OpenMP `private()` clause: `parquet_table`
+is finalizable, and a `private` copy of such a type is not reliably initialised — the first
+finalization then frees an undefined pointer.
+
+The full per-operation table is in
+[What a `parquet_table` allows concurrently](thread-safety.html#what-a-parquet_table-allows-concurrently).
+
+### Nulling elements from several threads
+
+Validity storage is allocated lazily — a null-free column carries no bitmap at all, which is what
+keeps it cheap. That means the *first* null on a column allocates, and two threads doing that at once
+would race. The library refuses it rather than racing, and tells you the fix:
+
+```fortran
+call t%ensure_validity("flags")     ! or t%ensure_validity() for every resident column
+!$omp parallel do
+do i = 1, n
+    if (bad(i)) call t%set_null("flags", i)
+end do
+!$omp end parallel do
+```
+
+`%ensure_validity` changes no value and no null state — it only decides *when* the allocation
+happens. It belongs **before** the region: it allocates, so calling it from inside one on a shared
+table is refused for the same reason `%set_null` is. A `date`/`time`/`timestamp` column never needs it (its null state lives in the element), and
+a string column cannot be written from several threads at all.
 
 
 ### A variable-length `LIST` column's width is discovered, not declared

@@ -35,13 +35,24 @@
 !! * **Assignment is blocked.** The column store lives behind a pointer, so `b = a` would leave two
 !!   tables sharing (and later double-freeing) one store. `b = a` is a hard error rather than a
 !!   silent corruption; copying a table comes with `%clone` in a later milestone.
-!! * **Mutation is NOT thread-safe.** Reading already-resident columns from several threads is
-!!   fine and takes no lock, and each thread may open and read its own table. A first touch on a
-!!   table shared across a parallel region is a hard error -- prefetch before the region instead.
+!! * **Concurrency is enforced, not merely documented.** Reading an already-resident column is
+!!   free -- no lock, no atomic, any number of threads -- and %append into a shared table is
+!!   serialised by the table's own lock, so a parallel producer needs no !$omp critical. Every
+!!   other change to a table another thread may be using is a hard error naming what to do
+!!   instead: a lazy first touch, any structural change, nulling a column whose validity storage
+!!   does not exist yet, and any write to a string column (whose rows share one packed store). A
+!!   table a thread opened ITSELF inside the region is thread-private and exempt from all of them.
+!!   See parquet_tables_parallel.f90 and doc/pages/thread-safety.md.
 !!
 !! Depends on `parquet_columns` (the value store) and `parquet_core` (the reader/writer it drives).
 module parquet_tables
     use, intrinsic :: iso_fortran_env, only : int32, int64, real32, real64
+#ifdef _OPENMP
+    ! Only omp_lock_kind is needed at module scope, for parquet_table_cache's own lock component.
+    ! The procedures that operate on it import omp_lib themselves, exactly as unsafe_first_touch
+    ! and record_open_thread already do.
+    use omp_lib, only : omp_lock_kind
+#endif
     use parquet_columns
     use parquet_strings, only : parquet_string_column
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp
@@ -240,6 +251,33 @@ module parquet_tables
         integer(int64) :: slice_row_hi = 0                 !! slice's last FILE row (0 = not a slice).
         logical :: opened_in_parallel = .false.            !! .true. if opened inside a parallel region.
         integer :: owner_thread = -1                       !! OpenMP thread that opened it (-1 if serial).
+        ! --- the table's own lock, and the two counters the read/append guards read ---
+        !     The lock serialises %append into a SHARED table, so a parallel producer region needs
+        !     no !$omp critical of its own and cannot wrap the wrong statement. It is an OpenMP
+        !     SIMPLE lock, which is not recursive: `table_append_table` is the only procedure that
+        !     may take it, and every internal caller goes to `append_table_worker` instead (see its
+        !     own doc-comment). Taking it twice on one thread deadlocks rather than failing to
+        !     build.
+        !
+        !     A lock is a HANDLE, not a value: %clone must initialise a fresh one rather than copy
+        !     the source's, and `table_finalize` must destroy it exactly once.
+#ifdef _OPENMP
+        integer(omp_lock_kind) :: lock                     !! serialises %append on a shared table.
+#endif
+        logical :: lock_ready = .false.                    !! .true. between omp_init_lock and omp_destroy_lock.
+        !> Nonzero while some thread is inside %append. Every table READ entry point checks it and
+        !! aborts, because the parallel append region is append-only: a reader inside a value array
+        !! while the appender reallocates it is reading freed memory. Read/written with
+        !! `!$omp atomic`, and deliberately an integer rather than a logical so the atomic update
+        !! is an increment (nested/overlapping appends stay correct without a second flag).
+        integer :: append_active = 0
+        !> Table read entry points currently in flight. %append checks it under the lock and
+        !! aborts rather than reallocating storage another thread is reading. Only the COARSE
+        !! entry points maintain it (%get, %col, %get_slice, %row, %get_valid_mask, %prefetch,
+        !! %materialize_all) -- the per-element accessors deliberately do not, since two atomics
+        !! per cell would dominate a %get_element loop over a large column, and they still take
+        !! the cheap `append_active` check above. Do not "fix" that asymmetry.
+        integer :: readers_active = 0
         ! --- read-time transform, composed ONCE at parquet_open_table time and retained only so
         !     %clone can reattach the same one when it reopens the file. Already translated to
         !     FILE names and already merged with whatever the read-in MAML declared, so nothing
@@ -644,6 +682,7 @@ module parquet_tables
         !! clears the null itself.
         generic :: clear_null => clear_null_i32, clear_null_i64, clear_null_e32, clear_null_e64
         procedure :: compact_validity => table_compact_validity !! Drop a null bitmap that no longer has nulls.
+        procedure :: ensure_validity => table_ensure_validity !! Allocate validity storage up front, for concurrent nulling.
         ! --- mutation: whole columns (never changes the row set) ---
         procedure :: drop_column => table_drop_column     !! Remove a column; force= for a predefined one.
         procedure :: rename_column => table_rename_column !! Change the name a column is looked up by.
@@ -1185,12 +1224,18 @@ module parquet_tables
         end function table_find
         !> Resolves `name` for a value access: aborts (or reports through `found`) when the
         !! column is missing, unsupported or not resident.
-        module subroutine table_resolve(self, name, proc, idx, found)
+        module subroutine table_resolve(self, name, proc, idx, found, writing)
             class(parquet_table), intent(in) :: self  !! the table.
             character(len=*), intent(in) :: name      !! column name.
             character(len=*), intent(in) :: proc      !! calling procedure, for the message.
             integer, intent(out) :: idx               !! slot index, or 0 when `found` is present.
             logical, intent(out), optional :: found   !! present: report a miss instead of aborting.
+            !> .true. when the caller is about to WRITE values into the column, which brings
+            !! `table_check_shared_write`'s string-column rule with it. Passed by every %set and
+            !! %set_element specific, so a new one inherits the rule by copying its neighbour. The
+            !! null-writing entry points call that guard directly instead, with `nulling=.true.`,
+            !! since only they can trigger the lazy validity allocation.
+            logical, intent(in), optional :: writing
         end subroutine table_resolve
         !> Builds the "(file 'x.parquet', column 'y')" suffix every error message carries.
         !! Takes the cache rather than the table so that a `parquet_table_row` handle, which
@@ -1458,10 +1503,16 @@ module parquet_tables
         !> Reads one already-classified file column into slot `idx`'s value store and marks it
         !! RES_FULL. Does NOT release the Arrow buffers -- that is the caller's policy choice,
         !! since a struct's array is shared by all its leaves (see `table_materialize_all`).
-        module subroutine table_materialize(cache, sc, idx)
+        module subroutine table_materialize(cache, sc, idx, rdr)
             type(parquet_table_cache), intent(inout) :: cache !! the column store.
             type(table_scope), intent(in) :: sc               !! rows this table covers.
             integer, intent(in) :: idx                        !! slot to fill.
+            !> Reader to decode through, INSTEAD of the store's own. Present only on the
+            !! internally-parallel prefetch path, where each thread must drive a reader nothing
+            !! else is touching -- a shared parquet_reader entered from two threads at once is
+            !! caught by the C++ ConcurrencyGuard and aborts the process. Absent everywhere else,
+            !! which is the ordinary single-reader path.
+            type(parquet_reader), intent(inout), optional :: rdr
         end subroutine table_materialize
         !> Reads every supported, file-backed column that is not resident yet, releasing each
         !! column's Arrow buffers as it goes so peak memory stays one column above the Fortran
@@ -1473,9 +1524,10 @@ module parquet_tables
         !> Frees the reader-side Arrow buffers behind column path `name`, which for a dotted
         !! struct leaf means the whole struct's array. Releasing a name twice, or one that was
         !! never read, is a quiet no-op.
-        module subroutine table_release_one(cache, name)
+        module subroutine table_release_one(cache, name, rdr)
             type(parquet_table_cache), intent(inout) :: cache !! the column store.
             character(len=*), intent(in) :: name              !! column path to release.
+            type(parquet_reader), intent(inout), optional :: rdr !! reader to release from; see table_materialize.
         end subroutine table_release_one
         !> Whether a lazy first touch on this store would be unsafe right now.
         !!
@@ -1497,6 +1549,100 @@ module parquet_tables
         module subroutine record_open_thread(cache)
             type(parquet_table_cache), intent(inout) :: cache !! the column store.
         end subroutine record_open_thread
+        !> Whether a STRUCTURAL change to this store would be unsafe right now.
+        !!
+        !! Same ownership test `unsafe_first_touch` applies to a first touch, and deliberately the
+        !! same one rather than a second concept: a table this very thread opened inside the region
+        !! is thread-private, so mutating it is the caller's own business, while any other table
+        !! visible inside a parallel region may be shared. Every column- and row-structural entry
+        !! point routes through this; %append is the one exception, because the table's own lock
+        !! makes it safe (see table_lock).
+        module function unsafe_shared_mutation(cache) result(unsafe)
+            type(parquet_table_cache), intent(in) :: cache !! the column store.
+            logical :: unsafe                              !! .true. if a structural change must be refused.
+        end function unsafe_shared_mutation
+        !> Initialises the store's lock. Called once, immediately after the cache is allocated.
+        module subroutine table_init_lock(cache)
+            type(parquet_table_cache), intent(inout) :: cache !! the column store.
+        end subroutine table_init_lock
+        !> Destroys the store's lock, if it has one. Safe to call twice and safe to call from a
+        !! finalizer: it validates nothing and can never abort.
+        module subroutine table_destroy_lock(cache)
+            type(parquet_table_cache), intent(inout) :: cache !! the column store.
+        end subroutine table_destroy_lock
+        !> Takes the store's lock, blocking until it is free. ONLY `table_append_table` may call
+        !! this -- an OpenMP simple lock is not recursive, so a second acquisition on one thread
+        !! deadlocks rather than failing to build.
+        module subroutine table_lock(cache)
+            type(parquet_table_cache), intent(inout) :: cache !! the column store.
+        end subroutine table_lock
+        !> Releases the store's lock.
+        module subroutine table_unlock(cache)
+            type(parquet_table_cache), intent(inout) :: cache !! the column store.
+        end subroutine table_unlock
+        !> Aborts if another thread is inside %append on this store.
+        !!
+        !! The cheap half of the append/read contract, and the one every read entry point takes:
+        !! a single atomic read of a counter, against a call that was going to copy a column
+        !! anyway. Detection is best-effort by construction -- a read starting fractionally before
+        !! the appender publishes its flag is not caught -- so this is a safety net over the
+        !! documented append-only contract, not a replacement for it.
+        module subroutine table_check_no_append(cache, proc)
+            type(parquet_table_cache), intent(in) :: cache !! the column store.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine table_check_no_append
+        !> `table_check_no_append`, plus registering this read as in flight so a concurrent %append
+        !! can refuse. Only the COARSE read entry points pair this with `table_read_exit`; the
+        !! per-element accessors take `table_check_no_append` alone -- see parquet_table_cache's
+        !! `readers_active` comment for why that asymmetry is deliberate.
+        module subroutine table_read_enter(cache, proc)
+            type(parquet_table_cache), intent(inout) :: cache !! the column store.
+            character(len=*), intent(in) :: proc              !! calling procedure, for the message.
+        end subroutine table_read_enter
+        !> Ends a read registered by `table_read_enter`. Must run on every exit path from it.
+        module subroutine table_read_exit(cache)
+            type(parquet_table_cache), intent(inout) :: cache !! the column store.
+        end subroutine table_read_exit
+        !> Aborts if a caller is about to WRITE into a column another thread may be using, in one
+        !! of the two ways that is unsafe even though writing values generally is not.
+        !!
+        !! Writing values into a resident column is normally free of any concurrency concern --
+        !! different columns are different allocations, and disjoint row ranges of one fixed-width
+        !! column are ordinary Fortran element writes. Two cases break that, and both are silent:
+        !!
+        !!   1. **A string column's rows are not independent.** `parquet_string_column` is a packed
+        !!      variable-length store, so writing any element can move the whole payload -- "disjoint
+        !!      row ranges" is not a meaningful division of it. Any table-level write to a string
+        !!      column on a possibly-shared table is refused.
+        !!   2. **The first null allocates.** Validity storage is lazy (that is the sparse-validity
+        !!      property a null-free column depends on), so two threads nulling elements of the same
+        !!      previously null-free column race on the allocation. Refused, naming
+        !!      `%ensure_validity`, which is the way to make the allocation happen up front and let
+        !!      the concurrent nulling proceed.
+        !!
+        !! A temporal column is exempt from (2) by construction: its null state lives in the element,
+        !! so nulling allocates nothing and never could.
+        module subroutine table_check_shared_write(self, idx, proc, nulling)
+            class(parquet_table), intent(in) :: self !! the table being written to.
+            integer, intent(in) :: idx               !! 1-based slot index of the target column.
+            character(len=*), intent(in) :: proc     !! calling procedure, for the message.
+            logical, intent(in) :: nulling           !! .true. if the write can create a null.
+        end subroutine table_check_shared_write
+        !> Materializes a column's validity storage up front, so concurrent nulling allocates
+        !! nothing. See `table_check_shared_write`.
+        module subroutine table_ensure_validity(self, name, found)
+            class(parquet_table), intent(in) :: self !! the table.
+            character(len=*), intent(in), optional :: name !! column to prepare; absent = every resident one.
+            logical, intent(out), optional :: found  !! .false. if `name` is not a column here.
+        end subroutine table_ensure_validity
+        !> Aborts if a caller is about to mutate a store another thread may be using.
+        !!
+        !! The shared refusal behind every structural entry point: `unsafe_shared_mutation` plus a
+        !! message naming `proc` and the table.
+        module subroutine table_check_not_shared(self, proc)
+            class(parquet_table), intent(in) :: self !! the table being changed.
+            character(len=*), intent(in) :: proc     !! calling procedure, for the message.
+        end subroutine table_check_not_shared
         !> Resolves a `width_pending` column's kind and width, then clears the flag. A no-op for
         !! every other column, so callers can invoke it unconditionally.
         !!

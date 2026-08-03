@@ -142,8 +142,18 @@ contains
             ! MAML's `unit:` key, captured onto the descriptor at open. It is applied AFTER the
             ! read rather than passed into it, because materialize_slice assembles the column from
             ! several row-group pieces and would have to thread it through each of them.
+            ! The two arms differ only in which reader they drive. Written out rather than
+            ! aliased with a pointer because `cache` is a plain dummy here, so a pointer to its
+            ! allocatable reader component is not permitted.
             if (sc%regime == REGIME_SLICE) then
-                call materialize_slice(cache, sc, idx)
+                if (present(rdr)) then
+                    call materialize_slice(cache, sc, idx, rdr)
+                else
+                    call materialize_slice(cache, sc, idx)
+                end if
+            else if (present(rdr)) then
+                call table_materialize_kind(slot%declared_kind, rdr, slot%file_name, &
+                    slot%values, sc%nrows, int(slot%width, int32), "")
             else
                 call table_materialize_kind(slot%declared_kind, cache%reader, slot%file_name, &
                     slot%values, sc%nrows, int(slot%width, int32), "")
@@ -178,11 +188,12 @@ contains
     !! The string kinds cannot be pasted (a variable-length store has no fixed row slots), so
     !! they keep the grow-and-append shape -- which costs them nothing, because
     !! `parquet_string_column` grows its buffers geometrically rather than exact-fit.
-    subroutine materialize_slice(cache, sc, idx)
+    subroutine materialize_slice(cache, sc, idx, rdr)
         type(parquet_table_cache), intent(inout) :: cache !! the column store.
         type(table_scope), intent(in) :: sc               !! rows this table covers.
         integer, intent(in) :: idx                        !! slot to fill.
         type(parquet_column) :: chunk
+        type(parquet_reader), intent(inout), optional :: rdr !! reader override; see table_materialize.
         logical, allocatable :: keep(:)
         character(len=:), allocatable :: sfx
         integer(int64) :: rg, rg_lo, rg_hi, lo, hi, rows_rg, cursor, take
@@ -201,8 +212,13 @@ contains
                 rg_hi = bounds(2, rg)
                 if (rg_hi < sc%row_lo .or. rg_lo > sc%row_hi) cycle
                 rows_rg = rg_hi - rg_lo + 1_int64
-                call table_materialize_chunk_kind(slot%declared_kind, cache%reader, &
-                    slot%file_name, rg, chunk, rows_rg, int(slot%width, int32), "")
+                if (present(rdr)) then
+                    call table_materialize_chunk_kind(slot%declared_kind, rdr, &
+                        slot%file_name, rg, chunk, rows_rg, int(slot%width, int32), "")
+                else
+                    call table_materialize_chunk_kind(slot%declared_kind, cache%reader, &
+                        slot%file_name, rg, chunk, rows_rg, int(slot%width, int32), "")
+                end if
                 lo = max(sc%row_lo, rg_lo)
                 hi = min(sc%row_hi, rg_hi)
                 take = hi - lo + 1_int64
@@ -238,7 +254,11 @@ contains
         character(len=:), allocatable :: top
         !
         call top_level_of(name, top)
-        call parquet_release_column(cache%reader, top)
+        if (present(rdr)) then
+            call parquet_release_column(rdr, top)
+        else
+            call parquet_release_column(cache%reader, top)
+        end if
     end procedure table_release_one
     !
     module procedure record_open_thread
@@ -404,15 +424,28 @@ contains
         integer :: i
         character(len=:), allocatable :: top, prev_top
         !
-        prev_top = ""
+        ! The other long read window besides a lazy first touch (see table_resolve): %prefetch and
+        ! %materialize_all both land here, and both read from the file for as long as it takes.
+        ! Registered so a concurrent %append refuses rather than reallocating storage this loop is
+        ! writing into.
+        call table_read_enter(cache, "prefetch")
+        ! Every marked column is validated on this thread, before any of them is read, so the
+        ! parallel path below cannot abort from inside a region -- and so the serial and parallel
+        ! paths refuse exactly the same tables at exactly the same point.
         do i = 1, cache%ncols
-            if (.not. want(i)) cycle
-            if (.not. cache%cols(i)%supported) cycle
-            if (.not. cache%cols(i)%file_source) cycle
-            if (cache%cols(i)%residency == RES_FULL) cycle
+            if (.not. materialize_wanted(cache, want, i)) cycle
             ! Checked per column rather than once up front, so a detached table whose columns are
             ! all resident is still a quiet no-op -- which is what %materialize_all means there.
             call table_check_not_detached(cache, sc, cache%cols(i)%name, "materialize_all")
+        end do
+        if (parallel_prefetch_ok(cache, sc, want)) then
+            call materialize_marked_parallel(cache, sc, want)
+            call table_read_exit(cache)
+            return
+        end if
+        prev_top = ""
+        do i = 1, cache%ncols
+            if (.not. materialize_wanted(cache, want, i)) cycle
             call table_materialize(cache, sc, i)
             call top_level_of(cache%cols(i)%file_name, top)
             if (len(prev_top) > 0 .and. prev_top /= top) then
@@ -421,7 +454,158 @@ contains
             prev_top = top
         end do
         if (len(prev_top) > 0) call parquet_release_column(cache%reader, prev_top)
+        call table_read_exit(cache)
     end subroutine materialize_marked
+    !
+    !> Whether slot `i` is one this pass has to read: marked, readable, file-backed, not already
+    !! resident. Factored out because the serial loop, the validation pass and the parallel
+    !! partitioner must agree on it exactly -- a fourth copy of this test is how the two paths
+    !! would come to read different sets of columns.
+    logical function materialize_wanted(cache, want, i)
+        type(parquet_table_cache), intent(in) :: cache !! the column store.
+        logical, intent(in) :: want(:)                 !! .true. for each slot to read.
+        integer, intent(in) :: i                       !! slot to test.
+        !
+        materialize_wanted = .false.
+        if (.not. want(i)) return
+        if (.not. cache%cols(i)%supported) return
+        if (.not. cache%cols(i)%file_source) return
+        if (cache%cols(i)%residency == RES_FULL) return
+        materialize_wanted = .true.
+    end function materialize_wanted
+    !
+    !> Whether this prefetch may read its columns on several threads at once.
+    !!
+    !! **Deliberately conservative, and every clause below is a correctness or cost rule rather
+    !! than a tuning knob.** The parallel path gives each thread its own `parquet_reader` on the
+    !! same file, because a shared one entered concurrently aborts (the C++ `ConcurrencyGuard`).
+    !! That is only sound when a freshly opened reader would see *exactly* what the table's own
+    !! reader sees, and only worth doing when opening those readers does not duplicate real work:
+    !!
+    !!   * **No read-time transform.** A per-thread reader would have to reproduce the table's
+    !!     filter/sort/sample/qc, and each of the four fails differently. An UNSEEDED
+    !!     `sample_fraction=` is the dangerous one: every reader would draw its own subset, so
+    !!     columns read by different threads would hold different rows -- a silent wrong answer,
+    !!     not a crash. A sort would rebuild the whole permutation per thread, a filter would
+    !!     re-evaluate its clauses per thread, and a qc schema would re-run (and re-warn) per
+    !!     thread. All four therefore fall back to the serial reader.
+    !!   * **Not detached, and file-backed**, or there is no file to open a second reader on.
+    !!   * **At least two top-level names to read.** One column cannot be split, and the release
+    !!     policy groups a struct's leaves under their top-level name (see `materialize_marked`),
+    !!     so that is the unit of work.
+    !!   * **Not already inside a parallel region.** Nested regions are the caller's business, and
+    !!     a table reached from inside one is exactly the shared-store case the first-touch guard
+    !!     refuses anyway.
+    logical function parallel_prefetch_ok(cache, sc, want)
+#ifdef _OPENMP
+        use omp_lib, only : omp_get_max_threads, omp_in_parallel
+#endif
+        type(parquet_table_cache), intent(in) :: cache !! the column store.
+        type(table_scope), intent(in) :: sc            !! rows this table covers.
+        logical, intent(in) :: want(:)                 !! .true. for each slot to read.
+        integer :: ngroups
+        !
+        parallel_prefetch_ok = .false.
+#ifdef _OPENMP
+        if (omp_get_max_threads() <= 1) return
+        if (omp_in_parallel()) return
+        if (sc%detached) return
+        if (.not. cache%file_backed) return
+        if (.not. allocated(cache%reader)) return
+        if (allocated(cache%read_filter)) return
+        if (allocated(cache%read_sort)) return
+        if (allocated(cache%read_qc_schema)) return
+        if (allocated(cache%read_sample_fraction)) return
+        call count_top_level_groups(cache, want, ngroups)
+        if (ngroups < 2) return
+        parallel_prefetch_ok = .true.
+#endif
+    end function parallel_prefetch_ok
+    !
+    !> Counts the distinct top-level names this pass will read. Slots are in file schema order, so
+    !! a struct's leaves are adjacent and a change of top-level name starts a new group.
+    subroutine count_top_level_groups(cache, want, ngroups)
+        type(parquet_table_cache), intent(in) :: cache !! the column store.
+        logical, intent(in) :: want(:)                 !! .true. for each slot to read.
+        integer, intent(out) :: ngroups                !! number of distinct top-level names.
+        integer :: i
+        character(len=:), allocatable :: top, prev_top
+        !
+        ngroups = 0
+        prev_top = ""
+        do i = 1, cache%ncols
+            if (.not. materialize_wanted(cache, want, i)) cycle
+            call top_level_of(cache%cols(i)%file_name, top)
+            if (len(prev_top) == 0 .or. prev_top /= top) ngroups = ngroups + 1
+            prev_top = top
+        end do
+    end subroutine count_top_level_groups
+    !
+    !> Reads the marked columns on several threads, one top-level name at a time.
+    !!
+    !! Each thread drives its OWN reader, opened on the same file: a `parquet_reader` is not safe
+    !! to enter from two threads at once and says so by aborting, and the whole point here is that
+    !! the caller never has to know that. The work unit is a top-level name rather than a column,
+    !! so a struct's leaves stay together on one thread and each thread's release policy is
+    !! exactly the serial one, applied to its own reader.
+    !!
+    !! Writing into `cache%cols(i)` from several threads is safe because the slots are distinct
+    !! allocations and each is written by exactly one thread; `cache%reads_started` is the one
+    !! cache-level scalar the materialize path sets, and it is set here, once, before the region.
+    !! `parallel_prefetch_ok` has already established that a freshly opened reader sees the same
+    !! rows as the table's own -- do not relax that without re-reading its own comment.
+    subroutine materialize_marked_parallel(cache, sc, want)
+        type(parquet_table_cache), intent(inout) :: cache !! the column store.
+        type(table_scope), intent(in) :: sc               !! rows this table covers.
+        logical, intent(in) :: want(:)                    !! .true. for each slot to read.
+        integer :: i, g, ngroups
+        integer, allocatable :: g_lo(:), g_hi(:)
+        character(len=:), allocatable :: top, prev_top
+        !
+        call count_top_level_groups(cache, want, ngroups)
+        allocate(g_lo(ngroups), g_hi(ngroups))
+        g = 0
+        prev_top = ""
+        do i = 1, cache%ncols
+            if (.not. materialize_wanted(cache, want, i)) cycle
+            call top_level_of(cache%cols(i)%file_name, top)
+            if (len(prev_top) == 0 .or. prev_top /= top) then
+                g = g + 1
+                g_lo(g) = i
+            end if
+            g_hi(g) = i
+            prev_top = top
+        end do
+        cache%reads_started = .true.
+        !$omp parallel do default(shared) private(g) schedule(dynamic)
+        do g = 1, ngroups
+            block
+                ! Declared HERE, not in a private() clause: parquet_reader is finalizable, and
+                ! gfortran does not reliably default-initialise a private copy of such a type --
+                ! the first finalization then frees an undefined pointer (see CLAUDE.md). Block
+                ! scope gives ordinary initialization and finalization instead.
+                type(parquet_reader) :: rdr
+                integer :: k
+                !
+                ! Arrow's own per-column threading is deliberately left ENABLED here rather than
+                ! disabled to avoid oversubscription: measured both ways on a 24-column x 900k-row
+                ! file, 8 OpenMP threads -- 0.037-0.040 s with Arrow threading on, 0.046-0.047 s
+                ! with use_threads=.false. Nesting the two is faster, not slower, so the obvious
+                ! "one level of parallelism only" instinct is wrong here. Re-measure before
+                ! changing it.
+                call parquet_open_reader(rdr, cache%source_file)
+                do k = g_lo(g), g_hi(g)
+                    if (.not. materialize_wanted(cache, want, k)) cycle
+                    call table_materialize(cache, sc, k, rdr)
+                end do
+                ! One release per group, on this thread's own reader, exactly as the serial loop
+                ! releases one top-level name once.
+                call table_release_one(cache, cache%cols(g_lo(g))%file_name, rdr)
+                call parquet_close_reader(rdr)
+            end block
+        end do
+        !$omp end parallel do
+    end subroutine materialize_marked_parallel
     !
     module procedure table_materialize_every
         call table_check_open(self, "materialize_all")
@@ -647,6 +831,7 @@ contains
         integer :: idx
         character(len=:), allocatable :: sfx
         !
+        call table_check_not_shared(self, "evict_column")
         ! Deliberately table_lookup_or_fail, not table_resolve: reading a column in order to
         ! throw it away would be exactly backwards.
         call table_lookup_or_fail(self, name, "evict_column", idx, found)
@@ -679,6 +864,7 @@ contains
         integer :: idx
         character(len=:), allocatable :: sfx
         !
+        call table_check_not_shared(self, "reload")
         call table_prefetch_resolve(self, name, "reload", idx, found)
         if (idx == 0) return
         if (.not. self%cache%cols(idx)%file_source) then

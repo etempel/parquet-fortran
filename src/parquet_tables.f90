@@ -316,7 +316,12 @@ module parquet_tables
         procedure :: ncols => table_ncols            !! Number of columns the table has.
         procedure :: column_names => table_column_names !! Copy out every column name, in order.
         procedure :: has_nulls => table_has_nulls    !! Whether a column holds (or may hold) nulls.
-        procedure :: get_valid_mask => table_get_valid_mask !! Copy out a column's per-row validity.
+        procedure, private :: table_get_valid_mask     !! %get_valid_mask specific, per-row mask.
+        procedure, private :: table_get_valid_mask_elem !! %get_valid_mask specific, per-element mask.
+        !> Copy out a column's validity as a plain `logical` array. A rank-1 `mask` gives one entry
+        !! per row (on a *_VEC column: "any element of the row is null"); a rank-2 `mask` gives the
+        !! true `(width, nrows)` per-element state.
+        generic :: get_valid_mask => table_get_valid_mask, table_get_valid_mask_elem
         procedure :: generation => table_generation  !! Counter bumped by every structural change.
         procedure :: has_column => table_has_column  !! Whether a column of this name exists.
         procedure :: kind => table_column_kind       !! A column's PK_* kind discriminator.
@@ -325,9 +330,14 @@ module parquet_tables
         procedure :: residency => table_column_residency !! A column's RES_* residency state.
         procedure, private :: is_null_i32 => table_is_null_i32 !! %is_null specific, int32 row index.
         procedure, private :: is_null_i64 => table_is_null_i64 !! %is_null specific, int64 row index.
-        !> Whether row `i` of a column is null. ROW-granular: on a *_VEC column it answers for the
-        !! whole row, since a single element of a vector row cannot be null on its own.
-        generic :: is_null => is_null_i32, is_null_i64
+        procedure, private :: is_null_e32 => table_is_null_e32 !! %is_null specific, int32 row + element.
+        procedure, private :: is_null_e64 => table_is_null_e64 !! %is_null specific, int64 row + element.
+        !> Whether row `i` of a column is null, or -- given `e` as well -- element `e` of it.
+        !!
+        !! On a *_VEC column the row form answers "ANY element of the row is null"; the element
+        !! form answers about that one element. Defined on a scalar column too, where `e` can only
+        !! be 1 and the two agree.
+        generic :: is_null => is_null_i32, is_null_i64, is_null_e32, is_null_e64
         procedure :: is_detached => table_is_detached !! Whether the table has left its file behind.
         procedure :: is_supported => table_is_supported !! Whether a column's type can be read.
         procedure :: filename => table_filename      !! Copy out the file this table came from.
@@ -599,16 +609,26 @@ module parquet_tables
             set_element_chrv_i32, set_element_chrv_i64
         procedure, private :: set_null_i32   !! %set_null specific taking an int32 row index.
         procedure, private :: set_null_i64   !! %set_null specific taking an int64 row index.
-        procedure, private :: set_null_mask  !! %set_null specific taking a whole-column mask.
-        !> Marks row `i` of a column null, or -- given a `logical` mask of one entry per row --
-        !! every row the mask marks `.false.`. ROW-granular even on a *_VEC column, where it nulls
-        !! every element of the row; a single element of a vector row cannot be nulled.
-        generic :: set_null => set_null_i32, set_null_i64, set_null_mask
+        procedure, private :: set_null_e32   !! %set_null specific taking an int32 row + element.
+        procedure, private :: set_null_e64   !! %set_null specific taking an int64 row + element.
+        procedure, private :: set_null_mask  !! %set_null specific taking a per-row mask.
+        procedure, private :: set_null_mask_elem !! %set_null specific taking a per-element mask.
+        !> Marks null: row `i` of a column, element `e` of row `i`, or every entry a `logical`
+        !! mask marks `.false.`.
+        !!
+        !! The row form is whole-row even on a *_VEC column -- naming only a row says the row is
+        !! missing. Name `e` to null one element. The mask form takes either shape: one entry per
+        !! row (whole rows), or a `(width, nrows)` mask (individual elements).
+        generic :: set_null => set_null_i32, set_null_i64, set_null_e32, set_null_e64, &
+            set_null_mask, set_null_mask_elem
         procedure, private :: clear_null_i32 !! %clear_null specific taking an int32 row index.
         procedure, private :: clear_null_i64 !! %clear_null specific taking an int64 row index.
-        !> Marks row `i` of a column valid without saying what its value is. Only useful when a
-        !! value is already there or is about to be written; %set_element clears the null itself.
-        generic :: clear_null => clear_null_i32, clear_null_i64
+        procedure, private :: clear_null_e32 !! %clear_null specific taking an int32 row + element.
+        procedure, private :: clear_null_e64 !! %clear_null specific taking an int64 row + element.
+        !> Marks row `i` -- or, given `e`, element `e` of it -- valid without saying what its value
+        !! is. Only useful when a value is already there or is about to be written; %set_element
+        !! clears the null itself.
+        generic :: clear_null => clear_null_i32, clear_null_i64, clear_null_e32, clear_null_e64
         procedure :: compact_validity => table_compact_validity !! Drop a null bitmap that no longer has nulls.
         ! --- mutation: whole columns (never changes the row set) ---
         procedure :: drop_column => table_drop_column     !! Remove a column; force= for a predefined one.
@@ -738,7 +758,10 @@ module parquet_tables
         generic :: ref => row_ref_i32, row_ref_i64, row_ref_f32, row_ref_f64, row_ref_bool, row_ref_date, row_ref_time, &
             row_ref_ts, row_ref_i32v, row_ref_i64v, row_ref_f32v, row_ref_f64v, row_ref_boolv, row_ref_datev, row_ref_timev, &
             row_ref_tsv
-        procedure :: is_null => row_is_null !! Whether this row is null in a column.
+        procedure, private :: row_is_null      !! %is_null specific asking about the whole row.
+        procedure, private :: row_is_null_elem !! %is_null specific asking about one element.
+        !> Whether this row is null in a column, or -- given `e` -- element `e` of it.
+        generic :: is_null => row_is_null, row_is_null_elem
         procedure :: index => row_index     !! This row's 1-based index within the table.
         final :: row_finalize               !! Drops the pointer; owns nothing, frees nothing.
     end type parquet_table_row
@@ -989,16 +1012,33 @@ module parquet_tables
         !> Copies out a column's per-ROW validity as a plain logical array: .true. where the row
         !! holds a value, .false. where it is null.
         !!
-        !! One entry per row of the table, for a vector column as much as a scalar one -- validity
-        !! is row-granular throughout this layer. A column with no nulls at all comes back all
-        !! `.true.` rather than unallocated, so a caller never has to test for that case.
-        !! Triggers the same lazy first touch any other value access does.
+        !! One entry per row of the table. On a *_VEC column this is the SUMMARY -- a row is
+        !! `.false.` when any element of it is null -- which is a genuinely useful question
+        !! ("which rows are complete?") and is why the rank-1 form is kept alongside the rank-2
+        !! one. For the true per-element state, declare `mask` rank-2 instead.
+        !!
+        !! A column with no nulls at all comes back all `.true.` rather than unallocated, so a
+        !! caller never has to test for that case. Triggers the same lazy first touch any other
+        !! value access does.
         module subroutine table_get_valid_mask(self, name, mask, found)
             class(parquet_table), intent(in) :: self               !! the table (fills through %cache).
             character(len=*), intent(in) :: name                   !! column name.
             logical, allocatable, intent(out) :: mask(:)           !! one entry per row; .true. = value.
             logical, intent(out), optional :: found                !! present: report a miss instead of aborting.
         end subroutine table_get_valid_mask
+        !> Copies out a column's per-ELEMENT validity as a `(width, nrows)` logical array.
+        !!
+        !! The rank-2 counterpart of the above, and the column's actual state rather than a row
+        !! summary. On a scalar column `width` is 1, so the two agree.
+        !!
+        !! **Note the memory**: `LOGICAL` is 4 bytes under gfortran, so a wide column's mask is
+        !! `4*width*nrows` bytes. Use `%is_null(name, i, e)` to ask about a few elements.
+        module subroutine table_get_valid_mask_elem(self, name, mask, found)
+            class(parquet_table), intent(in) :: self               !! the table (fills through %cache).
+            character(len=*), intent(in) :: name                   !! column name.
+            logical, allocatable, intent(out) :: mask(:,:)         !! (element, row); .true. = value.
+            logical, intent(out), optional :: found                !! present: report a miss instead of aborting.
+        end subroutine table_get_valid_mask_elem
         !> A counter bumped by every structural change to this table, for a caller holding a
         !! pointer across a call that might have invalidated it.
         !!
@@ -1079,6 +1119,24 @@ module parquet_tables
             logical, intent(out), optional :: found  !! present: report a miss instead of aborting.
             logical :: isnull                        !! .true. if that row is null (.false. on a miss).
         end function table_is_null_i32
+        !> Whether element `e` of row `i` is null (int32 indices).
+        module function table_is_null_e32(self, name, i, e, found) result(isnull)
+            class(parquet_table), intent(in) :: self !! the table.
+            character(len=*), intent(in) :: name     !! column name.
+            integer(int32), intent(in) :: i          !! 1-based row index.
+            integer(int32), intent(in) :: e          !! 1-based element index within the row.
+            logical, intent(out), optional :: found  !! present: report a miss instead of aborting.
+            logical :: isnull                        !! .true. if that element is null (.false. on a miss).
+        end function table_is_null_e32
+        !> Whether element `e` of row `i` is null (int64 indices).
+        module function table_is_null_e64(self, name, i, e, found) result(isnull)
+            class(parquet_table), intent(in) :: self !! the table.
+            character(len=*), intent(in) :: name     !! column name.
+            integer(int64), intent(in) :: i          !! 1-based row index.
+            integer(int64), intent(in) :: e          !! 1-based element index within the row.
+            logical, intent(out), optional :: found  !! present: report a miss instead of aborting.
+            logical :: isnull                        !! .true. if that element is null (.false. on a miss).
+        end function table_is_null_e64
         !> Whether row `i` of a column is null (int64 row index).
         module function table_is_null_i64(self, name, i, found) result(isnull)
             class(parquet_table), intent(in) :: self !! the table.
@@ -1184,6 +1242,42 @@ module parquet_tables
             character(len=*), intent(in) :: name        !! column name, for the message.
             character(len=*), intent(in) :: proc        !! calling procedure, for the message.
         end subroutine table_apply_valid_rows
+        !> Fills `mask` with slot `idx`'s per-ELEMENT validity, shaped (width, nrows).
+        !!
+        !! The rank-2 counterpart of `table_valid_mask_of`, and what a vector column's
+        !! `%get`/`%col`/`%get_slice` hand back: a vector column's validity is per element, so
+        !! summarising it to one bit per row would be a different (and lossier) answer.
+        module subroutine table_valid_mask_of_elem(cache, idx, mask)
+            type(parquet_table_cache), intent(in) :: cache  !! the table's store.
+            integer, intent(in) :: idx                      !! slot index.
+            logical, allocatable, intent(out) :: mask(:,:)  !! (element, row).
+        end subroutine table_valid_mask_of_elem
+        !> The same, for an arbitrary list of rows -- the rank-2 `%get_slice(is_valid=)` form.
+        module subroutine table_valid_mask_rows_elem(cache, idx, rows, mask)
+            type(parquet_table_cache), intent(in) :: cache  !! the table's store.
+            integer, intent(in) :: idx                      !! slot index.
+            integer(int64), intent(in) :: rows(:)           !! the selected rows, in order.
+            logical, allocatable, intent(out) :: mask(:,:)  !! (element, selected row).
+        end subroutine table_valid_mask_rows_elem
+        !> Applies a caller-supplied per-ELEMENT validity mask to slot `idx`: every element marked
+        !! .false. becomes null. Only ever ADDS nulls, exactly as the row form does. A mask whose
+        !! shape is not (width, nrows) is an error naming both shapes.
+        module subroutine table_apply_valid_elem(self, idx, is_valid, name, proc)
+            class(parquet_table), intent(inout) :: self !! the table.
+            integer, intent(in) :: idx                  !! slot index.
+            logical, intent(in) :: is_valid(:,:)        !! (element, row); .false. marks it null.
+            character(len=*), intent(in) :: name        !! column name, for the message.
+            character(len=*), intent(in) :: proc        !! calling procedure, for the message.
+        end subroutine table_apply_valid_elem
+        !> Applies a per-ELEMENT validity mask to a SELECTION of rows. Only ever adds nulls.
+        module subroutine table_apply_valid_rows_elem(self, idx, rows, is_valid, name, proc)
+            class(parquet_table), intent(inout) :: self !! the table.
+            integer, intent(in) :: idx                  !! slot index.
+            integer(int64), intent(in) :: rows(:)       !! the selected rows, in order.
+            logical, intent(in) :: is_valid(:,:)        !! (element, selected row).
+            character(len=*), intent(in) :: name        !! column name, for the message.
+            character(len=*), intent(in) :: proc        !! calling procedure, for the message.
+        end subroutine table_apply_valid_rows_elem
         !> error stops unless an array being written into a row selection has one value per
         !! selected row. Its own procedure because the two counts come from different places --
         !! the caller's array and the resolved selection -- and naming both is what makes the
@@ -1640,7 +1734,7 @@ module parquet_tables
             class(parquet_table), intent(in), target :: self !! the table.
             character(len=*), intent(in) :: name             !! column name.
             integer(int32), pointer, intent(out) :: p(:,:)  !! alias to the live storage.
-            logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity, (width, nrows).
             logical, intent(out), optional :: found          !! present: report a miss instead of aborting.
         end subroutine col_ptr_i32v
         !> Points `p` at a PK_INT64_VEC column's storage. The stored kind must match EXACTLY.
@@ -1648,7 +1742,7 @@ module parquet_tables
             class(parquet_table), intent(in), target :: self !! the table.
             character(len=*), intent(in) :: name             !! column name.
             integer(int64), pointer, intent(out) :: p(:,:)  !! alias to the live storage.
-            logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity, (width, nrows).
             logical, intent(out), optional :: found          !! present: report a miss instead of aborting.
         end subroutine col_ptr_i64v
         !> Points `p` at a PK_FLOAT32_VEC column's storage. The stored kind must match EXACTLY.
@@ -1656,7 +1750,7 @@ module parquet_tables
             class(parquet_table), intent(in), target :: self !! the table.
             character(len=*), intent(in) :: name             !! column name.
             real(real32), pointer, intent(out) :: p(:,:)    !! alias to the live storage.
-            logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity, (width, nrows).
             logical, intent(out), optional :: found          !! present: report a miss instead of aborting.
         end subroutine col_ptr_f32v
         !> Points `p` at a PK_FLOAT64_VEC column's storage. The stored kind must match EXACTLY.
@@ -1664,7 +1758,7 @@ module parquet_tables
             class(parquet_table), intent(in), target :: self !! the table.
             character(len=*), intent(in) :: name             !! column name.
             real(real64), pointer, intent(out) :: p(:,:)    !! alias to the live storage.
-            logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity, (width, nrows).
             logical, intent(out), optional :: found          !! present: report a miss instead of aborting.
         end subroutine col_ptr_f64v
         !> Points `p` at a PK_LOGICAL_VEC column's storage. The stored kind must match EXACTLY.
@@ -1672,7 +1766,7 @@ module parquet_tables
             class(parquet_table), intent(in), target :: self !! the table.
             character(len=*), intent(in) :: name             !! column name.
             logical, pointer, intent(out) :: p(:,:)         !! alias to the live storage.
-            logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity, (width, nrows).
             logical, intent(out), optional :: found          !! present: report a miss instead of aborting.
         end subroutine col_ptr_boolv
         !> Points `p` at a PK_DATE_VEC column's storage. The stored kind must match EXACTLY.
@@ -1680,7 +1774,7 @@ module parquet_tables
             class(parquet_table), intent(in), target :: self !! the table.
             character(len=*), intent(in) :: name             !! column name.
             type(parquet_date), pointer, intent(out) :: p(:,:) !! alias to the live storage.
-            logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity, (width, nrows).
             logical, intent(out), optional :: found          !! present: report a miss instead of aborting.
         end subroutine col_ptr_datev
         !> Points `p` at a PK_TIME_VEC column's storage. The stored kind must match EXACTLY.
@@ -1688,7 +1782,7 @@ module parquet_tables
             class(parquet_table), intent(in), target :: self !! the table.
             character(len=*), intent(in) :: name             !! column name.
             type(parquet_time), pointer, intent(out) :: p(:,:) !! alias to the live storage.
-            logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity, (width, nrows).
             logical, intent(out), optional :: found          !! present: report a miss instead of aborting.
         end subroutine col_ptr_timev
         !> Points `p` at a PK_TIMESTAMP_VEC column's storage. The stored kind must match EXACTLY.
@@ -1696,7 +1790,7 @@ module parquet_tables
             class(parquet_table), intent(in), target :: self !! the table.
             character(len=*), intent(in) :: name             !! column name.
             type(parquet_timestamp), pointer, intent(out) :: p(:,:) !! alias to the live storage.
-            logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity, (width, nrows).
             logical, intent(out), optional :: found          !! present: report a miss instead of aborting.
         end subroutine col_ptr_tsv
         !> Points `p` at a PK_STRING column's packed store (offsets + data + validity).
@@ -1786,7 +1880,7 @@ module parquet_tables
             class(parquet_table), intent(in) :: self             !! the table.
             character(len=*), intent(in) :: name                 !! column name.
             integer(int32), allocatable, intent(out) :: arr(:,:) !! (element, row), shaped (width, nrows).
-            logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity, (width, nrows).
             logical, intent(out), optional :: found              !! present: report a miss instead of aborting.
         end subroutine get_arr_i32v
         !> Copies a PK_INT64_VEC column out into a freshly allocated array.
@@ -1795,7 +1889,7 @@ module parquet_tables
             class(parquet_table), intent(in) :: self             !! the table.
             character(len=*), intent(in) :: name                 !! column name.
             integer(int64), allocatable, intent(out) :: arr(:,:) !! (element, row), shaped (width, nrows).
-            logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity, (width, nrows).
             logical, intent(out), optional :: found              !! present: report a miss instead of aborting.
         end subroutine get_arr_i64v
         !> Copies a PK_FLOAT32_VEC column out into a freshly allocated array.
@@ -1803,7 +1897,7 @@ module parquet_tables
             class(parquet_table), intent(in) :: self             !! the table.
             character(len=*), intent(in) :: name                 !! column name.
             real(real32), allocatable, intent(out) :: arr(:,:) !! (element, row), shaped (width, nrows).
-            logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity, (width, nrows).
             logical, intent(out), optional :: found              !! present: report a miss instead of aborting.
         end subroutine get_arr_f32v
         !> Copies a PK_FLOAT64_VEC column out into a freshly allocated array.
@@ -1812,7 +1906,7 @@ module parquet_tables
             class(parquet_table), intent(in) :: self             !! the table.
             character(len=*), intent(in) :: name                 !! column name.
             real(real64), allocatable, intent(out) :: arr(:,:) !! (element, row), shaped (width, nrows).
-            logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity, (width, nrows).
             logical, intent(out), optional :: found              !! present: report a miss instead of aborting.
         end subroutine get_arr_f64v
         !> Copies a PK_LOGICAL_VEC column out into a freshly allocated array.
@@ -1820,7 +1914,7 @@ module parquet_tables
             class(parquet_table), intent(in) :: self             !! the table.
             character(len=*), intent(in) :: name                 !! column name.
             logical, allocatable, intent(out) :: arr(:,:)   !! (element, row), shaped (width, nrows).
-            logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity, (width, nrows).
             logical, intent(out), optional :: found              !! present: report a miss instead of aborting.
         end subroutine get_arr_boolv
         !> Copies a PK_DATE_VEC column out into a freshly allocated array.
@@ -1828,7 +1922,7 @@ module parquet_tables
             class(parquet_table), intent(in) :: self             !! the table.
             character(len=*), intent(in) :: name                 !! column name.
             type(parquet_date), allocatable, intent(out) :: arr(:,:) !! (element, row), shaped (width, nrows).
-            logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity, (width, nrows).
             logical, intent(out), optional :: found              !! present: report a miss instead of aborting.
         end subroutine get_arr_datev
         !> Copies a PK_TIME_VEC column out into a freshly allocated array.
@@ -1836,7 +1930,7 @@ module parquet_tables
             class(parquet_table), intent(in) :: self             !! the table.
             character(len=*), intent(in) :: name                 !! column name.
             type(parquet_time), allocatable, intent(out) :: arr(:,:) !! (element, row), shaped (width, nrows).
-            logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity, (width, nrows).
             logical, intent(out), optional :: found              !! present: report a miss instead of aborting.
         end subroutine get_arr_timev
         !> Copies a PK_TIMESTAMP_VEC column out into a freshly allocated array.
@@ -1844,7 +1938,7 @@ module parquet_tables
             class(parquet_table), intent(in) :: self             !! the table.
             character(len=*), intent(in) :: name                 !! column name.
             type(parquet_timestamp), allocatable, intent(out) :: arr(:,:) !! (element, row), shaped (width, nrows).
-            logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity, (width, nrows).
             logical, intent(out), optional :: found              !! present: report a miss instead of aborting.
         end subroutine get_arr_tsv
         !> Copies a PK_STRING column out as a parquet_string_column (offsets+data+validity).
@@ -1870,7 +1964,7 @@ module parquet_tables
             class(parquet_table), intent(in) :: self               !! the table.
             character(len=*), intent(in) :: name                   !! column name.
             character(len=:), allocatable, intent(out) :: arr(:,:) !! (element, row) values.
-            logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity, (width, nrows).
             logical, intent(out), optional :: found                !! present: report a miss instead of aborting.
         end subroutine get_arr_chrv
     end interface
@@ -1883,7 +1977,7 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             integer(int32), intent(in) :: arr(:)            !! one value per row.
             logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
         end subroutine set_arr_i32
         !> Replaces every value of a PK_INT64 column. The array must have the column's own shape.
         module subroutine set_arr_i64(self, name, arr, is_valid, modify_nulls)
@@ -1891,7 +1985,7 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             integer(int64), intent(in) :: arr(:)            !! one value per row.
             logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
         end subroutine set_arr_i64
         !> Replaces every value of a PK_FLOAT32 column. The array must have the column's own shape.
         module subroutine set_arr_f32(self, name, arr, is_valid, modify_nulls)
@@ -1899,7 +1993,7 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             real(real32), intent(in) :: arr(:)              !! one value per row.
             logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
         end subroutine set_arr_f32
         !> Replaces every value of a PK_FLOAT64 column. The array must have the column's own shape.
         module subroutine set_arr_f64(self, name, arr, is_valid, modify_nulls)
@@ -1907,7 +2001,7 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             real(real64), intent(in) :: arr(:)              !! one value per row.
             logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
         end subroutine set_arr_f64
         !> Replaces every value of a PK_LOGICAL column. The array must have the column's own shape.
         module subroutine set_arr_bool(self, name, arr, is_valid, modify_nulls)
@@ -1915,7 +2009,7 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             logical, intent(in) :: arr(:)                   !! one value per row.
             logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
         end subroutine set_arr_bool
         !> Replaces every value of a PK_DATE column. The array must have the column's own shape.
         module subroutine set_arr_date(self, name, arr, is_valid, modify_nulls)
@@ -1923,7 +2017,7 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_date), intent(in) :: arr(:)        !! one value per row.
             logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
         end subroutine set_arr_date
         !> Replaces every value of a PK_TIME column. The array must have the column's own shape.
         module subroutine set_arr_time(self, name, arr, is_valid, modify_nulls)
@@ -1931,7 +2025,7 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_time), intent(in) :: arr(:)        !! one value per row.
             logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
         end subroutine set_arr_time
         !> Replaces every value of a PK_TIMESTAMP column. The array must have the column's own shape.
         module subroutine set_arr_ts(self, name, arr, is_valid, modify_nulls)
@@ -1939,71 +2033,71 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_timestamp), intent(in) :: arr(:)   !! one value per row.
             logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
         end subroutine set_arr_ts
         !> Replaces every value of a PK_INT32_VEC column. The array must have the column's own shape.
         module subroutine set_arr_i32v(self, name, arr, is_valid, modify_nulls)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             integer(int32), intent(in) :: arr(:,:)          !! (element, row), shaped (width, nrows).
-            logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+            logical, intent(in), optional :: is_valid(:,:) !! present: elements marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
         end subroutine set_arr_i32v
         !> Replaces every value of a PK_INT64_VEC column. The array must have the column's own shape.
         module subroutine set_arr_i64v(self, name, arr, is_valid, modify_nulls)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             integer(int64), intent(in) :: arr(:,:)          !! (element, row), shaped (width, nrows).
-            logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+            logical, intent(in), optional :: is_valid(:,:) !! present: elements marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
         end subroutine set_arr_i64v
         !> Replaces every value of a PK_FLOAT32_VEC column. The array must have the column's own shape.
         module subroutine set_arr_f32v(self, name, arr, is_valid, modify_nulls)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             real(real32), intent(in) :: arr(:,:)            !! (element, row), shaped (width, nrows).
-            logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+            logical, intent(in), optional :: is_valid(:,:) !! present: elements marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
         end subroutine set_arr_f32v
         !> Replaces every value of a PK_FLOAT64_VEC column. The array must have the column's own shape.
         module subroutine set_arr_f64v(self, name, arr, is_valid, modify_nulls)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             real(real64), intent(in) :: arr(:,:)            !! (element, row), shaped (width, nrows).
-            logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+            logical, intent(in), optional :: is_valid(:,:) !! present: elements marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
         end subroutine set_arr_f64v
         !> Replaces every value of a PK_LOGICAL_VEC column. The array must have the column's own shape.
         module subroutine set_arr_boolv(self, name, arr, is_valid, modify_nulls)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             logical, intent(in) :: arr(:,:)                 !! (element, row), shaped (width, nrows).
-            logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+            logical, intent(in), optional :: is_valid(:,:) !! present: elements marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
         end subroutine set_arr_boolv
         !> Replaces every value of a PK_DATE_VEC column. The array must have the column's own shape.
         module subroutine set_arr_datev(self, name, arr, is_valid, modify_nulls)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_date), intent(in) :: arr(:,:)      !! (element, row), shaped (width, nrows).
-            logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+            logical, intent(in), optional :: is_valid(:,:) !! present: elements marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
         end subroutine set_arr_datev
         !> Replaces every value of a PK_TIME_VEC column. The array must have the column's own shape.
         module subroutine set_arr_timev(self, name, arr, is_valid, modify_nulls)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_time), intent(in) :: arr(:,:)      !! (element, row), shaped (width, nrows).
-            logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+            logical, intent(in), optional :: is_valid(:,:) !! present: elements marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
         end subroutine set_arr_timev
         !> Replaces every value of a PK_TIMESTAMP_VEC column. The array must have the column's own shape.
         module subroutine set_arr_tsv(self, name, arr, is_valid, modify_nulls)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_timestamp), intent(in) :: arr(:,:) !! (element, row), shaped (width, nrows).
-            logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+            logical, intent(in), optional :: is_valid(:,:) !! present: elements marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
         end subroutine set_arr_tsv
         !> Replaces every value of a PK_STRING column from a character array.
         module subroutine set_arr_chr(self, name, arr, is_valid, modify_nulls)
@@ -2018,7 +2112,7 @@ module parquet_tables
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             character(len=*), intent(in) :: arr(:,:)     !! (element, row) values.
-            logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
+            logical, intent(in), optional :: is_valid(:,:) !! present: elements marked .false. become null.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_arr_chrv
         !> Replaces every value of a PK_STRING column from a compact parquet_string_column.
@@ -2794,6 +2888,32 @@ module parquet_tables
             integer(int64), intent(in) :: i             !! 1-based row index.
             logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_null_i64
+        !> Marks element `e` of row `i` null, leaving the row's other elements alone (int32).
+        module subroutine set_null_e32(self, name, i, e, found)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int32), intent(in) :: i             !! 1-based row index.
+            integer(int32), intent(in) :: e             !! 1-based element index within the row.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
+        end subroutine set_null_e32
+        !> Marks element `e` of row `i` null, leaving the row's other elements alone (int64).
+        module subroutine set_null_e64(self, name, i, e, found)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int64), intent(in) :: i             !! 1-based row index.
+            integer(int64), intent(in) :: e             !! 1-based element index within the row.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
+        end subroutine set_null_e64
+        !> Marks null every ELEMENT whose `is_valid` entry is .false., in one call.
+        !!
+        !! The rank-2 counterpart of the row form below, taking a `(width, nrows)` mask. Only ever
+        !! ADDS nulls, on exactly the same terms.
+        module subroutine set_null_mask_elem(self, name, is_valid, found)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            logical, intent(in) :: is_valid(:,:)        !! (element, row); .false. marks it null.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
+        end subroutine set_null_mask_elem
         !> Marks null every row whose `is_valid` entry is .false., in one call.
         !!
         !! The mask is the same shape `%get_valid_mask` hands back and `is_valid=` takes elsewhere:
@@ -2820,6 +2940,22 @@ module parquet_tables
             integer(int64), intent(in) :: i             !! 1-based row index.
             logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine clear_null_i64
+        !> Marks element `e` of row `i` valid, leaving its value unspecified (int32 indices).
+        module subroutine clear_null_e32(self, name, i, e, found)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int32), intent(in) :: i             !! 1-based row index.
+            integer(int32), intent(in) :: e             !! 1-based element index within the row.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
+        end subroutine clear_null_e32
+        !> Marks element `e` of row `i` valid, leaving its value unspecified (int64 indices).
+        module subroutine clear_null_e64(self, name, i, e, found)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column name.
+            integer(int64), intent(in) :: i             !! 1-based row index.
+            integer(int64), intent(in) :: e             !! 1-based element index within the row.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
+        end subroutine clear_null_e64
         !> Drops a column's null bitmap when it no longer holds any null, so a column that HAD
         !! nulls and no longer does stops paying for the bitmap. Scans the column, so it is not
         !! free -- a whole-column %set already compacts on its own and does not need this.
@@ -3126,6 +3262,13 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             logical :: isnull                            !! .true. if this row is null there.
         end function row_is_null
+        !> Whether element `e` of this row is null in a column.
+        module function row_is_null_elem(self, name, e) result(isnull)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            logical :: isnull                            !! .true. if that element is null.
+        end function row_is_null_elem
         !> This row's 1-based index within its table.
         pure module function row_index(self) result(i)
             class(parquet_table_row), intent(in) :: self !! the row handle.
@@ -3560,7 +3703,7 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_slice), intent(in) :: s         !! rows to pick.
             integer(int32), allocatable, intent(out) :: arr(:,:) !! (element, row), shaped (width, nrows).
-            logical, allocatable, intent(out), optional :: is_valid(:) !! present: validity of the selected rows.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity of the picked rows.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine get_slice_i32v
         !> Copies the rows `s` selects from a PK_INT64_VEC column into `arr`.
@@ -3570,7 +3713,7 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_slice), intent(in) :: s         !! rows to pick.
             integer(int64), allocatable, intent(out) :: arr(:,:) !! (element, row), shaped (width, nrows).
-            logical, allocatable, intent(out), optional :: is_valid(:) !! present: validity of the selected rows.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity of the picked rows.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine get_slice_i64v
         !> Copies the rows `s` selects from a PK_FLOAT32_VEC column into `arr`.
@@ -3579,7 +3722,7 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_slice), intent(in) :: s         !! rows to pick.
             real(real32), allocatable, intent(out) :: arr(:,:) !! (element, row), shaped (width, nrows).
-            logical, allocatable, intent(out), optional :: is_valid(:) !! present: validity of the selected rows.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity of the picked rows.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine get_slice_f32v
         !> Copies the rows `s` selects from a PK_FLOAT64_VEC column into `arr`.
@@ -3589,7 +3732,7 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_slice), intent(in) :: s         !! rows to pick.
             real(real64), allocatable, intent(out) :: arr(:,:) !! (element, row), shaped (width, nrows).
-            logical, allocatable, intent(out), optional :: is_valid(:) !! present: validity of the selected rows.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity of the picked rows.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine get_slice_f64v
         !> Copies the rows `s` selects from a PK_LOGICAL_VEC column into `arr`.
@@ -3598,7 +3741,7 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_slice), intent(in) :: s         !! rows to pick.
             logical, allocatable, intent(out) :: arr(:,:) !! (element, row), shaped (width, nrows).
-            logical, allocatable, intent(out), optional :: is_valid(:) !! present: validity of the selected rows.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity of the picked rows.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine get_slice_boolv
         !> Copies the rows `s` selects from a PK_DATE_VEC column into `arr`.
@@ -3607,7 +3750,7 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_slice), intent(in) :: s         !! rows to pick.
             type(parquet_date), allocatable, intent(out) :: arr(:,:) !! (element, row), shaped (width, nrows).
-            logical, allocatable, intent(out), optional :: is_valid(:) !! present: validity of the selected rows.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity of the picked rows.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine get_slice_datev
         !> Copies the rows `s` selects from a PK_TIME_VEC column into `arr`.
@@ -3616,7 +3759,7 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_slice), intent(in) :: s         !! rows to pick.
             type(parquet_time), allocatable, intent(out) :: arr(:,:) !! (element, row), shaped (width, nrows).
-            logical, allocatable, intent(out), optional :: is_valid(:) !! present: validity of the selected rows.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity of the picked rows.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine get_slice_timev
         !> Copies the rows `s` selects from a PK_TIMESTAMP_VEC column into `arr`.
@@ -3625,7 +3768,7 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_slice), intent(in) :: s         !! rows to pick.
             type(parquet_timestamp), allocatable, intent(out) :: arr(:,:) !! (element, row), shaped (width, nrows).
-            logical, allocatable, intent(out), optional :: is_valid(:) !! present: validity of the selected rows.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity of the picked rows.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine get_slice_tsv
         !> Copies the rows `s` selects from a PK_STRING column into a compact string column.
@@ -3653,7 +3796,7 @@ module parquet_tables
             character(len=*), intent(in) :: name                     !! column name.
             type(parquet_slice), intent(in) :: s                     !! rows to pick.
             character(len=:), allocatable, intent(out) :: arr(:,:)   !! (element, selected row).
-            logical, allocatable, intent(out), optional :: is_valid(:) !! present: validity of the selected rows.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity of the picked rows.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine get_slice_chrv
         !> Writes `arr` into the rows `s` selects of a PK_INT32 column.
@@ -3667,7 +3810,7 @@ module parquet_tables
             type(parquet_slice), intent(in) :: s         !! rows to write.
             integer(int32), intent(in) :: arr(:)       !! one value per selected row.
             logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null entry null.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine set_slice_i32
         !> Writes `arr` into the rows `s` selects of a PK_INT64 column.
@@ -3681,7 +3824,7 @@ module parquet_tables
             type(parquet_slice), intent(in) :: s         !! rows to write.
             integer(int64), intent(in) :: arr(:)       !! one value per selected row.
             logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null entry null.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine set_slice_i64
         !> Writes `arr` into the rows `s` selects of a PK_FLOAT32 column.
@@ -3695,7 +3838,7 @@ module parquet_tables
             type(parquet_slice), intent(in) :: s         !! rows to write.
             real(real32), intent(in) :: arr(:)         !! one value per selected row.
             logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null entry null.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine set_slice_f32
         !> Writes `arr` into the rows `s` selects of a PK_FLOAT64 column.
@@ -3709,7 +3852,7 @@ module parquet_tables
             type(parquet_slice), intent(in) :: s         !! rows to write.
             real(real64), intent(in) :: arr(:)         !! one value per selected row.
             logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null entry null.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine set_slice_f64
         !> Writes `arr` into the rows `s` selects of a PK_LOGICAL column.
@@ -3723,7 +3866,7 @@ module parquet_tables
             type(parquet_slice), intent(in) :: s         !! rows to write.
             logical, intent(in) :: arr(:)              !! one value per selected row.
             logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null entry null.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine set_slice_bool
         !> Writes `arr` into the rows `s` selects of a PK_DATE column.
@@ -3737,7 +3880,7 @@ module parquet_tables
             type(parquet_slice), intent(in) :: s         !! rows to write.
             type(parquet_date), intent(in) :: arr(:)   !! one value per selected row.
             logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null entry null.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine set_slice_date
         !> Writes `arr` into the rows `s` selects of a PK_TIME column.
@@ -3751,7 +3894,7 @@ module parquet_tables
             type(parquet_slice), intent(in) :: s         !! rows to write.
             type(parquet_time), intent(in) :: arr(:)   !! one value per selected row.
             logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null entry null.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine set_slice_time
         !> Writes `arr` into the rows `s` selects of a PK_TIMESTAMP column.
@@ -3765,7 +3908,7 @@ module parquet_tables
             type(parquet_slice), intent(in) :: s         !! rows to write.
             type(parquet_timestamp), intent(in) :: arr(:) !! one value per selected row.
             logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null entry null.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine set_slice_ts
         !> Writes `arr` into the rows `s` selects of a PK_INT32_VEC column.
@@ -3778,8 +3921,8 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_slice), intent(in) :: s         !! rows to write.
             integer(int32), intent(in) :: arr(:,:)       !! one value per selected row.
-            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(in), optional :: is_valid(:,:) !! present: selected elements marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null entry null.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine set_slice_i32v
         !> Writes `arr` into the rows `s` selects of a PK_INT64_VEC column.
@@ -3792,8 +3935,8 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_slice), intent(in) :: s         !! rows to write.
             integer(int64), intent(in) :: arr(:,:)       !! one value per selected row.
-            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(in), optional :: is_valid(:,:) !! present: selected elements marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null entry null.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine set_slice_i64v
         !> Writes `arr` into the rows `s` selects of a PK_FLOAT32_VEC column.
@@ -3806,8 +3949,8 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_slice), intent(in) :: s         !! rows to write.
             real(real32), intent(in) :: arr(:,:)         !! one value per selected row.
-            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(in), optional :: is_valid(:,:) !! present: selected elements marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null entry null.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine set_slice_f32v
         !> Writes `arr` into the rows `s` selects of a PK_FLOAT64_VEC column.
@@ -3820,8 +3963,8 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_slice), intent(in) :: s         !! rows to write.
             real(real64), intent(in) :: arr(:,:)         !! one value per selected row.
-            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(in), optional :: is_valid(:,:) !! present: selected elements marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null entry null.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine set_slice_f64v
         !> Writes `arr` into the rows `s` selects of a PK_LOGICAL_VEC column.
@@ -3834,8 +3977,8 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_slice), intent(in) :: s         !! rows to write.
             logical, intent(in) :: arr(:,:)              !! one value per selected row.
-            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(in), optional :: is_valid(:,:) !! present: selected elements marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null entry null.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine set_slice_boolv
         !> Writes `arr` into the rows `s` selects of a PK_DATE_VEC column.
@@ -3848,8 +3991,8 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_slice), intent(in) :: s         !! rows to write.
             type(parquet_date), intent(in) :: arr(:,:)   !! one value per selected row.
-            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(in), optional :: is_valid(:,:) !! present: selected elements marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null entry null.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine set_slice_datev
         !> Writes `arr` into the rows `s` selects of a PK_TIME_VEC column.
@@ -3862,8 +4005,8 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_slice), intent(in) :: s         !! rows to write.
             type(parquet_time), intent(in) :: arr(:,:)   !! one value per selected row.
-            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(in), optional :: is_valid(:,:) !! present: selected elements marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null entry null.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine set_slice_timev
         !> Writes `arr` into the rows `s` selects of a PK_TIMESTAMP_VEC column.
@@ -3876,8 +4019,8 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_slice), intent(in) :: s         !! rows to write.
             type(parquet_timestamp), intent(in) :: arr(:,:) !! one value per selected row.
-            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
-            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(in), optional :: is_valid(:,:) !! present: selected elements marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null entry null.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine set_slice_tsv
         !> Writes a character array into the rows `s` selects of a PK_STRING column.
@@ -3896,7 +4039,7 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_slice), intent(in) :: s         !! rows to write.
             character(len=*), intent(in) :: arr(:,:)     !! (element, selected row) values.
-            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
+            logical, intent(in), optional :: is_valid(:,:) !! present: selected elements marked .false. become null.
             logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine set_slice_chrv

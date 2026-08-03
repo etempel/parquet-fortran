@@ -61,24 +61,35 @@ contains
         end do
     end procedure any_null
     !
-    !> Whether row `i` is null.
+    !> Whether row `i` is null -- meaning, on a vector kind, that ANY element of it is null.
     !!
-    !! For a vector kind a row is reported null when its FIRST element is null, which is the
-    !! convention the whole-row operations (`set_null`, `append_nulls`, the `modify_nulls=`
-    !! guard) maintain: they mark every element of the row together. Per-element nulls within a
-    !! row remain representable in the bitmap for the reader path, but row-level queries answer
-    !! about the row.
-    module procedure is_null
-        integer(int64) :: bit
+    !! The row forms of the validity API are asymmetric on purpose: a row QUERY answers about the
+    !! row as a whole ("is anything here missing?"), while a whole-row MUTATION (`set_null(i)`,
+    !! `clear_null(i)`, `append_nulls`) acts on every element of it. Use `is_null(i, e)` when a
+    !! single element is what is meant.
+    !!
+    !! Costs O(width) with an early exit on the first null, against O(1) for the first-element
+    !! convention this replaced. That is the narrow, deliberate price of the correctness: a row
+    !! whose third element was null used to answer `.false.` here. The bulk paths do not pay it --
+    !! `row_validity` walks the bitmap by machine word instead of calling this per row.
+    module procedure is_null_row
+        integer(int64) :: e, base, w
         call check_index(self, i, "is_null")
         res = .false.
+        w = int(self%width, int64)
         select case (self%kind)
         case (PK_STRING, PK_STRING_VEC)
             if (.not. allocated(self%str)) return
             if (self%kind == PK_STRING) then
                 res = self%str%is_null(i)
             else
-                res = self%str%is_null((i - 1_int64)*int(self%width, int64) + 1_int64)
+                base = (i - 1_int64)*w
+                do e = 1_int64, w
+                    if (self%str%is_null(base + e)) then
+                        res = .true.
+                        return
+                    end if
+                end do
             end if
         case (PK_DATE)
             res = self%dt(i)%is_null()
@@ -87,21 +98,78 @@ contains
         case (PK_TIMESTAMP)
             res = self%ts(i)%is_null()
         case (PK_DATE_VEC)
-            res = self%dtv(1, i)%is_null()
+            do e = 1_int64, w
+                if (self%dtv(e, i)%is_null()) then
+                    res = .true.
+                    return
+                end if
+            end do
         case (PK_TIME_VEC)
-            res = self%tmv(1, i)%is_null()
+            do e = 1_int64, w
+                if (self%tmv(e, i)%is_null()) then
+                    res = .true.
+                    return
+                end if
+            end do
         case (PK_TIMESTAMP_VEC)
-            res = self%tsv(1, i)%is_null()
+            do e = 1_int64, w
+                if (self%tsv(e, i)%is_null()) then
+                    res = .true.
+                    return
+                end if
+            end do
         case (PK_NONE)
             ! Unreachable through the public API: check_index above rejects every index on a
             ! kindless column (its row count is 0), so this arm is defensive only.
             error stop EP//"is_null: column has no kind assigned" ! GCOVR_EXCL_LINE
         case default
             if (.not. self%has_nulls) return
-            bit = (i - 1_int64)*int(self%width, int64) + 1_int64
-            res = bit_test(self%validity, bit)
+            base = (i - 1_int64)*w
+            do e = 1_int64, w
+                if (bit_test(self%validity, base + e)) then
+                    res = .true.
+                    return
+                end if
+            end do
         end select
-    end procedure is_null
+    end procedure is_null_row
+    !
+    !> Whether element `e` of row `i` is null.
+    !!
+    !! Defined for every kind, scalar included: a scalar column has `width == 1`, so `e` can only
+    !! be 1 and the answer equals the row form. Keeping it defined there rather than an error is
+    !! what lets generic code (the generated table accessors, a caller's own loop over elements)
+    !! use one shape for both without branching on the kind.
+    module procedure is_null_elem
+        integer(int64) :: w
+        call check_index(self, i, "is_null")
+        w = int(self%width, int64)
+        call check_element(self, e, "is_null")
+        res = .false.
+        select case (self%kind)
+        case (PK_STRING, PK_STRING_VEC)
+            if (.not. allocated(self%str)) return
+            res = self%str%is_null((i - 1_int64)*w + e)
+        case (PK_DATE)
+            res = self%dt(i)%is_null()
+        case (PK_TIME)
+            res = self%tm(i)%is_null()
+        case (PK_TIMESTAMP)
+            res = self%ts(i)%is_null()
+        case (PK_DATE_VEC)
+            res = self%dtv(e, i)%is_null()
+        case (PK_TIME_VEC)
+            res = self%tmv(e, i)%is_null()
+        case (PK_TIMESTAMP_VEC)
+            res = self%tsv(e, i)%is_null()
+        case (PK_NONE)
+            ! Unreachable through the public API, exactly as in is_null_row above.
+            error stop EP//"is_null: column has no kind assigned" ! GCOVR_EXCL_LINE
+        case default
+            if (.not. self%has_nulls) return
+            res = bit_test(self%validity, (i - 1_int64)*w + e)
+        end select
+    end procedure is_null_elem
     !
     !> Builds the whole per-row validity mask in one pass.
     !!
@@ -144,39 +212,134 @@ contains
         w = int(self%width, int64)
         nbits = bits_needed(self)
         nblk = min(blocks_for(nbits), size(self%validity, kind=int64))
+        ! One loop for both scalar and vector kinds, because "any element null" makes them the
+        ! same walk: every SET bit names a null element, and that element's row is null. A zero
+        ! word is 64 valid elements and is skipped whole -- which is the property worth protecting
+        ! here, and it survives unchanged from the first-element convention this replaced. The
+        ! remaining cost is proportional to the NUMBER OF NULLS rather than to nrows, so on the
+        ! sparse-null case this is strictly less work than testing one bit per row was. Marking a
+        ! row twice (two null elements in one row) is harmless.
         do blk = 1_int64, nblk
             word = self%validity(blk)
             if (word == 0_int64) cycle
             base = (blk - 1_int64)*BITS_PER_BLOCK
-            if (w == 1_int64) then
-                ! Scalar kinds: one bit per row, so a block covers 64 consecutive rows and each
-                ! set bit names its row directly.
-                do p = 0, int(BITS_PER_BLOCK) - 1
-                    if (.not. btest(word, p)) cycle
-                    i = base + int(p, int64) + 1_int64
-                    if (i <= n) valid(i) = .false.
-                end do
-            else
-                ! Vector kinds: a row's validity is its FIRST element's bit (the same convention
-                ! is_null uses), so consecutive rows sit `width` bits apart and a block spans only
-                ! part of a row range. Derive that range and test the one bit each row owns.
-                lo = base/w + 1_int64
-                hi = (base + BITS_PER_BLOCK - 1_int64)/w + 1_int64
-                if (lo < 1_int64) lo = 1_int64
-                if (hi > n) hi = n
-                do i = lo, hi
-                    if (bit_test(self%validity, (i - 1_int64)*w + 1_int64)) valid(i) = .false.
-                end do
-            end if
+            ! Walk the SET bits only, via trailz + ibclr, rather than testing all 64 positions.
+            ! That is what keeps the cost proportional to the number of nulls: scanning every
+            ! position instead makes a densely-null column cost `width` times more than the
+            ! old one-bit-test-per-row form did (measured at 2.7x on a width-16 column that is
+            ! half null -- this loop shape brings it back to parity).
+            do while (word /= 0_int64)
+                p = trailz(word)
+                i = (base + int(p, int64))/w + 1_int64
+                if (i <= n) valid(i) = .false.
+                word = ibclr(word, p)
+            end do
         end do
     end procedure row_validity
     !
-    !> Marks row `i` null.
+    !> Builds the whole per-ELEMENT validity mask in one pass, shaped `(width, nrows)`.
+    !!
+    !! The same three cases as `row_validity`, and the same contract: a null-free column leaves
+    !! `valid` UNALLOCATED, so it reaches an `optional` dummy as an absent argument and costs
+    !! nothing. The difference is only that no row summary is applied -- this is the column's
+    !! actual state, and it is the shape `parquet_write_column` takes for a vector column, so a
+    !! table write can hand it straight on without a conversion pass.
+    module procedure element_validity
+        integer(int64) :: i, e, n, nblk, blk, base, w, nbits, flat
+        integer(int64) :: word
+        integer :: p
+        !
+        n = self%nrows
+        if (n <= 0_int64) return
+        if (.not. self%any_null()) return
+        w = int(self%width, int64)
+        allocate(valid(w, n))
+        valid = .true.
+        ! String and temporal kinds keep their null state outside the bitmap, so the per-element
+        ! query loop is the honest implementation for them (as in row_validity's case 3).
+        if (is_string_kind(self%kind) .or. is_temporal_kind(self%kind)) then
+            do i = 1_int64, n
+                do e = 1_int64, w
+                    valid(e, i) = .not. self%is_null(i, e)
+                end do
+            end do
+            return
+        end if
+        if (.not. allocated(self%validity)) return
+        nbits = bits_needed(self)
+        nblk = min(blocks_for(nbits), size(self%validity, kind=int64))
+        do blk = 1_int64, nblk
+            word = self%validity(blk)
+            if (word == 0_int64) cycle
+            base = (blk - 1_int64)*BITS_PER_BLOCK
+            ! Set bits only (trailz + ibclr), for the reason row_validity's own loop explains.
+            do while (word /= 0_int64)
+                p = trailz(word)
+                flat = base + int(p, int64)          ! 0-based flat element position
+                i = flat/w + 1_int64
+                e = mod(flat, w) + 1_int64
+                if (i <= n) valid(e, i) = .false.
+                word = ibclr(word, p)
+            end do
+        end do
+    end procedure element_validity
+    !
+    !> Writes a whole per-element validity mask in one pass: `.false.` marks that element null.
+    !!
+    !! The bulk counterpart of `set_null(i, e)`, and what lets the read path stop widening without
+    !! paying for it: replaying a mask element by element would cost `width*nrows` type-bound
+    !! calls, where this touches the bitmap directly and allocates it at most once.
+    !!
+    !! Only ever ADDS nulls. An element whose entry is `.true.` is left exactly as it is, so this
+    !! composes with a mask describing only part of what the caller knows and never resurrects a
+    !! value that was already null.
+    module procedure set_validity
+        integer(int64) :: i, e, n, w, base
+        logical :: any_false
+        !
+        n = self%nrows
+        w = int(self%width, int64)
+        if (size(valid, 1, kind=int64) /= w .or. size(valid, 2, kind=int64) /= n) then
+            error stop EP//"set_validity: mask shape does not match the column (width, nrows)"
+        end if
+        if (n <= 0_int64) return
+        ! Nothing to record, and in particular no bitmap to allocate -- the common case for a
+        ! column whose file reported nulls that the rows actually read do not contain.
+        any_false = .not. all(valid)
+        if (.not. any_false) return
+        select case (self%kind)
+        case (PK_NONE)
+            error stop EP//"set_validity: column has no kind assigned"
+        case (PK_STRING, PK_STRING_VEC, PK_DATE, PK_TIME, PK_TIMESTAMP, &
+              PK_DATE_VEC, PK_TIME_VEC, PK_TIMESTAMP_VEC)
+            ! No bitmap to write: these carry their null state in the element itself, so the
+            ! per-element setter is the only route and there is nothing faster to do.
+            do i = 1_int64, n
+                do e = 1_int64, w
+                    if (.not. valid(e, i)) call self%set_null(i, e)
+                end do
+            end do
+        case default
+            call ensure_bitmap(self)
+            do i = 1_int64, n
+                base = (i - 1_int64)*w
+                do e = 1_int64, w
+                    if (.not. valid(e, i)) call bit_set(self%validity, base + e)
+                end do
+            end do
+        end select
+    end procedure set_validity
+    !
+    !> Marks EVERY element of row `i` null.
     !!
     !! For a bitmap kind this is where the bitmap is lazily allocated (R2 ii) -- the first null
     !! in a column is what makes it exist at all. For a vector kind every element of the row is
     !! marked. Temporal kinds write the element's own null state; string kinds delegate.
-    module procedure set_null
+    !!
+    !! Deliberately whole-row, unlike the row QUERY `is_null(i)` which answers "any element": a
+    !! caller naming only a row is saying the row is missing, while a caller asking about a row
+    !! wants to know whether anything in it is. `set_null(i, e)` is the way to null one element.
+    module procedure set_null_row
         integer(int64) :: e, base, w
         call check_index(self, i, "set_null")
         w = int(self%width, int64)
@@ -223,15 +386,57 @@ contains
                 call bit_set(self%validity, base + e)
             end do
         end select
-    end procedure set_null
+    end procedure set_null_row
     !
-    !> Marks row `i` valid without writing a value.
+    !> Marks element `e` of row `i` null, leaving the row's other elements alone.
+    !!
+    !! Defined on a scalar column too (`width == 1`, so `e` can only be 1), where it is exactly
+    !! the row form -- see `is_null_elem` for why that is deliberate rather than an oversight.
+    module procedure set_null_elem
+        integer(int64) :: w, flat
+        call check_index(self, i, "set_null")
+        w = int(self%width, int64)
+        call check_element(self, e, "set_null")
+        flat = (i - 1_int64)*w + e
+        select case (self%kind)
+        case (PK_STRING, PK_STRING_VEC)
+            call self%str%set_null(flat)
+        case (PK_DATE)
+            call self%dt(i)%set_null()
+            self%nulls_dirty = .true.
+        case (PK_TIME)
+            call self%tm(i)%set_null()
+            self%nulls_dirty = .true.
+        case (PK_TIMESTAMP)
+            call self%ts(i)%set_null()
+            self%nulls_dirty = .true.
+        case (PK_DATE_VEC)
+            call self%dtv(e, i)%set_null()
+            self%nulls_dirty = .true.
+        case (PK_TIME_VEC)
+            call self%tmv(e, i)%set_null()
+            self%nulls_dirty = .true.
+        case (PK_TIMESTAMP_VEC)
+            call self%tsv(e, i)%set_null()
+            self%nulls_dirty = .true.
+        case (PK_NONE)
+            ! Unreachable through the public API, exactly as in set_null_row above.
+            error stop EP//"set_null: column has no kind assigned" ! GCOVR_EXCL_LINE
+        case default
+            call ensure_bitmap(self)
+            call bit_set(self%validity, flat)
+        end select
+    end procedure set_null_elem
+    !
+    !> Marks EVERY element of row `i` valid without writing a value.
     !!
     !! The value behind a previously-null row is unspecified until it is written, so this is
     !! normally used by the value-writing paths rather than called directly. It never drops the
     !! bitmap (a single-cell edit does not pay for a scan, R2 iii) -- use `compact_validity` for
     !! that. On a column that has no bitmap and no nulls it is a no-op.
-    module procedure clear_null
+    !!
+    !! Whole-row, mirroring `set_null(i)`; `clear_null(i, e)` clears one element.
+    module procedure clear_null_row
         integer(int64) :: e, base, w
         call check_index(self, i, "clear_null")
         w = int(self%width, int64)
@@ -256,7 +461,32 @@ contains
                 call bit_clear(self%validity, base + e)
             end do
         end select
-    end procedure clear_null
+    end procedure clear_null_row
+    !
+    !> Marks element `e` of row `i` valid, leaving the row's other elements alone.
+    !!
+    !! Same rules as the row form: the value behind it is unspecified until written, the bitmap is
+    !! never dropped here, and the temporal kinds reject it because a temporal element becomes
+    !! valid only by having a value written to it.
+    module procedure clear_null_elem
+        integer(int64) :: w, flat
+        call check_index(self, i, "clear_null")
+        w = int(self%width, int64)
+        call check_element(self, e, "clear_null")
+        flat = (i - 1_int64)*w + e
+        select case (self%kind)
+        case (PK_STRING, PK_STRING_VEC)
+            call self%str%set(flat, "")
+        case (PK_DATE, PK_TIME, PK_TIMESTAMP, PK_DATE_VEC, PK_TIME_VEC, PK_TIMESTAMP_VEC)
+            error stop EP//"clear_null: a temporal element becomes valid by writing a value to it"
+        case (PK_NONE)
+            ! Unreachable through the public API, exactly as in clear_null_row above.
+            error stop EP//"clear_null: column has no kind assigned" ! GCOVR_EXCL_LINE
+        case default
+            if (.not. self%has_nulls) return
+            call bit_clear(self%validity, flat)
+        end select
+    end procedure clear_null_elem
     !
     !> Scans for remaining nulls and releases the bitmap when there are none (R2 iv).
     !!

@@ -290,26 +290,16 @@ contains
     !! the stored orientation -- or leaves `valid` unallocated when there are no nulls, exactly as
     !! `scalar_validity` does and for the same reason.
     !!
-    !! parquet_column's validity is ROW-granular even for a vector kind -- is_null(i) takes a row
-    !! index bounded by nrows, not a flat element index -- so a null row comes back as a whole
-    !! row of .false. here. That mirrors the read side, which widens any per-element null to the
-    !! whole row for the same reason.
+    !! A pass-through, and that is the point: `parquet_column` stores validity per element and
+    !! `parquet_write_column` accepts it per element, so the writer records exactly the nulls the
+    !! table holds. It used to read the row bit and broadcast it back across the row, which turned
+    !! one null element into a null row in the output file.
     subroutine vector_validity(table, idx, valid)
         type(parquet_table), intent(in) :: table            !! the table.
         integer, intent(in) :: idx                          !! slot index.
         logical, allocatable, intent(out) :: valid(:,:)     !! .true. where the element is not null.
-        logical, allocatable :: rows(:)
-        integer(int64) :: i, n
-        integer :: wdt
         !
-        call table%cache%cols(idx)%values%row_validity(rows)
-        if (.not. allocated(rows)) return
-        n = table%cache%cols(idx)%values%length()
-        wdt = table%cache%cols(idx)%values%colwidth()
-        allocate(valid(wdt, n))
-        do i = 1, n
-            valid(:, i) = rows(i)
-        end do
+        call table%cache%cols(idx)%values%element_validity(valid)
     end subroutine vector_validity
     !
 end submodule parquet_tables_write

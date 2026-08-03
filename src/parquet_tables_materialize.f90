@@ -218,7 +218,7 @@ contains
     module procedure mat_i32v
         integer(int32), allocatable :: tmp(:,:)
         logical, allocatable :: valid(:,:)
-        integer(int64) :: i
+
         !
         allocate(tmp(wdt, nrows))
         ! The file's own statistics answer this from the footer, without reading a byte of the
@@ -235,9 +235,7 @@ contains
             ! reports Nulls may still have none among the rows actually read (a filter can remove
             ! them), and one vectorised all() beats nrows type-bound calls that do nothing.
             if (.not. all(valid)) then
-                do i = 1, nrows
-                    if (.not. all(valid(:, i))) call col%set_null(i)
-                end do
+                call col%set_validity(valid)
             end if
         else
             call parquet_read_column(reader, name, tmp)
@@ -248,7 +246,7 @@ contains
     module procedure mat_i64v
         integer(int64), allocatable :: tmp(:,:)
         logical, allocatable :: valid(:,:)
-        integer(int64) :: i
+
         !
         allocate(tmp(wdt, nrows))
         ! The file's own statistics answer this from the footer, without reading a byte of the
@@ -265,9 +263,7 @@ contains
             ! reports Nulls may still have none among the rows actually read (a filter can remove
             ! them), and one vectorised all() beats nrows type-bound calls that do nothing.
             if (.not. all(valid)) then
-                do i = 1, nrows
-                    if (.not. all(valid(:, i))) call col%set_null(i)
-                end do
+                call col%set_validity(valid)
             end if
         else
             call parquet_read_column(reader, name, tmp)
@@ -278,7 +274,7 @@ contains
     module procedure mat_f32v
         real(real32), allocatable :: tmp(:,:)
         logical, allocatable :: valid(:,:)
-        integer(int64) :: i
+
         !
         allocate(tmp(wdt, nrows))
         ! The file's own statistics answer this from the footer, without reading a byte of the
@@ -295,9 +291,7 @@ contains
             ! reports Nulls may still have none among the rows actually read (a filter can remove
             ! them), and one vectorised all() beats nrows type-bound calls that do nothing.
             if (.not. all(valid)) then
-                do i = 1, nrows
-                    if (.not. all(valid(:, i))) call col%set_null(i)
-                end do
+                call col%set_validity(valid)
             end if
         else
             call parquet_read_column(reader, name, tmp)
@@ -308,7 +302,7 @@ contains
     module procedure mat_f64v
         real(real64), allocatable :: tmp(:,:)
         logical, allocatable :: valid(:,:)
-        integer(int64) :: i
+
         !
         allocate(tmp(wdt, nrows))
         ! The file's own statistics answer this from the footer, without reading a byte of the
@@ -325,9 +319,7 @@ contains
             ! reports Nulls may still have none among the rows actually read (a filter can remove
             ! them), and one vectorised all() beats nrows type-bound calls that do nothing.
             if (.not. all(valid)) then
-                do i = 1, nrows
-                    if (.not. all(valid(:, i))) call col%set_null(i)
-                end do
+                call col%set_validity(valid)
             end if
         else
             call parquet_read_column(reader, name, tmp)
@@ -338,7 +330,7 @@ contains
     module procedure mat_boolv
         logical, allocatable :: tmp(:,:)
         logical, allocatable :: valid(:,:)
-        integer(int64) :: i
+
         !
         allocate(tmp(wdt, nrows))
         ! The file's own statistics answer this from the footer, without reading a byte of the
@@ -355,9 +347,7 @@ contains
             ! reports Nulls may still have none among the rows actually read (a filter can remove
             ! them), and one vectorised all() beats nrows type-bound calls that do nothing.
             if (.not. all(valid)) then
-                do i = 1, nrows
-                    if (.not. all(valid(:, i))) call col%set_null(i)
-                end do
+                call col%set_validity(valid)
             end if
         else
             call parquet_read_column(reader, name, tmp)
@@ -384,14 +374,11 @@ contains
             call parquet_read_column(reader, name, tmp, is_valid=valid)
             call col%init(PK_STRING_VEC, nrows, wdt, unit)
             call col%set_all(tmp)
-            ! Row-granular, exactly like every other vector kind: set_null's index is bounded by
-            ! nrows and nulls the whole row, so a per-element null is widened to the row. A flat
-            ! (i-1)*width+e index instead runs straight past nrows and aborts the read.
-            if (.not. all(valid)) then
-                do i = 1, nrows
-                    if (.not. all(valid(:, i))) call col%set_null(i)
-                end do
-            end if
+            ! Per ELEMENT, exactly like every other vector kind: the mask is handed over whole
+            ! rather than collapsed to one bit per row. set_all above wrote every element, which
+            ! cleared the all-null state a freshly initialized string store starts in, so this
+            ! records exactly the nulls Arrow reported and nothing else.
+            if (.not. all(valid)) call col%set_validity(valid)
         else
             call parquet_read_column(reader, name, tmp)
             call col%init(PK_STRING_VEC, nrows, wdt, unit)
@@ -592,7 +579,6 @@ contains
     module procedure matchunk_i32v
         integer(int32), allocatable :: tmp(:,:)
         logical, allocatable :: valid(:,:)
-        integer(int64) :: i
         !
         allocate(tmp(wdt, nrows))
         ! Scoped to THIS row group, unlike mat_i32v's whole-file question: a file with Nulls
@@ -603,9 +589,7 @@ contains
             call parquet_read_column_chunk(reader, name, rg, tmp, is_valid=valid)
             call col%adopt(tmp, unit)
             if (.not. all(valid)) then
-                do i = 1, nrows
-                    if (.not. all(valid(:, i))) call col%set_null(i)
-                end do
+                call col%set_validity(valid)
             end if
         else
             call parquet_read_column_chunk(reader, name, rg, tmp)
@@ -616,7 +600,6 @@ contains
     module procedure matchunk_i64v
         integer(int64), allocatable :: tmp(:,:)
         logical, allocatable :: valid(:,:)
-        integer(int64) :: i
         !
         allocate(tmp(wdt, nrows))
         ! Scoped to THIS row group, unlike mat_i64v's whole-file question: a file with Nulls
@@ -627,9 +610,7 @@ contains
             call parquet_read_column_chunk(reader, name, rg, tmp, is_valid=valid)
             call col%adopt(tmp, unit)
             if (.not. all(valid)) then
-                do i = 1, nrows
-                    if (.not. all(valid(:, i))) call col%set_null(i)
-                end do
+                call col%set_validity(valid)
             end if
         else
             call parquet_read_column_chunk(reader, name, rg, tmp)
@@ -640,7 +621,6 @@ contains
     module procedure matchunk_f32v
         real(real32), allocatable :: tmp(:,:)
         logical, allocatable :: valid(:,:)
-        integer(int64) :: i
         !
         allocate(tmp(wdt, nrows))
         ! Scoped to THIS row group, unlike mat_f32v's whole-file question: a file with Nulls
@@ -651,9 +631,7 @@ contains
             call parquet_read_column_chunk(reader, name, rg, tmp, is_valid=valid)
             call col%adopt(tmp, unit)
             if (.not. all(valid)) then
-                do i = 1, nrows
-                    if (.not. all(valid(:, i))) call col%set_null(i)
-                end do
+                call col%set_validity(valid)
             end if
         else
             call parquet_read_column_chunk(reader, name, rg, tmp)
@@ -664,7 +642,6 @@ contains
     module procedure matchunk_f64v
         real(real64), allocatable :: tmp(:,:)
         logical, allocatable :: valid(:,:)
-        integer(int64) :: i
         !
         allocate(tmp(wdt, nrows))
         ! Scoped to THIS row group, unlike mat_f64v's whole-file question: a file with Nulls
@@ -675,9 +652,7 @@ contains
             call parquet_read_column_chunk(reader, name, rg, tmp, is_valid=valid)
             call col%adopt(tmp, unit)
             if (.not. all(valid)) then
-                do i = 1, nrows
-                    if (.not. all(valid(:, i))) call col%set_null(i)
-                end do
+                call col%set_validity(valid)
             end if
         else
             call parquet_read_column_chunk(reader, name, rg, tmp)
@@ -688,7 +663,6 @@ contains
     module procedure matchunk_boolv
         logical, allocatable :: tmp(:,:)
         logical, allocatable :: valid(:,:)
-        integer(int64) :: i
         !
         allocate(tmp(wdt, nrows))
         ! Scoped to THIS row group, unlike mat_boolv's whole-file question: a file with Nulls
@@ -699,9 +673,7 @@ contains
             call parquet_read_column_chunk(reader, name, rg, tmp, is_valid=valid)
             call col%adopt(tmp, unit)
             if (.not. all(valid)) then
-                do i = 1, nrows
-                    if (.not. all(valid(:, i))) call col%set_null(i)
-                end do
+                call col%set_validity(valid)
             end if
         else
             call parquet_read_column_chunk(reader, name, rg, tmp)
@@ -726,11 +698,8 @@ contains
             call parquet_read_column_chunk(reader, name, rg, tmp, is_valid=valid)
             call col%init(PK_STRING_VEC, nrows, wdt, unit)
             call col%set_all(tmp)
-            if (.not. all(valid)) then
-                do i = 1, nrows
-                    if (.not. all(valid(:, i))) call col%set_null(i)
-                end do
-            end if
+            ! Per element, as in mat_strv -- see its note.
+            if (.not. all(valid)) call col%set_validity(valid)
         else
             call parquet_read_column_chunk(reader, name, rg, tmp)
             call col%init(PK_STRING_VEC, nrows, wdt, unit)

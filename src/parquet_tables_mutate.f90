@@ -61,6 +61,46 @@ contains
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_null_mask
     !
+    module procedure set_null_e32
+        call self%set_null(name, int(i, int64), int(e, int64), found)
+    end procedure set_null_e32
+    !
+    module procedure set_null_e64
+        integer :: idx
+        !
+        call table_resolve(self, name, "set_null", idx, found)
+        if (idx == 0) return
+        call table_require_row(self, i, "set_null")
+        call self%cache%cols(idx)%values%set_null(i, e)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_null_e64
+    !
+    module procedure set_null_mask_elem
+        integer :: idx, wdt
+        integer(int64) :: i, e
+        character(len=64) :: got, want
+        character(len=:), allocatable :: sfx
+        !
+        call table_resolve(self, name, "set_null", idx, found)
+        if (idx == 0) return
+        wdt = self%cache%cols(idx)%values%colwidth()
+        if (size(is_valid, 1, kind=int64) /= int(wdt, int64) .or. &
+            size(is_valid, 2, kind=int64) /= self%row_count) then
+            write(got, "(I0,A,I0)") size(is_valid, 1, kind=int64), " x ", size(is_valid, 2, kind=int64)
+            write(want, "(I0,A,I0)") wdt, " x ", self%row_count
+            call table_context_suffix(self%cache, name, sfx)
+            error stop EP // "set_null: the mask is shaped " // trim(got) // " but the column " // &
+                "is " // trim(want) // " (width x rows)" // sfx
+        end if
+        ! Only ever adds nulls, exactly as the row form does and for the same reason.
+        do i = 1_int64, self%row_count
+            do e = 1_int64, int(wdt, int64)
+                if (.not. is_valid(e, i)) call self%cache%cols(idx)%values%set_null(i, e)
+            end do
+        end do
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_null_mask_elem
+    !
     module procedure clear_null_i32
         call self%clear_null(name, int(i, int64), found)
     end procedure clear_null_i32
@@ -74,6 +114,20 @@ contains
         call self%cache%cols(idx)%values%clear_null(i)
         self%cache%cols(idx)%user_populated = .true.
     end procedure clear_null_i64
+    !
+    module procedure clear_null_e32
+        call self%clear_null(name, int(i, int64), int(e, int64), found)
+    end procedure clear_null_e32
+    !
+    module procedure clear_null_e64
+        integer :: idx
+        !
+        call table_resolve(self, name, "clear_null", idx, found)
+        if (idx == 0) return
+        call table_require_row(self, i, "clear_null")
+        call self%cache%cols(idx)%values%clear_null(i, e)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure clear_null_e64
     !
     module procedure table_compact_validity
         integer :: idx

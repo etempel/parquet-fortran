@@ -43,6 +43,18 @@ contains
         end if
     end procedure check_index
     !
+    !> Aborts unless `e` is a valid 1-based element index within a row (`1 <= e <= width`).
+    !!
+    !! Deliberately a different message from `check_index`'s, because the commonest way to get
+    !! this wrong is to pass a FLAT element position where a row index and an element index were
+    !! wanted -- naming the element axis is what makes that visible instead of looking like an
+    !! ordinary out-of-range row.
+    module procedure check_element
+        if (e < 1_int64 .or. e > int(self%width, int64)) then
+            error stop EP//proc//": element index out of range (must be 1 <= e <= the column's width)"
+        end if
+    end procedure check_element
+    !
     !> Aborts unless `n` matches the column's own row count.
     module procedure check_nrows
         if (n /= self%nrows) then

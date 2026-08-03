@@ -84,10 +84,12 @@ contains
         call check_width(self, size(value, kind=int64), "set_at")
         w = int(self%width, int64)
         base = (i - 1_int64)*w
-        if (.not. mod_nulls) then
-            if (self%str%is_null(base + 1_int64)) return
-        end if
+        ! modify_nulls=.false. protects individual null ELEMENTS, not the whole row: a row with
+        ! one null element still has its other elements written.
         do e = 1_int64, w
+            if (.not. mod_nulls) then
+                if (self%str%is_null(base + e)) cycle
+            end if
             call self%str%set(base + e, value(e))
         end do
     end procedure set_at_strv
@@ -122,12 +124,14 @@ contains
         call check_width(self, size(values, 1, kind=int64), "set_all")
         call check_nrows(self, size(values, 2, kind=int64), "set_all")
         w = int(self%width, int64)
+        ! Per ELEMENT, not per row: a row with one null element still has its other elements
+        ! written when modify_nulls=.false. -- see set_at_strv above.
         do k = 1_int64, self%nrows
             base = (k - 1_int64)*w
-            if (.not. mod_nulls) then
-                if (self%str%is_null(base + 1_int64)) cycle
-            end if
             do e = 1_int64, w
+                if (.not. mod_nulls) then
+                    if (self%str%is_null(base + e)) cycle
+                end if
                 call self%str%set(base + e, values(e, k))
             end do
         end do

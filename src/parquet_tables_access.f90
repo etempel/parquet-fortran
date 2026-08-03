@@ -204,13 +204,13 @@ contains
         nullify(p)
         call table_resolve(self, name, "col", idx, found)
         if (idx == 0) then
-            if (present(is_valid)) allocate(is_valid(0))
+            if (present(is_valid)) allocate(is_valid(0,0))
             return
         end if
         ! A copy, not an alias: validity is a packed bitmap, so there is no logical array in the
         ! column for a pointer to refer to. It is a snapshot -- writing through `p` afterwards
         ! does not update it, and nor does %set_null.
-        if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
+        if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         if (self%cache%cols(idx)%values%kindof() /= PK_INT32_VEC) then
             call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
@@ -227,13 +227,13 @@ contains
         nullify(p)
         call table_resolve(self, name, "col", idx, found)
         if (idx == 0) then
-            if (present(is_valid)) allocate(is_valid(0))
+            if (present(is_valid)) allocate(is_valid(0,0))
             return
         end if
         ! A copy, not an alias: validity is a packed bitmap, so there is no logical array in the
         ! column for a pointer to refer to. It is a snapshot -- writing through `p` afterwards
         ! does not update it, and nor does %set_null.
-        if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
+        if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         if (self%cache%cols(idx)%values%kindof() /= PK_INT64_VEC) then
             call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
@@ -250,13 +250,13 @@ contains
         nullify(p)
         call table_resolve(self, name, "col", idx, found)
         if (idx == 0) then
-            if (present(is_valid)) allocate(is_valid(0))
+            if (present(is_valid)) allocate(is_valid(0,0))
             return
         end if
         ! A copy, not an alias: validity is a packed bitmap, so there is no logical array in the
         ! column for a pointer to refer to. It is a snapshot -- writing through `p` afterwards
         ! does not update it, and nor does %set_null.
-        if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
+        if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         if (self%cache%cols(idx)%values%kindof() /= PK_FLOAT32_VEC) then
             call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
@@ -273,13 +273,13 @@ contains
         nullify(p)
         call table_resolve(self, name, "col", idx, found)
         if (idx == 0) then
-            if (present(is_valid)) allocate(is_valid(0))
+            if (present(is_valid)) allocate(is_valid(0,0))
             return
         end if
         ! A copy, not an alias: validity is a packed bitmap, so there is no logical array in the
         ! column for a pointer to refer to. It is a snapshot -- writing through `p` afterwards
         ! does not update it, and nor does %set_null.
-        if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
+        if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         if (self%cache%cols(idx)%values%kindof() /= PK_FLOAT64_VEC) then
             call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
@@ -296,13 +296,13 @@ contains
         nullify(p)
         call table_resolve(self, name, "col", idx, found)
         if (idx == 0) then
-            if (present(is_valid)) allocate(is_valid(0))
+            if (present(is_valid)) allocate(is_valid(0,0))
             return
         end if
         ! A copy, not an alias: validity is a packed bitmap, so there is no logical array in the
         ! column for a pointer to refer to. It is a snapshot -- writing through `p` afterwards
         ! does not update it, and nor does %set_null.
-        if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
+        if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         if (self%cache%cols(idx)%values%kindof() /= PK_LOGICAL_VEC) then
             call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
@@ -319,13 +319,13 @@ contains
         nullify(p)
         call table_resolve(self, name, "col", idx, found)
         if (idx == 0) then
-            if (present(is_valid)) allocate(is_valid(0))
+            if (present(is_valid)) allocate(is_valid(0,0))
             return
         end if
         ! A copy, not an alias: validity is a packed bitmap, so there is no logical array in the
         ! column for a pointer to refer to. It is a snapshot -- writing through `p` afterwards
         ! does not update it, and nor does %set_null.
-        if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
+        if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         if (self%cache%cols(idx)%values%kindof() /= PK_DATE_VEC) then
             call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
@@ -342,13 +342,13 @@ contains
         nullify(p)
         call table_resolve(self, name, "col", idx, found)
         if (idx == 0) then
-            if (present(is_valid)) allocate(is_valid(0))
+            if (present(is_valid)) allocate(is_valid(0,0))
             return
         end if
         ! A copy, not an alias: validity is a packed bitmap, so there is no logical array in the
         ! column for a pointer to refer to. It is a snapshot -- writing through `p` afterwards
         ! does not update it, and nor does %set_null.
-        if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
+        if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         if (self%cache%cols(idx)%values%kindof() /= PK_TIME_VEC) then
             call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
@@ -365,13 +365,13 @@ contains
         nullify(p)
         call table_resolve(self, name, "col", idx, found)
         if (idx == 0) then
-            if (present(is_valid)) allocate(is_valid(0))
+            if (present(is_valid)) allocate(is_valid(0,0))
             return
         end if
         ! A copy, not an alias: validity is a packed bitmap, so there is no logical array in the
         ! column for a pointer to refer to. It is a snapshot -- writing through `p` afterwards
         ! does not update it, and nor does %set_null.
-        if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
+        if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         if (self%cache%cols(idx)%values%kindof() /= PK_TIMESTAMP_VEC) then
             call table_context_suffix(self%cache, name, sfx)
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
@@ -1256,10 +1256,10 @@ contains
         call table_resolve(self, name, "get", idx, found)
         if (idx == 0) then
             allocate(arr(0,0))
-            if (present(is_valid)) allocate(is_valid(0))
+            if (present(is_valid)) allocate(is_valid(0,0))
             return
         end if
-        if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
+        if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_INT32_VEC)
             call self%cache%cols(idx)%values%data_ptr(p)
@@ -1281,10 +1281,10 @@ contains
         call table_resolve(self, name, "get", idx, found)
         if (idx == 0) then
             allocate(arr(0,0))
-            if (present(is_valid)) allocate(is_valid(0))
+            if (present(is_valid)) allocate(is_valid(0,0))
             return
         end if
-        if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
+        if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_INT64_VEC)
             call self%cache%cols(idx)%values%data_ptr(p)
@@ -1309,10 +1309,10 @@ contains
         call table_resolve(self, name, "get", idx, found)
         if (idx == 0) then
             allocate(arr(0,0))
-            if (present(is_valid)) allocate(is_valid(0))
+            if (present(is_valid)) allocate(is_valid(0,0))
             return
         end if
-        if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
+        if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_FLOAT32_VEC)
             call self%cache%cols(idx)%values%data_ptr(p)
@@ -1334,10 +1334,10 @@ contains
         call table_resolve(self, name, "get", idx, found)
         if (idx == 0) then
             allocate(arr(0,0))
-            if (present(is_valid)) allocate(is_valid(0))
+            if (present(is_valid)) allocate(is_valid(0,0))
             return
         end if
-        if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
+        if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_FLOAT64_VEC)
             call self%cache%cols(idx)%values%data_ptr(p)
@@ -1362,10 +1362,10 @@ contains
         call table_resolve(self, name, "get", idx, found)
         if (idx == 0) then
             allocate(arr(0,0))
-            if (present(is_valid)) allocate(is_valid(0))
+            if (present(is_valid)) allocate(is_valid(0,0))
             return
         end if
-        if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
+        if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_LOGICAL_VEC)
             call self%cache%cols(idx)%values%data_ptr(p)
@@ -1386,10 +1386,10 @@ contains
         call table_resolve(self, name, "get", idx, found)
         if (idx == 0) then
             allocate(arr(0,0))
-            if (present(is_valid)) allocate(is_valid(0))
+            if (present(is_valid)) allocate(is_valid(0,0))
             return
         end if
-        if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
+        if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_DATE_VEC)
             call self%cache%cols(idx)%values%data_ptr(p)
@@ -1410,10 +1410,10 @@ contains
         call table_resolve(self, name, "get", idx, found)
         if (idx == 0) then
             allocate(arr(0,0))
-            if (present(is_valid)) allocate(is_valid(0))
+            if (present(is_valid)) allocate(is_valid(0,0))
             return
         end if
-        if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
+        if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_TIME_VEC)
             call self%cache%cols(idx)%values%data_ptr(p)
@@ -1434,10 +1434,10 @@ contains
         call table_resolve(self, name, "get", idx, found)
         if (idx == 0) then
             allocate(arr(0,0))
-            if (present(is_valid)) allocate(is_valid(0))
+            if (present(is_valid)) allocate(is_valid(0,0))
             return
         end if
-        if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
+        if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_TIMESTAMP_VEC)
             call self%cache%cols(idx)%values%data_ptr(p)
@@ -1504,10 +1504,10 @@ contains
         call table_resolve(self, name, "get", idx, found)
         if (idx == 0) then
             allocate(character(len=1) :: arr(0,0))
-            if (present(is_valid)) allocate(is_valid(0))
+            if (present(is_valid)) allocate(is_valid(0,0))
             return
         end if
-        if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
+        if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         call table_require_kind(self, idx, PK_STRING_VEC, "get")
         n = self%cache%cols(idx)%values%length()
         wdt = self%cache%cols(idx)%values%colwidth()
@@ -1646,7 +1646,7 @@ contains
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
         ! Applied AFTER the values, because a whole-column %set drops the null bitmap by default:
         ! marking the nulls first would leave nothing behind.
-        if (present(is_valid)) call table_apply_valid(self, idx, is_valid, name, "set")
+        if (present(is_valid)) call table_apply_valid_elem(self, idx, is_valid, name, "set")
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_arr_i32v
     !
@@ -1659,7 +1659,7 @@ contains
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
         ! Applied AFTER the values, because a whole-column %set drops the null bitmap by default:
         ! marking the nulls first would leave nothing behind.
-        if (present(is_valid)) call table_apply_valid(self, idx, is_valid, name, "set")
+        if (present(is_valid)) call table_apply_valid_elem(self, idx, is_valid, name, "set")
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_arr_i64v
     !
@@ -1672,7 +1672,7 @@ contains
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
         ! Applied AFTER the values, because a whole-column %set drops the null bitmap by default:
         ! marking the nulls first would leave nothing behind.
-        if (present(is_valid)) call table_apply_valid(self, idx, is_valid, name, "set")
+        if (present(is_valid)) call table_apply_valid_elem(self, idx, is_valid, name, "set")
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_arr_f32v
     !
@@ -1685,7 +1685,7 @@ contains
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
         ! Applied AFTER the values, because a whole-column %set drops the null bitmap by default:
         ! marking the nulls first would leave nothing behind.
-        if (present(is_valid)) call table_apply_valid(self, idx, is_valid, name, "set")
+        if (present(is_valid)) call table_apply_valid_elem(self, idx, is_valid, name, "set")
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_arr_f64v
     !
@@ -1698,7 +1698,7 @@ contains
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
         ! Applied AFTER the values, because a whole-column %set drops the null bitmap by default:
         ! marking the nulls first would leave nothing behind.
-        if (present(is_valid)) call table_apply_valid(self, idx, is_valid, name, "set")
+        if (present(is_valid)) call table_apply_valid_elem(self, idx, is_valid, name, "set")
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_arr_boolv
     !
@@ -1711,7 +1711,7 @@ contains
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
         ! Applied AFTER the values, because a whole-column %set drops the null bitmap by default:
         ! marking the nulls first would leave nothing behind.
-        if (present(is_valid)) call table_apply_valid(self, idx, is_valid, name, "set")
+        if (present(is_valid)) call table_apply_valid_elem(self, idx, is_valid, name, "set")
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_arr_datev
     !
@@ -1724,7 +1724,7 @@ contains
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
         ! Applied AFTER the values, because a whole-column %set drops the null bitmap by default:
         ! marking the nulls first would leave nothing behind.
-        if (present(is_valid)) call table_apply_valid(self, idx, is_valid, name, "set")
+        if (present(is_valid)) call table_apply_valid_elem(self, idx, is_valid, name, "set")
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_arr_timev
     !
@@ -1737,7 +1737,7 @@ contains
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
         ! Applied AFTER the values, because a whole-column %set drops the null bitmap by default:
         ! marking the nulls first would leave nothing behind.
-        if (present(is_valid)) call table_apply_valid(self, idx, is_valid, name, "set")
+        if (present(is_valid)) call table_apply_valid_elem(self, idx, is_valid, name, "set")
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_arr_tsv
     !
@@ -1763,7 +1763,7 @@ contains
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
         ! Applied AFTER the values, because a whole-column %set drops the null bitmap by default:
         ! marking the nulls first would leave nothing behind.
-        if (present(is_valid)) call table_apply_valid(self, idx, is_valid, name, "set")
+        if (present(is_valid)) call table_apply_valid_elem(self, idx, is_valid, name, "set")
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_arr_chrv
     !
@@ -3301,11 +3301,11 @@ contains
         call table_resolve(self, name, "get_slice", idx, found)
         if (idx == 0) then
             allocate(arr(0,0))
-            if (present(is_valid)) allocate(is_valid(0))
+            if (present(is_valid)) allocate(is_valid(0,0))
             return
         end if
         call slice_resolve(s, self%row_count, rows, "get_slice")
-        if (present(is_valid)) call table_valid_mask_rows(self%cache, idx, rows, is_valid)
+        if (present(is_valid)) call table_valid_mask_rows_elem(self%cache, idx, rows, is_valid)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_INT32_VEC)
             allocate(arr(self%cache%cols(idx)%width, size(rows)))
@@ -3326,11 +3326,11 @@ contains
         call table_resolve(self, name, "get_slice", idx, found)
         if (idx == 0) then
             allocate(arr(0,0))
-            if (present(is_valid)) allocate(is_valid(0))
+            if (present(is_valid)) allocate(is_valid(0,0))
             return
         end if
         call slice_resolve(s, self%row_count, rows, "get_slice")
-        if (present(is_valid)) call table_valid_mask_rows(self%cache, idx, rows, is_valid)
+        if (present(is_valid)) call table_valid_mask_rows_elem(self%cache, idx, rows, is_valid)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_INT64_VEC)
             allocate(arr(self%cache%cols(idx)%width, size(rows)))
@@ -3357,11 +3357,11 @@ contains
         call table_resolve(self, name, "get_slice", idx, found)
         if (idx == 0) then
             allocate(arr(0,0))
-            if (present(is_valid)) allocate(is_valid(0))
+            if (present(is_valid)) allocate(is_valid(0,0))
             return
         end if
         call slice_resolve(s, self%row_count, rows, "get_slice")
-        if (present(is_valid)) call table_valid_mask_rows(self%cache, idx, rows, is_valid)
+        if (present(is_valid)) call table_valid_mask_rows_elem(self%cache, idx, rows, is_valid)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_FLOAT32_VEC)
             allocate(arr(self%cache%cols(idx)%width, size(rows)))
@@ -3382,11 +3382,11 @@ contains
         call table_resolve(self, name, "get_slice", idx, found)
         if (idx == 0) then
             allocate(arr(0,0))
-            if (present(is_valid)) allocate(is_valid(0))
+            if (present(is_valid)) allocate(is_valid(0,0))
             return
         end if
         call slice_resolve(s, self%row_count, rows, "get_slice")
-        if (present(is_valid)) call table_valid_mask_rows(self%cache, idx, rows, is_valid)
+        if (present(is_valid)) call table_valid_mask_rows_elem(self%cache, idx, rows, is_valid)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_FLOAT64_VEC)
             allocate(arr(self%cache%cols(idx)%width, size(rows)))
@@ -3413,11 +3413,11 @@ contains
         call table_resolve(self, name, "get_slice", idx, found)
         if (idx == 0) then
             allocate(arr(0,0))
-            if (present(is_valid)) allocate(is_valid(0))
+            if (present(is_valid)) allocate(is_valid(0,0))
             return
         end if
         call slice_resolve(s, self%row_count, rows, "get_slice")
-        if (present(is_valid)) call table_valid_mask_rows(self%cache, idx, rows, is_valid)
+        if (present(is_valid)) call table_valid_mask_rows_elem(self%cache, idx, rows, is_valid)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_LOGICAL_VEC)
             allocate(arr(self%cache%cols(idx)%width, size(rows)))
@@ -3437,11 +3437,11 @@ contains
         call table_resolve(self, name, "get_slice", idx, found)
         if (idx == 0) then
             allocate(arr(0,0))
-            if (present(is_valid)) allocate(is_valid(0))
+            if (present(is_valid)) allocate(is_valid(0,0))
             return
         end if
         call slice_resolve(s, self%row_count, rows, "get_slice")
-        if (present(is_valid)) call table_valid_mask_rows(self%cache, idx, rows, is_valid)
+        if (present(is_valid)) call table_valid_mask_rows_elem(self%cache, idx, rows, is_valid)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_DATE_VEC)
             allocate(arr(self%cache%cols(idx)%width, size(rows)))
@@ -3461,11 +3461,11 @@ contains
         call table_resolve(self, name, "get_slice", idx, found)
         if (idx == 0) then
             allocate(arr(0,0))
-            if (present(is_valid)) allocate(is_valid(0))
+            if (present(is_valid)) allocate(is_valid(0,0))
             return
         end if
         call slice_resolve(s, self%row_count, rows, "get_slice")
-        if (present(is_valid)) call table_valid_mask_rows(self%cache, idx, rows, is_valid)
+        if (present(is_valid)) call table_valid_mask_rows_elem(self%cache, idx, rows, is_valid)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_TIME_VEC)
             allocate(arr(self%cache%cols(idx)%width, size(rows)))
@@ -3485,11 +3485,11 @@ contains
         call table_resolve(self, name, "get_slice", idx, found)
         if (idx == 0) then
             allocate(arr(0,0))
-            if (present(is_valid)) allocate(is_valid(0))
+            if (present(is_valid)) allocate(is_valid(0,0))
             return
         end if
         call slice_resolve(s, self%row_count, rows, "get_slice")
-        if (present(is_valid)) call table_valid_mask_rows(self%cache, idx, rows, is_valid)
+        if (present(is_valid)) call table_valid_mask_rows_elem(self%cache, idx, rows, is_valid)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_TIMESTAMP_VEC)
             allocate(arr(self%cache%cols(idx)%width, size(rows)))
@@ -3564,7 +3564,7 @@ contains
         if (idx == 0) return
         call table_require_kind(self, idx, PK_STRING_VEC, "get_slice")
         call slice_resolve(s, self%row_count, rows, "get_slice")
-        if (present(is_valid)) call table_valid_mask_rows(self%cache, idx, rows, is_valid)
+        if (present(is_valid)) call table_valid_mask_rows_elem(self%cache, idx, rows, is_valid)
         wdt = self%cache%cols(idx)%width
         call self%cache%cols(idx)%values%string_column(store)
         maxlen = 1
@@ -3734,7 +3734,7 @@ contains
         do k = 1, size(rows, kind=int64)
             call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
         end do
-        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        if (present(is_valid)) call table_apply_valid_rows_elem(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_slice_i32v
     !
@@ -3751,7 +3751,7 @@ contains
         do k = 1, size(rows, kind=int64)
             call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
         end do
-        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        if (present(is_valid)) call table_apply_valid_rows_elem(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_slice_i64v
     !
@@ -3768,7 +3768,7 @@ contains
         do k = 1, size(rows, kind=int64)
             call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
         end do
-        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        if (present(is_valid)) call table_apply_valid_rows_elem(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_slice_f32v
     !
@@ -3785,7 +3785,7 @@ contains
         do k = 1, size(rows, kind=int64)
             call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
         end do
-        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        if (present(is_valid)) call table_apply_valid_rows_elem(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_slice_f64v
     !
@@ -3802,7 +3802,7 @@ contains
         do k = 1, size(rows, kind=int64)
             call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
         end do
-        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        if (present(is_valid)) call table_apply_valid_rows_elem(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_slice_boolv
     !
@@ -3819,7 +3819,7 @@ contains
         do k = 1, size(rows, kind=int64)
             call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
         end do
-        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        if (present(is_valid)) call table_apply_valid_rows_elem(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_slice_datev
     !
@@ -3836,7 +3836,7 @@ contains
         do k = 1, size(rows, kind=int64)
             call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
         end do
-        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        if (present(is_valid)) call table_apply_valid_rows_elem(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_slice_timev
     !
@@ -3853,7 +3853,7 @@ contains
         do k = 1, size(rows, kind=int64)
             call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
         end do
-        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        if (present(is_valid)) call table_apply_valid_rows_elem(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_slice_tsv
     !
@@ -3891,7 +3891,7 @@ contains
         do k = 1, size(rows, kind=int64)
             call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
         end do
-        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        if (present(is_valid)) call table_apply_valid_rows_elem(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_slice_chrv
     !

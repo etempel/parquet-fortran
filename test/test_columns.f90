@@ -70,7 +70,13 @@ contains
             new_unittest("clear_null marks a row valid again", test_clear_null), &
             new_unittest("every PK_* constant has a name", test_kind_names_complete), &
             new_unittest("modify_nulls= is honoured by every kind", test_matrix_modify_nulls_all_kinds), &
-            new_unittest("move_from hands storage over for every kind", test_matrix_move_from_all_kinds) &
+            new_unittest("move_from hands storage over for every kind", test_matrix_move_from_all_kinds), &
+            new_unittest("element nulls are addressable on every vector kind", test_element_nulls_all_kinds), &
+            new_unittest("row queries mean any element null", test_row_query_is_any_element), &
+            new_unittest("element_validity reports the true per-element state", test_element_validity), &
+            new_unittest("set_validity writes a whole mask and only adds nulls", test_set_validity), &
+            new_unittest("modify_nulls= protects elements, not whole rows", test_modify_nulls_is_element_wise), &
+            new_unittest("element nulls survive sort, delete and append", test_element_nulls_survive_mutation) &
             ]
     end subroutine collect_tests_parquet_columns
     !
@@ -1782,5 +1788,247 @@ contains
         call c%set_at(1_int64, "nope", modify_nulls=.false.)
         call check(error, c%is_null(1_int64), "PK_STRING: set_at(modify_nulls=.false.) must leave a null row null")
     end subroutine test_matrix_modify_nulls_all_kinds
+    !
+    !> One null ELEMENT must be addressable, and must not spread to its siblings, on a
+    !> representative of each of the three storage classes (bitmap, string, temporal).
+    !>
+    !> This is the test the whole stage exists for: before element-granular validity, nulling one
+    !> element of a row was simply not expressible, and reading one back reported the row.
+    subroutine test_element_nulls_all_kinds(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c
+        type(parquet_date) :: dv(3, 2)
+        integer :: i, j
+        !
+        ! Bitmap class.
+        call c%init(PK_FLOAT64_VEC, 3_int64, width=4_int32)
+        call c%set_null(2_int64, 3_int64)
+        call check(error, c%is_null(2_int64, 3_int64), "f64v: the nulled element must read back null")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(2_int64, 1_int64), "f64v: element 1 of the same row must stay valid")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(2_int64, 4_int64), "f64v: element 4 of the same row must stay valid")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(1_int64, 3_int64), "f64v: the same element of another row must stay valid")
+        if (allocated(error)) return
+        call c%clear_null(2_int64, 3_int64)
+        call check(error, .not. c%is_null(2_int64, 3_int64), "f64v: clear_null(i, e) must undo set_null(i, e)")
+        if (allocated(error)) return
+        !
+        ! String class. Values must be written first: a freshly initialized string column starts
+        ! out all-null (append_nulls on the embedded store), so nulling one element of a pristine
+        ! one would prove nothing about its siblings.
+        call c%init(PK_STRING_VEC, 2_int64, width=3_int32)
+        call c%set_all(reshape(["aa", "bb", "cc", "dd", "ee", "ff"], [3, 2]))
+        call c%set_null(1_int64, 2_int64)
+        call check(error, c%is_null(1_int64, 2_int64), "strv: the nulled element must read back null")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(1_int64, 1_int64), "strv: element 1 of the same row must stay valid")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(1_int64, 3_int64), "strv: element 3 of the same row must stay valid")
+        if (allocated(error)) return
+        !
+        ! Temporal class. Values first, for the same reason as the string case above: a
+        ! default-initialized parquet_date IS null, so a pristine column is entirely null.
+        call c%init(PK_DATE_VEC, 2_int64, width=3_int32)
+        do i = 1, 3
+            do j = 1, 2
+                call dv(i, j)%set(2026, 7, 10*j + i)
+            end do
+        end do
+        call c%set_all(dv)
+        call c%set_null(2_int64, 1_int64)
+        call check(error, c%is_null(2_int64, 1_int64), "datev: the nulled element must read back null")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(2_int64, 2_int64), "datev: element 2 of the same row must stay valid")
+        if (allocated(error)) return
+        !
+        ! A scalar column defines the element form too, with e == 1 meaning the row.
+        call c%init(PK_INT32, 2_int64)
+        call c%set_null(1_int64, 1_int64)
+        call check(error, c%is_null(1_int64), "scalar: set_null(i, 1) must be the same as set_null(i)")
+        if (allocated(error)) return
+        call check(error, c%is_null(1_int64, 1_int64), "scalar: is_null(i, 1) must agree with is_null(i)")
+    end subroutine test_element_nulls_all_kinds
+    !
+    !> The row-level QUERY means "any element of the row is null" -- not "its first element is",
+    !> which is what it meant before this stage and which a null in element 3 would hide.
+    subroutine test_row_query_is_any_element(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c
+        logical, allocatable :: rowmask(:)
+        !
+        call c%init(PK_INT32_VEC, 3_int64, width=4_int32)
+        ! Deliberately NOT element 1: the old first-element convention answered .false. here.
+        call c%set_null(2_int64, 3_int64)
+        call check(error, c%is_null(2_int64), "is_null(i) must be .true. when any element of row i is null")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(1_int64), "is_null(i) must stay .false. for a row with no null element")
+        if (allocated(error)) return
+        call check(error, c%any_null(), "any_null must see an element-only null")
+        if (allocated(error)) return
+        !
+        call c%row_validity(rowmask)
+        call check(error, allocated(rowmask), "row_validity must produce a mask when an element is null")
+        if (allocated(error)) return
+        call check(error, .not. rowmask(2), "row_validity must mark row 2 invalid from its element-3 null")
+        if (allocated(error)) return
+        call check(error, rowmask(1) .and. rowmask(3), "row_validity must leave the untouched rows valid")
+        if (allocated(error)) return
+        !
+        ! A whole-row set_null still nulls every element -- the mutation stays whole-row even
+        ! though the query became "any".
+        call c%init(PK_INT32_VEC, 2_int64, width=3_int32)
+        call c%set_null(1_int64)
+        call check(error, c%is_null(1_int64, 1_int64) .and. c%is_null(1_int64, 2_int64) .and. &
+            c%is_null(1_int64, 3_int64), "set_null(i) must still null every element of the row")
+    end subroutine test_row_query_is_any_element
+    !
+    !> element_validity reports the per-element truth, where row_validity summarises it.
+    subroutine test_element_validity(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c
+        logical, allocatable :: emask(:,:)
+        !
+        call c%init(PK_FLOAT64_VEC, 3_int64, width=2_int32)
+        call c%element_validity(emask)
+        call check(error, .not. allocated(emask), &
+            "element_validity must leave the mask unallocated for a null-free column")
+        if (allocated(error)) return
+        !
+        call c%set_null(2_int64, 2_int64)
+        call c%element_validity(emask)
+        call check(error, allocated(emask), "element_validity must allocate once a null exists")
+        if (allocated(error)) return
+        call check(error, size(emask, 1) == 2 .and. size(emask, 2) == 3, &
+            "element_validity must be shaped (width, nrows)")
+        if (allocated(error)) return
+        call check(error, .not. emask(2, 2), "element_validity must mark exactly the nulled element")
+        if (allocated(error)) return
+        call check(error, emask(1, 2), "element_validity must leave the row's other element valid")
+        if (allocated(error)) return
+        call check(error, all(emask(:, 1)) .and. all(emask(:, 3)), &
+            "element_validity must leave untouched rows entirely valid")
+        if (allocated(error)) return
+        !
+        ! The string class keeps its validity outside the bitmap, so it takes the other branch.
+        call c%init(PK_STRING_VEC, 2_int64, width=2_int32)
+        call c%set_all(reshape(["aa", "bb", "cc", "dd"], [2, 2]))
+        call c%set_null(1_int64, 2_int64)
+        call c%element_validity(emask)
+        call check(error, allocated(emask), "strv: element_validity must allocate once a null exists")
+        if (allocated(error)) return
+        call check(error, .not. emask(2, 1) .and. emask(1, 1), &
+            "strv: element_validity must mark exactly the nulled element")
+    end subroutine test_element_validity
+    !
+    !> set_validity writes a whole mask in one pass, and only ever ADDS nulls.
+    subroutine test_set_validity(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c
+        logical :: m(2, 3)
+        logical, allocatable :: emask(:,:)
+        !
+        call c%init(PK_INT32_VEC, 3_int64, width=2_int32)
+        m = .true.
+        m(2, 1) = .false.
+        m(1, 3) = .false.
+        call c%set_validity(m)
+        call check(error, c%is_null(1_int64, 2_int64), "set_validity must null element (2,1)")
+        if (allocated(error)) return
+        call check(error, c%is_null(3_int64, 1_int64), "set_validity must null element (1,3)")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(2_int64), "set_validity must leave an all-valid row untouched")
+        if (allocated(error)) return
+        !
+        ! Only ever adds: a .true. entry must not resurrect a null already recorded.
+        m = .true.
+        call c%set_validity(m)
+        call check(error, c%is_null(1_int64, 2_int64), &
+            "set_validity must not clear an existing null from a .true. entry")
+        if (allocated(error)) return
+        !
+        ! An all-valid mask on a clean column must not even allocate a bitmap.
+        call c%init(PK_INT32_VEC, 3_int64, width=2_int32)
+        m = .true.
+        call c%set_validity(m)
+        call check(error, c%validity_bytes() == 0_int64, &
+            "set_validity with an all-valid mask must not allocate a bitmap")
+        if (allocated(error)) return
+        !
+        ! Round trip: element_validity of what set_validity wrote must agree.
+        call c%init(PK_INT32_VEC, 3_int64, width=2_int32)
+        m = .true.
+        m(2, 2) = .false.
+        call c%set_validity(m)
+        call c%element_validity(emask)
+        call check(error, all(emask .eqv. m), "element_validity must round-trip what set_validity wrote")
+    end subroutine test_set_validity
+    !
+    !> modify_nulls=.false. protects individual null ELEMENTS: the row's other elements are
+    !> still written, where before this stage one null element vetoed the whole row.
+    subroutine test_modify_nulls_is_element_wise(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c
+        integer(int32) :: got(3)
+        character(len=8) :: gots(3)
+        !
+        call c%init(PK_INT32_VEC, 2_int64, width=3_int32)
+        call c%set_at(1_int64, [10_int32, 20_int32, 30_int32])
+        call c%set_null(1_int64, 2_int64)
+        call c%set_at(1_int64, [11_int32, 22_int32, 33_int32], modify_nulls=.false.)
+        call c%get_at(1_int64, got)
+        call check(error, got(1) == 11_int32, "set_at(modify_nulls=.false.) must write a valid element")
+        if (allocated(error)) return
+        call check(error, got(2) == 20_int32, "set_at(modify_nulls=.false.) must skip the null element")
+        if (allocated(error)) return
+        call check(error, got(3) == 33_int32, "set_at(modify_nulls=.false.) must write past the null element")
+        if (allocated(error)) return
+        call check(error, c%is_null(1_int64, 2_int64), "the protected element must still be null afterwards")
+        if (allocated(error)) return
+        !
+        ! Same rule for the string class.
+        call c%init(PK_STRING_VEC, 1_int64, width=3_int32)
+        call c%set_at(1_int64, ["aa      ", "bb      ", "cc      "])
+        call c%set_null(1_int64, 2_int64)
+        call c%set_at(1_int64, ["xx      ", "yy      ", "zz      "], modify_nulls=.false.)
+        call c%get_at(1_int64, gots)
+        call check(error, trim(gots(1)) == "xx", "strv: modify_nulls=.false. must write a valid element")
+        if (allocated(error)) return
+        call check(error, trim(gots(3)) == "zz", "strv: modify_nulls=.false. must write past the null element")
+        if (allocated(error)) return
+        call check(error, c%is_null(1_int64, 2_int64), "strv: the protected element must still be null")
+    end subroutine test_modify_nulls_is_element_wise
+    !
+    !> A row-structural mutation moves whole rows, so an element null must land on the same
+    !> element of the row's new position -- not be widened, dropped or shifted.
+    subroutine test_element_nulls_survive_mutation(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c, other
+        !
+        call c%init(PK_INT32_VEC, 3_int64, width=3_int32)
+        call c%set_null(1_int64, 2_int64)
+        call c%reindex([3_int64, 2_int64, 1_int64])
+        call check(error, c%is_null(3_int64, 2_int64), "reindex must carry an element null to the row's new index")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(3_int64, 1_int64), "reindex must not widen an element null to its row")
+        if (allocated(error)) return
+        !
+        call c%init(PK_INT32_VEC, 3_int64, width=3_int32)
+        call c%set_null(3_int64, 3_int64)
+        call c%delete_by_mask([.true., .false., .true.])
+        call check(error, c%is_null(2_int64, 3_int64), "delete_by_mask must carry an element null to the kept row")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(2_int64, 1_int64), "delete_by_mask must not widen an element null")
+        if (allocated(error)) return
+        !
+        call c%init(PK_INT32_VEC, 1_int64, width=3_int32)
+        call other%init(PK_INT32_VEC, 1_int64, width=3_int32)
+        call other%set_null(1_int64, 2_int64)
+        call c%append(other)
+        call check(error, c%is_null(2_int64, 2_int64), "append must carry the source's element null across")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(2_int64, 3_int64), "append must not widen the source's element null")
+    end subroutine test_element_nulls_survive_mutation
     !
 end module test_columns

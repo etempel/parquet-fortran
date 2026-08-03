@@ -228,6 +228,26 @@ contains
         end do
     end procedure table_get_valid_mask
     !
+    module procedure table_get_valid_mask_elem
+        integer :: idx, wdt
+        integer(int64) :: i, e
+        !
+        call table_resolve(self, name, "get_valid_mask", idx, found)
+        if (idx == 0) then
+            allocate(mask(0, 0))
+            return
+        end if
+        wdt = self%cache%cols(idx)%values%colwidth()
+        allocate(mask(wdt, self%cache%cols(idx)%values%length()))
+        ! Always filled, for the same reason the row form is: a caller should not have to test
+        ! allocated() before using what this hands back.
+        do i = 1_int64, size(mask, 2, kind=int64)
+            do e = 1_int64, int(wdt, int64)
+                mask(e, i) = .not. self%cache%cols(idx)%values%is_null(i, e)
+            end do
+        end do
+    end procedure table_get_valid_mask_elem
+    !
     module procedure table_is_detached
         call table_check_open(self, "is_detached")
         d = self%detached
@@ -294,6 +314,24 @@ contains
         call table_require_row(self, i, "is_null")
         isnull = self%cache%cols(idx)%values%is_null(i)
     end procedure table_is_null_i64
+    !
+    module procedure table_is_null_e32
+        isnull = self%is_null(name, int(i, int64), int(e, int64), found)
+    end procedure table_is_null_e32
+    !
+    module procedure table_is_null_e64
+        integer :: idx
+        !
+        ! .false. on a reported miss, for the same reason the row form gives .false.
+        isnull = .false.
+        call table_resolve(self, name, "is_null", idx, found)
+        if (idx == 0) return
+        call table_require_row(self, i, "is_null")
+        ! The element index is bounds-checked by parquet_column itself (check_element), which
+        ! names the element axis in its message -- the mistake this guards is passing a FLAT
+        ! element position where a row and an element were wanted.
+        isnull = self%cache%cols(idx)%values%is_null(i, e)
+    end procedure table_is_null_e64
     !
     module procedure table_require_row
         character(len=32) :: got, want
@@ -505,6 +543,78 @@ contains
             if (.not. is_valid(k)) call self%cache%cols(idx)%values%set_null(rows(k))
         end do
     end procedure table_apply_valid_rows
+    !
+    module procedure table_valid_mask_of_elem
+        integer(int64) :: i, e
+        integer :: wdt
+        !
+        ! Per-element queries rather than `element_validity`, for the same reason
+        ! table_valid_mask_of uses `is_null` rather than `row_validity`: `cache` is intent(in)
+        ! here, and the bulk builders take the column as intent(inout) so a temporal kind can
+        ! refresh its cached null flag. The contract also differs -- this one always allocates,
+        ! where the bulk builders deliberately leave a null-free column's mask unallocated.
+        wdt = cache%cols(idx)%values%colwidth()
+        allocate(mask(wdt, cache%cols(idx)%values%length()))
+        do i = 1_int64, size(mask, 2, kind=int64)
+            do e = 1_int64, int(wdt, int64)
+                mask(e, i) = .not. cache%cols(idx)%values%is_null(i, e)
+            end do
+        end do
+    end procedure table_valid_mask_of_elem
+    !
+    module procedure table_valid_mask_rows_elem
+        integer(int64) :: k, e
+        integer :: wdt
+        !
+        wdt = cache%cols(idx)%values%colwidth()
+        allocate(mask(wdt, size(rows)))
+        do k = 1_int64, size(rows, kind=int64)
+            do e = 1_int64, int(wdt, int64)
+                mask(e, k) = .not. cache%cols(idx)%values%is_null(rows(k), e)
+            end do
+        end do
+    end procedure table_valid_mask_rows_elem
+    !
+    module procedure table_apply_valid_elem
+        integer(int64) :: i, e, w
+        character(len=64) :: got, want
+        character(len=:), allocatable :: sfx
+        !
+        w = int(self%cache%cols(idx)%values%colwidth(), int64)
+        if (size(is_valid, 1, kind=int64) /= w .or. size(is_valid, 2, kind=int64) /= self%row_count) then
+            write(got, "(I0,A,I0)") size(is_valid, 1, kind=int64), " x ", size(is_valid, 2, kind=int64)
+            write(want, "(I0,A,I0)") w, " x ", self%row_count
+            call table_context_suffix(self%cache, name, sfx)
+            error stop EP // trim(proc) // ": is_valid is shaped " // trim(got) // " but the " // &
+                "column is " // trim(want) // " (width x rows)" // sfx
+        end if
+        do i = 1_int64, self%row_count
+            do e = 1_int64, w
+                if (.not. is_valid(e, i)) call self%cache%cols(idx)%values%set_null(i, e)
+            end do
+        end do
+    end procedure table_apply_valid_elem
+    !
+    module procedure table_apply_valid_rows_elem
+        integer(int64) :: k, e, w
+        character(len=64) :: got, want
+        character(len=:), allocatable :: sfx
+        !
+        w = int(self%cache%cols(idx)%values%colwidth(), int64)
+        if (size(is_valid, 1, kind=int64) /= w .or. &
+            size(is_valid, 2, kind=int64) /= size(rows, kind=int64)) then
+            write(got, "(I0,A,I0)") size(is_valid, 1, kind=int64), " x ", size(is_valid, 2, kind=int64)
+            write(want, "(I0,A,I0)") w, " x ", size(rows, kind=int64)
+            call table_context_suffix(self%cache, name, sfx)
+            error stop EP // trim(proc) // ": is_valid is shaped " // trim(got) // " but the " // &
+                "selection is " // trim(want) // " (width x rows)" // sfx
+        end if
+        do k = 1_int64, size(rows, kind=int64)
+            do e = 1_int64, w
+                if (.not. is_valid(e, k)) call self%cache%cols(idx)%values%set_null(rows(k), e)
+            end do
+        end do
+    end procedure table_apply_valid_rows_elem
     !
     module procedure table_require_slice_size
         character(len=32) :: got, want

@@ -525,6 +525,8 @@ program error_scenarios
         call scenario_validate_protected_cols_unknown_name()
     case ("write_protected_column_with_null")
         call scenario_write_protected_column_with_null()
+    case ("write_protected_vector_element_null")
+        call scenario_write_protected_vector_element_null()
     case ("validate_qc_min_not_numeric")
         call scenario_validate_qc_min_not_numeric()
     case ("validate_qc_max_not_numeric")
@@ -6249,6 +6251,41 @@ contains
         call parquet_close_writer(writer)
         print '(a)', "unexpectedly wrote a Null into a protected column without error"
     end subroutine scenario_write_protected_column_with_null
+
+    !> A protected VECTOR column with a single null ELEMENT must abort.
+    !>
+    !> New COVERAGE, not new behaviour: parquet_check_protected takes the FLATTENED mask, so it has
+    !> always rejected one null element, and the existing protected scenarios only ever exercised
+    !> scalar columns. Worth having precisely because element-granular validity makes a
+    !> one-element-null vector column reachable through the table layer for the first time, so
+    !> this path is about to be used in ways it was not before.
+    subroutine scenario_write_protected_vector_element_null()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int32) :: values(3, 2)
+        logical :: is_valid(3, 2)
+
+        values = reshape([1_int32, 2_int32, 3_int32, 4_int32, 5_int32, 6_int32], [3, 2])
+        is_valid = .true.
+        is_valid(2, 2) = .false.   ! ONE element, in the middle of its row
+
+        schema%maml%name = "protected_vec_write.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: protected_table", &
+            "extra:", &
+            "  protected_cols: a", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32", &
+            "  col_size: 3" ]
+
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_protected_vec.parquet", schema)
+        call parquet_write_column(writer, "a", values, is_valid=is_valid)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote a Null element into a protected vector column"
+    end subroutine scenario_write_protected_vector_element_null
 
     subroutine scenario_validate_qc_min_not_numeric()
         type(parquet_maml_file) :: maml

@@ -133,24 +133,42 @@ it.
 
 ### Reading and writing a column's nulls alongside its values
 
-`%get`, `%col`, `%get_slice` and `%set` all take an optional `is_valid=`, one entry per row (or
-per selected row), `.true.` where the row holds a value:
+`%get`, `%col`, `%get_slice` and `%set` all take an optional `is_valid=`, `.true.` where a value
+is present:
 
 ```fortran
 call t%get("flux", v, is_valid=ok)      ! values and their validity in one call
-call t%set("flux", v, is_valid=ok)      ! ... and back again: .false. rows become null
+call t%set("flux", v, is_valid=ok)      ! ... and back again: .false. entries become null
 ```
 
-Three things to know:
+**The mask has the same shape as the values it describes.** A scalar column's is `ok(:)`, one entry
+per row; a **vector** column's is `ok(:,:)`, shaped `(width, nrows)` exactly like the values, with
+one entry per *element*:
+
+```fortran
+real(real64), allocatable :: v(:,:)
+logical, allocatable :: ok(:,:)
+
+call t%get("spectrum", v, is_valid=ok)  ! ok is (width, nrows)
+if (.not. ok(3, 7)) print *, "element 3 of row 7 is missing"
+```
+
+There is no one-entry-per-row form for a vector column: a vector column's nulls are per element,
+and a mask that could not say which element is missing would be answering a different question.
+
+Four things to know:
 
 - **On `%set` it goes the other way.** A plain `%set` drops the column's nulls outright; passing
-  `is_valid=` writes the values and then marks the `.false.` rows null, which is the only way to
-  replace a column and its nulls in one call. A mask of the wrong length is an error.
+  `is_valid=` writes the values and then marks the `.false.` entries null, which is the only way to
+  replace a column and its nulls in one call. A mask of the wrong shape is an error naming both.
 - **From `%col` it is a snapshot, not an alias.** Validity is a packed bitmap, so there is no
   `logical` array in the column for a pointer to refer to. Writing through the value pointer
   afterwards does not update the mask you were given.
 - **It is the same data as `%get_valid_mask(name, mask)`**, which is the way to ask for validity
-  on its own without copying the values too.
+  on its own without copying the values too — and which accepts either shape (see below).
+- **A wide column's mask is not free.** `logical` is four bytes, so a `(width, nrows)` mask costs
+  `4 * width * nrows` bytes — for a width-100 column of a million rows, 400 MB. Ask for it when you
+  want the whole thing; use `%is_null(name, i, e)` for a few elements.
 
 ### Working with a column whose type you do not know
 
@@ -901,22 +919,46 @@ The value's kind must match the column's exactly, as it does for `%set`, and wri
 
 ## Null values, and changing them
 
-`%is_null(name, i)`, `%set_null(name, i)` and `%clear_null(name, i)` all work a **row** at a
-time, and that is true even for a vector column: `%set_null` on a `float64` column of width 3
-nulls the whole row, all three elements together. A single element of a vector row cannot be null
-on its own — the file format this library reads can express it, but the table cannot represent it,
-so a per-element null read from a file is widened to the whole row.
-
-`%set_null` also takes a **mask** — one `logical` per row, `.true.` meaning the row holds a value,
-the same shape `%get_valid_mask` hands back:
+`%is_null`, `%set_null` and `%clear_null` each work a **row** at a time or a single **element** at
+a time, depending on whether you name an element:
 
 ```fortran
-call t%get_valid_mask("flux", valid)
-valid = valid .and. (flux > 0.0_real64)
-call t%set_null("flux", valid)      ! nulls every row the mask marks .false.
+call t%set_null("spectrum", 7_int64)              ! the whole row: every element of row 7
+call t%set_null("spectrum", 7_int64, 3_int64)     ! just element 3 of row 7
+print *, t%is_null("spectrum", 7_int64, 3_int64)  ! .true.
+print *, t%is_null("spectrum", 7_int64)           ! .true. -- "any element of row 7 is null"
 ```
 
-It only ever *adds* nulls: a `.true.` entry leaves the row exactly as it was, so a mask describing
+**Each call acts at the granularity you named**, and the one place that is worth stating twice is
+the difference between asking and setting:
+
+- **Naming only a row and setting** marks the row missing — every element of it.
+- **Naming only a row and asking** answers about the row as a whole: `%is_null(name, i)` is `.true.`
+  when *any* element of it is null. So a row you nulled one element of reports itself null, which is
+  usually what you want to know before using it.
+
+Element indices run `1..width` and are checked; a scalar column has width 1, so `e` can only be 1
+and the two forms agree. The row handle takes the same pair: `r%is_null("spectrum")` and
+`r%is_null("spectrum", 3_int64)`.
+
+`%set_null` also takes a **mask**, in either shape — one `logical` per row, or one per element,
+matching whichever shape `%get_valid_mask` gave you:
+
+```fortran
+call t%get_valid_mask("flux", valid)          ! valid(:)   -- per row
+valid = valid .and. (flux > 0.0_real64)
+call t%set_null("flux", valid)                ! nulls every row the mask marks .false.
+
+call t%get_valid_mask("spectrum", vok)        ! vok(:,:)   -- per element, (width, nrows)
+call t%set_null("spectrum", vok)              ! nulls individual elements
+```
+
+On a vector column the rank-1 `%get_valid_mask` is the **row summary** (`.false.` where any element
+of the row is null) and the rank-2 one is the true per-element state. Both are useful — the first
+answers "which rows are complete?" — so both are available, and which you get is decided by how you
+declared the array.
+
+It only ever *adds* nulls: a `.true.` entry leaves the entry exactly as it was, so a mask describing
 only part of what you know cannot clear a null you did not mention. `%has_nulls(name)` answers
 whether there are any at all — and for a column that has not been read yet it answers from the
 file's footer without reading it, so it is cheap enough to ask before deciding to.

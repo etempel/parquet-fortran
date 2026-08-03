@@ -200,6 +200,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A vector column's nulls are now tracked per ELEMENT rather than per row, throughout the
+  `parquet_table`/`parquet_column` layer.** A per-element null read from a parquet file is no
+  longer widened to the whole row, and writing a table back out no longer broadcasts a row's null
+  across its elements — one null element now survives a file → table → file round trip intact.
+  Four consequences, the first of which is a **breaking API change**:
+  - `%get`, `%col`, `%get_slice` and `%set` take (or return) `is_valid` **shaped like the values**:
+    still `is_valid(:)` for a scalar column, but now `is_valid(:,:)` shaped `(width, nrows)` for the
+    `int32`/`int64`/`float32`/`float64`/`logical`/`string` vector kinds. Passing a rank-1 mask for a
+    vector column is a *compile* error, so the change cannot be missed; reshape it. Scalar columns
+    are unaffected.
+  - `%is_null`, `%set_null` and `%clear_null` gain an element form — `%is_null(name, i, e)` and so
+    on, with `e` running `1..width` — alongside the existing row form. Setting or clearing by row
+    still acts on the whole row; **asking** by row now means *"any element of the row is null"*
+    (previously: "its first element is"), which is what makes a row containing one null element
+    report itself null. The `parquet_table_row` handle takes the same pair (`r%is_null(name, e)`).
+  - `%get_valid_mask` and the mask form of `%set_null` accept **either** shape: rank-1 is the
+    per-row summary, rank-2 the true per-element state.
+  - `modify_nulls=.false.` on a vector column now protects individual null **elements** rather than
+    refusing to write the whole row: a row with one null element still has its other elements
+    written.
+
+  `parquet_read_column`/`parquet_write_column` are unchanged — they have always carried a rank-2
+  mask for a vector column. Building the per-row mask also got faster where nulls are dense
+  (measured 2.2x on a width-16 column that is half null), and is unchanged on the null-free path.
 - `parquet_read_array_row_mode` and `parquet_read_array_element_mode` stay row-group-scoped on a
   filtered or sampled reader, where they previously fell back to reading the whole (filtered)
   column. `row_index`/`elem_index` still address the filtered result, and are now resolved

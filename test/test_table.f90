@@ -206,6 +206,12 @@ contains
                 test_row_group_bounds_sorted), &
             new_unittest("a row mutation that changes no row does not detach", &
                 test_noop_mutation_keeps_file), &
+            new_unittest("one null element survives a file -> table -> file round trip", &
+                test_element_null_round_trip), &
+            new_unittest("the table's element-granular null API addresses single elements", &
+                test_table_element_null_api), &
+            new_unittest("a vector column's is_valid= is per element on get, col, set and slice", &
+                test_table_rank2_masks), &
             new_unittest("parquet_write_table parses a schema the caller left unparsed", &
                 test_write_table_parses_schema) &
             ]
@@ -884,9 +890,10 @@ contains
     !!    so the null rows are placed deliberately at and around block boundaries (64/65, 128/129)
     !!    and at the very first and last row, which is where an off-by-one in that walk shows up.
     !!
-    !! The vector column is not redundant with the scalar one: a vector row's validity is its first
-    !! element's bit, so consecutive rows sit `width` bits apart and the walk has to derive which
-    !! rows a block covers rather than reading them off directly.
+    !! The vector column is not redundant with the scalar one: its bits sit `width` apart in the
+    !! bitmap, so the walk has to map a bit back to the row that owns it rather than reading rows
+    !! off directly. It nulls WHOLE rows on purpose -- the single-element case is
+    !! `test_element_null_round_trip` below, which is a different question.
     subroutine test_write_table_nulls(error)
         type(error_type), allocatable, intent(out) :: error
         integer, parameter :: NBIG = 200 !! spans four 64-bit validity blocks.
@@ -952,6 +959,223 @@ contains
         call check(error, all(back == clean), &
             "a column written with no validity mask should keep its values")
     end subroutine test_write_table_nulls
+    !
+    !> **The headline test of the element-null milestone.** ONE null element must survive
+    !! file -> table -> file without spreading to its siblings.
+    !!
+    !! Before element-granular validity this failed in both directions and was self-consistent
+    !! about it: the read widened the null to the whole row, and the write broadcast the row's bit
+    !! back across every element, so the output file had `width` nulls where the input had one.
+    !!
+    !! Verified with the LOW-LEVEL reader and a rank-2 mask rather than through the table, so the
+    !! assertion does not depend on the same table code being tested -- and because the question
+    !! is what actually landed in the file.
+    subroutine test_element_null_round_trip(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: NW = 4     !! vector width.
+        integer, parameter :: NR = 7     !! rows.
+        type(parquet_writer) :: w
+        type(parquet_reader) :: r
+        type(parquet_table) :: t
+        type(parquet_schema) :: s
+        real(real64) :: fv(NW, NR), got(NW, NR)
+        integer(int32) :: iv(NW, NR), goti(NW, NR)
+        logical :: valid(NW, NR), back(NW, NR)
+        integer :: i, e
+        character(len=*), parameter :: f = "test_run/table_elem_null.parquet"
+        character(len=*), parameter :: fo = "test_run/table_elem_null_out.parquet"
+        !
+        do i = 1, NR
+            do e = 1, NW
+                fv(e, i) = real(10*i + e, real64)
+                iv(e, i) = int(100*i + e, int32)
+            end do
+        end do
+        valid = .true.
+        valid(3, 5) = .false.      ! deliberately NOT element 1: the old convention hid this one
+        valid(1, 2) = .false.      ! and one that the old convention would have caught
+        !
+        call parquet_open_writer(w, f)
+        call parquet_write_column(w, "fv", fv, is_valid=valid)
+        call parquet_write_column(w, "iv", iv, is_valid=valid)
+        call parquet_close_writer(w)
+        !
+        ! Round-trip it through the table layer: open, materialize, write back out.
+        call parquet_open_table(t, f)
+        call s%init("en")
+        call s%add_field("fv", "float64", col_size=NW)
+        call s%add_field("iv", "int32", col_size=NW)
+        call parquet_write_table(t, fo, s)
+        !
+        call parquet_open_reader(r, fo)
+        call parquet_read_column(r, "fv", got, is_valid=back)
+        call check(error, all(back .eqv. valid), &
+            "exactly the nulled elements must survive a table round trip, and no others")
+        if (allocated(error)) return
+        call check(error, .not. back(3, 5), "element (3,5) must still be null after the round trip")
+        if (allocated(error)) return
+        call check(error, back(1, 5) .and. back(2, 5) .and. back(4, 5), &
+            "the siblings of a null element must NOT be nulled by the round trip")
+        if (allocated(error)) return
+        call check(error, .not. back(1, 2), "element (1,2) must still be null after the round trip")
+        if (allocated(error)) return
+        call check(error, all(back(2:, 2)), "the siblings of element (1,2) must stay valid")
+        if (allocated(error)) return
+        ! The values of the surviving elements must be untouched by any of this.
+        call check(error, got(1, 5) == fv(1, 5) .and. got(4, 7) == fv(4, 7), &
+            "a valid element's value must survive the round trip unchanged")
+        if (allocated(error)) return
+        !
+        call parquet_read_column(r, "iv", goti, is_valid=back)
+        call check(error, all(back .eqv. valid), &
+            "the int32 vector kind must round-trip its element nulls the same way")
+        call parquet_close_reader(r)
+    end subroutine test_element_null_round_trip
+    !
+    !> The table's own element-granular null API: `%is_null(name, i, e)`, `%set_null(name, i, e)`,
+    !> `%clear_null(name, i, e)`, the rank-2 `%get_valid_mask`/`%set_null(mask)`, and the row
+    !> handle's element form.
+    subroutine test_table_element_null_api(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_table_row) :: r
+        real(real64) :: fv(3, 4)
+        logical, allocatable :: rmask(:), emask(:,:)
+        logical :: m(3, 4)
+        integer :: i, e
+        !
+        do i = 1, 4
+            do e = 1, 3
+                fv(e, i) = real(10*i + e, real64)
+            end do
+        end do
+        call parquet_new_table(t)
+        call t%add_column("fv", fv)
+        !
+        ! set_null(name, i, e) must touch exactly one element.
+        call t%set_null("fv", 2_int64, 3_int64)
+        call check(error, t%is_null("fv", 2_int64, 3_int64), "%set_null(name, i, e) must null that element")
+        if (allocated(error)) return
+        call check(error, .not. t%is_null("fv", 2_int64, 1_int64), "its siblings must stay valid")
+        if (allocated(error)) return
+        ! ... and the ROW query must then report the row as null ("any element").
+        call check(error, t%is_null("fv", 2_int64), &
+            "%is_null(name, i) must be .true. when any element of the row is null")
+        if (allocated(error)) return
+        call check(error, .not. t%is_null("fv", 1_int64), "a row with no null element must not report null")
+        if (allocated(error)) return
+        !
+        ! The int32 specifics must agree with the int64 ones.
+        call check(error, t%is_null("fv", 2, 3), "the int32 element specific must agree with the int64 one")
+        if (allocated(error)) return
+        !
+        ! clear_null(name, i, e) undoes it.
+        call t%clear_null("fv", 2_int64, 3_int64)
+        call check(error, .not. t%is_null("fv", 2_int64, 3_int64), "%clear_null(name, i, e) must undo it")
+        if (allocated(error)) return
+        !
+        ! The row handle's element form.
+        call t%set_null("fv", 3_int64, 2_int64)
+        r = t%row(3_int64)
+        call check(error, r%is_null("fv", 2_int64), "the row handle's element form must see the null")
+        if (allocated(error)) return
+        call check(error, .not. r%is_null("fv", 1_int64), "the row handle must not widen it")
+        if (allocated(error)) return
+        call check(error, r%is_null("fv"), "the row handle's row form must report the row null")
+        if (allocated(error)) return
+        !
+        ! %get_valid_mask offers BOTH ranks: rank-1 is the row summary, rank-2 the truth.
+        call t%get_valid_mask("fv", rmask)
+        call check(error, size(rmask) == 4, "the rank-1 mask must have one entry per row")
+        if (allocated(error)) return
+        call check(error, .not. rmask(3), "the rank-1 mask must summarise row 3 as invalid")
+        if (allocated(error)) return
+        call t%get_valid_mask("fv", emask)
+        call check(error, size(emask, 1) == 3 .and. size(emask, 2) == 4, &
+            "the rank-2 mask must be shaped (width, nrows)")
+        if (allocated(error)) return
+        call check(error, .not. emask(2, 3), "the rank-2 mask must mark exactly the null element")
+        if (allocated(error)) return
+        call check(error, emask(1, 3) .and. emask(3, 3), "the rank-2 mask must leave the siblings valid")
+        if (allocated(error)) return
+        !
+        ! %set_null(mask) also takes both ranks; the rank-2 form nulls individual elements.
+        call parquet_new_table(t)
+        call t%add_column("fv", fv)
+        m = .true.
+        m(1, 4) = .false.
+        call t%set_null("fv", m)
+        call check(error, t%is_null("fv", 4_int64, 1_int64), "the rank-2 %set_null(mask) must null that element")
+        if (allocated(error)) return
+        call check(error, .not. t%is_null("fv", 4_int64, 2_int64), &
+            "the rank-2 %set_null(mask) must not widen to the row")
+    end subroutine test_table_element_null_api
+    !
+    !> `is_valid=` on a vector column is rank-2 everywhere it appears -- the shape-must-match rule.
+    !!
+    !! This is the breaking half of the change: a caller passing a rank-1 mask for a vector column
+    !! now gets a compile error, and these are the shapes that replace it.
+    subroutine test_table_rank2_masks(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_slice) :: s
+        real(real64) :: fv(2, 4)
+        real(real64), allocatable :: got(:,:)
+        real(real64), pointer :: p(:,:)
+        logical :: m(2, 4), sm(2, 2)
+        logical, allocatable :: back(:,:)
+        integer :: i, e
+        !
+        do i = 1, 4
+            do e = 1, 2
+                fv(e, i) = real(10*i + e, real64)
+            end do
+        end do
+        !
+        ! %set with a rank-2 is_valid.
+        call parquet_new_table(t)
+        call t%add_column("fv", fv)
+        m = .true.
+        m(2, 2) = .false.
+        call t%set("fv", fv, is_valid=m)
+        call check(error, t%is_null("fv", 2_int64, 2_int64), "%set(is_valid=) must null exactly that element")
+        if (allocated(error)) return
+        call check(error, .not. t%is_null("fv", 2_int64, 1_int64), "%set(is_valid=) must not widen it")
+        if (allocated(error)) return
+        !
+        ! %get hands the same shape back.
+        call t%get("fv", got, is_valid=back)
+        call check(error, size(back, 1) == 2 .and. size(back, 2) == 4, "%get(is_valid=) must be (width, nrows)")
+        if (allocated(error)) return
+        call check(error, all(back .eqv. m), "%get(is_valid=) must report exactly what %set wrote")
+        if (allocated(error)) return
+        !
+        ! %col too, alongside the pointer.
+        call t%col("fv", p, is_valid=back)
+        call check(error, associated(p), "%col must still hand back the pointer")
+        if (allocated(error)) return
+        call check(error, all(back .eqv. m), "%col(is_valid=) must report the per-element state")
+        if (allocated(error)) return
+        !
+        ! %get_slice and %set_slice: the mask covers the SELECTED rows, per element.
+        s = parquet_slice_range(2_int64, 3_int64)
+        call t%get_slice("fv", s, got, is_valid=back)
+        call check(error, size(back, 1) == 2 .and. size(back, 2) == 2, &
+            "%get_slice(is_valid=) must be (width, selected rows)")
+        if (allocated(error)) return
+        call check(error, .not. back(2, 1), "%get_slice(is_valid=) must carry the null of the first picked row")
+        if (allocated(error)) return
+        call check(error, back(1, 1) .and. all(back(:, 2)), "%get_slice(is_valid=) must not widen it")
+        if (allocated(error)) return
+        !
+        sm = .true.
+        sm(1, 2) = .false.
+        call t%set_slice("fv", s, got, is_valid=sm)
+        call check(error, t%is_null("fv", 3_int64, 1_int64), &
+            "%set_slice(is_valid=) must null the element of the selected row")
+        if (allocated(error)) return
+        call check(error, .not. t%is_null("fv", 3_int64, 2_int64), "%set_slice(is_valid=) must not widen it")
+    end subroutine test_table_rank2_masks
     !
     !> Asserts that exactly the rows listed in `nulls` are null in `name`, and no others.
     subroutine check_null_positions(t, name, nulls, nrow, error)

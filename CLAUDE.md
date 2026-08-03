@@ -50,7 +50,7 @@ working rules).
   - [Guard mutating public procedures against being called twice](#guard-mutating-public-procedures-against-being-called-twice)
   - [Implicit finalizers must never route through a path that can throw/abort](#implicit-finalizers-must-never-route-through-a-path-that-can-throwabort)
   - [Automatic BYTE_STREAM_SPLIT for float columns in the writer](#automatic-byte_stream_split-for-float-columns-in-the-writer)
-  - [`parquet_column` validity is ROW-granular, even for the vector kinds](#parquet_column-validity-is-row-granular-even-for-the-vector-kinds)
+  - [Validity is per ELEMENT, and a vector row is not one bit](#validity-is-per-element-and-a-vector-row-is-not-one-bit)
   - [A `parquet_table` pointer does not survive a ROW-structural mutation](#a-parquet_table-pointer-does-not-survive-a-row-structural-mutation)
   - [New `parquet_table` state goes on the CACHE](#new-parquet_table-state-goes-on-the-cache--never-as-an-allocatable-component-of-the-type)
   - [Assembling a `parquet_column` from pieces: preallocate and `%paste`](#assembling-a-parquet_column-from-pieces-preallocate-and-paste)
@@ -645,6 +645,16 @@ caller might naturally declare as a plain `INTEGER`), make it generic over **bot
 with a default-kind `INTEGER` variable into a `Type mismatch ... passed INTEGER(4) to
 INTEGER(8)` compile error.
 
+**The rule only applies when the value can legitimately exceed int32.** It exists so a caller is
+never forced to widen a variable the library could have accepted as-is — not as a blanket style
+requirement on every integer argument. An argument whose value is bounded below `huge(1_int32)` by
+the format, by Arrow, or by the library's own guards stays a single default-kind `integer`, and
+adding a second kind for it would be noise. `parquet_open_writer`'s `chunk_size` is the worked
+example: it is a row-group row count, and a row group cannot hold more than int32 rows (see
+"Guarding a hard Arrow int32-only ceiling"), so there is deliberately no `_int64` form and its
+absence is not a defect. When declining the rule on these grounds, say so in the argument's own
+doc-comment, so the next reader does not "fix" it.
+
 Fortran constraint that shapes this: an *optional* dummy that differs only by kind cannot be
 the sole disambiguator between specific procedures in a generic interface (a call omitting it
 is ambiguous). So when such an argument is optional, carry the argument-absent case as its
@@ -842,21 +852,46 @@ library has no reader-side API to introspect a file's physical encoding, so `pya
 external tool) is the only way to confirm this end-to-end; a pure test-drive/Fortran test can only
 confirm the *data* round-trips correctly, not which encoding was used to store it.
 
-### `parquet_column` validity is ROW-granular, even for the vector kinds
+### Validity is per ELEMENT, and a vector row is not one bit
 
-`parquet_column`'s validity API (`is_null`, `set_null`, `clear_null`) indexes by **row**, bounded by
-the column's `nrows` — never by a flattened `(row - 1) * width + element` element position. On a
-`*_VEC` kind, `set_null(i)` nulls **every element of row `i`**, and `is_null(i)` answers for the row.
+`parquet_column`'s validity API comes in a **row** form and an **element** form, and the storage has
+always been `width * nrows` bits. Every query and mutation exists in both shapes — `is_null(i)` /
+`is_null(i, e)`, `set_null(i)` / `set_null(i, e)`, `clear_null(i)` / `clear_null(i, e)` — with the
+element index bounded by `width` (`check_element`), never a flattened `(row-1)*width + element`
+position.
 
-This is easy to get backwards, because the backing bitmap really is `width * nrows` bits, which makes
-flat element indexing look like the intended scheme. It is not reachable through the public API: there
-is no way to mark a single element of a vector row null. Passing a flat index instead aborts with
-`row index out of range` as soon as it exceeds `nrows` — which, on a fixture with no nulls, may not
-happen until some later code path (a write, say) starts asking about validity.
+**The row and element forms are deliberately asymmetric where they differ, and that asymmetry is the
+rule to preserve:**
 
-**Consequence to preserve and document in any new read path:** a *per-element* null in a vector column
-read from a parquet file cannot be represented and must be widened to the whole row (`if any element
-of the row is null, mark the row null`). Do not silently drop it, and do not attempt to store it.
+- A row **QUERY** answers about the row as a whole: `is_null(i)` is `.true.` when **any** element of
+  row `i` is null, and `row_validity` builds that summary. Costs O(width) with an early exit.
+- A whole-row **MUTATION** acts on every element: `set_null(i)`, `clear_null(i)` and `append_nulls`
+  mark the entire row. Naming only a row says the row is missing.
+- **`modify_nulls=.false.` protects individual null ELEMENTS**, not whole rows: a vector row with one
+  null element still has its other elements written.
+
+Each operation acts at the granularity the caller named — that one sentence generates all three.
+
+**Shapes must match on every paired API.** A rank-1 `values` takes a rank-1 `is_valid`; a rank-2
+`values` takes a rank-2 `is_valid`, shaped `(width, nrows)`. This holds for `parquet_read_column`,
+`parquet_write_column` (both always did), and now for the table's `%get`/`%col`/`%get_slice`/`%set`.
+There is no rank-1 form for a vector column and no widening anywhere. The **standalone** mask APIs
+are the deliberate exception, because they have no values to match: `%get_valid_mask` and
+`%set_null(mask)` accept **either** rank, where rank-1 is the row summary ("which rows are
+complete?") and rank-2 the true element state. Both are unambiguous because the mask is a required
+argument there — do not "fix" that asymmetry.
+
+**When walking the bitmap in bulk, iterate the SET BITS, not all 64 positions of a nonzero word.**
+`row_validity`/`element_validity` use `trailz` + `ibclr`. Testing every position instead makes a
+densely-null wide column cost `width` times more — measured at 2.7x on a width-16 column that is
+half null, against 2.2x *faster* than the pre-element-null implementation with the bit-scan. The
+zero-word skip is what keeps the null-free path free and must stay.
+
+**Do not reintroduce widening in a new read or write path.** A per-element null read from a file is
+stored as such (`set_validity` writes the whole mask in one pass rather than replaying `width*nrows`
+setter calls), and a table write hands the element mask straight to the writer. `feature_write.md`
+and `feature_element_nulls.md` record the design; the round-trip test in `test/test_table.f90`
+(`test_element_null_round_trip`) is what catches a regression, in both directions at once.
 
 ### A `parquet_table` pointer does not survive a ROW-structural mutation
 

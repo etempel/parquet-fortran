@@ -142,6 +142,12 @@ def gen_spec():
 !! * **Validity is sparse.** A column with no nulls allocates NO bitmap at all -- only a
 !!   logical scalar. The bitmap appears on the first `set_null`/`append_nulls` and disappears
 !!   again on a whole-column `set_all` (or an explicit `compact_validity`).
+!! * **Validity is per ELEMENT, and a vector row is not one bit.** The bitmap is
+!!   `width * nrows` bits, and every query and mutation comes in a row form and an `(i, e)`
+!!   element form. The two are deliberately asymmetric where they differ: a row QUERY
+!!   (`is_null(i)`, `row_validity`) answers "any element of the row is null", while a whole-row
+!!   MUTATION (`set_null(i)`, `clear_null(i)`, `append_nulls`) acts on every element of it.
+!!   `modify_nulls=.false.` skips individual null ELEMENTS, not whole rows.
 !! * **Row indices are `integer(int64)` throughout.** This type is internal to the library and
 !!   never sees a caller's default-kind `INTEGER`, so it deliberately does not carry the
 !!   int32/int64 specific pairs the public API uses.
@@ -205,11 +211,23 @@ module parquet_columns
         procedure :: unit_string                       !! Copy out the unit string ("" when unset).
         procedure :: set_unit                          !! Set (or clear) the unit string.
         procedure :: any_null                          !! Whether the column holds at least one null.
-        procedure :: is_null                           !! Whether element i is null.
+        procedure, private :: is_null_row               !! is_null specific taking a row index alone.
+        procedure, private :: is_null_elem              !! is_null specific taking a row and an element.
+        !> Whether row `i` (or, with `e`, element `e` of row `i`) is null. On a vector kind the
+        !! row form answers "ANY element of the row is null"; see the module doc.
+        generic :: is_null => is_null_row, is_null_elem
         procedure :: row_validity                      !! Build the whole per-row validity mask at once.
+        procedure :: element_validity                  !! Build the whole per-ELEMENT validity mask at once.
         ! --- validity mutation (sparse: see the module doc) ---
-        procedure :: set_null                          !! Mark element i null.
-        procedure :: clear_null                        !! Mark element i valid (value left unspecified).
+        procedure, private :: set_null_row              !! set_null specific taking a row index alone.
+        procedure, private :: set_null_elem             !! set_null specific taking a row and an element.
+        !> Marks row `i` null, or with `e` just element `e` of it.
+        generic :: set_null => set_null_row, set_null_elem
+        procedure, private :: clear_null_row            !! clear_null specific taking a row index alone.
+        procedure, private :: clear_null_elem           !! clear_null specific taking a row and an element.
+        !> Marks row `i` valid, or with `e` just element `e` of it.
+        generic :: clear_null => clear_null_row, clear_null_elem
+        procedure :: set_validity                      !! Write a whole per-ELEMENT validity mask in one pass.
         procedure :: compact_validity                  !! Drop the bitmap when no nulls remain.
         ! --- structural mutation ---
         procedure :: append                            !! Append another column of identical kind/width.
@@ -359,13 +377,29 @@ module parquet_columns
             class(parquet_column), intent(inout) :: self !! the column (null cache may be refreshed).
             logical :: res                               !! .true. when at least one row is null.
         end function any_null
-        !> Whether element `i` is null. For a *_VEC kind this is row `i`'s FIRST element; use
-        !! `is_null_element` semantics via the bitmap when per-element nulls matter.
-        module function is_null(self, i) result(res)
+        !> Whether row `i` is null. On a *_VEC kind that means **any element** of the row is null.
+        !!
+        !! The row forms of the validity API are deliberately asymmetric, and the asymmetry is the
+        !! useful one: a QUERY answers about the row as a whole ("is anything here missing?"),
+        !! while a whole-row MUTATION (`set_null(i)`/`clear_null(i)`) acts on every element. Use
+        !! the `(i, e)` forms whenever a single element is what is meant.
+        module function is_null_row(self, i) result(res)
             class(parquet_column), intent(in) :: self !! the column.
             integer(int64), intent(in) :: i           !! 1-based row index.
-            logical :: res                            !! .true. when the row is null.
-        end function is_null
+            logical :: res                            !! .true. when any element of the row is null.
+        end function is_null_row
+        !> Whether element `e` of row `i` is null.
+        !!
+        !! Defined for every kind, scalar included -- on a scalar column `width` is 1, so `e` can
+        !! only be 1 and the answer equals the row form. That is deliberate: generic code (the
+        !! generated table accessors, a caller's own loop) can use one shape for both without
+        !! branching on the kind.
+        module function is_null_elem(self, i, e) result(res)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            integer(int64), intent(in) :: e           !! 1-based element index within the row.
+            logical :: res                            !! .true. when that element is null.
+        end function is_null_elem
         !> Fills `valid` with one entry per row: `.true.` where the row is not null.
         !!
         !! The bulk counterpart of `is_null`, and worth having as its own entry point rather than
@@ -381,16 +415,59 @@ module parquet_columns
             class(parquet_column), intent(inout) :: self  !! the column (null cache may be refreshed).
             logical, allocatable, intent(out) :: valid(:) !! per-row mask, or unallocated when no nulls.
         end subroutine row_validity
-        !> Marks row `i` null, allocating the bitmap on first use (R2).
-        module subroutine set_null(self, i)
+        !> Fills `valid` with one entry per ELEMENT, shaped `(width, nrows)`: the column's true
+        !! validity state, without the row summary `row_validity` applies.
+        !!
+        !! Same contract as `row_validity` in every other respect, and for the same reasons: a
+        !! null-free column returns an UNALLOCATED `valid` (so it reaches an `optional` dummy as an
+        !! absent argument and costs nothing), and the bitmap is walked a 64-bit word at a time
+        !! rather than a call per element. This is the shape `parquet_write_column` takes for a
+        !! vector column, so a table write can hand it straight on.
+        !!
+        !! **Note the memory**: `LOGICAL` is 4 bytes under gfortran, so this is `4*width*nrows`
+        !! bytes -- for a wide column, orders of magnitude more than the bitmap it is built from.
+        !! Ask for it when the whole mask is genuinely needed; use `is_null(i, e)` for a few
+        !! elements.
+        module subroutine element_validity(self, valid)
+            class(parquet_column), intent(inout) :: self    !! the column (null cache may be refreshed).
+            logical, allocatable, intent(out) :: valid(:,:) !! (element, row) mask, or unallocated when no nulls.
+        end subroutine element_validity
+        !> Writes a whole per-ELEMENT validity mask in one pass: `.false.` marks that element null.
+        !!
+        !! The bulk counterpart of `set_null(i, e)`, and the reason the read path can stop widening
+        !! without paying for it: replaying a mask element by element would cost `width*nrows`
+        !! type-bound calls, where this writes the bitmap directly. `valid` must be shaped
+        !! `(width, nrows)` exactly.
+        !!
+        !! Only ever ADDS nulls -- an element whose entry is `.true.` is left exactly as it is, so
+        !! this composes with a mask describing only part of what the caller knows, and never
+        !! resurrects a value that was already null.
+        module subroutine set_validity(self, valid)
+            class(parquet_column), intent(inout) :: self !! the column.
+            logical, intent(in) :: valid(:,:)            !! (element, row); .false. marks that element null.
+        end subroutine set_validity
+        !> Marks every element of row `i` null, allocating the bitmap on first use (R2).
+        module subroutine set_null_row(self, i)
             class(parquet_column), intent(inout) :: self !! the column.
             integer(int64), intent(in) :: i              !! 1-based row index.
-        end subroutine set_null
-        !> Marks row `i` valid. The value behind it is unspecified until written.
-        module subroutine clear_null(self, i)
+        end subroutine set_null_row
+        !> Marks element `e` of row `i` null, allocating the bitmap on first use (R2).
+        module subroutine set_null_elem(self, i, e)
             class(parquet_column), intent(inout) :: self !! the column.
             integer(int64), intent(in) :: i              !! 1-based row index.
-        end subroutine clear_null
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+        end subroutine set_null_elem
+        !> Marks every element of row `i` valid. The values behind them are unspecified until written.
+        module subroutine clear_null_row(self, i)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+        end subroutine clear_null_row
+        !> Marks element `e` of row `i` valid. The value behind it is unspecified until written.
+        module subroutine clear_null_elem(self, i, e)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+        end subroutine clear_null_elem
         !> Scans for remaining nulls and releases the bitmap when none are found (R2 iv).
         module subroutine compact_validity(self)
             class(parquet_column), intent(inout) :: self !! the column.
@@ -574,6 +651,17 @@ module parquet_columns
             integer(int64), intent(in) :: i           !! the offending 1-based row index.
             character(len=*), intent(in) :: proc      !! calling procedure name (for the message).
         end subroutine check_index
+        !> Aborts unless `e` is a valid 1-based element index WITHIN a row, i.e. `1 <= e <= width`.
+        !!
+        !! The companion to `check_index` for the element forms of the validity API. Keeping the
+        !! two separate is what makes a flat element index passed where a row was meant fail with
+        !! a message about the right axis: on a scalar column `width` is 1, so anything but 1 is
+        !! rejected immediately rather than silently addressing another row's storage.
+        module subroutine check_element(self, e, proc)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: e           !! the offending 1-based element index.
+            character(len=*), intent(in) :: proc      !! calling procedure name (for the message).
+        end subroutine check_element
         !> Aborts unless `n` matches the column's own row count.
         module subroutine check_nrows(self, n, proc)
             class(parquet_column), intent(in) :: self !! the column.
@@ -707,8 +795,14 @@ def gen_access():
 !!
 !! Validity handling follows the RF9 rule table: writing a value CLEARS that row's null bit, so
 !! a default `set_all` drops the bitmap outright (O(1), no scan); `modify_nulls=.false.` leaves
-!! both the null rows and the bitmap untouched. Temporal kinds carry their null state inside
+!! the null entries and the bitmap untouched. Temporal kinds carry their null state inside
 !! the element, so they only invalidate the cached null flag.
+!!
+!! **`modify_nulls=.false.` skips null ELEMENTS, not whole rows.** On a vector kind it writes
+!! every element whose own bit is clear and leaves the null ones alone, rather than refusing the
+!! whole row because one element of it is null -- matching the rule that each operation acts at
+!! the granularity the caller named. The default (`.true.`) path is untouched by this and stays a
+!! single whole-array assignment with no per-element work, so the common case costs nothing.
 submodule (parquet_columns) parquet_columns_access
     implicit none
 contains""")
@@ -793,14 +887,22 @@ contains""")
     end procedure get_at_{tag}
     !
     module procedure set_at_{tag}
-        logical :: mod_nulls{"" if temporal else chr(10) + "        integer(int64) :: e, base"}
+        logical :: mod_nulls
+        integer(int64) :: e, base
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
         call check_kind(self, {pk}, "set_at")
         call check_index(self, i, "set_at")
         call check_width(self, size(value, kind=int64), "set_at")
+        ! modify_nulls=.false. protects individual null ELEMENTS, not the whole row: every
+        ! element whose own bit is clear is written, and the null ones are left as they are.
         if (.not. mod_nulls) then
-            if (self%is_null(i)) return
+            base = int(self%width, int64)
+            do e = 1_int64, base
+                if (self%is_null(i, e)) cycle
+                self%{comp}(e, i) = value(e)
+            end do
+            return
         end if
         self%{comp}(:, i) = value""")
             if temporal:
@@ -816,7 +918,7 @@ contains""")
     !
     module procedure set_all_{tag}
         logical :: mod_nulls
-        integer(int64) :: k
+        integer(int64) :: k, e
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
         call check_kind(self, {pk}, "set_all")
@@ -829,9 +931,13 @@ contains""")
             else:
                 w("            call drop_bitmap(self)")
             w("""        else
+            ! Per ELEMENT, not per row -- see this file's header. A row with one null element
+            ! still has its other elements written.
             do k = 1_int64, self%nrows
-                if (self%is_null(k)) cycle
-                self%""" + comp + """(:, k) = values(:, k)
+                do e = 1_int64, int(self%width, int64)
+                    if (self%is_null(k, e)) cycle
+                    self%""" + comp + """(e, k) = values(e, k)
+                end do
             end do""")
             if temporal:
                 w("            self%nulls_dirty = .true.")

@@ -12,8 +12,14 @@
 !!
 !! Validity handling follows the RF9 rule table: writing a value CLEARS that row's null bit, so
 !! a default `set_all` drops the bitmap outright (O(1), no scan); `modify_nulls=.false.` leaves
-!! both the null rows and the bitmap untouched. Temporal kinds carry their null state inside
+!! the null entries and the bitmap untouched. Temporal kinds carry their null state inside
 !! the element, so they only invalidate the cached null flag.
+!!
+!! **`modify_nulls=.false.` skips null ELEMENTS, not whole rows.** On a vector kind it writes
+!! every element whose own bit is clear and leaves the null ones alone, rather than refusing the
+!! whole row because one element of it is null -- matching the rule that each operation acts at
+!! the granularity the caller named. The default (`.true.`) path is untouched by this and stays a
+!! single whole-array assignment with no per-element work, so the common case costs nothing.
 submodule (parquet_columns) parquet_columns_access
     implicit none
 contains
@@ -495,8 +501,15 @@ contains
         call check_kind(self, PK_INT32_VEC, "set_at")
         call check_index(self, i, "set_at")
         call check_width(self, size(value, kind=int64), "set_at")
+        ! modify_nulls=.false. protects individual null ELEMENTS, not the whole row: every
+        ! element whose own bit is clear is written, and the null ones are left as they are.
         if (.not. mod_nulls) then
-            if (self%is_null(i)) return
+            base = int(self%width, int64)
+            do e = 1_int64, base
+                if (self%is_null(i, e)) cycle
+                self%i32v(e, i) = value(e)
+            end do
+            return
         end if
         self%i32v(:, i) = value
         if (self%has_nulls) then
@@ -509,7 +522,7 @@ contains
     !
     module procedure set_all_i32v
         logical :: mod_nulls
-        integer(int64) :: k
+        integer(int64) :: k, e
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
         call check_kind(self, PK_INT32_VEC, "set_all")
@@ -519,9 +532,13 @@ contains
             self%i32v(:, 1:self%nrows) = values
             call drop_bitmap(self)
         else
+            ! Per ELEMENT, not per row -- see this file's header. A row with one null element
+            ! still has its other elements written.
             do k = 1_int64, self%nrows
-                if (self%is_null(k)) cycle
-                self%i32v(:, k) = values(:, k)
+                do e = 1_int64, int(self%width, int64)
+                    if (self%is_null(k, e)) cycle
+                    self%i32v(e, k) = values(e, k)
+                end do
             end do
         end if
     end procedure set_all_i32v
@@ -560,8 +577,15 @@ contains
         call check_kind(self, PK_INT64_VEC, "set_at")
         call check_index(self, i, "set_at")
         call check_width(self, size(value, kind=int64), "set_at")
+        ! modify_nulls=.false. protects individual null ELEMENTS, not the whole row: every
+        ! element whose own bit is clear is written, and the null ones are left as they are.
         if (.not. mod_nulls) then
-            if (self%is_null(i)) return
+            base = int(self%width, int64)
+            do e = 1_int64, base
+                if (self%is_null(i, e)) cycle
+                self%i64v(e, i) = value(e)
+            end do
+            return
         end if
         self%i64v(:, i) = value
         if (self%has_nulls) then
@@ -574,7 +598,7 @@ contains
     !
     module procedure set_all_i64v
         logical :: mod_nulls
-        integer(int64) :: k
+        integer(int64) :: k, e
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
         call check_kind(self, PK_INT64_VEC, "set_all")
@@ -584,9 +608,13 @@ contains
             self%i64v(:, 1:self%nrows) = values
             call drop_bitmap(self)
         else
+            ! Per ELEMENT, not per row -- see this file's header. A row with one null element
+            ! still has its other elements written.
             do k = 1_int64, self%nrows
-                if (self%is_null(k)) cycle
-                self%i64v(:, k) = values(:, k)
+                do e = 1_int64, int(self%width, int64)
+                    if (self%is_null(k, e)) cycle
+                    self%i64v(e, k) = values(e, k)
+                end do
             end do
         end if
     end procedure set_all_i64v
@@ -625,8 +653,15 @@ contains
         call check_kind(self, PK_FLOAT32_VEC, "set_at")
         call check_index(self, i, "set_at")
         call check_width(self, size(value, kind=int64), "set_at")
+        ! modify_nulls=.false. protects individual null ELEMENTS, not the whole row: every
+        ! element whose own bit is clear is written, and the null ones are left as they are.
         if (.not. mod_nulls) then
-            if (self%is_null(i)) return
+            base = int(self%width, int64)
+            do e = 1_int64, base
+                if (self%is_null(i, e)) cycle
+                self%f32v(e, i) = value(e)
+            end do
+            return
         end if
         self%f32v(:, i) = value
         if (self%has_nulls) then
@@ -639,7 +674,7 @@ contains
     !
     module procedure set_all_f32v
         logical :: mod_nulls
-        integer(int64) :: k
+        integer(int64) :: k, e
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
         call check_kind(self, PK_FLOAT32_VEC, "set_all")
@@ -649,9 +684,13 @@ contains
             self%f32v(:, 1:self%nrows) = values
             call drop_bitmap(self)
         else
+            ! Per ELEMENT, not per row -- see this file's header. A row with one null element
+            ! still has its other elements written.
             do k = 1_int64, self%nrows
-                if (self%is_null(k)) cycle
-                self%f32v(:, k) = values(:, k)
+                do e = 1_int64, int(self%width, int64)
+                    if (self%is_null(k, e)) cycle
+                    self%f32v(e, k) = values(e, k)
+                end do
             end do
         end if
     end procedure set_all_f32v
@@ -690,8 +729,15 @@ contains
         call check_kind(self, PK_FLOAT64_VEC, "set_at")
         call check_index(self, i, "set_at")
         call check_width(self, size(value, kind=int64), "set_at")
+        ! modify_nulls=.false. protects individual null ELEMENTS, not the whole row: every
+        ! element whose own bit is clear is written, and the null ones are left as they are.
         if (.not. mod_nulls) then
-            if (self%is_null(i)) return
+            base = int(self%width, int64)
+            do e = 1_int64, base
+                if (self%is_null(i, e)) cycle
+                self%f64v(e, i) = value(e)
+            end do
+            return
         end if
         self%f64v(:, i) = value
         if (self%has_nulls) then
@@ -704,7 +750,7 @@ contains
     !
     module procedure set_all_f64v
         logical :: mod_nulls
-        integer(int64) :: k
+        integer(int64) :: k, e
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
         call check_kind(self, PK_FLOAT64_VEC, "set_all")
@@ -714,9 +760,13 @@ contains
             self%f64v(:, 1:self%nrows) = values
             call drop_bitmap(self)
         else
+            ! Per ELEMENT, not per row -- see this file's header. A row with one null element
+            ! still has its other elements written.
             do k = 1_int64, self%nrows
-                if (self%is_null(k)) cycle
-                self%f64v(:, k) = values(:, k)
+                do e = 1_int64, int(self%width, int64)
+                    if (self%is_null(k, e)) cycle
+                    self%f64v(e, k) = values(e, k)
+                end do
             end do
         end if
     end procedure set_all_f64v
@@ -755,8 +805,15 @@ contains
         call check_kind(self, PK_LOGICAL_VEC, "set_at")
         call check_index(self, i, "set_at")
         call check_width(self, size(value, kind=int64), "set_at")
+        ! modify_nulls=.false. protects individual null ELEMENTS, not the whole row: every
+        ! element whose own bit is clear is written, and the null ones are left as they are.
         if (.not. mod_nulls) then
-            if (self%is_null(i)) return
+            base = int(self%width, int64)
+            do e = 1_int64, base
+                if (self%is_null(i, e)) cycle
+                self%boolv(e, i) = value(e)
+            end do
+            return
         end if
         self%boolv(:, i) = value
         if (self%has_nulls) then
@@ -769,7 +826,7 @@ contains
     !
     module procedure set_all_boolv
         logical :: mod_nulls
-        integer(int64) :: k
+        integer(int64) :: k, e
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
         call check_kind(self, PK_LOGICAL_VEC, "set_all")
@@ -779,9 +836,13 @@ contains
             self%boolv(:, 1:self%nrows) = values
             call drop_bitmap(self)
         else
+            ! Per ELEMENT, not per row -- see this file's header. A row with one null element
+            ! still has its other elements written.
             do k = 1_int64, self%nrows
-                if (self%is_null(k)) cycle
-                self%boolv(:, k) = values(:, k)
+                do e = 1_int64, int(self%width, int64)
+                    if (self%is_null(k, e)) cycle
+                    self%boolv(e, k) = values(e, k)
+                end do
             end do
         end if
     end procedure set_all_boolv
@@ -814,13 +875,21 @@ contains
     !
     module procedure set_at_datev
         logical :: mod_nulls
+        integer(int64) :: e, base
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
         call check_kind(self, PK_DATE_VEC, "set_at")
         call check_index(self, i, "set_at")
         call check_width(self, size(value, kind=int64), "set_at")
+        ! modify_nulls=.false. protects individual null ELEMENTS, not the whole row: every
+        ! element whose own bit is clear is written, and the null ones are left as they are.
         if (.not. mod_nulls) then
-            if (self%is_null(i)) return
+            base = int(self%width, int64)
+            do e = 1_int64, base
+                if (self%is_null(i, e)) cycle
+                self%dtv(e, i) = value(e)
+            end do
+            return
         end if
         self%dtv(:, i) = value
         self%nulls_dirty = .true.
@@ -828,7 +897,7 @@ contains
     !
     module procedure set_all_datev
         logical :: mod_nulls
-        integer(int64) :: k
+        integer(int64) :: k, e
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
         call check_kind(self, PK_DATE_VEC, "set_all")
@@ -838,9 +907,13 @@ contains
             self%dtv(:, 1:self%nrows) = values
             self%nulls_dirty = .true.
         else
+            ! Per ELEMENT, not per row -- see this file's header. A row with one null element
+            ! still has its other elements written.
             do k = 1_int64, self%nrows
-                if (self%is_null(k)) cycle
-                self%dtv(:, k) = values(:, k)
+                do e = 1_int64, int(self%width, int64)
+                    if (self%is_null(k, e)) cycle
+                    self%dtv(e, k) = values(e, k)
+                end do
             end do
             self%nulls_dirty = .true.
         end if
@@ -875,13 +948,21 @@ contains
     !
     module procedure set_at_timev
         logical :: mod_nulls
+        integer(int64) :: e, base
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
         call check_kind(self, PK_TIME_VEC, "set_at")
         call check_index(self, i, "set_at")
         call check_width(self, size(value, kind=int64), "set_at")
+        ! modify_nulls=.false. protects individual null ELEMENTS, not the whole row: every
+        ! element whose own bit is clear is written, and the null ones are left as they are.
         if (.not. mod_nulls) then
-            if (self%is_null(i)) return
+            base = int(self%width, int64)
+            do e = 1_int64, base
+                if (self%is_null(i, e)) cycle
+                self%tmv(e, i) = value(e)
+            end do
+            return
         end if
         self%tmv(:, i) = value
         self%nulls_dirty = .true.
@@ -889,7 +970,7 @@ contains
     !
     module procedure set_all_timev
         logical :: mod_nulls
-        integer(int64) :: k
+        integer(int64) :: k, e
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
         call check_kind(self, PK_TIME_VEC, "set_all")
@@ -899,9 +980,13 @@ contains
             self%tmv(:, 1:self%nrows) = values
             self%nulls_dirty = .true.
         else
+            ! Per ELEMENT, not per row -- see this file's header. A row with one null element
+            ! still has its other elements written.
             do k = 1_int64, self%nrows
-                if (self%is_null(k)) cycle
-                self%tmv(:, k) = values(:, k)
+                do e = 1_int64, int(self%width, int64)
+                    if (self%is_null(k, e)) cycle
+                    self%tmv(e, k) = values(e, k)
+                end do
             end do
             self%nulls_dirty = .true.
         end if
@@ -936,13 +1021,21 @@ contains
     !
     module procedure set_at_tsv
         logical :: mod_nulls
+        integer(int64) :: e, base
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
         call check_kind(self, PK_TIMESTAMP_VEC, "set_at")
         call check_index(self, i, "set_at")
         call check_width(self, size(value, kind=int64), "set_at")
+        ! modify_nulls=.false. protects individual null ELEMENTS, not the whole row: every
+        ! element whose own bit is clear is written, and the null ones are left as they are.
         if (.not. mod_nulls) then
-            if (self%is_null(i)) return
+            base = int(self%width, int64)
+            do e = 1_int64, base
+                if (self%is_null(i, e)) cycle
+                self%tsv(e, i) = value(e)
+            end do
+            return
         end if
         self%tsv(:, i) = value
         self%nulls_dirty = .true.
@@ -950,7 +1043,7 @@ contains
     !
     module procedure set_all_tsv
         logical :: mod_nulls
-        integer(int64) :: k
+        integer(int64) :: k, e
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
         call check_kind(self, PK_TIMESTAMP_VEC, "set_all")
@@ -960,9 +1053,13 @@ contains
             self%tsv(:, 1:self%nrows) = values
             self%nulls_dirty = .true.
         else
+            ! Per ELEMENT, not per row -- see this file's header. A row with one null element
+            ! still has its other elements written.
             do k = 1_int64, self%nrows
-                if (self%is_null(k)) cycle
-                self%tsv(:, k) = values(:, k)
+                do e = 1_int64, int(self%width, int64)
+                    if (self%is_null(k, e)) cycle
+                    self%tsv(e, k) = values(e, k)
+                end do
             end do
             self%nulls_dirty = .true.
         end if

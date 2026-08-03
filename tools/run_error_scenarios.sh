@@ -129,6 +129,7 @@ scenarios=(
     "write_column_twice_no_schema:1"
     "write_maml_without_metadata:1"
     "write_protected_column_with_null:1"
+    "write_protected_vector_element_null:1"
     "write_values_not_divisible_by_col_size:1"
     "write_int64_to_int32_overflow:1"
     "write_float_to_int32_non_integral:1"

@@ -54,6 +54,13 @@ contains
         isnull = self%cache%cols(idx)%values%is_null(self%irow)
     end procedure row_is_null
     !
+    module procedure row_is_null_elem
+        integer :: idx
+        !
+        call row_resolve(self, name, "is_null", idx)
+        isnull = self%cache%cols(idx)%values%is_null(self%irow, e)
+    end procedure row_is_null_elem
+    !
     module procedure row_resolve
         character(len=:), allocatable :: sfx
         !

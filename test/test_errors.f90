@@ -477,6 +477,8 @@ contains
                 test_validate_protected_cols_unknown_name_aborts), &
             new_unittest("writing a Null into a protected column aborts", &
                 test_write_protected_column_with_null_aborts), &
+            new_unittest("a null element of a protected vector column aborts", &
+                test_write_protected_vector_element_null_aborts), &
             new_unittest("qc: min value that does not parse as a number aborts", &
                 test_validate_qc_min_not_numeric_aborts), &
             new_unittest("qc: max value that does not parse as a number aborts", &
@@ -3735,6 +3737,15 @@ contains
         call check_scenario_exit_status(error, "write_protected_column_with_null", expect_abort=.true., &
             failure_message="writing a Null (via is_valid) into a protected column was expected to error stop")
     end subroutine test_write_protected_column_with_null_aborts
+
+    !> The element-granular counterpart: ONE null element of a protected vector column, which
+    !> could not reach the check at all until validity stopped being widened to the row.
+    subroutine test_write_protected_vector_element_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "write_protected_vector_element_null", expect_abort=.true., &
+            failure_message="one Null ELEMENT of a protected vector column was expected to error stop")
+    end subroutine test_write_protected_vector_element_null_aborts
 
     subroutine test_validate_qc_min_not_numeric_aborts(error)
         type(error_type), allocatable, intent(out) :: error

@@ -408,6 +408,644 @@ contains
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_arr_strcol
     !
+    module procedure table_column_stat_text
+        min_s = "-"
+        max_s = "-"
+        select case (values%kindof())
+        case (PK_INT32)
+            call stat_i32(values, min_s, max_s)
+        case (PK_INT64)
+            call stat_i64(values, min_s, max_s)
+        case (PK_FLOAT32)
+            call stat_f32(values, min_s, max_s)
+        case (PK_FLOAT64)
+            call stat_f64(values, min_s, max_s)
+        case (PK_LOGICAL)
+            call stat_bool(values, min_s, max_s)
+        case (PK_STRING)
+            call stat_str(values, min_s, max_s)
+        case (PK_DATE)
+            call stat_date(values, min_s, max_s)
+        case (PK_TIME)
+            call stat_time(values, min_s, max_s)
+        case (PK_TIMESTAMP)
+            call stat_ts(values, min_s, max_s)
+        case (PK_INT32_VEC)
+            call stat_i32v(values, min_s, max_s)
+        case (PK_INT64_VEC)
+            call stat_i64v(values, min_s, max_s)
+        case (PK_FLOAT32_VEC)
+            call stat_f32v(values, min_s, max_s)
+        case (PK_FLOAT64_VEC)
+            call stat_f64v(values, min_s, max_s)
+        case (PK_LOGICAL_VEC)
+            call stat_boolv(values, min_s, max_s)
+        case (PK_STRING_VEC)
+            call stat_strv(values, min_s, max_s)
+        case (PK_DATE_VEC)
+            call stat_datev(values, min_s, max_s)
+        case (PK_TIME_VEC)
+            call stat_timev(values, min_s, max_s)
+        case (PK_TIMESTAMP_VEC)
+            call stat_tsv(values, min_s, max_s)
+        case default
+            ! PK_NONE, and the reserved container kinds: nothing to summarize.
+            return
+        end select
+    end procedure table_column_stat_text
+    !
+    !> PK_INT32: smallest and largest value, over the rows that hold one.
+    subroutine stat_i32(values, min_s, max_s)
+        type(parquet_column), intent(in) :: values             !! the column.
+        character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
+        character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
+        integer(int32), pointer :: p(:)
+        integer(int32) :: mn, mx
+        integer(int64) :: i
+        logical :: first
+        character(len=32) :: buf
+        !
+        min_s = "-"
+        max_s = "-"
+        first = .true.
+        call values%data_ptr(p)
+        do i = 1_int64, values%length()
+            if (values%is_null(i)) cycle
+                if (first) then
+                    mn = p(i)
+                    mx = p(i)
+                    first = .false.
+                else
+                    mn = min(mn, p(i))
+                    mx = max(mx, p(i))
+                end if
+        end do
+        if (first) return
+        write(buf, "(I0)") mn
+        min_s = trim(adjustl(buf))
+        write(buf, "(I0)") mx
+        max_s = trim(adjustl(buf))
+    end subroutine stat_i32
+
+    !> PK_INT64: smallest and largest value, over the rows that hold one.
+    subroutine stat_i64(values, min_s, max_s)
+        type(parquet_column), intent(in) :: values             !! the column.
+        character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
+        character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
+        integer(int64), pointer :: p(:)
+        integer(int64) :: mn, mx
+        integer(int64) :: i
+        logical :: first
+        character(len=32) :: buf
+        !
+        min_s = "-"
+        max_s = "-"
+        first = .true.
+        call values%data_ptr(p)
+        do i = 1_int64, values%length()
+            if (values%is_null(i)) cycle
+                if (first) then
+                    mn = p(i)
+                    mx = p(i)
+                    first = .false.
+                else
+                    mn = min(mn, p(i))
+                    mx = max(mx, p(i))
+                end if
+        end do
+        if (first) return
+        write(buf, "(I0)") mn
+        min_s = trim(adjustl(buf))
+        write(buf, "(I0)") mx
+        max_s = trim(adjustl(buf))
+    end subroutine stat_i64
+
+    !> PK_FLOAT32: smallest and largest value, over the rows that hold one.
+    subroutine stat_f32(values, min_s, max_s)
+        type(parquet_column), intent(in) :: values             !! the column.
+        character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
+        character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
+        real(real32), pointer :: p(:)
+        real(real32) :: mn, mx
+        integer(int64) :: i
+        logical :: first
+        character(len=32) :: buf
+        !
+        min_s = "-"
+        max_s = "-"
+        first = .true.
+        call values%data_ptr(p)
+        do i = 1_int64, values%length()
+            if (values%is_null(i)) cycle
+                if (first) then
+                    mn = p(i)
+                    mx = p(i)
+                    first = .false.
+                else
+                    mn = min(mn, p(i))
+                    mx = max(mx, p(i))
+                end if
+        end do
+        if (first) return
+        write(buf, "(G0.6)") mn
+        min_s = trim(adjustl(buf))
+        write(buf, "(G0.6)") mx
+        max_s = trim(adjustl(buf))
+    end subroutine stat_f32
+
+    !> PK_FLOAT64: smallest and largest value, over the rows that hold one.
+    subroutine stat_f64(values, min_s, max_s)
+        type(parquet_column), intent(in) :: values             !! the column.
+        character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
+        character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
+        real(real64), pointer :: p(:)
+        real(real64) :: mn, mx
+        integer(int64) :: i
+        logical :: first
+        character(len=32) :: buf
+        !
+        min_s = "-"
+        max_s = "-"
+        first = .true.
+        call values%data_ptr(p)
+        do i = 1_int64, values%length()
+            if (values%is_null(i)) cycle
+                if (first) then
+                    mn = p(i)
+                    mx = p(i)
+                    first = .false.
+                else
+                    mn = min(mn, p(i))
+                    mx = max(mx, p(i))
+                end if
+        end do
+        if (first) return
+        write(buf, "(G0.6)") mn
+        min_s = trim(adjustl(buf))
+        write(buf, "(G0.6)") mx
+        max_s = trim(adjustl(buf))
+    end subroutine stat_f64
+
+    !> PK_LOGICAL: true/false counts rather than an ordering.
+    subroutine stat_bool(values, min_s, max_s)
+        type(parquet_column), intent(in) :: values             !! the column.
+        character(len=:), allocatable, intent(out) :: min_s    !! "T:<n>".
+        character(len=:), allocatable, intent(out) :: max_s    !! "F:<n>".
+        logical, pointer :: p(:)
+        integer(int64) :: i, nt, nf
+        character(len=32) :: buf
+        !
+        nt = 0_int64
+        nf = 0_int64
+        call values%data_ptr(p)
+        do i = 1_int64, values%length()
+            if (values%is_null(i)) cycle
+                if (p(i)) then
+                    nt = nt + 1
+                else
+                    nf = nf + 1
+                end if
+        end do
+        write(buf, "(I0)") nt
+        min_s = "T:" // trim(buf)
+        write(buf, "(I0)") nf
+        max_s = "F:" // trim(buf)
+    end subroutine stat_bool
+
+    !> PK_STRING: lexicographically smallest and largest value.
+    subroutine stat_str(values, min_s, max_s)
+        type(parquet_column), intent(in) :: values             !! the column.
+        character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
+        character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
+        type(parquet_string_column), pointer :: store
+        character(len=:), allocatable :: sv
+        integer(int64) :: i, n
+        logical :: first
+        !
+        min_s = "-"
+        max_s = "-"
+        first = .true.
+        call values%string_column(store)
+        n = values%length()
+        do i = 1_int64, n
+            if (store%is_null(i)) cycle
+            call store%get(i, sv)
+            ! Trimmed for display only: a vector string column stores its values blank-padded to
+            ! the widest element, and printing that padding says nothing. Fortran's own comparison
+            ! blank-pads the shorter operand anyway, so trimming cannot change which value wins.
+            sv = trim(sv)
+            if (first) then
+                min_s = sv
+                max_s = sv
+                first = .false.
+            else
+                if (sv < min_s) min_s = sv
+                if (max_s < sv) max_s = sv
+            end if
+        end do
+    end subroutine stat_str
+
+    !> PK_DATE: earliest and latest value, in ISO-8601 form.
+    subroutine stat_date(values, min_s, max_s)
+        type(parquet_column), intent(in) :: values             !! the column.
+        character(len=:), allocatable, intent(out) :: min_s    !! earliest value, or "-".
+        character(len=:), allocatable, intent(out) :: max_s    !! latest value, or "-".
+        type(parquet_date), pointer :: p(:)
+        type(parquet_date) :: mn, mx
+        integer(int64) :: i
+        logical :: first
+        !
+        min_s = "-"
+        max_s = "-"
+        first = .true.
+        call values%data_ptr(p)
+        do i = 1_int64, values%length()
+            if (values%is_null(i)) cycle
+            if (p(i)%is_null()) cycle
+                if (first) then
+                    mn = p(i)
+                    mx = p(i)
+                    first = .false.
+                else
+                    if (p(i) < mn) mn = p(i)
+                    if (mx < p(i)) mx = p(i)
+                end if
+        end do
+        if (first) return
+        call mn%to_string(min_s)
+        call mx%to_string(max_s)
+    end subroutine stat_date
+
+    !> PK_TIME: earliest and latest value, in ISO-8601 form.
+    subroutine stat_time(values, min_s, max_s)
+        type(parquet_column), intent(in) :: values             !! the column.
+        character(len=:), allocatable, intent(out) :: min_s    !! earliest value, or "-".
+        character(len=:), allocatable, intent(out) :: max_s    !! latest value, or "-".
+        type(parquet_time), pointer :: p(:)
+        type(parquet_time) :: mn, mx
+        integer(int64) :: i
+        logical :: first
+        !
+        min_s = "-"
+        max_s = "-"
+        first = .true.
+        call values%data_ptr(p)
+        do i = 1_int64, values%length()
+            if (values%is_null(i)) cycle
+            if (p(i)%is_null()) cycle
+                if (first) then
+                    mn = p(i)
+                    mx = p(i)
+                    first = .false.
+                else
+                    if (p(i) < mn) mn = p(i)
+                    if (mx < p(i)) mx = p(i)
+                end if
+        end do
+        if (first) return
+        call mn%to_string(min_s)
+        call mx%to_string(max_s)
+    end subroutine stat_time
+
+    !> PK_TIMESTAMP: earliest and latest value, in ISO-8601 form.
+    subroutine stat_ts(values, min_s, max_s)
+        type(parquet_column), intent(in) :: values             !! the column.
+        character(len=:), allocatable, intent(out) :: min_s    !! earliest value, or "-".
+        character(len=:), allocatable, intent(out) :: max_s    !! latest value, or "-".
+        type(parquet_timestamp), pointer :: p(:)
+        type(parquet_timestamp) :: mn, mx
+        integer(int64) :: i
+        logical :: first
+        !
+        min_s = "-"
+        max_s = "-"
+        first = .true.
+        call values%data_ptr(p)
+        do i = 1_int64, values%length()
+            if (values%is_null(i)) cycle
+            if (p(i)%is_null()) cycle
+                if (first) then
+                    mn = p(i)
+                    mx = p(i)
+                    first = .false.
+                else
+                    if (p(i) < mn) mn = p(i)
+                    if (mx < p(i)) mx = p(i)
+                end if
+        end do
+        if (first) return
+        call mn%to_string(min_s)
+        call mx%to_string(max_s)
+    end subroutine stat_ts
+
+    !> PK_INT32_VEC: smallest and largest value, over the rows that hold one.
+    subroutine stat_i32v(values, min_s, max_s)
+        type(parquet_column), intent(in) :: values             !! the column.
+        character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
+        character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
+        integer(int32), pointer :: p(:,:)
+        integer(int32) :: mn, mx
+        integer(int64) :: i
+        integer :: e
+        logical :: first
+        character(len=32) :: buf
+        !
+        min_s = "-"
+        max_s = "-"
+        first = .true.
+        call values%data_ptr(p)
+        do i = 1_int64, values%length()
+            if (values%is_null(i)) cycle
+                do e = 1, size(p, 1)
+                    if (first) then
+                        mn = p(e, i)
+                        mx = p(e, i)
+                        first = .false.
+                    else
+                        mn = min(mn, p(e, i))
+                        mx = max(mx, p(e, i))
+                    end if
+                end do
+        end do
+        if (first) return
+        write(buf, "(I0)") mn
+        min_s = trim(adjustl(buf))
+        write(buf, "(I0)") mx
+        max_s = trim(adjustl(buf))
+    end subroutine stat_i32v
+
+    !> PK_INT64_VEC: smallest and largest value, over the rows that hold one.
+    subroutine stat_i64v(values, min_s, max_s)
+        type(parquet_column), intent(in) :: values             !! the column.
+        character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
+        character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
+        integer(int64), pointer :: p(:,:)
+        integer(int64) :: mn, mx
+        integer(int64) :: i
+        integer :: e
+        logical :: first
+        character(len=32) :: buf
+        !
+        min_s = "-"
+        max_s = "-"
+        first = .true.
+        call values%data_ptr(p)
+        do i = 1_int64, values%length()
+            if (values%is_null(i)) cycle
+                do e = 1, size(p, 1)
+                    if (first) then
+                        mn = p(e, i)
+                        mx = p(e, i)
+                        first = .false.
+                    else
+                        mn = min(mn, p(e, i))
+                        mx = max(mx, p(e, i))
+                    end if
+                end do
+        end do
+        if (first) return
+        write(buf, "(I0)") mn
+        min_s = trim(adjustl(buf))
+        write(buf, "(I0)") mx
+        max_s = trim(adjustl(buf))
+    end subroutine stat_i64v
+
+    !> PK_FLOAT32_VEC: smallest and largest value, over the rows that hold one.
+    subroutine stat_f32v(values, min_s, max_s)
+        type(parquet_column), intent(in) :: values             !! the column.
+        character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
+        character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
+        real(real32), pointer :: p(:,:)
+        real(real32) :: mn, mx
+        integer(int64) :: i
+        integer :: e
+        logical :: first
+        character(len=32) :: buf
+        !
+        min_s = "-"
+        max_s = "-"
+        first = .true.
+        call values%data_ptr(p)
+        do i = 1_int64, values%length()
+            if (values%is_null(i)) cycle
+                do e = 1, size(p, 1)
+                    if (first) then
+                        mn = p(e, i)
+                        mx = p(e, i)
+                        first = .false.
+                    else
+                        mn = min(mn, p(e, i))
+                        mx = max(mx, p(e, i))
+                    end if
+                end do
+        end do
+        if (first) return
+        write(buf, "(G0.6)") mn
+        min_s = trim(adjustl(buf))
+        write(buf, "(G0.6)") mx
+        max_s = trim(adjustl(buf))
+    end subroutine stat_f32v
+
+    !> PK_FLOAT64_VEC: smallest and largest value, over the rows that hold one.
+    subroutine stat_f64v(values, min_s, max_s)
+        type(parquet_column), intent(in) :: values             !! the column.
+        character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
+        character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
+        real(real64), pointer :: p(:,:)
+        real(real64) :: mn, mx
+        integer(int64) :: i
+        integer :: e
+        logical :: first
+        character(len=32) :: buf
+        !
+        min_s = "-"
+        max_s = "-"
+        first = .true.
+        call values%data_ptr(p)
+        do i = 1_int64, values%length()
+            if (values%is_null(i)) cycle
+                do e = 1, size(p, 1)
+                    if (first) then
+                        mn = p(e, i)
+                        mx = p(e, i)
+                        first = .false.
+                    else
+                        mn = min(mn, p(e, i))
+                        mx = max(mx, p(e, i))
+                    end if
+                end do
+        end do
+        if (first) return
+        write(buf, "(G0.6)") mn
+        min_s = trim(adjustl(buf))
+        write(buf, "(G0.6)") mx
+        max_s = trim(adjustl(buf))
+    end subroutine stat_f64v
+
+    !> PK_LOGICAL_VEC: true/false counts rather than an ordering.
+    subroutine stat_boolv(values, min_s, max_s)
+        type(parquet_column), intent(in) :: values             !! the column.
+        character(len=:), allocatable, intent(out) :: min_s    !! "T:<n>".
+        character(len=:), allocatable, intent(out) :: max_s    !! "F:<n>".
+        logical, pointer :: p(:,:)
+        integer(int64) :: i, nt, nf
+        integer :: e
+        character(len=32) :: buf
+        !
+        nt = 0_int64
+        nf = 0_int64
+        call values%data_ptr(p)
+        do i = 1_int64, values%length()
+            if (values%is_null(i)) cycle
+                do e = 1, size(p, 1)
+                    if (p(e, i)) then
+                        nt = nt + 1
+                    else
+                        nf = nf + 1
+                    end if
+                end do
+        end do
+        write(buf, "(I0)") nt
+        min_s = "T:" // trim(buf)
+        write(buf, "(I0)") nf
+        max_s = "F:" // trim(buf)
+    end subroutine stat_boolv
+
+    !> PK_STRING_VEC: lexicographically smallest and largest value.
+    subroutine stat_strv(values, min_s, max_s)
+        type(parquet_column), intent(in) :: values             !! the column.
+        character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
+        character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
+        type(parquet_string_column), pointer :: store
+        character(len=:), allocatable :: sv
+        integer(int64) :: i, n
+        logical :: first
+        !
+        min_s = "-"
+        max_s = "-"
+        first = .true.
+        call values%string_column(store)
+        n = values%length() * int(values%colwidth(), int64)
+        do i = 1_int64, n
+            if (store%is_null(i)) cycle
+            call store%get(i, sv)
+            ! Trimmed for display only: a vector string column stores its values blank-padded to
+            ! the widest element, and printing that padding says nothing. Fortran's own comparison
+            ! blank-pads the shorter operand anyway, so trimming cannot change which value wins.
+            sv = trim(sv)
+            if (first) then
+                min_s = sv
+                max_s = sv
+                first = .false.
+            else
+                if (sv < min_s) min_s = sv
+                if (max_s < sv) max_s = sv
+            end if
+        end do
+    end subroutine stat_strv
+
+    !> PK_DATE_VEC: earliest and latest value, in ISO-8601 form.
+    subroutine stat_datev(values, min_s, max_s)
+        type(parquet_column), intent(in) :: values             !! the column.
+        character(len=:), allocatable, intent(out) :: min_s    !! earliest value, or "-".
+        character(len=:), allocatable, intent(out) :: max_s    !! latest value, or "-".
+        type(parquet_date), pointer :: p(:,:)
+        type(parquet_date) :: mn, mx
+        integer(int64) :: i
+        integer :: e
+        logical :: first
+        !
+        min_s = "-"
+        max_s = "-"
+        first = .true.
+        call values%data_ptr(p)
+        do i = 1_int64, values%length()
+            if (values%is_null(i)) cycle
+                do e = 1, size(p, 1)
+                    if (p(e, i)%is_null()) cycle
+                    if (first) then
+                        mn = p(e, i)
+                        mx = p(e, i)
+                        first = .false.
+                    else
+                        if (p(e, i) < mn) mn = p(e, i)
+                        if (mx < p(e, i)) mx = p(e, i)
+                    end if
+                end do
+        end do
+        if (first) return
+        call mn%to_string(min_s)
+        call mx%to_string(max_s)
+    end subroutine stat_datev
+
+    !> PK_TIME_VEC: earliest and latest value, in ISO-8601 form.
+    subroutine stat_timev(values, min_s, max_s)
+        type(parquet_column), intent(in) :: values             !! the column.
+        character(len=:), allocatable, intent(out) :: min_s    !! earliest value, or "-".
+        character(len=:), allocatable, intent(out) :: max_s    !! latest value, or "-".
+        type(parquet_time), pointer :: p(:,:)
+        type(parquet_time) :: mn, mx
+        integer(int64) :: i
+        integer :: e
+        logical :: first
+        !
+        min_s = "-"
+        max_s = "-"
+        first = .true.
+        call values%data_ptr(p)
+        do i = 1_int64, values%length()
+            if (values%is_null(i)) cycle
+                do e = 1, size(p, 1)
+                    if (p(e, i)%is_null()) cycle
+                    if (first) then
+                        mn = p(e, i)
+                        mx = p(e, i)
+                        first = .false.
+                    else
+                        if (p(e, i) < mn) mn = p(e, i)
+                        if (mx < p(e, i)) mx = p(e, i)
+                    end if
+                end do
+        end do
+        if (first) return
+        call mn%to_string(min_s)
+        call mx%to_string(max_s)
+    end subroutine stat_timev
+
+    !> PK_TIMESTAMP_VEC: earliest and latest value, in ISO-8601 form.
+    subroutine stat_tsv(values, min_s, max_s)
+        type(parquet_column), intent(in) :: values             !! the column.
+        character(len=:), allocatable, intent(out) :: min_s    !! earliest value, or "-".
+        character(len=:), allocatable, intent(out) :: max_s    !! latest value, or "-".
+        type(parquet_timestamp), pointer :: p(:,:)
+        type(parquet_timestamp) :: mn, mx
+        integer(int64) :: i
+        integer :: e
+        logical :: first
+        !
+        min_s = "-"
+        max_s = "-"
+        first = .true.
+        call values%data_ptr(p)
+        do i = 1_int64, values%length()
+            if (values%is_null(i)) cycle
+                do e = 1, size(p, 1)
+                    if (p(e, i)%is_null()) cycle
+                    if (first) then
+                        mn = p(e, i)
+                        mx = p(e, i)
+                        first = .false.
+                    else
+                        if (p(e, i) < mn) mn = p(e, i)
+                        if (mx < p(e, i)) mx = p(e, i)
+                    end if
+                end do
+        end do
+        if (first) return
+        call mn%to_string(min_s)
+        call mx%to_string(max_s)
+    end subroutine stat_tsv
+
     module procedure get_arr_i32
         integer :: idx
         character(len=:), allocatable :: sfx, kname

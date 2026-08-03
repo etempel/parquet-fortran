@@ -173,7 +173,7 @@ module parquet_tables
         parquet_measure_list_width, parquet_column_width_needs_data, parquet_column_has_nulls, &
         parquet_load_qc_maml_file, parquet_filter, parquet_sortkey, parquet_read_qc, &
         parquet_compose_read_qc, parquet_reader_set_filter, parquet_parse_maml, &
-        parquet_get_metadata_items
+        parquet_get_metadata_items, parquet_get_qc_columns
     !
     implicit none
     private
@@ -450,6 +450,9 @@ def gen_table_type():
         generic :: prefetch => prefetch_one, prefetch_many
         procedure :: materialize_all => table_materialize_every !! Read every column not yet read.
         procedure :: reload => table_reload           !! Re-read one column, discarding local edits.
+        procedure :: evict_column => table_evict_column !! Drop a column's VALUES, keeping the slot.
+        procedure :: validate_qc => table_validate_qc !! Check every qc-declaring column, holding none.
+        procedure :: print_stat => table_print_stat  !! Print what the table holds, to stdout.
         procedure :: row_group_bounds => table_row_group_bounds !! Row-group row ranges, this table's rows or the file's.
         ! --- row view ---
         procedure, private :: row_at_i32 !! %row specific taking an int32 index.
@@ -1122,6 +1125,17 @@ def gen_spec_interfaces():
             character(len=*), intent(in) :: name     !! column name, for the message.
             character(len=*), intent(in) :: proc     !! calling procedure, for the message.
         end subroutine table_require_slice_size
+        !> A column's min and max as display text, for %print_stat.
+        !!
+        !! Over the VALUES only: a null row contributes nothing and is counted separately, which
+        !! is the sort engine's rule too. An all-null column has neither, and both come back as
+        !! "-". A `logical` column reports true/false counts instead of an ordering, and a vector
+        !! column's statistic is over all of its elements, flattened.
+        module subroutine table_column_stat_text(values, min_s, max_s)
+            type(parquet_column), intent(in) :: values          !! the column, which must be resident.
+            character(len=:), allocatable, intent(out) :: min_s !! smallest value as text, or "-".
+            character(len=:), allocatable, intent(out) :: max_s !! largest value as text, or "-".
+        end subroutine table_column_stat_text
         !> error stops unless slot `idx` holds exactly `kind`. The exact-kind rule the pointer
         !! path and the copy-back path both enforce (the copy-OUT path widens instead).
         module subroutine table_require_kind(self, idx, kind, proc)
@@ -1342,6 +1356,12 @@ def gen_spec_interfaces():
         !> Reads one named column now rather than on first touch. A column already resident is
         !! left alone; an unsupported one is an error, since asking to read something unreadable
         !! is a mistake worth hearing about.
+        !!
+        !! `name` may also be a STRUCT's own name, with no dot: every leaf under `name.` is then
+        !! read in ONE pass, which is what makes it worth having -- the reader decodes a struct as
+        !! one array shared by all its leaves, so reading them one at a time decodes it once per
+        !! leaf. A real column of that exact name always wins over the prefix reading, and a name
+        !! matching neither is a missing column reported the usual way.
         module subroutine prefetch_one(self, name, found)
             class(parquet_table), intent(in) :: self !! the table (fills through %cache).
             character(len=*), intent(in) :: name     !! column to read.
@@ -1359,6 +1379,66 @@ def gen_spec_interfaces():
         module subroutine table_materialize_every(self)
             class(parquet_table), intent(in) :: self !! the table (fills through %cache).
         end subroutine table_materialize_every
+        !> Prints what this table holds, to standard output: one header line and one line per
+        !! column, with each column's kind, width, row count, null count and min/max.
+        !!
+        !! **Materialized columns only, by default** -- the header says how many of the table's
+        !! columns those are, so a lazy table reports what it is actually holding rather than what
+        !! its file contains. `all=.true.` lists every column, with `-` where a column that has
+        !! not been read has nothing to report.
+        !!
+        !! **Printing never reads anything.** A deferred plain-`LIST` column, whose width is only
+        !! knowable from its data, prints as `pending` rather than being resolved -- a diagnostic
+        !! that changes what it is diagnosing is worse than one that admits it does not know.
+        !!
+        !! These are statistics of the values IN MEMORY, computed here by a plain Fortran scan.
+        !! They are not the file's own footer statistics, and they are the only ones available for
+        !! a column built with %add_column, which has no footer at all. The scan is O(rows) per
+        !! column, so this is not a call to put in a loop over a large table.
+        module subroutine table_print_stat(self, all)
+            class(parquet_table), intent(in) :: self !! the table.
+            logical, intent(in), optional :: all     !! .true.: list every column, not just the resident ones.
+        end subroutine table_print_stat
+        !> Checks this table's read-time qc against the file, WITHOUT leaving the columns resident.
+        !!
+        !! qc is enforced when a column is read, so on a lazy table a declared bound is only
+        !! checked once something asks for that column -- which means a program that reads two of
+        !! forty columns never finds out whether the other thirty-eight satisfy their bounds. This
+        !! reads exactly the columns that declare a bound, letting the reader check them, and then
+        !! releases the ones it had to read.
+        !!
+        !! **What it leaves behind is the point.** Residency is recorded BEFORE anything is read,
+        !! and only the columns this call made resident are released afterwards -- a column that
+        !! was already in memory stays there, values and all. So it can be called at any time
+        !! without disturbing what the program is working on.
+        !!
+        !! A violation is reported the way it would be on an ordinary read: an abort, or a warning
+        !! under `qc_soft=`. A table with no qc declared at all, and one built in memory, are
+        !! no-ops -- there is nothing to check and no file to check it against.
+        module subroutine table_validate_qc(self)
+            class(parquet_table), intent(inout) :: self !! the table.
+        end subroutine table_validate_qc
+        !> Releases one column's VALUES while keeping its slot -- the honest counterpart of
+        !! %prefetch, and the way to give a column's memory back without losing the column.
+        !!
+        !! The difference from %drop_column is what survives: an evicted column still appears in
+        !! %column_names, still answers %kind/%width/%unit, and is READ AGAIN on the next touch.
+        !! A dropped one is gone. So %drop_column is for a column you are finished with, and
+        !! %evict_column for one you are finished with FOR NOW.
+        !!
+        !! Only a file-backed column of an attached table can be evicted, and that restriction is
+        !! the whole safety story: everywhere else the values are the only copy that exists, so
+        !! evicting them would be silent data loss rather than a memory saving. A column built
+        !! with %add_column, and any column of a detached table, is therefore an error naming what
+        !! is wrong. Evicting a column that is not resident is a no-op.
+        !!
+        !! Eviction is user-driven only. Nothing in this library evicts on its own -- no LRU, no
+        !! memory budget -- so what a table holds stays predictable from the calls you wrote.
+        module subroutine table_evict_column(self, name, found)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column to release.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
+        end subroutine table_evict_column
         !> Re-reads one column from the file, discarding whatever is in the store -- the escape
         !! hatch back to the file's own values after %set has changed them locally. Only valid
         !! for a file-backed column of a table that has not been detached.
@@ -2364,6 +2444,9 @@ contains
         w(ptr_impl(k))
     w(ptr_str_impl())
     w(set_strcol_impl())
+    w(stat_dispatch())
+    for k in KINDS:
+        w(stat_impl(k))
     for k in ARRAY_KINDS:
         w(get_impl(k))
     w(get_str_impl())
@@ -2793,6 +2876,211 @@ def add_strcol_impl():
         self%cache%cols(idx)%residency = RES_FULL
         self%cache%cols(idx)%user_populated = .true.
     end procedure add_column_strcol
+    !"""
+
+
+NUMFMT = {
+    "i32": "(I0)", "i64": "(I0)", "f32": "(G0.6)", "f64": "(G0.6)",
+}
+
+
+def stat_impl(k):
+    """One kind's min/max, as text, over the rows that are not null.
+
+    A statistic is over the VALUES: a null row contributes nothing, and the null count is
+    reported separately. That is the sort engine's rule too, so the library has one story about
+    where nulls sit rather than two. An all-null column has no min or max and prints "-".
+
+    A vector kind's statistic is over ALL of its elements, flattened -- the same convention the
+    reader's own print_stat uses for a vector column's null count.
+    """
+    tag, pk, decl, comp, rank, cat = k
+    if cat == "num" and tag.startswith("bool"):
+        # A logical column's useful summary is how many of each, not an ordering.
+        inner = ("                do e = 1, size(p, 1)\n"
+                 "                    if (p(e, i)) then\n"
+                 "                        nt = nt + 1\n"
+                 "                    else\n"
+                 "                        nf = nf + 1\n"
+                 "                    end if\n"
+                 "                end do") if rank == 2 else (
+                 "                if (p(i)) then\n"
+                 "                    nt = nt + 1\n"
+                 "                else\n"
+                 "                    nf = nf + 1\n"
+                 "                end if")
+        bool_edecl = "        integer :: e\n" if rank == 2 else ""
+        return f"""    !> {pk}: true/false counts rather than an ordering.
+    subroutine stat_{tag}(values, min_s, max_s)
+        type(parquet_column), intent(in) :: values             !! the column.
+        character(len=:), allocatable, intent(out) :: min_s    !! "T:<n>".
+        character(len=:), allocatable, intent(out) :: max_s    !! "F:<n>".
+        {decl}, pointer :: p{dims(rank)}
+        integer(int64) :: i, nt, nf
+{bool_edecl}        character(len=32) :: buf
+        !
+        nt = 0_int64
+        nf = 0_int64
+        call values%data_ptr(p)
+        do i = 1_int64, values%length()
+            if (values%is_null(i)) cycle
+{inner}
+        end do
+        write(buf, "(I0)") nt
+        min_s = "T:" // trim(buf)
+        write(buf, "(I0)") nf
+        max_s = "F:" // trim(buf)
+    end subroutine stat_{tag}
+"""
+    if cat == "num":
+        fmt = NUMFMT[tag.replace("v", "") if tag.endswith("v") else tag]
+        if rank == 1:
+            body = """                if (first) then
+                    mn = p(i)
+                    mx = p(i)
+                    first = .false.
+                else
+                    mn = min(mn, p(i))
+                    mx = max(mx, p(i))
+                end if"""
+        else:
+            body = """                do e = 1, size(p, 1)
+                    if (first) then
+                        mn = p(e, i)
+                        mx = p(e, i)
+                        first = .false.
+                    else
+                        mn = min(mn, p(e, i))
+                        mx = max(mx, p(e, i))
+                    end if
+                end do"""
+        edecl = "        integer :: e\n" if rank == 2 else ""
+        return f"""    !> {pk}: smallest and largest value, over the rows that hold one.
+    subroutine stat_{tag}(values, min_s, max_s)
+        type(parquet_column), intent(in) :: values             !! the column.
+        character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
+        character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
+        {decl}, pointer :: p{dims(rank)}
+        {decl} :: mn, mx
+        integer(int64) :: i
+{edecl}        logical :: first
+        character(len=32) :: buf
+        !
+        min_s = "-"
+        max_s = "-"
+        first = .true.
+        call values%data_ptr(p)
+        do i = 1_int64, values%length()
+            if (values%is_null(i)) cycle
+{body}
+        end do
+        if (first) return
+        write(buf, "{fmt}") mn
+        min_s = trim(adjustl(buf))
+        write(buf, "{fmt}") mx
+        max_s = trim(adjustl(buf))
+    end subroutine stat_{tag}
+"""
+    if cat == "tmp":
+        if rank == 1:
+            body = """                if (first) then
+                    mn = p(i)
+                    mx = p(i)
+                    first = .false.
+                else
+                    if (p(i) < mn) mn = p(i)
+                    if (mx < p(i)) mx = p(i)
+                end if"""
+        else:
+            body = """                do e = 1, size(p, 1)
+                    if (p(e, i)%is_null()) cycle
+                    if (first) then
+                        mn = p(e, i)
+                        mx = p(e, i)
+                        first = .false.
+                    else
+                        if (p(e, i) < mn) mn = p(e, i)
+                        if (mx < p(e, i)) mx = p(e, i)
+                    end if
+                end do"""
+        edecl = "        integer :: e\n" if rank == 2 else ""
+        # A temporal element carries its own null, so a row that is not null can still hold one
+        # on the scalar path -- checked before the value is used, since < aborts on a null.
+        guard = ("            if (p(i)%is_null()) cycle\n" if rank == 1 else "")
+        return f"""    !> {pk}: earliest and latest value, in ISO-8601 form.
+    subroutine stat_{tag}(values, min_s, max_s)
+        type(parquet_column), intent(in) :: values             !! the column.
+        character(len=:), allocatable, intent(out) :: min_s    !! earliest value, or "-".
+        character(len=:), allocatable, intent(out) :: max_s    !! latest value, or "-".
+        {decl}, pointer :: p{dims(rank)}
+        {decl} :: mn, mx
+        integer(int64) :: i
+{edecl}        logical :: first
+        !
+        min_s = "-"
+        max_s = "-"
+        first = .true.
+        call values%data_ptr(p)
+        do i = 1_int64, values%length()
+            if (values%is_null(i)) cycle
+{guard}{body}
+        end do
+        if (first) return
+        call mn%to_string(min_s)
+        call mx%to_string(max_s)
+    end subroutine stat_{tag}
+"""
+    # string kinds: lexicographic, over the flat store
+    n_elems = "values%length()" if rank == 1 else "values%length() * int(values%colwidth(), int64)"
+    return f"""    !> {pk}: lexicographically smallest and largest value.
+    subroutine stat_{tag}(values, min_s, max_s)
+        type(parquet_column), intent(in) :: values             !! the column.
+        character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
+        character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
+        type(parquet_string_column), pointer :: store
+        character(len=:), allocatable :: sv
+        integer(int64) :: i, n
+        logical :: first
+        !
+        min_s = "-"
+        max_s = "-"
+        first = .true.
+        call values%string_column(store)
+        n = {n_elems}
+        do i = 1_int64, n
+            if (store%is_null(i)) cycle
+            call store%get(i, sv)
+            ! Trimmed for display only: a vector string column stores its values blank-padded to
+            ! the widest element, and printing that padding says nothing. Fortran's own comparison
+            ! blank-pads the shorter operand anyway, so trimming cannot change which value wins.
+            sv = trim(sv)
+            if (first) then
+                min_s = sv
+                max_s = sv
+                first = .false.
+            else
+                if (sv < min_s) min_s = sv
+                if (max_s < sv) max_s = sv
+            end if
+        end do
+    end subroutine stat_{tag}
+"""
+
+
+def stat_dispatch():
+    arms = []
+    for k in KINDS:
+        arms.append(f"        case ({k[1]})\n            call stat_{k[0]}(values, min_s, max_s)")
+    return """    module procedure table_column_stat_text
+        min_s = "-"
+        max_s = "-"
+        select case (values%kindof())
+""" + "\n".join(arms) + """
+        case default
+            ! PK_NONE, and the reserved container kinds: nothing to summarize.
+            return
+        end select
+    end procedure table_column_stat_text
     !"""
 
 

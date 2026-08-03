@@ -615,6 +615,10 @@ contains
                 test_table_write_unsupported_column_aborts), &
             new_unittest("parquet_write_table with a schema that was never built aborts", &
                 test_table_write_unbuilt_schema_aborts), &
+            new_unittest("evicting an in-memory column aborts", &
+                test_table_evict_in_memory_aborts), &
+            new_unittest("evicting a column of a detached table aborts", &
+                test_table_evict_detached_aborts), &
             new_unittest("a wrong-length is_valid mask on %set aborts", &
                 test_table_set_is_valid_length_aborts), &
             new_unittest("copy_metadata with an unknown key aborts", &
@@ -1031,6 +1035,20 @@ contains
             failure_message="writing a schema-named unsupported column was expected to abort", &
             required_stderr="the schema declares a column that holds no values")
     end subroutine test_table_write_unsupported_column_aborts
+
+    subroutine test_table_evict_in_memory_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_evict_in_memory", expect_abort=.true., &
+            failure_message="evicting an in-memory column was expected to abort", &
+            required_stderr="its values are the only copy there is")
+    end subroutine test_table_evict_in_memory_aborts
+
+    subroutine test_table_evict_detached_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_evict_detached", expect_abort=.true., &
+            failure_message="evicting a column of a detached table was expected to abort", &
+            required_stderr="an evicted column could never be read back")
+    end subroutine test_table_evict_detached_aborts
 
     subroutine test_table_set_is_valid_length_aborts(error)
         type(error_type), allocatable, intent(out) :: error

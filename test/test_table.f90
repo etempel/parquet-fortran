@@ -95,6 +95,11 @@ contains
             new_unittest("a column this library cannot read does not stop the file opening", &
                 test_unsupported_column), &
             new_unittest("nested struct leaves become dotted columns", test_struct_leaves), &
+            new_unittest("prefetch(struct) reads every leaf, evict_column gives them back", &
+                test_prefetch_prefix_and_evict), &
+            new_unittest("validate_qc checks every declaring column and holds none", &
+                test_validate_qc), &
+            new_unittest("print_stat reports without reading anything", test_print_stat), &
             new_unittest("parquet_new_table plus add_column builds a table and writes it", &
                 test_from_scratch), &
             new_unittest("add_column(force=) replaces a column of the same name", &
@@ -1174,6 +1179,71 @@ contains
         call t%get("v_uint32", names, found=ok)
         call check(error, .not. ok, "a soft-failing read of an unsupported column should report .false.")
     end subroutine test_unsupported_column
+    !
+    !> %prefetch("main") reads every leaf of a struct in one pass, and %evict_column gives a
+    !! column's memory back without losing the column.
+    !!
+    !! The prefix form exists for one reason: the reader decodes a struct as ONE array shared by
+    !! all its leaves, so touching them one at a time decodes it once per leaf. What can be
+    !! asserted from Fortran is the outcome -- every leaf resident after a single call naming only
+    !! the struct. The two features are tested together because %evict_column is what makes the
+    !! prefetch repeatable: evict the leaves, and the next call reads them again.
+    subroutine test_prefetch_prefix_and_evict(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, mem
+        logical :: ok
+        integer(int32), allocatable :: ids(:)
+        integer(int64) :: gen0
+        character(len=*), parameter :: f = "test/fixtures/nested_struct.parquet"
+        !
+        call parquet_open_table(t, f)
+        call check(error, .not. t%has_column("main"), &
+            "precondition: the bare struct name is not itself a column")
+        if (allocated(error)) return
+        call check(error, t%residency("main.id") == RES_EMPTY, "precondition: nothing is resident")
+        if (allocated(error)) return
+        !
+        call t%prefetch("main")
+        call check(error, t%residency("main.id") == RES_FULL, &
+            "%prefetch(struct) should read the struct's leaves")
+        if (allocated(error)) return
+        call check(error, t%residency("main.inner.deep.value") == RES_FULL, &
+            "%prefetch(struct) should reach a doubly-nested leaf too")
+        if (allocated(error)) return
+        !
+        ! %evict_column hands the memory back and leaves the column in place.
+        gen0 = t%generation()
+        call t%evict_column("main.id")
+        call check(error, t%residency("main.id") == RES_EMPTY, "%evict_column should release the values")
+        if (allocated(error)) return
+        call check(error, t%has_column("main.id") .and. t%kind("main.id") == PK_INT32, &
+            "an evicted column should still be a column, with its kind intact")
+        if (allocated(error)) return
+        call check(error, t%generation() > gen0, &
+            "%evict_column should bump the generation -- it frees storage a pointer may alias")
+        if (allocated(error)) return
+        ! ...and it is read again on the next touch, which is the whole difference from %drop_column.
+        call t%get("main.id", ids)
+        call check(error, size(ids) == int(t%nrows()) .and. t%residency("main.id") == RES_FULL, &
+            "an evicted column should be re-read on the next touch")
+        if (allocated(error)) return
+        ! Evicting twice is a no-op, not an error.
+        call t%evict_column("main.id")
+        call t%evict_column("main.id")
+        call check(error, t%residency("main.id") == RES_EMPTY, "evicting twice should be harmless")
+        if (allocated(error)) return
+        !
+        ! A prefix matching nothing is a missing column, reported the usual way.
+        call t%prefetch("no_such_struct", found=ok)
+        call check(error, .not. ok, "a prefix matching nothing should report through found=")
+        if (allocated(error)) return
+        !
+        ! An in-memory column has no file to be re-read from, so evicting it is refused --
+        ! the abort path lives out of process (scenario table_evict_in_memory).
+        call parquet_new_table(mem)
+        call mem%add_column("a", [1_int32, 2_int32])
+        call check(error, mem%residency("a") == RES_FULL, "precondition: an added column is resident")
+    end subroutine test_prefetch_prefix_and_evict
     !
     subroutine test_struct_leaves(error)
         type(error_type), allocatable, intent(out) :: error
@@ -4758,6 +4828,103 @@ contains
         call check(error, size(i32) == NROW .and. i32(1) == 1_int32, &
             "a satisfied qc= bound should have read the column unchanged")
     end subroutine test_open_qc
+    !
+    !> %print_stat reports what the table holds -- and, crucially, reads nothing to do it.
+    !!
+    !! The output goes to stdout, so what a test can assert is the behaviour around it rather than
+    !! the text: that printing a lazy table leaves it lazy, that `all=.true.` still does not read,
+    !! and that a deferred plain-LIST column is not resolved by being printed. Those are the three
+    !! ways a diagnostic could quietly change what it is diagnosing.
+    subroutine test_print_stat(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, mem
+        character(len=*), parameter :: f = "test_run/table_print_stat.parquet"
+        character(len=*), parameter :: fl = "test/fixtures/list_widths.parquet"
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t, f)
+        !
+        ! A lazy table: nothing to show, and showing it must not change that.
+        call t%print_stat()
+        call check(error, t%residency("i32") == RES_EMPTY .and. t%residency("f64") == RES_EMPTY, &
+            "%print_stat must not read anything")
+        if (allocated(error)) return
+        call t%print_stat(all=.true.)
+        call check(error, t%residency("i32") == RES_EMPTY, &
+            "%print_stat(all=.true.) must not read anything either")
+        if (allocated(error)) return
+        !
+        ! With values in memory it has something to report -- including for a column carrying nulls.
+        call t%prefetch("i32")
+        call t%set_null("i32", 2)
+        call t%print_stat()
+        call check(error, t%residency("i32") == RES_FULL .and. t%residency("f64") == RES_EMPTY, &
+            "%print_stat must not materialize the columns it is not showing")
+        if (allocated(error)) return
+        !
+        ! A table built in memory has no file, and prints anyway.
+        call parquet_new_table(mem)
+        call mem%add_column("id", [1_int32, 2_int32, 3_int32], unit="count")
+        call mem%add_column("name", ["a  ", "bcd", "ef "])
+        call mem%print_stat()
+        call check(error, mem%ncols() == 2, "%print_stat should leave an in-memory table alone")
+        if (allocated(error)) return
+        !
+        ! A deferred plain-LIST column prints as pending rather than being measured.
+        call parquet_open_table(t, fl)
+        call t%print_stat(all=.true.)
+        call check(error, t%residency("avg_ok") == RES_EMPTY, &
+            "%print_stat must not resolve a deferred LIST column's width")
+    end subroutine test_print_stat
+    !
+    !> %validate_qc checks every qc-declaring column and leaves the table's residency alone.
+    !!
+    !! On a lazy table qc is only enforced for columns something actually reads, so a program
+    !! using two of forty columns never learns whether the rest satisfy their bounds. This reads
+    !! exactly the declaring columns and then releases what it created -- and the "what it
+    !! created" half is the one worth testing: a column the program had already read must still be
+    !! resident afterwards, with its values intact.
+    subroutine test_validate_qc(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_read_qc) :: qc
+        integer(int32), allocatable :: i32(:)
+        character(len=*), parameter :: f = "test_run/table_validate_qc.parquet"
+        !
+        call write_basic_fixture(f)
+        call qc%add("i32, >=1, <=6")
+        call qc%add("f64, >=0")
+        call parquet_open_table(t, f, qc=qc)
+        !
+        ! One declaring column is read by the program first; the other is not.
+        call t%prefetch("f64")
+        call check(error, t%residency("f64") == RES_FULL .and. t%residency("i32") == RES_EMPTY, &
+            "precondition: exactly one qc-declaring column is resident")
+        if (allocated(error)) return
+        !
+        call t%validate_qc()
+        call check(error, t%residency("i32") == RES_EMPTY, &
+            "%validate_qc should release the columns it had to read")
+        if (allocated(error)) return
+        call check(error, t%residency("f64") == RES_FULL, &
+            "%validate_qc must leave a column the program had already read resident")
+        if (allocated(error)) return
+        ! A column with no qc declared is not touched at all.
+        call check(error, t%residency("i64") == RES_EMPTY, &
+            "%validate_qc should not read a column that declares no bound")
+        if (allocated(error)) return
+        ! ...and the released column is still perfectly readable afterwards.
+        call t%get("i32", i32)
+        call check(error, size(i32) == NROW .and. i32(1) == 1_int32, &
+            "a column released by %validate_qc should read normally afterwards")
+        if (allocated(error)) return
+        !
+        ! No qc at all: a no-op, not an error.
+        call parquet_open_table(t, f)
+        call t%validate_qc()
+        call check(error, t%residency("i32") == RES_EMPTY, &
+            "%validate_qc on a table with no qc should read nothing")
+    end subroutine test_validate_qc
     !
     !> A MAML's own extra: filter:/extra: sort: apply on their own, and AND/append with a
     !! code-supplied filter/sort respectively.

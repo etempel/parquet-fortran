@@ -334,6 +334,99 @@ contains
             "a row-structural change; materialize a column before mutating rows" // sfx
     end procedure table_check_not_detached
     !
+    module procedure table_print_stat
+        logical :: want_all
+        integer :: i, nshown, wname
+        integer(int64) :: nulls, k
+        character(len=:), allocatable :: kname, min_s, max_s, unit_s, fname
+        character(len=32) :: rows_s, nulls_s, wdt_s
+        !
+        call table_check_open(self, "print_stat")
+        want_all = .false.
+        if (present(all)) want_all = all
+        !
+        nshown = 0
+        ! At least as wide as the header word, or the header line would be wider than the rows
+        ! under it and nothing would line up.
+        wname = len("column")
+        do i = 1, self%cache%ncols
+            if (.not. want_all .and. self%cache%cols(i)%residency /= RES_FULL) cycle
+            nshown = nshown + 1
+            wname = max(wname, len(self%cache%cols(i)%name))
+        end do
+        call self%filename(fname)
+        write(rows_s, "(I0)") self%row_count
+        if (len_trim(fname) > 0) then
+            print "(a)", "parquet_table: " // trim(fname)
+        else
+            print "(a)", "parquet_table: (built in memory)"
+        end if
+        write(nulls_s, "(I0)") self%cache%ncols
+        write(wdt_s, "(I0)") count_resident(self%cache)
+        print "(a)", "  rows: " // trim(rows_s) // "   columns: " // trim(nulls_s) // &
+            " (" // trim(wdt_s) // " materialized)"
+        if (nshown == 0) then
+            print "(a)", "  (no materialized columns; pass all=.true. to list every column)"
+            return
+        end if
+        print "(a)", "  " // pad("column", wname) // "  " // pad("kind", 18) // "  " // &
+            pad("width", 6) // "  " // pad("nulls", 10) // "  " // pad("min", 22) // "  max"
+        do i = 1, self%cache%ncols
+            if (.not. want_all .and. self%cache%cols(i)%residency /= RES_FULL) cycle
+            ! A deferred plain-LIST column is reported as pending rather than resolved: measuring
+            ! its width would read the data, and a report must not change what it reports on.
+            if (self%cache%cols(i)%width_pending) then
+                print "(a)", "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
+                    pad("pending", 18) // "  " // pad("-", 6) // "  " // pad("-", 10) // "  " // &
+                    pad("-", 22) // "  -"
+                cycle
+            end if
+            call parquet_kind_name(self%cache%cols(i)%declared_kind, kname)
+            write(wdt_s, "(I0)") self%cache%cols(i)%width
+            if (self%cache%cols(i)%residency /= RES_FULL) then
+                print "(a)", "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
+                    pad(kname, 18) // "  " // pad(trim(wdt_s), 6) // "  " // pad("-", 10) // &
+                    "  " // pad("-", 22) // "  -"
+                cycle
+            end if
+            nulls = 0_int64
+            do k = 1_int64, self%cache%cols(i)%values%length()
+                if (self%cache%cols(i)%values%is_null(k)) nulls = nulls + 1_int64
+            end do
+            write(nulls_s, "(I0)") nulls
+            call table_column_stat_text(self%cache%cols(i)%values, min_s, max_s)
+            call self%cache%cols(i)%values%unit_string(unit_s)
+            if (allocated(self%cache%cols(i)%unit)) unit_s = self%cache%cols(i)%unit
+            if (len_trim(unit_s) > 0) kname = kname // " [" // trim(unit_s) // "]"
+            print "(a)", "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
+                pad(kname, 18) // "  " // pad(trim(wdt_s), 6) // "  " // pad(trim(nulls_s), 10) // &
+                "  " // pad(min_s, 22) // "  " // max_s
+        end do
+    end procedure table_print_stat
+    !
+    !> How many of a table's columns are resident.
+    integer function count_resident(cache) result(n)
+        type(parquet_table_cache), intent(in) :: cache !! the column store.
+        integer :: i
+        !
+        n = 0
+        do i = 1, cache%ncols
+            if (cache%cols(i)%residency == RES_FULL) n = n + 1
+        end do
+    end function count_resident
+    !
+    !> `text` in a field `w` wide: blank-padded, or returned whole when it is longer.
+    !!
+    !! A column whose value overflows its column is left overflowing rather than truncated -- a
+    !! ragged line is a nuisance, a silently shortened value is a wrong answer.
+    function pad(text, w) result(res)
+        character(len=*), intent(in) :: text !! the text to place.
+        integer, intent(in) :: w             !! field width.
+        character(len=max(len_trim(text), w)) :: res !! the padded field.
+        !
+        res = trim(text)
+    end function pad
+    !
     module procedure table_valid_mask_of
         integer(int64) :: i
         !

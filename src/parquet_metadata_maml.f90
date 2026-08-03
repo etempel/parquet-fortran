@@ -1075,6 +1075,34 @@ contains
     !> `parquet_parse_qc_maml` already drops any field with no `qc:` key (see its own tail), so the
     !> rules it returns ARE exactly the columns the MAML claims under Q9's `has_qc_block` rule --
     !> there is no separate test to keep in step with it.
+    module procedure parquet_get_qc_columns
+        type(parquet_qc_rule), allocatable :: rules(:)
+        integer :: i, n, w
+
+        allocate(character(len=1) :: names(0))
+        if (.not. allocated(schema%maml%lines)) return
+        call parquet_parse_qc_maml(schema%maml, rules)
+        ! Two passes, as everywhere a deferred-length array is built here: one to size it, one to
+        ! fill it. A rule with no qc: block declares nothing and is skipped -- that distinction is
+        ! the whole reason this reports rules rather than fields.
+        n = 0
+        w = 1
+        do i = 1, size(rules)
+            if (.not. rules(i)%has_qc_block) cycle
+            n = n + 1
+            w = max(w, len_trim(rules(i)%name))
+        end do
+        if (n == 0) return
+        deallocate(names)
+        allocate(character(len=w) :: names(n))
+        n = 0
+        do i = 1, size(rules)
+            if (.not. rules(i)%has_qc_block) cycle
+            n = n + 1
+            names(n) = trim(rules(i)%name)
+        end do
+    end procedure parquet_get_qc_columns
+
     module procedure parquet_compose_read_qc
         type(parquet_qc_rule), allocatable :: rules(:)
         character(len=:), allocatable :: lines(:), name

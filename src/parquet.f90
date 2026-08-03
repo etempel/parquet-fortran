@@ -1089,6 +1089,7 @@ module parquet
     public :: parquet_sortkey
     public :: parquet_read_qc
     public :: parquet_compose_read_qc
+    public :: parquet_get_qc_columns
     public :: parquet_reader_set_sort
     public :: parquet_column_info
     public :: parquet_column_type
@@ -1224,6 +1225,17 @@ module parquet
         !> unrecognized qc: miss: value (anything other than Null/NA,
         !> case-insensitive, or empty). Table-level metadata is ignored
         !> entirely. See parquet_qc_rule's own doc comment for min_text/max_text.
+        !> The columns a qc-MAML declares an actual `qc:` block for, as a blank-padded array.
+        !>
+        !> Answers "what does this qc actually constrain?" without exposing the rule objects
+        !> themselves: a field that merely NAMES a column, with no `qc:` key, declares nothing and
+        !> is left out -- the same distinction parquet_apply_qc makes before it reaches the reader.
+        !> `names` comes back zero-size when nothing is constrained. Sized to the longest name and
+        !> blank-padded, so `trim(names(i))` is the name to pass on.
+        module subroutine parquet_get_qc_columns(schema, names)
+            type(parquet_schema), intent(in) :: schema !! a qc schema (composed or loaded).
+            character(len=:), allocatable, intent(out) :: names(:) !! columns with a qc: block.
+        end subroutine parquet_get_qc_columns
         module subroutine parquet_parse_qc_maml(maml, rules)
             type(parquet_maml_file), intent(in) :: maml !! raw qc-maml (e.g. from parquet_load_qc_maml_file).
             type(parquet_qc_rule), allocatable, intent(out) :: rules(:) !! one entry per field with at least a name.

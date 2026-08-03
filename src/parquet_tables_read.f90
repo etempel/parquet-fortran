@@ -407,11 +407,59 @@ contains
     !
     module procedure prefetch_one
         integer :: idx
+        logical, allocatable :: want(:)
+        integer :: n
         !
-        call table_prefetch_resolve(self, name, "prefetch", idx, found)
-        if (idx == 0) return
-        call table_touch(self%cache, table_scope_of(self), idx, "prefetch")
+        call table_check_open(self, "prefetch")
+        ! A real column of that exact name wins, always. Only when there is none does the name get
+        ! read as a struct prefix -- so a file with a column literally called "main" is reached by
+        ! its own name even if it also has "main.a" leaves.
+        idx = table_find(self, name)
+        if (idx > 0) then
+            call table_prefetch_resolve(self, name, "prefetch", idx, found)
+            if (idx == 0) return
+            call table_touch(self%cache, table_scope_of(self), idx, "prefetch")
+            return
+        end if
+        ! Every leaf under "<name>." in ONE pass, which is the point: the reader decodes a struct
+        ! as one array shared by all its leaves, so reading them separately decodes it once per
+        ! leaf. This is the array form's single-pass behaviour, without having to name the leaves.
+        call mark_struct_leaves(self%cache, name, want, n)
+        if (n == 0) then
+            ! Nothing of that name and no leaves under it: an ordinary missing column, reported
+            ! the ordinary way. A prefix that matches nothing is a mistake, not a quiet no-op.
+            call table_prefetch_resolve(self, name, "prefetch", idx, found)
+            return
+        end if
+        if (present(found)) found = .true.
+        call materialize_marked(self%cache, table_scope_of(self), want)
     end procedure prefetch_one
+    !
+    !> Marks every slot whose name begins with `prefix // "."`, reporting how many.
+    !!
+    !! Unsupported leaves under the prefix are marked like any other and skipped by
+    !! `materialize_marked` itself -- an exotic leaf should not make its struct unprefetchable,
+    !! which is the same rule that keeps one exotic column from making a file unopenable.
+    subroutine mark_struct_leaves(cache, prefix, want, n)
+        type(parquet_table_cache), intent(in) :: cache      !! the column store.
+        character(len=*), intent(in) :: prefix              !! the struct name, without its dot.
+        logical, allocatable, intent(out) :: want(:)        !! .true. for each matching slot.
+        integer, intent(out) :: n                           !! how many matched.
+        character(len=:), allocatable :: pfx
+        integer :: i, w
+        !
+        allocate(want(cache%ncols))
+        want = .false.
+        n = 0
+        pfx = trim(prefix) // "."
+        w = len(pfx)
+        do i = 1, cache%ncols
+            if (len(cache%cols(i)%name) <= w) cycle
+            if (cache%cols(i)%name(1:w) /= pfx) cycle
+            want(i) = .true.
+            n = n + 1
+        end do
+    end subroutine mark_struct_leaves
     !
     module procedure prefetch_many
         logical, allocatable :: want(:)
@@ -471,6 +519,82 @@ contains
         end if
         if (present(found)) found = .true.
     end subroutine table_prefetch_resolve
+    !
+    module procedure table_validate_qc
+        character(len=:), allocatable :: qc_cols(:)
+        logical, allocatable :: want(:), was_resident(:)
+        integer :: i, j, n
+        !
+        call table_check_open(self, "validate_qc")
+        ! Nothing declared, or nothing to check it against: a no-op rather than an error, so a
+        ! caller can make this call unconditionally on any table.
+        if (.not. allocated(self%cache%read_qc_schema)) return
+        if (.not. self%cache%file_backed .or. self%detached) return
+        call parquet_get_qc_columns(self%cache%read_qc_schema, qc_cols)
+        if (size(qc_cols) == 0) return
+        !
+        ! Recorded BEFORE anything is read, so that what gets released afterwards is exactly what
+        ! this call created -- a column the program had already read stays resident.
+        allocate(was_resident(self%cache%ncols))
+        allocate(want(self%cache%ncols))
+        want = .false.
+        do i = 1, self%cache%ncols
+            was_resident(i) = self%cache%cols(i)%residency == RES_FULL
+        end do
+        ! The qc schema names the FILE's columns, as every read-time transform does, so the match
+        ! is against file_name -- a remapped column is checked under the name the file calls it.
+        n = 0
+        do j = 1, size(qc_cols)
+            do i = 1, self%cache%ncols
+                if (self%cache%cols(i)%file_name /= trim(qc_cols(j))) cycle
+                if (.not. self%cache%cols(i)%supported) cycle
+                want(i) = .true.
+                n = n + 1
+                exit
+            end do
+        end do
+        if (n == 0) return
+        ! One pass, so a struct whose leaves all declare qc is decoded once. The reader applies
+        ! the qc as each column is read; a violation aborts here (or warns, under qc_soft=).
+        call materialize_marked(self%cache, table_scope_of(self), want)
+        do i = 1, self%cache%ncols
+            if (was_resident(i)) cycle
+            if (self%cache%cols(i)%residency /= RES_FULL) cycle
+            call self%evict_column(self%cache%cols(i)%name)
+        end do
+    end procedure table_validate_qc
+    !
+    module procedure table_evict_column
+        integer :: idx
+        character(len=:), allocatable :: sfx
+        !
+        ! Deliberately table_lookup_or_fail, not table_resolve: reading a column in order to
+        ! throw it away would be exactly backwards.
+        call table_lookup_or_fail(self, name, "evict_column", idx, found)
+        if (idx == 0) return
+        ! Nothing held, nothing to release. Said before the checks below so that evicting an
+        ! already-evicted column stays idempotent whatever else is true of the table.
+        if (self%cache%cols(idx)%residency /= RES_FULL) return
+        if (.not. self%cache%cols(idx)%file_source) then
+            call table_context_suffix(self%cache, name, sfx)
+            error stop EP // "evict_column: this column was not read from a file, so its values " // &
+                "are the only copy there is; use %drop_column if you mean to discard them" // sfx
+        end if
+        if (self%detached .or. .not. self%cache%file_backed) then
+            call table_context_suffix(self%cache, name, sfx)
+            error stop EP // "evict_column: this table has been detached from its file, so an " // &
+                "evicted column could never be read back; use %drop_column if you mean to " // &
+                "discard it" // sfx
+        end if
+        ! Values only: the descriptor stays exactly as it is, so %column_names, %kind, %width and
+        ! %unit keep answering and the next touch reads the column again.
+        call self%cache%cols(idx)%values%clear()
+        self%cache%cols(idx)%residency = RES_EMPTY
+        self%cache%cols(idx)%user_populated = .false.
+        ! Structural for a pointer's purposes: whatever %col handed out for this column now points
+        ! at freed storage, which is exactly what the generation counter is there to report.
+        self%cache%generation = self%cache%generation + 1_int64
+    end procedure table_evict_column
     !
     module procedure table_reload
         integer :: idx

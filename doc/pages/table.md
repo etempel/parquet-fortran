@@ -261,6 +261,7 @@ Three calls control it explicitly:
 | `call t%prefetch(name)` / `call t%prefetch(names)` | read those columns now |
 | `call t%materialize_all()` | read every column not yet read |
 | `call t%reload(name)` | re-read one column from the file, discarding local `%set` edits |
+| `call t%evict_column(name)` | release a column's values, keeping the column |
 
 `%prefetch`'s array form is not just a loop: it reads the named columns in one pass, which
 matters for **struct leaves**. The reader decodes a struct as one array shared by all its leaves,
@@ -269,12 +270,33 @@ and the table frees that array as soon as the column it was asked for is stored 
 `call t%prefetch(["main.a", "main.b", "main.c"])` decodes it once. Reading them separately is
 never *wrong*, only slower.
 
+**Naming the struct itself does the same for all of its leaves**, which saves listing them:
+
+```fortran
+call t%prefetch("main")                            ! every leaf under main., in one pass
+call t%prefetch(["main.a", "main.b"])              ! ... or just these two
+```
+
+A real column of that exact name always wins over the prefix reading, so a file with a column
+literally called `main` is unaffected. A name matching neither is a missing column, reported the
+usual way.
+
 **Calling either twice is well defined, and they differ.** `%prefetch` on a column that is already
 resident does nothing — so prefetching a list of columns repeatedly, or prefetching one another
 call has already read, costs a name lookup and no I/O. `%reload` re-reads *every* time by design:
 it discards what is in the store and goes back to the file, which is the whole point of it, so two
 `%reload` calls are two reads. On a column nothing has read yet the two have the same outcome, and
 only then.
+
+**`%evict_column` is `%prefetch`'s counterpart** and the way to give a column's memory back
+without losing the column. An evicted column still appears in `%column_names`, still answers
+`%kind`/`%width`/`%unit`, and is read again on the next touch — where `%drop_column` removes it
+for good. Evicting is only allowed where the values can be read back: a column built with
+`%add_column`, and any column of a [detached](#what-detaching-means) table, is an error rather
+than silent data loss. Evicting a column that is not resident is a no-op.
+
+Eviction is **user-driven only**. Nothing in this library evicts on its own — there is no LRU and
+no memory budget — so what a table holds stays predictable from the calls you wrote.
 
 `%reload` only applies to a column that came from a file: reloading one built with `%add_column`
 is an error, since there is nothing to reload it from, as is reloading anything once the table has
@@ -1107,6 +1129,53 @@ of them. `before` must be declared as the same concrete table type as `t`.
 > points at freed memory afterwards. Fortran cannot detect this. Take the pointer again after the
 > mutation.
 
+## Seeing what a table holds
+
+`call t%print_stat()` prints one line per **materialized** column to standard output — its kind
+and unit, width, null count and min/max — under a header saying how many of the table's columns
+those are:
+
+```
+parquet_table: catalogue.parquet
+  rows: 6   columns: 18 (3 materialized)
+  column  kind                width   nulls       min                     max
+  s_i32   PK_INT32            1       0           1                       6
+  s_f64   PK_FLOAT64 [Msun]   1       1           1.75000                 10.5000
+  s_str   PK_STRING           1       0           a                       p
+```
+
+`all=.true.` lists every column, with `-` where one that has not been read has nothing to report.
+
+Four things worth knowing:
+
+- **Printing never reads anything.** A deferred plain-`LIST` column prints as `pending` rather
+  than being measured — a diagnostic that changes what it is diagnosing is worse than one that
+  admits it does not know.
+- **A `logical` column reports `T:<n>`/`F:<n>`** instead of an ordering, and a **vector** column's
+  statistic is over all of its elements, flattened. An all-null column has no min or max and
+  prints `-`.
+- **These are statistics of what is in memory**, computed by a plain scan here — not the file's
+  own footer statistics, and the only ones available for a column built with `%add_column`, which
+  has no footer at all.
+- **It costs a pass over every column it prints**, so it is a diagnostic, not something to put in
+  a loop.
+
+## Checking qc without keeping the columns
+
+qc declared with `qc=` or by a read-in MAML is enforced when a column is *read*, so on a lazy
+table a bound is only checked once something asks for that column. `call t%validate_qc()` checks
+them all without leaving them in memory:
+
+```fortran
+call parquet_open_table(t, "catalogue.parquet", qc=qc)
+call t%validate_qc()      ! reads each qc-declaring column, checks it, releases it again
+```
+
+What it leaves behind is the point: residency is recorded before anything is read, and only the
+columns *this call* made resident are released afterwards — a column the program had already read
+stays exactly as it was. A violation is reported the way it would be on an ordinary read (an
+abort, or a warning under `qc_soft=`), and a table with no qc declared is a no-op.
+
 ## Current limitations
 
 This is still a deliberately narrow version of the table layer.
@@ -1118,9 +1187,6 @@ This is still a deliberately narrow version of the table layer.
   it does to a whole file (see [A slice with a filter, a sample or
   qc](#a-slice-with-a-filter-a-sample-or-qc)); a sort reorders rows across the whole file, so it is
   refused there and has to be done in memory afterwards with `%sort_by`.
-- **Nothing is ever evicted.** A column stays resident once read; there is no per-column
-  eviction, and `%drop_column` is the only way to give a column's memory back. The slice regime
-  is what bounds total memory.
 - **`b = a` is a hard error**, not a silent alias — the column store lives behind a pointer, and
   a shallow copy would leave two tables sharing (and double-freeing) one store. Use `%clone`.
 - **A table is not thread-safe to mutate.** Reading resident columns from several threads is

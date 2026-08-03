@@ -54,7 +54,7 @@ module parquet_tables
         parquet_measure_list_width, parquet_column_width_needs_data, parquet_column_has_nulls, &
         parquet_load_qc_maml_file, parquet_filter, parquet_sortkey, parquet_read_qc, &
         parquet_compose_read_qc, parquet_reader_set_filter, parquet_parse_maml, &
-        parquet_get_metadata_items
+        parquet_get_metadata_items, parquet_get_qc_columns
     !
     implicit none
     private
@@ -318,6 +318,9 @@ module parquet_tables
         generic :: prefetch => prefetch_one, prefetch_many
         procedure :: materialize_all => table_materialize_every !! Read every column not yet read.
         procedure :: reload => table_reload           !! Re-read one column, discarding local edits.
+        procedure :: evict_column => table_evict_column !! Drop a column's VALUES, keeping the slot.
+        procedure :: validate_qc => table_validate_qc !! Check every qc-declaring column, holding none.
+        procedure :: print_stat => table_print_stat  !! Print what the table holds, to stdout.
         procedure :: row_group_bounds => table_row_group_bounds !! Row-group row ranges, this table's rows or the file's.
         ! --- row view ---
         procedure, private :: row_at_i32 !! %row specific taking an int32 index.
@@ -1138,6 +1141,17 @@ module parquet_tables
             character(len=*), intent(in) :: name     !! column name, for the message.
             character(len=*), intent(in) :: proc     !! calling procedure, for the message.
         end subroutine table_require_slice_size
+        !> A column's min and max as display text, for %print_stat.
+        !!
+        !! Over the VALUES only: a null row contributes nothing and is counted separately, which
+        !! is the sort engine's rule too. An all-null column has neither, and both come back as
+        !! "-". A `logical` column reports true/false counts instead of an ordering, and a vector
+        !! column's statistic is over all of its elements, flattened.
+        module subroutine table_column_stat_text(values, min_s, max_s)
+            type(parquet_column), intent(in) :: values          !! the column, which must be resident.
+            character(len=:), allocatable, intent(out) :: min_s !! smallest value as text, or "-".
+            character(len=:), allocatable, intent(out) :: max_s !! largest value as text, or "-".
+        end subroutine table_column_stat_text
         !> error stops unless slot `idx` holds exactly `kind`. The exact-kind rule the pointer
         !! path and the copy-back path both enforce (the copy-OUT path widens instead).
         module subroutine table_require_kind(self, idx, kind, proc)
@@ -1358,6 +1372,12 @@ module parquet_tables
         !> Reads one named column now rather than on first touch. A column already resident is
         !! left alone; an unsupported one is an error, since asking to read something unreadable
         !! is a mistake worth hearing about.
+        !!
+        !! `name` may also be a STRUCT's own name, with no dot: every leaf under `name.` is then
+        !! read in ONE pass, which is what makes it worth having -- the reader decodes a struct as
+        !! one array shared by all its leaves, so reading them one at a time decodes it once per
+        !! leaf. A real column of that exact name always wins over the prefix reading, and a name
+        !! matching neither is a missing column reported the usual way.
         module subroutine prefetch_one(self, name, found)
             class(parquet_table), intent(in) :: self !! the table (fills through %cache).
             character(len=*), intent(in) :: name     !! column to read.
@@ -1375,6 +1395,66 @@ module parquet_tables
         module subroutine table_materialize_every(self)
             class(parquet_table), intent(in) :: self !! the table (fills through %cache).
         end subroutine table_materialize_every
+        !> Prints what this table holds, to standard output: one header line and one line per
+        !! column, with each column's kind, width, row count, null count and min/max.
+        !!
+        !! **Materialized columns only, by default** -- the header says how many of the table's
+        !! columns those are, so a lazy table reports what it is actually holding rather than what
+        !! its file contains. `all=.true.` lists every column, with `-` where a column that has
+        !! not been read has nothing to report.
+        !!
+        !! **Printing never reads anything.** A deferred plain-`LIST` column, whose width is only
+        !! knowable from its data, prints as `pending` rather than being resolved -- a diagnostic
+        !! that changes what it is diagnosing is worse than one that admits it does not know.
+        !!
+        !! These are statistics of the values IN MEMORY, computed here by a plain Fortran scan.
+        !! They are not the file's own footer statistics, and they are the only ones available for
+        !! a column built with %add_column, which has no footer at all. The scan is O(rows) per
+        !! column, so this is not a call to put in a loop over a large table.
+        module subroutine table_print_stat(self, all)
+            class(parquet_table), intent(in) :: self !! the table.
+            logical, intent(in), optional :: all     !! .true.: list every column, not just the resident ones.
+        end subroutine table_print_stat
+        !> Checks this table's read-time qc against the file, WITHOUT leaving the columns resident.
+        !!
+        !! qc is enforced when a column is read, so on a lazy table a declared bound is only
+        !! checked once something asks for that column -- which means a program that reads two of
+        !! forty columns never finds out whether the other thirty-eight satisfy their bounds. This
+        !! reads exactly the columns that declare a bound, letting the reader check them, and then
+        !! releases the ones it had to read.
+        !!
+        !! **What it leaves behind is the point.** Residency is recorded BEFORE anything is read,
+        !! and only the columns this call made resident are released afterwards -- a column that
+        !! was already in memory stays there, values and all. So it can be called at any time
+        !! without disturbing what the program is working on.
+        !!
+        !! A violation is reported the way it would be on an ordinary read: an abort, or a warning
+        !! under `qc_soft=`. A table with no qc declared at all, and one built in memory, are
+        !! no-ops -- there is nothing to check and no file to check it against.
+        module subroutine table_validate_qc(self)
+            class(parquet_table), intent(inout) :: self !! the table.
+        end subroutine table_validate_qc
+        !> Releases one column's VALUES while keeping its slot -- the honest counterpart of
+        !! %prefetch, and the way to give a column's memory back without losing the column.
+        !!
+        !! The difference from %drop_column is what survives: an evicted column still appears in
+        !! %column_names, still answers %kind/%width/%unit, and is READ AGAIN on the next touch.
+        !! A dropped one is gone. So %drop_column is for a column you are finished with, and
+        !! %evict_column for one you are finished with FOR NOW.
+        !!
+        !! Only a file-backed column of an attached table can be evicted, and that restriction is
+        !! the whole safety story: everywhere else the values are the only copy that exists, so
+        !! evicting them would be silent data loss rather than a memory saving. A column built
+        !! with %add_column, and any column of a detached table, is therefore an error naming what
+        !! is wrong. Evicting a column that is not resident is a no-op.
+        !!
+        !! Eviction is user-driven only. Nothing in this library evicts on its own -- no LRU, no
+        !! memory budget -- so what a table holds stays predictable from the calls you wrote.
+        module subroutine table_evict_column(self, name, found)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column to release.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
+        end subroutine table_evict_column
         !> Re-reads one column from the file, discarding whatever is in the store -- the escape
         !! hatch back to the file's own values after %set has changed them locally. Only valid
         !! for a file-backed column of a table that has not been detached.

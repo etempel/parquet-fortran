@@ -1151,6 +1151,10 @@ program error_scenarios
         call scenario_table_write_unsupported_column()
     case ("table_write_unbuilt_schema")
         call scenario_table_write_unbuilt_schema()
+    case ("table_evict_in_memory")
+        call scenario_table_evict_in_memory()
+    case ("table_evict_detached")
+        call scenario_table_evict_detached()
     case ("table_set_is_valid_length")
         call scenario_table_set_is_valid_length()
     case ("table_copy_metadata_unknown_key")
@@ -9793,6 +9797,27 @@ contains
         call parquet_write_table(t, "test_run/es_table_wunsupported_out.parquet", s)   ! -> aborts
         print '(a)', "unexpectedly wrote a table's unsupported column"
     end subroutine scenario_table_write_unsupported_column
+
+    !> A column built in memory has no file to be read back from, so evicting its values would
+    !! be data loss rather than a memory saving.
+    subroutine scenario_table_evict_in_memory()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32, 3_int32])
+        call t%evict_column("a")   ! -> aborts
+        print '(a)', "unexpectedly evicted an in-memory column"
+    end subroutine scenario_table_evict_in_memory
+
+    !> A detached table can never read a column back, so evicting one is data loss too.
+    subroutine scenario_table_evict_detached()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_evict_detached.parquet")
+        call parquet_open_table(t, "test_run/es_evict_detached.parquet")
+        call t%materialize_all()
+        call t%truncate(2)
+        call t%evict_column("id")   ! -> aborts
+        print '(a)', "unexpectedly evicted a column of a detached table"
+    end subroutine scenario_table_evict_detached
 
     !> A caller-supplied validity mask must have one entry per row: a short one would silently
     !! leave the tail of the column at whatever nulls it had, which is exactly the mistake.

@@ -110,8 +110,31 @@ contains
             call table_kind_from_type(type_name, col_size, kind, ok)
             slot%declared_kind = kind
             slot%width = max(col_size, 1)
+            call record_temporal_unit(cache, slot, type_name)
         end associate
     end procedure table_classify
+    !
+    !> Records a TIME/TIMESTAMP column's stored resolution (and, for a timestamp, its timezone
+    !! flag) on the descriptor, while the reader is still there to answer.
+    !!
+    !! This has to happen at classification time and nowhere later, because nothing else in the
+    !! table remembers it: a `parquet_timestamp` stores seconds+nanoseconds and carries no unit,
+    !! and the descriptor's own `unit` is the physical unit (`"Msun"`), not the temporal
+    !! resolution. A schema-less write reads it back to emit the matching `timestamp[ns]`-style
+    !! data_type token; without it the writer would default to microseconds and a nanosecond
+    !! column would fail the write.
+    subroutine record_temporal_unit(cache, slot, type_name)
+        type(parquet_table_cache), intent(inout) :: cache      !! the column store (for the reader).
+        type(parquet_table_column), intent(inout) :: slot      !! descriptor being classified.
+        character(len=*), intent(in) :: type_name              !! canonical type token from the file.
+        character(len=:), allocatable :: tz
+        !
+        ! DATE has no unit (it is a day count) and no timezone, so it is deliberately not asked
+        ! about -- parquet_get_column_time_info aborts on a non-time/timestamp column.
+        if (trim(type_name) /= "time" .and. trim(type_name) /= "timestamp") return
+        call parquet_get_column_time_info(cache%reader, slot%file_name, slot%time_unit, tz)
+        slot%time_utc = len_trim(tz) > 0
+    end subroutine record_temporal_unit
     !
     module procedure table_materialize
         associate (slot => cache%cols(idx))

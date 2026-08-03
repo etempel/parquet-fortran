@@ -1153,6 +1153,8 @@ program error_scenarios
         call scenario_table_write_unsupported_column()
     case ("table_write_no_overwrite")
         call scenario_table_write_no_overwrite()
+    case ("table_write_schemaless_empty_maml")
+        call scenario_table_write_schemaless_empty_maml()
     case ("table_write_unbuilt_schema")
         call scenario_table_write_unbuilt_schema()
     case ("table_row_index_after_detach")
@@ -9854,6 +9856,17 @@ contains
         call parquet_write_table(t, "test_run/es_table_nowr_out.parquet", s, overwrite=.false.)   ! -> aborts
         print '(a)', "unexpectedly overwrote an existing file with overwrite=.false."
     end subroutine scenario_table_write_no_overwrite
+
+    !> A schema-less write of a table with nothing resident produces a valid EMPTY file -- but a
+    !! MAML cannot describe zero columns, so asking for a sidecar alongside it is a request the
+    !! library cannot satisfy. It says so rather than silently skipping the file it was asked for.
+    subroutine scenario_table_write_schemaless_empty_maml()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_table_slessmaml_in.parquet")
+        call parquet_open_table(t, "test_run/es_table_slessmaml_in.parquet")   ! reads nothing
+        call parquet_write_table(t, "test_run/es_table_slessmaml_out.parquet", write_maml=.true.)
+        print '(a)', "unexpectedly wrote a sidecar MAML for a zero-column table"
+    end subroutine scenario_table_write_schemaless_empty_maml
 
     !> The row index says which row of the SOURCE FILE each row came from, so a table that has
     !! cut its file loose can no longer produce it. Materializing it before the mutation is the

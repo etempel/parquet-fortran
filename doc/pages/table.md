@@ -839,6 +839,9 @@ call parquet_write_table(t, "out.parquet", s)   ! parses the schema itself if yo
 `%add_column` refuses a name that already exists unless you pass `force=.true.`, which replaces
 the column outright.
 
+The schema is optional — see [Writing without a schema](#writing-without-a-schema) for what a
+`parquet_write_table(t, "out.parquet")` with no schema does.
+
 **The schema decides the output.** `parquet_write_table` walks the schema's enabled fields, looks
 each one up in the table **by its internal name**, and writes it under the schema's output name —
 so a `col_map:` rename works exactly as it does for `parquet_open_writer`. A schema field with no
@@ -877,6 +880,58 @@ To write only some rows without changing the table, pass a mask:
 call parquet_write_table(t, "subset.parquet", s, row_mask=keep)
 ```
 
+### Writing without a schema
+
+For a small or temporary table, the schema is optional:
+
+```fortran
+call parquet_write_table(t, "out.parquet")                    ! whatever is in memory
+call parquet_write_table(t, "out.parquet", write_maml=.true.) ! ...and a .maml describing it
+```
+
+**It writes the columns that are currently resident, and reads nothing.** That is what makes it the
+quick path: a column the program never touched is not in the output. Columns come out in slot order
+— file order for a file-backed table, insertion order for one built with `%add_column` — under their
+own internal names, since without a schema there is no `col_map:` to rename them with. Use
+`%rename_column` if you want different names in the file. There is no `columns=` argument: to choose
+columns, or to rename them, pass a schema.
+
+A few consequences worth knowing:
+
+- **A table with nothing resident writes a valid empty file** — zero columns, zero rows — rather
+  than failing. Materialize something first if that is not what you meant.
+- **Writer-side qc is off**, because there is no `qc:` block to enforce. Read-time qc, if the table
+  was opened with `qc=` or a read-in MAML, has already run and is unaffected.
+- **The automatic [`parquet_row_index`](#which-row-of-the-file-is-this) column is never written**,
+  even when you have materialized it. It records where a row came from rather than being part of
+  your table; name it in a schema if you want it in the output.
+- **`release=` has nothing to do**, since a schema-less write only ever writes columns that were
+  already resident.
+
+**The sidecar `.maml` is what makes this round-trip.** With `write_maml=.true.` the write also emits
+a MAML file next to the parquet output (`out.parquet` → `out.maml`), generated from the table's own
+columns: each one's name, type, resolved `col_size:`/`array_size:`, and its `unit:` where it has one
+(a column with no unit gets no `unit:` key). The `table:` name is the output file's stem. That file
+is a valid read-in MAML for the file it describes, so
+
+```fortran
+call parquet_write_table(t, "tmp.parquet", write_maml=.true.)
+...
+call parquet_open_table(t2, "tmp.parquet", maml="tmp.maml")   ! units come back
+```
+
+gets you back what you wrote, units included — which a parquet file alone cannot carry. The one
+thing that cannot be described this way is a zero-column table: `write_maml=.true.` on a table with
+nothing resident is an error rather than a silently missing file, because MAML has no way to express
+`fields:` with nothing in it.
+
+**Temporal columns keep their own resolution.** A `timestamp[ns]` column read from a file is written
+back as `timestamp[ns]`, not coerced to the writer's microsecond default — the table records each
+time/timestamp column's stored unit when it opens the file, because a `parquet_timestamp` value
+carries no unit of its own. A temporal column *built in memory* with `%add_column` has no stored unit
+to record, so it takes the default microseconds; give it a schema with an explicit
+`timestamp[ns]`-style token if it needs finer.
+
 ### Writer options
 
 Everything [`parquet_open_writer`](writing.html#writer-options) can be told,
@@ -890,7 +945,7 @@ call parquet_write_table(t, "out.parquet", s, compression="snappy", chunk_size=5
 | argument | meaning | default |
 |---|---|---|
 | `write_maml` | also emit a sidecar `.maml` next to the output | `.false.` |
-| `qc` | run the schema's `qc:` min/max/miss checks on write | on |
+| `qc` | run the schema's `qc:` min/max/miss checks on write | on with a schema, off without |
 | `compression` | `uncompressed`/`snappy`/`gzip`/`zstd`/`brotli`/`lz4` | `"zstd"` |
 | `compression_level` | codec level (not every codec has one — `snappy` does not) | codec's own |
 | `chunk_size` | rows per row group | auto-sized |

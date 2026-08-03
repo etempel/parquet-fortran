@@ -10,37 +10,46 @@
 !! column the table does not have". Reusing `parquet_open_writer`/`parquet_write_column` rather
 !! than reimplementing them is what keeps a table write and a hand-written write path identical
 !! in behaviour.
+!!
+!! **A schema-less write BUILDS a schema rather than taking a second path.** `build_table_schema`
+!! turns the resident columns' descriptors into an ordinary `parquet_schema` and everything below
+!! proceeds as it always did. Two things fall out of that choice and are the reason for it: the
+!! sidecar MAML costs nothing (the writer already emits one from whatever schema it was given),
+!! and there is exactly one write loop to keep correct rather than two that can drift. The
+!! generated schema declares `col_size:`/`array_size:` as `auto`, so the writer resolves them from
+!! the data exactly as it would with no schema at all -- and because the sidecar is emitted at
+!! CLOSE, it records the resolved values rather than `auto`.
 submodule (parquet_tables) parquet_tables_write
     implicit none
     !
 contains
     !
     module procedure parquet_write_table
-        type(parquet_writer) :: writer
-        type(parquet_schema) :: carried
-        character(len=:), allocatable :: fname, sfx
-        integer :: i, nfields, idx
-        logical :: want_metadata, do_release, was_empty
+        type(parquet_schema) :: own
+        integer :: nfields
+        logical :: want_metadata, use_own
         !
         call table_check_open(table, "parquet_write_table")
-        ! A schema built in code with %init/%add_field only has MAML *text* until
-        ! parquet_parse_maml populates %cinfo -- and %get_num_fields on an unpopulated %cinfo
-        ! reads uninitialized state, which turns the loop below into a runaway allocation and an
-        ! OOM kill rather than any kind of diagnosable failure. There is no reason to make the
-        ! caller say so themselves, though: a schema that has been built but not parsed is parsed
-        ! here. It is a visible side effect (the caller's schema stays parsed afterwards, which is
-        ! what they wanted anyway), which is why `schema` is intent(inout).
-        !
-        ! A schema that was never built at all is a different mistake and still an error: parsing
-        ! empty MAML text would report something about the text rather than about the call.
-        if (.not. schema%is_parsed()) then
-            if (.not. schema%is_init()) then
-                error stop EP // "parquet_write_table: this schema has not been built; call " // &
-                    "schema%init/%add_field (or load a MAML file) before writing with it"
+        if (present(schema)) then
+            ! A schema built in code with %init/%add_field only has MAML *text* until
+            ! parquet_parse_maml populates %cinfo -- and %get_num_fields on an unpopulated %cinfo
+            ! reads uninitialized state, which turns the write loop into a runaway allocation and
+            ! an OOM kill rather than any kind of diagnosable failure. There is no reason to make
+            ! the caller say so themselves, though: a schema that has been built but not parsed is
+            ! parsed here. It is a visible side effect (the caller's schema stays parsed
+            ! afterwards, which is what they wanted anyway), which is why `schema` is
+            ! intent(inout).
+            !
+            ! A schema that was never built at all is a different mistake and still an error:
+            ! parsing empty MAML text would report something about the text rather than the call.
+            if (.not. schema%is_parsed()) then
+                if (.not. schema%is_init()) then
+                    error stop EP // "parquet_write_table: this schema has not been built; call " // &
+                        "schema%init/%add_field (or load a MAML file) before writing with it"
+                end if
+                call parquet_parse_maml(schema)
             end if
-            call parquet_parse_maml(schema)
         end if
-        nfields = schema%get_num_fields()
         !
         want_metadata = present(metadata_keys)
         if (present(copy_metadata)) then
@@ -51,33 +60,80 @@ contains
             end if
             want_metadata = want_metadata .or. copy_metadata
         end if
-        ! Two things about the open below. Every writer option is forwarded untouched, absent ones
-        ! included: passing an absent optional dummy on as an actual argument leaves the callee's
-        ! own dummy absent, so parquet_open_writer applies exactly the defaults it would for a
-        ! hand-written open, and there is no second set of defaults here to drift from it.
-        !
-        ! And the carried metadata goes onto a COPY of the schema, never the caller's own: writing
-        ! a second table with the same schema afterwards would otherwise inherit the first table's
-        ! source-file metadata, silently and permanently.
-        if (want_metadata) then
-            carried = schema
-            call carry_source_metadata(table, carried, metadata_keys)
-            call parquet_open_writer(writer, trim(filename), carried, write_maml=write_maml, qc=qc, &
-                compression=compression, compression_level=compression_level, chunk_size=chunk_size, &
-                use_threads=use_threads, overwrite=overwrite)
-        else
-            call parquet_open_writer(writer, trim(filename), schema, write_maml=write_maml, qc=qc, &
-                compression=compression, compression_level=compression_level, chunk_size=chunk_size, &
-                use_threads=use_threads, overwrite=overwrite)
+        ! `own` is used in two unrelated situations, and only one of them existed before: a
+        ! schema-less write has to BUILD a schema, and a metadata carry-over has to write onto a
+        ! COPY of the caller's rather than the caller's own -- otherwise writing a second table
+        ! with the same schema would inherit the first table's source-file metadata, silently and
+        ! permanently. Both end up wanting a local schema, so they share one.
+        use_own = want_metadata .or. .not. present(schema)
+        if (.not. present(schema)) then
+            call build_table_schema(table, trim(filename), own, nfields)
+            ! Nothing resident is not an error -- it writes a genuinely empty file, which Arrow
+            ! accepts and this library reopens as a 0-column, 0-row table. It cannot go through
+            ! the generated schema, though: MAML requires at least one field, so there is no
+            ! schema to build and the bare writer does the whole job.
+            if (nfields == 0) then
+                call write_empty_file(trim(filename), write_maml, compression, compression_level, &
+                    chunk_size, use_threads, overwrite)
+                return
+            end if
+        else if (want_metadata) then
+            own = schema
         end if
+        if (want_metadata) call carry_source_metadata(table, own, metadata_keys)
+        !
+        if (use_own) then
+            call write_through_schema(table, own, filename, row_mask, write_maml, qc,         &
+                compression, compression_level, chunk_size, use_threads, overwrite, release)
+        else
+            call write_through_schema(table, schema, filename, row_mask, write_maml, qc,      &
+                compression, compression_level, chunk_size, use_threads, overwrite, release)
+        end if
+    end procedure parquet_write_table
+    !
+    !> Opens the writer, writes every enabled column of `sch`, and closes -- the whole write, for
+    !! whichever schema the caller's arguments resolved to.
+    !!
+    !! It exists as its own procedure only so that the caller's schema and a locally built one can
+    !! share one body: Fortran has no way to bind a name to "whichever of these two objects", and
+    !! duplicating an eleven-argument `parquet_open_writer` call plus the write loop is exactly the
+    !! kind of pair that drifts.
+    !!
+    !! Every writer option is forwarded untouched, absent ones included: passing an absent optional
+    !! dummy on as an actual argument leaves the callee's own dummy absent, so
+    !! `parquet_open_writer` applies exactly the defaults it would for a hand-written open, and
+    !! there is no second set of defaults here to drift from it.
+    subroutine write_through_schema(table, sch, filename, row_mask, write_maml, qc,              &
+            compression, compression_level, chunk_size, use_threads, overwrite, release)
+        type(parquet_table), intent(in) :: table                   !! the table being written.
+        type(parquet_schema), intent(in) :: sch                    !! schema that decides the output.
+        character(len=*), intent(in) :: filename                   !! output parquet file.
+        logical, intent(in), optional :: row_mask(:)               !! per-row write mask.
+        logical, intent(in), optional :: write_maml                !! emit a sidecar .maml.
+        logical, intent(in), optional :: qc                        !! run the schema's qc: checks.
+        character(len=*), intent(in), optional :: compression      !! codec name.
+        integer, intent(in), optional :: compression_level         !! codec level.
+        integer, intent(in), optional :: chunk_size                !! row-group size, in rows.
+        logical, intent(in), optional :: use_threads               !! Arrow's multi-threaded writer.
+        logical, intent(in), optional :: overwrite                 !! allow truncating an existing file.
+        logical, intent(in), optional :: release                   !! give back what this write read.
+        type(parquet_writer) :: writer
+        character(len=:), allocatable :: fname, sfx
+        integer :: i, nfields, idx
+        logical :: do_release, was_empty
+        !
+        nfields = sch%get_num_fields()
+        call parquet_open_writer(writer, trim(filename), sch, write_maml=write_maml, qc=qc,       &
+            compression=compression, compression_level=compression_level, chunk_size=chunk_size,  &
+            use_threads=use_threads, overwrite=overwrite)
         do_release = .true.
         if (present(release)) do_release = release
         if (present(row_mask)) call parquet_write_row_mask(writer, row_mask)
         do i = 1, nfields
-            call schema%get_field_name(i, fname)
+            call sch%get_field_name(i, fname)
             ! A schema may deliberately disable a field (set_column_unavailable); skip those
             ! rather than demanding the table carry a column nobody is going to write.
-            if (.not. schema%is_column_set(fname)) cycle
+            if (.not. sch%is_column_set(fname)) cycle
             ! The lookup key is the INTERNAL name. A col_map: rename lives in the schema and is
             ! applied by the writer on the way out, so nothing here ever sees the output name.
             idx = table_find(table, fname)
@@ -94,7 +150,8 @@ contains
             ! Writing a column the caller never read is a first touch like any other: the schema
             ! naming it IS the request to read it. Nothing has to be pre-materialized to write.
             ! Whether it WAS is the whole of release=: what the caller had already read is theirs
-            ! and stays, what this write had to read is this write's to give back.
+            ! and stays, what this write had to read is this write's to give back. (A schema-less
+            ! write names only resident columns, so nothing is ever released on that path.)
             was_empty = table%cache%cols(idx)%residency == RES_EMPTY
             call table_touch(table%cache, table_scope_of(table), idx, "parquet_write_table")
             call write_one_column(writer, table, idx, fname)
@@ -103,7 +160,201 @@ contains
             if (do_release .and. was_empty) call release_written_column(table%cache, idx)
         end do
         call parquet_close_writer(writer)
-    end procedure parquet_write_table
+    end subroutine write_through_schema
+    !
+    !> Builds the schema a SCHEMA-LESS write uses: one field per resident column, in slot order,
+    !! under the column's own internal name.
+    !!
+    !! Three rules decide what goes in, and each is a decision rather than an implementation
+    !! detail:
+    !!
+    !! * **Resident columns only.** That is what makes this the quick path -- it writes what is
+    !!   already in memory and reads nothing. A column the caller never touched is not written, so
+    !!   `release=` never has anything to give back on this path.
+    !! * **`parquet_row_index` is never written**, even when it is resident. It is this library's
+    !!   own provenance column rather than the table's data, and having it appear unasked-for in an
+    !!   output file is the more surprising of the two possible answers. Name it in a schema to
+    !!   write it.
+    !! * **`col_size:`/`array_size:` are declared `auto`**, never measured here. The writer resolves
+    !!   both from the data at the first write exactly as it would with no schema at all, so this
+    !!   procedure cannot get them wrong -- and the sidecar MAML, emitted at close, records the
+    !!   resolved values.
+    !!
+    !! The `table:` name is the output file's stem, since a schema-less table has no schema name to
+    !! take one from and MAML requires the key.
+    subroutine build_table_schema(table, filename, sch, nfields)
+        type(parquet_table), intent(in) :: table    !! the table being written.
+        character(len=*), intent(in) :: filename    !! output parquet file, for the table: name.
+        type(parquet_schema), intent(out) :: sch    !! the schema built from the descriptors.
+        integer, intent(out) :: nfields             !! fields added; 0 means "write an empty file".
+        character(len=:), allocatable :: stem, dtype, u
+        logical :: is_vec, is_str
+        integer :: i
+        !
+        nfields = 0
+        call output_stem(filename, stem)
+        call sch%init(stem)
+        do i = 1, table%cache%ncols
+            associate (slot => table%cache%cols(i))
+                if (slot%residency /= RES_FULL) cycle
+                if (.not. slot%supported) cycle
+                if (slot%name == PARQUET_ROW_INDEX) cycle
+                call schema_type_token(slot, dtype)
+                is_vec = slot%width > 1
+                is_str = slot%declared_kind == PK_STRING .or. slot%declared_kind == PK_STRING_VEC
+                ! An UNALLOCATED allocatable actual makes an optional dummy absent (F2018
+                ! 15.5.2.12), which is how a column with no unit gets no `unit:` key at all rather
+                ! than an empty one -- deallocated first, since the previous column may have left
+                ! one behind.
+                if (allocated(u)) deallocate(u)
+                if (allocated(slot%unit)) u = slot%unit
+                if (is_vec .and. is_str) then
+                    call sch%add_field(slot%name, dtype, unit=u, col_size=parquet_size_auto, &
+                        array_size=parquet_size_auto)
+                else if (is_vec) then
+                    call sch%add_field(slot%name, dtype, unit=u, col_size=parquet_size_auto)
+                else if (is_str) then
+                    call sch%add_field(slot%name, dtype, unit=u, array_size=parquet_size_auto)
+                else
+                    call sch%add_field(slot%name, dtype, unit=u)
+                end if
+                nfields = nfields + 1
+            end associate
+        end do
+        ! MAML requires at least one field, so an empty schema cannot be parsed at all -- the
+        ! caller checks `nfields` and takes the empty-file path instead of this one.
+        if (nfields > 0) call parquet_parse_maml(sch)
+    end subroutine build_table_schema
+    !
+    !> Writes a valid parquet file with no columns and no rows, for a schema-less write of a table
+    !! that holds nothing resident.
+    !!
+    !! A bare (schema-less) writer does the whole job: opened and closed with nothing written, it
+    !! produces a file this library reopens as a 0-column, 0-row table -- verified against Arrow
+    !! rather than assumed. `qc` and `release` have nothing to act on and are deliberately not
+    !! forwarded; `row_mask` likewise, since there are no rows to mask.
+    !!
+    !! `write_maml=.true.` ABORTS here rather than silently producing no sidecar. A MAML file has
+    !! no way to describe zero columns (`fields:` may not be empty), so the request cannot be
+    !! satisfied, and dropping a requested output file without a word is the worse failure.
+    subroutine write_empty_file(filename, write_maml, compression, compression_level, chunk_size, &
+            use_threads, overwrite)
+        character(len=*), intent(in) :: filename                   !! output parquet file.
+        logical, intent(in), optional :: write_maml                !! sidecar request; see above.
+        character(len=*), intent(in), optional :: compression      !! codec name.
+        integer, intent(in), optional :: compression_level         !! codec level.
+        integer, intent(in), optional :: chunk_size                !! row-group size, in rows.
+        logical, intent(in), optional :: use_threads               !! Arrow's multi-threaded writer.
+        logical, intent(in), optional :: overwrite                 !! allow truncating an existing file.
+        type(parquet_writer) :: writer
+        !
+        if (present(write_maml)) then
+            if (write_maml) then
+                error stop EP // "parquet_write_table: write_maml=.true. was requested for a " // &
+                    "schema-less write of a table with no resident column, but a MAML file " // &
+                    "cannot describe zero columns; materialize a column first, or pass a schema " // &
+                    "(file: " // filename // ")"
+            end if
+        end if
+        call parquet_open_writer(writer, filename, compression=compression, &
+            compression_level=compression_level, chunk_size=chunk_size, &
+            use_threads=use_threads, overwrite=overwrite)
+        call parquet_close_writer(writer)
+    end subroutine write_empty_file
+    !
+    !> The MAML `data_type` token for a descriptor -- the inverse of `table_kind_from_type`, plus
+    !! the `[unit]`/`[unit,utc]` suffix a TIME/TIMESTAMP column needs.
+    !!
+    !! **The suffix is what makes a temporal column round-trip.** Without it the writer defaults to
+    !! microseconds, and a column that was stored at nanoseconds does not truncate quietly -- it
+    !! fails the write, because `to_unix` refuses to lose precision. The unit comes from
+    !! `time_unit`, recorded on the descriptor at classification time precisely because a
+    !! `parquet_timestamp` carries no unit of its own and nothing else remembers it.
+    !!
+    !! A column with no recorded unit -- one built in memory with `%add_column` rather than read
+    !! from a file -- gets no suffix and therefore the writer's own microsecond default, which is
+    !! exactly what a hand-written schema-less write of the same data would produce.
+    subroutine schema_type_token(slot, tok)
+        type(parquet_table_column), intent(in) :: slot        !! the descriptor to describe.
+        character(len=:), allocatable, intent(out) :: tok     !! the MAML data_type token.
+        character(len=:), allocatable :: sfx
+        !
+        select case (slot%declared_kind)
+        case (PK_INT32, PK_INT32_VEC)
+            tok = "int32"
+        case (PK_INT64, PK_INT64_VEC)
+            tok = "int64"
+        case (PK_FLOAT32, PK_FLOAT32_VEC)
+            tok = "float32"
+        case (PK_FLOAT64, PK_FLOAT64_VEC)
+            tok = "float64"
+        case (PK_LOGICAL, PK_LOGICAL_VEC)
+            tok = "boolean"
+        case (PK_STRING, PK_STRING_VEC)
+            tok = "string"
+        case (PK_DATE, PK_DATE_VEC)
+            ! DATE is a day count: no unit and no timezone, so no suffix exists for it.
+            tok = "date"
+        case (PK_TIME, PK_TIME_VEC)
+            call temporal_suffix(slot, .false., sfx)
+            tok = "time" // sfx
+        case (PK_TIMESTAMP, PK_TIMESTAMP_VEC)
+            call temporal_suffix(slot, .true., sfx)
+            tok = "timestamp" // sfx
+        case default
+            ! Not reachable: build_table_schema skips every unsupported slot, and a resident
+            ! column always has one of the 18 kinds above.
+            tok = "" ! GCOVR_EXCL_LINE
+        end select
+    end subroutine schema_type_token
+    !
+    !> The `[unit]`/`[unit,utc]` suffix for a TIME/TIMESTAMP token, or "" when the column carries
+    !! no recorded unit (an in-memory column) and the writer's default should stand.
+    subroutine temporal_suffix(slot, allow_utc, sfx)
+        type(parquet_table_column), intent(in) :: slot     !! the descriptor to describe.
+        logical, intent(in) :: allow_utc                   !! .true. for timestamp; time has no tz.
+        character(len=:), allocatable, intent(out) :: sfx  !! "[us]", "[ns,utc]", or "".
+        !
+        select case (slot%time_unit)
+        case (parquet_unit_millis)
+            sfx = "[ms"
+        case (parquet_unit_micros)
+            sfx = "[us"
+        case (parquet_unit_nanos)
+            sfx = "[ns"
+        case default
+            ! Includes parquet_unit_seconds, which no parquet file can actually store (a MAML
+            ! `time[s]`/`timestamp[s]` token is rejected at parse time), so it can only mean
+            ! "nothing was recorded".
+            sfx = ""
+            return
+        end select
+        if (allow_utc .and. slot%time_utc) sfx = sfx // ",utc"
+        sfx = sfx // "]"
+    end subroutine temporal_suffix
+    !
+    !> The output file's stem -- its basename with any directory part and a trailing ".parquet"
+    !! removed -- used as the generated schema's `table:` name, which MAML requires.
+    subroutine output_stem(filename, stem)
+        character(len=*), intent(in) :: filename           !! output parquet path.
+        character(len=:), allocatable, intent(out) :: stem !! the stem, never empty.
+        integer :: i, first
+        !
+        first = 1
+        do i = len_trim(filename), 1, -1
+            if (filename(i:i) == "/" .or. filename(i:i) == "\") then
+                first = i + 1
+                exit
+            end if
+        end do
+        stem = trim(filename(first:))
+        if (len(stem) > 8) then
+            if (stem(len(stem)-7:) == ".parquet") stem = stem(1:len(stem)-8)
+        end if
+        ! A path that is nothing but a directory separator or an extension would leave nothing to
+        ! name the schema with, and MAML requires a table: value.
+        if (len_trim(stem) == 0) stem = "table"
+    end subroutine output_stem
     !
     !> Gives back a column this write had to materialize, leaving the descriptor alone so the
     !! slot stays listed, queryable and re-readable -- `%evict_column`'s body, without its checks.

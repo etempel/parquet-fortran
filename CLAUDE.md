@@ -889,9 +889,9 @@ zero-word skip is what keeps the null-free path free and must stay.
 
 **Do not reintroduce widening in a new read or write path.** A per-element null read from a file is
 stored as such (`set_validity` writes the whole mask in one pass rather than replaying `width*nrows`
-setter calls), and a table write hands the element mask straight to the writer. `feature_write.md`
-and `feature_element_nulls.md` record the design; the round-trip test in `test/test_table.f90`
-(`test_element_null_round_trip`) is what catches a regression, in both directions at once.
+setter calls), and a table write hands the element mask straight to the writer. The round-trip test
+in `test/test_table.f90` (`test_element_null_round_trip`) is what catches a regression, in both
+directions at once.
 
 ### A `parquet_table` pointer does not survive a ROW-structural mutation
 

@@ -197,6 +197,8 @@ contains
         dst%declared_kind = src%declared_kind
         dst%width = src%width
         dst%width_pending = src%width_pending
+        dst%time_unit = src%time_unit
+        dst%time_utc = src%time_utc
         if (allocated(src%unit)) dst%unit = src%unit
         dst%file_source = src%file_source
         dst%predefined = src%predefined

@@ -617,6 +617,8 @@ contains
                 test_table_write_unsupported_column_aborts), &
             new_unittest("parquet_write_table with overwrite=.false. over an existing file aborts", &
                 test_table_write_no_overwrite_aborts), &
+            new_unittest("a sidecar MAML for a zero-column schema-less write aborts", &
+                test_table_write_schemaless_empty_maml_aborts), &
             new_unittest("parquet_write_table with a schema that was never built aborts", &
                 test_table_write_unbuilt_schema_aborts), &
             new_unittest("asking for the row index after a detach aborts", &
@@ -1048,6 +1050,13 @@ contains
             failure_message="a table write with overwrite=.false. over an existing file was expected to abort", &
             required_stderr="file already exists and overwrite=.false.")
     end subroutine test_table_write_no_overwrite_aborts
+
+    subroutine test_table_write_schemaless_empty_maml_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_write_schemaless_empty_maml", expect_abort=.true., &
+            failure_message="a sidecar MAML for a zero-column schema-less write was expected to abort", &
+            required_stderr="cannot describe zero columns")
+    end subroutine test_table_write_schemaless_empty_maml_aborts
 
     subroutine test_table_row_index_after_detach_aborts(error)
         type(error_type), allocatable, intent(out) :: error

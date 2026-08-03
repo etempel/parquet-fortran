@@ -281,6 +281,7 @@ scenarios=(
     "table_write_missing_column:1"
     "table_write_unsupported_column:1"
     "table_write_no_overwrite:1"
+    "table_write_schemaless_empty_maml:1"
     "table_write_unbuilt_schema:1"
     "table_row_index_after_detach:1"
     "table_evict_in_memory:1"

@@ -54,7 +54,9 @@ module parquet_tables
         parquet_measure_list_width, parquet_column_width_needs_data, parquet_column_has_nulls, &
         parquet_load_qc_maml_file, parquet_filter, parquet_sortkey, parquet_read_qc, &
         parquet_compose_read_qc, parquet_reader_set_filter, parquet_parse_maml, &
-        parquet_get_metadata_items, parquet_get_qc_columns, parquet_get_physical_row_indices
+        parquet_get_metadata_items, parquet_get_qc_columns, parquet_get_physical_row_indices, &
+        parquet_get_column_time_info, parquet_size_auto, &
+        parquet_unit_millis, parquet_unit_micros, parquet_unit_nanos
     !
     implicit none
     private
@@ -146,6 +148,18 @@ module parquet_tables
         !! some other way. A second `%cast` while it is set materializes first, so that a chain of
         !! casts cannot silently forget the intermediate one (see `table_cast`).
         logical :: cast_pending = .false.
+        !> The TIME/TIMESTAMP resolution this column is stored at in the file, as a parquet_unit_*
+        !! selector, or 0 for every other kind (and for a column with no file behind it). Recorded
+        !! at classification time because it is recoverable from nowhere else afterwards: a
+        !! `parquet_timestamp` holds seconds+nanoseconds and carries no unit of its own, so once
+        !! the reader is gone the table would have no way to know it read a `timestamp[ns]` column
+        !! rather than a `timestamp[us]` one. A schema-less write needs it to declare the matching
+        !! data_type token -- without it the writer defaults to microseconds and a nanosecond
+        !! column fails the write outright (`to_unix` aborts rather than truncating).
+        integer :: time_unit = 0
+        !> .true. when this column is a TIMESTAMP stored with a timezone (the MAML `,utc` token).
+        !! Recorded and used for the same reason as `time_unit`.
+        logical :: time_utc = .false.
         !> Unit declared for this column by the read-in MAML (`fields:`' `unit:` key), looked up
         !! by the column's FILE name at open. Unallocated when no MAML was given, or when it
         !! declares nothing for this column. It is held here rather than only on `values` because
@@ -1643,6 +1657,14 @@ module parquet_tables
         !! with no matching table column is an error; a table column the schema does not name is
         !! simply not written. `row_mask` writes a row subset without changing the table.
         !!
+        !! **`schema` is optional.** Without one the write is *schema-less*: every column that is
+        !! currently RESIDENT is written, in slot order, under its own internal name -- a quick
+        !! path for a small or temporary table that reads nothing and needs no schema built for
+        !! it. A table with nothing resident writes a valid empty file. The automatic
+        !! `parquet_row_index` column is never written by a schema-less write, even when it is
+        !! resident; name it in a schema to write it. Without a schema there is no `col_map:` and
+        !! no `qc:`, so output names are the internal names and writer-side qc is off.
+        !!
         !! A schema built with `%init`/`%add_field` and never parsed is parsed here, so calling
         !! `parquet_parse_maml` first is optional. That is why `schema` is `intent(inout)`: the
         !! caller's schema is parsed on return.
@@ -1671,7 +1693,7 @@ module parquet_tables
                 use_threads, overwrite, release)
             type(parquet_table), intent(in) :: table   !! the table to write.
             character(len=*), intent(in) :: filename   !! output parquet file.
-            type(parquet_schema), intent(inout) :: schema !! output schema (chooses/renames columns).
+            type(parquet_schema), intent(inout), optional :: schema !! output schema; absent = schema-less write.
             logical, intent(in), optional :: row_mask(:)  !! per-row write mask.
             logical, intent(in), optional :: copy_metadata !! .true.: carry every source-file metadata entry.
             character(len=*), intent(in), optional :: metadata_keys(:) !! carry only these source-file keys.

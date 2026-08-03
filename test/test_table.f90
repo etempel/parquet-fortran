@@ -217,7 +217,13 @@ contains
             new_unittest("release= leaves the table in the residency state the write found", &
                 test_write_table_release), &
             new_unittest("the writer options parquet_write_table forwards reach the file", &
-                test_write_table_writer_options) &
+                test_write_table_writer_options), &
+            new_unittest("a schema-less write writes the resident columns and nothing else", &
+                test_write_table_schemaless), &
+            new_unittest("a schema-less write's sidecar MAML carries units and reopens the file", &
+                test_write_table_schemaless_sidecar), &
+            new_unittest("a nanosecond timestamp column survives a schema-less write", &
+                test_write_table_temporal_unit) &
             ]
     end subroutine collect_tests_parquet_table
     !
@@ -5996,6 +6002,201 @@ contains
         call check(error, t%residency("f64") == RES_FULL, &
             "...and must leave the fully-materialized table exactly as it was")
     end subroutine test_write_table_release
+    !
+    !> A schema-less `parquet_write_table` writes the resident columns and nothing else.
+    !!
+    !! The point of the path is that it reads nothing, so the assertions are as much about what is
+    !! *absent* from the output as about what survives: an untouched column must not appear, and
+    !! neither must the automatic `parquet_row_index`, which is this library's own provenance
+    !! column rather than the table's data even when the caller has materialized it.
+    subroutine test_write_table_schemaless(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, t2
+        real(real64), allocatable :: r64(:)
+        integer(int64), allocatable :: ri(:)
+        type(parquet_reader) :: rd
+        character(len=:), allocatable :: names(:)
+        character(len=*), parameter :: f  = "test_run/table_sless_in.parquet"
+        character(len=*), parameter :: fo = "test_run/table_sless_out.parquet"
+        character(len=*), parameter :: fe = "test_run/table_sless_empty.parquet"
+        character(len=*), parameter :: fr = "test_run/table_sless_rowidx.parquet"
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t, f)
+        call t%prefetch(["f64", "i32"])
+        call parquet_write_table(t, fo)
+        !
+        call parquet_open_table(t2, fo)
+        call check(error, t2%ncols() == 2, &
+            "a schema-less write should write exactly the resident columns")
+        if (allocated(error)) return
+        call t2%column_names(names)
+        call check(error, trim(names(1)) == "i32" .and. trim(names(2)) == "f64", &
+            "a schema-less write should write columns in slot order, under their internal names")
+        if (allocated(error)) return
+        call check(error, t2%nrows() == NROW, "the written table should keep the row count")
+        if (allocated(error)) return
+        call t2%get("f64", r64)
+        call check(error, abs(r64(4) - 9.0_real64) < 1.0e-12_real64, &
+            "values should survive a schema-less write")
+        if (allocated(error)) return
+        call check(error, .not. t2%has_column("s"), &
+            "a column the schema-less write never read must not be in the output")
+        if (allocated(error)) return
+        !
+        ! Nothing resident: a valid, genuinely empty file rather than an error.
+        call parquet_open_table(t, f)
+        call parquet_write_table(t, fe)
+        call parquet_open_table(t2, fe)
+        call check(error, t2%ncols() == 0 .and. t2%nrows() == 0, &
+            "a schema-less write of a table with nothing resident should produce an empty file")
+        if (allocated(error)) return
+        !
+        ! parquet_row_index is excluded even when resident, and its exclusion must not stop the
+        ! ordinary columns beside it from being written.
+        call parquet_open_table(t, f)
+        call t%prefetch("i32")
+        ! %get, not %prefetch: the row-index column is a VIRTUAL slot until something asks for its
+        ! values, and %prefetch does not resolve that name.
+        call t%get(PARQUET_ROW_INDEX, ri)
+        call check(error, t%residency(PARQUET_ROW_INDEX) == RES_FULL, &
+            "precondition: the row-index column should be resident after a prefetch")
+        if (allocated(error)) return
+        call parquet_write_table(t, fr)
+        ! Asked of the FILE rather than of a table over it: %has_column answers .true. for
+        ! parquet_row_index on any file-backed table, virtual slot or not, so only the file's own
+        ! column list can say whether the write emitted it.
+        call parquet_open_reader(rd, fr)
+        call parquet_get_column_names(rd, names)
+        call parquet_close_reader(rd)
+        call check(error, size(names) == 1 .and. trim(names(1)) == "i32", &
+            "a schema-less write must not write parquet_row_index, even when it is resident")
+    end subroutine test_write_table_schemaless
+    !
+    !> A schema-less write emits a sidecar MAML that carries the units and reopens the file.
+    !!
+    !! This is the round trip the feature exists for -- write a temporary table, reopen it later,
+    !! get the units back -- and it rests on something worth stating: the sidecar is a *write*
+    !! (Role A) schema, while `parquet_open_table(maml=)` consumes the *read-in* (Role B) dialect.
+    !! They are compatible because the read-in loader scans for the keys it wants and ignores the
+    !! rest, so Role A's extra keys are inert. This test is what keeps that leniency from being
+    !! tightened by accident.
+    subroutine test_write_table_schemaless_sidecar(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: w
+        type(parquet_schema) :: s
+        type(parquet_table) :: t, t2
+        real(real64) :: v(NROW)
+        integer(int32) :: id(NROW)
+        character(len=:), allocatable :: u, line
+        integer :: i
+        character(len=*), parameter :: f  = "test_run/table_sidecar_in.parquet"
+        character(len=*), parameter :: fo = "test_run/table_sidecar_out.parquet"
+        character(len=*), parameter :: mo = "test_run/table_sidecar_out.maml"
+        !
+        do i = 1, NROW
+            id(i) = i
+            v(i) = real(i, real64) * 2.25_real64
+        end do
+        call s%init("src")
+        call s%add_field("id", "int32")
+        call s%add_field("mass", "float64", unit="Msun")
+        call parquet_parse_maml(s)
+        call parquet_open_writer(w, f, s, write_maml=.true.)
+        call parquet_write_column(w, "id", id)
+        call parquet_write_column(w, "mass", v)
+        call parquet_close_writer(w)
+        !
+        ! The unit only reaches the table through a read-in MAML -- a parquet file records none.
+        call parquet_open_table(t, f, maml="test_run/table_sidecar_in.maml")
+        call t%unit("mass", u)
+        call check(error, u == "Msun", "precondition: the read-in MAML should give the unit")
+        if (allocated(error)) return
+        call t%materialize_all()
+        call parquet_write_table(t, fo, write_maml=.true.)
+        !
+        call parquet_open_table(t2, fo, maml=mo)
+        call t2%unit("mass", u)
+        call check(error, u == "Msun", &
+            "a schema-less write's sidecar should carry the unit, and reopen the file it describes")
+        if (allocated(error)) return
+        call t2%unit("id", u)
+        call check(error, u == "", "a column with no unit should get no unit: key in the sidecar")
+        if (allocated(error)) return
+        call check(error, t2%ncols() == 2 .and. t2%nrows() == NROW, &
+            "the sidecar-reopened table should hold the written columns and rows")
+        if (allocated(error)) return
+        ! MAML requires a table: name and a schema-less table has none of its own, so it is taken
+        ! from the output file's stem -- checked from the text, since nothing reads it back.
+        call read_first_line(mo, line)
+        call check(error, trim(line) == "table: table_sidecar_out", &
+            "the generated sidecar's table: name should be the output file's stem")
+    end subroutine test_write_table_schemaless_sidecar
+    !
+    !> First line of a text file, for asserting on generated MAML.
+    subroutine read_first_line(fname, line)
+        character(len=*), intent(in) :: fname            !! file to read.
+        character(len=:), allocatable, intent(out) :: line !! its first record, or "" if unreadable.
+        character(len=512) :: buf
+        integer :: u, ios
+        !
+        line = ""
+        open(newunit=u, file=fname, status="old", action="read", iostat=ios)
+        if (ios /= 0) return
+        read(u, '(a)', iostat=ios) buf
+        if (ios == 0) line = trim(buf)
+        close(u)
+    end subroutine read_first_line
+    !
+    !> A nanosecond TIMESTAMP column survives a schema-less write at its own resolution.
+    !!
+    !! Without the stored unit on the descriptor this write does not merely lose precision, it
+    !! **aborts**: the writer would default to microseconds and `to_unix` refuses to truncate. So
+    !! the test reaching its assertions at all is half of what it checks; the other half is that
+    !! the reopened file reports nanoseconds rather than the default.
+    subroutine test_write_table_temporal_unit(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: w
+        type(parquet_schema) :: s
+        type(parquet_table) :: t
+        type(parquet_reader) :: rd
+        type(parquet_timestamp) :: ts(2), got(2)
+        type(parquet_time) :: tm(2)
+        integer :: unit_out, tm_unit
+        character(len=*), parameter :: f  = "test_run/table_tsunit_in.parquet"
+        character(len=*), parameter :: fo = "test_run/table_tsunit_out.parquet"
+        !
+        call s%init("tsu")
+        call s%add_field("ev", "timestamp[ns]")
+        call s%add_field("clock", "time[ms]")
+        call parquet_parse_maml(s)
+        call ts(1)%set(2024, 7, 16, 12, 0, 0, 123456789)   ! ns precision: only ns can hold it
+        call ts(2)%set(1999, 1, 1, 0, 0, 0)
+        call tm(1)%set(6, 30, 15, 500000000)
+        call tm(2)%set(23, 59, 59)
+        call parquet_open_writer(w, f, s)
+        call parquet_write_column(w, "ev", ts)
+        call parquet_write_column(w, "clock", tm)
+        call parquet_close_writer(w)
+        !
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        call parquet_write_table(t, fo)     ! aborts here if the unit was not recorded
+        !
+        call parquet_open_reader(rd, fo)
+        call parquet_get_column_time_info(rd, "ev", unit=unit_out)
+        call parquet_get_column_time_info(rd, "clock", unit=tm_unit)
+        call parquet_read_column(rd, "ev", got)
+        call parquet_close_reader(rd)
+        call check(error, unit_out == parquet_unit_nanos, &
+            "a schema-less write should keep a timestamp column's own nanosecond resolution")
+        if (allocated(error)) return
+        call check(error, tm_unit == parquet_unit_millis, &
+            "...and a time column's own millisecond resolution")
+        if (allocated(error)) return
+        call check(error, got(1) == ts(1) .and. got(2) == ts(2), &
+            "nanosecond timestamp values should survive the schema-less round trip exactly")
+    end subroutine test_write_table_temporal_unit
     !
     !> Every `parquet_open_writer` option `parquet_write_table` forwards actually reaches the file.
     !!

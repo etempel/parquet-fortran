@@ -526,7 +526,14 @@ contains
         integer :: existing, n, i
         type(parquet_table_column), allocatable :: bigger(:)
         character(len=:), allocatable :: sfx
+        type(parquet_table_cache), pointer :: cache
         !
+        ! ifx (unlike gfortran) refuses MOVE_ALLOC's TO argument when it is reached through an
+        ! intent(in) dummy, even though self%cache%cols is definable (self%cache is a POINTER
+        ! component, so its target is a distinct entity from self -- see table_new_slot's own
+        ! doc-comment on parquet_tables.f90). A local pointer alias sidesteps ifx's stricter check
+        ! without weakening self's own intent(in).
+        cache => self%cache
         existing = table_find(self, name)
         if (existing > 0) then
             if (.not. present(force)) then
@@ -541,41 +548,41 @@ contains
             ! Replacing in place keeps every other slot's index stable, so pointers into other
             ! columns survive -- the broad contract still says they may not, but there is no
             ! reason to invalidate them here.
-            call self%cache%cols(existing)%values%clear()
-            self%cache%cols(existing)%residency = RES_EMPTY
-            self%cache%cols(existing)%file_source = .false.
-            self%cache%cols(existing)%supported = .true.
-            self%cache%generation = self%cache%generation + 1_int64
+            call cache%cols(existing)%values%clear()
+            cache%cols(existing)%residency = RES_EMPTY
+            cache%cols(existing)%file_source = .false.
+            cache%cols(existing)%supported = .true.
+            cache%generation = cache%generation + 1_int64
             idx = existing
             return
         end if
         !
-        n = self%cache%ncols
-        if (n >= size(self%cache%cols)) then
+        n = cache%ncols
+        if (n >= size(cache%cols)) then
             ! Growth doubles rather than adding one, so a long add_column loop is not quadratic.
             ! This DOES relocate every descriptor, which is exactly why the documented rule is
             ! that any column-structural mutation invalidates every outstanding pointer.
-            allocate(bigger(max(2 * size(self%cache%cols), n + 1)))
+            allocate(bigger(max(2 * size(cache%cols), n + 1)))
             ! Moved, not assigned: an intrinsic array assignment here would deep-copy every
             ! column's storage into the new array and then free the old one, so growing the slot
             ! array would cost a full copy of everything the table holds.
             do i = 1, n
-                call move_table_column(bigger(i), self%cache%cols(i))
+                call move_table_column(bigger(i), cache%cols(i))
             end do
-            call move_alloc(bigger, self%cache%cols)
+            call move_alloc(bigger, cache%cols)
         end if
         n = n + 1
-        self%cache%ncols = n
+        cache%ncols = n
         ! Every path that adds, replaces or relocates a slot comes through here, so this is the
         ! one place a column-structural change has to bump the generation (%generation). The
         ! replace-in-place branch above bumps too, on its way out -- it clears a column's values,
         ! which is exactly the kind of thing a held pointer must not survive.
-        self%cache%generation = self%cache%generation + 1_int64
-        self%cache%cols(n)%name = trim(name)
-        self%cache%cols(n)%file_name = trim(name)
-        self%cache%cols(n)%file_source = .false.
-        self%cache%cols(n)%supported = .true.
-        self%cache%cols(n)%residency = RES_EMPTY
+        cache%generation = cache%generation + 1_int64
+        cache%cols(n)%name = trim(name)
+        cache%cols(n)%file_name = trim(name)
+        cache%cols(n)%file_source = .false.
+        cache%cols(n)%supported = .true.
+        cache%cols(n)%residency = RES_EMPTY
         idx = n
     end procedure table_new_slot
     !

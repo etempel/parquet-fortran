@@ -264,13 +264,17 @@ contains
     end procedure table_get_file_metadata
     !
     module procedure table_is_null_i32
-        isnull = self%is_null(name, int(i, int64))
+        isnull = self%is_null(name, int(i, int64), found)
     end procedure table_is_null_i32
     !
     module procedure table_is_null_i64
         integer :: idx
         !
-        call table_resolve(self, name, "is_null", idx)
+        ! .false. on a reported miss, not .true.: "there is no such column" is not "that row is
+        ! null", and a caller ignoring `found` should not read a missing column as all-null.
+        isnull = .false.
+        call table_resolve(self, name, "is_null", idx, found)
+        if (idx == 0) return
         call table_require_row(self, i, "is_null")
         isnull = self%cache%cols(idx)%values%is_null(i)
     end procedure table_is_null_i64
@@ -364,6 +368,35 @@ contains
             if (.not. is_valid(i)) call self%cache%cols(idx)%values%set_null(i)
         end do
     end procedure table_apply_valid
+    !
+    module procedure table_apply_valid_rows
+        integer(int64) :: k
+        character(len=32) :: got, want
+        character(len=:), allocatable :: sfx
+        !
+        if (size(is_valid, kind=int64) /= size(rows, kind=int64)) then
+            write(got, "(I0)") size(is_valid, kind=int64)
+            write(want, "(I0)") size(rows, kind=int64)
+            call table_context_suffix(self%cache, name, sfx)
+            error stop EP // trim(proc) // ": is_valid has " // trim(got) // " entries but the " // &
+                "selection has " // trim(want) // " rows" // sfx
+        end if
+        do k = 1_int64, size(rows, kind=int64)
+            if (.not. is_valid(k)) call self%cache%cols(idx)%values%set_null(rows(k))
+        end do
+    end procedure table_apply_valid_rows
+    !
+    module procedure table_require_slice_size
+        character(len=32) :: got, want
+        character(len=:), allocatable :: sfx
+        !
+        if (n_arr == n_rows) return
+        write(got, "(I0)") n_arr
+        write(want, "(I0)") n_rows
+        call table_context_suffix(self%cache, name, sfx)
+        error stop EP // trim(proc) // ": the array has " // trim(got) // " values but the " // &
+            "selection picks " // trim(want) // " rows" // sfx
+    end procedure table_require_slice_size
     !
     module procedure table_require_kind
         character(len=:), allocatable :: sfx, got, want

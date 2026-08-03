@@ -351,6 +351,31 @@ module parquet_tables
         generic :: get_slice => get_slice_i32, get_slice_i64, get_slice_f32, get_slice_f64, get_slice_bool, get_slice_date, &
             get_slice_time, get_slice_ts, get_slice_i32v, get_slice_i64v, get_slice_f32v, get_slice_f64v, get_slice_boolv, &
             get_slice_datev, get_slice_timev, get_slice_tsv, get_slice_str, get_slice_chr, get_slice_chrv
+        ! --- write a row selection back ---
+        procedure, private :: set_slice_i32 !! %set_slice specific for the i32 kind.
+        procedure, private :: set_slice_i64 !! %set_slice specific for the i64 kind.
+        procedure, private :: set_slice_f32 !! %set_slice specific for the f32 kind.
+        procedure, private :: set_slice_f64 !! %set_slice specific for the f64 kind.
+        procedure, private :: set_slice_bool !! %set_slice specific for the bool kind.
+        procedure, private :: set_slice_date !! %set_slice specific for the date kind.
+        procedure, private :: set_slice_time !! %set_slice specific for the time kind.
+        procedure, private :: set_slice_ts !! %set_slice specific for the ts kind.
+        procedure, private :: set_slice_i32v !! %set_slice specific for the i32v kind.
+        procedure, private :: set_slice_i64v !! %set_slice specific for the i64v kind.
+        procedure, private :: set_slice_f32v !! %set_slice specific for the f32v kind.
+        procedure, private :: set_slice_f64v !! %set_slice specific for the f64v kind.
+        procedure, private :: set_slice_boolv !! %set_slice specific for the boolv kind.
+        procedure, private :: set_slice_datev !! %set_slice specific for the datev kind.
+        procedure, private :: set_slice_timev !! %set_slice specific for the timev kind.
+        procedure, private :: set_slice_tsv !! %set_slice specific for the tsv kind.
+        procedure, private :: set_slice_chr  !! %set_slice specific taking a character array.
+        procedure, private :: set_slice_chrv !! %set_slice specific taking a character (elem, row) array.
+        !> Writes values into the rows a `parquet_slice` selects -- %get_slice's counterpart.
+        !! The kind must match the column's exactly, and the array must have one value per
+        !! selected row.
+        generic :: set_slice => set_slice_i32, set_slice_i64, set_slice_f32, set_slice_f64, set_slice_bool, set_slice_date, &
+            set_slice_time, set_slice_ts, set_slice_i32v, set_slice_i64v, set_slice_f32v, set_slice_f64v, set_slice_boolv, &
+            set_slice_datev, set_slice_timev, set_slice_tsv, set_slice_chr, set_slice_chrv
         ! --- zero-copy pointer access (exact kind) ---
         procedure, private :: col_ptr_i32 !! %col specific for the i32 kind.
         procedure, private :: col_ptr_i64 !! %col specific for the i64 kind.
@@ -368,11 +393,15 @@ module parquet_tables
         procedure, private :: col_ptr_datev !! %col specific for the datev kind.
         procedure, private :: col_ptr_timev !! %col specific for the timev kind.
         procedure, private :: col_ptr_tsv !! %col specific for the tsv kind.
+        procedure, private :: col_ptr_strcol !! %col specific aliasing the compact string store.
         !> Points `p` at a column's storage: zero copy, writable, and the pointer kind must
-        !! match the stored kind exactly (ask %kind first if you do not know it).
+        !! match the stored kind exactly (ask %kind first if you do not know it). A
+        !! `parquet_string_column` pointer aliases a PK_STRING column's packed store: read
+        !! it and edit its values in place, but do NOT change its length or element count
+        !! through the pointer -- the column's own row count would no longer describe it.
         generic :: col => col_ptr_i32, col_ptr_i64, col_ptr_f32, col_ptr_f64, col_ptr_bool, col_ptr_date, col_ptr_time, &
             col_ptr_ts, col_ptr_i32v, col_ptr_i64v, col_ptr_f32v, col_ptr_f64v, col_ptr_boolv, col_ptr_datev, col_ptr_timev, &
-            col_ptr_tsv
+            col_ptr_tsv, col_ptr_strcol
         ! --- copy out (widens int32->int64, float32->float64) ---
         procedure, private :: get_arr_i32 !! %get specific for the i32 kind.
         procedure, private :: get_arr_i64 !! %get specific for the i64 kind.
@@ -417,9 +446,10 @@ module parquet_tables
         procedure, private :: set_arr_chr  !! %set specific taking a character array.
         procedure, private :: set_arr_chrv !! %set specific taking a character (elem, row) array.
         !> Replaces every value of an existing column from an array of the same length.
+        procedure, private :: set_arr_strcol !! %set specific taking a parquet_string_column.
         generic :: set => set_arr_i32, set_arr_i64, set_arr_f32, set_arr_f64, set_arr_bool, set_arr_date, set_arr_time, &
             set_arr_ts, set_arr_i32v, set_arr_i64v, set_arr_f32v, set_arr_f64v, set_arr_boolv, set_arr_datev, set_arr_timev, &
-            set_arr_tsv, set_arr_chr, set_arr_chrv
+            set_arr_tsv, set_arr_chr, set_arr_chrv, set_arr_strcol
         ! --- from-scratch construction ---
         procedure, private :: add_column_i32 !! %add_column specific for the i32 kind.
         procedure, private :: add_column_i64 !! %add_column specific for the i64 kind.
@@ -440,9 +470,11 @@ module parquet_tables
         procedure, private :: add_column_chr  !! %add_column specific taking a character array.
         procedure, private :: add_column_chrv !! %add_column specific taking a character (elem, row) array.
         !> Appends a new column, taking its values (and so its kind, width and row count).
+        procedure, private :: add_column_strcol !! %add_column specific taking a parquet_string_column.
         generic :: add_column => add_column_i32, add_column_i64, add_column_f32, add_column_f64, add_column_bool, &
             add_column_date, add_column_time, add_column_ts, add_column_i32v, add_column_i64v, add_column_f32v, add_column_f64v, &
-            add_column_boolv, add_column_datev, add_column_timev, add_column_tsv, add_column_chr, add_column_chrv
+            add_column_boolv, add_column_datev, add_column_timev, add_column_tsv, add_column_chr, add_column_chrv, &
+            add_column_strcol
         ! --- mutation: one cell at a time (never changes the row set) ---
         procedure, private :: set_element_i32_i32 !! %set_element specific, i32 kind, i32 row index.
         procedure, private :: set_element_i32_i64 !! %set_element specific, i32 kind, i64 row index.
@@ -631,6 +663,54 @@ module parquet_tables
         generic :: get => row_get_i32, row_get_i64, row_get_f32, row_get_f64, row_get_bool, row_get_str, row_get_date, &
             row_get_time, row_get_ts, row_get_i32v, row_get_i64v, row_get_f32v, row_get_f64v, row_get_boolv, row_get_strv, &
             row_get_datev, row_get_timev, row_get_tsv
+        procedure, private :: row_set_i32 !! %set specific for the i32 kind.
+        procedure, private :: row_set_i64 !! %set specific for the i64 kind.
+        procedure, private :: row_set_f32 !! %set specific for the f32 kind.
+        procedure, private :: row_set_f64 !! %set specific for the f64 kind.
+        procedure, private :: row_set_bool !! %set specific for the bool kind.
+        procedure, private :: row_set_str !! %set specific for the str kind.
+        procedure, private :: row_set_date !! %set specific for the date kind.
+        procedure, private :: row_set_time !! %set specific for the time kind.
+        procedure, private :: row_set_ts !! %set specific for the ts kind.
+        procedure, private :: row_set_i32v !! %set specific for the i32v kind.
+        procedure, private :: row_set_i64v !! %set specific for the i64v kind.
+        procedure, private :: row_set_f32v !! %set specific for the f32v kind.
+        procedure, private :: row_set_f64v !! %set specific for the f64v kind.
+        procedure, private :: row_set_boolv !! %set specific for the boolv kind.
+        procedure, private :: row_set_strv !! %set specific for the strv kind.
+        procedure, private :: row_set_datev !! %set specific for the datev kind.
+        procedure, private :: row_set_timev !! %set specific for the timev kind.
+        procedure, private :: row_set_tsv !! %set specific for the tsv kind.
+        !> Writes this row's value for a column. The kind must match the column's exactly
+        !! (a write never widens), and writing a value CLEARS that row's null. The TABLE is
+        !! updated -- a handle is a view of it, not a copy.
+        generic :: set => row_set_i32, row_set_i64, row_set_f32, row_set_f64, row_set_bool, row_set_str, row_set_date, &
+            row_set_time, row_set_ts, row_set_i32v, row_set_i64v, row_set_f32v, row_set_f64v, row_set_boolv, row_set_strv, &
+            row_set_datev, row_set_timev, row_set_tsv
+        procedure, private :: row_ref_i32 !! %ref specific for the i32 kind.
+        procedure, private :: row_ref_i64 !! %ref specific for the i64 kind.
+        procedure, private :: row_ref_f32 !! %ref specific for the f32 kind.
+        procedure, private :: row_ref_f64 !! %ref specific for the f64 kind.
+        procedure, private :: row_ref_bool !! %ref specific for the bool kind.
+        procedure, private :: row_ref_date !! %ref specific for the date kind.
+        procedure, private :: row_ref_time !! %ref specific for the time kind.
+        procedure, private :: row_ref_ts !! %ref specific for the ts kind.
+        procedure, private :: row_ref_i32v !! %ref specific for the i32v kind.
+        procedure, private :: row_ref_i64v !! %ref specific for the i64v kind.
+        procedure, private :: row_ref_f32v !! %ref specific for the f32v kind.
+        procedure, private :: row_ref_f64v !! %ref specific for the f64v kind.
+        procedure, private :: row_ref_boolv !! %ref specific for the boolv kind.
+        procedure, private :: row_ref_datev !! %ref specific for the datev kind.
+        procedure, private :: row_ref_timev !! %ref specific for the timev kind.
+        procedure, private :: row_ref_tsv !! %ref specific for the tsv kind.
+        !> Points `p` at this row's storage: zero copy, writable, exact kind. A scalar
+        !! column gives a scalar pointer, a vector column a pointer to that row's whole
+        !! vector. The two string kinds have no %ref -- a packed variable-length store has
+        !! no fixed slot to point at -- and the pointer dies with any structural change,
+        !! exactly as the table's own %col pointers do.
+        generic :: ref => row_ref_i32, row_ref_i64, row_ref_f32, row_ref_f64, row_ref_bool, row_ref_date, row_ref_time, &
+            row_ref_ts, row_ref_i32v, row_ref_i64v, row_ref_f32v, row_ref_f64v, row_ref_boolv, row_ref_datev, row_ref_timev, &
+            row_ref_tsv
         procedure :: is_null => row_is_null !! Whether this row is null in a column.
         procedure :: index => row_index     !! This row's 1-based index within the table.
         final :: row_finalize               !! Drops the pointer; owns nothing, frees nothing.
@@ -935,18 +1015,20 @@ module parquet_tables
             logical, intent(out), optional :: found              !! present: report a miss instead of aborting.
         end subroutine table_get_file_metadata
         !> Whether row `i` of a column is null (int32 row index).
-        module function table_is_null_i32(self, name, i) result(isnull)
+        module function table_is_null_i32(self, name, i, found) result(isnull)
             class(parquet_table), intent(in) :: self !! the table.
             character(len=*), intent(in) :: name     !! column name.
             integer(int32), intent(in) :: i          !! 1-based row index.
-            logical :: isnull                        !! .true. if that row is null.
+            logical, intent(out), optional :: found  !! present: report a miss instead of aborting.
+            logical :: isnull                        !! .true. if that row is null (.false. on a miss).
         end function table_is_null_i32
         !> Whether row `i` of a column is null (int64 row index).
-        module function table_is_null_i64(self, name, i) result(isnull)
+        module function table_is_null_i64(self, name, i, found) result(isnull)
             class(parquet_table), intent(in) :: self !! the table.
             character(len=*), intent(in) :: name     !! column name.
             integer(int64), intent(in) :: i          !! 1-based row index.
-            logical :: isnull                        !! .true. if that row is null.
+            logical, intent(out), optional :: found  !! present: report a miss instead of aborting.
+            logical :: isnull                        !! .true. if that row is null (.false. on a miss).
         end function table_is_null_i64
         !> error stops unless `i` is a valid 1-based row index for this table. Shared by every
         !! per-row entry point so they all report the same way.
@@ -1034,6 +1116,28 @@ module parquet_tables
             character(len=*), intent(in) :: name        !! column name, for the message.
             character(len=*), intent(in) :: proc        !! calling procedure, for the message.
         end subroutine table_apply_valid
+        !> Applies a caller-supplied validity mask to a SELECTION of rows: every selected row
+        !! whose entry is .false. becomes null. Only ever adds nulls, exactly as the whole-column
+        !! form does. A mask whose length is not the selection's is an error.
+        module subroutine table_apply_valid_rows(self, idx, rows, is_valid, name, proc)
+            class(parquet_table), intent(inout) :: self !! the table.
+            integer, intent(in) :: idx                  !! slot index.
+            integer(int64), intent(in) :: rows(:)       !! the selected rows, in order.
+            logical, intent(in) :: is_valid(:)          !! one entry per selected row.
+            character(len=*), intent(in) :: name        !! column name, for the message.
+            character(len=*), intent(in) :: proc        !! calling procedure, for the message.
+        end subroutine table_apply_valid_rows
+        !> error stops unless an array being written into a row selection has one value per
+        !! selected row. Its own procedure because the two counts come from different places --
+        !! the caller's array and the resolved selection -- and naming both is what makes the
+        !! message useful.
+        module subroutine table_require_slice_size(self, n_arr, n_rows, name, proc)
+            class(parquet_table), intent(in) :: self !! the table.
+            integer(int64), intent(in) :: n_arr      !! values the caller supplied.
+            integer(int64), intent(in) :: n_rows     !! rows the selection resolves to.
+            character(len=*), intent(in) :: name     !! column name, for the message.
+            character(len=*), intent(in) :: proc     !! calling procedure, for the message.
+        end subroutine table_require_slice_size
         !> error stops unless slot `idx` holds exactly `kind`. The exact-kind rule the pointer
         !! path and the copy-back path both enforce (the copy-OUT path widens instead).
         module subroutine table_require_kind(self, idx, kind, proc)
@@ -1439,6 +1543,18 @@ module parquet_tables
             logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
             logical, intent(out), optional :: found          !! present: report a miss instead of aborting.
         end subroutine col_ptr_tsv
+        !> Points `p` at a PK_STRING column's packed store (offsets + data + validity).
+        !!
+        !! The compact counterpart of the typed `%col` pointers, and the one pointer this layer
+        !! hands out that a caller could use to change the column's SHAPE. Reading and in-place
+        !! value edits are supported; appending to it, or otherwise changing how many elements it
+        !! holds, is not -- the column's own row count is kept separately and would stop matching.
+        module subroutine col_ptr_strcol(self, name, p, found)
+            class(parquet_table), intent(in), target :: self          !! the table.
+            character(len=*), intent(in) :: name                      !! column name.
+            type(parquet_string_column), pointer, intent(out) :: p    !! alias to the packed store.
+            logical, intent(out), optional :: found                   !! present: report a miss instead of aborting.
+        end subroutine col_ptr_strcol
     end interface
     !
     ! ---- Copy out (parquet_tables_access) ----
@@ -1749,6 +1865,18 @@ module parquet_tables
             logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_arr_chrv
+        !> Replaces every value of a PK_STRING column from a compact parquet_string_column.
+        !!
+        !! The counterpart of `%get(name, packed)`: an independent copy is taken, so the caller's
+        !! own column and the table's do not share storage afterwards. The row count must match,
+        !! exactly as it must for the character-array form.
+        module subroutine set_arr_strcol(self, name, arr, is_valid, found)
+            class(parquet_table), intent(inout) :: self         !! the table.
+            character(len=*), intent(in) :: name                !! column name.
+            type(parquet_string_column), intent(in) :: arr      !! one value per row.
+            logical, intent(in), optional :: is_valid(:)        !! present: rows marked .false. become null.
+            logical, intent(out), optional :: found             !! present: report a miss instead of aborting.
+        end subroutine set_arr_strcol
     end interface
     !
     ! ---- From-scratch construction (parquet_tables_addcol) ----
@@ -1897,6 +2025,17 @@ module parquet_tables
             character(len=*), intent(in), optional :: unit !! unit string to store.
             logical, intent(in), optional :: force        !! .true. replaces an existing same-named column.
         end subroutine add_column_chrv
+        !> Appends a new PK_STRING column holding a compact parquet_string_column's values.
+        !!
+        !! Unlike the character-array form nothing is trimmed: a parquet_string_column already
+        !! stores each value at its own length, which is the reason to build one.
+        module subroutine add_column_strcol(self, name, values, unit, force)
+            class(parquet_table), intent(inout) :: self       !! the table.
+            character(len=*), intent(in) :: name              !! the new column's name.
+            type(parquet_string_column), intent(in) :: values !! one value per row.
+            character(len=*), intent(in), optional :: unit    !! unit string to store.
+            logical, intent(in), optional :: force            !! .true. replaces an existing same-named column.
+        end subroutine add_column_strcol
     end interface
     !
     ! ---- Single-cell mutation (the per-kind writers in ..._access, the rest in ..._mutate) ----
@@ -2198,268 +2337,306 @@ module parquet_tables
             logical, intent(out), optional :: found                 !! present: report a miss instead of aborting.
         end subroutine get_element_chrv_i64
         !> Writes one row of a PK_INT32 column (i32 row index).
-        module subroutine set_element_i32_i32(self, name, i, value)
+        module subroutine set_element_i32_i32(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int32), intent(in) :: i                 !! 1-based row index.
             integer(int32), intent(in) :: value             !! the new value.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_i32_i32
         !> Writes one row of a PK_INT32 column (i64 row index).
-        module subroutine set_element_i32_i64(self, name, i, value)
+        module subroutine set_element_i32_i64(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int64), intent(in) :: i                 !! 1-based row index.
             integer(int32), intent(in) :: value             !! the new value.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_i32_i64
         !> Writes one row of a PK_INT64 column (i32 row index).
-        module subroutine set_element_i64_i32(self, name, i, value)
+        module subroutine set_element_i64_i32(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int32), intent(in) :: i                 !! 1-based row index.
             integer(int64), intent(in) :: value             !! the new value.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_i64_i32
         !> Writes one row of a PK_INT64 column (i64 row index).
-        module subroutine set_element_i64_i64(self, name, i, value)
+        module subroutine set_element_i64_i64(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int64), intent(in) :: i                 !! 1-based row index.
             integer(int64), intent(in) :: value             !! the new value.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_i64_i64
         !> Writes one row of a PK_FLOAT32 column (i32 row index).
-        module subroutine set_element_f32_i32(self, name, i, value)
+        module subroutine set_element_f32_i32(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int32), intent(in) :: i                 !! 1-based row index.
             real(real32), intent(in) :: value               !! the new value.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_f32_i32
         !> Writes one row of a PK_FLOAT32 column (i64 row index).
-        module subroutine set_element_f32_i64(self, name, i, value)
+        module subroutine set_element_f32_i64(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int64), intent(in) :: i                 !! 1-based row index.
             real(real32), intent(in) :: value               !! the new value.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_f32_i64
         !> Writes one row of a PK_FLOAT64 column (i32 row index).
-        module subroutine set_element_f64_i32(self, name, i, value)
+        module subroutine set_element_f64_i32(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int32), intent(in) :: i                 !! 1-based row index.
             real(real64), intent(in) :: value               !! the new value.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_f64_i32
         !> Writes one row of a PK_FLOAT64 column (i64 row index).
-        module subroutine set_element_f64_i64(self, name, i, value)
+        module subroutine set_element_f64_i64(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int64), intent(in) :: i                 !! 1-based row index.
             real(real64), intent(in) :: value               !! the new value.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_f64_i64
         !> Writes one row of a PK_LOGICAL column (i32 row index).
-        module subroutine set_element_bool_i32(self, name, i, value)
+        module subroutine set_element_bool_i32(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int32), intent(in) :: i                 !! 1-based row index.
             logical, intent(in) :: value                    !! the new value.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_bool_i32
         !> Writes one row of a PK_LOGICAL column (i64 row index).
-        module subroutine set_element_bool_i64(self, name, i, value)
+        module subroutine set_element_bool_i64(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int64), intent(in) :: i                 !! 1-based row index.
             logical, intent(in) :: value                    !! the new value.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_bool_i64
         !> Writes one row of a PK_DATE column (i32 row index).
-        module subroutine set_element_date_i32(self, name, i, value)
+        module subroutine set_element_date_i32(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int32), intent(in) :: i                 !! 1-based row index.
             type(parquet_date), intent(in) :: value         !! the new value.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_date_i32
         !> Writes one row of a PK_DATE column (i64 row index).
-        module subroutine set_element_date_i64(self, name, i, value)
+        module subroutine set_element_date_i64(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int64), intent(in) :: i                 !! 1-based row index.
             type(parquet_date), intent(in) :: value         !! the new value.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_date_i64
         !> Writes one row of a PK_TIME column (i32 row index).
-        module subroutine set_element_time_i32(self, name, i, value)
+        module subroutine set_element_time_i32(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int32), intent(in) :: i                 !! 1-based row index.
             type(parquet_time), intent(in) :: value         !! the new value.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_time_i32
         !> Writes one row of a PK_TIME column (i64 row index).
-        module subroutine set_element_time_i64(self, name, i, value)
+        module subroutine set_element_time_i64(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int64), intent(in) :: i                 !! 1-based row index.
             type(parquet_time), intent(in) :: value         !! the new value.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_time_i64
         !> Writes one row of a PK_TIMESTAMP column (i32 row index).
-        module subroutine set_element_ts_i32(self, name, i, value)
+        module subroutine set_element_ts_i32(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int32), intent(in) :: i                 !! 1-based row index.
             type(parquet_timestamp), intent(in) :: value    !! the new value.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_ts_i32
         !> Writes one row of a PK_TIMESTAMP column (i64 row index).
-        module subroutine set_element_ts_i64(self, name, i, value)
+        module subroutine set_element_ts_i64(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int64), intent(in) :: i                 !! 1-based row index.
             type(parquet_timestamp), intent(in) :: value    !! the new value.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_ts_i64
         !> Writes one row of a PK_INT32_VEC column (i32 row index).
-        module subroutine set_element_i32v_i32(self, name, i, value)
+        module subroutine set_element_i32v_i32(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int32), intent(in) :: i                 !! 1-based row index.
             integer(int32), intent(in) :: value(:)          !! that row's whole vector.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_i32v_i32
         !> Writes one row of a PK_INT32_VEC column (i64 row index).
-        module subroutine set_element_i32v_i64(self, name, i, value)
+        module subroutine set_element_i32v_i64(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int64), intent(in) :: i                 !! 1-based row index.
             integer(int32), intent(in) :: value(:)          !! that row's whole vector.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_i32v_i64
         !> Writes one row of a PK_INT64_VEC column (i32 row index).
-        module subroutine set_element_i64v_i32(self, name, i, value)
+        module subroutine set_element_i64v_i32(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int32), intent(in) :: i                 !! 1-based row index.
             integer(int64), intent(in) :: value(:)          !! that row's whole vector.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_i64v_i32
         !> Writes one row of a PK_INT64_VEC column (i64 row index).
-        module subroutine set_element_i64v_i64(self, name, i, value)
+        module subroutine set_element_i64v_i64(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int64), intent(in) :: i                 !! 1-based row index.
             integer(int64), intent(in) :: value(:)          !! that row's whole vector.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_i64v_i64
         !> Writes one row of a PK_FLOAT32_VEC column (i32 row index).
-        module subroutine set_element_f32v_i32(self, name, i, value)
+        module subroutine set_element_f32v_i32(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int32), intent(in) :: i                 !! 1-based row index.
             real(real32), intent(in) :: value(:)            !! that row's whole vector.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_f32v_i32
         !> Writes one row of a PK_FLOAT32_VEC column (i64 row index).
-        module subroutine set_element_f32v_i64(self, name, i, value)
+        module subroutine set_element_f32v_i64(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int64), intent(in) :: i                 !! 1-based row index.
             real(real32), intent(in) :: value(:)            !! that row's whole vector.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_f32v_i64
         !> Writes one row of a PK_FLOAT64_VEC column (i32 row index).
-        module subroutine set_element_f64v_i32(self, name, i, value)
+        module subroutine set_element_f64v_i32(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int32), intent(in) :: i                 !! 1-based row index.
             real(real64), intent(in) :: value(:)            !! that row's whole vector.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_f64v_i32
         !> Writes one row of a PK_FLOAT64_VEC column (i64 row index).
-        module subroutine set_element_f64v_i64(self, name, i, value)
+        module subroutine set_element_f64v_i64(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int64), intent(in) :: i                 !! 1-based row index.
             real(real64), intent(in) :: value(:)            !! that row's whole vector.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_f64v_i64
         !> Writes one row of a PK_LOGICAL_VEC column (i32 row index).
-        module subroutine set_element_boolv_i32(self, name, i, value)
+        module subroutine set_element_boolv_i32(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int32), intent(in) :: i                 !! 1-based row index.
             logical, intent(in) :: value(:)                 !! that row's whole vector.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_boolv_i32
         !> Writes one row of a PK_LOGICAL_VEC column (i64 row index).
-        module subroutine set_element_boolv_i64(self, name, i, value)
+        module subroutine set_element_boolv_i64(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int64), intent(in) :: i                 !! 1-based row index.
             logical, intent(in) :: value(:)                 !! that row's whole vector.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_boolv_i64
         !> Writes one row of a PK_DATE_VEC column (i32 row index).
-        module subroutine set_element_datev_i32(self, name, i, value)
+        module subroutine set_element_datev_i32(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int32), intent(in) :: i                 !! 1-based row index.
             type(parquet_date), intent(in) :: value(:)      !! that row's whole vector.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_datev_i32
         !> Writes one row of a PK_DATE_VEC column (i64 row index).
-        module subroutine set_element_datev_i64(self, name, i, value)
+        module subroutine set_element_datev_i64(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int64), intent(in) :: i                 !! 1-based row index.
             type(parquet_date), intent(in) :: value(:)      !! that row's whole vector.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_datev_i64
         !> Writes one row of a PK_TIME_VEC column (i32 row index).
-        module subroutine set_element_timev_i32(self, name, i, value)
+        module subroutine set_element_timev_i32(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int32), intent(in) :: i                 !! 1-based row index.
             type(parquet_time), intent(in) :: value(:)      !! that row's whole vector.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_timev_i32
         !> Writes one row of a PK_TIME_VEC column (i64 row index).
-        module subroutine set_element_timev_i64(self, name, i, value)
+        module subroutine set_element_timev_i64(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int64), intent(in) :: i                 !! 1-based row index.
             type(parquet_time), intent(in) :: value(:)      !! that row's whole vector.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_timev_i64
         !> Writes one row of a PK_TIMESTAMP_VEC column (i32 row index).
-        module subroutine set_element_tsv_i32(self, name, i, value)
+        module subroutine set_element_tsv_i32(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int32), intent(in) :: i                 !! 1-based row index.
             type(parquet_timestamp), intent(in) :: value(:) !! that row's whole vector.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_tsv_i32
         !> Writes one row of a PK_TIMESTAMP_VEC column (i64 row index).
-        module subroutine set_element_tsv_i64(self, name, i, value)
+        module subroutine set_element_tsv_i64(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int64), intent(in) :: i                 !! 1-based row index.
             type(parquet_timestamp), intent(in) :: value(:) !! that row's whole vector.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_tsv_i64
         !> Writes one row of a PK_STRING column from a character value (i32 row index).
-        module subroutine set_element_chr_i32(self, name, i, value)
+        module subroutine set_element_chr_i32(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int32), intent(in) :: i                 !! 1-based row index.
             character(len=*), intent(in) :: value           !! the new value.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_chr_i32
         !> Writes one row of a PK_STRING column from a character value (i64 row index).
-        module subroutine set_element_chr_i64(self, name, i, value)
+        module subroutine set_element_chr_i64(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int64), intent(in) :: i                 !! 1-based row index.
             character(len=*), intent(in) :: value           !! the new value.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_chr_i64
         !> Writes one row of a PK_STRING_VEC column from a character value (i32 row index).
-        module subroutine set_element_chrv_i32(self, name, i, value)
+        module subroutine set_element_chrv_i32(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int32), intent(in) :: i                 !! 1-based row index.
             character(len=*), intent(in) :: value(:)        !! that row's whole vector.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_chrv_i32
         !> Writes one row of a PK_STRING_VEC column from a character value (i64 row index).
-        module subroutine set_element_chrv_i64(self, name, i, value)
+        module subroutine set_element_chrv_i64(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int64), intent(in) :: i                 !! 1-based row index.
             character(len=*), intent(in) :: value(:)        !! that row's whole vector.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_chrv_i64
         !> Marks row `i` of a column null (int32 row index).
-        module subroutine set_null_i32(self, name, i)
+        module subroutine set_null_i32(self, name, i, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int32), intent(in) :: i             !! 1-based row index.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_null_i32
         !> Marks row `i` of a column null (int64 row index).
-        module subroutine set_null_i64(self, name, i)
+        module subroutine set_null_i64(self, name, i, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int64), intent(in) :: i             !! 1-based row index.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_null_i64
         !> Marks null every row whose `is_valid` entry is .false., in one call.
         !!
@@ -2467,30 +2644,34 @@ module parquet_tables
         !! one entry per row, `.true.` meaning the row holds a value. Rows marked `.true.` are left
         !! exactly as they are -- this only ever ADDS nulls, so it composes with a mask that
         !! describes only part of what the caller knows. A wrong-length mask is an error.
-        module subroutine set_null_mask(self, name, is_valid)
+        module subroutine set_null_mask(self, name, is_valid, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             logical, intent(in) :: is_valid(:)          !! one entry per row; .false. marks it null.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_null_mask
         !> Marks row `i` of a column valid, leaving its value unspecified (int32 row index).
-        module subroutine clear_null_i32(self, name, i)
+        module subroutine clear_null_i32(self, name, i, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int32), intent(in) :: i             !! 1-based row index.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine clear_null_i32
         !> Marks row `i` of a column valid, leaving its value unspecified (int64 row index).
-        module subroutine clear_null_i64(self, name, i)
+        module subroutine clear_null_i64(self, name, i, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int64), intent(in) :: i             !! 1-based row index.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine clear_null_i64
         !> Drops a column's null bitmap when it no longer holds any null, so a column that HAD
         !! nulls and no longer does stops paying for the bitmap. Scans the column, so it is not
         !! free -- a whole-column %set already compacts on its own and does not need this.
         !! Idempotent: calling it on an already-compact column is a cheap no-op.
-        module subroutine table_compact_validity(self, name)
+        module subroutine table_compact_validity(self, name, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine table_compact_validity
     end interface
     !
@@ -2500,19 +2681,21 @@ module parquet_tables
         !! leaves every remaining column the same length, so the table can still read the ones it
         !! has not read yet. Dropping a column that was never read is the memory-reclaiming case
         !! and reads nothing.
-        module subroutine table_drop_column(self, name, force)
+        module subroutine table_drop_column(self, name, force, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column to remove.
             logical, intent(in), optional :: force      !! .true. to drop a PREDEFINED column.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine table_drop_column
         !> Changes a column's name. Only the name a caller looks it up by changes -- a
         !! file-backed column that has not been read yet still reads from the same physical
         !! column afterwards. A predefined column cannot be renamed at all (its accessor is bound
         !! to the name at compile time), and there is no `force=` for it.
-        module subroutine table_rename_column(self, old_name, new_name)
+        module subroutine table_rename_column(self, old_name, new_name, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: old_name    !! the column to rename.
             character(len=*), intent(in) :: new_name    !! its new name; must not already exist.
+            logical, intent(out), optional :: found     !! present: report a missing SOURCE column instead of aborting.
         end subroutine table_rename_column
         !> Adds a NEW column holding a copy of `name`'s values, leaving the source column
         !! untouched. With `to_kind` absent it is a plain deep copy and works for EVERY kind the
@@ -2524,12 +2707,13 @@ module parquet_tables
         !! row and the value rather than a silent truncation. Every value is checked before
         !! anything is written, so a rejected copy leaves the table exactly as it was. The unit
         !! carries over unchanged -- a kind conversion is not a unit change.
-        module subroutine table_copy_column(self, name, new_name, to_kind, exact)
+        module subroutine table_copy_column(self, name, new_name, to_kind, exact, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! the source column.
             character(len=*), intent(in) :: new_name    !! the column to create.
             integer, intent(in), optional :: to_kind    !! target PK_* kind; absent keeps the source's.
             logical, intent(in), optional :: exact      !! .false. to allow lossy narrowing (default .true.).
+            logical, intent(out), optional :: found     !! present: report a missing SOURCE column instead of aborting.
         end subroutine table_copy_column
         !> Converts a column to `to_kind` IN PLACE, so that `%col` can be called with a kind the
         !! calling code has decided on rather than the one the file happens to hold. A column
@@ -2548,11 +2732,12 @@ module parquet_tables
         !!
         !! **This invalidates any pointer previously taken from `%col`** for this column, which
         !! Fortran cannot detect -- take the pointer again afterwards.
-        module subroutine table_cast(self, name, to_kind, exact)
+        module subroutine table_cast(self, name, to_kind, exact, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! the column to convert.
             integer, intent(in) :: to_kind              !! target PK_* kind.
             logical, intent(in), optional :: exact      !! .true. to refuse any precision loss.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine table_cast
         !> Appends an already-built `parquet_column` as a new column. The kind-generic
         !! `%add_column` covers every case a user has; this is the internal path for code that
@@ -2935,6 +3120,210 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_timestamp), allocatable, intent(out) :: value(:) !! receives width values.
         end subroutine row_get_tsv
+        !> Writes this row's value into a PK_INT32 column.
+        module subroutine row_set_i32(self, name, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            integer(int32), intent(in) :: value             !! the new value.
+        end subroutine row_set_i32
+        !> Writes this row's value into a PK_INT64 column.
+        module subroutine row_set_i64(self, name, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            integer(int64), intent(in) :: value             !! the new value.
+        end subroutine row_set_i64
+        !> Writes this row's value into a PK_FLOAT32 column.
+        module subroutine row_set_f32(self, name, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            real(real32), intent(in) :: value               !! the new value.
+        end subroutine row_set_f32
+        !> Writes this row's value into a PK_FLOAT64 column.
+        module subroutine row_set_f64(self, name, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            real(real64), intent(in) :: value               !! the new value.
+        end subroutine row_set_f64
+        !> Writes this row's value into a PK_LOGICAL column.
+        module subroutine row_set_bool(self, name, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            logical, intent(in) :: value                    !! the new value.
+        end subroutine row_set_bool
+        !> Writes this row's string value into a PK_STRING column.
+        module subroutine row_set_str(self, name, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            character(len=*), intent(in) :: value        !! the new value.
+        end subroutine row_set_str
+        !> Writes this row's value into a PK_DATE column.
+        module subroutine row_set_date(self, name, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_date), intent(in) :: value         !! the new value.
+        end subroutine row_set_date
+        !> Writes this row's value into a PK_TIME column.
+        module subroutine row_set_time(self, name, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_time), intent(in) :: value         !! the new value.
+        end subroutine row_set_time
+        !> Writes this row's value into a PK_TIMESTAMP column.
+        module subroutine row_set_ts(self, name, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_timestamp), intent(in) :: value    !! the new value.
+        end subroutine row_set_ts
+        !> Writes this row's value into a PK_INT32_VEC column.
+        module subroutine row_set_i32v(self, name, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            integer(int32), intent(in) :: value(:)          !! that row's whole vector.
+        end subroutine row_set_i32v
+        !> Writes this row's value into a PK_INT64_VEC column.
+        module subroutine row_set_i64v(self, name, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            integer(int64), intent(in) :: value(:)          !! that row's whole vector.
+        end subroutine row_set_i64v
+        !> Writes this row's value into a PK_FLOAT32_VEC column.
+        module subroutine row_set_f32v(self, name, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            real(real32), intent(in) :: value(:)            !! that row's whole vector.
+        end subroutine row_set_f32v
+        !> Writes this row's value into a PK_FLOAT64_VEC column.
+        module subroutine row_set_f64v(self, name, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            real(real64), intent(in) :: value(:)            !! that row's whole vector.
+        end subroutine row_set_f64v
+        !> Writes this row's value into a PK_LOGICAL_VEC column.
+        module subroutine row_set_boolv(self, name, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            logical, intent(in) :: value(:)                 !! that row's whole vector.
+        end subroutine row_set_boolv
+        !> Writes this row's whole string vector into a PK_STRING_VEC column.
+        module subroutine row_set_strv(self, name, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            character(len=*), intent(in) :: value(:)     !! width values.
+        end subroutine row_set_strv
+        !> Writes this row's value into a PK_DATE_VEC column.
+        module subroutine row_set_datev(self, name, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_date), intent(in) :: value(:)      !! that row's whole vector.
+        end subroutine row_set_datev
+        !> Writes this row's value into a PK_TIME_VEC column.
+        module subroutine row_set_timev(self, name, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_time), intent(in) :: value(:)      !! that row's whole vector.
+        end subroutine row_set_timev
+        !> Writes this row's value into a PK_TIMESTAMP_VEC column.
+        module subroutine row_set_tsv(self, name, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_timestamp), intent(in) :: value(:) !! that row's whole vector.
+        end subroutine row_set_tsv
+        !> Points `p` at this row's storage in a PK_INT32 column. The kind must match EXACTLY.
+        module subroutine row_ref_i32(self, name, p)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            integer(int32), pointer, intent(out) :: p       !! alias to this row's value.
+        end subroutine row_ref_i32
+        !> Points `p` at this row's storage in a PK_INT64 column. The kind must match EXACTLY.
+        module subroutine row_ref_i64(self, name, p)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            integer(int64), pointer, intent(out) :: p       !! alias to this row's value.
+        end subroutine row_ref_i64
+        !> Points `p` at this row's storage in a PK_FLOAT32 column. The kind must match EXACTLY.
+        module subroutine row_ref_f32(self, name, p)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            real(real32), pointer, intent(out) :: p         !! alias to this row's value.
+        end subroutine row_ref_f32
+        !> Points `p` at this row's storage in a PK_FLOAT64 column. The kind must match EXACTLY.
+        module subroutine row_ref_f64(self, name, p)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            real(real64), pointer, intent(out) :: p         !! alias to this row's value.
+        end subroutine row_ref_f64
+        !> Points `p` at this row's storage in a PK_LOGICAL column. The kind must match EXACTLY.
+        module subroutine row_ref_bool(self, name, p)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            logical, pointer, intent(out) :: p              !! alias to this row's value.
+        end subroutine row_ref_bool
+        !> Points `p` at this row's storage in a PK_DATE column. The kind must match EXACTLY.
+        module subroutine row_ref_date(self, name, p)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_date), pointer, intent(out) :: p   !! alias to this row's value.
+        end subroutine row_ref_date
+        !> Points `p` at this row's storage in a PK_TIME column. The kind must match EXACTLY.
+        module subroutine row_ref_time(self, name, p)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_time), pointer, intent(out) :: p   !! alias to this row's value.
+        end subroutine row_ref_time
+        !> Points `p` at this row's storage in a PK_TIMESTAMP column. The kind must match EXACTLY.
+        module subroutine row_ref_ts(self, name, p)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_timestamp), pointer, intent(out) :: p !! alias to this row's value.
+        end subroutine row_ref_ts
+        !> Points `p` at this row's storage in a PK_INT32_VEC column. The kind must match EXACTLY.
+        module subroutine row_ref_i32v(self, name, p)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            integer(int32), pointer, intent(out) :: p(:)    !! alias to this row's vector.
+        end subroutine row_ref_i32v
+        !> Points `p` at this row's storage in a PK_INT64_VEC column. The kind must match EXACTLY.
+        module subroutine row_ref_i64v(self, name, p)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            integer(int64), pointer, intent(out) :: p(:)    !! alias to this row's vector.
+        end subroutine row_ref_i64v
+        !> Points `p` at this row's storage in a PK_FLOAT32_VEC column. The kind must match EXACTLY.
+        module subroutine row_ref_f32v(self, name, p)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            real(real32), pointer, intent(out) :: p(:)      !! alias to this row's vector.
+        end subroutine row_ref_f32v
+        !> Points `p` at this row's storage in a PK_FLOAT64_VEC column. The kind must match EXACTLY.
+        module subroutine row_ref_f64v(self, name, p)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            real(real64), pointer, intent(out) :: p(:)      !! alias to this row's vector.
+        end subroutine row_ref_f64v
+        !> Points `p` at this row's storage in a PK_LOGICAL_VEC column. The kind must match EXACTLY.
+        module subroutine row_ref_boolv(self, name, p)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            logical, pointer, intent(out) :: p(:)           !! alias to this row's vector.
+        end subroutine row_ref_boolv
+        !> Points `p` at this row's storage in a PK_DATE_VEC column. The kind must match EXACTLY.
+        module subroutine row_ref_datev(self, name, p)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_date), pointer, intent(out) :: p(:) !! alias to this row's vector.
+        end subroutine row_ref_datev
+        !> Points `p` at this row's storage in a PK_TIME_VEC column. The kind must match EXACTLY.
+        module subroutine row_ref_timev(self, name, p)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_time), pointer, intent(out) :: p(:) !! alias to this row's vector.
+        end subroutine row_ref_timev
+        !> Points `p` at this row's storage in a PK_TIMESTAMP_VEC column. The kind must match EXACTLY.
+        module subroutine row_ref_tsv(self, name, p)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_timestamp), pointer, intent(out) :: p(:) !! alias to this row's vector.
+        end subroutine row_ref_tsv
         !> Copies the rows `s` selects from a PK_INT32 column into `arr`.
         module subroutine get_slice_i32(self, name, s, arr, is_valid, found)
             class(parquet_table), intent(in) :: self     !! the table.
@@ -3111,6 +3500,250 @@ module parquet_tables
             logical, allocatable, intent(out), optional :: is_valid(:) !! present: validity of the selected rows.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine get_slice_chrv
+        !> Writes `arr` into the rows `s` selects of a PK_INT32 column.
+        !!
+        !! The mirror of %get_slice: same selection object, same order, and the array must have
+        !! exactly one value (or one vector) per selected row. The kind must match EXACTLY, as it
+        !! does for %set -- a copy INTO the table never widens.
+        module subroutine set_slice_i32(self, name, s, arr, is_valid, modify_nulls, found)
+            class(parquet_table), intent(inout) :: self  !! the table.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_slice), intent(in) :: s         !! rows to write.
+            integer(int32), intent(in) :: arr(:)       !! one value per selected row.
+            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
+        end subroutine set_slice_i32
+        !> Writes `arr` into the rows `s` selects of a PK_INT64 column.
+        !!
+        !! The mirror of %get_slice: same selection object, same order, and the array must have
+        !! exactly one value (or one vector) per selected row. The kind must match EXACTLY, as it
+        !! does for %set -- a copy INTO the table never widens.
+        module subroutine set_slice_i64(self, name, s, arr, is_valid, modify_nulls, found)
+            class(parquet_table), intent(inout) :: self  !! the table.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_slice), intent(in) :: s         !! rows to write.
+            integer(int64), intent(in) :: arr(:)       !! one value per selected row.
+            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
+        end subroutine set_slice_i64
+        !> Writes `arr` into the rows `s` selects of a PK_FLOAT32 column.
+        !!
+        !! The mirror of %get_slice: same selection object, same order, and the array must have
+        !! exactly one value (or one vector) per selected row. The kind must match EXACTLY, as it
+        !! does for %set -- a copy INTO the table never widens.
+        module subroutine set_slice_f32(self, name, s, arr, is_valid, modify_nulls, found)
+            class(parquet_table), intent(inout) :: self  !! the table.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_slice), intent(in) :: s         !! rows to write.
+            real(real32), intent(in) :: arr(:)         !! one value per selected row.
+            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
+        end subroutine set_slice_f32
+        !> Writes `arr` into the rows `s` selects of a PK_FLOAT64 column.
+        !!
+        !! The mirror of %get_slice: same selection object, same order, and the array must have
+        !! exactly one value (or one vector) per selected row. The kind must match EXACTLY, as it
+        !! does for %set -- a copy INTO the table never widens.
+        module subroutine set_slice_f64(self, name, s, arr, is_valid, modify_nulls, found)
+            class(parquet_table), intent(inout) :: self  !! the table.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_slice), intent(in) :: s         !! rows to write.
+            real(real64), intent(in) :: arr(:)         !! one value per selected row.
+            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
+        end subroutine set_slice_f64
+        !> Writes `arr` into the rows `s` selects of a PK_LOGICAL column.
+        !!
+        !! The mirror of %get_slice: same selection object, same order, and the array must have
+        !! exactly one value (or one vector) per selected row. The kind must match EXACTLY, as it
+        !! does for %set -- a copy INTO the table never widens.
+        module subroutine set_slice_bool(self, name, s, arr, is_valid, modify_nulls, found)
+            class(parquet_table), intent(inout) :: self  !! the table.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_slice), intent(in) :: s         !! rows to write.
+            logical, intent(in) :: arr(:)              !! one value per selected row.
+            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
+        end subroutine set_slice_bool
+        !> Writes `arr` into the rows `s` selects of a PK_DATE column.
+        !!
+        !! The mirror of %get_slice: same selection object, same order, and the array must have
+        !! exactly one value (or one vector) per selected row. The kind must match EXACTLY, as it
+        !! does for %set -- a copy INTO the table never widens.
+        module subroutine set_slice_date(self, name, s, arr, is_valid, modify_nulls, found)
+            class(parquet_table), intent(inout) :: self  !! the table.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_slice), intent(in) :: s         !! rows to write.
+            type(parquet_date), intent(in) :: arr(:)   !! one value per selected row.
+            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
+        end subroutine set_slice_date
+        !> Writes `arr` into the rows `s` selects of a PK_TIME column.
+        !!
+        !! The mirror of %get_slice: same selection object, same order, and the array must have
+        !! exactly one value (or one vector) per selected row. The kind must match EXACTLY, as it
+        !! does for %set -- a copy INTO the table never widens.
+        module subroutine set_slice_time(self, name, s, arr, is_valid, modify_nulls, found)
+            class(parquet_table), intent(inout) :: self  !! the table.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_slice), intent(in) :: s         !! rows to write.
+            type(parquet_time), intent(in) :: arr(:)   !! one value per selected row.
+            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
+        end subroutine set_slice_time
+        !> Writes `arr` into the rows `s` selects of a PK_TIMESTAMP column.
+        !!
+        !! The mirror of %get_slice: same selection object, same order, and the array must have
+        !! exactly one value (or one vector) per selected row. The kind must match EXACTLY, as it
+        !! does for %set -- a copy INTO the table never widens.
+        module subroutine set_slice_ts(self, name, s, arr, is_valid, modify_nulls, found)
+            class(parquet_table), intent(inout) :: self  !! the table.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_slice), intent(in) :: s         !! rows to write.
+            type(parquet_timestamp), intent(in) :: arr(:) !! one value per selected row.
+            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
+        end subroutine set_slice_ts
+        !> Writes `arr` into the rows `s` selects of a PK_INT32_VEC column.
+        !!
+        !! The mirror of %get_slice: same selection object, same order, and the array must have
+        !! exactly one value (or one vector) per selected row. The kind must match EXACTLY, as it
+        !! does for %set -- a copy INTO the table never widens.
+        module subroutine set_slice_i32v(self, name, s, arr, is_valid, modify_nulls, found)
+            class(parquet_table), intent(inout) :: self  !! the table.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_slice), intent(in) :: s         !! rows to write.
+            integer(int32), intent(in) :: arr(:,:)       !! one value per selected row.
+            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
+        end subroutine set_slice_i32v
+        !> Writes `arr` into the rows `s` selects of a PK_INT64_VEC column.
+        !!
+        !! The mirror of %get_slice: same selection object, same order, and the array must have
+        !! exactly one value (or one vector) per selected row. The kind must match EXACTLY, as it
+        !! does for %set -- a copy INTO the table never widens.
+        module subroutine set_slice_i64v(self, name, s, arr, is_valid, modify_nulls, found)
+            class(parquet_table), intent(inout) :: self  !! the table.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_slice), intent(in) :: s         !! rows to write.
+            integer(int64), intent(in) :: arr(:,:)       !! one value per selected row.
+            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
+        end subroutine set_slice_i64v
+        !> Writes `arr` into the rows `s` selects of a PK_FLOAT32_VEC column.
+        !!
+        !! The mirror of %get_slice: same selection object, same order, and the array must have
+        !! exactly one value (or one vector) per selected row. The kind must match EXACTLY, as it
+        !! does for %set -- a copy INTO the table never widens.
+        module subroutine set_slice_f32v(self, name, s, arr, is_valid, modify_nulls, found)
+            class(parquet_table), intent(inout) :: self  !! the table.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_slice), intent(in) :: s         !! rows to write.
+            real(real32), intent(in) :: arr(:,:)         !! one value per selected row.
+            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
+        end subroutine set_slice_f32v
+        !> Writes `arr` into the rows `s` selects of a PK_FLOAT64_VEC column.
+        !!
+        !! The mirror of %get_slice: same selection object, same order, and the array must have
+        !! exactly one value (or one vector) per selected row. The kind must match EXACTLY, as it
+        !! does for %set -- a copy INTO the table never widens.
+        module subroutine set_slice_f64v(self, name, s, arr, is_valid, modify_nulls, found)
+            class(parquet_table), intent(inout) :: self  !! the table.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_slice), intent(in) :: s         !! rows to write.
+            real(real64), intent(in) :: arr(:,:)         !! one value per selected row.
+            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
+        end subroutine set_slice_f64v
+        !> Writes `arr` into the rows `s` selects of a PK_LOGICAL_VEC column.
+        !!
+        !! The mirror of %get_slice: same selection object, same order, and the array must have
+        !! exactly one value (or one vector) per selected row. The kind must match EXACTLY, as it
+        !! does for %set -- a copy INTO the table never widens.
+        module subroutine set_slice_boolv(self, name, s, arr, is_valid, modify_nulls, found)
+            class(parquet_table), intent(inout) :: self  !! the table.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_slice), intent(in) :: s         !! rows to write.
+            logical, intent(in) :: arr(:,:)              !! one value per selected row.
+            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
+        end subroutine set_slice_boolv
+        !> Writes `arr` into the rows `s` selects of a PK_DATE_VEC column.
+        !!
+        !! The mirror of %get_slice: same selection object, same order, and the array must have
+        !! exactly one value (or one vector) per selected row. The kind must match EXACTLY, as it
+        !! does for %set -- a copy INTO the table never widens.
+        module subroutine set_slice_datev(self, name, s, arr, is_valid, modify_nulls, found)
+            class(parquet_table), intent(inout) :: self  !! the table.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_slice), intent(in) :: s         !! rows to write.
+            type(parquet_date), intent(in) :: arr(:,:)   !! one value per selected row.
+            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
+        end subroutine set_slice_datev
+        !> Writes `arr` into the rows `s` selects of a PK_TIME_VEC column.
+        !!
+        !! The mirror of %get_slice: same selection object, same order, and the array must have
+        !! exactly one value (or one vector) per selected row. The kind must match EXACTLY, as it
+        !! does for %set -- a copy INTO the table never widens.
+        module subroutine set_slice_timev(self, name, s, arr, is_valid, modify_nulls, found)
+            class(parquet_table), intent(inout) :: self  !! the table.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_slice), intent(in) :: s         !! rows to write.
+            type(parquet_time), intent(in) :: arr(:,:)   !! one value per selected row.
+            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
+        end subroutine set_slice_timev
+        !> Writes `arr` into the rows `s` selects of a PK_TIMESTAMP_VEC column.
+        !!
+        !! The mirror of %get_slice: same selection object, same order, and the array must have
+        !! exactly one value (or one vector) per selected row. The kind must match EXACTLY, as it
+        !! does for %set -- a copy INTO the table never widens.
+        module subroutine set_slice_tsv(self, name, s, arr, is_valid, modify_nulls, found)
+            class(parquet_table), intent(inout) :: self  !! the table.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_slice), intent(in) :: s         !! rows to write.
+            type(parquet_timestamp), intent(in) :: arr(:,:) !! one value per selected row.
+            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
+        end subroutine set_slice_tsv
+        !> Writes a character array into the rows `s` selects of a PK_STRING column.
+        module subroutine set_slice_chr(self, name, s, arr, is_valid, modify_nulls, found)
+            class(parquet_table), intent(inout) :: self  !! the table.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_slice), intent(in) :: s         !! rows to write.
+            character(len=*), intent(in) :: arr(:)       !! one value per selected row.
+            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
+        end subroutine set_slice_chr
+        !> Writes a character (element, row) array into the rows `s` selects of a PK_STRING_VEC column.
+        module subroutine set_slice_chrv(self, name, s, arr, is_valid, modify_nulls, found)
+            class(parquet_table), intent(inout) :: self  !! the table.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_slice), intent(in) :: s         !! rows to write.
+            character(len=*), intent(in) :: arr(:,:)     !! (element, selected row) values.
+            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
+        end subroutine set_slice_chrv
     end interface
     !
     ! ---- Per-kind materialization (parquet_tables_materialize) ----

@@ -266,4 +266,20 @@ contains
         self%cache%cols(idx)%user_populated = .true.
     end procedure add_column_chrv
     !
+    module procedure add_column_strcol
+        integer :: idx
+        type(parquet_string_column), pointer :: store
+        !
+        call table_check_open(self, "add_column")
+        call table_fix_nrows(self, name, values%size())
+        call table_new_slot(self, name, force, idx)
+        call self%cache%cols(idx)%values%init(PK_STRING, values%size(), 1_int32, unit)
+        call self%cache%cols(idx)%values%string_column(store)
+        store = values%clone()
+        self%cache%cols(idx)%declared_kind = PK_STRING
+        self%cache%cols(idx)%width = 1
+        self%cache%cols(idx)%residency = RES_FULL
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure add_column_strcol
+    !
 end submodule parquet_tables_addcol

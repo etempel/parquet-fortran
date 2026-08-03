@@ -163,6 +163,11 @@ contains
                 test_clone_structure_lazy), &
             new_unittest("get_element reads one cell, widening like %get", test_get_element), &
             new_unittest("is_valid= on get, col, get_slice and set", test_is_valid_argument), &
+            new_unittest("set_slice writes a selection back", test_set_slice), &
+            new_unittest("parquet_string_column is a first-class table value", &
+                test_string_column_first_class), &
+            new_unittest("a row handle can write: %set and %ref", test_row_set_and_ref), &
+            new_unittest("found= reaches every name-taking procedure", test_found_everywhere), &
             new_unittest("extra: remap: shadows, swaps and duplicates as documented", test_remap_shadow_duplicate), &
             new_unittest("rename_column on a remapped column keeps its file column", test_remap_then_rename), &
             new_unittest("open with filter= narrows every column, in internal names", test_open_filter), &
@@ -2984,6 +2989,260 @@ contains
     !> The basic remap: a read-in MAML relabels a file column, and everything table-facing uses
     !! the new name while the read still goes to the physical one. The un-remapped columns are
     !! untouched, and the column count is unchanged (one internal name, one file column).
+    !> `found=` reaches every procedure that takes a column name, mutators included.
+    !!
+    !! The rule that matters is the one for a MUTATING procedure: `found=.false.` has to mean
+    !! "nothing was changed", so the lookup happens before the first write. Each call below is made
+    !! on a name that does not exist, and the table is checked afterwards to be exactly as it was.
+    subroutine test_found_everywhere(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        logical :: ok, mask(NROW)
+        integer :: ncols0
+        integer(int64) :: gen0
+        character(len=*), parameter :: f = "test_run/table_found_everywhere.parquet"
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        ncols0 = t%ncols()
+        gen0 = t%generation()
+        mask = .true.
+        !
+        ! Queries.
+        call check(error, .not. t%is_null("no_such", 1, found=ok) .and. .not. ok, &
+            "%is_null should report a missing column through found=, answering .false.")
+        if (allocated(error)) return
+        !
+        ! Cell and validity mutators.
+        call t%set_element("no_such", 1, 1.0_real64, found=ok)
+        call check(error, .not. ok, "%set_element should report a missing column through found=")
+        if (allocated(error)) return
+        call t%set_null("no_such", 1, found=ok)
+        call check(error, .not. ok, "%set_null should report a missing column through found=")
+        if (allocated(error)) return
+        call t%set_null("no_such", mask, found=ok)
+        call check(error, .not. ok, "%set_null(mask) should report a missing column through found=")
+        if (allocated(error)) return
+        call t%clear_null("no_such", 1, found=ok)
+        call check(error, .not. ok, "%clear_null should report a missing column through found=")
+        if (allocated(error)) return
+        call t%compact_validity("no_such", found=ok)
+        call check(error, .not. ok, "%compact_validity should report a missing column through found=")
+        if (allocated(error)) return
+        !
+        ! Column-structural mutators. These are the ones where a late lookup would already have
+        ! changed something by the time it reported.
+        call t%drop_column("no_such", found=ok)
+        call check(error, .not. ok, "%drop_column should report a missing column through found=")
+        if (allocated(error)) return
+        call t%rename_column("no_such", "whatever", found=ok)
+        call check(error, .not. ok, "%rename_column should report a missing source through found=")
+        if (allocated(error)) return
+        call t%copy_column("no_such", "whatever", found=ok)
+        call check(error, .not. ok, "%copy_column should report a missing source through found=")
+        if (allocated(error)) return
+        call t%cast("no_such", PK_FLOAT64, found=ok)
+        call check(error, .not. ok, "%cast should report a missing column through found=")
+        if (allocated(error)) return
+        !
+        ! Nothing was changed by any of them -- not the column set, not the generation counter.
+        call check(error, t%ncols() == ncols0, "a reported miss must not change the column set")
+        if (allocated(error)) return
+        call check(error, t%generation() == gen0, &
+            "a reported miss must not count as a structural change")
+        if (allocated(error)) return
+        call check(error, t%nrows() == int(NROW, int64), "a reported miss must not change the rows")
+    end subroutine test_found_everywhere
+    !
+    !> A row handle can WRITE as well as read: `r%set` updates the table, `r%ref` aliases one row.
+    !!
+    !! The question the handle's documentation used to leave open is the one checked first here:
+    !! a handle is a view of the table, not a copy of the row, so writing through it changes the
+    !! table. `%ref` is the zero-copy form of the same thing, and carries the same lifetime rule as
+    !! `%col` -- it is a pointer into the column's storage, so a structural change strands it.
+    subroutine test_row_set_and_ref(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_table_row) :: r
+        real(real64), allocatable :: f64(:)
+        real(real64), pointer :: fp
+        integer(int32), pointer :: ip
+        character(len=:), allocatable :: sv
+        real(real64) :: got
+        character(len=*), parameter :: f = "test_run/table_row_write.parquet"
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t, f)
+        r = t%row(3)
+        !
+        ! %set through the handle changes the TABLE, which is the whole question.
+        call r%set("f64", 99.5_real64)
+        call t%get("f64", f64)
+        call check(error, abs(f64(3) - 99.5_real64) < 1.0e-12_real64, &
+            "a write through a row handle should update the table")
+        if (allocated(error)) return
+        call r%get("f64", got)
+        call check(error, abs(got - 99.5_real64) < 1.0e-12_real64, &
+            "reading back through the same handle should see the write")
+        if (allocated(error)) return
+        ! Strings too.
+        call r%set("s", "written")
+        call r%get("s", sv)
+        call check(error, sv == "written", "a row handle should write a string cell")
+        if (allocated(error)) return
+        ! Writing a value clears that row's null, exactly as %set_element does.
+        call t%set_null("i32", 3)
+        call check(error, r%is_null("i32"), "precondition: the row should be null")
+        if (allocated(error)) return
+        call r%set("i32", 33_int32)
+        call check(error, .not. r%is_null("i32"), "writing a value should clear the row's null")
+        if (allocated(error)) return
+        !
+        ! %ref aliases the storage: writing through the pointer is writing to the table.
+        call r%ref("f64", fp)
+        call check(error, associated(fp), "%ref should give a pointer into the column")
+        if (allocated(error)) return
+        fp = -7.0_real64
+        call t%get("f64", f64)
+        call check(error, abs(f64(3) + 7.0_real64) < 1.0e-12_real64, &
+            "a write through a %ref pointer should reach the table")
+        if (allocated(error)) return
+        call r%ref("i32", ip)
+        call check(error, ip == 33_int32, "%ref should alias the value just written")
+    end subroutine test_row_set_and_ref
+    !
+    !> A `parquet_string_column` is a first-class table value: %col, %set and %add_column.
+    !!
+    !! Reading one out has always worked (`%get(name, packed)`); the other three directions were
+    !! missing, so the compact form could be got out of a table but never put back in without
+    !! flattening it to a fixed-width character array first -- which is exactly the copy the
+    !! compact form exists to avoid.
+    subroutine test_string_column_first_class(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, mem
+        type(parquet_string_column) :: packed, out
+        type(parquet_string_column), pointer :: sp
+        character(len=:), allocatable :: sv
+        logical :: ok
+        character(len=*), parameter :: f = "test_run/table_strcol_first_class.parquet"
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t, f)
+        !
+        ! %col aliases the packed store: an in-place value edit through it changes the table.
+        call t%col("s", sp)
+        call check(error, associated(sp), "%col should alias a string column's packed store")
+        if (allocated(error)) return
+        call check(error, sp%size() == int(NROW, int64), &
+            "the aliased store should hold one element per row")
+        if (allocated(error)) return
+        call sp%get(1_int64, sv)
+        call check(error, sv == "a", "the aliased store should hold the column's values")
+        if (allocated(error)) return
+        !
+        ! %set from a compact column, at each value's own length.
+        call packed%append_string("alpha")
+        call packed%append_string("b")
+        call packed%append_null()
+        call packed%append_string("delta")
+        call packed%append_string("e")
+        call packed%append_string("zeta")
+        call t%set("s", packed)
+        call t%get("s", out)
+        call check(error, out%size() == int(NROW, int64), "%set(packed) should keep the row count")
+        if (allocated(error)) return
+        call out%get(1_int64, sv)
+        call check(error, sv == "alpha", "%set(packed) should write each value at its own length")
+        if (allocated(error)) return
+        call check(error, t%is_null("s", 3), "%set(packed) should carry the packed column's nulls")
+        if (allocated(error)) return
+        ! ...and it is a copy, not a handover: editing the caller's column afterwards is invisible.
+        call packed%append_string("extra")
+        call t%get("s", out)
+        call check(error, out%size() == int(NROW, int64), &
+            "%set(packed) should take an independent copy, not share storage")
+        if (allocated(error)) return
+        !
+        ! %add_column from a compact column, on a table built in memory.
+        call parquet_new_table(mem)
+        call mem%add_column("name", packed, unit="label")
+        call check(error, mem%nrows() == packed%size() .and. mem%kind("name") == PK_STRING, &
+            "%add_column(packed) should add a string column of the packed column's length")
+        if (allocated(error)) return
+        call mem%unit("name", sv)
+        call check(error, sv == "label", "%add_column(packed) should keep the unit it is given")
+        if (allocated(error)) return
+        call mem%get_element("name", 1, sv)
+        call check(error, sv == "alpha", "%add_column(packed) should carry the values across")
+        if (allocated(error)) return
+        !
+        call t%col("no_such", sp, found=ok)
+        call check(error, (.not. ok) .and. (.not. associated(sp)), &
+            "a missed %col(packed) should report through found= and leave the pointer null")
+    end subroutine test_string_column_first_class
+    !
+    !> %set_slice writes a selection back, mirroring %get_slice exactly.
+    !!
+    !! The pairing is the point: whatever `%get_slice` hands out for a selection, `%set_slice`
+    !! takes back for the same selection, in the same order -- including a reversed or repeated
+    !! one, where "in the same order" is the whole question. Unlike `%get_slice` it does not
+    !! widen: a copy INTO the table is exact-kind, as `%set` is.
+    subroutine test_set_slice(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_slice) :: sel
+        real(real64), allocatable :: got(:)
+        character(len=:), allocatable :: sv(:)
+        logical :: ok
+        integer(int32), allocatable :: i32(:)
+        character(len=*), parameter :: f = "test_run/table_set_slice.parquet"
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t, f)
+        !
+        ! A strided selection: rows 1, 3, 5.
+        sel = parquet_slice_range(1, 5, 2)
+        call t%set_slice("f64", sel, [-1.0_real64, -3.0_real64, -5.0_real64])
+        call t%get("f64", got)
+        call check(error, abs(got(1) + 1.0_real64) < 1.0e-12_real64 .and. &
+            abs(got(3) + 3.0_real64) < 1.0e-12_real64 .and. abs(got(5) + 5.0_real64) < 1.0e-12_real64, &
+            "%set_slice should write the rows the selection picks")
+        if (allocated(error)) return
+        call check(error, abs(got(2) - 4.5_real64) < 1.0e-12_real64, &
+            "%set_slice should leave the rows it does not pick alone")
+        if (allocated(error)) return
+        !
+        ! A reversed, explicit list: order is what distinguishes a right answer from a wrong one.
+        sel = parquet_slice_list([6, 2])
+        call t%set_slice("i32", sel, [66_int32, 22_int32])
+        call t%get("i32", i32)
+        call check(error, i32(6) == 66_int32 .and. i32(2) == 22_int32, &
+            "%set_slice should follow the selection's own order")
+        if (allocated(error)) return
+        !
+        ! Round-trip against %get_slice, which is the property that matters.
+        sel = parquet_slice_list([4, 1, 4])
+        call t%get_slice("f64", sel, got)
+        call t%set_slice("f64", sel, got)
+        call t%get_slice("f64", sel, got)
+        call check(error, size(got) == 3, "%get_slice/%set_slice should round-trip a repeated selection")
+        if (allocated(error)) return
+        !
+        ! Strings, and is_valid= over the selection.
+        sel = parquet_slice_range(1, 2)
+        call t%set_slice("s", sel, ["zz", "yy"], is_valid=[.true., .false.])
+        call t%get("s", sv)
+        call check(error, trim(sv(1)) == "zz", "%set_slice should write a string selection")
+        if (allocated(error)) return
+        call check(error, t%is_null("s", 2), "%set_slice(is_valid=) should null the rows it marks")
+        if (allocated(error)) return
+        !
+        ! A missing column reports through found=.
+        call t%set_slice("no_such", sel, [1.0_real64, 2.0_real64], found=ok)
+        call check(error, .not. ok, "%set_slice should report a missing column through found=")
+    end subroutine test_set_slice
+    !
     !> `is_valid=` on %get, %col, %get_slice and %set.
     !!
     !! One optional argument, four places, and it means the same thing in all of them: one entry

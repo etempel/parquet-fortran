@@ -381,6 +381,33 @@ contains
         call self%cache%cols(idx)%values%data_ptr(p)
     end procedure col_ptr_tsv
     !
+    module procedure col_ptr_strcol
+        integer :: idx
+        !
+        nullify(p)
+        call table_resolve(self, name, "col", idx, found)
+        if (idx == 0) return
+        call table_require_kind(self, idx, PK_STRING, "col")
+        call self%cache%cols(idx)%values%string_column(p)
+    end procedure col_ptr_strcol
+    !
+    module procedure set_arr_strcol
+        integer :: idx
+        type(parquet_string_column), pointer :: store
+        !
+        call table_resolve(self, name, "set", idx, found)
+        if (idx == 0) return
+        call table_require_kind(self, idx, PK_STRING, "set")
+        call table_require_length(self, idx, arr%size(), "set")
+        ! Replaces the packed store wholesale with an independent copy, so the caller's own column
+        ! and the table's do not end up sharing storage. %set is a value replacement, exactly as
+        ! the character-array form is; it is not a way to hand ownership over.
+        call self%cache%cols(idx)%values%string_column(store)
+        store = arr%clone()
+        if (present(is_valid)) call table_apply_valid(self, idx, is_valid, name, "set")
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_arr_strcol
+    !
     module procedure get_arr_i32
         integer :: idx
         character(len=:), allocatable :: sfx, kname
@@ -1521,13 +1548,16 @@ contains
     end procedure get_element_chrv_i64
     !
     module procedure set_element_i32_i32
-        call self%set_element(name, int(i, int64), value)
+        call self%set_element(name, int(i, int64), value, found)
     end procedure set_element_i32_i32
     !
     module procedure set_element_i32_i64
         integer :: idx
         !
-        call table_resolve(self, name, "set_element", idx)
+        ! The lookup happens BEFORE anything is written, which is what lets found=.false. mean
+        ! "nothing was changed" rather than "something was changed and then a problem arose".
+        call table_resolve(self, name, "set_element", idx, found)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_INT32, "set_element")
         call table_require_row(self, i, "set_element")
         call self%cache%cols(idx)%values%set_at(i, value)
@@ -1535,13 +1565,16 @@ contains
     end procedure set_element_i32_i64
     !
     module procedure set_element_i64_i32
-        call self%set_element(name, int(i, int64), value)
+        call self%set_element(name, int(i, int64), value, found)
     end procedure set_element_i64_i32
     !
     module procedure set_element_i64_i64
         integer :: idx
         !
-        call table_resolve(self, name, "set_element", idx)
+        ! The lookup happens BEFORE anything is written, which is what lets found=.false. mean
+        ! "nothing was changed" rather than "something was changed and then a problem arose".
+        call table_resolve(self, name, "set_element", idx, found)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_INT64, "set_element")
         call table_require_row(self, i, "set_element")
         call self%cache%cols(idx)%values%set_at(i, value)
@@ -1549,13 +1582,16 @@ contains
     end procedure set_element_i64_i64
     !
     module procedure set_element_f32_i32
-        call self%set_element(name, int(i, int64), value)
+        call self%set_element(name, int(i, int64), value, found)
     end procedure set_element_f32_i32
     !
     module procedure set_element_f32_i64
         integer :: idx
         !
-        call table_resolve(self, name, "set_element", idx)
+        ! The lookup happens BEFORE anything is written, which is what lets found=.false. mean
+        ! "nothing was changed" rather than "something was changed and then a problem arose".
+        call table_resolve(self, name, "set_element", idx, found)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_FLOAT32, "set_element")
         call table_require_row(self, i, "set_element")
         call self%cache%cols(idx)%values%set_at(i, value)
@@ -1563,13 +1599,16 @@ contains
     end procedure set_element_f32_i64
     !
     module procedure set_element_f64_i32
-        call self%set_element(name, int(i, int64), value)
+        call self%set_element(name, int(i, int64), value, found)
     end procedure set_element_f64_i32
     !
     module procedure set_element_f64_i64
         integer :: idx
         !
-        call table_resolve(self, name, "set_element", idx)
+        ! The lookup happens BEFORE anything is written, which is what lets found=.false. mean
+        ! "nothing was changed" rather than "something was changed and then a problem arose".
+        call table_resolve(self, name, "set_element", idx, found)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_FLOAT64, "set_element")
         call table_require_row(self, i, "set_element")
         call self%cache%cols(idx)%values%set_at(i, value)
@@ -1577,13 +1616,16 @@ contains
     end procedure set_element_f64_i64
     !
     module procedure set_element_bool_i32
-        call self%set_element(name, int(i, int64), value)
+        call self%set_element(name, int(i, int64), value, found)
     end procedure set_element_bool_i32
     !
     module procedure set_element_bool_i64
         integer :: idx
         !
-        call table_resolve(self, name, "set_element", idx)
+        ! The lookup happens BEFORE anything is written, which is what lets found=.false. mean
+        ! "nothing was changed" rather than "something was changed and then a problem arose".
+        call table_resolve(self, name, "set_element", idx, found)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_LOGICAL, "set_element")
         call table_require_row(self, i, "set_element")
         call self%cache%cols(idx)%values%set_at(i, value)
@@ -1591,13 +1633,16 @@ contains
     end procedure set_element_bool_i64
     !
     module procedure set_element_date_i32
-        call self%set_element(name, int(i, int64), value)
+        call self%set_element(name, int(i, int64), value, found)
     end procedure set_element_date_i32
     !
     module procedure set_element_date_i64
         integer :: idx
         !
-        call table_resolve(self, name, "set_element", idx)
+        ! The lookup happens BEFORE anything is written, which is what lets found=.false. mean
+        ! "nothing was changed" rather than "something was changed and then a problem arose".
+        call table_resolve(self, name, "set_element", idx, found)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_DATE, "set_element")
         call table_require_row(self, i, "set_element")
         call self%cache%cols(idx)%values%set_at(i, value)
@@ -1605,13 +1650,16 @@ contains
     end procedure set_element_date_i64
     !
     module procedure set_element_time_i32
-        call self%set_element(name, int(i, int64), value)
+        call self%set_element(name, int(i, int64), value, found)
     end procedure set_element_time_i32
     !
     module procedure set_element_time_i64
         integer :: idx
         !
-        call table_resolve(self, name, "set_element", idx)
+        ! The lookup happens BEFORE anything is written, which is what lets found=.false. mean
+        ! "nothing was changed" rather than "something was changed and then a problem arose".
+        call table_resolve(self, name, "set_element", idx, found)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_TIME, "set_element")
         call table_require_row(self, i, "set_element")
         call self%cache%cols(idx)%values%set_at(i, value)
@@ -1619,13 +1667,16 @@ contains
     end procedure set_element_time_i64
     !
     module procedure set_element_ts_i32
-        call self%set_element(name, int(i, int64), value)
+        call self%set_element(name, int(i, int64), value, found)
     end procedure set_element_ts_i32
     !
     module procedure set_element_ts_i64
         integer :: idx
         !
-        call table_resolve(self, name, "set_element", idx)
+        ! The lookup happens BEFORE anything is written, which is what lets found=.false. mean
+        ! "nothing was changed" rather than "something was changed and then a problem arose".
+        call table_resolve(self, name, "set_element", idx, found)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_TIMESTAMP, "set_element")
         call table_require_row(self, i, "set_element")
         call self%cache%cols(idx)%values%set_at(i, value)
@@ -1633,13 +1684,16 @@ contains
     end procedure set_element_ts_i64
     !
     module procedure set_element_i32v_i32
-        call self%set_element(name, int(i, int64), value)
+        call self%set_element(name, int(i, int64), value, found)
     end procedure set_element_i32v_i32
     !
     module procedure set_element_i32v_i64
         integer :: idx
         !
-        call table_resolve(self, name, "set_element", idx)
+        ! The lookup happens BEFORE anything is written, which is what lets found=.false. mean
+        ! "nothing was changed" rather than "something was changed and then a problem arose".
+        call table_resolve(self, name, "set_element", idx, found)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_INT32_VEC, "set_element")
         call table_require_row(self, i, "set_element")
         call self%cache%cols(idx)%values%set_at(i, value)
@@ -1647,13 +1701,16 @@ contains
     end procedure set_element_i32v_i64
     !
     module procedure set_element_i64v_i32
-        call self%set_element(name, int(i, int64), value)
+        call self%set_element(name, int(i, int64), value, found)
     end procedure set_element_i64v_i32
     !
     module procedure set_element_i64v_i64
         integer :: idx
         !
-        call table_resolve(self, name, "set_element", idx)
+        ! The lookup happens BEFORE anything is written, which is what lets found=.false. mean
+        ! "nothing was changed" rather than "something was changed and then a problem arose".
+        call table_resolve(self, name, "set_element", idx, found)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_INT64_VEC, "set_element")
         call table_require_row(self, i, "set_element")
         call self%cache%cols(idx)%values%set_at(i, value)
@@ -1661,13 +1718,16 @@ contains
     end procedure set_element_i64v_i64
     !
     module procedure set_element_f32v_i32
-        call self%set_element(name, int(i, int64), value)
+        call self%set_element(name, int(i, int64), value, found)
     end procedure set_element_f32v_i32
     !
     module procedure set_element_f32v_i64
         integer :: idx
         !
-        call table_resolve(self, name, "set_element", idx)
+        ! The lookup happens BEFORE anything is written, which is what lets found=.false. mean
+        ! "nothing was changed" rather than "something was changed and then a problem arose".
+        call table_resolve(self, name, "set_element", idx, found)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_FLOAT32_VEC, "set_element")
         call table_require_row(self, i, "set_element")
         call self%cache%cols(idx)%values%set_at(i, value)
@@ -1675,13 +1735,16 @@ contains
     end procedure set_element_f32v_i64
     !
     module procedure set_element_f64v_i32
-        call self%set_element(name, int(i, int64), value)
+        call self%set_element(name, int(i, int64), value, found)
     end procedure set_element_f64v_i32
     !
     module procedure set_element_f64v_i64
         integer :: idx
         !
-        call table_resolve(self, name, "set_element", idx)
+        ! The lookup happens BEFORE anything is written, which is what lets found=.false. mean
+        ! "nothing was changed" rather than "something was changed and then a problem arose".
+        call table_resolve(self, name, "set_element", idx, found)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_FLOAT64_VEC, "set_element")
         call table_require_row(self, i, "set_element")
         call self%cache%cols(idx)%values%set_at(i, value)
@@ -1689,13 +1752,16 @@ contains
     end procedure set_element_f64v_i64
     !
     module procedure set_element_boolv_i32
-        call self%set_element(name, int(i, int64), value)
+        call self%set_element(name, int(i, int64), value, found)
     end procedure set_element_boolv_i32
     !
     module procedure set_element_boolv_i64
         integer :: idx
         !
-        call table_resolve(self, name, "set_element", idx)
+        ! The lookup happens BEFORE anything is written, which is what lets found=.false. mean
+        ! "nothing was changed" rather than "something was changed and then a problem arose".
+        call table_resolve(self, name, "set_element", idx, found)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_LOGICAL_VEC, "set_element")
         call table_require_row(self, i, "set_element")
         call self%cache%cols(idx)%values%set_at(i, value)
@@ -1703,13 +1769,16 @@ contains
     end procedure set_element_boolv_i64
     !
     module procedure set_element_datev_i32
-        call self%set_element(name, int(i, int64), value)
+        call self%set_element(name, int(i, int64), value, found)
     end procedure set_element_datev_i32
     !
     module procedure set_element_datev_i64
         integer :: idx
         !
-        call table_resolve(self, name, "set_element", idx)
+        ! The lookup happens BEFORE anything is written, which is what lets found=.false. mean
+        ! "nothing was changed" rather than "something was changed and then a problem arose".
+        call table_resolve(self, name, "set_element", idx, found)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_DATE_VEC, "set_element")
         call table_require_row(self, i, "set_element")
         call self%cache%cols(idx)%values%set_at(i, value)
@@ -1717,13 +1786,16 @@ contains
     end procedure set_element_datev_i64
     !
     module procedure set_element_timev_i32
-        call self%set_element(name, int(i, int64), value)
+        call self%set_element(name, int(i, int64), value, found)
     end procedure set_element_timev_i32
     !
     module procedure set_element_timev_i64
         integer :: idx
         !
-        call table_resolve(self, name, "set_element", idx)
+        ! The lookup happens BEFORE anything is written, which is what lets found=.false. mean
+        ! "nothing was changed" rather than "something was changed and then a problem arose".
+        call table_resolve(self, name, "set_element", idx, found)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_TIME_VEC, "set_element")
         call table_require_row(self, i, "set_element")
         call self%cache%cols(idx)%values%set_at(i, value)
@@ -1731,13 +1803,16 @@ contains
     end procedure set_element_timev_i64
     !
     module procedure set_element_tsv_i32
-        call self%set_element(name, int(i, int64), value)
+        call self%set_element(name, int(i, int64), value, found)
     end procedure set_element_tsv_i32
     !
     module procedure set_element_tsv_i64
         integer :: idx
         !
-        call table_resolve(self, name, "set_element", idx)
+        ! The lookup happens BEFORE anything is written, which is what lets found=.false. mean
+        ! "nothing was changed" rather than "something was changed and then a problem arose".
+        call table_resolve(self, name, "set_element", idx, found)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_TIMESTAMP_VEC, "set_element")
         call table_require_row(self, i, "set_element")
         call self%cache%cols(idx)%values%set_at(i, value)
@@ -1745,13 +1820,16 @@ contains
     end procedure set_element_tsv_i64
     !
     module procedure set_element_chr_i32
-        call self%set_element(name, int(i, int64), value)
+        call self%set_element(name, int(i, int64), value, found)
     end procedure set_element_chr_i32
     !
     module procedure set_element_chr_i64
         integer :: idx
         !
-        call table_resolve(self, name, "set_element", idx)
+        ! The lookup happens BEFORE anything is written, which is what lets found=.false. mean
+        ! "nothing was changed" rather than "something was changed and then a problem arose".
+        call table_resolve(self, name, "set_element", idx, found)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_STRING, "set_element")
         call table_require_row(self, i, "set_element")
         call self%cache%cols(idx)%values%set_at(i, value)
@@ -1759,13 +1837,16 @@ contains
     end procedure set_element_chr_i64
     !
     module procedure set_element_chrv_i32
-        call self%set_element(name, int(i, int64), value)
+        call self%set_element(name, int(i, int64), value, found)
     end procedure set_element_chrv_i32
     !
     module procedure set_element_chrv_i64
         integer :: idx
         !
-        call table_resolve(self, name, "set_element", idx)
+        ! The lookup happens BEFORE anything is written, which is what lets found=.false. mean
+        ! "nothing was changed" rather than "something was changed and then a problem arose".
+        call table_resolve(self, name, "set_element", idx, found)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_STRING_VEC, "set_element")
         call table_require_row(self, i, "set_element")
         call self%cache%cols(idx)%values%set_at(i, value)
@@ -2029,6 +2110,344 @@ contains
             call row_kind_error(self, name, idx)
         end select
     end procedure row_get_tsv
+    !
+    module procedure row_set_i32
+        integer :: idx
+        !
+        call row_resolve(self, name, "set", idx)
+        call row_require_kind(self, name, idx, PK_INT32)
+        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure row_set_i32
+    !
+    module procedure row_set_i64
+        integer :: idx
+        !
+        call row_resolve(self, name, "set", idx)
+        call row_require_kind(self, name, idx, PK_INT64)
+        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure row_set_i64
+    !
+    module procedure row_set_f32
+        integer :: idx
+        !
+        call row_resolve(self, name, "set", idx)
+        call row_require_kind(self, name, idx, PK_FLOAT32)
+        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure row_set_f32
+    !
+    module procedure row_set_f64
+        integer :: idx
+        !
+        call row_resolve(self, name, "set", idx)
+        call row_require_kind(self, name, idx, PK_FLOAT64)
+        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure row_set_f64
+    !
+    module procedure row_set_bool
+        integer :: idx
+        !
+        call row_resolve(self, name, "set", idx)
+        call row_require_kind(self, name, idx, PK_LOGICAL)
+        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure row_set_bool
+    !
+    module procedure row_set_str
+        integer :: idx
+        !
+        call row_resolve(self, name, "set", idx)
+        call row_require_kind(self, name, idx, PK_STRING)
+        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure row_set_str
+    !
+    module procedure row_set_date
+        integer :: idx
+        !
+        call row_resolve(self, name, "set", idx)
+        call row_require_kind(self, name, idx, PK_DATE)
+        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure row_set_date
+    !
+    module procedure row_set_time
+        integer :: idx
+        !
+        call row_resolve(self, name, "set", idx)
+        call row_require_kind(self, name, idx, PK_TIME)
+        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure row_set_time
+    !
+    module procedure row_set_ts
+        integer :: idx
+        !
+        call row_resolve(self, name, "set", idx)
+        call row_require_kind(self, name, idx, PK_TIMESTAMP)
+        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure row_set_ts
+    !
+    module procedure row_set_i32v
+        integer :: idx
+        !
+        call row_resolve(self, name, "set", idx)
+        call row_require_kind(self, name, idx, PK_INT32_VEC)
+        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure row_set_i32v
+    !
+    module procedure row_set_i64v
+        integer :: idx
+        !
+        call row_resolve(self, name, "set", idx)
+        call row_require_kind(self, name, idx, PK_INT64_VEC)
+        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure row_set_i64v
+    !
+    module procedure row_set_f32v
+        integer :: idx
+        !
+        call row_resolve(self, name, "set", idx)
+        call row_require_kind(self, name, idx, PK_FLOAT32_VEC)
+        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure row_set_f32v
+    !
+    module procedure row_set_f64v
+        integer :: idx
+        !
+        call row_resolve(self, name, "set", idx)
+        call row_require_kind(self, name, idx, PK_FLOAT64_VEC)
+        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure row_set_f64v
+    !
+    module procedure row_set_boolv
+        integer :: idx
+        !
+        call row_resolve(self, name, "set", idx)
+        call row_require_kind(self, name, idx, PK_LOGICAL_VEC)
+        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure row_set_boolv
+    !
+    module procedure row_set_strv
+        integer :: idx
+        !
+        call row_resolve(self, name, "set", idx)
+        call row_require_kind(self, name, idx, PK_STRING_VEC)
+        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure row_set_strv
+    !
+    module procedure row_set_datev
+        integer :: idx
+        !
+        call row_resolve(self, name, "set", idx)
+        call row_require_kind(self, name, idx, PK_DATE_VEC)
+        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure row_set_datev
+    !
+    module procedure row_set_timev
+        integer :: idx
+        !
+        call row_resolve(self, name, "set", idx)
+        call row_require_kind(self, name, idx, PK_TIME_VEC)
+        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure row_set_timev
+    !
+    module procedure row_set_tsv
+        integer :: idx
+        !
+        call row_resolve(self, name, "set", idx)
+        call row_require_kind(self, name, idx, PK_TIMESTAMP_VEC)
+        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure row_set_tsv
+    !
+    module procedure row_ref_i32
+        integer :: idx
+        integer(int32), pointer :: store(:)
+        !
+        nullify(p)
+        call row_resolve(self, name, "ref", idx)
+        call row_require_kind(self, name, idx, PK_INT32)
+        call self%cache%cols(idx)%values%data_ptr(store)
+        p => store(self%irow)
+    end procedure row_ref_i32
+    !
+    module procedure row_ref_i64
+        integer :: idx
+        integer(int64), pointer :: store(:)
+        !
+        nullify(p)
+        call row_resolve(self, name, "ref", idx)
+        call row_require_kind(self, name, idx, PK_INT64)
+        call self%cache%cols(idx)%values%data_ptr(store)
+        p => store(self%irow)
+    end procedure row_ref_i64
+    !
+    module procedure row_ref_f32
+        integer :: idx
+        real(real32), pointer :: store(:)
+        !
+        nullify(p)
+        call row_resolve(self, name, "ref", idx)
+        call row_require_kind(self, name, idx, PK_FLOAT32)
+        call self%cache%cols(idx)%values%data_ptr(store)
+        p => store(self%irow)
+    end procedure row_ref_f32
+    !
+    module procedure row_ref_f64
+        integer :: idx
+        real(real64), pointer :: store(:)
+        !
+        nullify(p)
+        call row_resolve(self, name, "ref", idx)
+        call row_require_kind(self, name, idx, PK_FLOAT64)
+        call self%cache%cols(idx)%values%data_ptr(store)
+        p => store(self%irow)
+    end procedure row_ref_f64
+    !
+    module procedure row_ref_bool
+        integer :: idx
+        logical, pointer :: store(:)
+        !
+        nullify(p)
+        call row_resolve(self, name, "ref", idx)
+        call row_require_kind(self, name, idx, PK_LOGICAL)
+        call self%cache%cols(idx)%values%data_ptr(store)
+        p => store(self%irow)
+    end procedure row_ref_bool
+    !
+    module procedure row_ref_date
+        integer :: idx
+        type(parquet_date), pointer :: store(:)
+        !
+        nullify(p)
+        call row_resolve(self, name, "ref", idx)
+        call row_require_kind(self, name, idx, PK_DATE)
+        call self%cache%cols(idx)%values%data_ptr(store)
+        p => store(self%irow)
+    end procedure row_ref_date
+    !
+    module procedure row_ref_time
+        integer :: idx
+        type(parquet_time), pointer :: store(:)
+        !
+        nullify(p)
+        call row_resolve(self, name, "ref", idx)
+        call row_require_kind(self, name, idx, PK_TIME)
+        call self%cache%cols(idx)%values%data_ptr(store)
+        p => store(self%irow)
+    end procedure row_ref_time
+    !
+    module procedure row_ref_ts
+        integer :: idx
+        type(parquet_timestamp), pointer :: store(:)
+        !
+        nullify(p)
+        call row_resolve(self, name, "ref", idx)
+        call row_require_kind(self, name, idx, PK_TIMESTAMP)
+        call self%cache%cols(idx)%values%data_ptr(store)
+        p => store(self%irow)
+    end procedure row_ref_ts
+    !
+    module procedure row_ref_i32v
+        integer :: idx
+        integer(int32), pointer :: store(:,:)
+        !
+        nullify(p)
+        call row_resolve(self, name, "ref", idx)
+        call row_require_kind(self, name, idx, PK_INT32_VEC)
+        call self%cache%cols(idx)%values%data_ptr(store)
+        p => store(:, self%irow)
+    end procedure row_ref_i32v
+    !
+    module procedure row_ref_i64v
+        integer :: idx
+        integer(int64), pointer :: store(:,:)
+        !
+        nullify(p)
+        call row_resolve(self, name, "ref", idx)
+        call row_require_kind(self, name, idx, PK_INT64_VEC)
+        call self%cache%cols(idx)%values%data_ptr(store)
+        p => store(:, self%irow)
+    end procedure row_ref_i64v
+    !
+    module procedure row_ref_f32v
+        integer :: idx
+        real(real32), pointer :: store(:,:)
+        !
+        nullify(p)
+        call row_resolve(self, name, "ref", idx)
+        call row_require_kind(self, name, idx, PK_FLOAT32_VEC)
+        call self%cache%cols(idx)%values%data_ptr(store)
+        p => store(:, self%irow)
+    end procedure row_ref_f32v
+    !
+    module procedure row_ref_f64v
+        integer :: idx
+        real(real64), pointer :: store(:,:)
+        !
+        nullify(p)
+        call row_resolve(self, name, "ref", idx)
+        call row_require_kind(self, name, idx, PK_FLOAT64_VEC)
+        call self%cache%cols(idx)%values%data_ptr(store)
+        p => store(:, self%irow)
+    end procedure row_ref_f64v
+    !
+    module procedure row_ref_boolv
+        integer :: idx
+        logical, pointer :: store(:,:)
+        !
+        nullify(p)
+        call row_resolve(self, name, "ref", idx)
+        call row_require_kind(self, name, idx, PK_LOGICAL_VEC)
+        call self%cache%cols(idx)%values%data_ptr(store)
+        p => store(:, self%irow)
+    end procedure row_ref_boolv
+    !
+    module procedure row_ref_datev
+        integer :: idx
+        type(parquet_date), pointer :: store(:,:)
+        !
+        nullify(p)
+        call row_resolve(self, name, "ref", idx)
+        call row_require_kind(self, name, idx, PK_DATE_VEC)
+        call self%cache%cols(idx)%values%data_ptr(store)
+        p => store(:, self%irow)
+    end procedure row_ref_datev
+    !
+    module procedure row_ref_timev
+        integer :: idx
+        type(parquet_time), pointer :: store(:,:)
+        !
+        nullify(p)
+        call row_resolve(self, name, "ref", idx)
+        call row_require_kind(self, name, idx, PK_TIME_VEC)
+        call self%cache%cols(idx)%values%data_ptr(store)
+        p => store(:, self%irow)
+    end procedure row_ref_timev
+    !
+    module procedure row_ref_tsv
+        integer :: idx
+        type(parquet_timestamp), pointer :: store(:,:)
+        !
+        nullify(p)
+        call row_resolve(self, name, "ref", idx)
+        call row_require_kind(self, name, idx, PK_TIMESTAMP_VEC)
+        call self%cache%cols(idx)%values%data_ptr(store)
+        p => store(:, self%irow)
+    end procedure row_ref_tsv
     !
     module procedure get_slice_i32
         integer :: idx
@@ -2527,5 +2946,315 @@ contains
             end do
         end do
     end procedure get_slice_chrv
+    !
+    module procedure set_slice_i32
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "set_slice", idx, found)
+        if (idx == 0) return
+        call table_require_kind(self, idx, PK_INT32, "set_slice")
+        call slice_resolve(s, self%row_count, rows, "set_slice")
+        call table_require_slice_size(self, size(arr, kind=int64), size(rows, kind=int64), name, "set_slice")
+        do k = 1, size(rows, kind=int64)
+            call self%cache%cols(idx)%values%set_at(rows(k), arr(k), modify_nulls)
+        end do
+        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_slice_i32
+    !
+    module procedure set_slice_i64
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "set_slice", idx, found)
+        if (idx == 0) return
+        call table_require_kind(self, idx, PK_INT64, "set_slice")
+        call slice_resolve(s, self%row_count, rows, "set_slice")
+        call table_require_slice_size(self, size(arr, kind=int64), size(rows, kind=int64), name, "set_slice")
+        do k = 1, size(rows, kind=int64)
+            call self%cache%cols(idx)%values%set_at(rows(k), arr(k), modify_nulls)
+        end do
+        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_slice_i64
+    !
+    module procedure set_slice_f32
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "set_slice", idx, found)
+        if (idx == 0) return
+        call table_require_kind(self, idx, PK_FLOAT32, "set_slice")
+        call slice_resolve(s, self%row_count, rows, "set_slice")
+        call table_require_slice_size(self, size(arr, kind=int64), size(rows, kind=int64), name, "set_slice")
+        do k = 1, size(rows, kind=int64)
+            call self%cache%cols(idx)%values%set_at(rows(k), arr(k), modify_nulls)
+        end do
+        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_slice_f32
+    !
+    module procedure set_slice_f64
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "set_slice", idx, found)
+        if (idx == 0) return
+        call table_require_kind(self, idx, PK_FLOAT64, "set_slice")
+        call slice_resolve(s, self%row_count, rows, "set_slice")
+        call table_require_slice_size(self, size(arr, kind=int64), size(rows, kind=int64), name, "set_slice")
+        do k = 1, size(rows, kind=int64)
+            call self%cache%cols(idx)%values%set_at(rows(k), arr(k), modify_nulls)
+        end do
+        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_slice_f64
+    !
+    module procedure set_slice_bool
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "set_slice", idx, found)
+        if (idx == 0) return
+        call table_require_kind(self, idx, PK_LOGICAL, "set_slice")
+        call slice_resolve(s, self%row_count, rows, "set_slice")
+        call table_require_slice_size(self, size(arr, kind=int64), size(rows, kind=int64), name, "set_slice")
+        do k = 1, size(rows, kind=int64)
+            call self%cache%cols(idx)%values%set_at(rows(k), arr(k), modify_nulls)
+        end do
+        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_slice_bool
+    !
+    module procedure set_slice_date
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "set_slice", idx, found)
+        if (idx == 0) return
+        call table_require_kind(self, idx, PK_DATE, "set_slice")
+        call slice_resolve(s, self%row_count, rows, "set_slice")
+        call table_require_slice_size(self, size(arr, kind=int64), size(rows, kind=int64), name, "set_slice")
+        do k = 1, size(rows, kind=int64)
+            call self%cache%cols(idx)%values%set_at(rows(k), arr(k), modify_nulls)
+        end do
+        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_slice_date
+    !
+    module procedure set_slice_time
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "set_slice", idx, found)
+        if (idx == 0) return
+        call table_require_kind(self, idx, PK_TIME, "set_slice")
+        call slice_resolve(s, self%row_count, rows, "set_slice")
+        call table_require_slice_size(self, size(arr, kind=int64), size(rows, kind=int64), name, "set_slice")
+        do k = 1, size(rows, kind=int64)
+            call self%cache%cols(idx)%values%set_at(rows(k), arr(k), modify_nulls)
+        end do
+        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_slice_time
+    !
+    module procedure set_slice_ts
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "set_slice", idx, found)
+        if (idx == 0) return
+        call table_require_kind(self, idx, PK_TIMESTAMP, "set_slice")
+        call slice_resolve(s, self%row_count, rows, "set_slice")
+        call table_require_slice_size(self, size(arr, kind=int64), size(rows, kind=int64), name, "set_slice")
+        do k = 1, size(rows, kind=int64)
+            call self%cache%cols(idx)%values%set_at(rows(k), arr(k), modify_nulls)
+        end do
+        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_slice_ts
+    !
+    module procedure set_slice_i32v
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "set_slice", idx, found)
+        if (idx == 0) return
+        call table_require_kind(self, idx, PK_INT32_VEC, "set_slice")
+        call slice_resolve(s, self%row_count, rows, "set_slice")
+        call table_require_slice_size(self, size(arr, 2, kind=int64), size(rows, kind=int64), name, "set_slice")
+        do k = 1, size(rows, kind=int64)
+            call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
+        end do
+        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_slice_i32v
+    !
+    module procedure set_slice_i64v
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "set_slice", idx, found)
+        if (idx == 0) return
+        call table_require_kind(self, idx, PK_INT64_VEC, "set_slice")
+        call slice_resolve(s, self%row_count, rows, "set_slice")
+        call table_require_slice_size(self, size(arr, 2, kind=int64), size(rows, kind=int64), name, "set_slice")
+        do k = 1, size(rows, kind=int64)
+            call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
+        end do
+        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_slice_i64v
+    !
+    module procedure set_slice_f32v
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "set_slice", idx, found)
+        if (idx == 0) return
+        call table_require_kind(self, idx, PK_FLOAT32_VEC, "set_slice")
+        call slice_resolve(s, self%row_count, rows, "set_slice")
+        call table_require_slice_size(self, size(arr, 2, kind=int64), size(rows, kind=int64), name, "set_slice")
+        do k = 1, size(rows, kind=int64)
+            call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
+        end do
+        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_slice_f32v
+    !
+    module procedure set_slice_f64v
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "set_slice", idx, found)
+        if (idx == 0) return
+        call table_require_kind(self, idx, PK_FLOAT64_VEC, "set_slice")
+        call slice_resolve(s, self%row_count, rows, "set_slice")
+        call table_require_slice_size(self, size(arr, 2, kind=int64), size(rows, kind=int64), name, "set_slice")
+        do k = 1, size(rows, kind=int64)
+            call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
+        end do
+        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_slice_f64v
+    !
+    module procedure set_slice_boolv
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "set_slice", idx, found)
+        if (idx == 0) return
+        call table_require_kind(self, idx, PK_LOGICAL_VEC, "set_slice")
+        call slice_resolve(s, self%row_count, rows, "set_slice")
+        call table_require_slice_size(self, size(arr, 2, kind=int64), size(rows, kind=int64), name, "set_slice")
+        do k = 1, size(rows, kind=int64)
+            call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
+        end do
+        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_slice_boolv
+    !
+    module procedure set_slice_datev
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "set_slice", idx, found)
+        if (idx == 0) return
+        call table_require_kind(self, idx, PK_DATE_VEC, "set_slice")
+        call slice_resolve(s, self%row_count, rows, "set_slice")
+        call table_require_slice_size(self, size(arr, 2, kind=int64), size(rows, kind=int64), name, "set_slice")
+        do k = 1, size(rows, kind=int64)
+            call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
+        end do
+        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_slice_datev
+    !
+    module procedure set_slice_timev
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "set_slice", idx, found)
+        if (idx == 0) return
+        call table_require_kind(self, idx, PK_TIME_VEC, "set_slice")
+        call slice_resolve(s, self%row_count, rows, "set_slice")
+        call table_require_slice_size(self, size(arr, 2, kind=int64), size(rows, kind=int64), name, "set_slice")
+        do k = 1, size(rows, kind=int64)
+            call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
+        end do
+        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_slice_timev
+    !
+    module procedure set_slice_tsv
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "set_slice", idx, found)
+        if (idx == 0) return
+        call table_require_kind(self, idx, PK_TIMESTAMP_VEC, "set_slice")
+        call slice_resolve(s, self%row_count, rows, "set_slice")
+        call table_require_slice_size(self, size(arr, 2, kind=int64), size(rows, kind=int64), name, "set_slice")
+        do k = 1, size(rows, kind=int64)
+            call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
+        end do
+        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_slice_tsv
+    !
+    module procedure set_slice_chr
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "set_slice", idx, found)
+        if (idx == 0) return
+        call table_require_kind(self, idx, PK_STRING, "set_slice")
+        call slice_resolve(s, self%row_count, rows, "set_slice")
+        call table_require_slice_size(self, size(arr, kind=int64), size(rows, kind=int64), name, "set_slice")
+        ! One row at a time through set_at, which the string store supports in place -- unlike
+        ! %paste, which cannot overwrite a packed variable-length store's range wholesale.
+        do k = 1, size(rows, kind=int64)
+            call self%cache%cols(idx)%values%set_at(rows(k), arr(k), modify_nulls)
+        end do
+        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_slice_chr
+    !
+    module procedure set_slice_chrv
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "set_slice", idx, found)
+        if (idx == 0) return
+        call table_require_kind(self, idx, PK_STRING_VEC, "set_slice")
+        call slice_resolve(s, self%row_count, rows, "set_slice")
+        call table_require_slice_size(self, size(arr, 2, kind=int64), size(rows, kind=int64), name, "set_slice")
+        ! One row at a time through set_at, which the string store supports in place -- unlike
+        ! %paste, which cannot overwrite a packed variable-length store's range wholesale.
+        do k = 1, size(rows, kind=int64)
+            call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
+        end do
+        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_slice_chrv
     !
 end submodule parquet_tables_access

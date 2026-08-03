@@ -24,13 +24,15 @@ contains
     ! ---- single-cell validity -------------------------------------------------------------
     !
     module procedure set_null_i32
-        call self%set_null(name, int(i, int64))
+        call self%set_null(name, int(i, int64), found)
     end procedure set_null_i32
     !
     module procedure set_null_i64
         integer :: idx
         !
-        call table_resolve(self, name, "set_null", idx)
+        ! Resolved before anything is written, so found=.false. means nothing changed.
+        call table_resolve(self, name, "set_null", idx, found)
+        if (idx == 0) return
         call table_require_row(self, i, "set_null")
         call self%cache%cols(idx)%values%set_null(i)
         self%cache%cols(idx)%user_populated = .true.
@@ -42,7 +44,8 @@ contains
         character(len=32) :: got, want
         character(len=:), allocatable :: sfx
         !
-        call table_resolve(self, name, "set_null", idx)
+        call table_resolve(self, name, "set_null", idx, found)
+        if (idx == 0) return
         if (size(is_valid, kind=int64) /= self%row_count) then
             write(got, "(I0)") size(is_valid, kind=int64)
             write(want, "(I0)") self%row_count
@@ -59,13 +62,14 @@ contains
     end procedure set_null_mask
     !
     module procedure clear_null_i32
-        call self%clear_null(name, int(i, int64))
+        call self%clear_null(name, int(i, int64), found)
     end procedure clear_null_i32
     !
     module procedure clear_null_i64
         integer :: idx
         !
-        call table_resolve(self, name, "clear_null", idx)
+        call table_resolve(self, name, "clear_null", idx, found)
+        if (idx == 0) return
         call table_require_row(self, i, "clear_null")
         call self%cache%cols(idx)%values%clear_null(i)
         self%cache%cols(idx)%user_populated = .true.
@@ -74,7 +78,8 @@ contains
     module procedure table_compact_validity
         integer :: idx
         !
-        call table_resolve(self, name, "compact_validity", idx)
+        call table_resolve(self, name, "compact_validity", idx, found)
+        if (idx == 0) return
         call self%cache%cols(idx)%values%compact_validity()
     end procedure table_compact_validity
     !
@@ -134,7 +139,8 @@ contains
         ! Deliberately table_lookup_or_fail, not table_resolve: dropping a column that was never
         ! read is the cheap memory-reclaiming case, and reading it first to throw it away would
         ! defeat the point.
-        call table_lookup_or_fail(self, name, "drop_column", idx)
+        call table_lookup_or_fail(self, name, "drop_column", idx, found)
+        if (idx == 0) return
         forced = .false.
         if (present(force)) forced = force
         ! Not reachable yet, and deliberately written now: `predefined` is only ever set by the
@@ -191,7 +197,10 @@ contains
         integer :: idx
         character(len=:), allocatable :: sfx
         !
-        call table_lookup_or_fail(self, old_name, "rename_column", idx)
+        ! `found` reports a missing SOURCE column only. A NEW name that is already taken is a
+        ! different mistake -- the caller named a column that does exist -- and stays fatal.
+        call table_lookup_or_fail(self, old_name, "rename_column", idx, found)
+        if (idx == 0) return
         ! Same as drop_column's own predefined guard above: written now, unreachable until the
         ! generated table type exists. There is no `force=` here on purpose -- M3 -- because a
         ! renamed predefined column would break a compile-time-bound accessor with no diagnostic,
@@ -229,7 +238,8 @@ contains
         ! unread column is read here. There is no deferred form of a copy -- unlike %cast, which
         ! can hand its conversion to the read that has not happened yet, a copy needs a second
         ! column's worth of values now.
-        call table_resolve(self, name, "copy_column", idx)
+        call table_resolve(self, name, "copy_column", idx, found)
+        if (idx == 0) return
         if (len_trim(new_name) == 0) then
             call table_context_suffix(self%cache, name, sfx)
             error stop EP // "copy_column: the new name is blank" // sfx
@@ -274,7 +284,8 @@ contains
         ! Deliberately table_lookup_or_fail, not table_resolve: resolving TOUCHES, and the whole
         ! point of the deferred path below is to decide before the read happens. The two guards
         ! table_resolve would have applied on the way past are applied here instead.
-        call table_lookup_or_fail(self, name, "cast", idx)
+        call table_lookup_or_fail(self, name, "cast", idx, found)
+        if (idx == 0) return
         if (.not. self%cache%cols(idx)%supported) then
             call table_context_suffix(self%cache, name, sfx)
             error stop EP // "cast: this column's type is not supported by parquet_table, so " // &

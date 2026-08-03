@@ -133,8 +133,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before the column has been read and carried onto the values once it has.
   Value access gained `is_valid=` on `%get`, `%col`, `%get_slice` and `%set` — per-row validity
   alongside the values in one call, and on `%set` the way to write a column and its nulls together
-  — and `%get_element(name, i, value)`, the read counterpart of `%set_element`, widening into the
-  caller's variable exactly as `%get` does and taking either integer kind for the row index.
+  — `%get_element(name, i, value)`, the read counterpart of `%set_element`, widening into the
+  caller's variable exactly as `%get` does and taking either integer kind for the row index, and
+  `%set_slice(name, s, arr)`, which writes a `parquet_slice` selection back in the order the
+  selection names. A `parquet_string_column` is now a first-class table value in both directions:
+  `%col` hands back a pointer to a `PK_STRING` column's packed store (read and in-place value
+  edits only — changing its element count would leave the column's row count describing something
+  else), and `%set`/`%add_column` accept one, so a compact string column no longer has to be
+  flattened into a fixed-width character array to be put into a table. A row handle can write as
+  well as read: `r%set(name, value)` updates the table it is a view of, and `r%ref(name, p)` gives
+  a zero-copy pointer to that one row's storage (every kind but the two string ones, which have no
+  fixed slot to point at). **`found=` now reaches every procedure that takes a column name**,
+  mutators included — and on a mutating call `found=.false.` means nothing was changed, since the
+  column is looked up before anything is written.
   Introspection gained `%has_nulls(name)` (from the file's own footer for a column that has not
   been read, so it costs no I/O), `%get_valid_mask(name, mask)`, a `%set_null(name, is_valid)`
   form taking a whole-column mask, `resident_only=` on `%ncols`/`%column_names`/

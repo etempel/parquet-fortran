@@ -471,14 +471,30 @@ def gen_table_type():
     w("        generic :: get_slice => " + wrap_list(
         [f"get_slice_{k[0]}" for k in ARRAY_KINDS] + ["get_slice_str", "get_slice_chr", "get_slice_chrv"], 12,
         first_prefix=len("        generic :: get_slice => ")))
+    w("        ! --- write a row selection back ---")
+    for k in ARRAY_KINDS:
+        tag = k[0]
+        w(f"        procedure, private :: set_slice_{tag} !! %set_slice specific for the {tag} kind.")
+    w("        procedure, private :: set_slice_chr  !! %set_slice specific taking a character array.")
+    w("        procedure, private :: set_slice_chrv !! %set_slice specific taking a character (elem, row) array.")
+    w("        !> Writes values into the rows a `parquet_slice` selects -- %get_slice's counterpart.")
+    w("        !! The kind must match the column's exactly, and the array must have one value per")
+    w("        !! selected row.")
+    w("        generic :: set_slice => " + wrap_list(
+        [f"set_slice_{k[0]}" for k in ARRAY_KINDS] + ["set_slice_chr", "set_slice_chrv"], 12,
+        first_prefix=len("        generic :: set_slice => ")))
     # pointer accessors
     w("        ! --- zero-copy pointer access (exact kind) ---")
     for k in PTR_KINDS:
         tag = k[0]
         w(f"        procedure, private :: col_ptr_{tag} !! %col specific for the {tag} kind.")
+    w("        procedure, private :: col_ptr_strcol !! %col specific aliasing the compact string store.")
     w("        !> Points `p` at a column's storage: zero copy, writable, and the pointer kind must")
-    w("        !! match the stored kind exactly (ask %kind first if you do not know it).")
-    w("        generic :: col => " + wrap_list([f"col_ptr_{k[0]}" for k in PTR_KINDS], 12,
+    w("        !! match the stored kind exactly (ask %kind first if you do not know it). A")
+    w("        !! `parquet_string_column` pointer aliases a PK_STRING column's packed store: read")
+    w("        !! it and edit its values in place, but do NOT change its length or element count")
+    w("        !! through the pointer -- the column's own row count would no longer describe it.")
+    w("        generic :: col => " + wrap_list([f"col_ptr_{k[0]}" for k in PTR_KINDS] + ["col_ptr_strcol"], 12,
                                                 first_prefix=len("        generic :: col => ")))
     # get
     w("        ! --- copy out (widens int32->int64, float32->float64) ---")
@@ -500,8 +516,9 @@ def gen_table_type():
     w("        procedure, private :: set_arr_chr  !! %set specific taking a character array.")
     w("        procedure, private :: set_arr_chrv !! %set specific taking a character (elem, row) array.")
     w("        !> Replaces every value of an existing column from an array of the same length.")
+    w("        procedure, private :: set_arr_strcol !! %set specific taking a parquet_string_column.")
     w("        generic :: set => " + wrap_list(
-        [f"set_arr_{k[0]}" for k in ARRAY_KINDS] + ["set_arr_chr", "set_arr_chrv"], 12,
+        [f"set_arr_{k[0]}" for k in ARRAY_KINDS] + ["set_arr_chr", "set_arr_chrv", "set_arr_strcol"], 12,
         first_prefix=len("        generic :: set => ")))
     # add_column
     w("        ! --- from-scratch construction ---")
@@ -511,8 +528,10 @@ def gen_table_type():
     w("        procedure, private :: add_column_chr  !! %add_column specific taking a character array.")
     w("        procedure, private :: add_column_chrv !! %add_column specific taking a character (elem, row) array.")
     w("        !> Appends a new column, taking its values (and so its kind, width and row count).")
+    w("        procedure, private :: add_column_strcol !! %add_column specific taking a parquet_string_column.")
     w("        generic :: add_column => " + wrap_list(
-        [f"add_column_{k[0]}" for k in ARRAY_KINDS] + ["add_column_chr", "add_column_chrv"], 12,
+        [f"add_column_{k[0]}" for k in ARRAY_KINDS]
+        + ["add_column_chr", "add_column_chrv", "add_column_strcol"], 12,
         first_prefix=len("        generic :: add_column => ")))
     # set_element + validity
     w("        ! --- mutation: one cell at a time (never changes the row set) ---")
@@ -630,6 +649,24 @@ def gen_row_type():
     w("        !! int32 -> int64 and float32 -> float64 exactly as the table's own %get does.")
     w("        generic :: get => " + wrap_list([f"row_get_{k[0]}" for k in KINDS], 12,
                                                first_prefix=len("        generic :: get => ")))
+    for k in KINDS:
+        tag = k[0]
+        w(f"        procedure, private :: row_set_{tag} !! %set specific for the {tag} kind.")
+    w("        !> Writes this row's value for a column. The kind must match the column's exactly")
+    w("        !! (a write never widens), and writing a value CLEARS that row's null. The TABLE is")
+    w("        !! updated -- a handle is a view of it, not a copy.")
+    w("        generic :: set => " + wrap_list([f"row_set_{k[0]}" for k in KINDS], 12,
+                                               first_prefix=len("        generic :: set => ")))
+    for k in ARRAY_KINDS:
+        tag = k[0]
+        w(f"        procedure, private :: row_ref_{tag} !! %ref specific for the {tag} kind.")
+    w("        !> Points `p` at this row's storage: zero copy, writable, exact kind. A scalar")
+    w("        !! column gives a scalar pointer, a vector column a pointer to that row's whole")
+    w("        !! vector. The two string kinds have no %ref -- a packed variable-length store has")
+    w("        !! no fixed slot to point at -- and the pointer dies with any structural change,")
+    w("        !! exactly as the table's own %col pointers do.")
+    w("        generic :: ref => " + wrap_list([f"row_ref_{k[0]}" for k in ARRAY_KINDS], 12,
+                                               first_prefix=len("        generic :: ref => ")))
     w("""        procedure :: is_null => row_is_null !! Whether this row is null in a column.
         procedure :: index => row_index     !! This row's 1-based index within the table.
         final :: row_finalize               !! Drops the pointer; owns nothing, frees nothing.
@@ -962,18 +999,20 @@ def gen_spec_interfaces():
             logical, intent(out), optional :: found              !! present: report a miss instead of aborting.
         end subroutine table_get_file_metadata
         !> Whether row `i` of a column is null (int32 row index).
-        module function table_is_null_i32(self, name, i) result(isnull)
+        module function table_is_null_i32(self, name, i, found) result(isnull)
             class(parquet_table), intent(in) :: self !! the table.
             character(len=*), intent(in) :: name     !! column name.
             integer(int32), intent(in) :: i          !! 1-based row index.
-            logical :: isnull                        !! .true. if that row is null.
+            logical, intent(out), optional :: found  !! present: report a miss instead of aborting.
+            logical :: isnull                        !! .true. if that row is null (.false. on a miss).
         end function table_is_null_i32
         !> Whether row `i` of a column is null (int64 row index).
-        module function table_is_null_i64(self, name, i) result(isnull)
+        module function table_is_null_i64(self, name, i, found) result(isnull)
             class(parquet_table), intent(in) :: self !! the table.
             character(len=*), intent(in) :: name     !! column name.
             integer(int64), intent(in) :: i          !! 1-based row index.
-            logical :: isnull                        !! .true. if that row is null.
+            logical, intent(out), optional :: found  !! present: report a miss instead of aborting.
+            logical :: isnull                        !! .true. if that row is null (.false. on a miss).
         end function table_is_null_i64
         !> error stops unless `i` is a valid 1-based row index for this table. Shared by every
         !! per-row entry point so they all report the same way.
@@ -1061,6 +1100,28 @@ def gen_spec_interfaces():
             character(len=*), intent(in) :: name        !! column name, for the message.
             character(len=*), intent(in) :: proc        !! calling procedure, for the message.
         end subroutine table_apply_valid
+        !> Applies a caller-supplied validity mask to a SELECTION of rows: every selected row
+        !! whose entry is .false. becomes null. Only ever adds nulls, exactly as the whole-column
+        !! form does. A mask whose length is not the selection's is an error.
+        module subroutine table_apply_valid_rows(self, idx, rows, is_valid, name, proc)
+            class(parquet_table), intent(inout) :: self !! the table.
+            integer, intent(in) :: idx                  !! slot index.
+            integer(int64), intent(in) :: rows(:)       !! the selected rows, in order.
+            logical, intent(in) :: is_valid(:)          !! one entry per selected row.
+            character(len=*), intent(in) :: name        !! column name, for the message.
+            character(len=*), intent(in) :: proc        !! calling procedure, for the message.
+        end subroutine table_apply_valid_rows
+        !> error stops unless an array being written into a row selection has one value per
+        !! selected row. Its own procedure because the two counts come from different places --
+        !! the caller's array and the resolved selection -- and naming both is what makes the
+        !! message useful.
+        module subroutine table_require_slice_size(self, n_arr, n_rows, name, proc)
+            class(parquet_table), intent(in) :: self !! the table.
+            integer(int64), intent(in) :: n_arr      !! values the caller supplied.
+            integer(int64), intent(in) :: n_rows     !! rows the selection resolves to.
+            character(len=*), intent(in) :: name     !! column name, for the message.
+            character(len=*), intent(in) :: proc     !! calling procedure, for the message.
+        end subroutine table_require_slice_size
         !> error stops unless slot `idx` holds exactly `kind`. The exact-kind rule the pointer
         !! path and the copy-back path both enforce (the copy-OUT path widens instead).
         module subroutine table_require_kind(self, idx, kind, proc)
@@ -1340,6 +1401,7 @@ def gen_spec_interfaces():
     w("    interface")
     for k in PTR_KINDS:
         w(ptr_iface(k))
+    w(ptr_str_iface())
     w("    end interface")
     w("    !")
     w("    ! ---- Copy out (parquet_tables_access) ----")
@@ -1354,6 +1416,7 @@ def gen_spec_interfaces():
     for k in ARRAY_KINDS:
         w(set_iface(k))
     w(set_str_iface())
+    w(set_strcol_iface())
     w("    end interface")
     w("    !")
     w("    ! ---- From-scratch construction (parquet_tables_addcol) ----")
@@ -1361,6 +1424,7 @@ def gen_spec_interfaces():
     for k in ARRAY_KINDS:
         w(add_iface(k))
     w(add_str_iface())
+    w(add_strcol_iface())
     w("    end interface")
     w("    !")
     w("    ! ---- Single-cell mutation (the per-kind writers in ..._access, the rest in ..._mutate) ----")
@@ -1372,16 +1436,18 @@ def gen_spec_interfaces():
         w(setelem_iface(k))
     w(setelem_str_iface())
     w("""        !> Marks row `i` of a column null (int32 row index).
-        module subroutine set_null_i32(self, name, i)
+        module subroutine set_null_i32(self, name, i, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int32), intent(in) :: i             !! 1-based row index.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_null_i32
         !> Marks row `i` of a column null (int64 row index).
-        module subroutine set_null_i64(self, name, i)
+        module subroutine set_null_i64(self, name, i, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int64), intent(in) :: i             !! 1-based row index.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_null_i64
         !> Marks null every row whose `is_valid` entry is .false., in one call.
         !!
@@ -1389,30 +1455,34 @@ def gen_spec_interfaces():
         !! one entry per row, `.true.` meaning the row holds a value. Rows marked `.true.` are left
         !! exactly as they are -- this only ever ADDS nulls, so it composes with a mask that
         !! describes only part of what the caller knows. A wrong-length mask is an error.
-        module subroutine set_null_mask(self, name, is_valid)
+        module subroutine set_null_mask(self, name, is_valid, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             logical, intent(in) :: is_valid(:)          !! one entry per row; .false. marks it null.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_null_mask
         !> Marks row `i` of a column valid, leaving its value unspecified (int32 row index).
-        module subroutine clear_null_i32(self, name, i)
+        module subroutine clear_null_i32(self, name, i, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int32), intent(in) :: i             !! 1-based row index.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine clear_null_i32
         !> Marks row `i` of a column valid, leaving its value unspecified (int64 row index).
-        module subroutine clear_null_i64(self, name, i)
+        module subroutine clear_null_i64(self, name, i, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
             integer(int64), intent(in) :: i             !! 1-based row index.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine clear_null_i64
         !> Drops a column's null bitmap when it no longer holds any null, so a column that HAD
         !! nulls and no longer does stops paying for the bitmap. Scans the column, so it is not
         !! free -- a whole-column %set already compacts on its own and does not need this.
         !! Idempotent: calling it on an already-compact column is a cheap no-op.
-        module subroutine table_compact_validity(self, name)
+        module subroutine table_compact_validity(self, name, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine table_compact_validity
     end interface""")
     w("    !")
@@ -1422,19 +1492,21 @@ def gen_spec_interfaces():
         !! leaves every remaining column the same length, so the table can still read the ones it
         !! has not read yet. Dropping a column that was never read is the memory-reclaiming case
         !! and reads nothing.
-        module subroutine table_drop_column(self, name, force)
+        module subroutine table_drop_column(self, name, force, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column to remove.
             logical, intent(in), optional :: force      !! .true. to drop a PREDEFINED column.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine table_drop_column
         !> Changes a column's name. Only the name a caller looks it up by changes -- a
         !! file-backed column that has not been read yet still reads from the same physical
         !! column afterwards. A predefined column cannot be renamed at all (its accessor is bound
         !! to the name at compile time), and there is no `force=` for it.
-        module subroutine table_rename_column(self, old_name, new_name)
+        module subroutine table_rename_column(self, old_name, new_name, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: old_name    !! the column to rename.
             character(len=*), intent(in) :: new_name    !! its new name; must not already exist.
+            logical, intent(out), optional :: found     !! present: report a missing SOURCE column instead of aborting.
         end subroutine table_rename_column
         !> Adds a NEW column holding a copy of `name`'s values, leaving the source column
         !! untouched. With `to_kind` absent it is a plain deep copy and works for EVERY kind the
@@ -1446,12 +1518,13 @@ def gen_spec_interfaces():
         !! row and the value rather than a silent truncation. Every value is checked before
         !! anything is written, so a rejected copy leaves the table exactly as it was. The unit
         !! carries over unchanged -- a kind conversion is not a unit change.
-        module subroutine table_copy_column(self, name, new_name, to_kind, exact)
+        module subroutine table_copy_column(self, name, new_name, to_kind, exact, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! the source column.
             character(len=*), intent(in) :: new_name    !! the column to create.
             integer, intent(in), optional :: to_kind    !! target PK_* kind; absent keeps the source's.
             logical, intent(in), optional :: exact      !! .false. to allow lossy narrowing (default .true.).
+            logical, intent(out), optional :: found     !! present: report a missing SOURCE column instead of aborting.
         end subroutine table_copy_column
         !> Converts a column to `to_kind` IN PLACE, so that `%col` can be called with a kind the
         !! calling code has decided on rather than the one the file happens to hold. A column
@@ -1470,11 +1543,12 @@ def gen_spec_interfaces():
         !!
         !! **This invalidates any pointer previously taken from `%col`** for this column, which
         !! Fortran cannot detect -- take the pointer again afterwards.
-        module subroutine table_cast(self, name, to_kind, exact)
+        module subroutine table_cast(self, name, to_kind, exact, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! the column to convert.
             integer, intent(in) :: to_kind              !! target PK_* kind.
             logical, intent(in), optional :: exact      !! .true. to refuse any precision loss.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine table_cast
         !> Appends an already-built `parquet_column` as a new column. The kind-generic
         !! `%add_column` covers every case a user has; this is the internal path for code that
@@ -1747,9 +1821,16 @@ def gen_spec_interfaces():
         end subroutine row_kind_error""")
     for k in KINDS:
         w(rowget_iface(k))
+    for k in KINDS:
+        w(rowset_iface(k))
+    for k in ARRAY_KINDS:
+        w(rowref_iface(k))
     for k in ARRAY_KINDS:
         w(getslice_iface(k))
     w(getslice_str_iface())
+    for k in ARRAY_KINDS:
+        w(setslice_iface(k))
+    w(setslice_str_iface())
     w("    end interface")
     w("    !")
     w("    ! ---- Per-kind materialization (parquet_tables_materialize) ----")
@@ -1795,6 +1876,21 @@ def ptr_iface(k):
             logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
             logical, intent(out), optional :: found          !! present: report a miss instead of aborting.
         end subroutine col_ptr_{tag}"""
+
+
+def ptr_str_iface():
+    return """        !> Points `p` at a PK_STRING column's packed store (offsets + data + validity).
+        !!
+        !! The compact counterpart of the typed `%col` pointers, and the one pointer this layer
+        !! hands out that a caller could use to change the column's SHAPE. Reading and in-place
+        !! value edits are supported; appending to it, or otherwise changing how many elements it
+        !! holds, is not -- the column's own row count is kept separately and would stop matching.
+        module subroutine col_ptr_strcol(self, name, p, found)
+            class(parquet_table), intent(in), target :: self          !! the table.
+            character(len=*), intent(in) :: name                      !! column name.
+            type(parquet_string_column), pointer, intent(out) :: p    !! alias to the packed store.
+            logical, intent(out), optional :: found                   !! present: report a miss instead of aborting.
+        end subroutine col_ptr_strcol"""
 
 
 def get_iface(k):
@@ -1873,6 +1969,76 @@ def set_str_iface():
         end subroutine set_arr_chrv"""
 
 
+def setslice_iface(k):
+    tag, pk, decl, comp, rank, cat = k
+    return f"""        !> Writes `arr` into the rows `s` selects of a {pk} column.
+        !!
+        !! The mirror of %get_slice: same selection object, same order, and the array must have
+        !! exactly one value (or one vector) per selected row. The kind must match EXACTLY, as it
+        !! does for %set -- a copy INTO the table never widens.
+        module subroutine set_slice_{tag}(self, name, s, arr, is_valid, modify_nulls, found)
+            class(parquet_table), intent(inout) :: self  !! the table.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_slice), intent(in) :: s         !! rows to write.
+            {decl}, intent(in) :: arr{dims(rank)}{' ' * max(1, 21 - len(decl))}!! one value per selected row.
+            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
+        end subroutine set_slice_{tag}"""
+
+
+def setslice_str_iface():
+    return """        !> Writes a character array into the rows `s` selects of a PK_STRING column.
+        module subroutine set_slice_chr(self, name, s, arr, is_valid, modify_nulls, found)
+            class(parquet_table), intent(inout) :: self  !! the table.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_slice), intent(in) :: s         !! rows to write.
+            character(len=*), intent(in) :: arr(:)       !! one value per selected row.
+            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
+        end subroutine set_slice_chr
+        !> Writes a character (element, row) array into the rows `s` selects of a PK_STRING_VEC column.
+        module subroutine set_slice_chrv(self, name, s, arr, is_valid, modify_nulls, found)
+            class(parquet_table), intent(inout) :: self  !! the table.
+            character(len=*), intent(in) :: name         !! column name.
+            type(parquet_slice), intent(in) :: s         !! rows to write.
+            character(len=*), intent(in) :: arr(:,:)     !! (element, selected row) values.
+            logical, intent(in), optional :: is_valid(:) !! present: selected rows marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null row null.
+            logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
+        end subroutine set_slice_chrv"""
+
+
+def set_strcol_iface():
+    return """        !> Replaces every value of a PK_STRING column from a compact parquet_string_column.
+        !!
+        !! The counterpart of `%get(name, packed)`: an independent copy is taken, so the caller's
+        !! own column and the table's do not share storage afterwards. The row count must match,
+        !! exactly as it must for the character-array form.
+        module subroutine set_arr_strcol(self, name, arr, is_valid, found)
+            class(parquet_table), intent(inout) :: self         !! the table.
+            character(len=*), intent(in) :: name                !! column name.
+            type(parquet_string_column), intent(in) :: arr      !! one value per row.
+            logical, intent(in), optional :: is_valid(:)        !! present: rows marked .false. become null.
+            logical, intent(out), optional :: found             !! present: report a miss instead of aborting.
+        end subroutine set_arr_strcol"""
+
+
+def add_strcol_iface():
+    return """        !> Appends a new PK_STRING column holding a compact parquet_string_column's values.
+        !!
+        !! Unlike the character-array form nothing is trimmed: a parquet_string_column already
+        !! stores each value at its own length, which is the reason to build one.
+        module subroutine add_column_strcol(self, name, values, unit, force)
+            class(parquet_table), intent(inout) :: self       !! the table.
+            character(len=*), intent(in) :: name              !! the new column's name.
+            type(parquet_string_column), intent(in) :: values !! one value per row.
+            character(len=*), intent(in), optional :: unit    !! unit string to store.
+            logical, intent(in), optional :: force            !! .true. replaces an existing same-named column.
+        end subroutine add_column_strcol"""
+
+
 def getelem_iface(k):
     """One row's value, by row index, for one column -- %set_element's read counterpart."""
     tag, pk, decl, comp, rank, cat = k
@@ -1928,11 +2094,12 @@ def setelem_iface(k):
     out = []
     for ik, ityp in (("i32", "integer(int32)"), ("i64", "integer(int64)")):
         out.append(f"""        !> Writes one row of a {pk} column ({ik} row index).
-        module subroutine set_element_{tag}_{ik}(self, name, i, value)
+        module subroutine set_element_{tag}_{ik}(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
 {decl_line(12, f"{ityp}, intent(in) :: i", "!! 1-based row index.")}
 {decl_line(12, val, f"!! {what}.")}
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_{tag}_{ik}""")
     return "\n".join(out)
 
@@ -1945,11 +2112,12 @@ def setelem_str_iface():
     ):
         for ik, ityp in (("i32", "integer(int32)"), ("i64", "integer(int64)")):
             out.append(f"""        !> Writes one row of a {pk} column from a character value ({ik} row index).
-        module subroutine set_element_{tag}_{ik}(self, name, i, value)
+        module subroutine set_element_{tag}_{ik}(self, name, i, value, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column name.
 {decl_line(12, f"{ityp}, intent(in) :: i", "!! 1-based row index.")}
 {decl_line(12, val, f"!! {what}.")}
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine set_element_{tag}_{ik}""")
     return "\n".join(out)
 
@@ -1996,6 +2164,46 @@ def mat_iface(k):
             integer(int32), intent(in) :: wdt            !! values per row.
             character(len=*), intent(in) :: unit         !! unit string to store ("" for none).
         end subroutine mat_{tag}"""
+
+
+def rowset_iface(k):
+    """Write one row's value for one column, through a row handle."""
+    tag, pk, decl, comp, rank, cat = k
+    if cat == "str":
+        if rank == 1:
+            return f"""        !> Writes this row's string value into a {pk} column.
+        module subroutine row_set_{tag}(self, name, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            character(len=*), intent(in) :: value        !! the new value.
+        end subroutine row_set_{tag}"""
+        return f"""        !> Writes this row's whole string vector into a {pk} column.
+        module subroutine row_set_{tag}(self, name, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+            character(len=*), intent(in) :: value(:)     !! width values.
+        end subroutine row_set_{tag}"""
+    val = f"{decl}, intent(in) :: value" + ("(:)" if rank == 2 else "")
+    what = "that row's whole vector" if rank == 2 else "the new value"
+    return f"""        !> Writes this row's value into a {pk} column.
+        module subroutine row_set_{tag}(self, name, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+{decl_line(12, val, f"!! {what}.")}
+        end subroutine row_set_{tag}"""
+
+
+def rowref_iface(k):
+    """A zero-copy pointer to one row's storage in one column."""
+    tag, pk, decl, comp, rank, cat = k
+    ptr = f"{decl}, pointer, intent(out) :: p" + ("(:)" if rank == 2 else "")
+    what = "alias to this row's vector" if rank == 2 else "alias to this row's value"
+    return f"""        !> Points `p` at this row's storage in a {pk} column. The kind must match EXACTLY.
+        module subroutine row_ref_{tag}(self, name, p)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: name         !! column name.
+{decl_line(12, ptr, f"!! {what}.")}
+        end subroutine row_ref_{tag}"""
 
 
 def rowget_iface(k):
@@ -2154,6 +2362,8 @@ contains
     !""")
     for k in PTR_KINDS:
         w(ptr_impl(k))
+    w(ptr_str_impl())
+    w(set_strcol_impl())
     for k in ARRAY_KINDS:
         w(get_impl(k))
     w(get_str_impl())
@@ -2168,9 +2378,16 @@ contains
     w(setelem_str_impl())
     for k in KINDS:
         w(rowget_impl(k))
+    for k in KINDS:
+        w(rowset_impl(k))
+    for k in ARRAY_KINDS:
+        w(rowref_impl(k))
     for k in ARRAY_KINDS:
         w(getslice_impl(k))
     w(getslice_str_impl())
+    for k in ARRAY_KINDS:
+        w(setslice_impl(k))
+    w(setslice_str_impl())
     w("end submodule parquet_tables_access")
     return "\n".join(o) + "\n"
 
@@ -2234,6 +2451,60 @@ def getslice_impl(k):
               f"    end procedure get_slice_{tag}",
               "    !"]
     return "\n".join(lines)
+
+
+def setslice_impl(k):
+    """Scatter the given values into the selected rows, one at a time through set_at.
+
+    Row by row for the same reason %get_slice gathers row by row: a selection may be strided,
+    reversed or an arbitrary list, none of which is a contiguous section of the store.
+    """
+    tag, pk, decl, comp, rank, cat = k
+    n_arr = "size(arr, kind=int64)" if rank == 1 else "size(arr, 2, kind=int64)"
+    val = "arr(k)" if rank == 1 else "arr(:, k)"
+    return f"""    module procedure set_slice_{tag}
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "set_slice", idx, found)
+        if (idx == 0) return
+        call table_require_kind(self, idx, {pk}, "set_slice")
+        call slice_resolve(s, self%row_count, rows, "set_slice")
+        call table_require_slice_size(self, {n_arr}, size(rows, kind=int64), name, "set_slice")
+        do k = 1, size(rows, kind=int64)
+            call self%cache%cols(idx)%values%set_at(rows(k), {val}, modify_nulls)
+        end do
+        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_slice_{tag}
+    !"""
+
+
+def setslice_str_impl():
+    out = []
+    for tag, pk, val, n_arr in (("chr", "PK_STRING", "arr(k)", "size(arr, kind=int64)"),
+                                ("chrv", "PK_STRING_VEC", "arr(:, k)", "size(arr, 2, kind=int64)")):
+        out.append(f"""    module procedure set_slice_{tag}
+        integer :: idx
+        integer(int64) :: k
+        integer(int64), allocatable :: rows(:)
+        !
+        call table_resolve(self, name, "set_slice", idx, found)
+        if (idx == 0) return
+        call table_require_kind(self, idx, {pk}, "set_slice")
+        call slice_resolve(s, self%row_count, rows, "set_slice")
+        call table_require_slice_size(self, {n_arr}, size(rows, kind=int64), name, "set_slice")
+        ! One row at a time through set_at, which the string store supports in place -- unlike
+        ! %paste, which cannot overwrite a packed variable-length store's range wholesale.
+        do k = 1, size(rows, kind=int64)
+            call self%cache%cols(idx)%values%set_at(rows(k), {val}, modify_nulls)
+        end do
+        if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_slice_{tag}
+    !""")
+    return "\n".join(out)
 
 
 def getslice_str_impl():
@@ -2320,6 +2591,47 @@ def getslice_str_impl():
             end do
         end do
     end procedure get_slice_chrv
+    !"""
+
+
+def rowset_impl(k):
+    """Write one row's value through a handle: exact kind, and it changes the TABLE.
+
+    Exact-kind rather than widening, unlike row_get: widening is a rule for copying OUT into the
+    caller's variable, while a write would have to change what the column stores.
+    """
+    tag, pk, decl, comp, rank, cat = k
+    return f"""    module procedure row_set_{tag}
+        integer :: idx
+        !
+        call row_resolve(self, name, "set", idx)
+        call row_require_kind(self, name, idx, {pk})
+        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure row_set_{tag}
+    !"""
+
+
+def rowref_impl(k):
+    """A pointer to one row's storage: the whole-column pointer, narrowed to this row."""
+    tag, pk, decl, comp, rank, cat = k
+    if rank == 1:
+        body = """        call self%cache%cols(idx)%values%data_ptr(store)
+        p => store(self%irow)"""
+        decl_store = f"        {decl}, pointer :: store(:)"
+    else:
+        body = """        call self%cache%cols(idx)%values%data_ptr(store)
+        p => store(:, self%irow)"""
+        decl_store = f"        {decl}, pointer :: store(:,:)"
+    return f"""    module procedure row_ref_{tag}
+        integer :: idx
+{decl_store}
+        !
+        nullify(p)
+        call row_resolve(self, name, "ref", idx)
+        call row_require_kind(self, name, idx, {pk})
+{body}
+    end procedure row_ref_{tag}
     !"""
 
 
@@ -2429,6 +2741,58 @@ def ptr_impl(k):
         end if
         call self%cache%cols(idx)%values%data_ptr(p)
     end procedure col_ptr_{tag}
+    !"""
+
+
+def ptr_str_impl():
+    return """    module procedure col_ptr_strcol
+        integer :: idx
+        !
+        nullify(p)
+        call table_resolve(self, name, "col", idx, found)
+        if (idx == 0) return
+        call table_require_kind(self, idx, PK_STRING, "col")
+        call self%cache%cols(idx)%values%string_column(p)
+    end procedure col_ptr_strcol
+    !"""
+
+
+def set_strcol_impl():
+    return """    module procedure set_arr_strcol
+        integer :: idx
+        type(parquet_string_column), pointer :: store
+        !
+        call table_resolve(self, name, "set", idx, found)
+        if (idx == 0) return
+        call table_require_kind(self, idx, PK_STRING, "set")
+        call table_require_length(self, idx, arr%size(), "set")
+        ! Replaces the packed store wholesale with an independent copy, so the caller's own column
+        ! and the table's do not end up sharing storage. %set is a value replacement, exactly as
+        ! the character-array form is; it is not a way to hand ownership over.
+        call self%cache%cols(idx)%values%string_column(store)
+        store = arr%clone()
+        if (present(is_valid)) call table_apply_valid(self, idx, is_valid, name, "set")
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_arr_strcol
+    !"""
+
+
+def add_strcol_impl():
+    return """    module procedure add_column_strcol
+        integer :: idx
+        type(parquet_string_column), pointer :: store
+        !
+        call table_check_open(self, "add_column")
+        call table_fix_nrows(self, name, values%size())
+        call table_new_slot(self, name, force, idx)
+        call self%cache%cols(idx)%values%init(PK_STRING, values%size(), 1_int32, unit)
+        call self%cache%cols(idx)%values%string_column(store)
+        store = values%clone()
+        self%cache%cols(idx)%declared_kind = PK_STRING
+        self%cache%cols(idx)%width = 1
+        self%cache%cols(idx)%residency = RES_FULL
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure add_column_strcol
     !"""
 
 
@@ -2581,13 +2945,16 @@ def _setelem_pair(tag, pk):
     a public numeric argument.
     """
     return f"""    module procedure set_element_{tag}_i32
-        call self%set_element(name, int(i, int64), value)
+        call self%set_element(name, int(i, int64), value, found)
     end procedure set_element_{tag}_i32
     !
     module procedure set_element_{tag}_i64
         integer :: idx
         !
-        call table_resolve(self, name, "set_element", idx)
+        ! The lookup happens BEFORE anything is written, which is what lets found=.false. mean
+        ! "nothing was changed" rather than "something was changed and then a problem arose".
+        call table_resolve(self, name, "set_element", idx, found)
+        if (idx == 0) return
         call table_require_kind(self, idx, {pk}, "set_element")
         call table_require_row(self, i, "set_element")
         call self%cache%cols(idx)%values%set_at(i, value)
@@ -2773,6 +3140,7 @@ contains
     for k in ARRAY_KINDS:
         w(add_impl(k))
     w(add_str_impl())
+    w(add_strcol_impl())
     w("end submodule parquet_tables_addcol")
     return "\n".join(o) + "\n"
 

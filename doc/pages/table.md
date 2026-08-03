@@ -99,9 +99,11 @@ Four things to know about `%col`:
   The counter is deliberately conservative — every column- and row-structural call bumps it,
   whether or not it actually moved anything — so a change in it means "re-fetch", not "definitely
   invalidated". A call that changes nothing does not bump it.
-- **There is no pointer form for a string column.** `%col` covers the numeric, logical, temporal
-  and vector kinds; `PK_STRING`/`PK_STRING_VEC` are stored as a packed variable-length buffer with
-  no fixed row slots to point a Fortran array at, so a string column is reached by copy only — see
+- **A string column has no *array* pointer form, but it does have one.** `PK_STRING`/
+  `PK_STRING_VEC` are stored as a packed variable-length buffer, so there are no fixed row slots
+  for a Fortran array to alias — but `%col` will hand back a `type(parquet_string_column),
+  pointer` to the store itself. Read it and edit its values in place; do not change its length or
+  element count through the pointer, since the column's own row count is kept separately. See
   [String columns in a table](#string-columns-in-a-table).
 - **Arithmetic through the pointer costs what arithmetic over your own array costs.** Measured
   with `tools/benchmark_table.sh`'s access mode, `z = xp + yp` through two `%col` pointers runs
@@ -216,10 +218,12 @@ if (.not. ok) print *, "column not in this file"
 On a reported miss `%get` leaves a zero-length array and `%col` a null pointer, so a program that
 ignores `found` gets an empty result rather than stale data.
 
-The others do not have it, and it is worth knowing which: `%is_null`, `%set`, `%set_element`,
-`%set_null`, `%clear_null`, `%get_slice`, `%row` and every mutation name a column that must
-exist, so a miss there is an error. `%has_column` answers the question directly instead, and
-`%get_file_metadata`'s `found` reports a missing **key**, not a missing column.
+**Every procedure that takes a column name now accepts it**, mutators included — `%is_null`,
+`%set`, `%set_element`, `%set_null`, `%clear_null`, `%get_slice`, `%set_slice`, `%get_element`,
+`%has_nulls`, `%get_valid_mask`, `%compact_validity`, `%drop_column`, `%rename_column`,
+`%copy_column` and `%cast`. On a mutating call `found=.false.` means **nothing was changed**: the
+column is looked up before anything is written. `%row(i)` is the exception, since it names no
+column, and `%get_file_metadata`'s `found` reports a missing **key** rather than a missing column.
 
 On `%prefetch`'s array form, `found` is the *conjunction*: it comes back `.false.` if any name
 was missing, and the names that do exist are still read. A column whose type this library cannot
@@ -500,8 +504,16 @@ A handle has three procedures, and that is all:
 | call | answer |
 |---|---|
 | `call r%get(name, value)` | one column's value in this row — scalar for a scalar column, allocatable rank-1 array for a vector one |
+| `call r%set(name, value)` | writes that value into the table — a handle is a view of it, not a copy |
+| `call r%ref(name, p)` | a pointer to this row's storage: zero copy, writable, exact kind |
 | `r%is_null(name)` | whether this row of that column is null |
 | `r%index()` | which row this is, in the table's own numbering |
+
+`%set` is exact-kind (a write never widens) and clears that row's null, exactly as
+`%set_element` does. `%ref` gives a scalar pointer for a scalar column and a pointer to the whole
+vector for a vector one; the two string kinds have no `%ref`, since a packed variable-length store
+has no fixed slot to point at. A `%ref` pointer carries the same lifetime rule as `%col`'s — see
+[Two ways to reach a column](#two-ways-to-reach-a-column).
 
 `%get` on a handle widens exactly as the table's own does, and triggers the same lazy first
 touch, so a handle can reach a column nothing has read yet. The handle resolves the column by
@@ -545,6 +557,18 @@ selected row must exist. `%get_slice` widens like `%get`, and a vector column ke
 `(element, row)` shape. There is no pointer form: a strided or gathered selection is not
 contiguous, so `%col` (the whole column) remains the zero-copy path.
 
+**`%set_slice` writes a selection back**, taking the same selection object in the same order:
+
+```fortran
+call t%get_slice("mass", s, m)
+m = m * 2.0_real64
+call t%set_slice("mass", s, m)      ! the same rows, in the same order
+```
+
+The array must have exactly one value (or one vector) per selected row, and unlike `%get_slice` it
+does **not** widen — a copy *into* the table is exact-kind, as `%set` is. It also takes
+`is_valid=` (one entry per selected row) and `modify_nulls=`.
+
 ## String columns in a table
 
 A `PK_STRING` column is reached by copy, in either of two shapes, and which one you declare picks
@@ -560,11 +584,14 @@ call t%get("name", packed)     ! keeps each value's own length, and its nulls wi
 
 Four things follow from strings having no fixed-width storage:
 
-- **No `%col`.** There is no pointer form for `PK_STRING`/`PK_STRING_VEC` at all.
-- **Writing back takes a character array**, not a `parquet_string_column`: `%set`, `%set_element`
-  and `%add_column` have `character(len=*)` specifics (rank 1, and rank 2 shaped `(element, row)`
-  for a vector column) and no compact-column form. To put a `parquet_string_column` into a table,
-  copy its elements into a character array first.
+- **`%col` gives a pointer to the packed store, not to an array.** `call t%col("name", sp)` with
+  `type(parquet_string_column), pointer :: sp` aliases a `PK_STRING` column's own store: reading
+  and in-place value edits go straight to the table. Changing how many elements it holds does not
+  — the column's row count is kept separately and would stop matching.
+- **A `parquet_string_column` is a first-class value in both directions.** `%get`, `%set` and
+  `%add_column` all take one (`%set` and `%add_column` copy it in, so the caller's own column and
+  the table's do not share storage afterwards). The `character(len=*)` forms are still there for
+  when a fixed-width array is what you have.
 - **`%get_slice` offers all three** — `parquet_string_column`, `character(:)` and the
   `(element, row)` rank-2 form — and a row handle's `%get` hands back a
   `character(len=:), allocatable` scalar for a `PK_STRING` column, or a rank-1 array of them for a

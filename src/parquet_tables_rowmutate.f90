@@ -91,6 +91,7 @@ contains
             call self%cache%cols(i)%values%delete_by_mask(keep)
         end do
         self%row_count = count(keep, kind=int64)
+        self%cache%generation = self%cache%generation + 1_int64
         call table_detach(self)
     end procedure table_apply_keep
     !
@@ -197,6 +198,7 @@ contains
             if (.not. table_mutable_column(self, i)) cycle
             call self%cache%cols(i)%values%reindex(perm(1:self%row_count))
         end do
+        self%cache%generation = self%cache%generation + 1_int64
         call table_detach(self)
     end procedure table_sort_by
     !
@@ -262,6 +264,7 @@ contains
             end if
         end do
         self%row_count = self%row_count + added
+        self%cache%generation = self%cache%generation + 1_int64
         call table_detach(self)
     end subroutine append_table_worker
     !
@@ -296,6 +299,7 @@ contains
             call self%cache%cols(i)%values%append_nulls(n)
         end do
         self%row_count = self%row_count + n
+        self%cache%generation = self%cache%generation + 1_int64
         call table_detach(self)
     end procedure table_append_null_rows_i64
     !

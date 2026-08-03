@@ -196,6 +196,7 @@ module parquet_columns
         procedure :: init                              !! Set kind/geometry and allocate empty storage.
         procedure :: clear                             !! Release all storage and reset to PK_NONE.
         procedure :: deep_copy                         !! Independent copy of values, validity and unit.
+        procedure :: move_from                         !! Take over another column's storage, leaving it empty.
         ! --- queries ---
         procedure :: kindof                            !! The active PK_* discriminator.
         procedure :: length                            !! Number of rows stored.
@@ -273,6 +274,20 @@ module parquet_columns
             class(parquet_column), intent(in) :: self       !! the source column.
             type(parquet_column), intent(out) :: out        !! the copy.
         end subroutine deep_copy
+        !> Takes over `src`'s storage outright, leaving `src` empty (PK_NONE, zero rows).
+        !!
+        !! The move counterpart of `deep_copy`: every allocatable component is handed over with
+        !! `move_alloc` rather than copied, so relocating a column costs a handful of descriptor
+        !! assignments instead of a full copy of its data. Use it wherever a column is being
+        !! RELOCATED rather than duplicated -- `%drop_column` shifting the tail of a table's slot
+        !! array down over the dropped one is the case that motivated it, where intrinsic
+        !! assignment memcpy'd every remaining column's values.
+        !!
+        !! `self` is cleared first, so whatever it held is released.
+        module subroutine move_from(self, src)
+            class(parquet_column), intent(inout) :: self    !! the column receiving the storage.
+            type(parquet_column), intent(inout) :: src      !! the column giving it up; left empty.
+        end subroutine move_from
         !> Copies the unit string out ("" when no unit is set).
         module subroutine unit_string(self, u)
             class(parquet_column), intent(in) :: self          !! the column.

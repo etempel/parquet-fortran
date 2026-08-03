@@ -89,6 +89,45 @@ contains
     !!
     !! This is the library's only rollback mechanism under the in-place mutation model (D6's
     !! "copy before mutating"), so it is a first-class operation rather than an afterthought.
+    module procedure move_from
+        ! Handed over one component at a time rather than by intrinsic assignment, which would
+        ! deep-copy every one of them -- the whole point of this procedure. THE COMPONENT LIST
+        ! HERE AND `clear`'s ABOVE MUST STAY IN STEP: a new kind's storage array missing from this
+        ! list is not a compile error, it is a column that silently loses that array on every
+        ! move. Both lists are checked by test_column_move_from, which moves a column of every
+        ! kind and asserts the source came back empty and the destination intact.
+        call self%clear()
+        self%kind = src%kind
+        self%nrows = src%nrows
+        self%width = src%width
+        self%has_nulls = src%has_nulls
+        self%nulls_dirty = src%nulls_dirty
+        self%nulls_cached = src%nulls_cached
+        if (allocated(src%validity)) call move_alloc(src%validity, self%validity)
+        if (allocated(src%unit)) call move_alloc(src%unit, self%unit)
+        if (allocated(src%str)) call move_alloc(src%str, self%str)
+        if (allocated(src%i32)) call move_alloc(src%i32, self%i32)
+        if (allocated(src%i64)) call move_alloc(src%i64, self%i64)
+        if (allocated(src%f32)) call move_alloc(src%f32, self%f32)
+        if (allocated(src%f64)) call move_alloc(src%f64, self%f64)
+        if (allocated(src%bool)) call move_alloc(src%bool, self%bool)
+        if (allocated(src%dt)) call move_alloc(src%dt, self%dt)
+        if (allocated(src%tm)) call move_alloc(src%tm, self%tm)
+        if (allocated(src%ts)) call move_alloc(src%ts, self%ts)
+        if (allocated(src%i32v)) call move_alloc(src%i32v, self%i32v)
+        if (allocated(src%i64v)) call move_alloc(src%i64v, self%i64v)
+        if (allocated(src%f32v)) call move_alloc(src%f32v, self%f32v)
+        if (allocated(src%f64v)) call move_alloc(src%f64v, self%f64v)
+        if (allocated(src%boolv)) call move_alloc(src%boolv, self%boolv)
+        if (allocated(src%dtv)) call move_alloc(src%dtv, self%dtv)
+        if (allocated(src%tmv)) call move_alloc(src%tmv, self%tmv)
+        if (allocated(src%tsv)) call move_alloc(src%tsv, self%tsv)
+        if (allocated(src%container)) call move_alloc(src%container, self%container)
+        ! `src` gave up its arrays but still claims a kind and a row count, which would describe
+        ! storage that is no longer there. Reset it to exactly what a fresh column looks like.
+        call src%clear()
+    end procedure move_from
+    !
     module procedure deep_copy
         call out%clear()
         if (self%kind == PK_NONE) return

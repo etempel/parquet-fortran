@@ -615,6 +615,8 @@ contains
                 test_table_write_unsupported_column_aborts), &
             new_unittest("parquet_write_table with a schema that was never built aborts", &
                 test_table_write_unbuilt_schema_aborts), &
+            new_unittest("a wrong-length is_valid mask on %set aborts", &
+                test_table_set_is_valid_length_aborts), &
             new_unittest("copy_metadata with an unknown key aborts", &
                 test_table_copy_metadata_unknown_key_aborts), &
             new_unittest("copy_metadata on an in-memory table aborts", &
@@ -1029,6 +1031,13 @@ contains
             failure_message="writing a schema-named unsupported column was expected to abort", &
             required_stderr="the schema declares a column that holds no values")
     end subroutine test_table_write_unsupported_column_aborts
+
+    subroutine test_table_set_is_valid_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_set_is_valid_length", expect_abort=.true., &
+            failure_message="a wrong-length is_valid mask was expected to abort", &
+            required_stderr="is_valid has 2 entries but the table has 3 rows")
+    end subroutine test_table_set_is_valid_length_aborts
 
     subroutine test_table_copy_metadata_unknown_key_aborts(error)
         type(error_type), allocatable, intent(out) :: error

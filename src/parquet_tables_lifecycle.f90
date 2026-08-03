@@ -446,7 +446,7 @@ contains
     end procedure table_finalize
     !
     module procedure table_new_slot
-        integer :: existing, n
+        integer :: existing, n, i
         type(parquet_table_column), allocatable :: bigger(:)
         character(len=:), allocatable :: sfx
         !
@@ -468,6 +468,7 @@ contains
             self%cache%cols(existing)%residency = RES_EMPTY
             self%cache%cols(existing)%file_source = .false.
             self%cache%cols(existing)%supported = .true.
+            self%cache%generation = self%cache%generation + 1_int64
             idx = existing
             return
         end if
@@ -478,11 +479,21 @@ contains
             ! This DOES relocate every descriptor, which is exactly why the documented rule is
             ! that any column-structural mutation invalidates every outstanding pointer.
             allocate(bigger(max(2 * size(self%cache%cols), n + 1)))
-            bigger(1:n) = self%cache%cols(1:n)
+            ! Moved, not assigned: an intrinsic array assignment here would deep-copy every
+            ! column's storage into the new array and then free the old one, so growing the slot
+            ! array would cost a full copy of everything the table holds.
+            do i = 1, n
+                call move_table_column(bigger(i), self%cache%cols(i))
+            end do
             call move_alloc(bigger, self%cache%cols)
         end if
         n = n + 1
         self%cache%ncols = n
+        ! Every path that adds, replaces or relocates a slot comes through here, so this is the
+        ! one place a column-structural change has to bump the generation (%generation). The
+        ! replace-in-place branch above bumps too, on its way out -- it clears a column's values,
+        ! which is exactly the kind of thing a held pointer must not survive.
+        self%cache%generation = self%cache%generation + 1_int64
         self%cache%cols(n)%name = trim(name)
         self%cache%cols(n)%file_name = trim(name)
         self%cache%cols(n)%file_source = .false.

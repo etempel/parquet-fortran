@@ -280,6 +280,7 @@ scenarios=(
     "table_write_missing_column:1"
     "table_write_unsupported_column:1"
     "table_write_unbuilt_schema:1"
+    "table_set_is_valid_length:1"
     "table_copy_metadata_unknown_key:1"
     "table_copy_metadata_in_memory:1"
     "table_copy_metadata_both_forms:1"

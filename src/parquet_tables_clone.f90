@@ -87,9 +87,13 @@ contains
     !
     module procedure table_clone_structure
         integer :: i, n
+        logical :: only_res
+        character(len=:), allocatable :: sfx
         !
         call table_check_open(self, "clone_structure")
         call clone_check_same_type(self, out, "clone_structure")
+        only_res = .false.
+        if (present(resident_only)) only_res = resident_only
         call clone_new_cache(self, out)
         n = 0
         do i = 1, self%cache%ncols
@@ -97,13 +101,14 @@ contains
             ! ever fill it. %append refuses a table holding one for the same reason, and points
             ! at %drop_column.
             if (.not. self%cache%cols(i)%supported) cycle
+            if (only_res .and. self%cache%cols(i)%residency /= RES_FULL) cycle
             ! A plain-LIST column's kind is not known until its width is, and a batch column has
             ! no file to measure it from later -- so it is measured now, for real. That reads
             ! data for that one column, exactly as %kind already does.
             call table_resolve_width(self%cache, table_scope_of(self), i, .true., "clone_structure")
             n = n + 1
             call clone_copy_descriptor(self%cache%cols(i), out%cache%cols(n))
-            call clone_empty_column(self%cache%cols(i)%values, out%cache%cols(n)%values)
+            call clone_empty_column(self%cache%cols(i), out%cache%cols(n)%values)
             out%cache%cols(n)%file_source = .false.
             out%cache%cols(n)%residency = RES_FULL
         end do
@@ -174,13 +179,29 @@ contains
     end subroutine clone_copy_descriptor
     !
     !> Creates a zero-row column of the same kind, width and unit as `src`.
+    !> Builds the empty column one descriptor slot implies: same kind, width and unit, zero rows.
+    !!
+    !! Takes its shape from the DESCRIPTOR, not from the slot's values, and that is the whole
+    !! point: a column that has never been read holds no values, so reading `values%kindof()`
+    !! answered PK_NONE and `%clone_structure` on a freshly opened (lazy) table aborted inside the
+    !! column store. Every supported column's kind and width are known from the file's schema at
+    !! open -- the one exception, a plain LIST whose width lives in the data, is resolved by the
+    !! caller before it gets here -- so the descriptor can always answer and a batch can be cloned
+    !! from a table that has read nothing at all.
+    !!
+    !! The unit comes from the descriptor too where there is one (a read-in MAML's `unit:` key),
+    !! and otherwise from the values, which is where `%add_column(unit=)` puts it.
     subroutine clone_empty_column(src, dst)
-        type(parquet_column), intent(in) :: src   !! the column to take the shape of.
-        type(parquet_column), intent(inout) :: dst !! receives the empty column.
+        type(parquet_table_column), intent(in) :: src !! the slot to take the shape of.
+        type(parquet_column), intent(inout) :: dst    !! receives the empty column.
         character(len=:), allocatable :: unit
         !
-        call src%unit_string(unit)
-        call dst%init(src%kindof(), 0_int64, src%colwidth(), unit)
+        if (allocated(src%unit)) then
+            unit = src%unit
+        else
+            call src%values%unit_string(unit)
+        end if
+        call dst%init(src%declared_kind, 0_int64, src%width, unit)
     end subroutine clone_empty_column
     !
     !> Opens the clone's own reader on the same file, so the clone stays lazy.

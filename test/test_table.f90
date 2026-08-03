@@ -157,6 +157,12 @@ contains
                 test_unit_from_maml), &
             new_unittest("parquet_write_table carries the source file's metadata on request", &
                 test_write_table_copy_metadata), &
+            new_unittest("resident_only, has_nulls, get_valid_mask, set_null(mask), generation", &
+                test_introspection_additions), &
+            new_unittest("clone_structure works on a table that has read nothing", &
+                test_clone_structure_lazy), &
+            new_unittest("get_element reads one cell, widening like %get", test_get_element), &
+            new_unittest("is_valid= on get, col, get_slice and set", test_is_valid_argument), &
             new_unittest("extra: remap: shadows, swaps and duplicates as documented", test_remap_shadow_duplicate), &
             new_unittest("rename_column on a remapped column keeps its file column", test_remap_then_rename), &
             new_unittest("open with filter= narrows every column, in internal names", test_open_filter), &
@@ -2978,6 +2984,279 @@ contains
     !> The basic remap: a read-in MAML relabels a file column, and everything table-facing uses
     !! the new name while the read still goes to the physical one. The un-remapped columns are
     !! untouched, and the column count is unchanged (one internal name, one file column).
+    !> `is_valid=` on %get, %col, %get_slice and %set.
+    !!
+    !! One optional argument, four places, and it means the same thing in all of them: one entry
+    !! per row (or per selected row), `.true.` where the row holds a value. On %set it goes the
+    !! other way -- rows marked `.false.` become null -- which is the only way to write a column
+    !! and its nulls in one call. The %col form is the one with a caveat worth testing: it is a
+    !! SNAPSHOT, not an alias, because validity is a packed bitmap with no logical array to point
+    !! at.
+    subroutine test_is_valid_argument(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: w
+        type(parquet_table) :: t
+        type(parquet_schema) :: sc
+        real(real64) :: v(NROW)
+        logical :: valid(NROW)
+        logical, allocatable :: gotv(:)
+        real(real64), allocatable :: arr(:)
+        real(real64), pointer :: p(:)
+        type(parquet_slice) :: sel
+        integer :: i
+        character(len=*), parameter :: f = "test_run/table_isvalid.parquet"
+        !
+        do i = 1, NROW
+            v(i) = real(i, real64)
+            valid(i) = i /= 2 .and. i /= 5
+        end do
+        call sc%init("isvalid")
+        call sc%add_field("v", "float64")
+        call parquet_parse_maml(sc)
+        call parquet_open_writer(w, f, sc)
+        call parquet_write_column(w, "v", v, is_valid=valid)
+        call parquet_close_writer(w)
+        !
+        call parquet_open_table(t, f)
+        call t%get("v", arr, is_valid=gotv)
+        call check(error, size(gotv) == NROW .and. all(gotv .eqv. valid), &
+            "%get(is_valid=) should report the column's per-row validity")
+        if (allocated(error)) return
+        call t%col("v", p, is_valid=gotv)
+        call check(error, all(gotv .eqv. valid), &
+            "%col(is_valid=) should report the same validity as %get")
+        if (allocated(error)) return
+        sel = parquet_slice_list([5, 1, 2])
+        call t%get_slice("v", sel, arr, is_valid=gotv)
+        call check(error, size(gotv) == 3, "%get_slice(is_valid=) should have one entry per selected row")
+        if (allocated(error)) return
+        call check(error, (.not. gotv(1)) .and. gotv(2) .and. (.not. gotv(3)), &
+            "%get_slice(is_valid=) should follow the selection, not the row order")
+        if (allocated(error)) return
+        !
+        ! %set with is_valid=: values and nulls in one call. A plain %set drops the bitmap, so the
+        ! mask has to be applied after the values -- checked by asking for it back.
+        arr = [(real(i, real64) * 10.0_real64, i = 1, NROW)]
+        valid = .true.
+        valid(3) = .false.
+        call t%set("v", arr, is_valid=valid)
+        call t%get("v", arr, is_valid=gotv)
+        call check(error, all(gotv .eqv. valid), "%set(is_valid=) should write the nulls it is given")
+        if (allocated(error)) return
+        call check(error, abs(arr(1) - 10.0_real64) < 1.0e-12_real64, &
+            "%set(is_valid=) should still write every value")
+        if (allocated(error)) return
+        ! A wrong-length mask is an error, not a silent partial application -- the abort path is
+        ! covered out of process (scenario table_set_is_valid_length).
+        !
+        ! A missing column reports through found= and leaves an empty mask rather than aborting.
+        call t%get("no_such", arr, is_valid=gotv, found=valid(1))
+        call check(error, .not. valid(1) .and. size(gotv) == 0, &
+            "a missed %get(is_valid=) should report through found= and leave an empty mask")
+    end subroutine test_is_valid_argument
+    !
+    !> %get_element reads one cell by row index, for every kind, widening as %get does.
+    !!
+    !! It is the one-call form of `r = t%row(i)` then `r%get(name, v)` -- the two-step form is the
+    !! only way Fortran allows a row handle to be used, so this exists for the common case of
+    !! wanting a single cell. Both row-index kinds resolve, and a miss reports through `found=`
+    !! rather than aborting.
+    subroutine test_get_element(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer(int32) :: i32v
+        integer(int64) :: i64v
+        real(real64) :: f64v
+        logical :: bv, ok
+        character(len=:), allocatable :: sv
+        character(len=*), parameter :: f = "test_run/table_get_element.parquet"
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t, f)
+        ! A first touch through %get_element, on a column nothing has read.
+        call t%get_element("i32", 4, i32v)
+        call check(error, i32v == 4_int32, "%get_element should read the cell (int32 index)")
+        if (allocated(error)) return
+        call t%get_element("i32", 5_int64, i32v)
+        call check(error, i32v == 5_int32, "%get_element should take an int64 row index too")
+        if (allocated(error)) return
+        ! ...widening into the caller's variable, exactly as %get does.
+        call t%get_element("i32", 6, i64v)
+        call check(error, i64v == 6_int64, "%get_element should widen int32 into an int64 variable")
+        if (allocated(error)) return
+        call t%get_element("f32", 4, f64v)
+        call check(error, abs(f64v - 2.0_real64) < 1.0e-6_real64, &
+            "%get_element should widen float32 into a float64 variable")
+        if (allocated(error)) return
+        call t%get_element("b", 2, bv)
+        call check(error, bv, "%get_element should read a logical cell")
+        if (allocated(error)) return
+        call t%get_element("s", 4, sv)
+        call check(error, sv == "ghijklm", "%get_element should read a string cell at its own length")
+        if (allocated(error)) return
+        ! It agrees with the two-step row-handle form, which is what it is shorthand for.
+        block
+            type(parquet_table_row) :: r
+            real(real64) :: viaRow
+            r = t%row(3)
+            call r%get("f64", viaRow)
+            call t%get_element("f64", 3, f64v)
+            call check(error, abs(viaRow - f64v) < 1.0e-12_real64, &
+                "%get_element and the row handle's %get should agree")
+        end block
+        if (allocated(error)) return
+        ! A missing column reports through found= instead of aborting.
+        call t%get_element("no_such", 1, i32v, found=ok)
+        call check(error, .not. ok, "%get_element should report a missing column through found=")
+    end subroutine test_get_element
+    !
+    !> %clone_structure works on a table that has read nothing, which is the normal case.
+    !!
+    !! The shape of every supported column is known from the file's schema at open, so a batch can
+    !! be cloned from a freshly opened table without reading a single column -- which is what the
+    !! bulk-append idiom (`clone_structure` -> fill -> `%append`) actually wants. It used to abort
+    !! inside the column store (`init: PK_NONE is not a storable kind`) because it took each
+    !! column's shape from values a lazy column does not have. Residency is asserted afterwards to
+    !! prove nothing was read to answer.
+    subroutine test_clone_structure_lazy(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, batch
+        character(len=:), allocatable :: names(:), u
+        character(len=*), parameter :: f = "test_run/table_clone_struct_lazy.parquet"
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t, f)
+        call t%clone_structure(batch)
+        call check(error, t%residency("i32") == RES_EMPTY .and. t%residency("s") == RES_EMPTY, &
+            "%clone_structure must not read a column to learn its shape")
+        if (allocated(error)) return
+        call check(error, batch%ncols() == 6 .and. batch%nrows() == 0_int64, &
+            "a batch cloned from a lazy table should have every column and no rows")
+        if (allocated(error)) return
+        call check(error, batch%kind("f64") == PK_FLOAT64 .and. batch%kind("s") == PK_STRING, &
+            "a batch cloned from a lazy table should carry each column's kind")
+        if (allocated(error)) return
+        call batch%column_names(names)
+        call check(error, trim(names(1)) == "i32" .and. trim(names(6)) == "s", &
+            "a cloned batch should keep the source's column order")
+        if (allocated(error)) return
+        ! ...and it is a usable batch: fill it and append it back.
+        call batch%append_null_rows(2)
+        call batch%set_element("i32", 1, 71_int32)
+        call t%materialize_all()
+        call t%append(batch)
+        call check(error, t%nrows() == int(NROW, int64) + 2_int64, &
+            "a batch cloned from a lazy table should append back into it")
+        if (allocated(error)) return
+        !
+        ! resident_only=.true. still filters to what has been read.
+        call parquet_open_table(t, f)
+        call t%prefetch("f64")
+        call t%clone_structure(batch, resident_only=.true.)
+        call check(error, batch%ncols() == 1 .and. batch%has_column("f64"), &
+            "resident_only=.true. should clone only the columns already read")
+        if (allocated(error)) return
+        call batch%unit("f64", u)
+        call check(error, u == "", "a column with no declared unit should clone without one")
+    end subroutine test_clone_structure_lazy
+    !
+    !> The introspection additions: %ncols/%column_names filtered to resident columns,
+    !! %has_nulls, %get_valid_mask, %set_null(mask) and %generation.
+    !!
+    !! %has_nulls is the one with two answers rather than one: a resident column knows exactly,
+    !! while a column still in the file is answered from the footer without reading it. Both are
+    !! checked here on the same column, before and after the read, which is also what proves the
+    !! footer path is being taken at all -- residency is asserted either side.
+    subroutine test_introspection_additions(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: w
+        type(parquet_table) :: t
+        type(parquet_schema) :: s
+        real(real64) :: v(NROW)
+        logical :: valid(NROW), mask(NROW)
+        logical, allocatable :: got(:)
+        integer(int64) :: g0, g1
+        character(len=:), allocatable :: names(:)
+        integer :: i
+        character(len=*), parameter :: f = "test_run/table_introspect.parquet"
+        !
+        do i = 1, NROW
+            v(i) = real(i, real64)
+            valid(i) = i /= 3
+        end do
+        call s%init("introspect")
+        call s%add_field("v", "float64")
+        call s%add_field("w", "float64")
+        call parquet_parse_maml(s)
+        call parquet_open_writer(w, f, s)
+        call parquet_write_column(w, "v", v, is_valid=valid)
+        call parquet_write_column(w, "w", v)
+        call parquet_close_writer(w)
+        !
+        call parquet_open_table(t, f)
+        ! Nothing is resident yet, so the filtered forms report nothing while the plain ones
+        ! report everything.
+        call check(error, t%ncols() == 2 .and. t%ncols(resident_only=.true.) == 0, &
+            "resident_only should count only the columns already read")
+        if (allocated(error)) return
+        call t%column_names(names, resident_only=.true.)
+        call check(error, size(names) == 0, "resident_only should list only the columns already read")
+        if (allocated(error)) return
+        ! %has_nulls from the FOOTER -- no read, which the residency check either side proves.
+        call check(error, t%has_nulls("v"), "the footer should report the null-carrying column")
+        if (allocated(error)) return
+        call check(error, .not. t%has_nulls("w"), "the footer should clear the null-free column")
+        if (allocated(error)) return
+        call check(error, t%residency("v") == RES_EMPTY, &
+            "%has_nulls must not have read the column to answer")
+        if (allocated(error)) return
+        !
+        call t%prefetch("v")
+        call check(error, t%ncols(resident_only=.true.) == 1, &
+            "resident_only should count the column just read")
+        if (allocated(error)) return
+        call t%column_names(names, resident_only=.true.)
+        call check(error, size(names) == 1 .and. trim(names(1)) == "v", &
+            "resident_only should name the column just read")
+        if (allocated(error)) return
+        call check(error, t%has_nulls("v"), "a resident column should still report its nulls")
+        if (allocated(error)) return
+        !
+        call t%get_valid_mask("v", got)
+        call check(error, size(got) == NROW, "%get_valid_mask should have one entry per row")
+        if (allocated(error)) return
+        call check(error, all(got .eqv. valid), "%get_valid_mask should report the column's nulls")
+        if (allocated(error)) return
+        ! A null-free column comes back all .true., not unallocated.
+        call t%get_valid_mask("w", got)
+        call check(error, size(got) == NROW .and. all(got), &
+            "%get_valid_mask on a null-free column should be all .true.")
+        if (allocated(error)) return
+        !
+        ! %set_null(mask) adds the mask's nulls and leaves the rest alone.
+        mask = .true.
+        mask(5) = .false.
+        call t%set_null("v", mask)
+        call t%get_valid_mask("v", got)
+        call check(error, .not. got(5) .and. .not. got(3), &
+            "%set_null(mask) should null the masked row and keep the existing null")
+        if (allocated(error)) return
+        call check(error, got(1) .and. got(2), "%set_null(mask) should leave unmasked rows valid")
+        if (allocated(error)) return
+        !
+        ! %generation moves on a structural change and not on a value one.
+        g0 = t%generation()
+        call t%set_element("v", 1, 42.0_real64)
+        call check(error, t%generation() == g0, "a cell write should not bump the generation")
+        if (allocated(error)) return
+        call t%drop_column("w")
+        g1 = t%generation()
+        call check(error, g1 > g0, "dropping a column should bump the generation")
+        if (allocated(error)) return
+        call t%truncate(2)
+        call check(error, t%generation() > g1, "a row mutation should bump the generation")
+    end subroutine test_introspection_additions
+    !
     !> parquet_write_table carries the SOURCE file's metadata into the output on request.
     !!
     !! The natural shape of this is read, mutate, write -- by which point the table has detached and
@@ -3102,9 +3381,6 @@ contains
         call t%unit("flux", u)
         call check(error, u == "Msun", "%unit should still answer once the column is resident")
         if (allocated(error)) return
-        ! materialize_all first: %clone_structure takes each column's shape from its VALUES, so a
-        ! column that has never been read has no kind for it to copy.
-        call t%materialize_all()
         call t%clone_structure(batch)
         call batch%unit("flux", u)
         call check(error, u == "Msun", "a cloned structure should carry the unit")
@@ -4746,12 +5022,8 @@ contains
         if (allocated(error)) return
         !
         ! Appending a table with no rows: checked for compatibility, then does nothing.
-        ! (The batch is cloned from a materialized table because %clone_structure takes each
-        ! column's shape from its VALUES, which a column that has never been read does not have.)
         call parquet_open_table(t, f)
-        call t%materialize_all()
         call t%clone_structure(empty)
-        call parquet_open_table(t, f)
         call t%append(empty)
         call check(error, .not. t%is_detached() .and. t%nrows() == NROW, &
             "appending a zero-row table should not detach or change the row count")

@@ -86,7 +86,19 @@ Four things to know about `%col`:
   the column first with [`%cast`](#changing-a-columns-type) — a column already of that kind is
   left alone, so the call is safe to make unconditionally.
 - **Do not keep the pointer across a structural change.** Adding or replacing a column may
-  relocate the store. Re-fetch the pointer after any such call.
+  relocate the store, and every row-changing operation does. Re-fetch the pointer after any such
+  call. Fortran cannot detect a stale pointer and neither can this library, but `%generation()`
+  can tell you whether anything structural happened:
+
+  ```fortran
+  g = t%generation()
+  call some_procedure(t)          ! might mutate it
+  if (t%generation() /= g) call t%col("flux", p)   ! re-fetch; the old p may be stale
+  ```
+
+  The counter is deliberately conservative — every column- and row-structural call bumps it,
+  whether or not it actually moved anything — so a change in it means "re-fetch", not "definitely
+  invalidated". A call that changes nothing does not bump it.
 - **There is no pointer form for a string column.** `%col` covers the numeric, logical, temporal
   and vector kinds; `PK_STRING`/`PK_STRING_VEC` are stored as a packed variable-length buffer with
   no fixed row slots to point a Fortran array at, so a string column is reached by copy only — see
@@ -116,6 +128,27 @@ it.
   pointer does neither.
 
 `tools/benchmark_table.sh`'s access mode measures both on your own machine and column size.
+
+### Reading and writing a column's nulls alongside its values
+
+`%get`, `%col`, `%get_slice` and `%set` all take an optional `is_valid=`, one entry per row (or
+per selected row), `.true.` where the row holds a value:
+
+```fortran
+call t%get("flux", v, is_valid=ok)      ! values and their validity in one call
+call t%set("flux", v, is_valid=ok)      ! ... and back again: .false. rows become null
+```
+
+Three things to know:
+
+- **On `%set` it goes the other way.** A plain `%set` drops the column's nulls outright; passing
+  `is_valid=` writes the values and then marks the `.false.` rows null, which is the only way to
+  replace a column and its nulls in one call. A mask of the wrong length is an error.
+- **From `%col` it is a snapshot, not an alias.** Validity is a packed bitmap, so there is no
+  `logical` array in the column for a pointer to refer to. Writing through the value pointer
+  afterwards does not update the mask you were given.
+- **It is the same data as `%get_valid_mask(name, mask)`**, which is the way to ask for validity
+  on its own without copying the values too.
 
 ### Working with a column whose type you do not know
 
@@ -151,8 +184,8 @@ column is numeric at all.
 | call | answer |
 |---|---|
 | `t%nrows()` | rows every column holds |
-| `t%ncols()` | number of columns |
-| `call t%column_names(names)` | every column name, in file order |
+| `t%ncols([resident_only])` | number of columns; `resident_only=.true.` counts only the ones already read |
+| `call t%column_names(names [, resident_only])` | every column name, in file order; `resident_only=.true.` lists only the ones already read |
 | `t%has_column(name)` | whether a column of that name exists |
 | `t%kind(name)` | its `PK_*` kind (`PK_NONE` if unreadable) |
 | `t%width(name)` | values per row: 1 for a scalar column, the element count for a vector one |
@@ -160,6 +193,9 @@ column is numeric at all.
 | `t%residency(name)` | `RES_FULL` once read, `RES_EMPTY` before that (and for an unreadable column) |
 | `t%is_supported(name)` | whether its physical type is one this library can read |
 | `t%is_null(name, i)` | whether row `i` of that column is null |
+| `t%has_nulls(name [, found])` | whether the column holds any null — from the file's footer if it has not been read |
+| `call t%get_valid_mask(name, mask [, found])` | its per-row validity as a `logical` array, `.true.` where the row holds a value |
+| `t%generation()` | a counter bumped by every structural change (see [pointers](#two-ways-to-reach-a-column)) |
 | `t%is_detached()` | whether a row-changing operation has cut the table loose from its file |
 | `call t%filename(f)` | the file this table was opened from, or `""` for one built in memory |
 | `call t%get_file_metadata(key, value, [found])` | one key from the source file's metadata — an error on a table built in memory, which has no file to ask |
@@ -486,6 +522,9 @@ r = t%row(42)
 call r%get("mass", m)
 ```
 
+For a single cell there is no need for a handle at all — `call t%get_element("mass", 42, m)` is
+the one-call form (see [Replacing values](#replacing-values)).
+
 ## Picking rows out of a column
 
 `%get_slice` copies a selection of rows rather than the whole column. Build the selection with
@@ -795,11 +834,16 @@ By default every row is written and the column's null bitmap is dropped outright
 `%set` the column holds no nulls at all. Pass `modify_nulls=.false.` to leave the null rows, and
 their bitmap, exactly as they were.
 
-To write a single cell, use `%set_element`:
+To write a single cell, use `%set_element`, and to read one, `%get_element`:
 
 ```fortran
 call t%set_element("mass", 42, 1.75_real64)   ! row 42 of the mass column
+call t%get_element("mass", 42, m)             ! ... and back out again
 ```
+
+`%get_element` widens into your variable exactly as `%get` does, takes either integer kind for
+the row index, and is the one-call form of the two-step row handle (`r = t%row(42)` then
+`call r%get("mass", m)` — see [One row at a time](#one-row-at-a-time)).
 
 The value's kind must match the column's exactly, as it does for `%set`, and writing a value
 **clears that row's null** — a cell cannot be both a value and missing.
@@ -811,6 +855,20 @@ time, and that is true even for a vector column: `%set_null` on a `float64` colu
 nulls the whole row, all three elements together. A single element of a vector row cannot be null
 on its own — the file format this library reads can express it, but the table cannot represent it,
 so a per-element null read from a file is widened to the whole row.
+
+`%set_null` also takes a **mask** — one `logical` per row, `.true.` meaning the row holds a value,
+the same shape `%get_valid_mask` hands back:
+
+```fortran
+call t%get_valid_mask("flux", valid)
+valid = valid .and. (flux > 0.0_real64)
+call t%set_null("flux", valid)      ! nulls every row the mask marks .false.
+```
+
+It only ever *adds* nulls: a `.true.` entry leaves the row exactly as it was, so a mask describing
+only part of what you know cannot clear a null you did not mention. `%has_nulls(name)` answers
+whether there are any at all — and for a column that has not been read yet it answers from the
+file's footer without reading it, so it is cheap enough to ask before deciding to.
 
 A column that holds no null at all carries no null bitmap, which is why `%compact_validity(name)`
 exists: it drops the bitmap of a column that once had nulls and no longer does. A whole-column
@@ -840,7 +898,8 @@ look:
 
 - **`%drop_column` never reads the column it drops.** Dropping one that was never touched is the
   memory-reclaiming case and costs nothing; the remaining columns keep their order, so
-  `%column_names` still reads like the file.
+  `%column_names` still reads like the file. Keeping that order costs nothing either — the
+  remaining columns' storage is handed over rather than copied.
 - **`%rename_column` changes only the name you look the column up by.** A file-backed column that
   has not been read yet still reads from the same physical column afterwards, which is what lets a
   rename compose with a MAML [remap](#renaming-a-files-columns-with-a-read-in-maml) in either
@@ -983,6 +1042,10 @@ call batch%set("id", ids)         ! ... and fill them
 call batch%set("mass", masses)
 call t%append(batch)
 ```
+
+`%clone_structure` reads nothing: every column's kind and width are known from the file's schema,
+so a batch can be cloned from a freshly opened table without touching a column. Pass
+`resident_only=.true.` to clone only the columns that have been read.
 
 `%append` requires the appended table's columns to be a subset of this table's, with matching
 kinds, widths and units. A column this table has and the batch does not is **null-filled**; a

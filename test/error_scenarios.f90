@@ -1151,6 +1151,8 @@ program error_scenarios
         call scenario_table_write_unsupported_column()
     case ("table_write_unbuilt_schema")
         call scenario_table_write_unbuilt_schema()
+    case ("table_set_is_valid_length")
+        call scenario_table_set_is_valid_length()
     case ("table_copy_metadata_unknown_key")
         call scenario_table_copy_metadata_unknown_key()
     case ("table_copy_metadata_in_memory")
@@ -9791,6 +9793,18 @@ contains
         call parquet_write_table(t, "test_run/es_table_wunsupported_out.parquet", s)   ! -> aborts
         print '(a)', "unexpectedly wrote a table's unsupported column"
     end subroutine scenario_table_write_unsupported_column
+
+    !> A caller-supplied validity mask must have one entry per row: a short one would silently
+    !! leave the tail of the column at whatever nulls it had, which is exactly the mistake.
+    subroutine scenario_table_set_is_valid_length()
+        type(parquet_table) :: t
+        logical :: valid(2)
+        call write_table_scenario_fixture("test_run/es_isvalid_len.parquet")
+        call parquet_open_table(t, "test_run/es_isvalid_len.parquet")
+        valid = .true.
+        call t%set("id", [7_int32, 8_int32, 9_int32], is_valid=valid)   ! 3 rows, 2 entries -> aborts
+        print '(a)', "unexpectedly accepted an is_valid mask of the wrong length"
+    end subroutine scenario_table_set_is_valid_length
 
     !> Writes a fixture carrying two metadata keys, for the copy_metadata scenarios below.
     subroutine write_metadata_scenario_fixture(fname)

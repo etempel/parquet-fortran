@@ -69,7 +69,8 @@ contains
             new_unittest("string vector set_at/get_at and modify_nulls", test_string_vector_set_at), &
             new_unittest("clear_null marks a row valid again", test_clear_null), &
             new_unittest("every PK_* constant has a name", test_kind_names_complete), &
-            new_unittest("modify_nulls= is honoured by every kind", test_matrix_modify_nulls_all_kinds) &
+            new_unittest("modify_nulls= is honoured by every kind", test_matrix_modify_nulls_all_kinds), &
+            new_unittest("move_from hands storage over for every kind", test_matrix_move_from_all_kinds) &
             ]
     end subroutine collect_tests_parquet_columns
     !
@@ -1367,6 +1368,85 @@ contains
     !
     !> One kind's null round-trip: mark row 2 null, and check the column agrees -- while row 1,
     !> which was never touched, does not.
+    !> %move_from hands storage over for EVERY kind, leaving the source empty.
+    !!
+    !! The component list inside `move_from` is written out by hand, exactly as `clear`'s is, so
+    !! the failure this guards against is a kind whose storage array was forgotten there: the move
+    !! would silently drop that array and the destination would come back with a kind and a row
+    !! count but no values. Sweeping all 18 kinds is what makes that a test failure rather than a
+    !! future surprise.
+    subroutine test_matrix_move_from_all_kinds(error)
+        type(error_type), allocatable, intent(out) :: error
+        !
+        call move_sweep(error, PK_INT32, 1_int32, "PK_INT32")
+        if (allocated(error)) return
+        call move_sweep(error, PK_INT64, 1_int32, "PK_INT64")
+        if (allocated(error)) return
+        call move_sweep(error, PK_FLOAT32, 1_int32, "PK_FLOAT32")
+        if (allocated(error)) return
+        call move_sweep(error, PK_FLOAT64, 1_int32, "PK_FLOAT64")
+        if (allocated(error)) return
+        call move_sweep(error, PK_LOGICAL, 1_int32, "PK_LOGICAL")
+        if (allocated(error)) return
+        call move_sweep(error, PK_STRING, 1_int32, "PK_STRING")
+        if (allocated(error)) return
+        call move_sweep(error, PK_DATE, 1_int32, "PK_DATE")
+        if (allocated(error)) return
+        call move_sweep(error, PK_TIME, 1_int32, "PK_TIME")
+        if (allocated(error)) return
+        call move_sweep(error, PK_TIMESTAMP, 1_int32, "PK_TIMESTAMP")
+        if (allocated(error)) return
+        call move_sweep(error, PK_INT32_VEC, 2_int32, "PK_INT32_VEC")
+        if (allocated(error)) return
+        call move_sweep(error, PK_INT64_VEC, 2_int32, "PK_INT64_VEC")
+        if (allocated(error)) return
+        call move_sweep(error, PK_FLOAT32_VEC, 2_int32, "PK_FLOAT32_VEC")
+        if (allocated(error)) return
+        call move_sweep(error, PK_FLOAT64_VEC, 2_int32, "PK_FLOAT64_VEC")
+        if (allocated(error)) return
+        call move_sweep(error, PK_LOGICAL_VEC, 2_int32, "PK_LOGICAL_VEC")
+        if (allocated(error)) return
+        call move_sweep(error, PK_STRING_VEC, 2_int32, "PK_STRING_VEC")
+        if (allocated(error)) return
+        call move_sweep(error, PK_DATE_VEC, 2_int32, "PK_DATE_VEC")
+        if (allocated(error)) return
+        call move_sweep(error, PK_TIME_VEC, 2_int32, "PK_TIME_VEC")
+        if (allocated(error)) return
+        call move_sweep(error, PK_TIMESTAMP_VEC, 2_int32, "PK_TIMESTAMP_VEC")
+    end subroutine test_matrix_move_from_all_kinds
+    !
+    !> One kind's move: the destination ends up with everything, the source with nothing.
+    subroutine move_sweep(error, kind, width, label)
+        type(error_type), allocatable, intent(inout) :: error
+        integer, intent(in) :: kind
+        integer(int32), intent(in) :: width
+        character(len=*), intent(in) :: label
+        type(parquet_column) :: src, dst
+        character(len=:), allocatable :: u
+        !
+        call src%init(kind, 3_int64, width=width, unit="widget")
+        call src%set_null(2_int64)
+        ! The destination starts out holding something else, which the move must release.
+        call dst%init(PK_INT32, 7_int64)
+        call dst%move_from(src)
+        call check(error, dst%kindof() == kind, label//": move_from should carry the kind over")
+        if (allocated(error)) return
+        call check(error, dst%length() == 3_int64, label//": move_from should carry the row count over")
+        if (allocated(error)) return
+        call check(error, dst%colwidth() == width, label//": move_from should carry the width over")
+        if (allocated(error)) return
+        call check(error, dst%is_null(2_int64), label//": move_from should carry the validity over")
+        if (allocated(error)) return
+        call dst%unit_string(u)
+        call check(error, u == "widget", label//": move_from should carry the unit over")
+        if (allocated(error)) return
+        ! ...and the source is left as though it had just been declared -- NOT still claiming a
+        ! kind and a row count for storage it no longer owns.
+        call check(error, src%kindof() == PK_NONE, label//": move_from should leave the source empty")
+        if (allocated(error)) return
+        call check(error, src%length() == 0_int64, label//": move_from should leave the source with no rows")
+    end subroutine move_sweep
+    !
     subroutine null_sweep(error, kind, width, label)
         type(error_type), allocatable, intent(inout) :: error
         integer, intent(in) :: kind

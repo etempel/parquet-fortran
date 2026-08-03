@@ -36,6 +36,28 @@ contains
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_null_i64
     !
+    module procedure set_null_mask
+        integer :: idx
+        integer(int64) :: i
+        character(len=32) :: got, want
+        character(len=:), allocatable :: sfx
+        !
+        call table_resolve(self, name, "set_null", idx)
+        if (size(is_valid, kind=int64) /= self%row_count) then
+            write(got, "(I0)") size(is_valid, kind=int64)
+            write(want, "(I0)") self%row_count
+            call table_context_suffix(self%cache, name, sfx)
+            error stop EP // "set_null: the mask has " // trim(got) // " entries but the table " // &
+                "has " // trim(want) // " rows" // sfx
+        end if
+        ! Only ever adds nulls: a .true. entry says nothing about a row that is already null, and
+        ! clearing it would make this the inverse of a call the caller did not make.
+        do i = 1_int64, self%row_count
+            if (.not. is_valid(i)) call self%cache%cols(idx)%values%set_null(i)
+        end do
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_null_mask
+    !
     module procedure clear_null_i32
         call self%clear_null(name, int(i, int64))
     end procedure clear_null_i32
@@ -71,6 +93,39 @@ contains
         self%cache%cols(idx)%user_populated = .true.
     end procedure table_put_column
     !
+    module procedure move_table_column
+        if (allocated(src%name)) then
+            dst%name = src%name
+        else if (allocated(dst%name)) then
+            deallocate(dst%name)
+        end if
+        if (allocated(src%file_name)) then
+            dst%file_name = src%file_name
+        else if (allocated(dst%file_name)) then
+            deallocate(dst%file_name)
+        end if
+        if (allocated(src%unit)) then
+            dst%unit = src%unit
+        else if (allocated(dst%unit)) then
+            deallocate(dst%unit)
+        end if
+        dst%declared_kind = src%declared_kind
+        dst%width = src%width
+        dst%width_pending = src%width_pending
+        dst%cast_pending = src%cast_pending
+        dst%file_source = src%file_source
+        dst%predefined = src%predefined
+        dst%user_populated = src%user_populated
+        dst%supported = src%supported
+        dst%residency = src%residency
+        if (allocated(src%rg_loaded)) then
+            call move_alloc(src%rg_loaded, dst%rg_loaded)
+        else if (allocated(dst%rg_loaded)) then
+            deallocate(dst%rg_loaded)
+        end if
+        call dst%values%move_from(src%values)
+    end procedure move_table_column
+    !
     module procedure table_drop_column
         integer :: idx, i
         logical :: forced
@@ -100,8 +155,13 @@ contains
         ! Shift the tail down over the dropped slot. The store is name-keyed, so the order of the
         ! remaining slots is not itself meaningful -- but %column_names reports it, and keeping it
         ! stable makes a drop look like a drop rather than a reshuffle.
+        ! MOVED, not assigned: intrinsic assignment on a parquet_table_column deep-copies its
+        ! `values`, so shifting the tail of a 40-column, 8 GB table down by one used to memcpy
+        ! roughly 8 GB inside the procedure documented as the way to give memory back. %move_from
+        ! hands the storage over instead, so the shift costs a descriptor's worth of pointers per
+        ! slot whatever the column holds.
         do i = idx, self%cache%ncols - 1
-            self%cache%cols(i) = self%cache%cols(i + 1)
+            call move_table_column(self%cache%cols(i), self%cache%cols(i + 1))
         end do
         ! Reset the vacated tail slot field-by-field rather than via `parquet_table_column()`:
         ! ifx rejects a default structure constructor here (Structure constructor may not have
@@ -124,6 +184,7 @@ contains
             if (allocated(slot%rg_loaded)) deallocate(slot%rg_loaded)
         end associate
         self%cache%ncols = self%cache%ncols - 1
+        self%cache%generation = self%cache%generation + 1_int64
     end procedure table_drop_column
     !
     module procedure table_rename_column
@@ -156,6 +217,7 @@ contains
         ! Only the INTERNAL name changes. file_name is what a later first touch reads from, so a
         ! renamed but still-unread file-backed column keeps working.
         self%cache%cols(idx)%name = trim(new_name)
+        self%cache%generation = self%cache%generation + 1_int64
     end procedure table_rename_column
     !
     module procedure table_copy_column
@@ -198,6 +260,7 @@ contains
         self%cache%cols(new_idx)%width = self%cache%cols(new_idx)%values%colwidth()
         self%cache%cols(new_idx)%residency = RES_FULL
         self%cache%cols(new_idx)%user_populated = .true.
+        self%cache%generation = self%cache%generation + 1_int64
     end procedure table_copy_column
     !
     module procedure table_cast
@@ -264,6 +327,7 @@ contains
         self%cache%cols(idx)%declared_kind = to_kind
         self%cache%cols(idx)%cast_pending = .false.
         self%cache%cols(idx)%user_populated = .true.
+        self%cache%generation = self%cache%generation + 1_int64
     end procedure table_cast
     !
     ! ---- conversion between numeric kinds, shared by %cast and %copy_column ------------------

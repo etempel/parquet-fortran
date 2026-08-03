@@ -495,6 +495,9 @@ contains
         ! cannot drift apart.
         call self%cache%cols(idx)%values%clear()
         self%cache%cols(idx)%residency = RES_EMPTY
+        ! A re-read replaces the column's storage outright, so any pointer into it is stale --
+        ! which is what the generation counter is for (%generation).
+        self%cache%generation = self%cache%generation + 1_int64
         call table_touch(self%cache, table_scope_of(self), idx, "reload")
     end procedure table_reload
     !

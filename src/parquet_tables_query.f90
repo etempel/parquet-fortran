@@ -32,23 +32,42 @@ contains
     end procedure table_nrows
     !
     module procedure table_ncols
+        integer :: i
+        !
         call table_check_open(self, "ncols")
         n = self%cache%ncols
+        if (.not. present(resident_only)) return
+        if (.not. resident_only) return
+        n = 0
+        do i = 1, self%cache%ncols
+            if (self%cache%cols(i)%residency == RES_FULL) n = n + 1
+        end do
     end procedure table_ncols
     !
     module procedure table_column_names
-        integer :: i, maxlen
+        integer :: i, maxlen, n
+        logical :: only_res
         !
         call table_check_open(self, "column_names")
+        only_res = .false.
+        if (present(resident_only)) only_res = resident_only
         ! A fixed-length array cannot hold ragged names, so the width is the longest name
-        ! present; len=1 keeps a zero-column table's result well-formed rather than len=0.
+        ! present; len=1 keeps a zero-column table's result well-formed rather than len=0. Sized
+        ! over the columns actually being reported, so a filtered list is not padded to the width
+        ! of a name it leaves out.
         maxlen = 1
+        n = 0
         do i = 1, self%cache%ncols
+            if (only_res .and. self%cache%cols(i)%residency /= RES_FULL) cycle
+            n = n + 1
             if (len(self%cache%cols(i)%name) > maxlen) maxlen = len(self%cache%cols(i)%name)
         end do
-        allocate(character(len=maxlen) :: names(self%cache%ncols))
+        allocate(character(len=maxlen) :: names(n))
+        n = 0
         do i = 1, self%cache%ncols
-            names(i) = self%cache%cols(i)%name
+            if (only_res .and. self%cache%cols(i)%residency /= RES_FULL) cycle
+            n = n + 1
+            names(n) = self%cache%cols(i)%name
         end do
     end procedure table_column_names
     !
@@ -140,6 +159,58 @@ contains
         if (idx == 0) return
         ok = self%cache%cols(idx)%supported
     end procedure table_is_supported
+    !
+    module procedure table_generation
+        call table_check_open(self, "generation")
+        g = self%cache%generation
+    end procedure table_generation
+    !
+    module procedure table_has_nulls
+        integer :: idx
+        integer(int64) :: rg_lo, rg_hi
+        !
+        any_null = .false.
+        call table_lookup_or_fail(self, name, "has_nulls", idx, found)
+        if (idx == 0) return
+        ! A resident column knows the answer exactly. A file-backed one that has NOT been read is
+        ! answered from the file's footer instead of by reading it -- the whole reason this exists
+        ! rather than the caller reading the column and scanning it. The footer answer is
+        ! conservative (see the interface's own note), and it is not asked for a column that is
+        ! not file-backed or a table that has detached, since neither has a footer to ask.
+        if (self%cache%cols(idx)%residency == RES_FULL) then
+            any_null = self%cache%cols(idx)%values%any_null()
+            return
+        end if
+        if (.not. self%cache%cols(idx)%file_source) return
+        if (.not. self%cache%file_backed) return
+        ! Scoped to the row groups this table actually covers, so a slice is not told about nulls
+        ! in rows it does not hold. 0/0 asks about the whole file, which is right for a whole-file
+        ! table; a slice narrows it to its covering row groups.
+        rg_lo = 0_int64
+        rg_hi = 0_int64
+        if (allocated(self%cache%rg_bounds)) then
+            call rg_covering_range(self%cache%rg_bounds, self%row_lo, self%row_hi, rg_lo, rg_hi)
+        end if
+        any_null = parquet_column_has_nulls(self%cache%reader, self%cache%cols(idx)%file_name, rg_lo, rg_hi)
+    end procedure table_has_nulls
+    !
+    module procedure table_get_valid_mask
+        integer :: idx
+        integer(int64) :: i
+        !
+        call table_resolve(self, name, "get_valid_mask", idx, found)
+        if (idx == 0) then
+            allocate(mask(0))
+            return
+        end if
+        allocate(mask(self%cache%cols(idx)%values%length()))
+        ! Always filled, never left unallocated for a null-free column: a caller would then have
+        ! to test allocated() before every use, and the one thing this procedure exists to give
+        ! them is an array they can use directly.
+        do i = 1_int64, size(mask, kind=int64)
+            mask(i) = .not. self%cache%cols(idx)%values%is_null(i)
+        end do
+    end procedure table_get_valid_mask
     !
     module procedure table_is_detached
         call table_check_open(self, "is_detached")
@@ -258,6 +329,41 @@ contains
         error stop EP // trim(proc) // ": this table has been detached from its file by " // &
             "a row-structural change; materialize a column before mutating rows" // sfx
     end procedure table_check_not_detached
+    !
+    module procedure table_valid_mask_of
+        integer(int64) :: i
+        !
+        allocate(mask(cache%cols(idx)%values%length()))
+        do i = 1_int64, size(mask, kind=int64)
+            mask(i) = .not. cache%cols(idx)%values%is_null(i)
+        end do
+    end procedure table_valid_mask_of
+    !
+    module procedure table_valid_mask_rows
+        integer(int64) :: k
+        !
+        allocate(mask(size(rows)))
+        do k = 1_int64, size(rows, kind=int64)
+            mask(k) = .not. cache%cols(idx)%values%is_null(rows(k))
+        end do
+    end procedure table_valid_mask_rows
+    !
+    module procedure table_apply_valid
+        integer(int64) :: i
+        character(len=32) :: got, want
+        character(len=:), allocatable :: sfx
+        !
+        if (size(is_valid, kind=int64) /= self%row_count) then
+            write(got, "(I0)") size(is_valid, kind=int64)
+            write(want, "(I0)") self%row_count
+            call table_context_suffix(self%cache, name, sfx)
+            error stop EP // trim(proc) // ": is_valid has " // trim(got) // " entries but the " // &
+                "table has " // trim(want) // " rows" // sfx
+        end if
+        do i = 1_int64, self%row_count
+            if (.not. is_valid(i)) call self%cache%cols(idx)%values%set_null(i)
+        end do
+    end procedure table_apply_valid
     !
     module procedure table_require_kind
         character(len=:), allocatable :: sfx, got, want

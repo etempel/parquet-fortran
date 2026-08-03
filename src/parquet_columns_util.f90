@@ -10,7 +10,7 @@
 !! submodule's siblings, while one contained in the *module* is reported as
 !! `-Wunused-function` when the module is compiled as its own translation unit (its only
 !! callers being in other files). Declaring the interfaces in the module and implementing them
-!! here gives every submodule access with no warnings, and matches how `parquet.f90` already
+!! here gives every submodule access with no warnings, and matches how `parquet_core.f90` already
 !! shares its private helpers.
 !!
 !! **The bitmap.** A hand-rolled `integer(int64)` block array with `1 = null`, `0 = valid`, so

@@ -218,6 +218,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **One `use parquet` now covers the whole library.** It brings the `parquet_table` container, the
+  `parquet_column` foundation and its `PK_*` kind constants into scope alongside the readers,
+  writers, schemas, string columns and temporal types it already carried, so a program mixing a
+  table with a kind constant and a schema no longer needs four `use` statements. This is purely
+  additive — every existing `use parquet` keeps compiling and gains names, and the individual
+  modules (`parquet_tables`, `parquet_columns`, `parquet_strings`, `parquet_temporal`) remain
+  usable on their own for a narrower import. Internally, `parquet` is now a facade module and the
+  reader/writer/schema implementation it re-exports has moved to a new module, `parquet_core`
+  (`src/parquet.f90` → `src/parquet_core.f90`). **`parquet_core` is internal**: it is not covered
+  by the semantic-versioning promise and may be renamed or restructured in any release — `use
+  parquet` is the supported spelling. Because `parquet` re-exports rather than defines, the
+  generated API reference lists each name on its implementing module's page; use the site-wide
+  procedures/types listings to look a name up.
+
 - **A vector column's nulls are now tracked per ELEMENT rather than per row, throughout the
   `parquet_table`/`parquet_column` layer.** A per-element null read from a parquet file is no
   longer widened to the whole row, and writing a table back out no longer broadcasts a row's null

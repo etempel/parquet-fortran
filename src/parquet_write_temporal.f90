@@ -3,9 +3,9 @@
 !===========================================
 !> Temporal (date/time/timestamp) write specifics, scalar and matrix, whole-
 !> column and row-group-chunked: bodies of the module procedures declared in
-!> parquet.f90's interface block, plus the temporal-only private helpers
+!> parquet_core.f90's interface block, plus the temporal-only private helpers
 !> (preamble/unit-resolution/validity/flat-write workers) they depend on.
-submodule (parquet:parquet_write) parquet_write_temporal
+submodule (parquet_core:parquet_write) parquet_write_temporal
     implicit none
 contains
 

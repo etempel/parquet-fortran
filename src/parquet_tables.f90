@@ -39,13 +39,13 @@
 !!   fine and takes no lock, and each thread may open and read its own table. A first touch on a
 !!   table shared across a parallel region is a hard error -- prefetch before the region instead.
 !!
-!! Depends on `parquet_columns` (the value store) and `parquet` (the reader/writer it drives).
+!! Depends on `parquet_columns` (the value store) and `parquet_core` (the reader/writer it drives).
 module parquet_tables
     use, intrinsic :: iso_fortran_env, only : int32, int64, real32, real64
     use parquet_columns
     use parquet_strings, only : parquet_string_column
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp
-    use parquet, only : parquet_reader, parquet_writer, parquet_schema, parquet_column_type, &
+    use parquet_core, only : parquet_reader, parquet_writer, parquet_schema, parquet_column_type, &
         parquet_open_reader, parquet_close_reader, parquet_get_nrows, parquet_get_col_size, &
         parquet_get_column_names, parquet_get_column_type, parquet_column_exists, &
         parquet_release_column, parquet_read_column, parquet_get_metadata, parquet_get_string_length, &

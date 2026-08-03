@@ -32,16 +32,30 @@ end program mean_mass
 
 ### What to `use`
 
-The table layer is its own module, and it does not re-export the rest of the library — a program
-that names a kind constant or a schema has to say where it comes from:
+**`use parquet` is enough for everything on this page.** It re-exports the whole library, so a
+program that mixes a table with a kind constant, a schema, a filter and a timestamp needs exactly
+one `use` statement:
 
-| you write | you need |
+```fortran
+use parquet          ! parquet_table, PK_FLOAT64, parquet_schema, parquet_filter, ... all in scope
+```
+
+The example above says `use parquet_tables` instead, and that still works: each layer remains its
+own module and can be named individually when you want a narrower import (it compiles marginally
+faster, and it documents which layers a source file actually depends on). The table below says
+which module each name lives in, for when you want that.
+
+| you write | its own module |
 |---|---|
-| `parquet_table`, `parquet_open_table`, `parquet_new_table`, `parquet_write_table`, `parquet_table_row`, `parquet_slice`/`parquet_slice_range`/`parquet_slice_list`, `parquet_table_row_group_bounds`, `RES_EMPTY`/`RES_FULL` | `use parquet_tables` |
-| the `PK_*` kind constants, `parquet_kind_name` | `use parquet_columns` |
-| `parquet_schema`, `parquet_parse_maml`, `parquet_filter`, `parquet_sortkey`, `parquet_read_qc` | `use parquet` |
-| `parquet_string_column` | `use parquet_strings` |
-| `parquet_date`, `parquet_time`, `parquet_timestamp` | `use parquet_temporal` |
+| `parquet_table`, `parquet_open_table`, `parquet_new_table`, `parquet_write_table`, `parquet_table_row`, `parquet_slice`/`parquet_slice_range`/`parquet_slice_list`, `parquet_table_row_group_bounds`, `RES_EMPTY`/`RES_FULL` | `parquet_tables` |
+| the `PK_*` kind constants, `parquet_kind_name` | `parquet_columns` |
+| `parquet_schema`, `parquet_parse_maml`, `parquet_filter`, `parquet_sortkey`, `parquet_read_qc` | `parquet_core` (internal — reach these through `use parquet`) |
+| `parquet_string_column` | `parquet_strings` |
+| `parquet_date`, `parquet_time`, `parquet_timestamp` | `parquet_temporal` |
+
+`parquet_core` is the one entry there you should not name directly: it is an internal
+implementation module that may be renamed or restructured in any release, and `use parquet` is
+what the library's [API stability](../index.html#important-behavior) promise covers.
 
 ## Two ways to reach a column
 

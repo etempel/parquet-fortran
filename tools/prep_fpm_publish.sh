@@ -135,6 +135,7 @@ KEEP_PATHS=(
     README.md
     VERSION.txt
     src/parquet.f90
+    src/parquet_core.f90
     app/program.f90
     tools/generate_parquet_maml.sh
     tools/convert_fits_to_parquet.py

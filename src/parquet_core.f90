@@ -1,12 +1,19 @@
 !===========================================
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
 !===========================================
-!> Public API for reading and writing Apache Parquet files: schema
+!> Core reader/writer implementation for Apache Parquet files: schema
 !> construction/validation from MAML, writers/readers, row filtering,
 !> quality-control (qc:) enforcement, and flat key-value table metadata.
 !> Submodules parquet_write.f90/parquet_read.f90/parquet_metadata.f90 hold the
 !> bodies of the module procedures declared in the interface block below.
-module parquet
+!>
+!> **This is an internal implementation module -- do not `use parquet_core`
+!> directly.** Everything public here is re-exported by the `parquet` facade
+!> module (parquet.f90), which is the one and only supported entry point and
+!> the surface the library's semantic-versioning promise covers. `parquet_core`
+!> has to stay accessible because the sibling modules (parquet_tables,
+!> ...) use it, but its name and contents may change in any release.
+module parquet_core
     use iso_c_binding
     use iso_fortran_env, only: int8, int32, int64, real32, real64
     use parquet_bindings
@@ -18,11 +25,6 @@ module parquet
     implicit none
     private
     !
-    character(len=*),parameter:: cversion = "v1.3.0 (2026-08-03)" !! version info
-#ifndef RELEASE_VERSION
-#  define RELEASE_VERSION 0.1
-#endif
-
     !> Valid values for a field's data_type in a MAML file, checked by
     !> parquet_validate_maml (parquet_metadata_validate.f90) and schema%add_field
     !> (parquet_metadata.f90) alike -- add new supported types here as needed.
@@ -316,7 +318,7 @@ module parquet
     !> implementation detail (the raw C handle, schema bookkeeping, write
     !> tracking) that parquet_write_column/parquet_open_writer/etc. manage
     !> internally. Never referenced directly by any test or consumer -- only
-    !> parquet.f90's own submodules (parquet_write, parquet_read,
+    !> parquet_core.f90's own submodules (parquet_write, parquet_read,
     !> parquet_metadata) need access, which `private` here still allows.
     type parquet_writer
         private
@@ -1115,7 +1117,6 @@ module parquet
     public :: parquet_finish_row_group
     public :: parquet_get_chunk_size
     public :: parquet_close_writer
-    public :: parquet_get_version
     public :: parquet_parse_maml
     public :: parquet_load_maml_file
     public :: parquet_load_qc_maml_file
@@ -3639,69 +3640,6 @@ module parquet
     end interface
 
 contains
-
-    !> Returns a version string. Default (mode absent): the RELEASE_VERSION build
-    !> macro's bare release number; prints a WARNING to stdout first if that
-    !> disagrees with cversion (a hand-maintained "vX.Y.Z (date)" string), which
-    !> signals a build that skipped fpm's macro substitution or a version bump
-    !> missed on one side. mode="internal" instead returns cversion verbatim.
-    !> mode="arrow"/mode="parquet" return the actually-linked Arrow library's
-    !> runtime version, respectively the compile-time Parquet C++ library
-    !> version, each formatted "major.minor.patch". Any other mode value is an
-    !> error.
-    subroutine parquet_get_version(ver_string, mode)
-        implicit none
-        character(len=:), allocatable, intent(out) :: ver_string !! resulting version string.
-        character(len=*), intent(in), optional :: mode
-        !! "internal" | "arrow" | "parquet"; absent = default RELEASE_VERSION behavior.
-        integer :: i
-        integer(c_int) :: major, minor, patch
-        character(len=32) :: buf
-        !
-! Accept solution from https://stackoverflow.com/questions/31649691/stringify-macro-with-gnu-gfortran
-! which provides the easiest way to pass a macro to a string in Fortran complying with both
-! gfortran traditional cpp and the standard cpp syntaxes
-#ifdef __GFORTRAN__
-#  define STRINGIFY_START(X) "&
-#  define STRINGIFY_END(X) &X"
-#else
-#  define STRINGIFY_(X) #X
-#  define STRINGIFY_START(X) &
-#  define STRINGIFY_END(X) STRINGIFY_(X)
-#endif
-
-        ver_string = STRINGIFY_START(RELEASE_VERSION)
-        STRINGIFY_END(RELEASE_VERSION)
-        !
-        i = index(cversion, " ")
-        !
-        if (cversion(2:i-1) /= ver_string) then ! GCOVR_EXCL_START -- gcov attribution artifact
-            write(*,*) "WARNING: using development parquet-fortran library!"
-            write(*,*) "         library version: ", trim(cversion)
-            write(*,*) "         RELEASE_VERSION: ", trim(ver_string)
-        end if ! GCOVR_EXCL_STOP
-        !
-        if (present(mode)) then
-            select case (mode)
-            case ("internal")
-                ver_string = trim(cversion)
-            case ("arrow")
-                call parquet_get_arrow_version(major, minor, patch)
-                write(buf, '(i0,".",i0,".",i0)') major, minor, patch
-                ver_string = trim(buf)
-            case ("parquet")
-                call parquet_get_parquet_version(major, minor, patch)
-                write(buf, '(i0,".",i0,".",i0)') major, minor, patch
-                ver_string = trim(buf)
-            case default
-                error stop "parquet_get_version: invalid mode '" // mode // &
-                    "' (must be 'internal', 'arrow', or 'parquet')"
-            end select
-        else
-            ver_string = trim(ver_string)
-        end if
-        !
-    end subroutine parquet_get_version
 
     !> Resizes Arrow's global CPU thread pool -- the single pool shared by
     !> every parquet_reader/parquet_writer in this process that has

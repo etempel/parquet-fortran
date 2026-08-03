@@ -21,7 +21,7 @@
 !> key. Direction words are case-insensitive. Giving both forms at once ("-dec desc") is a
 !> mistake worth reporting rather than silently resolving, since the two could equally be read as
 !> agreeing or as cancelling out.
-submodule (parquet:parquet_read) parquet_read_sort
+submodule (parquet_core:parquet_read) parquet_read_sort
     implicit none
     !
 contains

@@ -3,12 +3,12 @@
 !===========================================
 !
 !> Everything here backs the parquet_get_metadata generic (declared in
-!> parquet.f90): reader%metadata is populated once, by parquet_open_reader
+!> parquet_core.f90): reader%metadata is populated once, by parquet_open_reader
 !> (parquet_read.f90) copying the Arrow schema's flat key-value metadata,
 !> so every call here only scans that in-memory array -- it never touches
 !> the file. Messages follow the "<proc>: <message>" error stop convention
 !> used throughout this module.
-submodule (parquet:parquet_metadata) parquet_metadata_get
+submodule (parquet_core:parquet_metadata) parquet_metadata_get
     implicit none
 contains
 

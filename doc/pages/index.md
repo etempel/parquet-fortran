@@ -22,6 +22,16 @@ front page. For the full per-procedure API reference (every public type/function
 under `use parquet`), see the [modules](../lists/modules.html) and
 [procedures](../lists/procedures.html) listings generated from source.
 
+**One `use parquet` brings in the whole library** — readers and writers, schemas and MAML, the
+`parquet_table` container, the `parquet_column` foundation and its `PK_*` kind constants, compact
+string columns, and the date/time/timestamp types. Every page below assumes that single import.
+The individual modules (`parquet_tables`, `parquet_columns`, `parquet_strings`, `parquet_temporal`,
+`parquet_maml_base`) are still there and can be named directly when you want a narrower import;
+`parquet_core` is the one exception — it is internal, and `use parquet` is what the library's API
+stability promise covers. Because `parquet` re-exports rather than defines, the generated
+[procedures](../lists/procedures.html) and [types](../lists/types.html) listings are the reliable
+place to look a name up, rather than the `parquet` module's own page.
+
 Ordered roughly by what a new user needs first; reference/advanced material is last. This list and
 the `ordered_subpage:` frontmatter above are kept in the same order by hand — there is no automatic
 check that they stay in sync, so update both together if you reorder either one.

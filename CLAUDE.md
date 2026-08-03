@@ -318,8 +318,10 @@ instead — expect it to be very noisy (several thousand warnings), dominated by
   roughly N** — and a large chunk of the entries are FORD's own unnamed `'unknown'` placeholders,
   which name no entity at all and cannot be acted on even in principle.
 
-**The one category that is genuinely load-bearing is `Unknown entity`,** which is the `public ::`
-re-export limitation documented under "FORD config gotchas" and sits at a stable 14. Compare *that*
+**The one category that is genuinely load-bearing is `Unknown entity`,** which is the
+use-association accessibility limitation documented under "FORD config gotchas" and sits at a
+stable **17** (14 `public ::` re-exports in `parquet_core.f90` plus 3 `private ::` statements in
+the `parquet` facade). Compare *that*
 number across a change, not the total: it is the only one that moves for a real reason. When a
 before/after total does move, break the delta down by category
 (`grep "Warning" | sed -E 's/.*Warning: //'`) rather than treating the raw count as a regression —
@@ -335,10 +337,10 @@ Keep new code to the same standard:
 - Leading `!>` = predoc (documents what follows); trailing `!!` = postdoc (documents what
   precedes). **`!<` is not a FORD marker at all** (that's Doxygen).
 - Every dummy argument/function result gets its own trailing `!!` tag wherever the argument list
-  is actually written out — the spec in `parquet.f90`, and any submodule body that *restates*
+  is actually written out — the spec in `parquet_core.f90`, and any submodule body that *restates*
   the full interface (`module subroutine name(args)` with the arguments redeclared, e.g.
   `parquet_maml_base_add_col_qc.f90`). The abbreviated `module procedure name ... end procedure
-  name` form (no restated arguments) is exempt — nothing to tag, and the spec in `parquet.f90`
+  name` form (no restated arguments) is exempt — nothing to tag, and the spec in `parquet_core.f90`
   is the canonical doc location for it.
 - Every type-bound procedure binding (`procedure ::`, `generic ::`, `final ::` inside a type's
   `contains` block) needs its own short trailing `!!` description, separate from documenting the
@@ -346,7 +348,7 @@ Keep new code to the same standard:
   "covers" the binding), e.g.
   `procedure :: add => parquet_filter_add !! Appends one AND-combined rule clause.`.
   **Accepted exception:** the two `generic :: add_metadata => ...`/`generic :: add_metadata =>
-  schema_add_metadata_...` bindings (`parquet.f90`'s `parquet_column_info`/`parquet_schema` type
+  schema_add_metadata_...` bindings (`parquet_core.f90`'s `parquet_column_info`/`parquet_schema` type
   bodies) document with a leading `!>` above the binding instead, since both are long multi-line
   continuation lists where a trailing `!!` would be awkward. Every other binding in both type
   bodies still uses the trailing form — don't extend this exception to a new binding without a
@@ -372,7 +374,7 @@ Keep new code to the same standard:
   private helper legitimately
   disappearing from its old module's FORD
   page (private procedures don't get individual page entries) is expected and not a regression by
-  itself — cross-check with `grep 'public ::'` in `parquet.f90` before treating an "not found on
+  itself — cross-check with `grep 'public ::'` in `parquet_core.f90` before treating an "not found on
   page" result as a problem.
 
 ### FORD config gotchas
@@ -414,25 +416,34 @@ Keep new code to the same standard:
   since that comment does render on the generic's page. Do not re-attempt the submodule-restatement
   fix without first checking a newer FORD release against upstream issue
   (https://github.com/Fortran-FOSS-Programmers/ford/issues/738).
-- **FORD 7.0.13 cannot resolve a `public ::` re-export chain** — `parquet.f90` re-exports 14 names
-  from sibling modules (`parquet_date`/`parquet_time`/`parquet_timestamp` and the eight
-  `parquet_unit_*`/`parquet_ns_*` constants from `parquet_temporal`; `parquet_string`/
-  `parquet_string_column` from `parquet_strings`; `parquet_maml_file` from `parquet_maml_base`),
-  and `ford --warn docs.md` reports all 14 as `Unknown entity ... with attribute 'public'`,
-  silently dropping them from the generated `parquet` module page. **Confirmed not fixable from
-  source**: neither adding a `!>` doc-comment directly on the `public ::` line, nor using an
-  explicit `use ..., only: name1, name2` import list (already how these modules are imported), nor
-  a bare unrestricted `use` with no `only:` at all, changes this — all three were tried against
-  FORD 7.0.13 and the warning count stayed at 14 every time. The underlying symbols are not lost
+- **FORD 7.0.13 cannot resolve a `use`-association accessibility statement** — an
+  `Unknown entity '<name>' with attribute '<public|private>' in module '<m>'` warning, currently
+  **17** of them and the one FORD number worth tracking across a change. Two independent groups:
+  **14 `public ::`** re-exports in `parquet_core.f90` (`parquet_date`/`parquet_time`/
+  `parquet_timestamp` and the eight `parquet_unit_*`/`parquet_ns_*` constants from
+  `parquet_temporal`; `parquet_string`/`parquet_string_column` from `parquet_strings`;
+  `parquet_maml_file` from `parquet_maml_base`), which FORD silently drops from that module's
+  generated page; and **3 `private ::`** statements in the `parquet` facade (`c_int` and the two
+  `parquet_get_*_version` bindings), which are the facade's only way to keep those names out of the
+  namespace `use parquet` hands a user, so they cannot be removed. **Confirmed not fixable from
+  source**: for the `public ::` group, neither adding a `!>` doc-comment directly on the line, nor
+  an explicit `use ..., only: name1, name2` import list (already how these modules are imported),
+  nor a bare unrestricted `use` with no `only:` at all changes anything — all three were tried
+  against FORD 7.0.13 and the count stayed at 14 every time. The underlying symbols are not lost
   from the generated site — the three temporal types get their own `type/parquet_date.html`-style
   pages and the constants render on `module/parquet_temporal.html`/`module/parquet_strings.html`/
-  `module/parquet_maml_base.html` — they just don't appear as belonging to `parquet` on that
-  module's own generated page. No `doc/pages/*.md` or README text currently links a reader
-  specifically to `module/parquet.html` expecting to find these symbols there (the guide's own
-  pointers go to the site-wide `lists/procedures.html`/`lists/types.html`, where they do appear),
-  so this is a cosmetic gap in the generated reference, not a broken link — left undocumented
-  further and accepted as a FORD limitation. Re-test against a newer FORD release before
-  attempting either source-side fix again.
+  `module/parquet_maml_base.html` — they just don't appear as belonging to `parquet_core` on that
+  module's own generated page. Re-test against a newer FORD release before attempting either
+  source-side fix again.
+- **The `parquet` facade's re-exports do not appear on `module/parquet.html` either, and that is
+  the accepted cost of S10.** The facade re-exports its siblings with *bare* `use` statements
+  (no `public ::` list), which produces no warning at all — but FORD equally does not list the
+  re-exported names as belonging to `parquet`, so the page a user is told to `use` shows only
+  `parquet_get_version`. Keeping `cversion`/`parquet_get_version` in the facade is what stops it
+  being an empty page (it renders at ~33 KB). **The maintainer accepted this** and the guide points
+  readers at the site-wide `lists/procedures.html`/`lists/types.html` instead, where every name does
+  appear — `doc/pages/index.md` says so explicitly. This is a cosmetic gap in the generated
+  reference, not a broken link. Re-test against a newer FORD before assuming it still holds.
 - **FORD 7.0.13 cannot extract a "Source Code" section for a `module procedure NAME ... end
   procedure NAME` implementation** (the abbreviated form; `fpm.toml` sets `source = true`), which
   is why `ford --warn docs.md` reports roughly 240 "Could not extract source code for proc ..."
@@ -445,7 +456,7 @@ Keep new code to the same standard:
   doc-comments (it otherwise reports a new `Undocumented interface` warning), which directly
   conflicts with this project's own deliberate convention (see "FORD doc-comment conventions"
   above) that the abbreviated form is *exempt* from restating docs precisely so they aren't
-  duplicated between `parquet.f90`'s spec and every submodule body. Applying this fix across all
+  duplicated between `parquet_core.f90`'s spec and every submodule body. Applying this fix across all
   ~240 affected procedures would mean restating and re-documenting most of
   `parquet_read.f90`/`parquet_write.f90`/`parquet_metadata*.f90` — a large, high-blast-radius
   rewrite for a convenience feature (an auto-generated source listing on each procedure's page),
@@ -505,12 +516,13 @@ Working rules for this class of file:
 
 ### Nested submodule tree
 
-`src/*.f90`'s `parquet`/`parquet_read`/`parquet_write`/`parquet_metadata` files form a nested
-submodule tree (not flat siblings under `parquet`), split by data-type family for read/write and
-by format for metadata:
+`src/*.f90`'s `parquet_core`/`parquet_read`/`parquet_write`/`parquet_metadata` files form a nested
+submodule tree (not flat siblings under `parquet_core`), split by data-type family for read/write
+and by format for metadata:
 
 ```
-parquet                         (module — public API + cross-subtree private-helper interfaces)
+parquet                         (module — the FACADE; see below. Holds only parquet_get_version)
+parquet_core                    (module — core API + cross-subtree private-helper interfaces)
 ├─ parquet_read                 (submodule — reader lifecycle, queries, shared read helpers)
 │   ├─ parquet_read_numeric     (int32/int64/float32/float64/logical, all access modes)
 │   ├─ parquet_read_string
@@ -532,6 +544,36 @@ parquet_maml_base               (module — generated)
 parquet_wrapper.cpp             (C++ TU)
 ```
 
+**`parquet` is a facade module and holds almost no code.** `src/parquet.f90` re-exports
+`parquet_core`, `parquet_tables`, `parquet_columns`, `parquet_strings`, `parquet_temporal` and
+three types from `parquet_maml_base`, so a user writes exactly one `use parquet`. Four rules
+follow, and all four are easy to violate by reflex:
+
+- **The core API's spec file is `src/parquet_core.f90`, not `src/parquet.f90`.** Every
+  `public ::` line, every interface body, every shared `parameter` reached by host association
+  from a submodule lives there. A note elsewhere in this file saying "declared in `parquet.f90`"
+  and meaning the reader/writer spec means `parquet_core.f90`.
+- **The facade must not gain library logic.** It holds `cversion` and `parquet_get_version` —
+  which is where they belong, being about the library itself, and which is also what keeps the
+  file needing cpp preprocessing and keeps `module/parquet.html` from rendering as an empty page.
+  A new public procedure goes in `parquet_core` (or the relevant sibling) and is re-exported for
+  free.
+- **The facade uses bare `use <sibling>` with DEFAULT-PUBLIC accessibility**, deliberately — that
+  is what re-exports a whole module without maintaining a ~120-name `public ::` list. Its three
+  `private ::` statements (`c_int`, the two version bindings, `cversion`) are the only thing
+  keeping implementation details out of the user's namespace, so anything new the facade imports
+  for its own use needs its own `private ::` line. `parquet_bindings` is never re-exported.
+  `parquet_maml_base` is imported with an `only:` list rather than in full, because its other
+  public names are this library's own embedded MAML fixtures, not user API.
+- **`parquet_core` is internal and documented as such** (README's API-stability bullet,
+  `doc/pages/table.md`, and the module's own doc-comment). Only `use parquet` carries the
+  semantic-versioning promise. Sibling modules must `use parquet_core`, never `use parquet` —
+  the facade uses *them*, so the reverse is a circular dependency and will not compile.
+
+`test/test_examples.f90`'s `test_facade_covers_every_layer` is the regression test: that whole test
+module's only library import is a bare `use parquet`, so a dropped re-export breaks the *build*
+rather than an assertion.
+
 Reserved for future element-domain work (not yet implemented): `parquet_map`/`parquet_list`/
 `parquet_struct` (independent modules, like `parquet_temporal`) plus their own
 `parquet_read_*`/`parquet_write_*` type-family children — see CONTRIBUTING.md's "Features
@@ -542,13 +584,13 @@ more than one of numeric/string/temporal) belongs in the parent (`parquet_read`/
 as an ordinary contained procedure — descendants reach it by host association, no interface
 needed. Type-specific code belongs in the matching child, also as an ordinary contained
 procedure. A new *public* generic's specifics, and any type-bound binding target, must keep
-their interface declared in `parquet.f90` itself regardless of family (see "A module procedure
+their interface declared in `parquet_core.f90` itself regardless of family (see "A module procedure
 cannot implement its own submodule's spec-declared interface" below for what breaks if you
 relocate one incorrectly) — never assume a helper is safe to relocate purely from its call sites
 without also checking those two disqualifiers, plus whether it's itself `public ::`-exported.
 
 **A known gfortran 15.2.0 ICE to watch for when adding a new cross-subtree call into this
-tree:** calling `parquet_parse_protected_cols` (declared in `parquet.f90`) directly from a
+tree:** calling `parquet_parse_protected_cols` (declared in `parquet_core.f90`) directly from a
 submodule nested **two levels** under `parquet` (e.g. `parquet:parquet_metadata:
 parquet_metadata_maml`) crashes the compiler with an internal compiler error — isolated to this
 one procedure's exact argument shape (an assumed-length `character` array paired with a
@@ -564,7 +606,7 @@ it; other similarly-shaped procedures at the same nesting depth compile and run 
 
 ### Group interface bodies into commented `interface` blocks
 
-Declare the `module subroutine`/`function` interface bodies in `parquet.f90` (and in any
+Declare the `module subroutine`/`function` interface bodies in `parquet_core.f90` (and in any
 submodule spec that hosts relocated interfaces) as **several small `interface … end interface`
 blocks grouped by concern**, each introduced by a one-line plain-`!` banner (e.g.
 `! ---- Read column specifics (by type x access mode) ----`) — not one monolithic block.
@@ -584,7 +626,7 @@ A `module procedure`/full-restated `module subroutine` body must live in a **des
 whichever spec declared its interface — never in the same submodule that declares it. This
 matters when relocating a private helper's interface (per the Placement rule in "Nested
 submodule tree" above): if the helper's *body* already lives in the same file the interface is moving into
-(e.g. relocating an interface from `parquet.f90` into `parquet_metadata`'s own spec, when the
+(e.g. relocating an interface from `parquet_core.f90` into `parquet_metadata`'s own spec, when the
 body already lives in `parquet_metadata.f90` itself, not one of its children), keeping it a
 `module procedure` no longer works — gfortran reports errors like "Symbol ... has already been
 host associated" or, for a still-public name, a `public ::` failure. Convert that one procedure
@@ -600,7 +642,7 @@ examples.
 
 Follow these when adding new public API, types, or internal helpers:
 
-- **Public module-level API** (anything in `src/parquet.f90`'s `public ::` list — functions,
+- **Public module-level API** (anything in `src/parquet_core.f90`'s `public ::` list — functions,
   subroutines, types) always carries the `parquet_` prefix, e.g. `parquet_get_metadata`,
   `parquet_open_reader`, `parquet_schema`.
 - **Type-bound procedures** (`schema%init`, `schema%add_field`, `reader%...`) do *not* need a
@@ -620,7 +662,7 @@ Follow these when adding new public API, types, or internal helpers:
 - **C++ bindings** (`parquet_bindings.f90` interfaces, `parquet_wrapper.cpp`) mirror the C++
   side's own naming (still generally `parquet_`-prefixed for the `extern "C"` surface) —
   don't rename these to match Fortran-side conventions. **One exception, and the rule for
-  creating another:** `parquet.f90` does an unrestricted `use parquet_bindings`, so a public API
+  creating another:** `parquet_core.f90` does an unrestricted `use parquet_bindings`, so a public API
   procedure cannot share a name with a binding. When that collides, keep the public name and give
   the *Fortran-side interface* a `c_`-prefixed one while leaving `bind(C, name="...")` — and thus
   the linked symbol and `parquet_wrapper.cpp` — untouched; `tools/check_bindc_boundary.py` keys on
@@ -1305,7 +1347,7 @@ counterpart. User guide: `doc/pages/date-time.md`.
   not emit it (it also reports `-Wunused-function` for it, which is the early warning). This is
   invisible to per-file compilation and only appears when something actually links, so it can survive
   a long way into a change. Fix: declare the procedure's interface in the module and implement it in a
-  submodule, exactly as `parquet.f90` already does for its shared private helpers (see
+  submodule, exactly as `parquet_core.f90` already does for its shared private helpers (see
   `src/parquet_columns_util.f90` for a file created solely to hold such helpers). Prefer that shape
   from the start for any helper a submodule will call.
 - **The "no `character`-returning function" rule above extends to an *automatic*-length result,
@@ -1347,7 +1389,7 @@ counterpart. User guide: `doc/pages/date-time.md`.
   8192 crashes every time). This bites hardest exactly where it is least expected: a "value too
   long" guard that reports the offending value verbatim is *guaranteed* to build a huge message on
   the one input that triggers it, turning a clean abort into a crash and an error-scenario test
-  into a confusing stderr-mismatch failure. `parquet_filter_add` (`src/parquet.f90`) is the
+  into a confusing stderr-mismatch failure. `parquet_filter_add` (`src/parquet_core.f90`) is the
   pattern to copy — at most the first 100 characters of the rule, plus `"..."` when truncated.
   Apply the same cap to any new message embedding a rule, a MAML line, a filename, or any other
   value whose length the caller controls; it is better behaviour regardless of compiler, since a

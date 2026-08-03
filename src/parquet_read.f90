@@ -7,7 +7,7 @@
 !> host association: validity-buffer construction, reader/column/row-group
 !> existence checks, fixed-width text packing for the filter/qc C++ API, and
 !> the whole-column-read-avoidance row-group helpers.
-submodule (parquet) parquet_read
+submodule (parquet_core) parquet_read
     use ieee_arithmetic, only: ieee_is_nan
     implicit none
 
@@ -1042,7 +1042,7 @@ contains
         num_row_groups = int(num_row_groups64, kind=int32)
     end procedure parquet_get_num_row_groups_int32
     !> Shared body of parquet_get_chunk_size_reader_int32/_int64 -- see the generic interface's
-    !> own doc comment in parquet.f90. `row_group` is 0 if the caller omitted its own optional
+    !> own doc comment in parquet_core.f90. `row_group` is 0 if the caller omitted its own optional
     !> row_group argument (both kind-specifics translate "absent" to 0 before calling in),
     !> resolved here to 1 (the first row group) -- 0 can never be a valid 1-based row_group, so
     !> it is unambiguous as an "absent" sentinel.
@@ -1212,7 +1212,7 @@ contains
             if (tzlen > 0) call parquet_reader_get_column_timezone(reader%handle, trim(name)//char(0), timezone, tzlen)
         end if
     end procedure parquet_get_column_time_info
-    !> Resolves `name`'s canonical physical data type (see valid_query_data_types in parquet.f90),
+    !> Resolves `name`'s canonical physical data type (see valid_query_data_types in parquet_core.f90),
     !> without checking that `name` exists first -- every caller (parquet_column_exists/
     !> parquet_get_column_type) already validated existence via parquet_reader_has_column/
     !> check_column_exists beforehand. `recognized` is .false. if the physical type falls outside

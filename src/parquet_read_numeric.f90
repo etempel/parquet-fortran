@@ -4,9 +4,9 @@
 !> Numeric read specifics (int32/int64/float32/float64/logical: column_1d,
 !> array_full, array_row_mode[_row_index], array_element_mode, and
 !> column_chunk/array_column_chunk, both row-group-index kinds): bodies of
-!> the module procedures declared in parquet.f90's interface block, plus
+!> the module procedures declared in parquet_core.f90's interface block, plus
 !> the numeric-only private per-mode worker helpers they depend on.
-submodule (parquet:parquet_read) parquet_read_numeric
+submodule (parquet_core:parquet_read) parquet_read_numeric
     implicit none
 contains
 
@@ -226,7 +226,7 @@ contains
         end do
     end procedure parquet_read_logical_array_full
     !> Shared body of parquet_read_int32_array_row_mode/_row_index_int64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_index has two kind-specifics.
+    !> interface's own doc comment in parquet_core.f90 for why row_index has two kind-specifics.
     subroutine parquet_read_int32_array_row_mode_impl(reader, name, values, row_index, null_value, is_valid)
         type(parquet_reader), intent(in) :: reader !! open reader.
         character(len=*), intent(in) :: name !! vector column name.
@@ -475,7 +475,7 @@ contains
         end if
     end procedure parquet_read_logical_array_element_mode
     !> Shared body of parquet_read_int32_column_chunk_rg32/_rg64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics.
+    !> interface's own doc comment in parquet_core.f90 for why row_group has two kind-specifics.
     subroutine parquet_read_int32_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
         type(parquet_reader), intent(in) :: reader !! open reader.
         character(len=*), intent(in) :: name !! column name.
@@ -502,7 +502,7 @@ contains
         end if
     end subroutine parquet_read_int32_column_chunk_impl
     !> Shared body of parquet_read_int32_array_column_chunk_rg32/_rg64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics.
+    !> interface's own doc comment in parquet_core.f90 for why row_group has two kind-specifics.
     subroutine parquet_read_int32_array_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
         type(parquet_reader), intent(in) :: reader !! open reader.
         character(len=*), intent(in) :: name !! vector column name.
@@ -536,7 +536,7 @@ contains
         end if
     end subroutine parquet_read_int32_array_column_chunk_impl
     !> Shared body of parquet_read_int64_column_chunk_rg32/_rg64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics.
+    !> interface's own doc comment in parquet_core.f90 for why row_group has two kind-specifics.
     subroutine parquet_read_int64_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
         type(parquet_reader), intent(in) :: reader !! open reader.
         character(len=*), intent(in) :: name !! column name.
@@ -563,7 +563,7 @@ contains
         end if
     end subroutine parquet_read_int64_column_chunk_impl
     !> Shared body of parquet_read_int64_array_column_chunk_rg32/_rg64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics.
+    !> interface's own doc comment in parquet_core.f90 for why row_group has two kind-specifics.
     subroutine parquet_read_int64_array_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
         type(parquet_reader), intent(in) :: reader !! open reader.
         character(len=*), intent(in) :: name !! vector column name.
@@ -597,7 +597,7 @@ contains
         end if
     end subroutine parquet_read_int64_array_column_chunk_impl
     !> Shared body of parquet_read_float32_column_chunk_rg32/_rg64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics.
+    !> interface's own doc comment in parquet_core.f90 for why row_group has two kind-specifics.
     subroutine parquet_read_float32_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
         type(parquet_reader), intent(in) :: reader !! open reader.
         character(len=*), intent(in) :: name !! column name.
@@ -624,7 +624,7 @@ contains
         end if
     end subroutine parquet_read_float32_column_chunk_impl
     !> Shared body of parquet_read_float32_array_column_chunk_rg32/_rg64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics.
+    !> interface's own doc comment in parquet_core.f90 for why row_group has two kind-specifics.
     subroutine parquet_read_float32_array_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
         type(parquet_reader), intent(in) :: reader !! open reader.
         character(len=*), intent(in) :: name !! vector column name.
@@ -658,7 +658,7 @@ contains
         end if
     end subroutine parquet_read_float32_array_column_chunk_impl
     !> Shared body of parquet_read_float64_column_chunk_rg32/_rg64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics.
+    !> interface's own doc comment in parquet_core.f90 for why row_group has two kind-specifics.
     subroutine parquet_read_float64_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
         type(parquet_reader), intent(in) :: reader !! open reader.
         character(len=*), intent(in) :: name !! column name.
@@ -685,7 +685,7 @@ contains
         end if
     end subroutine parquet_read_float64_column_chunk_impl
     !> Shared body of parquet_read_float64_array_column_chunk_rg32/_rg64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics.
+    !> interface's own doc comment in parquet_core.f90 for why row_group has two kind-specifics.
     subroutine parquet_read_float64_array_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
         type(parquet_reader), intent(in) :: reader !! open reader.
         character(len=*), intent(in) :: name !! vector column name.
@@ -719,7 +719,7 @@ contains
         end if
     end subroutine parquet_read_float64_array_column_chunk_impl
     !> Shared body of parquet_read_logical_column_chunk_rg32/_rg64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics.
+    !> interface's own doc comment in parquet_core.f90 for why row_group has two kind-specifics.
     subroutine parquet_read_logical_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
         type(parquet_reader), intent(in) :: reader !! open reader.
         character(len=*), intent(in) :: name !! column name.
@@ -751,7 +751,7 @@ contains
         end if
     end subroutine parquet_read_logical_column_chunk_impl
     !> Shared body of parquet_read_logical_array_column_chunk_rg32/_rg64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics.
+    !> interface's own doc comment in parquet_core.f90 for why row_group has two kind-specifics.
     subroutine parquet_read_logical_array_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
         type(parquet_reader), intent(in) :: reader !! open reader.
         character(len=*), intent(in) :: name !! vector column name.

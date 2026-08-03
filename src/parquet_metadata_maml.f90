@@ -9,7 +9,7 @@
 !> (parquet_validate_user_maml); loading MAML/qc-maml files from disk; and
 !> qc-maml field parsing/validation for read-time quality control. Merges
 !> what used to be parquet_metadata_sections.f90 and parquet_metadata_validate.f90.
-submodule (parquet:parquet_metadata) parquet_metadata_maml
+submodule (parquet_core:parquet_metadata) parquet_metadata_maml
     use ieee_arithmetic, only: ieee_is_nan
     use iso_fortran_env, only: iostat_eor, iostat_end
     implicit none
@@ -1065,7 +1065,7 @@ contains
     end procedure parquet_read_qc_remap_column_names
 
     !> Merges a MAML-declared and a code-declared read-time QC into one schema. See the interface
-    !> in parquet.f90 for the override rule and why `composed` carries only qc-bearing entries.
+    !> in parquet_core.f90 for the override rule and why `composed` carries only qc-bearing entries.
     !>
     !> The MAML side is copied as raw SOURCE LINES rather than re-emitted from the parsed
     !> parquet_qc_rule array: a round trip through that representation would have to reconstruct

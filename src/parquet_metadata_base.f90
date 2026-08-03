@@ -6,7 +6,7 @@
 !> per-field column_info lookups/toggles, and low-level MAML string helpers
 !> (parquet_split_key_value/parquet_unquote/parquet_to_lower) reused across
 !> submodules.
-submodule (parquet:parquet_metadata) parquet_metadata_base
+submodule (parquet_core:parquet_metadata) parquet_metadata_base
     implicit none
 contains
 

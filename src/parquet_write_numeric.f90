@@ -3,11 +3,11 @@
 !===========================================
 !> Numeric write specifics (int32/int64/float32/float64/logical, scalar and
 !> matrix, whole-column and row-group-chunked): bodies of the module
-!> procedures declared in parquet.f90's interface block, plus the
+!> procedures declared in parquet_core.f90's interface block, plus the
 !> numeric-only private helpers (schema-type widening/narrowing, append,
 !> qc: enforcement, qc: numeric-bound satisfaction, qc: real-value text
 !> formatting) they depend on.
-submodule (parquet:parquet_write) parquet_write_numeric
+submodule (parquet_core:parquet_write) parquet_write_numeric
     implicit none
 contains
 

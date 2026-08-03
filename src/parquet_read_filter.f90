@@ -31,7 +31,7 @@
 !> token out, so lexing a rule costs three small integer arrays regardless of how long the rule
 !> is (a filter_max_rule_len-sized rule would otherwise need a token array of that length
 !> squared, in the tens of megabytes).
-submodule (parquet:parquet_read) parquet_read_filter
+submodule (parquet_core:parquet_read) parquet_read_filter
     implicit none
 
     !> Token kinds lex_filter_expr produces. TK_TEXT covers everything that is neither

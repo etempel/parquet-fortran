@@ -7,7 +7,7 @@
 !> row-count and row-mask bookkeeping, output-name resolution, qc: integer-count
 !> text formatting (shared by numeric and string qc: reports), and the
 !> write_maml=.true. sidecar .maml.
-submodule (parquet) parquet_write
+submodule (parquet_core) parquet_write
     implicit none
 contains
 
@@ -991,7 +991,7 @@ contains
     !> parquet_write_column, parquet_write_column_chunk never converts `values`' own kind to the
     !> schema's declared type before writing (there is no parquet_append_as_schema_chunk_*
     !> dispatcher the way there is for the batch path) -- see parquet_write_column_chunk's own
-    !> doc-comment in parquet.f90.
+    !> doc-comment in parquet_core.f90.
     subroutine parquet_assert_column_type_exact(writer, name, expected_type)
         type(parquet_writer), intent(in) :: writer !! open writer.
         character(len=*), intent(in) :: name !! column name.
@@ -1047,7 +1047,7 @@ contains
         if (is_first) call parquet_mark_column_written(writer, name)
     end subroutine parquet_chunk_mark_written_if_first
     !> Shared worker for parquet_new_row_group_int32/_int64 -- see the parquet_new_row_group
-    !> generic interface in parquet.f90. Also resets the current row group's masking state and,
+    !> generic interface in parquet_core.f90. Also resets the current row group's masking state and,
     !> for a writer using the shared whole-file mask (parquet_write_row_mask) together with row
     !> groups, claims this row group's window (the next `nrows` positions of the stored mask) --
     !> see "Chunked masking mechanics -- shared whole-file mask" in feature_write_mask.md.

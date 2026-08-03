@@ -2141,7 +2141,7 @@ contains
     !> open_reader_nrows_zero_rows error scenario, since it error stops.
     !>
     !> nrows= is generic over integer(int32)/integer(int64) (see
-    !> parquet_open_reader's interface in src/parquet.f90), so this also
+    !> parquet_open_reader's interface in src/parquet_core.f90), so this also
     !> checks the int32 form -- including a plain default INTEGER actual
     !> argument, the form most callers reach for and the one a caller who
     !> only declares `integer :: nrows` (no explicit kind) would use.

@@ -235,7 +235,7 @@ for path in maml_files:
     # so callers get a ready-to-use schema with no separate parse step.
     # Base mode keeps returning the raw parquet_maml_file: it's this
     # library's own internal fixture accessor (parquet_maml_base sits below
-    # parquet.f90/parquet_schema in the module stack, so it cannot return a
+    # parquet_core.f90/parquet_schema in the module stack, so it cannot return a
     # parquet_schema without a circular dependency), and its own callers
     # parse the result themselves via parquet_parse_maml.
     result_var = 'maml' if is_base else 'schema'

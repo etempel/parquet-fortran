@@ -33,7 +33,7 @@ module parquet_bindings
     public :: parquet_append_string_column_buffers
     ! Local (Fortran-side) names deliberately differ from their bind(C, name="...") C++ symbol,
     ! same reason parquet_append_int32_column (this binding) differs from parquet_write_column
-    ! (the public generic parquet.f90 exposes for it): parquet_write.f90 is a submodule of
+    ! (the public generic parquet_core.f90 exposes for it): parquet_write.f90 is a submodule of
     ! parquet, which use-associates this whole module -- a public Fortran wrapper reusing the
     ! exact same name as the C symbol it wraps would collide with that use association.
     public :: parquet_writer_new_row_group, parquet_writer_finish_row_group, parquet_writer_get_chunk_size
@@ -532,8 +532,8 @@ module parquet_bindings
         !>
         !> Deliberately NOT named parquet_reader_set_filter on the Fortran side,
         !> unlike every other interface here: that name belongs to the public
-        !> API procedure in parquet.f90 (which calls this one via
-        !> parquet_apply_filter), and parquet.f90 imports this module
+        !> API procedure in parquet_core.f90 (which calls this one via
+        !> parquet_apply_filter), and parquet_core.f90 imports this module
         !> unrestricted, so the two would collide. The linked C symbol is
         !> unchanged.
         function c_reader_set_filter(reader, names_packed, name_len, ops_packed, op_len, &
@@ -572,7 +572,7 @@ module parquet_bindings
         !> in `err_out` (capacity `err_cap`), so the Fortran caller owns the
         !> error stop text -- the same convention c_reader_set_filter uses.
         !> Named c_reader_set_sort on this side because the public API
-        !> procedure parquet_reader_set_sort (parquet.f90) owns that name; the
+        !> procedure parquet_reader_set_sort (parquet_core.f90) owns that name; the
         !> bind(C) symbol, and so parquet_wrapper.cpp, is unchanged.
         function c_reader_set_sort(reader, names_packed, name_len, descending, nulls_first, &
                 n, key_text, err_out, err_cap) &
@@ -674,7 +674,7 @@ module parquet_bindings
 
         !> Whether any column of `reader` has already been decoded into its
         !> column cache (1) or not (0) -- the guard parquet_reader_set_filter
-        !> (parquet.f90) needs, since applying a filter after a read would
+        !> (parquet_core.f90) needs, since applying a filter after a read would
         !> misalign what was already returned against everything read after.
         function parquet_reader_has_decoded_columns(reader) &
                 bind(C, name="parquet_reader_has_decoded_columns") result(has_any)
@@ -685,7 +685,7 @@ module parquet_bindings
 
         !> Whether `reader` has filter CLAUSES installed (1) or not (0) --
         !> narrower than parquet_reader_has_filter, which also reports a
-        !> sample-only mask. parquet_reader_set_filter (parquet.f90) refuses a
+        !> sample-only mask. parquet_reader_set_filter (parquet_core.f90) refuses a
         !> reader that is already filtered but accepts a sampled one, and this
         !> is the distinction that lets it tell the two apart.
         function parquet_reader_has_filter_clauses(reader) &

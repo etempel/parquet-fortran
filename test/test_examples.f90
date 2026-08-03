@@ -36,9 +36,101 @@ contains
             new_unittest("doc/pages/performance.md write_parquet_qc_example", test_performance_qc_example), &
             new_unittest("doc/pages/string-columns.md strings_quickstart example", &
                 test_strings_quickstart_example), &
-            new_unittest("doc/pages/string-columns.md token_column example", test_token_column_example) &
+            new_unittest("doc/pages/string-columns.md token_column example", test_token_column_example), &
+            new_unittest("use parquet alone reaches every layer of the library", test_facade_covers_every_layer) &
             ]
     end subroutine collect_tests_parquet_examples
+
+    !> The acceptance test for the `parquet` facade module (src/parquet.f90): this whole
+    !> test module's only library import is a bare `use parquet`, so naming one entity from
+    !> each re-exported layer here proves that a user really does need exactly one `use`
+    !> statement. If the facade ever stops re-exporting one of the sibling modules, this
+    !> test stops COMPILING rather than failing an assertion -- which is the point, since a
+    !> missing re-export is a build-time break for every downstream user.
+    !>
+    !> Layers touched, one name each: parquet_core (parquet_reader/parquet_schema),
+    !> parquet_tables (parquet_table), parquet_columns (PK_FLOAT64/parquet_kind_name),
+    !> parquet_strings (parquet_string_column), parquet_temporal (parquet_timestamp),
+    !> parquet_maml_base (parquet_maml_file), and the facade's own parquet_get_version.
+    subroutine test_facade_covers_every_layer(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: out_file = "test_run/facade_covers_every_layer.parquet"
+        type(parquet_table) :: t, t2
+        type(parquet_schema) :: s
+        type(parquet_reader) :: reader
+        type(parquet_column) :: col
+        type(parquet_string_column) :: sc
+        type(parquet_timestamp) :: ts
+        type(parquet_maml_file) :: mf
+        real(real64) :: mass(4)
+        real(real64), allocatable :: got(:)
+        integer(int64) :: nrows
+        character(len=:), allocatable :: ver, kname
+        integer :: i
+
+        do i = 1, size(mass)
+            mass(i) = real(i, real64) * 2.5_real64
+        end do
+
+        ! parquet_tables + parquet_columns: build a table, ask for a kind constant by name.
+        call parquet_new_table(t)
+        call t%add_column("mass", mass, unit="Msun")
+        call check(error, t%kind("mass") == PK_FLOAT64, &
+            "PK_FLOAT64 must be reachable from use parquet alone")
+        if (allocated(error)) return
+        call parquet_kind_name(t%kind("mass"), kname)
+        call check(error, kname == "PK_FLOAT64", &
+            "parquet_kind_name must be reachable from use parquet alone and name the kind")
+        if (allocated(error)) return
+
+        ! parquet_columns: the standalone column container behind the table layer.
+        call col%init(PK_FLOAT64, 2_int64)
+        call check(error, col%length() == 2_int64, &
+            "parquet_column must be reachable from use parquet alone")
+        if (allocated(error)) return
+        call col%clear()
+
+        ! parquet_strings: the compact string store.
+        call sc%append_string("facade")
+        call check(error, sc%size() == 1_int64, &
+            "parquet_string_column must be reachable from use parquet alone")
+        if (allocated(error)) return
+
+        ! parquet_temporal: one element type, carrying its own null state.
+        call ts%parse("2026-08-03T12:00:00")
+        call check(error, .not. ts%is_null(), &
+            "parquet_timestamp must be reachable from use parquet alone and parse a literal")
+        if (allocated(error)) return
+
+        ! parquet_maml_base: the MAML file type a schema is built from.
+        call check(error, .not. allocated(mf%lines), &
+            "parquet_maml_file must be reachable from use parquet alone")
+        if (allocated(error)) return
+
+        ! parquet_core: schema, table write-out and the plain reader, on the same table.
+        call s%init("facade")
+        call s%add_field("mass", "float64", unit="Msun")
+        call parquet_parse_maml(s)
+        call parquet_write_table(t, out_file, s)
+
+        call parquet_open_table(t2, out_file)
+        call t2%get("mass", got)
+        call check(error, abs(got(3) - 7.5_real64) < 1.0e-12_real64, &
+            "the table written through the facade should round-trip its values")
+        if (allocated(error)) return
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 4_int64, &
+            "the plain reader should agree with the table on the row count")
+        if (allocated(error)) return
+
+        ! The facade's own code, rather than something it re-exports.
+        call parquet_get_version(ver, mode="internal")
+        call check(error, len(ver) > 0, &
+            "parquet_get_version must still be reachable now that it lives in the facade")
+    end subroutine test_facade_covers_every_layer
 
     !> "Minimal writer example" + "Minimal reader example"
     !> (README sections "Writing parquet files..." / "Reading parquet files...")

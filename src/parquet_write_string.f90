@@ -3,10 +3,10 @@
 !===========================================
 !> String write specifics (scalar and matrix, whole-column and
 !> row-group-chunked, plus the fixed-width "compact" variants): bodies of the
-!> module procedures declared in parquet.f90's interface block, plus the
+!> module procedures declared in parquet_core.f90's interface block, plus the
 !> string-only private qc: enforcement/bound-satisfaction helpers they
 !> depend on.
-submodule (parquet:parquet_write) parquet_write_string
+submodule (parquet_core:parquet_write) parquet_write_string
     implicit none
 contains
 

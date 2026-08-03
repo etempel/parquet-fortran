@@ -4,9 +4,9 @@
 !> String read specifics (column_1d, array_full, the fixed-width "compact"
 !> column form, array_row_mode[_row_index], array_element_mode, and
 !> column_chunk/array_column_chunk incl. the compact chunked form): bodies
-!> of the module procedures declared in parquet.f90's interface block, plus
+!> of the module procedures declared in parquet_core.f90's interface block, plus
 !> the string-only private per-mode worker helpers they depend on.
-submodule (parquet:parquet_read) parquet_read_string
+submodule (parquet_core:parquet_read) parquet_read_string
     implicit none
 contains
 
@@ -167,7 +167,7 @@ contains
         end if
     end procedure parquet_read_string_array_element_mode
     !> Shared body of parquet_read_string_column_chunk_rg32/_rg64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics.
+    !> interface's own doc comment in parquet_core.f90 for why row_group has two kind-specifics.
     subroutine parquet_read_string_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
         type(parquet_reader), intent(in) :: reader !! open reader.
         character(len=*), intent(in) :: name !! column name.
@@ -208,7 +208,7 @@ contains
         end if
     end subroutine parquet_read_string_column_chunk_impl
     !> Shared body of parquet_read_string_array_column_chunk_rg32/_rg64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics.
+    !> interface's own doc comment in parquet_core.f90 for why row_group has two kind-specifics.
     subroutine parquet_read_string_array_column_chunk_impl(reader, name, row_group, values, null_value, is_valid)
         type(parquet_reader), intent(in) :: reader !! open reader.
         character(len=*), intent(in) :: name !! vector column name.
@@ -251,7 +251,7 @@ contains
         end do
     end subroutine parquet_read_string_array_column_chunk_impl
     !> Shared body of parquet_read_string_column_chunk_compact_rg32/_rg64 -- see the generic
-    !> interface's own doc comment in parquet.f90 for why row_group has two kind-specifics, and
+    !> interface's own doc comment in parquet_core.f90 for why row_group has two kind-specifics, and
     !> parquet_read_string_column_compact's own doc comment for the parquet_string_column notes
     !> shared with this chunked counterpart.
     subroutine parquet_read_string_column_chunk_compact_impl(reader, name, row_group, values)

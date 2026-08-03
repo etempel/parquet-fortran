@@ -2565,7 +2565,7 @@ contains
     !> parquet_column_info%set_available (bound as schema%set_column_available)
     !> rejects toggling a column that's deactivated -- merged in as an
     !> inactive placeholder because a base MAML declared it but the user
-    !> MAML excluded it (see is_deactivated's doc comment in src/parquet.f90).
+    !> MAML excluded it (see is_deactivated's doc comment in src/parquet_core.f90).
     !> Base declares "a"/"b"; the user MAML only declares "a", so "b" merges
     !> in deactivated.
     subroutine scenario_set_column_available_deactivated()
@@ -5121,7 +5121,7 @@ contains
         print '(a)', "unexpectedly opened a reader with two filter clauses and no combinator"
     end subroutine scenario_filter_missing_combinator
 
-    !> Nesting deeper than filter_max_depth (parquet.f90) aborts cleanly instead of overflowing
+    !> Nesting deeper than filter_max_depth (parquet_core.f90) aborts cleanly instead of overflowing
     !> the recursive-descent parser's own call stack, which would be a signal with no message.
     subroutine scenario_filter_nesting_too_deep()
         type(parquet_reader) :: reader
@@ -5134,7 +5134,7 @@ contains
         print '(a)', "unexpectedly opened a reader with a filter expression nested past the limit"
     end subroutine scenario_filter_nesting_too_deep
 
-    !> More expression terms than filter_max_nodes (parquet.f90) allows. 700 clauses become 1399
+    !> More expression terms than filter_max_nodes (parquet_core.f90) allows. 700 clauses become 1399
     !> nodes (700 leaves + 699 'and's), comfortably past the 1024 cap.
     subroutine scenario_filter_too_many_nodes()
         type(parquet_reader) :: reader
@@ -6131,7 +6131,7 @@ contains
     !> parquet_open_reader(nrows=) internally calls parquet_get_nrows with
     !> check_positive=.true., so a filter matching zero rows must abort at
     !> open time instead of silently returning nrows=0 -- see the nrows
-    !> doc comment on parquet_open_reader in src/parquet.f90.
+    !> doc comment on parquet_open_reader in src/parquet_core.f90.
     subroutine scenario_open_reader_nrows_zero_rows()
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
@@ -7601,7 +7601,7 @@ contains
 
     !> Compact (parquet_string_column) write into a schema-declared vector (col_size>1) string
     !> column aborts -- the compact path is scalar-only (see parquet_write_column's own doc
-    !> comment in parquet.f90).
+    !> comment in parquet_core.f90).
     subroutine scenario_compact_string_write_requires_scalar_column()
         type(parquet_schema) :: schema
         type(parquet_writer) :: writer

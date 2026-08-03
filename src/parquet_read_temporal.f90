@@ -4,9 +4,9 @@
 !> Temporal (date/time/timestamp) read specifics: column_1d, array_full,
 !> column_chunk/array_column_chunk (both row-group-index kinds),
 !> array_row_mode[_row_index], and array_element_mode: bodies of the module
-!> procedures declared in parquet.f90's interface block, plus the
+!> procedures declared in parquet_core.f90's interface block, plus the
 !> temporal-only private per-mode worker helpers they depend on.
-submodule (parquet:parquet_read) parquet_read_temporal
+submodule (parquet_core:parquet_read) parquet_read_temporal
     implicit none
 contains
 

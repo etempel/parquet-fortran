@@ -1,12 +1,12 @@
 !===========================================
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
 !===========================================
-!> Bodies of the schema-building module procedures declared in parquet.f90's
+!> Bodies of the schema-building module procedures declared in parquet_core.f90's
 !> interface block: parsing a MAML into a parquet_schema (parquet_parse_maml),
 !> building a schema from scratch (schema%init/%add_field), and the central
 !> parquet_parse_maml_lines parser, plus the private MAML-section helpers
 !> (keyarray:/DOI/depends/keywords/col_map/protected_cols) it depends on.
-submodule (parquet) parquet_metadata
+submodule (parquet_core) parquet_metadata
     use iso_fortran_env, only: output_unit
     implicit none
 
@@ -19,7 +19,7 @@ submodule (parquet) parquet_metadata
     integer, parameter :: maml_max_line_len = 1024
 
     ! ---- MAML load/parse/validate helpers (metadata-subtree-only private interfaces,
-    ! relocated here from parquet.f90 -- see CLAUDE.md's private-helper relocation rule) ----
+    ! relocated here from parquet_core.f90 -- see CLAUDE.md's private-helper relocation rule) ----
     interface
         !> Parses one qc: min:/max: value (already unquoted or not) into an
         !> operator + bound-text pair: a leading ">=", "<=", ">", or "<" (checked
@@ -527,7 +527,7 @@ contains
         !> way (min: >=/>, max: <=/<) and be followed by a non-empty value; a
         !> bare value with no operator is accepted as-is. Mirrors the rule
         !> %add_col_qc enforces for its own min:/max: fields, checked
-        !> independently here -- see schema_add_field's doc comment (parquet.f90)
+        !> independently here -- see schema_add_field's doc comment (parquet_core.f90)
         !> for why these two aren't unified into one implementation.
         subroutine validate_qc_bound(raw, is_min)
             character(len=*), intent(in), optional :: raw !! qc_min/qc_max text, absent or empty means nothing to check.
@@ -1722,7 +1722,7 @@ contains
     !> narrow, specific lookup rather than a generically-validated section.
     !> Returns a zero-size array if there is no extra:/col_map: section.
     !> Plain contained function (not a module procedure): its interface used
-    !> to live in parquet.f90, but since its body already lived here in the
+    !> to live in parquet_core.f90, but since its body already lived here in the
     !> parquet_metadata parent (not a descendant submodule), keeping it a
     !> module procedure after relocating the interface into this same file's
     !> own spec would mean parquet_metadata implementing its own spec-declared
@@ -1900,7 +1900,7 @@ contains
     !> intent(out) :: names(:), called from 2+ levels deep). Relaying through this ordinary
     !> contained subroutine in the parent submodule (reached by any descendant via host
     !> association, fact 3.6) sidesteps it: the grandchild calls this one-level-up wrapper
-    !> instead of reaching two levels up to parquet.f90's interface directly.
+    !> instead of reaching two levels up to parquet_core.f90's interface directly.
     subroutine parquet_parse_protected_cols_relay(lines, names)
         character(len=*), intent(in) :: lines(:) !! raw MAML source lines to scan.
         character(len=:), allocatable, intent(out) :: names(:) !! trimmed, unquoted protected column names.

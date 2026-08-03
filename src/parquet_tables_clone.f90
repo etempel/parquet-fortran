@@ -153,6 +153,7 @@ contains
     subroutine clone_new_cache(self, out)
         class(parquet_table), intent(in) :: self    !! the source table.
         class(parquet_table), intent(inout) :: out  !! the destination table.
+        integer :: i
         !
         allocate(out%cache)
         call record_open_thread(out%cache)
@@ -162,9 +163,27 @@ contains
         if (allocated(self%cache%source_file)) out%cache%source_file = self%cache%source_file
         ! The source file's metadata comes across as data, not by re-reading: a clone of a
         ! DETACHED table has no file left to reopen, and its metadata is no less true for that.
+        ! Explicit allocate-then-copy, not `out%cache%meta_keys = self%cache%meta_keys`: the plain
+        ! assignment leans on F2003 automatic reallocation to establish BOTH the shape and the
+        ! deferred LENGTH of a character array component that is reached through a POINTER-typed
+        ! intermediate (`out%cache`). That is the same shape this file already sidesteps for
+        ! `rg_bounds` below, and it is worse for a character array, because the length has to be
+        ! set as well -- a clone of a table carrying file metadata was seen to segfault inside
+        ! libc's allocator here on GitLab CI's (older) gfortran, while the identical code runs
+        ! clean on gfortran 15. Allocating with an explicit length and copying element by element
+        ! removes the reallocation from the picture entirely. Element-wise, not `dst = src`, per
+        ! the whole-array-assignment hazard in CLAUDE.md's "Compiler & language gotchas".
         if (allocated(self%cache%meta_keys)) then
-            out%cache%meta_keys = self%cache%meta_keys
-            out%cache%meta_values = self%cache%meta_values
+            allocate(character(len=len(self%cache%meta_keys)) :: out%cache%meta_keys(size(self%cache%meta_keys)))
+            do i = 1, size(self%cache%meta_keys)
+                out%cache%meta_keys(i) = self%cache%meta_keys(i)
+            end do
+        end if
+        if (allocated(self%cache%meta_values)) then
+            allocate(character(len=len(self%cache%meta_values)) :: out%cache%meta_values(size(self%cache%meta_values)))
+            do i = 1, size(self%cache%meta_values)
+                out%cache%meta_values(i) = self%cache%meta_values(i)
+            end do
         end if
     end subroutine clone_new_cache
     !

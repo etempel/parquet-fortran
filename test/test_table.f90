@@ -1503,6 +1503,12 @@ contains
         call s%add_field("v", "float64")
         call parquet_parse_maml(s)
         call s%add_metadata("mykey", "myvalue")
+        ! Deliberately ragged, and deliberately with the SHORTEST entry first: the snapshot is a
+        ! blank-padded deferred-length character array, so a copy of it that gets the length from
+        ! the first entry rather than the longest would truncate everything after it. %clone
+        ! copies that array, which is what the assertions further down are really checking.
+        call s%add_metadata("k", "v")
+        call s%add_metadata("a_considerably_longer_metadata_key", "a considerably longer metadata value")
         call parquet_open_writer(w, f, s)
         call parquet_write_column(w, "v", v)
         call parquet_close_writer(w)
@@ -1551,6 +1557,19 @@ contains
         call clone%get_file_metadata("mykey", val, found=ok)
         call check(error, ok .and. val == "myvalue", &
             "a clone of a detached table should carry its source file's metadata")
+        if (allocated(error)) return
+        ! Every entry, not just the first: a clone that copied the ragged key/value arrays wrongly
+        ! would come back with truncated (or, on an older gfortran, no) entries here.
+        call clone%get_file_metadata("k", val, found=ok)
+        call check(error, ok .and. val == "v", &
+            "a clone should carry the shortest metadata entry intact")
+        if (allocated(error)) return
+        call clone%get_file_metadata("a_considerably_longer_metadata_key", val, found=ok)
+        call check(error, ok .and. val == "a considerably longer metadata value", &
+            "a clone should carry the longest metadata entry intact, untruncated")
+        if (allocated(error)) return
+        call clone%get_file_metadata("no_such_key", val, found=ok)
+        call check(error, .not. ok, "a clone should still report a missing metadata key as a miss")
         if (allocated(error)) return
         !
         ! parquet_get_metadata_items reports the same store the snapshot is taken from.

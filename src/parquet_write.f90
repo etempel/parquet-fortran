@@ -1151,13 +1151,20 @@ contains
             error stop "parquet_close_writer: writer has not been opened, or was already closed"
         end if
 
-        if (writer%mask_used_with_row_groups .and. writer%mask_cursor /= size(writer%file_mask, kind=int64)) then
-            write(cursor_str, '(i0)') writer%mask_cursor
-            write(mask_str, '(i0)') size(writer%file_mask, kind=int64)
-            call writer_context_suffix(writer, ctx)
-            error stop "parquet_close_writer: the mask set via parquet_write_row_mask (" // trim(mask_str) // &
-                " rows) was not fully consumed by this writer's row groups (only " // trim(cursor_str) // &
-                " rows claimed)" // ctx
+        ! Nested rather than one `.and.`: Fortran does not guarantee short-circuit evaluation, so a
+        ! single combined condition references size(writer%file_mask) even when no mask was ever
+        ! set and file_mask is unallocated (a runtime error under -fcheck=all, undefined otherwise).
+        if (writer%mask_used_with_row_groups) then
+            if (allocated(writer%file_mask)) then
+                if (writer%mask_cursor /= size(writer%file_mask, kind=int64)) then
+                    write(cursor_str, '(i0)') writer%mask_cursor
+                    write(mask_str, '(i0)') size(writer%file_mask, kind=int64)
+                    call writer_context_suffix(writer, ctx)
+                    error stop "parquet_close_writer: the mask set via parquet_write_row_mask (" // trim(mask_str) // &
+                        " rows) was not fully consumed by this writer's row groups (only " // trim(cursor_str) // &
+                        " rows claimed)" // ctx
+                end if
+            end if
         end if
 
         if (writer%is_schema_enforced .and. allocated(writer%enabled_columns)) then

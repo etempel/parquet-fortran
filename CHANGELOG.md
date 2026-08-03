@@ -236,6 +236,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   surfaced later, in unrelated code. `parquet_open_reader`/`parquet_open_writer` now force both
   into existence once, from a single thread, before any concurrent caller can reach Arrow. See
   [Thread safety](doc/pages/thread-safety.md#a-note-on-arrows-own-type-singleton-construction).
+- Fixed `parquet_close_writer` referencing an unallocated array on every writer that never set a
+  row mask with `parquet_write_row_mask`: the mask-consumed check was one combined condition, and
+  Fortran does not guarantee short-circuit evaluation, so the unused mask's size was queried
+  regardless. Harmless in an ordinary build, but it aborted at close under `-fcheck=all`.
 
 ## [1.0.0] - 2026-07-27
 

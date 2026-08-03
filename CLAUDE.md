@@ -26,6 +26,7 @@ working rules).
   - [Only apply low-blast-radius renames/refactors](#only-apply-low-blast-radius-renamesrefactors)
   - [`feature_*.md` planning documents](#feature_md-planning-documents)
   - [Don't run the GitLab CI pipeline yourself](#dont-run-the-gitlab-ci-pipeline-yourself)
+  - [The CI-environment Docker image: ask for it, never build it](#the-ci-environment-docker-image-ask-for-it-never-build-it)
   - [Don't commit or push on the main/default branch yourself](#dont-commit-or-push-on-the-maindefault-branch-yourself)
 - [Documentation conventions](#documentation-conventions)
   - [New features require tests and docs](#new-features-require-tests-and-docs)
@@ -137,6 +138,31 @@ locally run `FPM_FFLAGS="-fopenmp" fpm test` (adding `--coverage` only when meas
 preferring `tools/coverage.sh` for that) and leave the C++ flags to the environment. **Run the
 OpenMP form at least once** before declaring a change verified: it is a genuinely different build
 (see "Tests run concurrently" for a guard that only exists under it), and CI runs only that one.
+
+### The CI-environment Docker image: ask for it, never build it
+
+A local run can only ever prove a change works on *this* machine's compiler. Some real failures
+are specific to the CI toolchain and are invisible locally — the metadata-array copy in
+`clone_new_cache` (see "Compiler & language gotchas") segfaulted on CI's gfortran while running
+clean locally under `-fcheck=all`, `--coverage -fopenmp` and the full suite. When a CI failure
+cannot be reproduced locally, or when a change needs checking against a compiler that isn't
+installed here, **ask the maintainer for the CI-environment Docker image**: it reproduces the
+GitLab CI environment and carries **gfortran, ifx and flang**, so all three can be exercised
+against the current working tree.
+
+Rules for using it:
+
+- **Never build or rebuild the image yourself** — not via `tools/build_ci_test_image.sh`, not via
+  `docker build`/`docker run` against a base image, not by any other route. Building it is the
+  maintainer's job, and only the maintainer's.
+- **Only ever run the library against an image the maintainer has already made available.** That
+  means building and testing this repository inside it, nothing else.
+- **Any change the image itself needs** (a different compiler version, another package, a changed
+  `before_script` step) is a **request** to the maintainer, who will generate a new image. Do not
+  work around a missing tool by installing it into a running container either — say what is
+  needed and wait.
+- Asking for the image is not a substitute for the local verification described above; it is what
+  to reach for *after* a local run has come back green and the failure persists on CI.
 
 ### Don't commit or push on the main/default branch yourself
 
@@ -1212,6 +1238,20 @@ counterpart. User guide: `doc/pages/date-time.md`.
   `%clone`-style deep copy adds another allocatable array reached through a `pointer` intermediate,
   prefer this explicit allocate-then-copy shape over a bare intrinsic assignment from the start,
   rather than rediscovering the same spurious bounds-check failure.
+
+  **The same shape carrying a deferred-length `character` array is worse than a bounds-check
+  complaint — it has been seen to segfault outright, and only on CI's compiler.** `clone_new_cache`
+  (same file) used to copy the file-metadata snapshot with
+  `out%cache%meta_keys = self%cache%meta_keys`, where automatic reallocation has to establish the
+  deferred LENGTH as well as the shape, through the same `pointer` intermediate. That crashed
+  inside libc's allocator on GitLab CI's (older, Ubuntu-packaged) gfortran — backtrace naming
+  `clone_new_cache` with two `???` libc frames under it and nothing else — while running clean on
+  gfortran 15.2 locally, under `-fcheck=all`, and under `--coverage -fopenmp`. **A clean local run
+  proves nothing about this class of bug**; the fix is the same explicit
+  `allocate(character(len=len(src)) :: dst(size(src)))` plus an element-wise loop (element-wise
+  because a whole-array `dst = src` is itself the reallocation hazard described further up this
+  section). Reach for that shape from the start for any deferred-length `character` array component
+  behind a pointer, and do not restore the plain assignment on the strength of a green local run.
 - **cpp runs over every source file, so `/*` anywhere — including inside a Fortran comment —
   breaks the build.** `fpm.toml` declares `[preprocess.cpp]`, which applies to *all* sources, not
   just `.F90` ones. Writing a glob like `tools/*.sh` in a comment opens a C block comment and the

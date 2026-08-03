@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds the cached "test" job environment image -- everything .gitlab-ci.yml's
-# before_script installs (gfortran/gcc/g++, fpm via pipx, Arrow/Parquet C++ dev
-# packages), baked into one image tagged parquet-fortran-ci-test:latest.
+# before_script installs (gfortran/gcc/g++, fpm via the official bootstrap,
+# Arrow/Parquet C++ dev packages), baked into one image tagged
+# parquet-fortran-ci-test:latest.
 #
 # Uses `docker run --platform linux/amd64` + `docker commit` rather than
 # `docker build --platform ...`: this machine's docker CLI only has the legacy
@@ -75,8 +76,16 @@ docker run \
     python3 -m pip install --no-cache-dir --break-system-packages pipx
     export PATH=/root/.local/bin:$PATH
     python3 -m pipx ensurepath
-    pipx install fpm
-    pipx upgrade fpm
+
+    echo "Installing fpm via the official source bootstrap installer from the fpm docs."
+    rm -rf /tmp/fpm-src
+    git clone --depth 1 https://github.com/fortran-lang/fpm /tmp/fpm-src
+    cd /tmp/fpm-src
+    ./install.sh --prefix=/usr/local
+    # Installing fpm via pipx is not recommended because the PyPI package is not
+    # maintained by the fpm team and is often out of date.
+    #pipx install fpm
+
     pipx install "gcovr>=7.1,<8.4"
 
     echo "Installing Intel oneAPI compiler-fortran package from Intel apt repository so ifx is available in the image too."
@@ -104,8 +113,10 @@ docker run \
 
     echo "Installing Arrow/Parquet C++ dev packages from Arrow apt repository so fpm can build against them."
     # Install the Arrow/Parquet C++ library from Arrow apt repository.
-    wget "https://packages.apache.org/artifactory/arrow/$(lsb_release --id --short | tr "A-Z" "a-z")/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb"
-    apt-get install -y -V ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
+    distro_id="$(lsb_release --id --short | tr 'A-Z' 'a-z')"
+    distro_codename="$(lsb_release --codename --short)"
+    wget "https://packages.apache.org/artifactory/arrow/${distro_id}/apache-arrow-apt-source-latest-${distro_codename}.deb"
+    apt-get install -y -V "./apache-arrow-apt-source-latest-${distro_codename}.deb"
     apt-get update -y
     apt-get install -y -V libarrow-dev libarrow-compute-dev libparquet-dev
     rm -f ./apache-arrow-apt-source-latest-*.deb

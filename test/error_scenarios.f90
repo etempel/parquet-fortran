@@ -1195,6 +1195,8 @@ program error_scenarios
         call scenario_table_row_unsupported_column()
     case ("table_detached_read_unmaterialized")
         call scenario_table_detached_read_unmaterialized()
+    case ("table_slice_mutate_then_read")
+        call scenario_table_slice_mutate_then_read()
     case ("table_detached_prefetch")
         call scenario_table_detached_prefetch()
     case ("table_detached_materialize_all")
@@ -10329,6 +10331,22 @@ contains
         call t%get("val", v)    ! -> aborts
         print '(a,i0)', "unexpectedly read from a detached table, size=", size(v)
     end subroutine scenario_table_detached_read_unmaterialized
+
+    !> The slice counterpart of table_detached_read_unmaterialized, and the case where two
+    !! mechanisms meet: the mutation SKIPS the column it cannot see (which is what lets a lazy
+    !! table drop rows at all), and detaching then rewrites the slice's own row scope away, so the
+    !! skipped column can never be lined up with what is left. The abort is the only thing that
+    !! reports the loss.
+    subroutine scenario_table_slice_mutate_then_read()
+        type(parquet_table) :: t
+        real(real64), allocatable :: v(:)
+        call write_mutate_fixture("test_run/es_tbl_slice_mut.parquet")
+        call parquet_open_table(t, "test_run/es_tbl_slice_mut.parquet", 2_int64, 3_int64)
+        call t%prefetch("id")     ! only "id" is resident; "val" was never read
+        call t%delete_rows([1_int64])   ! -> mutates the SLICE, skips "val", detaches
+        call t%get("val", v)      ! -> aborts
+        print '(a,i0)', "unexpectedly read a slice's stranded column, size=", size(v)
+    end subroutine scenario_table_slice_mutate_then_read
 
     subroutine scenario_table_detached_prefetch()
         type(parquet_table) :: t

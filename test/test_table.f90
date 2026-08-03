@@ -223,7 +223,13 @@ contains
             new_unittest("a schema-less write's sidecar MAML carries units and reopens the file", &
                 test_write_table_schemaless_sidecar), &
             new_unittest("a nanosecond timestamp column survives a schema-less write", &
-                test_write_table_temporal_unit) &
+                test_write_table_temporal_unit), &
+            new_unittest("a row mutation on a slice detaches it and strands its unread columns", &
+                test_mutate_slice_then_read), &
+            new_unittest("prefetch reaches the automatic row-index column", &
+                test_prefetch_row_index), &
+            new_unittest("per-element nulls written by Arrow survive the read intact", &
+                test_element_nulls_from_arrow) &
             ]
     end subroutine collect_tests_parquet_table
     !
@@ -5789,7 +5795,184 @@ contains
         if (allocated(error)) return
         call check(error, tb(1, 1) == 1_int64 .and. tb(2, size(tb, 2)) == t%nrows(), &
             "a filtered whole-file table's default bounds should tile its own rows")
+        if (allocated(error)) return
+        !
+        ! A SAMPLED table with no filter and no sort. It reaches the same on-demand branch as the
+        ! filtered case, but through a different predicate -- there is no parquet_filter object
+        ! anywhere -- so it is the one narrowing transform the cases above never exercise alone.
+        call parquet_open_table(t, f, sample_fraction=0.5_real64, sample_seed=7)
+        call t%row_group_bounds(tb)
+        call t%row_group_bounds(pb, physical=.true.)
+        call check(error, all(pb == fb), &
+            "a sampled table should report the file's own bounds under physical=.true.")
+        if (allocated(error)) return
+        call check(error, size(tb, 2) == size(fb, 2), &
+            "a sampled table should still report one entry per physical row group")
+        if (allocated(error)) return
+        next = 1_int64
+        do rg = 1_int64, size(tb, 2, kind=int64)
+            if (tb(1, rg) > tb(2, rg)) cycle
+            call check(error, tb(1, rg) == next, &
+                "a sampled table's contributing row groups should tile its own rows in order")
+            if (allocated(error)) return
+            next = tb(2, rg) + 1_int64
+        end do
+        call check(error, next - 1_int64 == t%nrows(), &
+            "a sampled table's default bounds should tile 1..nrows() exactly")
     end subroutine test_row_group_bounds_physical
+    !
+    !> A row mutation on a SLICE, and what it costs a column the slice never read.
+    !!
+    !! This is where two mechanisms meet: detaching rewrites `regime`/`row_lo`/`row_hi` into a
+    !! plain in-memory table, and a row-structural mutation SKIPS a column that is not resident
+    !! rather than refusing to run -- which is what lets a lazy table drop rows without first
+    !! reading everything it has. The skipped column is then unreadable for good. Here that is
+    !! asserted from the successful side (the resident column really is mutated, and the row scope
+    !! really is gone); the read that can no longer happen is `table_slice_mutate_then_read` in
+    !! test/error_scenarios.f90, since it aborts.
+    subroutine test_mutate_slice_then_read(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer, parameter :: N = 20, CH = 7, LO = 6, HI = 16
+        integer(int32), allocatable :: k(:)
+        integer :: i
+        character(len=*), parameter :: f = "test_run/table_slice_mutate.parquet"
+        !
+        call write_slice_xform_fixture(f, N, CH)
+        call parquet_open_table(t, f, LO, HI)
+        call t%prefetch("k")        ! "x" and "s" are deliberately left unread
+        call check(error, t%nrows() == HI - LO + 1, "precondition: the slice should hold its own range")
+        if (allocated(error)) return
+        call check(error, t%residency("x") == RES_EMPTY, "precondition: x should not be resident")
+        if (allocated(error)) return
+        !
+        ! Drops the first two rows of the SLICE, not of the file.
+        call t%delete_rows([1_int64, 2_int64])
+        call check(error, t%is_detached(), "a row mutation on a slice should detach it")
+        if (allocated(error)) return
+        call check(error, t%nrows() == HI - LO - 1, &
+            "the mutation should be applied in the slice's own row numbering")
+        if (allocated(error)) return
+        call t%get("k", k)
+        call check(error, all(k == [(int(i, int32), i = LO + 2, HI)]), &
+            "the resident column should hold the slice's surviving rows, in the file's values")
+        if (allocated(error)) return
+        !
+        ! The skipped columns keep their descriptors -- they are still listed, still typed -- which
+        ! is exactly what makes the loss quiet: nothing about the table looks different until a
+        ! read is attempted.
+        call check(error, t%has_column("x") .and. t%kind("x") == PK_FLOAT64, &
+            "a column the mutation skipped should still be listed and typed")
+        if (allocated(error)) return
+        call check(error, t%residency("x") == RES_EMPTY, &
+            "...and still report itself as holding nothing")
+    end subroutine test_mutate_slice_then_read
+    !
+    !> Per-element nulls written by ARROW, not by this library, survive the read intact.
+    !!
+    !! This is the one element-null test that cannot be fooled by a self-consistent bug. Every
+    !! other one writes its fixture with `parquet_write_column` and reads it back, so a defect that
+    !! widened a null on read *and* broadcast it on write would agree with itself and look perfectly
+    !! healthy. `test/fixtures/element_nulls.parquet` is written by `tools/generate_fixtures.cpp`
+    !! through Arrow directly, so it is an independent statement of what the read path must produce.
+    !!
+    !! One column per validity dispatch class, because they are three different mechanisms behind
+    !! one API: the packed bitmap (`vec`), the embedded string column (`svec`), and the null inside
+    !! each element (`tvec`). Each has exactly one null element, and the assertions are on element
+    !! POSITIONS -- a widened null would still be "a null in that row" and would pass a count.
+    subroutine test_element_nulls_from_arrow(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        real(real64), allocatable :: vec(:,:)
+        character(len=:), allocatable :: svec(:,:)
+        type(parquet_timestamp), allocatable :: tvec(:,:)
+        logical, allocatable :: vmask(:,:), smask(:,:)
+        character(len=*), parameter :: f = "test/fixtures/element_nulls.parquet"
+        !
+        call parquet_open_table(t, f)
+        call check(error, t%nrows() == 4 .and. t%ncols() == 4, &
+            "the Arrow-written element-null fixture should open with 4 rows and 4 columns")
+        if (allocated(error)) return
+        call check(error, t%width("vec") == 3 .and. t%kind("vec") == PK_FLOAT64_VEC, &
+            "vec should read as a width-3 float64 vector column")
+        if (allocated(error)) return
+        !
+        ! Bitmap class: the null is at element 2 of row 2 and nowhere else.
+        call t%get("vec", vec, is_valid=vmask)
+        call check(error, .not. vmask(2, 2), "vec: element 2 of row 2 should be null")
+        if (allocated(error)) return
+        call check(error, count(.not. vmask) == 1, &
+            "vec: exactly one ELEMENT should be null -- a widened null would mark three")
+        if (allocated(error)) return
+        call check(error, abs(vec(1, 2) - 21.0_real64) < 1.0e-12_real64 .and. &
+            abs(vec(3, 2) - 23.0_real64) < 1.0e-12_real64, &
+            "vec: the null element's siblings should keep their values")
+        if (allocated(error)) return
+        call check(error, t%is_null("vec", 2_int64, 2_int64), &
+            "vec: %is_null(row, elem) should report the single null element")
+        if (allocated(error)) return
+        call check(error, .not. t%is_null("vec", 2_int64, 1_int64), &
+            "vec: %is_null(row, elem) should not report its siblings")
+        if (allocated(error)) return
+        call check(error, t%is_null("vec", 2_int64), &
+            "vec: the row query means 'any element null', so row 2 is null")
+        if (allocated(error)) return
+        call check(error, .not. t%is_null("vec", 1_int64), "vec: row 1 has no null element")
+        if (allocated(error)) return
+        !
+        ! String class: the embedded string column keeps its own per-element validity.
+        call t%get("svec", svec, is_valid=smask)
+        call check(error, .not. smask(1, 3), "svec: element 1 of row 3 should be null")
+        if (allocated(error)) return
+        call check(error, count(.not. smask) == 1, "svec: exactly one element should be null")
+        if (allocated(error)) return
+        call check(error, trim(svec(2, 3)) == "ff", &
+            "svec: the null element's sibling should keep its value")
+        if (allocated(error)) return
+        call check(error, trim(svec(1, 1)) == "a" .and. trim(svec(2, 2)) == "ddddd", &
+            "svec: values should survive with the shortest element read first")
+        if (allocated(error)) return
+        !
+        ! Temporal class: no mask at all -- the null lives inside each element.
+        call t%get("tvec", tvec)
+        call check(error, tvec(2, 1)%is_null(), "tvec: element 2 of row 1 should be null")
+        if (allocated(error)) return
+        call check(error, .not. tvec(1, 1)%is_null(), "tvec: its sibling should not be null")
+        if (allocated(error)) return
+        call check(error, count(tvec%is_null()) == 1, "tvec: exactly one element should be null")
+    end subroutine test_element_nulls_from_arrow
+    !
+    !> `%prefetch` reaches the automatic row-index column, like every other way of asking for it.
+    !!
+    !! The name resolves for `%get`/`%col` but used to report "no column of this name" here, which
+    !! made `%prefetch` -- the one documented way to ask for a column ahead of time -- the one way
+    !! that could not ask for this one. Materializing it gives it a real slot, so `%ncols()` grows
+    !! by one exactly as it does after a `%get`.
+    subroutine test_prefetch_row_index(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer(int64), allocatable :: ri(:)
+        integer :: before, i
+        character(len=*), parameter :: f = "test_run/table_prefetch_rowidx.parquet"
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t, f)
+        before = t%ncols()
+        call t%prefetch(PARQUET_ROW_INDEX)
+        call check(error, t%residency(PARQUET_ROW_INDEX) == RES_FULL, &
+            "%prefetch should materialize the automatic row-index column")
+        if (allocated(error)) return
+        call check(error, t%ncols() == before + 1, &
+            "...which gives it a real slot, exactly as %get on it does")
+        if (allocated(error)) return
+        call t%get(PARQUET_ROW_INDEX, ri)
+        call check(error, all(ri == [(int(i, int64), i = 1, NROW)]), &
+            "the prefetched row-index column should hold the file's own row numbers")
+        if (allocated(error)) return
+        ! A second prefetch is a no-op, like any other already-resident column.
+        call t%prefetch(PARQUET_ROW_INDEX)
+        call check(error, t%ncols() == before + 1, "a second prefetch should not add another slot")
+    end subroutine test_prefetch_row_index
     !
     !> `parquet_write_table` parses a schema the caller built but never parsed.
     !!

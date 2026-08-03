@@ -1049,6 +1049,114 @@ static bool generate_map_list_types_fixture()
     return status.ok();
 }
 
+// test/fixtures/element_nulls.parquet: vector (fixed_size_list) columns whose nulls sit on
+// INDIVIDUAL ELEMENTS rather than on whole rows, written by Arrow directly.
+//
+// Why it has to come from here rather than from this library's own writer: every other
+// element-null test writes its fixture with parquet-fortran and reads it back, so a bug that
+// widened a null on read AND broadcast it on write would be perfectly self-consistent and
+// invisible. This file is the independent statement of what the read path must produce.
+//
+// One column per validity dispatch class, since they are three different mechanisms behind one
+// API (a packed bitmap, the embedded string column, the null inside each element):
+//   id    int32 scalar, no nulls                  -- orientation
+//   vec   fixed_size_list<double, 3>              -- row 2, element 2 is null (bitmap class)
+//   svec  fixed_size_list<string, 2>              -- row 3, element 1 is null (string class)
+//   tvec  fixed_size_list<timestamp[us], 2>       -- row 1, element 2 is null (temporal class)
+// Every other element of every row is a real value, so a test can assert that the null landed on
+// exactly one element and that its siblings survived.
+static bool generate_element_nulls_fixture()
+{
+    arrow::Int32Builder id_builder;
+    auto st = id_builder.AppendValues({1, 2, 3, 4});
+    std::shared_ptr<arrow::Array> id_arr;
+    st = id_builder.Finish(&id_arr);
+
+    // double vector, width 3: null at (row 2, element 2) only.
+    auto vec_values = std::make_shared<arrow::DoubleBuilder>();
+    arrow::FixedSizeListBuilder vec_builder(arrow::default_memory_pool(), vec_values, 3);
+    for (int row = 0; row < 4; ++row)
+    {
+        st = vec_builder.Append();
+        for (int e = 0; e < 3; ++e)
+        {
+            if (row == 1 && e == 1)
+            {
+                st = vec_values->AppendNull();
+            }
+            else
+            {
+                st = vec_values->Append(10.0 * (row + 1) + (e + 1));
+            }
+        }
+    }
+    std::shared_ptr<arrow::Array> vec_arr;
+    st = vec_builder.Finish(&vec_arr);
+
+    // string vector, width 2: null at (row 3, element 1) only. First element deliberately the
+    // shortest, per this project's "sized from the first element" convention.
+    auto svec_values = std::make_shared<arrow::StringBuilder>();
+    arrow::FixedSizeListBuilder svec_builder(arrow::default_memory_pool(), svec_values, 2);
+    const char *words[4][2] = {{"a", "bbbb"}, {"cc", "ddddd"}, {"e", "ff"}, {"gggg", "h"}};
+    for (int row = 0; row < 4; ++row)
+    {
+        st = svec_builder.Append();
+        for (int e = 0; e < 2; ++e)
+        {
+            if (row == 2 && e == 0)
+            {
+                st = svec_values->AppendNull();
+            }
+            else
+            {
+                st = svec_values->Append(words[row][e]);
+            }
+        }
+    }
+    std::shared_ptr<arrow::Array> svec_arr;
+    st = svec_builder.Finish(&svec_arr);
+
+    // timestamp vector, width 2: null at (row 1, element 2) only.
+    auto ts_type = arrow::timestamp(arrow::TimeUnit::MICRO);
+    auto tvec_values = std::make_shared<arrow::TimestampBuilder>(ts_type, arrow::default_memory_pool());
+    arrow::FixedSizeListBuilder tvec_builder(arrow::default_memory_pool(), tvec_values, 2);
+    for (int row = 0; row < 4; ++row)
+    {
+        st = tvec_builder.Append();
+        for (int e = 0; e < 2; ++e)
+        {
+            if (row == 0 && e == 1)
+            {
+                st = tvec_values->AppendNull();
+            }
+            else
+            {
+                // 2024-01-01T00:00:00Z is 1704067200 s; add a distinct second per element.
+                st = tvec_values->Append((1704067200LL + row * 2 + e) * 1000000LL);
+            }
+        }
+    }
+    std::shared_ptr<arrow::Array> tvec_arr;
+    st = tvec_builder.Finish(&tvec_arr);
+
+    // The LIST fields themselves are non-nullable while their elements are nullable: that is what
+    // makes every null in this file an element null rather than a row null.
+    auto schema = arrow::schema({
+        arrow::field("id", arrow::int32(), false),
+        arrow::field("vec", arrow::fixed_size_list(arrow::field("item", arrow::float64(), true), 3), false),
+        arrow::field("svec", arrow::fixed_size_list(arrow::field("item", arrow::utf8(), true), 2), false),
+        arrow::field("tvec", arrow::fixed_size_list(arrow::field("item", ts_type, true), 2), false),
+    });
+    auto table = arrow::Table::Make(schema, {id_arr, vec_arr, svec_arr, tvec_arr});
+
+    auto maybe_outfile = arrow::io::FileOutputStream::Open("test/fixtures/element_nulls.parquet");
+    auto outfile = *maybe_outfile;
+    auto props = parquet::ArrowWriterProperties::Builder().store_schema()->build();
+    auto status = parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile, 4,
+                                             parquet::default_writer_properties(), props);
+    return status.ok();
+}
+
 int main()
 {
     struct Fixture
@@ -1066,6 +1174,7 @@ int main()
         {"test/fixtures/extended_types.parquet", generate_extended_types_fixture},
         {"test/fixtures/nested_struct.parquet", generate_nested_struct_fixture},
         {"test/fixtures/map_list_types.parquet", generate_map_list_types_fixture},
+        {"test/fixtures/element_nulls.parquet", generate_element_nulls_fixture},
     };
 
     int failures = 0;

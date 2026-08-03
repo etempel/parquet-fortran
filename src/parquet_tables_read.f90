@@ -526,6 +526,17 @@ contains
         character(len=:), allocatable :: sfx
         !
         call table_check_open(self, proc)
+        ! The reserved name has to resolve here too, exactly as it does in table_resolve for the
+        ! value accessors -- otherwise %prefetch is the one documented way to ask for a column
+        ! ahead of time that cannot ask for this one, and reports "no column of this name" for a
+        ! name %has_column answers .true. for. Materializing it is what %prefetch means, so it
+        ! becomes an ordinary listed column here just as it does after a %get.
+        !
+        ! %materialize_all deliberately does NOT go through this: it marks the slots that exist,
+        ! so a table that never asked for the row index does not acquire one from a bulk read.
+        if (name == PARQUET_ROW_INDEX .and. table_find(self, name) == 0) then
+            if (allocated(self%cache%meta_keys)) call table_make_row_index(self)
+        end if
         idx = table_find(self, name)
         if (idx == 0) then
             if (present(found)) then

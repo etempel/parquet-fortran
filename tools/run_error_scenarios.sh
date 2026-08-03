@@ -301,6 +301,7 @@ scenarios=(
     "table_row_unknown_column:1"
     "table_row_unattached:1"
     "table_detached_read_unmaterialized:1"
+    "table_slice_mutate_then_read:1"
     "table_detached_prefetch:1"
     "table_detached_materialize_all:1"
     "table_detached_reload:1"

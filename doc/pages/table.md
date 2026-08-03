@@ -1307,7 +1307,10 @@ Four things to know:
   is not built at open. `%has_column(PARQUET_ROW_INDEX)` answers `.true.` before the first use,
   while `%ncols`/`%column_names` do not list it; asking for it once gives it a real slot, listed
   last. That is the one place those two queries disagree, and deliberately: `%has_column` answers
-  "can I use this name?", `%column_names` lists what the table is holding.
+  "can I use this name?", `%column_names` lists what the table is holding. Any of `%get`, `%col`
+  or `%prefetch(PARQUET_ROW_INDEX)` counts as asking. `%materialize_all` does **not** — it reads
+  the columns the table has, so a table that never asked for the row index does not acquire one
+  from a bulk read.
 - **Materialize it before changing the row set.** It names rows of a file, so a
   [detached](#what-detaching-means) table cannot produce it any more — asking then is an error
   saying so. Ask for it *first* and it becomes an ordinary column: `%sort_by` reorders it with

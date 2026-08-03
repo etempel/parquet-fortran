@@ -142,7 +142,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reopening the file it describes — so a table written this way round-trips complete with the
   units a parquet file cannot itself carry. Temporal columns keep their stored resolution through
   that round trip: a `timestamp[ns]` column is written back as nanoseconds rather than coerced to
-  the writer's microsecond default. The source file's metadata is snapshotted when the table opens, so
+  the writer's microsecond default. `%prefetch(PARQUET_ROW_INDEX)` now materializes the automatic
+  row-index column, like `%get`/`%col` already did, instead of reporting a column of that name as
+  missing; `%materialize_all` still does not create it. The source file's metadata is snapshotted when the table opens, so
   `%get_file_metadata` — and that carry-over — keep working after a row mutation has detached the
   table from its file. **Column units now come from a read-in MAML**: a `fields:` entry's `unit:`
   key gives that column its unit, matched on the file's own column name, answered by `%unit`

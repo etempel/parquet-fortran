@@ -659,6 +659,8 @@ contains
                 test_table_detached_read_unmaterialized_aborts), &
             new_unittest("prefetching on a detached table aborts", &
                 test_table_detached_prefetch_aborts), &
+            new_unittest("reading a slice's stranded column after a row mutation aborts", &
+                test_table_slice_mutate_then_read_aborts), &
             new_unittest("materialize_all on a detached table aborts", &
                 test_table_detached_materialize_all_aborts), &
             new_unittest("reloading a column of a detached table aborts", &
@@ -4934,6 +4936,13 @@ contains
             failure_message="reading a column left behind by a detach was expected to abort", &
             required_stderr="this table has been detached from its file by a row-structural change")
     end subroutine test_table_detached_read_unmaterialized_aborts
+
+    subroutine test_table_slice_mutate_then_read_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_slice_mutate_then_read", expect_abort=.true., &
+            failure_message="reading a slice's stranded column after a row mutation was expected to abort", &
+            required_stderr="detached")
+    end subroutine test_table_slice_mutate_then_read_aborts
 
     subroutine test_table_detached_prefetch_aborts(error)
         type(error_type), allocatable, intent(out) :: error

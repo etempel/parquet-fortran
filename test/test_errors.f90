@@ -615,6 +615,8 @@ contains
                 test_table_write_missing_column_aborts), &
             new_unittest("parquet_write_table with a schema naming an unsupported column aborts", &
                 test_table_write_unsupported_column_aborts), &
+            new_unittest("parquet_write_table with overwrite=.false. over an existing file aborts", &
+                test_table_write_no_overwrite_aborts), &
             new_unittest("parquet_write_table with a schema that was never built aborts", &
                 test_table_write_unbuilt_schema_aborts), &
             new_unittest("asking for the row index after a detach aborts", &
@@ -1039,6 +1041,13 @@ contains
             failure_message="writing a schema-named unsupported column was expected to abort", &
             required_stderr="the schema declares a column that holds no values")
     end subroutine test_table_write_unsupported_column_aborts
+
+    subroutine test_table_write_no_overwrite_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_write_no_overwrite", expect_abort=.true., &
+            failure_message="a table write with overwrite=.false. over an existing file was expected to abort", &
+            required_stderr="file already exists and overwrite=.false.")
+    end subroutine test_table_write_no_overwrite_aborts
 
     subroutine test_table_row_index_after_detach_aborts(error)
         type(error_type), allocatable, intent(out) :: error

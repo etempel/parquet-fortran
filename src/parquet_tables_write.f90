@@ -20,7 +20,7 @@ contains
         type(parquet_schema) :: carried
         character(len=:), allocatable :: fname, sfx
         integer :: i, nfields, idx
-        logical :: want_metadata
+        logical :: want_metadata, do_release, was_empty
         !
         call table_check_open(table, "parquet_write_table")
         ! A schema built in code with %init/%add_field only has MAML *text* until
@@ -51,16 +51,27 @@ contains
             end if
             want_metadata = want_metadata .or. copy_metadata
         end if
-        ! The carried metadata goes onto a COPY of the schema, never the caller's own: writing a
-        ! second table with the same schema afterwards would otherwise inherit the first table's
+        ! Two things about the open below. Every writer option is forwarded untouched, absent ones
+        ! included: passing an absent optional dummy on as an actual argument leaves the callee's
+        ! own dummy absent, so parquet_open_writer applies exactly the defaults it would for a
+        ! hand-written open, and there is no second set of defaults here to drift from it.
+        !
+        ! And the carried metadata goes onto a COPY of the schema, never the caller's own: writing
+        ! a second table with the same schema afterwards would otherwise inherit the first table's
         ! source-file metadata, silently and permanently.
         if (want_metadata) then
             carried = schema
             call carry_source_metadata(table, carried, metadata_keys)
-            call parquet_open_writer(writer, trim(filename), carried)
+            call parquet_open_writer(writer, trim(filename), carried, write_maml=write_maml, qc=qc, &
+                compression=compression, compression_level=compression_level, chunk_size=chunk_size, &
+                use_threads=use_threads, overwrite=overwrite)
         else
-            call parquet_open_writer(writer, trim(filename), schema)
+            call parquet_open_writer(writer, trim(filename), schema, write_maml=write_maml, qc=qc, &
+                compression=compression, compression_level=compression_level, chunk_size=chunk_size, &
+                use_threads=use_threads, overwrite=overwrite)
         end if
+        do_release = .true.
+        if (present(release)) do_release = release
         if (present(row_mask)) call parquet_write_row_mask(writer, row_mask)
         do i = 1, nfields
             call schema%get_field_name(i, fname)
@@ -82,11 +93,41 @@ contains
             end if
             ! Writing a column the caller never read is a first touch like any other: the schema
             ! naming it IS the request to read it. Nothing has to be pre-materialized to write.
+            ! Whether it WAS is the whole of release=: what the caller had already read is theirs
+            ! and stays, what this write had to read is this write's to give back.
+            was_empty = table%cache%cols(idx)%residency == RES_EMPTY
             call table_touch(table%cache, table_scope_of(table), idx, "parquet_write_table")
             call write_one_column(writer, table, idx, fname)
+            ! Released here rather than after the loop, so peak residency is one column rather
+            ! than every column the schema names.
+            if (do_release .and. was_empty) call release_written_column(table%cache, idx)
         end do
         call parquet_close_writer(writer)
     end procedure parquet_write_table
+    !
+    !> Gives back a column this write had to materialize, leaving the descriptor alone so the
+    !! slot stays listed, queryable and re-readable -- `%evict_column`'s body, without its checks.
+    !!
+    !! The checks are not needed and are deliberately not repeated: the only caller runs this
+    !! solely for a slot that was `RES_EMPTY` before `table_touch` and is `RES_FULL` after, and
+    !! `table_touch` itself has already rejected a slot with no file column behind it and a table
+    !! detached from its file. So there is no unreleasable case left to skip silently here -- a
+    !! column that could not be released could not have been read either, and the write would
+    !! have aborted before reaching this point.
+    !!
+    !! The generation counter advances because storage a `%col` pointer could alias really has
+    !! been freed. No pointer a caller can hold is ever affected (taking one materializes the
+    !! column, which puts it outside the released set), so the signal is conservative rather than
+    !! precise -- and it does not move at all when nothing was released.
+    subroutine release_written_column(cache, idx)
+        type(parquet_table_cache), intent(inout) :: cache !! the column store.
+        integer, intent(in) :: idx                        !! slot just written.
+        !
+        call cache%cols(idx)%values%clear()
+        cache%cols(idx)%residency = RES_EMPTY
+        cache%cols(idx)%user_populated = .false.
+        cache%generation = cache%generation + 1_int64
+    end subroutine release_written_column
     !
     !> Copies the table's source-file metadata onto `sch`, which is already a private copy.
     !!

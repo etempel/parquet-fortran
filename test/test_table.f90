@@ -213,7 +213,11 @@ contains
             new_unittest("a vector column's is_valid= is per element on get, col, set and slice", &
                 test_table_rank2_masks), &
             new_unittest("parquet_write_table parses a schema the caller left unparsed", &
-                test_write_table_parses_schema) &
+                test_write_table_parses_schema), &
+            new_unittest("release= leaves the table in the residency state the write found", &
+                test_write_table_release), &
+            new_unittest("the writer options parquet_write_table forwards reach the file", &
+                test_write_table_writer_options) &
             ]
     end subroutine collect_tests_parquet_table
     !
@@ -5927,5 +5931,133 @@ contains
         call check(error, all(pb == fb), &
             "a sorted, fully-sampled table should report the file's own row-group bounds")
     end subroutine test_row_group_bounds_sorted
+    !
+    !> `release=` leaves the table in the residency state the write found it in.
+    !!
+    !! Three claims, and the middle one is what a naive implementation gets wrong: a column the
+    !! CALLER had already read must survive the write resident, because materializing it was never
+    !! this write's doing. The generation counter is checked alongside, since eviction frees storage
+    !! a `%col` pointer could alias and the counter is the only signal a caller has -- it must move
+    !! when something was released and stay put when nothing was.
+    subroutine test_write_table_release(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_schema) :: s
+        integer(int64) :: g0
+        real(real64), allocatable :: r64(:)
+        character(len=*), parameter :: f  = "test_run/table_release_in.parquet"
+        character(len=*), parameter :: fo = "test_run/table_release_out.parquet"
+        character(len=*), parameter :: fk = "test_run/table_release_keep.parquet"
+        character(len=*), parameter :: fr = "test_run/table_release_resident.parquet"
+        !
+        call write_basic_fixture(f)
+        call s%init("rel")
+        call s%add_field("i32", "int32")
+        call s%add_field("f64", "float64")
+        call s%add_field("b", "boolean")
+        call parquet_parse_maml(s)
+        !
+        call parquet_open_table(t, f)
+        call t%prefetch("i32")      ! the caller's own read -- not the write's to undo
+        g0 = t%generation()
+        call parquet_write_table(t, fo, s)
+        call check(error, t%residency("i32") == RES_FULL, &
+            "release= must leave resident a column the caller had already read")
+        if (allocated(error)) return
+        call check(error, t%residency("f64") == RES_EMPTY, &
+            "release= should give back a column the write itself materialized")
+        if (allocated(error)) return
+        call check(error, t%residency("b") == RES_EMPTY, "...for every such column, not just one")
+        if (allocated(error)) return
+        call check(error, t%generation() > g0, &
+            "releasing frees storage a %col pointer could alias, so the generation must advance")
+        if (allocated(error)) return
+        ! Released, not dropped: the descriptor stays and the next read works.
+        call t%get("f64", r64)
+        call check(error, abs(r64(4) - 9.0_real64) < 1.0e-12_real64, &
+            "a released column must still be readable from the file afterwards")
+        if (allocated(error)) return
+        !
+        ! release=.false. keeps everything the write read.
+        call parquet_open_table(t, f)
+        call parquet_write_table(t, fk, s, release=.false.)
+        call check(error, t%residency("f64") == RES_FULL .and. t%residency("b") == RES_FULL, &
+            "release=.false. should leave what the write materialized resident")
+        if (allocated(error)) return
+        !
+        ! Nothing released, nothing to report: a write over an already-resident table must not move
+        ! the counter at all, or every write would look like it invalidated the caller's pointers.
+        call t%materialize_all()
+        g0 = t%generation()
+        call parquet_write_table(t, fr, s)
+        call check(error, t%generation() == g0, &
+            "a write that releases nothing must leave the generation counter alone")
+        if (allocated(error)) return
+        call check(error, t%residency("f64") == RES_FULL, &
+            "...and must leave the fully-materialized table exactly as it was")
+    end subroutine test_write_table_release
+    !
+    !> Every `parquet_open_writer` option `parquet_write_table` forwards actually reaches the file.
+    !!
+    !! The point of the pass-through is that a table write and the equivalent hand-written open are
+    !! the same calls, so what is checked here is the option's OBSERVABLE effect, not that the
+    !! argument was accepted: `chunk_size` against the reopened file's row-group count, `write_maml`
+    !! against the sidecar's existence, and the codec arguments against the values surviving (a
+    !! codec name that never reached Arrow would still produce a readable file, but a wrong one
+    !! would abort in the writer).
+    subroutine test_write_table_writer_options(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, t2
+        type(parquet_schema) :: s
+        type(parquet_reader) :: rd
+        integer :: nrg, unit
+        real(real64), allocatable :: r64(:)
+        logical :: sidecar
+        character(len=*), parameter :: f  = "test_run/table_wopts_in.parquet"
+        character(len=*), parameter :: fc = "test_run/table_wopts_chunked.parquet"
+        character(len=*), parameter :: fz = "test_run/table_wopts_snappy.parquet"
+        character(len=*), parameter :: fm = "test_run/table_wopts_maml.parquet"
+        character(len=*), parameter :: sidecar_path = "test_run/table_wopts_maml.maml"
+        !
+        call write_basic_fixture(f)
+        call s%init("wopts")
+        call s%add_field("i32", "int32")
+        call s%add_field("f64", "float64")
+        call parquet_parse_maml(s)
+        call parquet_open_table(t, f)
+        !
+        ! chunk_size: 6 rows in row groups of 2 is 3 row groups, and nothing else in the call
+        ! could produce that number.
+        call parquet_write_table(t, fc, s, chunk_size=2)
+        call parquet_open_reader(rd, fc)
+        call parquet_get_num_row_groups(rd, nrg)
+        call parquet_close_reader(rd)
+        call check(error, nrg == 3, "chunk_size= should size the output's row groups")
+        if (allocated(error)) return
+        !
+        ! The codec arguments, with the values checked on the way back: an unknown codec name
+        ! aborts in the writer, so reaching this point at all proves the name was passed on.
+        ! qc= rides along here rather than getting its own assertion: a qc violation only PRINTS a
+        ! warning, so there is nothing an in-process test can check. What it does with the flag is
+        ! parquet_open_writer's own behaviour and is covered on that side.
+        ! No compression_level= alongside snappy: Arrow rejects a level for a codec that has none,
+        ! so the two are exercised separately -- the level below, on the default zstd.
+        call parquet_write_table(t, fz, s, compression="snappy", &
+            use_threads=.false., overwrite=.true., qc=.false.)
+        call parquet_open_table(t2, fz)
+        call t2%get("f64", r64)
+        call check(error, abs(r64(4) - 9.0_real64) < 1.0e-12_real64, &
+            "values should survive a table write under a non-default codec")
+        if (allocated(error)) return
+        !
+        ! write_maml: the sidecar lands next to the parquet file, named after it. Deleted first,
+        ! or the check passes on a leftover from an earlier run whether or not the argument was
+        ! forwarded -- which is exactly what a mutation of the pass-through proved.
+        open(newunit=unit, file=sidecar_path, status="unknown", action="write")
+        close(unit, status="delete")
+        call parquet_write_table(t, fm, s, write_maml=.true., compression_level=1)
+        inquire(file=sidecar_path, exist=sidecar)
+        call check(error, sidecar, "write_maml=.true. should leave a sidecar next to the output")
+    end subroutine test_write_table_writer_options
     !
 end module test_table

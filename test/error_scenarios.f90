@@ -1151,6 +1151,8 @@ program error_scenarios
         call scenario_table_write_missing_column()
     case ("table_write_unsupported_column")
         call scenario_table_write_unsupported_column()
+    case ("table_write_no_overwrite")
+        call scenario_table_write_no_overwrite()
     case ("table_write_unbuilt_schema")
         call scenario_table_write_unbuilt_schema()
     case ("table_row_index_after_detach")
@@ -9836,6 +9838,22 @@ contains
         call parquet_write_table(t, "test_run/es_table_wunsupported_out.parquet", s)   ! -> aborts
         print '(a)', "unexpectedly wrote a table's unsupported column"
     end subroutine scenario_table_write_unsupported_column
+
+    !> `overwrite=` is forwarded to parquet_open_writer untouched, which is the whole contract of
+    !! the writer options on parquet_write_table: a table write over an existing file must fail in
+    !! exactly the place, and with exactly the message, a hand-written open would.
+    subroutine scenario_table_write_no_overwrite()
+        type(parquet_table) :: t
+        type(parquet_schema) :: s
+        call write_table_scenario_fixture("test_run/es_table_nowr_in.parquet")
+        call parquet_open_table(t, "test_run/es_table_nowr_in.parquet")
+        call s%init("nowr")
+        call s%add_field("id", "int32")
+        call parquet_parse_maml(s)
+        call parquet_write_table(t, "test_run/es_table_nowr_out.parquet", s)
+        call parquet_write_table(t, "test_run/es_table_nowr_out.parquet", s, overwrite=.false.)   ! -> aborts
+        print '(a)', "unexpectedly overwrote an existing file with overwrite=.false."
+    end subroutine scenario_table_write_no_overwrite
 
     !> The row index says which row of the SOURCE FILE each row came from, so a table that has
     !! cut its file loose can no longer produce it. Materializing it before the mutation is the

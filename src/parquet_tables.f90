@@ -1653,13 +1653,36 @@ module parquet_tables
         !! declares wins and is not overwritten -- the schema is the explicit statement. Both work
         !! after the table has detached, since the metadata was snapshotted at open, and neither
         !! adds anything to the caller's own schema.
-        module subroutine parquet_write_table(table, filename, schema, row_mask, copy_metadata, metadata_keys)
+        !!
+        !! `write_maml`, `qc`, `compression`, `compression_level`, `chunk_size`, `use_threads` and
+        !! `overwrite` are pass-throughs to `parquet_open_writer` with its own defaults and no
+        !! reinterpretation, so a table write and the equivalent hand-written open stay the same
+        !! calls. `chunk_size` is default-kind `integer` on purpose: a row group cannot hold more
+        !! than int32 rows, so there is no `int64` form to add.
+        !!
+        !! `release` (default `.true.`) leaves the table in the residency state it started in: a
+        !! column this write had to materialize is evicted again once it has been written, while a
+        !! column the caller had already read is left alone. Releasing frees storage a `%col`
+        !! pointer could alias, so the generation counter advances when at least one column was
+        !! actually released -- possibly a false alarm (nothing you can hold a pointer to is ever
+        !! released), never a missed one.
+        module subroutine parquet_write_table(table, filename, schema, row_mask, copy_metadata,   &
+                metadata_keys, write_maml, qc, compression, compression_level, chunk_size,        &
+                use_threads, overwrite, release)
             type(parquet_table), intent(in) :: table   !! the table to write.
             character(len=*), intent(in) :: filename   !! output parquet file.
             type(parquet_schema), intent(inout) :: schema !! output schema (chooses/renames columns).
             logical, intent(in), optional :: row_mask(:)  !! per-row write mask.
             logical, intent(in), optional :: copy_metadata !! .true.: carry every source-file metadata entry.
             character(len=*), intent(in), optional :: metadata_keys(:) !! carry only these source-file keys.
+            logical, intent(in), optional :: write_maml !! also save a sidecar .maml next to filename.
+            logical, intent(in), optional :: qc !! run the schema's qc: checks on write; defaults to on.
+            character(len=*), intent(in), optional :: compression !! Arrow compression codec name (e.g. "snappy").
+            integer, intent(in), optional :: compression_level !! codec-specific compression level.
+            integer, intent(in), optional :: chunk_size !! Parquet row-group size, in rows.
+            logical, intent(in), optional :: use_threads !! use Arrow's multi-threaded writer.
+            logical, intent(in), optional :: overwrite !! allow truncating an existing file; default .true.
+            logical, intent(in), optional :: release !! evict columns this write materialized; default .true.
         end subroutine parquet_write_table
     end interface
     !

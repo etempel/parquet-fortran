@@ -99,6 +99,13 @@ Four things to know about `%col`:
   The counter is deliberately conservative — every column- and row-structural call bumps it,
   whether or not it actually moved anything — so a change in it means "re-fetch", not "definitely
   invalidated". A call that changes nothing does not bump it.
+
+  One bump is worth knowing about because the call does not look structural:
+  [`parquet_write_table`](#writer-options) advances the counter when it gives back a column it had
+  to read (its default). Nothing you can hold a pointer to is ever given back — taking a pointer
+  materializes the column, and only columns the write itself materialized are released — so after
+  a write the counter may have moved while every pointer you hold is still good. Re-fetch or
+  ignore it; do not read the advance as evidence of damage.
 - **A string column has no *array* pointer form, but it does have one.** `PK_STRING`/
   `PK_STRING_VEC` are stored as a packed variable-length buffer, so there are no fixed row slots
   for a Fortran array to alias — but `%col` will hand back a `type(parquet_string_column),
@@ -849,6 +856,16 @@ materialized as it is written, so `parquet_write_table` on a freshly opened tabl
 the columns the schema asks for — and on a [detached](#what-detaching-means) table, a schema field
 whose column was never read is an error, since there is no longer a file to read it from.
 
+**...and gives it back again.** By default (`release=.true.`) the table ends the write in the
+residency state it started in: a column the write had to read is released once it has been
+written, so writing a freshly opened 16-column table costs one column's residency rather than
+sixteen. A column *you* had already read is left alone — materializing it was not the write's
+doing, so undoing it is not the write's business either. Pass `release=.false.` to keep everything
+the write read, which is what you want when the next thing you do is read those same columns.
+Releasing frees storage a `%col` pointer could alias, so it advances
+[`%generation()`](#two-ways-to-reach-a-column) — see the note there for why that is a conservative
+signal rather than a real one.
+
 **It costs about what writing the columns yourself costs.** `parquet_write_table` writes straight
 out of the table's store without copying, and a column that holds no nulls is written with no
 validity mask at all — the same call a hand-written loop would make. `tools/benchmark_table.sh`'s
@@ -859,6 +876,37 @@ To write only some rows without changing the table, pass a mask:
 ```fortran
 call parquet_write_table(t, "subset.parquet", s, row_mask=keep)
 ```
+
+### Writer options
+
+Everything [`parquet_open_writer`](writing.html#writer-options) can be told,
+`parquet_write_table` can be told too, under the same names and with the same defaults:
+
+```fortran
+call parquet_write_table(t, "out.parquet", s, compression="snappy", chunk_size=500000, &
+                         overwrite=.false., write_maml=.true.)
+```
+
+| argument | meaning | default |
+|---|---|---|
+| `write_maml` | also emit a sidecar `.maml` next to the output | `.false.` |
+| `qc` | run the schema's `qc:` min/max/miss checks on write | on |
+| `compression` | `uncompressed`/`snappy`/`gzip`/`zstd`/`brotli`/`lz4` | `"zstd"` |
+| `compression_level` | codec level (not every codec has one — `snappy` does not) | codec's own |
+| `chunk_size` | rows per row group | auto-sized |
+| `use_threads` | Arrow's multi-threaded writer | `.true.` |
+| `overwrite` | allow truncating an existing file | `.true.` |
+| `release` | give back columns this write materialized | `.true.` |
+
+**They are pass-throughs, not reinterpretations.** Each one is handed to `parquet_open_writer`
+untouched, and an argument you omit stays omitted all the way down — so a table write and the
+equivalent hand-written open are the same call, with the same defaults, producing the same file.
+`release=` is the one exception, because it is about the table rather than the file; it is
+described [above](#building-a-table-in-memory-and-writing-it-out).
+
+`chunk_size` is a plain default-kind `integer` with no `int64` form, unlike most row counts in
+this library. That is deliberate rather than an oversight: a row group cannot hold more than
+`huge(1_int32)` rows, so there is no larger value to pass.
 
 ### Carrying the source file's metadata to the output
 

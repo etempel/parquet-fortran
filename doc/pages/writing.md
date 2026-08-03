@@ -84,6 +84,8 @@ call parquet_open_writer(writer, "data.parquet", compression="zstd", compression
 
 Quality control (`qc:` range/miss checks run automatically against what's being written, when a schema is given) is its own topic — see [Quality control](quality-control.html#write-side-enforcement).
 
+Every one of these options is also accepted by `parquet_write_table`, under the same name and with the same default, so writing a `parquet_table` out is not a reason to give them up — see [Writer options](table.html#writer-options) in the table guide.
+
 ## Writing a large scalar string column with parquet_string_column
 
 A scalar `string` column can also be written from a `type(parquet_string_column)` (`call

@@ -126,7 +126,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   calling `parquet_parse_maml` beforehand is optional (the schema is left parsed afterwards), and
   takes `copy_metadata=.true.` (or `metadata_keys=[...]`) to carry the source file's own key/value
   metadata into the output, where a key the schema declares itself wins and nothing is added to
-  the caller's schema. The source file's metadata is snapshotted when the table opens, so
+  the caller's schema. It also takes every writer option `parquet_open_writer` takes —
+  `write_maml`, `qc`, `compression`, `compression_level`, `chunk_size`, `use_threads`,
+  `overwrite` — forwarded untouched and with the same defaults, so a table write and the
+  equivalent hand-written open produce the same file; and `release=` (default `.true.`), which
+  leaves the table in the residency state the write found it in by giving back each column the
+  write itself had to read, while leaving alone any column the caller had already materialized. The source file's metadata is snapshotted when the table opens, so
   `%get_file_metadata` — and that carry-over — keep working after a row mutation has detached the
   table from its file. **Column units now come from a read-in MAML**: a `fields:` entry's `unit:`
   key gives that column its unit, matched on the file's own column name, answered by `%unit`

@@ -221,6 +221,9 @@ contains
         n_qc = 0
         n_rules = 0
         n_keys = 0
+        n_units = 0
+        allocate(character(len=1) :: unit_cols(0))
+        allocate(character(len=1) :: unit_vals(0))
         allocate(character(len=1) :: internal(0))
         allocate(character(len=1) :: physical(0))
         allocate(character(len=1) :: maml_rules(0))
@@ -229,6 +232,8 @@ contains
             read_maml = parquet_load_qc_maml_file(trim(maml_file))
             deallocate(internal, physical)
             call parse_read_maml_remap(read_maml, internal, physical, n_remap, trim(maml_file))
+            deallocate(unit_cols, unit_vals)
+            call collect_maml_units(read_maml, unit_cols, unit_vals, n_units)
             deallocate(maml_rules, maml_keys)
             call parse_read_maml_string_list(read_maml, "filter:", maml_rules, n_rules)
             call parse_read_maml_string_list(read_maml, "sort:", maml_keys, n_keys)
@@ -278,6 +283,156 @@ contains
         end if
         call parquet_compose_read_qc(read_maml, qc_local, out_qc, n_qc)
     end procedure compose_read_transform
+    !
+    !> Collects every `fields:` entry of a read-in MAML that declares a `unit:`, as a
+    !! file-name/unit pair list.
+    !!
+    !! Walks the raw MAML lines, exactly as `parse_read_maml_remap` above does, and for the same
+    !! reason: `parquet_load_qc_maml_file` deliberately does not parse a read-in MAML into
+    !! `%cinfo` (its validation rules are the write side's, and a file-describing MAML need not
+    !! satisfy them), so `%get_num_fields` would answer 0 here. The grammar recognized is the one
+    !! `fields:` already uses everywhere else -- a list of `- name: X` items, each followed by
+    !! indented `key: value` lines until the next item.
+    !!
+    !! The names are the MAML's own, i.e. the FILE's column names -- a read-in MAML describes the
+    !! physical file, so `extra: remap:` renames its columns for the table but does not rename them
+    !! here. open_table_impl therefore matches these against each slot's `file_name`, never its
+    !! internal name.
+    !!
+    !! Fields declaring no unit are skipped rather than stored as "", so an absent entry and an
+    !! empty one stay distinguishable and a column keeps whatever unit it had.
+    subroutine collect_maml_units(read_maml, cols, vals, n)
+        type(parquet_schema), intent(in) :: read_maml              !! the loaded read-in MAML.
+        character(len=:), allocatable, intent(out) :: cols(:)      !! file column names declaring a unit.
+        character(len=:), allocatable, intent(out) :: vals(:)      !! the unit each declares.
+        integer, intent(out) :: n                                  !! live entries.
+        character(len=:), allocatable :: fname, u
+        integer :: i, first, last, count, width, pass
+        !
+        n = 0
+        allocate(character(len=1) :: cols(0))
+        allocate(character(len=1) :: vals(0))
+        if (.not. allocated(read_maml%maml%lines)) return
+        call locate_fields_block(read_maml%maml%lines, first, last)
+        if (first == 0) return
+        ! Two passes, as everywhere else in this file: one to size the deferred-length result,
+        ! one to fill it.
+        count = 0
+        width = 1
+        do pass = 1, 2
+            if (pass == 2) then
+                if (count == 0) return
+                deallocate(cols, vals)
+                allocate(character(len=width) :: cols(count))
+                allocate(character(len=width) :: vals(count))
+                ! Element by element, never `cols = ""` -- see parse_read_maml_remap's own note on
+                ! what a whole-array assignment to a deferred-length allocatable array does here.
+                do i = 1, count
+                    cols(i) = ""
+                    vals(i) = ""
+                end do
+            end if
+            n = 0
+            fname = ""
+            u = ""
+            do i = first, last
+                if (len_trim(read_maml%maml%lines(i)) == 0) cycle
+                call scan_field_line(read_maml%maml%lines(i), fname, u, pass, cols, vals, n, width)
+            end do
+            call emit_field_unit(fname, u, pass, cols, vals, n, width)
+            if (pass == 1) count = n
+        end do
+    end subroutine collect_maml_units
+    !
+    !> One line of a `fields:` block: starts a new entry, records its `unit:`, or is ignored.
+    subroutine scan_field_line(line, fname, u, pass, cols, vals, n, width)
+        character(len=*), intent(in) :: line                  !! the raw MAML line.
+        character(len=:), allocatable, intent(inout) :: fname !! name of the entry being scanned.
+        character(len=:), allocatable, intent(inout) :: u     !! its unit so far ("" if none).
+        integer, intent(in) :: pass                           !! 1 = counting, 2 = filling.
+        character(len=*), intent(inout) :: cols(:)            !! result names (pass 2).
+        character(len=*), intent(inout) :: vals(:)            !! result units (pass 2).
+        integer, intent(inout) :: n                           !! entries emitted so far.
+        integer, intent(inout) :: width                       !! widest entry seen (pass 1).
+        character(len=:), allocatable :: tline, key, cvalue
+        !
+        tline = trim(adjustl(line))
+        if (tline(1:1) == "-") then
+            ! A new list item closes the previous one, whatever it had.
+            call emit_field_unit(fname, u, pass, cols, vals, n, width)
+            u = ""
+            fname = ""
+            call split_key_value(tline(2:), key, cvalue)
+            if (key == "name") fname = cvalue
+            return
+        end if
+        call split_key_value(tline, key, cvalue)
+        if (key == "unit") u = cvalue
+    end subroutine scan_field_line
+    !
+    !> Records one completed `fields:` entry, if it named a column and declared a unit.
+    subroutine emit_field_unit(fname, u, pass, cols, vals, n, width)
+        character(len=*), intent(in) :: fname      !! the entry's column name ("" if none).
+        character(len=*), intent(in) :: u          !! its unit ("" if none).
+        integer, intent(in) :: pass                !! 1 = counting, 2 = filling.
+        character(len=*), intent(inout) :: cols(:) !! result names (pass 2).
+        character(len=*), intent(inout) :: vals(:) !! result units (pass 2).
+        integer, intent(inout) :: n                !! entries emitted so far.
+        integer, intent(inout) :: width            !! widest entry seen (pass 1).
+        !
+        if (len_trim(fname) == 0 .or. len_trim(u) == 0) return
+        n = n + 1
+        if (pass == 1) then
+            width = max(width, len_trim(fname), len_trim(u))
+        else
+            cols(n) = trim(fname)
+            vals(n) = trim(u)
+        end if
+    end subroutine emit_field_unit
+    !
+    !> Bounds of the MAML's top-level `fields:` block: the lines after it, up to the next
+    !! unindented line. `first` is 0 when there is no such section.
+    subroutine locate_fields_block(lines, first, last)
+        character(len=*), intent(in) :: lines(:) !! raw MAML source lines.
+        integer, intent(out) :: first            !! first line inside the block, or 0.
+        integer, intent(out) :: last             !! last line inside it.
+        integer :: i, nlines
+        !
+        nlines = size(lines)
+        first = 0
+        last = nlines
+        do i = 1, nlines
+            if (len_trim(lines(i)) == 0) cycle
+            if (lines(i)(1:1) /= " " .and. trim(adjustl(lines(i))) == "fields:") then
+                first = i + 1
+                exit
+            end if
+        end do
+        if (first == 0) return
+        do i = first, nlines
+            if (len_trim(lines(i)) == 0) cycle
+            if (lines(i)(1:1) /= " " .and. lines(i)(1:1) /= "-") then
+                last = i - 1
+                return
+            end if
+        end do
+    end subroutine locate_fields_block
+    !
+    !> Splits a `key: value` line into its two trimmed, unquoted halves. Both come back empty for
+    !! a line with no colon, which every caller skips.
+    subroutine split_key_value(line, key, cvalue)
+        character(len=*), intent(in) :: line                 !! the line, already trimmed.
+        character(len=:), allocatable, intent(out) :: key    !! the key, lowercase-as-written.
+        character(len=:), allocatable, intent(out) :: cvalue !! the value, unquoted.
+        integer :: colon
+        !
+        key = ""
+        cvalue = ""
+        colon = index(line, ":")
+        if (colon <= 1) return
+        key = trim(adjustl(line(1:colon - 1)))
+        call unquote_trimmed(line(colon + 1:), cvalue)
+    end subroutine split_key_value
     !
     !> Splits one `- internal: physical` list item (leading dash already the first character) into
     !! its two unquoted halves. Both come back empty for a line that is not a well-formed entry,

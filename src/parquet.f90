@@ -1165,6 +1165,7 @@ module parquet
     public :: parquet_get_column_names
     public :: parquet_release_column
     public :: parquet_get_metadata
+    public :: parquet_get_metadata_items
     public :: parquet_read_column
     public :: parquet_read_column_chunk
     public :: parquet_read_array_row_mode
@@ -2633,6 +2634,24 @@ module parquet
             type(parquet_reader), intent(in) :: reader !! open reader.
             character(len=:), allocatable, intent(out) :: names(:) !! one entry per column, schema order.
         end subroutine parquet_get_column_names
+        !> Every key/value metadata entry the file carries, in the order it is stored.
+        !>
+        !> parquet_get_metadata answers for a key you already know; this reports what is there at
+        !> all, which is what a caller copying metadata from one file to another needs (it is how
+        !> parquet_table snapshots a file's metadata at open, so that %get_file_metadata keeps
+        !> working after the table has detached from its file, and how parquet_write_table's
+        !> copy_metadata= carries it to an output file).
+        !>
+        !> `keys` and `values` are index-aligned and each is allocated to its own longest entry,
+        !> blank-padded, so `trim(keys(i))` is the key to pass on -- the same convention
+        !> parquet_get_column_names uses. Both come back zero-size for a file with no metadata.
+        !> Reads nothing: the answer comes from the copy parquet_open_reader already made of the
+        !> file's footer metadata.
+        module subroutine parquet_get_metadata_items(reader, keys, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=:), allocatable, intent(out) :: keys(:) !! one entry per metadata item, stored order.
+            character(len=:), allocatable, intent(out) :: values(:) !! that item's value, same order.
+        end subroutine parquet_get_metadata_items
         !> Frees column `name`'s decoded Arrow buffers inside `reader`, after the caller has
         !> copied the values it wanted into its own Fortran storage. Purely a memory/time trade:
         !> a later read of the same column transparently re-reads and re-decodes it, so this can

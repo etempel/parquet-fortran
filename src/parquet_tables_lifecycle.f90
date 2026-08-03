@@ -55,11 +55,12 @@ contains
         logical, intent(in), optional :: use_threads !! forwarded to parquet_open_reader.
         real(real64), intent(in), optional :: sample_fraction !! keep each row with this probability.
         integer(int32), intent(in), optional :: sample_seed !! seed for that draw.
-        integer :: i, ncol, n_remap, n_qc
+        integer :: i, j, ncol, n_remap, n_qc, n_units
         integer(int64) :: file_rows
         logical :: masked
         character(len=:), allocatable :: names(:)
         character(len=:), allocatable :: remap_internal(:), remap_physical(:)
+        character(len=:), allocatable :: unit_cols(:), unit_vals(:)
         type(parquet_filter) :: comp_filter
         type(parquet_sortkey) :: comp_sort
         type(parquet_schema) :: comp_qc
@@ -88,7 +89,7 @@ contains
         ! and means a malformed MAML aborts with no reader -- and so no live Arrow object -- in
         ! scope. See compose_read_transform (parquet_tables_maml) for the composition rules.
         call compose_read_transform(sliced, maml, filter, sort, qc, remap_internal, remap_physical, &
-            n_remap, comp_filter, comp_sort, comp_qc, n_qc)
+            n_remap, comp_filter, comp_sort, comp_qc, n_qc, unit_cols, unit_vals, n_units)
         !
         allocate(table%cache)
         call record_open_thread(table%cache)
@@ -159,6 +160,11 @@ contains
             table%row_count = file_rows
         end if
         !
+        ! The file's own key/value metadata, taken now rather than asked for later: the reader is
+        ! released by the first row mutation, and the file's metadata does not stop being true
+        ! when that happens. Costs a copy of what parquet_open_reader already holds in memory.
+        call parquet_get_metadata_items(table%cache%reader, table%cache%meta_keys, table%cache%meta_values)
+        !
         call parquet_get_column_names(table%cache%reader, names)
         call table_enumerate_columns(table%cache, names, remap_internal, remap_physical, n_remap, filename)
         ncol = table%cache%ncols
@@ -167,6 +173,19 @@ contains
         ! answer for every column while none of them is resident.
         do i = 1, ncol
             call table_classify(table%cache, i)
+        end do
+        ! Units come from the read-in MAML, matched on the FILE name: a read-in MAML describes the
+        ! physical file, so `extra: remap:` gives a column a table-facing name without changing
+        ! what the MAML calls it. Stored on the descriptor, so %unit answers for a column nothing
+        ! has read; table_materialize copies it onto the values when they arrive. The parquet file
+        ! itself carries no unit for a column, so this is the only source there is.
+        do i = 1, ncol
+            do j = 1, n_units
+                if (trim(unit_cols(j)) == table%cache%cols(i)%file_name) then
+                    table%cache%cols(i)%unit = trim(unit_vals(j))
+                    exit
+                end if
+            end do
         end do
         ! ...then drop anything classification itself had to decode. Only one case can: a
         ! foreign plain LIST column, whose per-row width has no schema-level answer, so the

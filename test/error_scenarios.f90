@@ -1151,6 +1151,12 @@ program error_scenarios
         call scenario_table_write_unsupported_column()
     case ("table_write_unbuilt_schema")
         call scenario_table_write_unbuilt_schema()
+    case ("table_copy_metadata_unknown_key")
+        call scenario_table_copy_metadata_unknown_key()
+    case ("table_copy_metadata_in_memory")
+        call scenario_table_copy_metadata_in_memory()
+    case ("table_copy_metadata_both_forms")
+        call scenario_table_copy_metadata_both_forms()
     case ("table_slice_below_first_row")
         call scenario_table_slice_below_first_row()
     case ("table_slice_past_last_row")
@@ -9785,6 +9791,63 @@ contains
         call parquet_write_table(t, "test_run/es_table_wunsupported_out.parquet", s)   ! -> aborts
         print '(a)', "unexpectedly wrote a table's unsupported column"
     end subroutine scenario_table_write_unsupported_column
+
+    !> Writes a fixture carrying two metadata keys, for the copy_metadata scenarios below.
+    subroutine write_metadata_scenario_fixture(fname)
+        character(len=*), intent(in) :: fname !! file to write.
+        type(parquet_writer) :: w
+        type(parquet_schema) :: s
+        real(real64) :: v(3)
+        v = [1.0_real64, 2.0_real64, 3.0_real64]
+        call s%init("meta_src")
+        call s%add_field("v", "float64")
+        call parquet_parse_maml(s)
+        call s%add_metadata("origin", "survey_A")
+        call parquet_open_writer(w, fname, s)
+        call parquet_write_column(w, "v", v)
+        call parquet_close_writer(w)
+    end subroutine write_metadata_scenario_fixture
+
+    !> Naming a metadata key the source file does not carry is a mistake, not an omission: the
+    !! output would silently lack what the caller asked to preserve.
+    subroutine scenario_table_copy_metadata_unknown_key()
+        type(parquet_table) :: t
+        type(parquet_schema) :: out_s
+        call write_metadata_scenario_fixture("test_run/es_meta_key_in.parquet")
+        call parquet_open_table(t, "test_run/es_meta_key_in.parquet")
+        call out_s%init("dest")
+        call out_s%add_field("v", "float64")
+        call parquet_write_table(t, "test_run/es_meta_key_out.parquet", out_s, &
+            metadata_keys=["no_such_key"])   ! -> aborts
+        print '(a)', "unexpectedly carried a metadata key the source file does not have"
+    end subroutine scenario_table_copy_metadata_unknown_key
+
+    !> A table built in memory has no source file, so there is no metadata to carry from one.
+    subroutine scenario_table_copy_metadata_in_memory()
+        type(parquet_table) :: t
+        type(parquet_schema) :: out_s
+        call parquet_new_table(t)
+        call t%add_column("v", [1.0_real64, 2.0_real64, 3.0_real64])
+        call out_s%init("dest")
+        call out_s%add_field("v", "float64")
+        call parquet_write_table(t, "test_run/es_meta_mem_out.parquet", out_s, &
+            copy_metadata=.true.)   ! -> aborts
+        print '(a)', "unexpectedly copied source metadata for a table with no source file"
+    end subroutine scenario_table_copy_metadata_in_memory
+
+    !> copy_metadata=.true. means "every key" and metadata_keys= means "these"; asking for both at
+    !! once has no consistent reading, so it is refused rather than silently preferring one.
+    subroutine scenario_table_copy_metadata_both_forms()
+        type(parquet_table) :: t
+        type(parquet_schema) :: out_s
+        call write_metadata_scenario_fixture("test_run/es_meta_both_in.parquet")
+        call parquet_open_table(t, "test_run/es_meta_both_in.parquet")
+        call out_s%init("dest")
+        call out_s%add_field("v", "float64")
+        call parquet_write_table(t, "test_run/es_meta_both_out.parquet", out_s, &
+            copy_metadata=.true., metadata_keys=["origin"])   ! -> aborts
+        print '(a)', "unexpectedly accepted copy_metadata= and metadata_keys= together"
+    end subroutine scenario_table_copy_metadata_both_forms
 
     !> A schema that was never built at all cannot be parsed into anything, and writing with it
     !! would otherwise read uninitialized state and run away. Reported as its own mistake rather

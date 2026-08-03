@@ -115,15 +115,17 @@ contains
     !
     module procedure table_materialize
         associate (slot => cache%cols(idx))
-            ! Units are not read from the file in this milestone: their source is a read-time
-            ! MAML's `unit:` key, which does not exist yet. %unit therefore reports "" for a
-            ! file-backed column, and %add_column(unit=) is the only way to set one.
+            ! A parquet file records no unit for a column, so the only source is the read-in
+            ! MAML's `unit:` key, captured onto the descriptor at open. It is applied AFTER the
+            ! read rather than passed into it, because materialize_slice assembles the column from
+            ! several row-group pieces and would have to thread it through each of them.
             if (sc%regime == REGIME_SLICE) then
                 call materialize_slice(cache, sc, idx)
             else
                 call table_materialize_kind(slot%declared_kind, cache%reader, slot%file_name, &
                     slot%values, sc%nrows, int(slot%width, int32), "")
             end if
+            if (allocated(slot%unit)) call slot%values%set_unit(slot%unit)
             slot%residency = RES_FULL
             ! A deferred %cast is carried out by this read and by nothing else: `declared_kind`
             ! was rewritten when it was asked for, and the per-kind readers above have just

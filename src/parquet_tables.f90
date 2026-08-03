@@ -53,7 +53,8 @@ module parquet_tables
         parquet_open_writer, parquet_write_column, parquet_close_writer, parquet_write_row_mask, &
         parquet_measure_list_width, parquet_column_width_needs_data, parquet_column_has_nulls, &
         parquet_load_qc_maml_file, parquet_filter, parquet_sortkey, parquet_read_qc, &
-        parquet_compose_read_qc, parquet_reader_set_filter, parquet_parse_maml
+        parquet_compose_read_qc, parquet_reader_set_filter, parquet_parse_maml, &
+        parquet_get_metadata_items
     !
     implicit none
     private
@@ -139,6 +140,13 @@ module parquet_tables
         !! some other way. A second `%cast` while it is set materializes first, so that a chain of
         !! casts cannot silently forget the intermediate one (see `table_cast`).
         logical :: cast_pending = .false.
+        !> Unit declared for this column by the read-in MAML (`fields:`' `unit:` key), looked up
+        !! by the column's FILE name at open. Unallocated when no MAML was given, or when it
+        !! declares nothing for this column. It is held here rather than only on `values` because
+        !! a lazy column has no values yet, and %unit must answer for a column nothing has read;
+        !! table_materialize copies it onto the values as they arrive, so everything downstream
+        !! (%append's unit check, %clone, the writer) sees one unit rather than two.
+        character(len=:), allocatable :: unit
         logical :: file_source = .false.           !! .true. iff a backing file column exists.
         logical :: predefined = .false.            !! reserved: a generated accessor exists for it.
         logical :: user_populated = .false.        !! .true. once user values were written into it.
@@ -164,6 +172,17 @@ module parquet_tables
         logical :: reads_started = .false.                 !! .true. once any column has been read.
         logical :: file_backed = .false.                   !! .true. if opened from a parquet file.
         character(len=:), allocatable :: source_file       !! the file this table was opened from.
+        ! --- the source file's key/value metadata, copied ONCE at open.
+        !
+        !     Snapshotted rather than read through `reader` on demand, because `reader` does not
+        !     survive a row mutation (table_detach releases it) and a file's metadata is a
+        !     property of where the rows came from, which detaching does not change. Both arrays
+        !     are allocated for every file-backed open, zero-size when the file carries no
+        !     metadata at all -- so `allocated(meta_keys)` answers "did this table come from a
+        !     file", which is the question %get_file_metadata has to ask once file_backed can no
+        !     longer be trusted to mean it.
+        character(len=:), allocatable :: meta_keys(:)      !! metadata keys, blank-padded; file order.
+        character(len=:), allocatable :: meta_values(:)    !! the matching values, same order.
         ! --- row-group geometry, slice regime only. TWO coordinate systems, and which one a given
         !     array is in is the whole reason there are two of them:
         !
@@ -973,7 +992,7 @@ module parquet_tables
         !! parquet_open_reader as constructor arguments, and it means a malformed MAML aborts with
         !! no reader -- and so no live Arrow object -- anywhere in scope.
         module subroutine compose_read_transform(sliced, maml_file, filter, sort, qc, internal, physical, &
-                n_remap, out_filter, out_sort, out_qc, n_qc)
+                n_remap, out_filter, out_sort, out_qc, n_qc, unit_cols, unit_vals, n_units)
             logical, intent(in) :: sliced          !! .true. for a slice-regime open, which forbids sorting.
             character(len=*), intent(in), optional :: maml_file !! read-in MAML path, if one was given.
             type(parquet_filter), intent(in), optional :: filter !! code filter, INTERNAL names.
@@ -986,6 +1005,9 @@ module parquet_tables
             type(parquet_sortkey), intent(out) :: out_sort  !! composed sort keys, FILE names.
             type(parquet_schema), intent(out) :: out_qc     !! merged qc schema, FILE names.
             integer, intent(out) :: n_qc           !! columns `out_qc` declares qc for.
+            character(len=:), allocatable, intent(out) :: unit_cols(:) !! MAML fields declaring a unit, FILE names.
+            character(len=:), allocatable, intent(out) :: unit_vals(:) !! the unit each one declares.
+            integer, intent(out) :: n_units        !! live entries in `unit_cols`/`unit_vals`.
         end subroutine compose_read_transform
         module subroutine table_enumerate_columns(cache, names, internal, physical, n_remap, filename)
             type(parquet_table_cache), intent(inout) :: cache !! the column store to fill.
@@ -1131,11 +1153,20 @@ module parquet_tables
         !! A schema built with `%init`/`%add_field` and never parsed is parsed here, so calling
         !! `parquet_parse_maml` first is optional. That is why `schema` is `intent(inout)`: the
         !! caller's schema is parsed on return.
-        module subroutine parquet_write_table(table, filename, schema, row_mask)
+        !!
+        !! `copy_metadata=.true.` carries every key/value metadata entry of the table's SOURCE FILE
+        !! into the output; `metadata_keys=` carries only the listed keys (and error stops on one
+        !! the source does not have). The two are mutually exclusive. A key the schema itself
+        !! declares wins and is not overwritten -- the schema is the explicit statement. Both work
+        !! after the table has detached, since the metadata was snapshotted at open, and neither
+        !! adds anything to the caller's own schema.
+        module subroutine parquet_write_table(table, filename, schema, row_mask, copy_metadata, metadata_keys)
             type(parquet_table), intent(in) :: table   !! the table to write.
             character(len=*), intent(in) :: filename   !! output parquet file.
             type(parquet_schema), intent(inout) :: schema !! output schema (chooses/renames columns).
             logical, intent(in), optional :: row_mask(:)  !! per-row write mask.
+            logical, intent(in), optional :: copy_metadata !! .true.: carry every source-file metadata entry.
+            character(len=*), intent(in), optional :: metadata_keys(:) !! carry only these source-file keys.
         end subroutine parquet_write_table
     end interface
     !

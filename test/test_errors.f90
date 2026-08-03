@@ -615,6 +615,12 @@ contains
                 test_table_write_unsupported_column_aborts), &
             new_unittest("parquet_write_table with a schema that was never built aborts", &
                 test_table_write_unbuilt_schema_aborts), &
+            new_unittest("copy_metadata with an unknown key aborts", &
+                test_table_copy_metadata_unknown_key_aborts), &
+            new_unittest("copy_metadata on an in-memory table aborts", &
+                test_table_copy_metadata_in_memory_aborts), &
+            new_unittest("copy_metadata= and metadata_keys= together abort", &
+                test_table_copy_metadata_both_forms_aborts), &
             new_unittest("opening a table slice starting before row 1 aborts", &
                 test_table_slice_below_first_row_aborts), &
             new_unittest("opening a table slice past the last row aborts", &
@@ -1023,6 +1029,27 @@ contains
             failure_message="writing a schema-named unsupported column was expected to abort", &
             required_stderr="the schema declares a column that holds no values")
     end subroutine test_table_write_unsupported_column_aborts
+
+    subroutine test_table_copy_metadata_unknown_key_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_copy_metadata_unknown_key", expect_abort=.true., &
+            failure_message="carrying a metadata key the source lacks was expected to abort", &
+            required_stderr="which this table's source file does not have")
+    end subroutine test_table_copy_metadata_unknown_key_aborts
+
+    subroutine test_table_copy_metadata_in_memory_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_copy_metadata_in_memory", expect_abort=.true., &
+            failure_message="copying source metadata for an in-memory table was expected to abort", &
+            required_stderr="has no source metadata to copy")
+    end subroutine test_table_copy_metadata_in_memory_aborts
+
+    subroutine test_table_copy_metadata_both_forms_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_copy_metadata_both_forms", expect_abort=.true., &
+            failure_message="copy_metadata= with metadata_keys= was expected to abort", &
+            required_stderr="cannot both be given")
+    end subroutine test_table_copy_metadata_both_forms_aborts
 
     subroutine test_table_write_unbuilt_schema_aborts(error)
         type(error_type), allocatable, intent(out) :: error

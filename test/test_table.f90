@@ -153,6 +153,10 @@ contains
             new_unittest("append takes a single row through a row handle", test_append_row), &
             new_unittest("a clone is independent, stays lazy and keeps the row scope", test_clone), &
             new_unittest("extra: remap: renames a file column for reading", test_remap_basic), &
+            new_unittest("a read-in MAML's unit: reaches %unit, before and after the read", &
+                test_unit_from_maml), &
+            new_unittest("parquet_write_table carries the source file's metadata on request", &
+                test_write_table_copy_metadata), &
             new_unittest("extra: remap: shadows, swaps and duplicates as documented", test_remap_shadow_duplicate), &
             new_unittest("rename_column on a remapped column keeps its file column", test_remap_then_rename), &
             new_unittest("open with filter= narrows every column, in internal names", test_open_filter), &
@@ -1398,10 +1402,11 @@ contains
     subroutine test_filename_and_metadata(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_writer) :: w
-        type(parquet_table) :: t, mem
+        type(parquet_reader) :: rd
+        type(parquet_table) :: t, mem, clone
         type(parquet_schema) :: s
         real(real64) :: v(NROW)
-        character(len=:), allocatable :: fname, val
+        character(len=:), allocatable :: fname, val, keys(:), vals(:)
         logical :: ok
         integer :: i
         character(len=*), parameter :: f = "test_run/table_meta.parquet"
@@ -1438,6 +1443,44 @@ contains
         call mem%get_file_metadata("anything", val, found=ok)
         call check(error, .not. ok, &
             "metadata on an in-memory table should report .false. rather than aborting")
+        if (allocated(error)) return
+        !
+        ! The file's metadata is snapshotted at open, so DETACHING does not lose it: the reader is
+        ! gone, but where the rows came from has not changed. Before the snapshot this read through
+        ! the reader and died with it.
+        call t%materialize_all()
+        call t%truncate(2)
+        call check(error, t%is_detached(), "precondition: %truncate should have detached the table")
+        if (allocated(error)) return
+        call t%get_file_metadata("mykey", val, found=ok)
+        call check(error, ok .and. val == "myvalue", &
+            "a detached table should still answer for its source file's metadata")
+        if (allocated(error)) return
+        call t%get_file_metadata("no_such_key", val, found=ok)
+        call check(error, .not. ok, "a detached table should still report a missing key as a miss")
+        if (allocated(error)) return
+        !
+        ! ...and a clone carries the snapshot too, including a clone of an already-detached table
+        ! (which has no file to reopen and so could not re-read it).
+        call t%clone(clone)
+        call clone%get_file_metadata("mykey", val, found=ok)
+        call check(error, ok .and. val == "myvalue", &
+            "a clone of a detached table should carry its source file's metadata")
+        if (allocated(error)) return
+        !
+        ! parquet_get_metadata_items reports the same store the snapshot is taken from.
+        call parquet_open_reader(rd, f)
+        call parquet_get_metadata_items(rd, keys, vals)
+        call check(error, size(keys) == size(vals) .and. size(keys) > 0, &
+            "parquet_get_metadata_items should report the file's metadata entries")
+        if (allocated(error)) return
+        ok = .false.
+        do i = 1, size(keys)
+            if (trim(keys(i)) == "mykey") ok = trim(vals(i)) == "myvalue"
+        end do
+        call check(error, ok, "parquet_get_metadata_items should report the key and its value")
+        if (allocated(error)) return
+        call parquet_close_reader(rd)
     end subroutine test_filename_and_metadata
     !
     !> Writes the all-18-kinds fixture the three matrix tests share.
@@ -2935,6 +2978,144 @@ contains
     !> The basic remap: a read-in MAML relabels a file column, and everything table-facing uses
     !! the new name while the read still goes to the physical one. The un-remapped columns are
     !! untouched, and the column count is unchanged (one internal name, one file column).
+    !> parquet_write_table carries the SOURCE file's metadata into the output on request.
+    !!
+    !! The natural shape of this is read, mutate, write -- by which point the table has detached and
+    !! its reader is gone, so the whole feature rests on the snapshot taken at open. Checked here,
+    !! along with the three rules: a selective key list, the schema winning a collision, and nothing
+    !! being added to the caller's own schema (which would leak one table's provenance into the
+    !! next file written with the same schema).
+    subroutine test_write_table_copy_metadata(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: w
+        type(parquet_table) :: t, plain
+        type(parquet_schema) :: s, out_s
+        real(real64) :: v(NROW)
+        character(len=:), allocatable :: val
+        logical :: ok
+        integer :: i
+        character(len=*), parameter :: f = "test_run/table_copymeta_in.parquet"
+        character(len=*), parameter :: fo = "test_run/table_copymeta_out.parquet"
+        character(len=*), parameter :: fk = "test_run/table_copymeta_keys.parquet"
+        character(len=*), parameter :: fn = "test_run/table_copymeta_none.parquet"
+        !
+        do i = 1, NROW
+            v(i) = real(i, real64)
+        end do
+        call s%init("source")
+        call s%add_field("v", "float64")
+        call parquet_parse_maml(s)
+        call s%add_metadata("origin", "survey_A")
+        call s%add_metadata("release", "DR3")
+        call s%add_metadata("instrument", "spectro")
+        call parquet_open_writer(w, f, s)
+        call parquet_write_column(w, "v", v)
+        call parquet_close_writer(w)
+        !
+        call out_s%init("dest")
+        call out_s%add_field("v", "float64")
+        call parquet_parse_maml(out_s)
+        call out_s%add_metadata("release", "DR4")   ! the schema's own -- must win
+        !
+        ! Read, detach, then write: the reader is gone by the time the metadata is needed.
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        call t%truncate(3)
+        call check(error, t%is_detached(), "precondition: %truncate should have detached the table")
+        if (allocated(error)) return
+        call parquet_write_table(t, fo, out_s, copy_metadata=.true.)
+        call parquet_open_table(plain, fo)
+        call plain%get_file_metadata("origin", val, found=ok)
+        call check(error, ok .and. val == "survey_A", &
+            "copy_metadata=.true. should carry the source file's metadata into the output")
+        if (allocated(error)) return
+        call plain%get_file_metadata("release", val, found=ok)
+        call check(error, ok .and. val == "DR4", &
+            "a key the output schema declares itself should win over the carried one")
+        if (allocated(error)) return
+        !
+        ! Nothing was added to the caller's schema, so the next file written with it is clean.
+        call parquet_write_table(t, fn, out_s)
+        call parquet_open_table(plain, fn)
+        call plain%get_file_metadata("origin", val, found=ok)
+        call check(error, .not. ok, &
+            "carrying metadata once must not add it to the caller's schema for the next write")
+        if (allocated(error)) return
+        call plain%get_file_metadata("instrument", val, found=ok)
+        call check(error, .not. ok, "...for any of the keys it carried")
+        if (allocated(error)) return
+        !
+        ! The selective form.
+        call parquet_write_table(t, fk, out_s, metadata_keys=["origin"])
+        call parquet_open_table(plain, fk)
+        call plain%get_file_metadata("origin", val, found=ok)
+        call check(error, ok .and. val == "survey_A", "metadata_keys= should carry the key it names")
+        if (allocated(error)) return
+        call plain%get_file_metadata("instrument", val, found=ok)
+        call check(error, .not. ok, "metadata_keys= should carry no key it does not name")
+    end subroutine test_write_table_copy_metadata
+    !
+    !> A read-in MAML's `fields:`' `unit:` key gives a file-backed column its unit.
+    !!
+    !! A parquet file records no unit for a column, so a read-in MAML is the only source there is.
+    !! Three things have to hold, and each has its own failure mode: `%unit` must answer BEFORE the
+    !! column is read (it is on the descriptor, not on values that do not exist yet); the unit must
+    !! survive the read onto the values, or `%append`'s unit check and the writer would not see it;
+    !! and the MAML names the FILE's columns, so a remapped column takes its unit under the file
+    !! name while the table looks it up under the internal one.
+    subroutine test_unit_from_maml(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, batch
+        real(real64), allocatable :: v(:)
+        character(len=:), allocatable :: u
+        character(len=*), parameter :: f = "test_run/table_unit_maml.parquet"
+        character(len=*), parameter :: m = "test_run/table_unit_maml.maml"
+        !
+        call write_basic_fixture(f)
+        call write_maml_file(m, [character(len=40) :: &
+            "table: units", &
+            "extra:", &
+            "  remap:", &
+            "  - flux: f64", &
+            "fields:", &
+            "- name: f64", &
+            "  data_type: float64", &
+            "  unit: Msun", &
+            "- name: i32", &
+            "  data_type: int32" ])
+        call parquet_open_table(t, f, maml=m)
+        ! Before any read: the unit is on the descriptor, and the lookup key is the INTERNAL name
+        ! even though the MAML declared it under the file name.
+        call check(error, t%residency("flux") == RES_EMPTY, "precondition: nothing should be read yet")
+        if (allocated(error)) return
+        call t%unit("flux", u)
+        call check(error, u == "Msun", "%unit should answer from the MAML before the column is read")
+        if (allocated(error)) return
+        call t%unit("i32", u)
+        call check(error, u == "", "a MAML field declaring no unit should leave %unit empty")
+        if (allocated(error)) return
+        call t%unit("s", u)
+        call check(error, u == "", "a column the MAML does not mention should have no unit")
+        if (allocated(error)) return
+        ! ...and after the read it is on the values too, which is what %append and the writer see.
+        call t%get("flux", v)
+        call t%unit("flux", u)
+        call check(error, u == "Msun", "%unit should still answer once the column is resident")
+        if (allocated(error)) return
+        ! materialize_all first: %clone_structure takes each column's shape from its VALUES, so a
+        ! column that has never been read has no kind for it to copy.
+        call t%materialize_all()
+        call t%clone_structure(batch)
+        call batch%unit("flux", u)
+        call check(error, u == "Msun", "a cloned structure should carry the unit")
+        if (allocated(error)) return
+        !
+        ! Without a MAML there is no unit to have: the file itself carries none.
+        call parquet_open_table(t, f)
+        call t%unit("f64", u)
+        call check(error, u == "", "a table opened with no MAML should report no unit")
+    end subroutine test_unit_from_maml
+    !
     subroutine test_remap_basic(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table) :: t

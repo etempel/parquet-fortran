@@ -17,8 +17,10 @@ contains
     !
     module procedure parquet_write_table
         type(parquet_writer) :: writer
+        type(parquet_schema) :: carried
         character(len=:), allocatable :: fname, sfx
         integer :: i, nfields, idx
+        logical :: want_metadata
         !
         call table_check_open(table, "parquet_write_table")
         ! A schema built in code with %init/%add_field only has MAML *text* until
@@ -40,7 +42,25 @@ contains
         end if
         nfields = schema%get_num_fields()
         !
-        call parquet_open_writer(writer, trim(filename), schema)
+        want_metadata = present(metadata_keys)
+        if (present(copy_metadata)) then
+            if (present(metadata_keys) .and. copy_metadata) then
+                error stop EP // "parquet_write_table: copy_metadata= and metadata_keys= cannot " // &
+                    "both be given; copy_metadata=.true. carries every key, metadata_keys= only " // &
+                    "the listed ones"
+            end if
+            want_metadata = want_metadata .or. copy_metadata
+        end if
+        ! The carried metadata goes onto a COPY of the schema, never the caller's own: writing a
+        ! second table with the same schema afterwards would otherwise inherit the first table's
+        ! source-file metadata, silently and permanently.
+        if (want_metadata) then
+            carried = schema
+            call carry_source_metadata(table, carried, metadata_keys)
+            call parquet_open_writer(writer, trim(filename), carried)
+        else
+            call parquet_open_writer(writer, trim(filename), schema)
+        end if
         if (present(row_mask)) call parquet_write_row_mask(writer, row_mask)
         do i = 1, nfields
             call schema%get_field_name(i, fname)
@@ -67,6 +87,81 @@ contains
         end do
         call parquet_close_writer(writer)
     end procedure parquet_write_table
+    !
+    !> Copies the table's source-file metadata onto `sch`, which is already a private copy.
+    !!
+    !! Three rules, all deliberate:
+    !!
+    !! * **The schema wins a collision.** A key the schema declares itself is the caller's explicit
+    !!   statement about the output; the carried one is inherited from wherever the input came
+    !!   from, so it is skipped rather than overwriting.
+    !! * **A requested key that does not exist is an error**, not a silent omission -- naming a key
+    !!   is a claim that it is there, and quietly writing a file without it is the failure mode
+    !!   this is supposed to prevent.
+    !! * **It works after a detach**, because the metadata was snapshotted at open. That is the
+    !!   whole point: the natural shape is read, mutate rows, write, and the reader is gone by then.
+    subroutine carry_source_metadata(table, sch, keys)
+        type(parquet_table), intent(in) :: table                   !! the table being written.
+        type(parquet_schema), intent(inout) :: sch                 !! private schema copy to add to.
+        character(len=*), intent(in), optional :: keys(:)          !! only these keys, if given.
+        character(len=:), allocatable :: sfx
+        integer :: i, k
+        logical :: wanted
+        !
+        if (.not. allocated(table%cache%meta_keys)) then
+            call table_context_suffix(table%cache, "", sfx)
+            error stop EP // "parquet_write_table: this table was not opened from a file, so it " // &
+                "has no source metadata to copy" // sfx
+        end if
+        ! Every requested key is checked BEFORE anything is added, so a typo fails with the output
+        ! file not yet opened rather than half-written.
+        if (present(keys)) then
+            do k = 1, size(keys)
+                if (.not. source_has_key(table, trim(keys(k)))) then
+                    call table_context_suffix(table%cache, "", sfx)
+                    error stop EP // "parquet_write_table: metadata_keys names '" // trim(keys(k)) // &
+                        "', which this table's source file does not have" // sfx
+                end if
+            end do
+        end if
+        do i = 1, size(table%cache%meta_keys)
+            wanted = .true.
+            if (present(keys)) then
+                wanted = .false.
+                do k = 1, size(keys)
+                    if (trim(keys(k)) == trim(table%cache%meta_keys(i))) wanted = .true.
+                end do
+            end if
+            if (.not. wanted) cycle
+            if (schema_declares_key(sch, trim(table%cache%meta_keys(i)))) cycle
+            call sch%add_metadata(trim(table%cache%meta_keys(i)), trim(table%cache%meta_values(i)))
+        end do
+    end subroutine carry_source_metadata
+    !
+    !> .true. when the table's source file carried `key`.
+    logical function source_has_key(table, key) result(has)
+        type(parquet_table), intent(in) :: table !! the table being written.
+        character(len=*), intent(in) :: key      !! the key to look for.
+        integer :: i
+        !
+        has = .false.
+        do i = 1, size(table%cache%meta_keys)
+            if (trim(table%cache%meta_keys(i)) == key) has = .true.
+        end do
+    end function source_has_key
+    !
+    !> .true. when the schema already declares `key` itself, so a carried entry must not replace it.
+    logical function schema_declares_key(sch, key) result(has)
+        type(parquet_schema), intent(in) :: sch !! the output schema.
+        character(len=*), intent(in) :: key     !! the key to look for.
+        integer :: i
+        !
+        has = .false.
+        if (.not. allocated(sch%metadata%items)) return
+        do i = 1, size(sch%metadata%items)
+            if (trim(sch%metadata%items(i)%key) == key) has = .true.
+        end do
+    end function schema_declares_key
     !
     !> Writes slot `idx` through the `parquet_write_column` specific matching its stored kind.
     !!

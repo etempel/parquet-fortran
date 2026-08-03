@@ -112,6 +112,14 @@ contains
         u = ""
         call table_lookup_or_fail(self, name, "unit", idx, found)
         if (idx == 0) return
+        ! The descriptor first, because it answers for a column nothing has read yet -- a
+        ! file-backed column's unit comes from the read-in MAML at open, not from its values. The
+        ! values are asked only for a column that has no descriptor unit, which is every column
+        ! built with %add_column(unit=).
+        if (allocated(self%cache%cols(idx)%unit)) then
+            u = self%cache%cols(idx)%unit
+            return
+        end if
         call self%cache%cols(idx)%values%unit_string(u)
     end procedure table_column_unit
     !
@@ -149,10 +157,16 @@ contains
     module procedure table_get_file_metadata
         character(len=:), allocatable :: sfx
         logical :: got
+        integer :: i
         !
         call table_check_open(self, "get_file_metadata")
         value = ""
-        if (.not. self%cache%file_backed) then
+        ! Answered from the snapshot taken at open, NOT through the reader -- which is what makes
+        ! it keep working after a row mutation has detached the table and released that reader.
+        ! `meta_keys` is allocated (possibly zero-size) for every file-backed open, so its being
+        ! unallocated is exactly "this table never had a file", which is the question here; by
+        ! this point `file_backed` cannot answer it, since detaching clears that too.
+        if (.not. allocated(self%cache%meta_keys)) then
             if (present(found)) then
                 found = .false.
                 return
@@ -160,10 +174,14 @@ contains
             call table_context_suffix(self%cache, "", sfx)
             error stop EP // "get_file_metadata: this table was not opened from a file" // sfx
         end if
-        ! warn=.false. keeps a missing key quiet here: whether it is fatal is `found`'s job,
-        ! decided one level up, not the reader's.
-        call parquet_get_metadata(self%cache%reader, key, value, default="", warn=.false.)
-        got = len(value) > 0
+        got = .false.
+        do i = 1, size(self%cache%meta_keys)
+            if (trim(self%cache%meta_keys(i)) == trim(key)) then
+                value = trim(self%cache%meta_values(i))
+                got = .true.
+                exit
+            end if
+        end do
         if (present(found)) then
             found = got
             return

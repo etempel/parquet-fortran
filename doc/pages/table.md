@@ -163,6 +163,7 @@ column is numeric at all.
 | `t%is_detached()` | whether a row-changing operation has cut the table loose from its file |
 | `call t%filename(f)` | the file this table was opened from, or `""` for one built in memory |
 | `call t%get_file_metadata(key, value, [found])` | one key from the source file's metadata — an error on a table built in memory, which has no file to ask |
+| `call t%unit(name, u)` | a column's unit, from the read-in MAML's `unit:` key |
 
 (An argument in **square brackets** is optional — `[found]` above means `found` may be omitted.
 The brackets are notation for this documentation, never something you type.)
@@ -617,6 +618,37 @@ at open rather than a surprise later. See
 [the MAML format](maml-format.html#renaming-columns-for-reading-with-extra-remap) for the grammar
 and its write-side counterpart `col_map:`.
 
+### Units
+
+A parquet file records no unit for a column, so a read-in MAML is where a table's units come from.
+A `fields:` entry's `unit:` key gives that column its unit, and `%unit` reports it:
+
+```yaml
+# catalogue.maml
+table: input_table
+fields:
+  - MASS_KG:
+      data_type: float64
+      unit: kg
+```
+
+```fortran
+call parquet_open_table(t, "catalogue.parquet", maml="catalogue.maml")
+call t%unit("MASS_KG", u)      ! "kg" -- and nothing has been read yet
+```
+
+Three things follow:
+
+- **It answers before the column is read.** The unit is part of what the table knows about a
+  column from the schema, like `%kind` and `%width`, not something that arrives with the values.
+- **The MAML names the file's columns.** A column renamed by `extra: remap:` takes its unit under
+  the *file* name it is declared with, and you ask for it under your internal name.
+- **The unit travels with the values.** Once read, it is on the column itself, so `%append`'s unit
+  check sees it, `%clone` keeps it, and `parquet_write_table` writes it out.
+
+There is no unit *conversion* in this library: appending a `"km/h"` column to an `"m/s"` one is an
+error rather than a silent reinterpretation.
+
 ## Filtering, sorting and checking rows as the file is opened
 
 `parquet_open_table` takes the same read-time transform `parquet_open_reader` does, applied once as the file is opened, so the table simply *is* the filtered/sorted/sampled result — there is no separate step and nothing downstream has to know a transform was applied:
@@ -719,6 +751,34 @@ To write only some rows without changing the table, pass a mask:
 ```fortran
 call parquet_write_table(t, "subset.parquet", s, row_mask=keep)
 ```
+
+### Carrying the source file's metadata to the output
+
+A table opened from a file snapshots that file's key/value metadata when it opens, and
+`parquet_write_table` can carry it into the output:
+
+```fortran
+call parquet_write_table(t, "out.parquet", s, copy_metadata=.true.)      ! every key
+call parquet_write_table(t, "out.parquet", s, metadata_keys=["origin"])  ! only these
+```
+
+Four rules:
+
+- **The two forms are mutually exclusive.** `copy_metadata=.true.` means every key,
+  `metadata_keys=` means exactly the listed ones; giving both is an error rather than a guess.
+- **A key the schema declares itself wins.** The schema is your explicit statement about the
+  output, so a carried key of the same name is skipped rather than overwriting it.
+- **A key `metadata_keys=` names but the source file does not have is an error**, checked before
+  the output file is opened. Naming a key is a claim that it is there.
+- **It works after the table has [detached](#what-detaching-means)** — which is the point, since
+  read, change rows, write is exactly the shape that detaches. It also adds nothing to your own
+  schema, so writing a second table with the same schema does not inherit the first one's
+  provenance.
+
+`call t%get_file_metadata(key, value, [found])` reads one key of that snapshot at any time, and
+survives detaching for the same reason. To see everything a file carries, before or without a
+table, use
+[`parquet_get_metadata_items`](reading.html#listing-every-metadata-entry).
 
 ## Replacing values
 
@@ -981,8 +1041,9 @@ This is still a deliberately narrow version of the table layer.
   and a conversion never changes a column's width.
 - **`%append` null-fills a missing column; a per-column default value is not available.** Fill
   the batch explicitly if you want something other than nulls.
-- **Units are not read from the file.** `%unit` reports what `%add_column(unit=)` stored, and `""`
-  for a column read from a file.
+- **A parquet file records no unit for a column.** `%unit` reports what a read-in MAML's `unit:`
+  key declared (see [Units](#units)) or what `%add_column(unit=)` stored, and `""` otherwise.
+  There is no unit *conversion* anywhere in this library.
 - **Vector string columns are trimmed.** A rank-2 string column has no compact read path, so it
   goes through the fixed-width reader, where trailing blanks cannot be told from padding.
 - **String columns are copy-only.** There is no `%col` pointer form for them, and `%set`/

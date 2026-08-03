@@ -1362,6 +1362,32 @@ contains
             names(i + 1) = buf
         end do
     end procedure parquet_get_column_names
+    !
+    module procedure parquet_get_metadata_items
+        integer :: n, i, klen, vlen
+        !
+        call check_reader_open(reader, "parquet_get_metadata_items")
+        ! The reader already holds the whole key/value table in memory (populate_reader_metadata
+        ! copies it at open), so this is a reshape of what is there, not a read.
+        n = 0
+        if (allocated(reader%metadata%items)) n = size(reader%metadata%items)
+        ! Same two-pass shape as parquet_get_column_names: one length for the whole array, found
+        ! first, because a fixed-length array cannot hold ragged entries and a guessed maximum
+        ! would truncate silently. Keys and values are sized independently -- a long value should
+        ! not widen every key.
+        klen = 0
+        vlen = 0
+        do i = 1, n
+            klen = max(klen, len(reader%metadata%items(i)%key))
+            vlen = max(vlen, len(reader%metadata%items(i)%value))
+        end do
+        allocate(character(len=klen) :: keys(n))
+        allocate(character(len=vlen) :: values(n))
+        do i = 1, n
+            keys(i) = reader%metadata%items(i)%key
+            values(i) = reader%metadata%items(i)%value
+        end do
+    end procedure parquet_get_metadata_items
     module procedure parquet_release_column
         call check_reader_open(reader, "parquet_release_column")
         call parquet_reader_release_column(reader%handle, trim(name)//char(0))

@@ -147,6 +147,12 @@ contains
         out%cache%ncols = 0
         out%cache%file_backed = .false.
         if (allocated(self%cache%source_file)) out%cache%source_file = self%cache%source_file
+        ! The source file's metadata comes across as data, not by re-reading: a clone of a
+        ! DETACHED table has no file left to reopen, and its metadata is no less true for that.
+        if (allocated(self%cache%meta_keys)) then
+            out%cache%meta_keys = self%cache%meta_keys
+            out%cache%meta_values = self%cache%meta_values
+        end if
     end subroutine clone_new_cache
     !
     !> Copies everything about a column EXCEPT its values.
@@ -159,6 +165,7 @@ contains
         dst%declared_kind = src%declared_kind
         dst%width = src%width
         dst%width_pending = src%width_pending
+        if (allocated(src%unit)) dst%unit = src%unit
         dst%file_source = src%file_source
         dst%predefined = src%predefined
         dst%user_populated = src%user_populated

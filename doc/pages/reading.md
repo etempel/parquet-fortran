@@ -507,6 +507,21 @@ continues).
 - A **present but unconvertible** stored value (e.g. non-numeric text, or an integer too large for the requested kind) always prints a `WARNING`, then falls back to `default` if given, else `error stop`.
 - `warn` (optional `logical`, default `.true.`) only governs the missing-key-with-`default` case; pass `warn=.false.` to suppress that warning. It has no effect when the key is present.
 
+### Listing every metadata entry
+
+`parquet_get_metadata` answers for a key you already know. To find out what a file carries at all, `parquet_get_metadata_items(reader, keys, values)` hands back both, index-aligned and in the file's own order:
+
+```fortran
+character(len=:), allocatable :: keys(:), values(:)
+
+call parquet_get_metadata_items(reader, keys, values)
+do i = 1, size(keys)
+    print *, trim(keys(i)), " = ", trim(values(i))
+end do
+```
+
+Each array is allocated to its own longest entry and blank-padded, so `trim()` is how you use them — the same convention `parquet_get_column_names` follows. Both come back zero-size for a file with no metadata. Like `parquet_get_metadata` it reads nothing: the answer comes from the copy made when the reader was opened. This is what copying metadata from one file to another is built on — see [`parquet_write_table`'s `copy_metadata=`](table.html#carrying-the-source-files-metadata-to-the-output).
+
 ## Streaming/chunked reads
 
 `parquet_read_column` reads a whole column into one complete array — fine for most data, but not for a column too large to hold in memory that way. `parquet_read_column_chunk` reads such a column one Parquet row group at a time instead, so peak memory is bounded by a row group's worth of data rather than the whole column — the read-side mirror of [streaming/chunked writes](writing.html#streamingchunked-writes):

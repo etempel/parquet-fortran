@@ -59,6 +59,10 @@ module parquet_bindings
     public :: parquet_sort_builder_new, parquet_sort_builder_add_key_int64
     public :: parquet_sort_builder_add_key_double, parquet_sort_builder_add_key_string
     public :: parquet_sort_builder_build, parquet_sort_builder_is_sorted, parquet_sort_builder_free
+    public :: parquet_sort_builder_build_partial, parquet_sort_builder_nth_element
+    public :: parquet_sort_partial_argsort_int64, parquet_sort_partial_argsort_double
+    public :: parquet_sort_partial_argsort_string
+    public :: parquet_sort_nth_index_int64, parquet_sort_nth_index_double, parquet_sort_nth_index_string
     public :: parquet_sort_argsort_int64, parquet_sort_argsort_double, parquet_sort_argsort_string
     public :: parquet_sort_is_sorted_int64, parquet_sort_is_sorted_double, parquet_sort_is_sorted_string
     public :: parquet_reader_set_sample
@@ -677,6 +681,119 @@ module parquet_bindings
             import
             type(c_ptr), value :: builder !! builder handle.
             integer(c_long_long) :: sorted !! 1 in order, 0 not, -1 when no key was added.
+        end function
+
+        !> Writes the first `count` entries of the 1-based permutation over every
+        !> key added so far. `perm` is sized `count` by the caller, NOT nrows.
+        !> `count` is clamped to nrows on the C side, so asking for more elements
+        !> than exist returns all of them rather than failing.
+        function parquet_sort_builder_build_partial(builder, count, perm) &
+                bind(C, name="parquet_sort_builder_build_partial") result(status)
+            import
+            type(c_ptr), value :: builder !! builder handle.
+            integer(c_long_long), value :: count !! how many leading entries to order.
+            integer(c_long_long) :: perm(*) !! receives `count` 1-based indices.
+            integer(c_long_long) :: status !! 0 on success, 1 when no key was added.
+        end function
+
+        !> The 1-based row index a full stable sort would place at 1-based rank
+        !> `nth`, over every key added so far. Returns 0 when no key was added or
+        !> `nth` is outside 1..nrows. Only the index is computed -- the caller
+        !> reads its own value out with it, which is what keeps the C side free of
+        !> any per-type value handling.
+        function parquet_sort_builder_nth_element(builder, nth) &
+                bind(C, name="parquet_sort_builder_nth_element") result(idx)
+            import
+            type(c_ptr), value :: builder !! builder handle.
+            integer(c_long_long), value :: nth !! 1-based rank wanted.
+            integer(c_long_long) :: idx !! 1-based row index at that rank, or 0.
+        end function
+
+        !> One-shot single-key partial argsort over an integer key: writes the
+        !> first `count` entries of the 1-based permutation into `perm`. Borrows
+        !> `values` for the duration of the call, exactly as
+        !> `parquet_sort_argsort_int64` does.
+        subroutine parquet_sort_partial_argsort_int64(n, values, valid, descending, nulls_first, &
+                count, perm) bind(C, name="parquet_sort_partial_argsort_int64")
+            import
+            integer(c_long_long), value :: n !! number of rows.
+            integer(c_long_long) :: values(*) !! one value per row.
+            type(c_ptr), value :: valid !! int8 per row (1 = valid), or C_NULL_PTR.
+            integer(c_int8_t), value :: descending !! nonzero for descending order.
+            integer(c_int8_t), value :: nulls_first !! nonzero to place nulls before values.
+            integer(c_long_long), value :: count !! how many leading entries to order.
+            integer(c_long_long) :: perm(*) !! receives `count` 1-based indices.
+        end subroutine
+
+        !> One-shot single-key partial argsort over a floating-point key.
+        subroutine parquet_sort_partial_argsort_double(n, values, valid, descending, nulls_first, &
+                count, perm) bind(C, name="parquet_sort_partial_argsort_double")
+            import
+            integer(c_long_long), value :: n !! number of rows.
+            real(c_double) :: values(*) !! one value per row.
+            type(c_ptr), value :: valid !! int8 per row (1 = valid), or C_NULL_PTR.
+            integer(c_int8_t), value :: descending !! nonzero for descending order.
+            integer(c_int8_t), value :: nulls_first !! nonzero to place nulls before values.
+            integer(c_long_long), value :: count !! how many leading entries to order.
+            integer(c_long_long) :: perm(*) !! receives `count` 1-based indices.
+        end subroutine
+
+        !> One-shot single-key partial argsort over a string key, same packed
+        !> offsets/data layout as `parquet_sort_argsort_string`.
+        subroutine parquet_sort_partial_argsort_string(n, offsets, data, valid, descending, &
+                nulls_first, count, perm) bind(C, name="parquet_sort_partial_argsort_string")
+            import
+            integer(c_long_long), value :: n !! number of rows.
+            integer(c_long_long) :: offsets(*) !! n+1 byte offsets into `data`.
+            character(kind=c_char) :: data(*) !! the packed bytes of every row.
+            type(c_ptr), value :: valid !! int8 per row (1 = valid), or C_NULL_PTR.
+            integer(c_int8_t), value :: descending !! nonzero for descending order.
+            integer(c_int8_t), value :: nulls_first !! nonzero to place nulls before values.
+            integer(c_long_long), value :: count !! how many leading entries to order.
+            integer(c_long_long) :: perm(*) !! receives `count` 1-based indices.
+        end subroutine
+
+        !> One-shot single-key nth-element over an integer key: the 1-based row
+        !> index a full stable sort would place at 1-based rank `nth`, or 0 when
+        !> `nth` is outside 1..n.
+        function parquet_sort_nth_index_int64(n, values, valid, descending, nulls_first, nth) &
+                bind(C, name="parquet_sort_nth_index_int64") result(idx)
+            import
+            integer(c_long_long), value :: n !! number of rows.
+            integer(c_long_long) :: values(*) !! one value per row.
+            type(c_ptr), value :: valid !! int8 per row (1 = valid), or C_NULL_PTR.
+            integer(c_int8_t), value :: descending !! nonzero for descending order.
+            integer(c_int8_t), value :: nulls_first !! nonzero to place nulls before values.
+            integer(c_long_long), value :: nth !! 1-based rank wanted.
+            integer(c_long_long) :: idx !! 1-based row index at that rank, or 0.
+        end function
+
+        !> One-shot single-key nth-element over a floating-point key.
+        function parquet_sort_nth_index_double(n, values, valid, descending, nulls_first, nth) &
+                bind(C, name="parquet_sort_nth_index_double") result(idx)
+            import
+            integer(c_long_long), value :: n !! number of rows.
+            real(c_double) :: values(*) !! one value per row.
+            type(c_ptr), value :: valid !! int8 per row (1 = valid), or C_NULL_PTR.
+            integer(c_int8_t), value :: descending !! nonzero for descending order.
+            integer(c_int8_t), value :: nulls_first !! nonzero to place nulls before values.
+            integer(c_long_long), value :: nth !! 1-based rank wanted.
+            integer(c_long_long) :: idx !! 1-based row index at that rank, or 0.
+        end function
+
+        !> One-shot single-key nth-element over a string key, same packed
+        !> offsets/data layout as `parquet_sort_argsort_string`.
+        function parquet_sort_nth_index_string(n, offsets, data, valid, descending, nulls_first, &
+                nth) bind(C, name="parquet_sort_nth_index_string") result(idx)
+            import
+            integer(c_long_long), value :: n !! number of rows.
+            integer(c_long_long) :: offsets(*) !! n+1 byte offsets into `data`.
+            character(kind=c_char) :: data(*) !! the packed bytes of every row.
+            type(c_ptr), value :: valid !! int8 per row (1 = valid), or C_NULL_PTR.
+            integer(c_int8_t), value :: descending !! nonzero for descending order.
+            integer(c_int8_t), value :: nulls_first !! nonzero to place nulls before values.
+            integer(c_long_long), value :: nth !! 1-based rank wanted.
+            integer(c_long_long) :: idx !! 1-based row index at that rank, or 0.
         end function
 
         !> Releases a sort builder and everything it copied.

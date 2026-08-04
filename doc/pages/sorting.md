@@ -18,7 +18,7 @@ happily sort an array that never came from one. The module itself is `parquet_so
 `parquet_sort` because Fortran does not allow a module to share its name with a procedure it
 declares.
 
-## Four operations
+## The operations
 
 | Call | Does |
 |---|---|
@@ -26,6 +26,13 @@ declares.
 | `pf_sort(values, sorted)` | an independent sorted copy; never modifies its input |
 | `pf_permute(values, perm)` | applies a permutation to `values` **in place** |
 | `pf_is_sorted(values, answer)` | whether `values` is already in the stated order |
+| `pf_partial_sort(values, sorted, n)` | the first `n` in order, without sorting the rest |
+| `pf_partial_argsort(values, perm, n)` | their indices instead |
+| `pf_nth_element(values, nth, p_value, [index])` | the value a full sort puts at rank `nth` |
+| `pf_nth_quantile(values, quantile, p_value, [index])` | a quantile of the non-null values |
+
+The first four are covered immediately below; the selection operations have their own section,
+[Selecting without sorting](#selecting-without-sorting).
 
 Optional arguments are shown in square brackets below — they are optional at the call site, not
 part of the syntax.
@@ -56,16 +63,20 @@ call pf_permute(name, perm)
 
 Eleven element types, in three groups.
 
-| Type | `is_valid=` | `pf_sort` | Notes |
-|---|---|---|---|
-| `integer(int32)`, `integer(int64)` | yes | yes | |
-| `real(real32)`, `real(real64)` | yes | yes | NaNs get their own tier, see below |
-| `logical` | yes | yes | `.false.` before `.true.` |
-| `character(len=*)` | yes | yes | compared over the full declared length |
-| `parquet_date`, `parquet_time` | no | yes | carries its own null state |
-| `parquet_timestamp` | no | yes | ordered by seconds, then nanoseconds |
-| `parquet_string_column` | no | no | `pf_permute` delegates to `%reindex` |
-| `parquet_column` | no | no | element kind resolved at runtime |
+| Type | `is_valid=` | `pf_sort`/`_partial_sort` | `pf_nth_*` | Notes |
+|---|---|---|---|---|
+| `integer(int32)`, `integer(int64)` | yes | yes | yes | |
+| `real(real32)`, `real(real64)` | yes | yes | yes | NaNs get their own tier, see below |
+| `logical` | yes | yes | yes | `.false.` before `.true.` |
+| `character(len=*)` | yes | yes | yes | compared over the full declared length |
+| `parquet_date`, `parquet_time` | no | yes | yes | carries its own null state |
+| `parquet_timestamp` | no | yes | yes | ordered by seconds, then nanoseconds |
+| `parquet_string_column` | no | no | yes | `pf_permute` delegates to `%reindex` |
+| `parquet_column` | no | no | no | element kind resolved at runtime |
+
+`pf_argsort`, `pf_partial_argsort`, `pf_permute` and `pf_is_sorted` apply to **all eleven**: their
+answer is a permutation, a boolean or an index, never a value, so a runtime element type is no
+obstacle.
 
 The `is_valid=` column says where nullness comes from. The six types with no null state of their
 own take an **optional** `is_valid(:)` mask; the temporal types and the two column types carry
@@ -189,8 +200,102 @@ key values.
 Sorting a **standalone** `parquet_column` — one you built yourself, or copied out of a table — is
 perfectly safe, and is what the `parquet_column` row of the type table above is for.
 
+## Selecting without sorting
+
+Three operations answer "which element ends up here?" without ordering the whole array.
+
+```fortran
+call pf_partial_sort(v, top, n=10)        ! the 10 smallest, in order
+call pf_partial_argsort(v, perm, n=10)    ! their indices instead
+call pf_nth_element(v, 5, val [, index])  ! the value a full sort puts at rank 5
+call pf_nth_quantile(v, 0.5d0, med)       ! the median of the non-null values
+```
+
+**`n` is clamped, not checked.** `pf_partial_sort(v, top, n=1000)` on a 100-element array returns
+all 100, in order — so an `n` derived from a fraction, a config value or a post-filter row count
+needs no `min(n, size(v))` of your own. A *negative* `n` is still an error.
+
+**"The last N" is `descending=.true.`**, not a separate procedure:
+
+```fortran
+call pf_partial_sort(flux, brightest, n=10, descending=.true.)
+```
+
+**The complexity claim, with its caveat.** `pf_partial_sort` is `O(n log k)` for `k` results and
+`pf_nth_element` is `O(n)`, against `O(n log n)` for a full sort — but `pf_partial_sort` stops
+paying as `k` approaches the array size, and at `k = size` it is strictly *worse* than calling
+`pf_sort`. Use it when you want a small slice of a large array; use `pf_sort` when you want most of
+it. (One case gets both for free: a low-cardinality integer key takes a counting-sort path that is
+already `O(n)` and already fully ordered, so partial and full cost the same there.)
+
+### The index `pf_nth_element` reports
+
+`index` is optional, and the value it reports is **the index a full *stable* sort would give** —
+not merely *an* element equal to the answer. That matters whenever the array has duplicates:
+
+```fortran
+integer(int32) :: v(6) = [5, 3, 5, 1, 5, 3]
+call pf_nth_element(v, 3, val, index)   ! val = 3, index = 6
+```
+
+Ranks 2 and 3 both hold the value `3`; rank 3 is the *second* of them, so it reports the later
+original position. `std::nth_element` on its own leaves an arbitrary member of an equal run at that
+position, which would make the answer vary between builds — the ordering here ends with a
+tiebreaker on the original index, so it does not.
+
+`nth` counts nulls as ranked elements, placed by the same tier rules as the sort, and
+`descending`/`nulls_first`/`is_valid` mean exactly what they do for `pf_argsort`.
+
+### Quantiles
+
+`pf_nth_quantile`'s `quantile` argument is on a **0–1 scale, not 0–100**. Passing `50` aborts
+rather than silently answering, because `0.5` is valid on both scales and means completely
+different things.
+
+```fortran
+call pf_nth_quantile(flux, 0.5d0, median)
+call pf_nth_quantile(flux, 0.9d0, p90, is_valid=mask, n_null=nmissing)
+```
+
+**Nulls are excluded from the population, not placed in it** — the one operation in this module
+where that is true, and the reason it takes neither `descending` nor `nulls_first`: there is no
+null tier to position, and a descending quantile is just `1 - quantile`. `n_null` reports how many
+values were dropped, so you can decide whether the answer is trustworthy.
+
+**An all-null array aborts.** There is no value to return and no sentinel that works across all ten
+supported types, so returning an undefined `p_value` would hand back something that looks like data.
+`n_null` is for *partial* nullness; guard with `count(mask)` (or a column's own null count) if the
+all-null case can happen.
+
+A fractional position is resolved by `rounding=`, matched case-insensitively:
+
+```fortran
+call pf_nth_quantile(v, 0.5d0, q, rounding="down")   ! "nearest" (default), "down", "up"
+```
+
+An unrecognized token aborts and names the valid ones.
+
+### Sorted validity
+
+`pf_sort` and `pf_partial_sort` take an optional `sorted_valid=` reporting which *output* elements
+are null — the mask you passed in describes the input order, which is not the order you get back:
+
+```fortran
+call pf_sort(v, sorted, is_valid=mask, sorted_valid=out_mask)   ! out_mask(k) describes sorted(k)
+```
+
+It is **always allocated** when you ask for it, including when you passed no `is_valid` at all (in
+which case it is all `.true.`). That differs from the "unallocated means no nulls" convention used
+for *inputs*, deliberately: an input you leave unallocated is you declining to supply information,
+while an output you explicitly asked for is a direct question.
+
 ## What is not here yet
 
 Binary search (`pf_lower_bound`/`pf_upper_bound`/`pf_equal_range`), `pf_merge`, `pf_unique` and
 `pf_rank` are planned but not implemented. The `assume_sorted` argument described for them does not
 exist yet either.
+
+`pf_partial_sort` and `pf_partial_argsort` are not defined for `parquet_string_column` or
+`parquet_column`, for the same reason `pf_sort` is not. `pf_nth_element` and `pf_nth_quantile` are
+not defined for `parquet_column`: its element type is a runtime discriminator, so there is no
+compile-time type for the value they return.

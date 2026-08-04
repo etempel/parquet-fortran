@@ -121,6 +121,21 @@ def wrap_list(names, indent, width=110):
     return ("\n" + pad).join(out)
 
 
+#: Types `pf_nth_element`/`pf_nth_quantile` apply to: every one except `parquet_column`, whose
+#: element type is a runtime discriminator, so there is no compile-time type for `p_value`
+#: (feature_sort.md §6's first exclusion rule).
+def has_nth(t):
+    return t[0] != "col"
+
+
+def pval_decl(t, name="p_value"):
+    """Declaration of ONE element of type `t`, as an intent(out) result."""
+    tag, decl, what, family, nulls, _, _ = t
+    if family in ("chr", "strcol"):
+        return f"        character(len=:), allocatable, intent(out) :: {name}"
+    return f"        {decl}, intent(out) :: {name}"
+
+
 def val_decl(t, intent, name="values"):
     """Declaration of the values array for type `t`."""
     tag, decl, what, family, nulls, _, _ = t
@@ -189,7 +204,11 @@ module parquet_sorting
         parquet_sort_builder_add_key_double, parquet_sort_builder_add_key_string, &
         parquet_sort_builder_build, parquet_sort_builder_is_sorted, parquet_sort_builder_free, &
         parquet_sort_argsort_int64, parquet_sort_argsort_double, parquet_sort_argsort_string, &
-        parquet_sort_is_sorted_int64, parquet_sort_is_sorted_double, parquet_sort_is_sorted_string
+        parquet_sort_is_sorted_int64, parquet_sort_is_sorted_double, parquet_sort_is_sorted_string, &
+        parquet_sort_builder_build_partial, parquet_sort_builder_nth_element, &
+        parquet_sort_partial_argsort_int64, parquet_sort_partial_argsort_double, &
+        parquet_sort_partial_argsort_string, parquet_sort_nth_index_int64, &
+        parquet_sort_nth_index_double, parquet_sort_nth_index_string
     use parquet_strings, only : parquet_string_column
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp
     use parquet_columns, only : parquet_column, parquet_kind_name, PK_INT32, PK_INT64, PK_FLOAT32, &
@@ -203,6 +222,10 @@ module parquet_sorting
     public :: pf_argsort
     public :: pf_permute
     public :: pf_is_sorted
+    public :: pf_partial_sort
+    public :: pf_partial_argsort
+    public :: pf_nth_element
+    public :: pf_nth_quantile
     !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_sorting: "
@@ -211,6 +234,11 @@ module parquet_sorting
     integer, parameter :: SK_INT = 1  !! key values live in `ints`.
     integer, parameter :: SK_REAL = 2 !! key values live in `reals`.
     integer, parameter :: SK_STR = 3  !! key values live in `offsets`/`data`.
+    !
+    ! ---- Fractional-position rounding for pf_nth_quantile ----
+    integer, parameter :: RND_NEAREST = 1 !! round a fractional rank to the nearest whole one.
+    integer, parameter :: RND_DOWN = 2    !! round a fractional rank down.
+    integer, parameter :: RND_UP = 3      !! round a fractional rank up.
     !
     !> One extracted sort key, in the canonical form the C++ engine takes.
     !!
@@ -314,6 +342,76 @@ module parquet_sorting
         w(f"        module procedure is_sorted_{t[0]}")
     w("    end interface pf_is_sorted")
     w("    !")
+    w("    !> The permutation that would sort the FIRST `n` elements of `values`, without ordering")
+    w("    !> the rest. `perm` comes back with exactly `n` entries (fewer if the array is shorter).")
+    w("    !>")
+    w("    !> `n` is CLAMPED to the array size rather than being an error, so a caller whose `n` is")
+    w("    !> derived -- a fraction of a row count, a config value, a post-filter survivor count --")
+    w("    !> needs no `min(n, size(v))` of their own. A negative `n` is still an error.")
+    w("    !>")
+    w("    !> \"The last n\" is `descending=.true.`, not a separate procedure.")
+    w("    interface pf_partial_argsort")
+    for t in TYPES:
+        for ik, _, _ in IDX_KINDS:
+            w(f"        module procedure partial_argsort_{t[0]}_{ik}")
+    w("    end interface pf_partial_argsort")
+    w("    !")
+    w("    !> The first `n` elements of `values` in order, as an independent copy of length `n`.")
+    w("    !> Same clamping rule as `pf_partial_argsort`. Never modifies its input.")
+    w("    !>")
+    w("    !> Cheaper than `pf_sort` only while `n` stays well below the array size -- the underlying")
+    w("    !> `std::partial_sort` degrades past a full sort as `n` approaches it. At `n = size` this")
+    w("    !> is strictly worse than calling `pf_sort`.")
+    w("    interface pf_partial_sort")
+    for t in TYPES:
+        if t[5]:
+            w(f"        module procedure partial_sort_{t[0]}")
+    w("    end interface pf_partial_sort")
+    w("    !")
+    w("    !> The element a full sort would place at 1-based rank `nth`, without sorting -- O(n)")
+    w("    !> rather than O(n log n). `index` optionally reports which element of `values` that was.")
+    w("    !>")
+    w("    !> **The reported index is the one a full STABLE sort would give.** `std::nth_element`")
+    w("    !> normally leaves an arbitrary member of an equal-comparing run at that position; here")
+    w("    !> the comparator ends with a tiebreaker on the original index, making it a total order")
+    w("    !> under which no two elements compare equal, so the answer is deterministic and agrees")
+    w("    !> with `pf_sort` element for element.")
+    w("    !>")
+    w("    !> `nth` counts NULLS too, placed by the same tier rules as the sort (last by default).")
+    w("    !> Takes `descending`/`nulls_first`/`is_valid` exactly as `pf_argsort` does.")
+    w("    interface pf_nth_element")
+    for t in TYPES:
+        if not has_nth(t):
+            continue
+        for nk, _, _ in IDX_KINDS:
+            w(f"        module procedure nth_{t[0]}_{nk}")
+            for ik, _, _ in IDX_KINDS:
+                w(f"        module procedure nth_{t[0]}_{nk}_{ik}")
+    w("    end interface pf_nth_element")
+    w("    !")
+    w("    !> The value at `quantile` (on a **0-1 scale**, not 0-100) of the NON-NULL values.")
+    w("    !> `index` optionally reports which element that was; `n_null` how many were excluded.")
+    w("    !>")
+    w("    !> **Nulls are excluded from the population, not placed in it** -- unlike every other")
+    w("    !> operation in this module, which is why this one takes neither `descending` nor")
+    w("    !> `nulls_first`: there is no null tier to position, and a descending quantile is just")
+    w("    !> `1 - quantile`.")
+    w("    !>")
+    w("    !> `rounding=` selects how a fractional position is resolved: `\"nearest\"` (the default),")
+    w("    !> `\"down\"` or `\"up\"`, matched case-insensitively. An unrecognized token aborts.")
+    w("    !>")
+    w("    !> Aborts when EVERY value is null: there is no value to return, and no sentinel exists")
+    w("    !> across all ten types. `n_null` is for PARTIAL nullness; the all-null case never")
+    w("    !> reaches it. Guard with `count(mask)` (or a column's own null count) if that matters.")
+    w("    interface pf_nth_quantile")
+    for t in TYPES:
+        if not has_nth(t):
+            continue
+        w(f"        module procedure quantile_{t[0]}")
+        for ik, _, _ in IDX_KINDS:
+            w(f"        module procedure quantile_{t[0]}_{ik}")
+    w("    end interface pf_nth_quantile")
+    w("    !")
 
     # ---- interface bodies ----
     w("    ! ---- Key extraction and pf_sort_keys%add (parquet_sorting_keys) ----")
@@ -363,6 +461,56 @@ module parquet_sorting
     w("            character(len=*), intent(in) :: proc                !! calling procedure, for messages.")
     w("            integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.")
     w("        end subroutine drive_engine")
+    w("        !> Runs the engine over `keys` but orders only the first `count` entries -- `perm`")
+    w("        !! comes back with exactly `count` elements.")
+    w("        module subroutine drive_engine_partial(keys, nrows, count, proc, perm)")
+    w("            type(sort_key_buf), intent(in), target :: keys(:)   !! the keys, primary first.")
+    w("            integer(int64), intent(in) :: nrows                 !! rows each key describes.")
+    w("            integer(int64), intent(in) :: count                 !! leading entries to order.")
+    w("            character(len=*), intent(in) :: proc                !! calling procedure, for messages.")
+    w("            integer(int64), allocatable, intent(out) :: perm(:) !! the first `count` 1-based indices.")
+    w("        end subroutine drive_engine_partial")
+    w("        !> The 1-based index a full stable sort would place at rank `nth`, without sorting.")
+    w("        module subroutine engine_nth_index(keys, nrows, nth, proc, idx)")
+    w("            type(sort_key_buf), intent(in), target :: keys(:)   !! the keys, primary first.")
+    w("            integer(int64), intent(in) :: nrows                 !! rows each key describes.")
+    w("            integer(int64), intent(in) :: nth                   !! 1-based rank wanted.")
+    w("            character(len=*), intent(in) :: proc                !! calling procedure, for messages.")
+    w("            integer(int64), intent(out) :: idx                  !! 1-based row index at that rank.")
+    w("        end subroutine engine_nth_index")
+    w("        !> Clamps a requested count to the array size, aborting only on a negative one.")
+    w("        module subroutine resolve_count(n, nrows, proc, count)")
+    w("            integer, intent(in) :: n                !! requested count, as the caller gave it.")
+    w("            integer(int64), intent(in) :: nrows     !! the array size.")
+    w("            character(len=*), intent(in) :: proc    !! calling procedure, for messages.")
+    w("            integer(int64), intent(out) :: count    !! min(n, nrows).")
+    w("        end subroutine resolve_count")
+    w("        !> Aborts unless `nth` names a rank that exists.")
+    w("        module subroutine check_rank(nth, nrows, proc)")
+    w("            integer(int64), intent(in) :: nth      !! 1-based rank wanted.")
+    w("            integer(int64), intent(in) :: nrows    !! the array size.")
+    w("            character(len=*), intent(in) :: proc   !! calling procedure, for messages.")
+    w("        end subroutine check_rank")
+    w("        !> How many of a key's rows are non-null.")
+    w("        module subroutine key_valid_count(keys, nrows, n_valid)")
+    w("            type(sort_key_buf), intent(in) :: keys(:) !! the keys; only the first is consulted.")
+    w("            integer(int64), intent(in) :: nrows       !! the array size.")
+    w("            integer(int64), intent(out) :: n_valid    !! rows that are not null.")
+    w("        end subroutine key_valid_count")
+    w("        !> Turns a `rounding=` token into an RND_* mode, aborting on an unrecognized one.")
+    w("        module subroutine resolve_rounding(rounding, proc, mode)")
+    w("            character(len=*), intent(in), optional :: rounding !! token; default \"nearest\".")
+    w("            character(len=*), intent(in) :: proc               !! calling procedure, for messages.")
+    w("            integer, intent(out) :: mode                       !! RND_NEAREST / RND_DOWN / RND_UP.")
+    w("        end subroutine resolve_rounding")
+    w("        !> The 1-based rank a quantile names within `n_valid` non-null values.")
+    w("        module subroutine quantile_rank(quantile, n_valid, mode, proc, rank)")
+    w("            real(real64), intent(in) :: quantile   !! position on a 0-1 scale.")
+    w("            integer(int64), intent(in) :: n_valid  !! non-null population size.")
+    w("            integer, intent(in) :: mode            !! RND_* rounding of a fractional position.")
+    w("            character(len=*), intent(in) :: proc   !! calling procedure, for messages.")
+    w("            integer(int64), intent(out) :: rank    !! 1-based rank within the non-null values.")
+    w("        end subroutine quantile_rank")
     w("        !> Whether every row is already in order under `keys`, using the same comparator")
     w("        !! `drive_engine` sorts with, so the two can never disagree.")
     w("        module subroutine engine_is_sorted(keys, nrows, proc, answer)")
@@ -419,7 +567,7 @@ module parquet_sorting
         if not has_sort:
             continue
         w(f"        !> pf_sort over a {what} array: an independent sorted copy.")
-        w(f"        module subroutine sort_{tag}(values, sorted, descending, nulls_first{', is_valid' if nulls == 'arg' else ''})")
+        w(f"        module subroutine sort_{tag}(values, sorted, descending, nulls_first{', is_valid, sorted_valid' if nulls == 'arg' else ''})")
         w(val_decl(t, "in"))
         if family == "chr":
             w("            character(len=len(values)), allocatable, intent(out) :: sorted(:) !! the sorted copy.")
@@ -429,7 +577,93 @@ module parquet_sorting
         w("            logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.")
         if nulls == "arg":
             w("            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
+            w("            logical, allocatable, intent(out), optional :: sorted_valid(:)")
+            w("            !! validity of `sorted`, in its order. ALWAYS ALLOCATED when asked for -- all .true.")
+            w("            !! when `is_valid` was absent, since the caller asked a direct question.")
         w(f"        end subroutine sort_{tag}")
+    w("    end interface")
+    w("    !")
+    w("    ! ---- pf_partial_sort and pf_partial_argsort (parquet_sorting_select) ----")
+    w("    interface")
+    for t in TYPES:
+        tag, decl, what, family, nulls, has_sort, _ = t
+        for ik, idecl, iname in IDX_KINDS:
+            w(f"        !> pf_partial_argsort over a {what} array, returning an {iname} permutation.")
+            w(f"        module subroutine partial_argsort_{tag}_{ik}(values, perm, n, descending, nulls_first{', is_valid' if nulls == 'arg' else ''})")
+            w(val_decl(t, "in"))
+            w(f"            {idecl}, allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.")
+            w("            integer, intent(in) :: n !! leading elements to order; clamped to the size.")
+            w("            logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.")
+            w("            logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.")
+            if nulls == "arg":
+                w("            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
+            w(f"        end subroutine partial_argsort_{tag}_{ik}")
+    for t in TYPES:
+        tag, decl, what, family, nulls, has_sort, _ = t
+        if not has_sort:
+            continue
+        w(f"        !> pf_partial_sort over a {what} array: the first `n` in order, as a copy.")
+        w(f"        module subroutine partial_sort_{tag}(values, sorted, n, descending, nulls_first{', is_valid, sorted_valid' if nulls == 'arg' else ''})")
+        w(val_decl(t, "in"))
+        if family == "chr":
+            w("            character(len=len(values)), allocatable, intent(out) :: sorted(:) !! the first `n`, in order.")
+        else:
+            w(f"            {decl}, allocatable, intent(out) :: sorted(:) !! the first `n`, in order.")
+        w("            integer, intent(in) :: n !! leading elements to order; clamped to the size.")
+        w("            logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.")
+        w("            logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.")
+        if nulls == "arg":
+            w("            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
+            w("            logical, allocatable, intent(out), optional :: sorted_valid(:)")
+            w("            !! validity of `sorted`, in its order; always allocated when asked for.")
+        w(f"        end subroutine partial_sort_{tag}")
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        if not has_nth(t):
+            continue
+        for nk, nkdecl, nkname in IDX_KINDS:
+            for ik, idecl, iname in [(None, None, None)] + IDX_KINDS:
+                sfx = f"_{ik}" if ik else ""
+                iarg = ", index" if ik else ""
+                w(f"        !> pf_nth_element over a {what} array, with an {nkname} rank" +
+                  (f" and an {iname} index." if ik else " and no index out-argument."))
+                w(f"        module subroutine nth_{tag}_{nk}{sfx}(values, nth, p_value{iarg}, descending, " +
+                  f"nulls_first{', is_valid' if nulls == 'arg' else ''})")
+                w(val_decl(t, "in"))
+                w(f"            {nkdecl}, intent(in) :: nth !! 1-based rank wanted.")
+                w("    " + pval_decl(t) + " !! the value at that rank.")
+                if ik:
+                    w(f"            {idecl}, intent(out) :: index !! which element of `values` that was.")
+                w("            logical, intent(in), optional :: descending !! .true. ranks high to low.")
+                w("            logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.")
+                if nulls == "arg":
+                    w("            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
+                w(f"        end subroutine nth_{tag}_{nk}{sfx}")
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        if not has_nth(t):
+            continue
+        for ik, idecl, iname in [(None, None, None)] + IDX_KINDS:
+            sfx = f"_{ik}" if ik else ""
+            iarg = ", index" if ik else ""
+            w(f"        !> pf_nth_quantile over a {what} array" +
+              (f", with an {iname} index." if ik else ", with no index out-argument."))
+            w(f"        module subroutine quantile_{tag}{sfx}(values, quantile, p_value{iarg}, rounding" +
+              f"{', is_valid' if nulls == 'arg' else ''}, n_null)")
+            w(val_decl(t, "in"))
+            w("            real(real64), intent(in) :: quantile !! position on a 0-1 scale.")
+            w("    " + pval_decl(t) + " !! the value at that quantile.")
+            if ik:
+                w(f"            {idecl}, intent(out) :: index !! which element of `values` that was.")
+            w("            character(len=*), intent(in), optional :: rounding !! \"nearest\"/\"down\"/\"up\".")
+            if nulls == "arg":
+                w("            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
+            w("            integer(int64), intent(out), optional :: n_null !! how many values were null.")
+            w("            !! LAST, not next to `index` as feature_sort.md \u00a75 sketched: both are optional")
+            w("            !! int64 out-arguments, so with `n_null` at position 4 a positional call could")
+            w("            !! not be told apart from the `index` form. Nothing else here is a character,")
+            w("            !! so `rounding` at position 4 disambiguates them.")
+            w(f"        end subroutine quantile_{tag}{sfx}")
     w("    end interface")
     w("    !")
     w("    ! ---- pf_permute and pf_is_sorted (parquet_sorting_permute) ----")
@@ -978,6 +1212,112 @@ contains
         end if
     end procedure drive_engine
     !
+    module procedure drive_engine_partial
+        type(c_ptr) :: builder
+        integer(int64) :: status, ik
+        integer :: jk
+        !
+        if (size(keys) < 1) then
+            error stop EP // proc // ": no sort key was given"
+        end if
+        allocate(perm(count))
+        do ik = 1_int64, count
+            perm(ik) = ik
+        end do
+        if (count < 1_int64 .or. nrows < 2_int64) return
+        if (size(keys) == 1) then
+            call engine_one_shot_partial(keys(1), nrows, count, perm)
+            return
+        end if
+        builder = parquet_sort_builder_new(nrows)
+        do jk = 1, size(keys)
+            call engine_add_key(builder, keys(jk), nrows)
+        end do
+        status = parquet_sort_builder_build_partial(builder, count, perm)
+        call parquet_sort_builder_free(builder)
+        if (status /= 0_int64) then
+            ! Only reachable with an empty key list, which the guard above already rejects.
+            error stop EP // proc // ": the sort engine could not build a permutation" ! GCOVR_EXCL_LINE
+        end if
+    end procedure drive_engine_partial
+    !
+    module procedure engine_nth_index
+        type(c_ptr) :: builder
+        integer :: ik
+        !
+        if (size(keys) < 1) then
+            error stop EP // proc // ": no sort key was given"
+        end if
+        if (size(keys) == 1) then
+            call engine_one_shot_nth(keys(1), nrows, nth, idx)
+            return
+        end if
+        builder = parquet_sort_builder_new(nrows)
+        do ik = 1, size(keys)
+            call engine_add_key(builder, keys(ik), nrows)
+        end do
+        idx = parquet_sort_builder_nth_element(builder, nth)
+        call parquet_sort_builder_free(builder)
+        if (idx < 1_int64) then
+            ! The C side answers 0 for an empty key list or an out-of-range rank; both are already
+            ! rejected above and by the caller's own bounds check.
+            error stop EP // proc // ": the sort engine could not resolve that rank" ! GCOVR_EXCL_LINE
+        end if
+    end procedure engine_nth_index
+    !
+    module procedure resolve_count
+        character(len=32) :: n_str
+        !
+        ! Clamped, not refused: `n` is very often derived (a fraction of a row count, a config
+        ! value, a post-filter survivor count), and aborting would put min(n, size(v)) at every
+        ! call site. A NEGATIVE n is a different thing -- a caller error, not a boundary.
+        if (n < 0) then
+            write (n_str, "(i0)") n
+            error stop EP // proc // ": n is " // trim(n_str) // ", which is negative"
+        end if
+        count = min(int(n, int64), nrows)
+    end procedure resolve_count
+    !
+    !> Partially argsorts one already-extracted key through the matching one-shot entry point.
+    subroutine engine_one_shot_partial(key, nrows, count, perm)
+        type(sort_key_buf), intent(in), target :: key !! the key.
+        integer(int64), intent(in) :: nrows           !! its row count.
+        integer(int64), intent(in) :: count           !! leading entries to order.
+        integer(int64), intent(inout) :: perm(:)      !! receives `count` 1-based indices.
+        type(c_ptr) :: vp
+        integer(c_int8_t) :: df, nf
+        !
+        call key_flags(key, vp, df, nf)
+        select case (key%family)
+        case (SK_REAL)
+            call parquet_sort_partial_argsort_double(nrows, key%reals, vp, df, nf, count, perm)
+        case (SK_STR)
+            call parquet_sort_partial_argsort_string(nrows, key%offsets, key%data, vp, df, nf, count, perm)
+        case default
+            call parquet_sort_partial_argsort_int64(nrows, key%ints, vp, df, nf, count, perm)
+        end select
+    end subroutine engine_one_shot_partial
+    !
+    !> Resolves one already-extracted key's nth index through the matching one-shot entry point.
+    subroutine engine_one_shot_nth(key, nrows, nth, idx)
+        type(sort_key_buf), intent(in), target :: key !! the key.
+        integer(int64), intent(in) :: nrows           !! its row count.
+        integer(int64), intent(in) :: nth             !! 1-based rank wanted.
+        integer(int64), intent(out) :: idx            !! 1-based row index at that rank.
+        type(c_ptr) :: vp
+        integer(c_int8_t) :: df, nf
+        !
+        call key_flags(key, vp, df, nf)
+        select case (key%family)
+        case (SK_REAL)
+            idx = parquet_sort_nth_index_double(nrows, key%reals, vp, df, nf, nth)
+        case (SK_STR)
+            idx = parquet_sort_nth_index_string(nrows, key%offsets, key%data, vp, df, nf, nth)
+        case default
+            idx = parquet_sort_nth_index_int64(nrows, key%ints, vp, df, nf, nth)
+        end select
+    end subroutine engine_one_shot_nth
+    !
     module procedure engine_is_sorted
         type(c_ptr) :: builder
         integer(int64) :: res
@@ -1076,6 +1416,90 @@ contains
         desc_flag = merge(1_c_int8_t, 0_c_int8_t, key%descending)
         nulls_flag = merge(1_c_int8_t, 0_c_int8_t, key%nulls_first)
     end subroutine key_flags
+    !
+    module procedure check_rank
+        character(len=32) :: a_str, b_str
+        !
+        if (nth < 1_int64 .or. nth > nrows) then
+            write (a_str, "(i0)") nth
+            write (b_str, "(i0)") nrows
+            error stop EP // proc // ": nth is " // trim(a_str) // ", which is outside 1.." // &
+                trim(b_str)
+        end if
+    end procedure check_rank
+    !
+    module procedure key_valid_count
+        integer(int64) :: k
+        !
+        ! An unallocated `valid` is the module's "no nulls at all" convention, so the whole array
+        ! counts -- the same fast path the engine itself takes.
+        if (.not. allocated(keys(1)%valid)) then
+            n_valid = nrows
+            return
+        end if
+        n_valid = 0_int64
+        do k = 1_int64, nrows
+            if (keys(1)%valid(k) /= 0_c_int8_t) n_valid = n_valid + 1_int64
+        end do
+    end procedure key_valid_count
+    !
+    module procedure resolve_rounding
+        character(len=:), allocatable :: tok, shown
+        integer :: k, ic
+        !
+        mode = RND_NEAREST
+        if (.not. present(rounding)) return
+        ! Lower-cased in place rather than with a helper: this is the only case-folding site in the
+        ! module, and parquet_sortkey's own direction words are matched the same way.
+        tok = trim(adjustl(rounding))
+        do k = 1, len(tok)
+            ic = iachar(tok(k:k))
+            if (ic >= iachar("A") .and. ic <= iachar("Z")) tok(k:k) = achar(ic + 32)
+        end do
+        select case (tok)
+        case ("nearest")
+            mode = RND_NEAREST
+        case ("down")
+            mode = RND_DOWN
+        case ("up")
+            mode = RND_UP
+        case default
+            ! Capped to a short preview: the caller controls this string's length, and ifx's
+            ! ERROR STOP runtime corrupts the heap once the composed message reaches 8192 bytes
+            ! (CLAUDE.md). Same shape as parquet_filter_add's own rule preview.
+            shown = trim(adjustl(rounding))
+            if (len(shown) > 100) shown = shown(1:100) // "..."
+            error stop EP // proc // ": rounding='" // shown // "' is not recognized; use " // &
+                "'nearest' (the default), 'down' or 'up'"
+        end select
+    end procedure resolve_rounding
+    !
+    module procedure quantile_rank
+        real(real64) :: pos
+        !
+        if (quantile < 0.0_real64 .or. quantile > 1.0_real64 .or. quantile /= quantile) then
+            ! The NaN arm is what the self-comparison catches; ieee_is_nan would need another
+            ! import here for one test, and this expression is exact with no arithmetic drift.
+            error stop EP // proc // ": quantile must lie on a 0-1 scale (note: NOT 0-100)"
+        end if
+        if (n_valid < 1_int64) then
+            error stop EP // proc // ": every value is null, so no quantile exists; guard with " // &
+                "count(is_valid) (or the column's own null count) if that can happen"
+        end if
+        ! Position on the 0-based index scale of the non-null values, so quantile=0 gives the
+        ! smallest and quantile=1 the largest exactly, with no rounding involved at either end.
+        pos = quantile * real(n_valid - 1_int64, real64)
+        select case (mode)
+        case (RND_DOWN)
+            rank = int(floor(pos), int64) + 1_int64
+        case (RND_UP)
+            rank = int(ceiling(pos), int64) + 1_int64
+        case default
+            rank = int(nint(pos, int64), int64) + 1_int64
+        end select
+        if (rank < 1_int64) rank = 1_int64
+        if (rank > n_valid) rank = n_valid
+    end procedure quantile_rank
     !
     module procedure check_permutation
         integer(int8), allocatable :: seen(:)
@@ -1228,6 +1652,21 @@ contains
         w("        do k = 1_int64, n")
         w("            sorted(k) = values(perm(k))")
         w("        end do")
+        if nulls == "arg":
+            w("        ! Deliberately ALLOCATED even when `is_valid` was absent. The module's")
+            w("        ! \"unallocated means no nulls\" convention governs an INPUT, where unallocated is")
+            w("        ! the caller declining to supply information; an output they explicitly asked")
+            w("        ! for is a direct question, and answering it with an unallocated array would")
+            w("        ! force `if (allocated(...))` around every use.")
+            w("        if (present(sorted_valid)) then")
+            w("            allocate(sorted_valid(n))")
+            w("            sorted_valid = .true.")
+            w("            if (present(is_valid)) then")
+            w("                do k = 1_int64, n")
+            w("                    sorted_valid(k) = is_valid(perm(k))")
+            w("                end do")
+            w("            end if")
+            w("        end if")
         w(f"    end procedure sort_{tag}")
         w("    !")
 
@@ -1319,6 +1758,217 @@ contains
     return "\n".join(o) + "\n"
 
 
+# --------------------------------------------------------------------------------------
+# src/parquet_sorting_select.f90 -- pf_partial_sort and pf_partial_argsort
+# --------------------------------------------------------------------------------------
+def gen_select():
+    o = []
+    w = o.append
+    w(BANNER)
+    w("""!> `pf_partial_sort` and `pf_partial_argsort` -- ordering only the first `n` elements.
+!!
+!! Same engine, same comparator, same tiers as a full sort (`feature_risks.md` Risk-34): these
+!! reach `std::partial_sort` through the very object `std::sort` is given, so a partial result can
+!! never disagree with the corresponding prefix of a full one.
+!!
+!! **`n` is clamped, not checked.** Asking for more elements than the array holds returns all of
+!! them, in order. That is deliberate -- `n` is very often derived, and refusing it would put
+!! `min(n, size(v))` at every call site. A negative `n` is a caller error and aborts.
+!!
+!! **A partial sort that is not actually partial is invisible**: returning the first `n` of a FULL
+!! sort is correct and merely slower, so no correctness test can tell the two apart. That is what
+!! `parquet_debug_get_sort_comparisons` exists for, and why the guide states the complexity claim
+!! with its own caveat rather than as a free win.
+submodule (parquet_sorting) parquet_sorting_select
+    implicit none
+    !
+contains
+    !""")
+
+    for t in TYPES:
+        tag, decl, what, family, nulls, has_sort, _ = t
+        iv = ", is_valid=is_valid" if nulls == "arg" else ""
+        for ik, idecl, iname in IDX_KINDS:
+            w(f"    module procedure partial_argsort_{tag}_{ik}")
+            w("        type(sort_key_buf), allocatable :: buf(:)")
+            w("        integer(int64), allocatable :: perm64(:)")
+            w("        integer(int64) :: nrows, count")
+            w("        logical :: desc, nlo")
+            w("        !")
+            w("        desc = .false.")
+            w("        if (present(descending)) desc = descending")
+            w("        nlo = .false.")
+            w("        if (present(nulls_first)) nlo = nulls_first")
+            w(f"        nrows = {rows_expr(t)}")
+            w("        call resolve_count(n, nrows, \"pf_partial_argsort\", count)")
+            w(f"        call extract_{tag}(values, buf, desc, nlo, \"pf_partial_argsort\"{iv})")
+            w("        call drive_engine_partial(buf, nrows, count, \"pf_partial_argsort\", perm64)")
+            if ik == "i32":
+                w("        call narrow_perm(perm64, \"pf_partial_argsort\", perm)")
+            else:
+                w("        call move_alloc(perm64, perm)")
+            w(f"    end procedure partial_argsort_{tag}_{ik}")
+            w("    !")
+
+    for t in TYPES:
+        tag, decl, what, family, nulls, has_sort, _ = t
+        if not has_sort:
+            continue
+        iv = ", is_valid=is_valid" if nulls == "arg" else ""
+        w(f"    module procedure partial_sort_{tag}")
+        w("        type(sort_key_buf), allocatable :: buf(:)")
+        w("        integer(int64), allocatable :: perm(:)")
+        w("        integer(int64) :: k, nrows, count")
+        w("        logical :: desc, nlo")
+        w("        !")
+        w("        desc = .false.")
+        w("        if (present(descending)) desc = descending")
+        w("        nlo = .false.")
+        w("        if (present(nulls_first)) nlo = nulls_first")
+        w(f"        nrows = {rows_expr(t)}")
+        w("        call resolve_count(n, nrows, \"pf_partial_sort\", count)")
+        w(f"        call extract_{tag}(values, buf, desc, nlo, \"pf_partial_sort\"{iv})")
+        w("        call drive_engine_partial(buf, nrows, count, \"pf_partial_sort\", perm)")
+        if family == "chr":
+            w("        allocate(character(len=len(values)) :: sorted(count))")
+        else:
+            w("        allocate(sorted(count))")
+        w("        do k = 1_int64, count")
+        w("            sorted(k) = values(perm(k))")
+        w("        end do")
+        if nulls == "arg":
+            w("        if (present(sorted_valid)) then")
+            w("            allocate(sorted_valid(count))")
+            w("            sorted_valid = .true.")
+            w("            if (present(is_valid)) then")
+            w("                do k = 1_int64, count")
+            w("                    sorted_valid(k) = is_valid(perm(k))")
+            w("                end do")
+            w("            end if")
+            w("        end if")
+        w(f"    end procedure partial_sort_{tag}")
+        w("    !")
+
+    # ---- pf_nth_element: one shared impl per type, six thin specifics over it ----
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        if not has_nth(t):
+            continue
+        iv = ", is_valid=is_valid" if nulls == "arg" else ""
+        for nk, nkdecl, _ in IDX_KINDS:
+            for ik, idecl, _ in [(None, None, None)] + IDX_KINDS:
+                sfx = "_" + ik if ik else ""
+                w("    module procedure nth_" + tag + "_" + nk + sfx)
+                w("        integer(int64) :: idx")
+                w("        logical :: desc, nlo")
+                w("        !")
+                w("        desc = .false.")
+                w("        if (present(descending)) desc = descending")
+                w("        nlo = .false.")
+                w("        if (present(nulls_first)) nlo = nulls_first")
+                w("        call nth_impl_" + tag + "(values, int(nth, int64), p_value, idx, desc, nlo" + iv + ")")
+                if ik == "i32":
+                    w("        call narrow_index(idx, \"pf_nth_element\", index)")
+                elif ik == "i64":
+                    w("        index = idx")
+                w("    end procedure nth_" + tag + "_" + nk + sfx)
+                w("    !")
+
+    # ---- pf_nth_quantile: same shape, over its own shared impl ----
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        if not has_nth(t):
+            continue
+        iv = ", is_valid=is_valid" if nulls == "arg" else ""
+        for ik, idecl, _ in [(None, None, None)] + IDX_KINDS:
+            sfx = "_" + ik if ik else ""
+            w("    module procedure quantile_" + tag + sfx)
+            w("        integer(int64) :: idx, nn")
+            w("        !")
+            w("        call quantile_impl_" + tag + "(values, quantile, p_value, idx, nn, rounding" + iv + ")")
+            w("        if (present(n_null)) n_null = nn")
+            if ik == "i32":
+                w("        call narrow_index(idx, \"pf_nth_quantile\", index)")
+            elif ik == "i64":
+                w("        index = idx")
+            w("    end procedure quantile_" + tag + sfx)
+            w("    !")
+
+    # ---- the two shared workers, one pair per type ----
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        if not has_nth(t):
+            continue
+        iv = ", is_valid=is_valid" if nulls == "arg" else ""
+        iarg = ", is_valid" if nulls == "arg" else ""
+        getval = ("        call values%get(idx, p_value, allow_null=.true.)" if family == "strcol"
+                  else "        p_value = values(idx)")
+        w("    !> Shared worker behind every pf_nth_element specific for a " + what + " array.")
+        w("    subroutine nth_impl_" + tag + "(values, nth, p_value, idx, descending, nulls_first" + iarg + ")")
+        w(val_decl(t, "in"))
+        w("        integer(int64), intent(in) :: nth   !! 1-based rank wanted.")
+        w(pval_decl(t) + " !! the value at that rank.")
+        w("        integer(int64), intent(out) :: idx  !! which element of `values` that was.")
+        w("        logical, intent(in) :: descending   !! .true. ranks high to low.")
+        w("        logical, intent(in) :: nulls_first  !! .true. ranks nulls first.")
+        if nulls == "arg":
+            w("        logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
+        w("        type(sort_key_buf), allocatable :: buf(:)")
+        w("        integer(int64) :: nrows")
+        w("        !")
+        w("        nrows = " + rows_expr(t))
+        w("        call check_rank(nth, nrows, \"pf_nth_element\")")
+        w("        call extract_" + tag + "(values, buf, descending, nulls_first, \"pf_nth_element\"" + iv + ")")
+        w("        call engine_nth_index(buf, nrows, nth, \"pf_nth_element\", idx)")
+        w(getval)
+        w("    end subroutine nth_impl_" + tag)
+        w("    !")
+        w("    !> Shared worker behind every pf_nth_quantile specific for a " + what + " array.")
+        w("    subroutine quantile_impl_" + tag + "(values, quantile, p_value, idx, n_null, rounding" + iarg + ")")
+        w(val_decl(t, "in"))
+        w("        real(real64), intent(in) :: quantile !! position on a 0-1 scale.")
+        w(pval_decl(t) + " !! the value at that quantile.")
+        w("        integer(int64), intent(out) :: idx     !! which element of `values` that was.")
+        w("        integer(int64), intent(out) :: n_null  !! how many values were null.")
+        w("        character(len=*), intent(in), optional :: rounding !! rounding token.")
+        if nulls == "arg":
+            w("        logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
+        w("        type(sort_key_buf), allocatable :: buf(:)")
+        w("        integer(int64) :: nrows, n_valid, rank")
+        w("        integer :: mode")
+        w("        !")
+        w("        call resolve_rounding(rounding, \"pf_nth_quantile\", mode)")
+        w("        nrows = " + rows_expr(t))
+        w("        ! Ascending with nulls LAST, unconditionally: the population is the non-null")
+        w("        ! values, so a rank in 1..n_valid can never address a null.")
+        w("        call extract_" + tag + "(values, buf, .false., .false., \"pf_nth_quantile\"" + iv + ")")
+        w("        call key_valid_count(buf, nrows, n_valid)")
+        w("        n_null = nrows - n_valid")
+        w("        call quantile_rank(quantile, n_valid, mode, \"pf_nth_quantile\", rank)")
+        w("        call engine_nth_index(buf, nrows, rank, \"pf_nth_quantile\", idx)")
+        w(getval)
+        w("    end subroutine quantile_impl_" + tag)
+        w("    !")
+
+    w("    !> Narrows a 1-based int64 index to int32, aborting rather than truncating.")
+    w("    subroutine narrow_index(idx64, proc, idx32)")
+    w("        integer(int64), intent(in) :: idx64  !! the index.")
+    w("        character(len=*), intent(in) :: proc !! calling procedure, for messages.")
+    w("        integer(int32), intent(out) :: idx32 !! the narrowed copy.")
+    w("        character(len=32) :: n_str")
+    w("        !")
+    w("        if (idx64 > int(huge(1_int32), int64)) then")
+    w("            write (n_str, \"(i0)\") idx64")
+    w("            error stop EP // proc // \": the answer is at element \" // trim(n_str) // &")
+    w("                \", which does not fit an int32 index; declare index as integer(int64)\"")
+    w("        end if")
+    w("        idx32 = int(idx64, int32)")
+    w("    end subroutine narrow_index")
+    w("    !")
+    w("end submodule parquet_sorting_select ! GCOVR_EXCL_LINE")
+    return "\n".join(o) + "\n"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--check", action="store_true",
@@ -1351,6 +2001,7 @@ def main():
         REPO_ROOT / "src" / "parquet_sorting_keys.f90": gen_keys(),
         REPO_ROOT / "src" / "parquet_sorting_argsort.f90": gen_argsort(),
         REPO_ROOT / "src" / "parquet_sorting_permute.f90": gen_permute(),
+        REPO_ROOT / "src" / "parquet_sorting_select.f90": gen_select(),
     }
 
     if args.check:

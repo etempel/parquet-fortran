@@ -69,7 +69,20 @@ contains
             new_unittest("%clear makes a key list reusable", test_keys_clear), &
             new_unittest("empty and single-element arrays are handled", test_degenerate_sizes), &
             new_unittest("pf_argsort matches a read-time sort_by=", test_oracle_matches_read_time_sort), &
-            new_unittest("the counting path matches the comparator", test_counting_path_agrees) &
+            new_unittest("the counting path matches the comparator", test_counting_path_agrees), &
+            new_unittest("partial_sort equals a truncated full sort", test_partial_matches_full), &
+            new_unittest("n is clamped, not refused", test_partial_clamps), &
+            new_unittest("partial_argsort agrees with argsort", test_partial_argsort), &
+            new_unittest("partial descending gives the last N", test_partial_descending), &
+            new_unittest("partial_sort really is partial", test_partial_is_partial), &
+            new_unittest("sorted_valid tracks the sorted order", test_sorted_valid), &
+            new_unittest("nth_element agrees with a full sort", test_nth_matches_full), &
+            new_unittest("nth_element is stable on duplicates", test_nth_stable_index), &
+            new_unittest("nth_element takes direction and nulls", test_nth_options), &
+            new_unittest("quantile endpoints are exact", test_quantile_endpoints), &
+            new_unittest("quantile excludes nulls and counts them", test_quantile_nulls), &
+            new_unittest("each rounding token resolves differently", test_quantile_rounding), &
+            new_unittest("rounding tokens are case-insensitive", test_quantile_rounding_case) &
             ]
     end subroutine collect_tests_parquet_sorting
     !
@@ -612,5 +625,313 @@ contains
         call check(error, all([(v(fast(k)), k = 1, 40)] == [(v(slow(k)), k = 1, 40)]), &
             "both paths must gather the same values in the same order")
     end subroutine test_counting_path_agrees
+    !
+    !> **The partial-sort oracle.** Its first `n` must equal `pf_sort`'s first `n`, for every
+    !> boundary value of `n` -- which is nearly free, because `pf_sort` is already trusted by every
+    !> test above it.
+    subroutine test_partial_matches_full(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(10) = [30, 10, 50, 20, 60, 40, 15, 55, 25, 45]
+        integer(int32), allocatable :: full(:), part(:)
+        integer :: n
+
+        call pf_sort(v, full)
+        do n = 0, 10
+            call pf_partial_sort(v, part, n)
+            call check(error, size(part) == n, "pf_partial_sort must return exactly n elements")
+            if (allocated(error)) return
+            if (n > 0) then
+                call check(error, all(part == full(1:n)), &
+                    "pf_partial_sort's result must equal the first n of a full sort")
+                if (allocated(error)) return
+            end if
+        end do
+    end subroutine test_partial_matches_full
+    !
+    !> `n` past the end returns everything rather than aborting, and `n = 0` returns nothing.
+    subroutine test_partial_clamps(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(5) = [3, 1, 4, 1, 5]
+        integer(int32), allocatable :: part(:)
+        integer(int32), allocatable :: perm(:)
+
+        call pf_partial_sort(v, part, 100)
+        call check(error, size(part) == 5, "n past the end must clamp to the array size")
+        if (allocated(error)) return
+        call check(error, all(part == [1, 1, 3, 4, 5]), "a clamped partial sort must sort everything")
+        if (allocated(error)) return
+        call pf_partial_sort(v, part, 0)
+        call check(error, size(part) == 0, "n = 0 must return an empty array")
+        if (allocated(error)) return
+        call pf_partial_argsort(v, perm, 100)
+        call check(error, size(perm) == 5, "pf_partial_argsort must clamp the same way")
+    end subroutine test_partial_clamps
+    !
+    !> The permutation form must agree with the full argsort's prefix, element for element.
+    subroutine test_partial_argsort(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(8) = [30, 10, 50, 20, 60, 40, 15, 55]
+        integer(int32), allocatable :: full(:), part(:)
+        integer(int64), allocatable :: p64(:)
+
+        call pf_argsort(v, full)
+        call pf_partial_argsort(v, part, 4)
+        call check(error, all(part == full(1:4)), &
+            "pf_partial_argsort must equal the first n of a full argsort")
+        if (allocated(error)) return
+        call pf_partial_argsort(v, p64, 4)
+        call check(error, all(int(part, int64) == p64), &
+            "the int32 and int64 partial permutation forms must agree")
+    end subroutine test_partial_argsort
+    !
+    !> "The last N" is `descending=.true.`, not a separate procedure -- so it must equal the tail
+    !> of an ascending full sort, reversed.
+    subroutine test_partial_descending(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(8) = [30, 10, 50, 20, 60, 40, 15, 55]
+        integer(int32), allocatable :: full(:), part(:)
+
+        call pf_sort(v, full)
+        call pf_partial_sort(v, part, 3, descending=.true.)
+        call check(error, all(part == full(8:6:-1)), &
+            "a descending partial sort must give the largest n, in descending order")
+    end subroutine test_partial_descending
+    !
+    !> **A partial sort that is not actually partial is invisible to every test above.** Returning
+    !> the first n of a FULL sort is correct and merely slower, so only a comparison count
+    !> distinguishes them -- a wall-clock benchmark would be flaky and needs warm-up.
+    !>
+    !> Uses a REAL key on purpose: the integer counting fast path performs zero comparisons, so a
+    !> low-cardinality integer key would report 0 on both paths and the test would pass vacuously.
+    subroutine test_partial_is_partial(error)
+        type(error_type), allocatable, intent(out) :: error
+        real(real64) :: v(4000)
+        real(real64), allocatable :: out(:)
+        integer(int64) :: n_partial, n_full
+        integer :: k
+        interface
+            subroutine count_cmp(enable) bind(C, name="parquet_debug_set_count_sort_comparisons")
+                use iso_c_binding, only : c_int
+                integer(c_int), value :: enable !! nonzero arms and zeroes the counter.
+            end subroutine count_cmp
+            function got_cmp() bind(C, name="parquet_debug_get_sort_comparisons") result(n)
+                use iso_c_binding, only : c_long_long
+                integer(c_long_long) :: n !! comparisons since the counter was armed.
+            end function got_cmp
+        end interface
+
+        do k = 1, 4000
+            v(k) = real(mod(k * 7919, 4001), real64) * 0.5_real64
+        end do
+        call count_cmp(1)
+        call pf_partial_sort(v, out, 10)
+        n_partial = got_cmp()
+        call count_cmp(1)
+        call pf_sort(v, out)
+        n_full = got_cmp()
+        call count_cmp(0)
+        call check(error, n_partial > 0 .and. n_full > 0, &
+            "both sorts must reach the comparator path for this comparison to mean anything")
+        if (allocated(error)) return
+        call check(error, n_partial < n_full, &
+            "a partial sort of 10 of 4000 must do fewer comparisons than a full sort")
+    end subroutine test_partial_is_partial
+    !
+    !> `sorted_valid` must describe `sorted`, in ITS order -- so it equals the input mask gathered
+    !> by the same permutation `pf_argsort` produces. Always allocated, even with no `is_valid`.
+    subroutine test_sorted_valid(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(5) = [30, 10, 50, 20, 40]
+        logical :: mask(5) = [.true., .false., .true., .false., .true.]
+        integer(int32), allocatable :: sorted(:), perm(:)
+        logical, allocatable :: sv(:)
+        integer :: k
+
+        call pf_argsort(v, perm, is_valid=mask)
+        call pf_sort(v, sorted, is_valid=mask, sorted_valid=sv)
+        call check(error, allocated(sv), "sorted_valid must be allocated when asked for")
+        if (allocated(error)) return
+        call check(error, all(sv .eqv. [(mask(perm(k)), k = 1, 5)]), &
+            "sorted_valid must be the input mask gathered by the sort's own permutation")
+        if (allocated(error)) return
+        call check(error, all(sv(4:5) .eqv. [.false., .false.]), &
+            "the two null rows must be marked invalid, at the end")
+        if (allocated(error)) return
+        ! No is_valid at all: the answer is a direct question, so it is all .true., not unallocated.
+        call pf_sort(v, sorted, sorted_valid=sv)
+        call check(error, allocated(sv) .and. all(sv), &
+            "with no is_valid, sorted_valid must be allocated and all .true.")
+    end subroutine test_sorted_valid
+    !
+    !> `pf_nth_element` must agree with `pf_sort` at every rank, value and index alike.
+    subroutine test_nth_matches_full(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(9) = [30, 10, 50, 20, 60, 40, 15, 55, 25]
+        integer(int32), allocatable :: full(:)
+        integer(int32) :: val
+        integer(int64) :: idx
+        integer :: k
+
+        call pf_sort(v, full)
+        do k = 1, 9
+            call pf_nth_element(v, k, val, idx)
+            call check(error, val == full(k), "pf_nth_element must return the value a full sort puts at that rank")
+            if (allocated(error)) return
+            call check(error, v(idx) == full(k), "pf_nth_element's index must point at that same value")
+            if (allocated(error)) return
+        end do
+    end subroutine test_nth_matches_full
+    !
+    !> **The test that fails if the comparator's row-index tiebreaker is ever dropped.**
+    !> `std::nth_element` normally leaves an arbitrary member of an equal-comparing run at the
+    !> requested position; only a total order makes the reported index deterministic. Without
+    !> duplicates this proves nothing at all.
+    subroutine test_nth_stable_index(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: n = 300, ngroup = 10
+        integer(int32) :: v(n)
+        integer(int32), allocatable :: perm(:)
+        integer(int64) :: expect(n)
+        integer(int32) :: val
+        integer(int64) :: idx
+        integer :: k, g, m, pass
+        interface
+            subroutine disable_counting(enable) bind(C, name="parquet_debug_set_disable_sort_counting_path")
+                use iso_c_binding, only : c_int
+                integer(c_int), value :: enable !! nonzero forces the comparator path.
+            end subroutine disable_counting
+        end interface
+
+        ! An INDEPENDENT oracle, not a second call into the engine. v(k) = mod(k-1, ngroup), so the
+        ! stable order is: every index with value 0 in increasing order, then every index with
+        ! value 1, and so on -- which the nested loop below constructs without sorting anything.
+        !
+        ! Asserting against pf_argsort instead would be circular: both it and pf_nth_element go
+        ! through the same comparator, so removing its tiebreaker breaks the two identically and
+        ! the comparison still holds. That mutation survived an earlier version of this test.
+        !
+        ! The array is deliberately LARGE. libstdc++ falls back to insertion sort below ~16
+        ! elements, which is stable even with no tiebreaker at all, so a six-element fixture cannot
+        ! distinguish a total order from an accidentally-stable one either.
+        do k = 1, n
+            v(k) = int(mod(k - 1, ngroup), int32)
+        end do
+        m = 0
+        do g = 0, ngroup - 1
+            do k = 1, n
+                if (v(k) == g) then
+                    m = m + 1
+                    expect(m) = int(k, int64)
+                end if
+            end do
+        end do
+
+        ! BOTH code paths, because they are stable for entirely different reasons and only one of
+        ! them can lose it: the counting path places in order by construction and never calls the
+        ! comparator at all, so a key it accepts -- like this low-cardinality integer one -- cannot
+        ! test the comparator's tiebreaker. An earlier version of this test ran only pass 1 and a
+        ! mutation removing that tiebreaker survived it.
+        do pass = 1, 2
+            call disable_counting(pass - 1)
+            call pf_argsort(v, perm)
+            call check(error, all(int(perm, int64) == expect), &
+                "pf_argsort must be stable: equal values must keep their original index order")
+            if (allocated(error)) exit
+            do k = 1, n
+                call pf_nth_element(v, k, val, idx)
+                call check(error, idx == expect(k), &
+                    "pf_nth_element's index must be the one a full STABLE sort gives, duplicates included")
+                if (allocated(error)) exit
+                call check(error, val == v(expect(k)), "pf_nth_element's value must match its own index")
+                if (allocated(error)) exit
+            end do
+            if (allocated(error)) exit
+        end do
+        call disable_counting(0)
+    end subroutine test_nth_stable_index
+    !
+    !> `descending` and `nulls_first` mean here exactly what they mean for the sort, and `nth`
+    !> counts nulls as ranked elements rather than skipping them.
+    subroutine test_nth_options(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(5) = [30, 10, 50, 20, 40]
+        logical :: mask(5) = [.true., .false., .true., .true., .true.]
+        integer(int32) :: val
+        integer(int64) :: idx
+
+        call pf_nth_element(v, 1, val, descending=.true.)
+        call check(error, val == 50, "rank 1 descending must be the largest value")
+        if (allocated(error)) return
+        ! v(2) is null; with nulls last it occupies rank 5.
+        call pf_nth_element(v, 5, val, idx, is_valid=mask)
+        call check(error, idx == 2_int64, "with nulls last, the final rank must be the null row")
+        if (allocated(error)) return
+        call pf_nth_element(v, 1, val, idx, is_valid=mask, nulls_first=.true.)
+        call check(error, idx == 2_int64, "with nulls_first, rank 1 must be the null row")
+    end subroutine test_nth_options
+    !
+    !> quantile 0 and 1 must land exactly on the smallest and largest value, with no rounding
+    !> involved at either end, and 0.5 on the true median for an odd count.
+    subroutine test_quantile_endpoints(error)
+        type(error_type), allocatable, intent(out) :: error
+        real(real64) :: v(5) = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 10.0_real64]
+        real(real64) :: q
+
+        call pf_nth_quantile(v, 0.0_real64, q)
+        call check(error, q == 1.0_real64, "quantile 0 must be the smallest value")
+        if (allocated(error)) return
+        call pf_nth_quantile(v, 1.0_real64, q)
+        call check(error, q == 10.0_real64, "quantile 1 must be the largest value")
+        if (allocated(error)) return
+        call pf_nth_quantile(v, 0.5_real64, q)
+        call check(error, q == 3.0_real64, "quantile 0.5 of five values must be the middle one")
+    end subroutine test_quantile_endpoints
+    !
+    !> Nulls are EXCLUDED from the population rather than placed in it -- the one operation in this
+    !> module where that is true -- and `n_null` reports how many were dropped.
+    subroutine test_quantile_nulls(error)
+        type(error_type), allocatable, intent(out) :: error
+        real(real64) :: v(5) = [1.0_real64, 2.0_real64, 999.0_real64, 4.0_real64, 10.0_real64]
+        logical :: mask(5) = [.true., .true., .false., .true., .true.]
+        real(real64) :: q
+        integer(int64) :: nn
+
+        call pf_nth_quantile(v, 0.0_real64, q, is_valid=mask, n_null=nn)
+        call check(error, nn == 1_int64, "n_null must report the one excluded value")
+        if (allocated(error)) return
+        call check(error, q == 1.0_real64, "the excluded value must not become the population")
+        if (allocated(error)) return
+        call pf_nth_quantile(v, 1.0_real64, q, is_valid=mask)
+        call check(error, q == 10.0_real64, &
+            "the largest NON-NULL value must be quantile 1, not the null row's 999")
+    end subroutine test_quantile_nulls
+    !
+    !> On a fractional position the three tokens must give three different answers, or they are
+    !> untested. Four values, quantile 0.5 -> position 1.5 on the 0-based scale.
+    subroutine test_quantile_rounding(error)
+        type(error_type), allocatable, intent(out) :: error
+        real(real64) :: v(4) = [1.0_real64, 2.0_real64, 4.0_real64, 10.0_real64]
+        real(real64) :: down, up, near
+
+        call pf_nth_quantile(v, 0.5_real64, down, rounding="down")
+        call pf_nth_quantile(v, 0.5_real64, up, rounding="up")
+        call pf_nth_quantile(v, 0.5_real64, near)
+        call check(error, down == 2.0_real64, "rounding down must take the lower of the two middle values")
+        if (allocated(error)) return
+        call check(error, up == 4.0_real64, "rounding up must take the higher")
+        if (allocated(error)) return
+        call check(error, near == up, "the default rounding must be nearest, which rounds 1.5 up")
+    end subroutine test_quantile_rounding
+    !
+    !> Tokens match case-insensitively, like parquet_sortkey's own direction words.
+    subroutine test_quantile_rounding_case(error)
+        type(error_type), allocatable, intent(out) :: error
+        real(real64) :: v(4) = [1.0_real64, 2.0_real64, 4.0_real64, 10.0_real64]
+        real(real64) :: lower, upper
+
+        call pf_nth_quantile(v, 0.5_real64, lower, rounding="down")
+        call pf_nth_quantile(v, 0.5_real64, upper, rounding="DoWn")
+        call check(error, lower == upper, "a rounding token must match regardless of case")
+    end subroutine test_quantile_rounding_case
     !
 end module test_sorting

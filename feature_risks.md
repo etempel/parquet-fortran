@@ -99,6 +99,7 @@ something a reader is expected to have.
 | [Risk-32](#risk-32--a-hand-edit-inside-a-generated-region-survives-until-the-next-regeneration) | A hand edit inside a generated region survives until the next regeneration | 4 — covered |
 | [Risk-33](#risk-33--pf_permute-through-a-col-pointer-desynchronises-a-table) | `pf_permute` through a `%col` pointer desynchronises a table | 3 — not testable |
 | [Risk-34](#risk-34--pf_argsort-and-the-read-time-sort-can-drift-apart) | `pf_argsort` and the read-time sort can drift apart | 4 — covered |
+| [Risk-35](#risk-35--nth_elements-determinism-rests-on-the-comparators-index-tiebreaker) | `nth_element`'s determinism rests on the comparator's index tiebreaker | 4 — covered |
 
 ---
 
@@ -106,7 +107,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-33**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-35**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -1298,4 +1299,42 @@ ordering. The single-key one-shot C entry points
 (`parquet_sort_argsort_*`/`parquet_sort_is_sorted_*`) exist to avoid a *copy*, not to avoid the
 comparator — they route through it exactly as the multi-key builder does, and a future fourth entry
 point must too.
+
+---
+
+### Risk-35 — `nth_element`'s determinism rests on the comparator's index tiebreaker
+
+`SortRowLess` (`src/parquet_wrapper.cpp`) ends with `return a < b` on the row index. That single line
+carries **two** contracts, and only one of them is obvious.
+
+The obvious one is stability: a full tie falls back to original order, so plain `std::sort` is stable
+and `std::stable_sort`'s temporary buffer is never allocated.
+
+The quiet one is that it makes the comparator a **total order**, under which no two elements compare
+equal — and that is the *only* reason `pf_nth_element` can promise "the index a full stable sort
+would have put there". `std::nth_element` normally leaves an **arbitrary** member of an
+equal-comparing run at the requested position. Remove the tiebreaker and `pf_nth_element` keeps
+returning a valid-looking index that is merely a *different* member of the tied run — varying with
+the standard-library version, the array length, even the optimisation level. Nothing aborts, and the
+value is still correct; only the index is wrong.
+
+**Covered by** `nth_element is stable on duplicates` (`test/test_sorting.f90`). **Its shape is the
+point, and both halves were arrived at by a mutation surviving the test:**
+
+- **It asserts against an INDEPENDENTLY CONSTRUCTED expectation**, not against `pf_argsort`. The
+  first version compared the two, and removing the tiebreaker survived it — both go through the same
+  comparator, so the mutation broke them identically and the comparison still held. The oracle now
+  builds the expected permutation directly (group by value, then by original index), sorting nothing.
+- **It runs the whole assertion TWICE, forcing the comparator path on the second pass** via
+  `parquet_debug_set_disable_sort_counting_path`. With an independent oracle but a low-cardinality
+  integer fixture the mutation *still* survived, because `sort_counting_candidate` accepts such a key
+  and the counting path never calls the comparator at all. **Zero comparisons is a passing test.**
+- **The fixture is 300 elements, not a handful.** libstdc++ falls back to insertion sort below ~16
+  elements, which is stable with no tiebreaker whatsoever, so a small fixture cannot tell a total
+  order from an accidentally-stable one either.
+
+**What this still forbids:** never remove or weaken that final `return a < b`, and never assume a
+stability test is meaningful without checking *which code path it actually reaches*. The last point
+generalises past sorting — any fast path that skips the machinery under test makes a test that
+exercises it vacuous while still reporting green.
 

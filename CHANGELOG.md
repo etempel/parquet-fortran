@@ -24,7 +24,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   permutation really is one before writing anything, since an invalid one silently duplicates some
   elements and drops others; pass `assume_valid=.true.` to skip that for a permutation from
   `pf_argsort`. Public names here carry a `pf_` prefix rather than `parquet_`, because their
-  subject is not a parquet file. See [Sorting arrays and columns](doc/pages/sorting.md).
+  subject is not a parquet file. **Selection** comes with it: `pf_partial_sort`/`pf_partial_argsort`
+  order only the first `n` elements (`n` is clamped to the array size, so an `n` derived from a
+  row count needs no `min()`; "the last n" is `descending=.true.`), `pf_nth_element` reports the
+  value — and optionally the index — a full *stable* sort would place at a given rank without
+  sorting, and `pf_nth_quantile` takes a quantile on a **0-1 scale** over the non-null values, with
+  a `rounding=` of `"nearest"`/`"down"`/`"up"` and an optional `n_null=`; it aborts rather than
+  return an undefined value when every value is null. `pf_sort`/`pf_partial_sort` also take an
+  optional `sorted_valid=` reporting which of the *sorted* values are null, since the mask handed
+  in describes the input order. See [Sorting arrays and columns](doc/pages/sorting.md).
 - **Generated table types.** `tools/generate_user_table_code.py` turns a MAML schema into a named
   `parquet_table` extension with one accessor per declared column, so a program that always reads
   the same columns can write `t%ra()` instead of naming strings everywhere. Each accessor comes in

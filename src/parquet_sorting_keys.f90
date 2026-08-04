@@ -702,6 +702,112 @@ contains
         end if
     end procedure drive_engine
     !
+    module procedure drive_engine_partial
+        type(c_ptr) :: builder
+        integer(int64) :: status, ik
+        integer :: jk
+        !
+        if (size(keys) < 1) then
+            error stop EP // proc // ": no sort key was given"
+        end if
+        allocate(perm(count))
+        do ik = 1_int64, count
+            perm(ik) = ik
+        end do
+        if (count < 1_int64 .or. nrows < 2_int64) return
+        if (size(keys) == 1) then
+            call engine_one_shot_partial(keys(1), nrows, count, perm)
+            return
+        end if
+        builder = parquet_sort_builder_new(nrows)
+        do jk = 1, size(keys)
+            call engine_add_key(builder, keys(jk), nrows)
+        end do
+        status = parquet_sort_builder_build_partial(builder, count, perm)
+        call parquet_sort_builder_free(builder)
+        if (status /= 0_int64) then
+            ! Only reachable with an empty key list, which the guard above already rejects.
+            error stop EP // proc // ": the sort engine could not build a permutation" ! GCOVR_EXCL_LINE
+        end if
+    end procedure drive_engine_partial
+    !
+    module procedure engine_nth_index
+        type(c_ptr) :: builder
+        integer :: ik
+        !
+        if (size(keys) < 1) then
+            error stop EP // proc // ": no sort key was given"
+        end if
+        if (size(keys) == 1) then
+            call engine_one_shot_nth(keys(1), nrows, nth, idx)
+            return
+        end if
+        builder = parquet_sort_builder_new(nrows)
+        do ik = 1, size(keys)
+            call engine_add_key(builder, keys(ik), nrows)
+        end do
+        idx = parquet_sort_builder_nth_element(builder, nth)
+        call parquet_sort_builder_free(builder)
+        if (idx < 1_int64) then
+            ! The C side answers 0 for an empty key list or an out-of-range rank; both are already
+            ! rejected above and by the caller's own bounds check.
+            error stop EP // proc // ": the sort engine could not resolve that rank" ! GCOVR_EXCL_LINE
+        end if
+    end procedure engine_nth_index
+    !
+    module procedure resolve_count
+        character(len=32) :: n_str
+        !
+        ! Clamped, not refused: `n` is very often derived (a fraction of a row count, a config
+        ! value, a post-filter survivor count), and aborting would put min(n, size(v)) at every
+        ! call site. A NEGATIVE n is a different thing -- a caller error, not a boundary.
+        if (n < 0) then
+            write (n_str, "(i0)") n
+            error stop EP // proc // ": n is " // trim(n_str) // ", which is negative"
+        end if
+        count = min(int(n, int64), nrows)
+    end procedure resolve_count
+    !
+    !> Partially argsorts one already-extracted key through the matching one-shot entry point.
+    subroutine engine_one_shot_partial(key, nrows, count, perm)
+        type(sort_key_buf), intent(in), target :: key !! the key.
+        integer(int64), intent(in) :: nrows           !! its row count.
+        integer(int64), intent(in) :: count           !! leading entries to order.
+        integer(int64), intent(inout) :: perm(:)      !! receives `count` 1-based indices.
+        type(c_ptr) :: vp
+        integer(c_int8_t) :: df, nf
+        !
+        call key_flags(key, vp, df, nf)
+        select case (key%family)
+        case (SK_REAL)
+            call parquet_sort_partial_argsort_double(nrows, key%reals, vp, df, nf, count, perm)
+        case (SK_STR)
+            call parquet_sort_partial_argsort_string(nrows, key%offsets, key%data, vp, df, nf, count, perm)
+        case default
+            call parquet_sort_partial_argsort_int64(nrows, key%ints, vp, df, nf, count, perm)
+        end select
+    end subroutine engine_one_shot_partial
+    !
+    !> Resolves one already-extracted key's nth index through the matching one-shot entry point.
+    subroutine engine_one_shot_nth(key, nrows, nth, idx)
+        type(sort_key_buf), intent(in), target :: key !! the key.
+        integer(int64), intent(in) :: nrows           !! its row count.
+        integer(int64), intent(in) :: nth             !! 1-based rank wanted.
+        integer(int64), intent(out) :: idx            !! 1-based row index at that rank.
+        type(c_ptr) :: vp
+        integer(c_int8_t) :: df, nf
+        !
+        call key_flags(key, vp, df, nf)
+        select case (key%family)
+        case (SK_REAL)
+            idx = parquet_sort_nth_index_double(nrows, key%reals, vp, df, nf, nth)
+        case (SK_STR)
+            idx = parquet_sort_nth_index_string(nrows, key%offsets, key%data, vp, df, nf, nth)
+        case default
+            idx = parquet_sort_nth_index_int64(nrows, key%ints, vp, df, nf, nth)
+        end select
+    end subroutine engine_one_shot_nth
+    !
     module procedure engine_is_sorted
         type(c_ptr) :: builder
         integer(int64) :: res
@@ -800,6 +906,90 @@ contains
         desc_flag = merge(1_c_int8_t, 0_c_int8_t, key%descending)
         nulls_flag = merge(1_c_int8_t, 0_c_int8_t, key%nulls_first)
     end subroutine key_flags
+    !
+    module procedure check_rank
+        character(len=32) :: a_str, b_str
+        !
+        if (nth < 1_int64 .or. nth > nrows) then
+            write (a_str, "(i0)") nth
+            write (b_str, "(i0)") nrows
+            error stop EP // proc // ": nth is " // trim(a_str) // ", which is outside 1.." // &
+                trim(b_str)
+        end if
+    end procedure check_rank
+    !
+    module procedure key_valid_count
+        integer(int64) :: k
+        !
+        ! An unallocated `valid` is the module's "no nulls at all" convention, so the whole array
+        ! counts -- the same fast path the engine itself takes.
+        if (.not. allocated(keys(1)%valid)) then
+            n_valid = nrows
+            return
+        end if
+        n_valid = 0_int64
+        do k = 1_int64, nrows
+            if (keys(1)%valid(k) /= 0_c_int8_t) n_valid = n_valid + 1_int64
+        end do
+    end procedure key_valid_count
+    !
+    module procedure resolve_rounding
+        character(len=:), allocatable :: tok, shown
+        integer :: k, ic
+        !
+        mode = RND_NEAREST
+        if (.not. present(rounding)) return
+        ! Lower-cased in place rather than with a helper: this is the only case-folding site in the
+        ! module, and parquet_sortkey's own direction words are matched the same way.
+        tok = trim(adjustl(rounding))
+        do k = 1, len(tok)
+            ic = iachar(tok(k:k))
+            if (ic >= iachar("A") .and. ic <= iachar("Z")) tok(k:k) = achar(ic + 32)
+        end do
+        select case (tok)
+        case ("nearest")
+            mode = RND_NEAREST
+        case ("down")
+            mode = RND_DOWN
+        case ("up")
+            mode = RND_UP
+        case default
+            ! Capped to a short preview: the caller controls this string's length, and ifx's
+            ! ERROR STOP runtime corrupts the heap once the composed message reaches 8192 bytes
+            ! (CLAUDE.md). Same shape as parquet_filter_add's own rule preview.
+            shown = trim(adjustl(rounding))
+            if (len(shown) > 100) shown = shown(1:100) // "..."
+            error stop EP // proc // ": rounding='" // shown // "' is not recognized; use " // &
+                "'nearest' (the default), 'down' or 'up'"
+        end select
+    end procedure resolve_rounding
+    !
+    module procedure quantile_rank
+        real(real64) :: pos
+        !
+        if (quantile < 0.0_real64 .or. quantile > 1.0_real64 .or. quantile /= quantile) then
+            ! The NaN arm is what the self-comparison catches; ieee_is_nan would need another
+            ! import here for one test, and this expression is exact with no arithmetic drift.
+            error stop EP // proc // ": quantile must lie on a 0-1 scale (note: NOT 0-100)"
+        end if
+        if (n_valid < 1_int64) then
+            error stop EP // proc // ": every value is null, so no quantile exists; guard with " // &
+                "count(is_valid) (or the column's own null count) if that can happen"
+        end if
+        ! Position on the 0-based index scale of the non-null values, so quantile=0 gives the
+        ! smallest and quantile=1 the largest exactly, with no rounding involved at either end.
+        pos = quantile * real(n_valid - 1_int64, real64)
+        select case (mode)
+        case (RND_DOWN)
+            rank = int(floor(pos), int64) + 1_int64
+        case (RND_UP)
+            rank = int(ceiling(pos), int64) + 1_int64
+        case default
+            rank = int(nint(pos, int64), int64) + 1_int64
+        end select
+        if (rank < 1_int64) rank = 1_int64
+        if (rank > n_valid) rank = n_valid
+    end procedure quantile_rank
     !
     module procedure check_permutation
         integer(int8), allocatable :: seen(:)

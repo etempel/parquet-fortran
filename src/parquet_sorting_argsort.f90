@@ -344,6 +344,20 @@ contains
         do k = 1_int64, n
             sorted(k) = values(perm(k))
         end do
+        ! Deliberately ALLOCATED even when `is_valid` was absent. The module's
+        ! "unallocated means no nulls" convention governs an INPUT, where unallocated is
+        ! the caller declining to supply information; an output they explicitly asked
+        ! for is a direct question, and answering it with an unallocated array would
+        ! force `if (allocated(...))` around every use.
+        if (present(sorted_valid)) then
+            allocate(sorted_valid(n))
+            sorted_valid = .true.
+            if (present(is_valid)) then
+                do k = 1_int64, n
+                    sorted_valid(k) = is_valid(perm(k))
+                end do
+            end if
+        end if
     end procedure sort_i32
     !
     module procedure sort_i64
@@ -363,6 +377,20 @@ contains
         do k = 1_int64, n
             sorted(k) = values(perm(k))
         end do
+        ! Deliberately ALLOCATED even when `is_valid` was absent. The module's
+        ! "unallocated means no nulls" convention governs an INPUT, where unallocated is
+        ! the caller declining to supply information; an output they explicitly asked
+        ! for is a direct question, and answering it with an unallocated array would
+        ! force `if (allocated(...))` around every use.
+        if (present(sorted_valid)) then
+            allocate(sorted_valid(n))
+            sorted_valid = .true.
+            if (present(is_valid)) then
+                do k = 1_int64, n
+                    sorted_valid(k) = is_valid(perm(k))
+                end do
+            end if
+        end if
     end procedure sort_i64
     !
     module procedure sort_f32
@@ -382,6 +410,20 @@ contains
         do k = 1_int64, n
             sorted(k) = values(perm(k))
         end do
+        ! Deliberately ALLOCATED even when `is_valid` was absent. The module's
+        ! "unallocated means no nulls" convention governs an INPUT, where unallocated is
+        ! the caller declining to supply information; an output they explicitly asked
+        ! for is a direct question, and answering it with an unallocated array would
+        ! force `if (allocated(...))` around every use.
+        if (present(sorted_valid)) then
+            allocate(sorted_valid(n))
+            sorted_valid = .true.
+            if (present(is_valid)) then
+                do k = 1_int64, n
+                    sorted_valid(k) = is_valid(perm(k))
+                end do
+            end if
+        end if
     end procedure sort_f32
     !
     module procedure sort_f64
@@ -401,6 +443,20 @@ contains
         do k = 1_int64, n
             sorted(k) = values(perm(k))
         end do
+        ! Deliberately ALLOCATED even when `is_valid` was absent. The module's
+        ! "unallocated means no nulls" convention governs an INPUT, where unallocated is
+        ! the caller declining to supply information; an output they explicitly asked
+        ! for is a direct question, and answering it with an unallocated array would
+        ! force `if (allocated(...))` around every use.
+        if (present(sorted_valid)) then
+            allocate(sorted_valid(n))
+            sorted_valid = .true.
+            if (present(is_valid)) then
+                do k = 1_int64, n
+                    sorted_valid(k) = is_valid(perm(k))
+                end do
+            end if
+        end if
     end procedure sort_f64
     !
     module procedure sort_bool
@@ -420,6 +476,20 @@ contains
         do k = 1_int64, n
             sorted(k) = values(perm(k))
         end do
+        ! Deliberately ALLOCATED even when `is_valid` was absent. The module's
+        ! "unallocated means no nulls" convention governs an INPUT, where unallocated is
+        ! the caller declining to supply information; an output they explicitly asked
+        ! for is a direct question, and answering it with an unallocated array would
+        ! force `if (allocated(...))` around every use.
+        if (present(sorted_valid)) then
+            allocate(sorted_valid(n))
+            sorted_valid = .true.
+            if (present(is_valid)) then
+                do k = 1_int64, n
+                    sorted_valid(k) = is_valid(perm(k))
+                end do
+            end if
+        end if
     end procedure sort_bool
     !
     module procedure sort_chr
@@ -439,6 +509,20 @@ contains
         do k = 1_int64, n
             sorted(k) = values(perm(k))
         end do
+        ! Deliberately ALLOCATED even when `is_valid` was absent. The module's
+        ! "unallocated means no nulls" convention governs an INPUT, where unallocated is
+        ! the caller declining to supply information; an output they explicitly asked
+        ! for is a direct question, and answering it with an unallocated array would
+        ! force `if (allocated(...))` around every use.
+        if (present(sorted_valid)) then
+            allocate(sorted_valid(n))
+            sorted_valid = .true.
+            if (present(is_valid)) then
+                do k = 1_int64, n
+                    sorted_valid(k) = is_valid(perm(k))
+                end do
+            end if
+        end if
     end procedure sort_chr
     !
     module procedure sort_date

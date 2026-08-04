@@ -1753,6 +1753,15 @@ which can pick a *stale* binary from an old hash dir — symptom: tests pass whe
 fail under a full `fpm test`. `tools/coverage.sh` runs `fpm clean` up front to avoid this; for a
 plain `fpm test`, `fpm clean --skip` fixes it.
 
+**A restored `src/parquet_wrapper.cpp` is the case fpm most reliably misses, and it bites hardest
+during mutation testing.** Reverting that file (`cp backup src/parquet_wrapper.cpp`, `git checkout`,
+a stash pop) and re-running `fpm build` repeatedly left the *mutated* object still linked — the
+suite kept failing with the mutation's own symptom after the source was demonstrably clean, which
+reads exactly like "my revert did not work" and invites a hunt for a second bug that does not
+exist. `fpm clean --skip` fixes it. **So: after reverting a C++ mutation, `fpm clean --skip` before
+believing any result** — and treat a failure that persists across a verified-correct source as a
+stale-cache symptom first, not a new defect.
+
 **`tools/coverage.sh`/`tools/coverage_cpp.sh` clean up after themselves** (they delete their own
 `build/gcov`/`build/gcov-cpp` tree on exit, since an instrumented `error_scenarios` binary left under
 `build/` is indistinguishable to the lookup below) — `COVERAGE_KEEP_BUILD=1` keeps it, and then it is
@@ -1954,6 +1963,14 @@ Three things about doing it *here* specifically:
   `grep -c '\[FAILED\]'` then reports 0 and the mutation looks survived. Always check the exit
   status too (`error stop` → nonzero, SIGABRT → 134, SIGSEGV → 139/11 through `fpm run`). Getting
   this wrong made 3 of 5 mutations look uncaught in one session when they were all caught.
+- **Check WHICH CODE PATH the test actually reaches before trusting it.** A mutation to the
+  comparator survived a stability test twice: first because the test compared two procedures that
+  both use that comparator (so it broke them identically and the comparison still held), then
+  because the fixture — low-cardinality integers — took the counting fast path, which never calls
+  the comparator at all. **Zero invocations is a passing test.** Assert against an independently
+  constructed expectation rather than a second call into the same machinery, and where a fast path
+  exists, force the slow one (`parquet_debug_set_disable_sort_counting_path` and friends) or pick a
+  fixture the fast path declines. See `feature_risks.md` Risk-35.
 - **A surviving mutation is not automatically a coverage gap.** It may be *masked*: by a redundant
   sibling guard (removing either alone changes nothing — see `column_has_nulls_from_footer`'s
   `is_stats_set()`/`HasNullCount()` pair, where removing both segfaults), or by a later check that

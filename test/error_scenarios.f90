@@ -396,6 +396,16 @@ program error_scenarios
         call scenario_filter_row_element_mode_no_whole_column_read()
     case ("filter_scoped_reads_no_whole_column")
         call scenario_filter_scoped_reads_no_whole_column()
+    case ("sorting_nth_out_of_range")
+        call scenario_sorting_nth_out_of_range()
+    case ("sorting_partial_negative_n")
+        call scenario_sorting_partial_negative_n()
+    case ("sorting_quantile_out_of_range")
+        call scenario_sorting_quantile_out_of_range()
+    case ("sorting_quantile_bad_rounding")
+        call scenario_sorting_quantile_bad_rounding()
+    case ("sorting_quantile_all_null")
+        call scenario_sorting_quantile_all_null()
     case ("sorting_permute_index_out_of_range")
         call scenario_sorting_permute_index_out_of_range()
     case ("sorting_permute_duplicate_index")
@@ -11077,6 +11087,59 @@ contains
     end subroutine scenario_table_clone_type_mismatch
 
     ! ---- parquet_sorting (pf_argsort / pf_sort / pf_permute / pf_is_sorted) ----
+
+    !> A rank outside 1..n names an element that does not exist.
+    subroutine scenario_sorting_nth_out_of_range()
+        integer(int32) :: v(4) = [10, 20, 30, 40]
+        integer(int32) :: val
+        call pf_nth_element(v, 9, val)   ! -> aborts (rank 9 of 4)
+        print '(a,i0)', "unexpectedly resolved an out-of-range rank, value=", val
+    end subroutine scenario_sorting_nth_out_of_range
+
+    !> `n` past the end CLAMPS, deliberately -- but a negative n is a caller error, not a boundary.
+    !! The clamping half is asserted in the ordinary suite; this is only the refusal.
+    subroutine scenario_sorting_partial_negative_n()
+        integer(int32) :: v(4) = [10, 20, 30, 40]
+        integer(int32), allocatable :: sorted(:)
+        ! The permitted neighbour first, as the negative control: without it a guard that fired
+        ! unconditionally would pass this scenario just as happily.
+        call pf_partial_sort(v, sorted, 99)
+        print '(a,i0)', "clamped n=99 to size ", size(sorted)
+        call pf_partial_sort(v, sorted, -1)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a negative n, size=", size(sorted)
+    end subroutine scenario_sorting_partial_negative_n
+
+    !> The quantile scale is 0-1, not 0-100 -- and 50 is a plausible thing for a caller to write.
+    subroutine scenario_sorting_quantile_out_of_range()
+        real(real64) :: v(4) = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        real(real64) :: q
+        call pf_nth_quantile(v, 50.0_real64, q)   ! -> aborts (0-1 scale)
+        print '(a,f0.3)', "unexpectedly accepted a 0-100 quantile, q=", q
+    end subroutine scenario_sorting_quantile_out_of_range
+
+    !> An unrecognized rounding token aborts naming the valid ones, rather than silently
+    !! defaulting -- which is the whole reason a string selector is acceptable at all.
+    subroutine scenario_sorting_quantile_bad_rounding()
+        real(real64) :: v(4) = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        real(real64) :: q
+        call pf_nth_quantile(v, 0.5_real64, q, rounding="downwards")   ! -> aborts
+        print '(a,f0.3)', "unexpectedly accepted an unknown rounding token, q=", q
+    end subroutine scenario_sorting_quantile_bad_rounding
+
+    !> Every value null: there is no value to return, and no sentinel exists across all ten types.
+    !! Returning an undefined p_value would be the silent-wrong-answer case this library refuses.
+    subroutine scenario_sorting_quantile_all_null()
+        real(real64) :: v(3) = [1.0_real64, 2.0_real64, 3.0_real64]
+        logical :: none(3) = [.false., .false., .false.]
+        logical :: some(3) = [.true., .false., .false.]
+        real(real64) :: q
+        integer(int64) :: nn
+        ! Negative control: a PARTIALLY null column still answers, and reports the null count.
+        call pf_nth_quantile(v, 0.5_real64, q, is_valid=some, n_null=nn)
+        print '(a,f0.3,a,i0)', "partial nulls answered q=", q, " n_null=", nn
+        call pf_nth_quantile(v, 0.5_real64, q, is_valid=none)   ! -> aborts
+        print '(a,f0.3)', "unexpectedly quantiled an all-null array, q=", q
+    end subroutine scenario_sorting_quantile_all_null
 
     !> An index outside 1..n would read past the array being permuted. Caught before anything is
     !! written, so the array is never left half-rearranged.

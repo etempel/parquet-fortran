@@ -3403,28 +3403,72 @@ extern "C"
 	// reasoning as every other g_debug_* here.
 	static bool g_debug_disable_sort_counting_path = false;
 
+	// Test-only: counts calls to SortRowLess, so a test can prove a partial sort really is partial.
+	// Returning the first n of a FULL sort is correct and only slower, so every correctness test
+	// passes against both -- a comparison count is what distinguishes them, and unlike a wall-clock
+	// benchmark it is deterministic and needs no warm-up. Read via parquet_debug_get_sort_comparisons.
+	//
+	// NOT atomic, and deliberately so: an atomic increment in the engine's hottest loop would cost
+	// more than the feature is worth. It is therefore only meaningful single-threaded, which is why
+	// the `sorting` suite is excluded from test-drive's per-test parallelism (run_tester.f90).
+	static bool g_debug_count_sort_comparisons = false;
+	static int64_t g_debug_sort_comparison_count = 0;
+
+	// THE comparator. Every ordering entry point in this file routes through this one object --
+	// full sort, partial sort, nth_element -- which is what feature_risks.md Risk-34 requires: three
+	// public entry points agree on null placement, NaN placement and tie order only because none of
+	// them owns a comparison of its own.
+	//
+	// The final `a < b` on the row index is what makes this a TOTAL order, and two separate
+	// contracts rest on it. Stability: a full tie falls back to original file order, so plain
+	// std::sort is stable here and std::stable_sort's temporary buffer is never allocated.
+	// Determinism of nth_element: std::nth_element normally leaves an ARBITRARY element of an
+	// equal-comparing run at the nth position, but under a total order no two elements compare
+	// equal, so it lands on exactly the element a full stable sort would put there -- which is the
+	// index pf_nth_element is documented to report. Remove this line and both break silently.
+	struct SortRowLess
+	{
+		const std::vector<SortKeyData> *keys; //!< Borrowed; must outlive the sort.
+
+		bool operator()(int64_t a, int64_t b) const
+		{
+			// One predictable branch on a global that is false in every non-test process. Measured
+			// as noise against sort_compare_key's own tier arithmetic on the same call.
+			if (g_debug_count_sort_comparisons) ++g_debug_sort_comparison_count;
+			for (const auto &key : *keys)
+			{
+				int c = sort_compare_key(key, a, b);
+				if (c != 0) return c < 0;
+			}
+			return a < b;
+		}
+	};
+
+	// Once per build, not per comparison: turns a forgotten sort_key_finalize() into a named abort
+	// rather than a null dereference somewhere inside std::sort's comparator. Only the pointer the
+	// key's own kind reads is checked, since the other is legitimately null for a borrowed key.
+	// n == 0 is exempt: nothing is ever dereferenced, and an empty owned vector may report
+	// data() == nullptr.
+	static void sort_check_keys_finalized(const std::vector<SortKeyData> &keys, int64_t n, const char *who)
+	{
+		if (n <= 0) return;
+		for (const auto &key : keys)
+		{
+			bool ok = (key.kind == SortValueKind::Integer)  ? key.ints_ptr != nullptr
+				: (key.kind == SortValueKind::Real) ? key.reals_ptr != nullptr
+				: true;
+			if (!ok)
+			{
+				report_fatal_error(who,
+					"internal error: a sort key was used without being finalized"); // GCOVR_EXCL_LINE
+			}
+		}
+	}
+
 	// The engine's entry point: 0-based permutation of [0, n) putting the rows in key order.
 	static std::vector<int64_t> sort_build_permutation(const std::vector<SortKeyData> &keys, int64_t n)
 	{
-		// Once per build, not per comparison: turns a forgotten sort_key_finalize() into a named
-		// abort here rather than a null dereference somewhere inside std::sort's comparator. Only
-		// the pointer the key's own kind reads is checked, since the other is legitimately null for
-		// a borrowed key. n == 0 is exempt: nothing is ever dereferenced, and an empty owned vector
-		// may report data() == nullptr.
-		if (n > 0)
-		{
-			for (const auto &key : keys)
-			{
-				bool ok = (key.kind == SortValueKind::Integer)  ? key.ints_ptr != nullptr
-					: (key.kind == SortValueKind::Real) ? key.reals_ptr != nullptr
-					: true;
-				if (!ok)
-				{
-					report_fatal_error("sort_build_permutation",
-						"internal error: a sort key was used without being finalized"); // GCOVR_EXCL_LINE
-				}
-			}
-		}
+		sort_check_keys_finalized(keys, n, "sort_build_permutation");
 		int64_t lo = 0, hi = 0;
 		if (!g_debug_disable_sort_counting_path && sort_counting_candidate(keys, n, lo, hi))
 		{
@@ -3432,15 +3476,58 @@ extern "C"
 		}
 		std::vector<int64_t> perm(static_cast<size_t>(n));
 		std::iota(perm.begin(), perm.end(), static_cast<int64_t>(0));
-		std::sort(perm.begin(), perm.end(), [&keys](int64_t a, int64_t b) {
-			for (const auto &key : keys)
-			{
-				int c = sort_compare_key(key, a, b);
-				if (c != 0) return c < 0;
-			}
-			return a < b; // full tie -> original file order, i.e. a stable result from std::sort
-		});
+		std::sort(perm.begin(), perm.end(), SortRowLess{&keys});
 		return perm;
+	}
+
+	// ---- Selection (parquet_sorting's M2 operations) ----
+	//
+	// Both below reuse the counting fast path unchanged when it applies. That is not laziness: the
+	// counting sort is already O(n) and already produces a FULLY ordered permutation, so there is
+	// nothing a partial or nth variant of it could save. It does mean a low-cardinality integer key
+	// performs ZERO comparisons on either path -- which any test asserting "partial does fewer
+	// comparisons than full" has to account for, by using a key the counting path declines.
+
+	// 0-based permutation whose first `count` entries are exactly the first `count` a full sort
+	// would produce. Everything past `count` is unspecified and must not be read.
+	static std::vector<int64_t> sort_build_partial_permutation(const std::vector<SortKeyData> &keys,
+		int64_t n, int64_t count)
+	{
+		sort_check_keys_finalized(keys, n, "sort_build_partial_permutation");
+		// Clamped here as well as on the Fortran side: the Fortran clamp is what sizes the output
+		// array, this one is what keeps the entry point safe for any other caller.
+		if (count < 0) count = 0;
+		if (count > n) count = n;
+		int64_t lo = 0, hi = 0;
+		if (!g_debug_disable_sort_counting_path && sort_counting_candidate(keys, n, lo, hi))
+		{
+			return sort_counting_permutation(keys[0], n, lo, hi);
+		}
+		std::vector<int64_t> perm(static_cast<size_t>(n));
+		std::iota(perm.begin(), perm.end(), static_cast<int64_t>(0));
+		std::partial_sort(perm.begin(), perm.begin() + static_cast<ptrdiff_t>(count), perm.end(),
+			SortRowLess{&keys});
+		return perm;
+	}
+
+	// The 0-based row index a full stable sort would place at 0-based rank `nth`.
+	//
+	// Only the one index is computed, not a permutation -- the caller reads its own value out of
+	// its own array with it, which is what keeps this free of any per-type value handling.
+	static int64_t sort_nth_index(const std::vector<SortKeyData> &keys, int64_t n, int64_t nth)
+	{
+		sort_check_keys_finalized(keys, n, "sort_nth_index");
+		int64_t lo = 0, hi = 0;
+		if (!g_debug_disable_sort_counting_path && sort_counting_candidate(keys, n, lo, hi))
+		{
+			auto perm = sort_counting_permutation(keys[0], n, lo, hi);
+			return perm[static_cast<size_t>(nth)];
+		}
+		std::vector<int64_t> perm(static_cast<size_t>(n));
+		std::iota(perm.begin(), perm.end(), static_cast<int64_t>(0));
+		std::nth_element(perm.begin(), perm.begin() + static_cast<ptrdiff_t>(nth), perm.end(),
+			SortRowLess{&keys});
+		return perm[static_cast<size_t>(nth)];
 	}
 
 	// ---- Arrow binding (the only Arrow-aware part of the engine) ----
@@ -5792,6 +5879,31 @@ extern "C"
 		return 1;
 	}
 
+	// Writes the first `count` entries of the 1-BASED permutation into `perm_out` (which the caller
+	// sized to `count`, not to nrows). `count` is clamped to nrows, so asking for more elements than
+	// exist returns all of them rather than failing -- pf_partial_sort's documented behaviour.
+	// Returns 0 on success, 1 when no key was added.
+	int64_t parquet_sort_builder_build_partial(void *handle, int64_t count, int64_t *perm_out)
+	{
+		auto *h = static_cast<SortBuilderHandle *>(handle);
+		if (h->keys.empty()) return 1;
+		if (count > h->nrows) count = h->nrows;
+		auto perm = sort_build_partial_permutation(h->keys, h->nrows, count);
+		for (int64_t i = 0; i < count; ++i) perm_out[i] = perm[static_cast<size_t>(i)] + 1;
+		return 0;
+	}
+
+	// The 1-BASED row index a full stable sort would place at 1-based rank `nth`, or 0 when no key
+	// was added or `nth` is outside 1..nrows. The caller reads its own value out with this index,
+	// which is why nothing here knows anything about value types.
+	int64_t parquet_sort_builder_nth_element(void *handle, int64_t nth)
+	{
+		auto *h = static_cast<SortBuilderHandle *>(handle);
+		if (h->keys.empty()) return 0;
+		if (nth < 1 || nth > h->nrows) return 0;
+		return sort_nth_index(h->keys, h->nrows, nth - 1) + 1;
+	}
+
 	void parquet_sort_builder_free(void *handle)
 	{
 		delete static_cast<SortBuilderHandle *>(handle);
@@ -5928,6 +6040,99 @@ extern "C"
 		sort_builder_set_valid(key, valid, n);
 		sort_key_finalize(key);
 		return sort_is_sorted_key(key, n);
+	}
+
+	// ---- One-shot single-key selection (pf_partial_sort / pf_partial_argsort / pf_nth_element) ----
+	//
+	// Same borrowing rule as the one-shot argsorts above: nothing outlives the call, so the caller's
+	// array is read in place. The string forms build string_views into the caller's `data` for the
+	// duration of the call and copy nothing.
+
+	// Builds the borrowed string key the two string entry points below share.
+	static SortKeyData sort_borrowed_string_key(int64_t n, const int64_t *offsets, const char *data,
+		const int8_t *valid, int8_t descending, int8_t nulls_first)
+	{
+		SortKeyData key;
+		key.kind = SortValueKind::Str;
+		key.descending = descending != 0;
+		key.nulls_first = nulls_first != 0;
+		key.strs.resize(static_cast<size_t>(n));
+		for (int64_t i = 0; i < n; ++i)
+		{
+			key.strs[static_cast<size_t>(i)] =
+				std::string_view(data + offsets[i], static_cast<size_t>(offsets[i + 1] - offsets[i]));
+		}
+		sort_builder_set_valid(key, valid, n);
+		sort_key_finalize(key);
+		return key;
+	}
+
+	// Writes the first `count` entries of the 1-based permutation of an integer key into `perm_out`.
+	// `count` is clamped to n, so asking for more than exists returns all of it.
+	void parquet_sort_partial_argsort_int64(int64_t n, const int64_t *values, const int8_t *valid,
+		int8_t descending, int8_t nulls_first, int64_t count, int64_t *perm_out)
+	{
+		if (n <= 0 || count <= 0) return;
+		if (count > n) count = n;
+		std::vector<SortKeyData> keys;
+		keys.push_back(sort_borrowed_key(SortValueKind::Integer, values, nullptr, valid, n, descending, nulls_first));
+		auto perm = sort_build_partial_permutation(keys, n, count);
+		for (int64_t i = 0; i < count; ++i) perm_out[i] = perm[static_cast<size_t>(i)] + 1;
+	}
+
+	// The floating-point counterpart. NaNs are ordinary values and are tiered by sort_tier_of.
+	void parquet_sort_partial_argsort_double(int64_t n, const double *values, const int8_t *valid,
+		int8_t descending, int8_t nulls_first, int64_t count, int64_t *perm_out)
+	{
+		if (n <= 0 || count <= 0) return;
+		if (count > n) count = n;
+		std::vector<SortKeyData> keys;
+		keys.push_back(sort_borrowed_key(SortValueKind::Real, nullptr, values, valid, n, descending, nulls_first));
+		auto perm = sort_build_partial_permutation(keys, n, count);
+		for (int64_t i = 0; i < count; ++i) perm_out[i] = perm[static_cast<size_t>(i)] + 1;
+	}
+
+	// The string counterpart, over the same packed (offsets, data) pair as parquet_sort_argsort_string.
+	void parquet_sort_partial_argsort_string(int64_t n, const int64_t *offsets, const char *data,
+		const int8_t *valid, int8_t descending, int8_t nulls_first, int64_t count, int64_t *perm_out)
+	{
+		if (n <= 0 || count <= 0) return;
+		if (count > n) count = n;
+		std::vector<SortKeyData> keys;
+		keys.push_back(sort_borrowed_string_key(n, offsets, data, valid, descending, nulls_first));
+		auto perm = sort_build_partial_permutation(keys, n, count);
+		for (int64_t i = 0; i < count; ++i) perm_out[i] = perm[static_cast<size_t>(i)] + 1;
+	}
+
+	// The 1-based row index a full stable sort would place at 1-based rank `nth`, for an integer
+	// key. Returns 0 when `nth` is outside 1..n.
+	int64_t parquet_sort_nth_index_int64(int64_t n, const int64_t *values, const int8_t *valid,
+		int8_t descending, int8_t nulls_first, int64_t nth)
+	{
+		if (n <= 0 || nth < 1 || nth > n) return 0;
+		std::vector<SortKeyData> keys;
+		keys.push_back(sort_borrowed_key(SortValueKind::Integer, values, nullptr, valid, n, descending, nulls_first));
+		return sort_nth_index(keys, n, nth - 1) + 1;
+	}
+
+	// The floating-point counterpart.
+	int64_t parquet_sort_nth_index_double(int64_t n, const double *values, const int8_t *valid,
+		int8_t descending, int8_t nulls_first, int64_t nth)
+	{
+		if (n <= 0 || nth < 1 || nth > n) return 0;
+		std::vector<SortKeyData> keys;
+		keys.push_back(sort_borrowed_key(SortValueKind::Real, nullptr, values, valid, n, descending, nulls_first));
+		return sort_nth_index(keys, n, nth - 1) + 1;
+	}
+
+	// The string counterpart.
+	int64_t parquet_sort_nth_index_string(int64_t n, const int64_t *offsets, const char *data,
+		const int8_t *valid, int8_t descending, int8_t nulls_first, int64_t nth)
+	{
+		if (n <= 0 || nth < 1 || nth > n) return 0;
+		std::vector<SortKeyData> keys;
+		keys.push_back(sort_borrowed_string_key(n, offsets, data, valid, descending, nulls_first));
+		return sort_nth_index(keys, n, nth - 1) + 1;
 	}
 
 	// 1 when a read-time sort is active on this reader, 0 otherwise. This is what the Fortran side's
@@ -9794,6 +9999,27 @@ extern "C"
 	void parquet_debug_set_disable_sort_counting_path(int enable)
 	{
 		g_debug_disable_sort_counting_path = (enable != 0);
+	}
+
+	// Test-only: arms (and zeroes) the SortRowLess comparison counter. Exists because a partial sort
+	// that is not actually partial is INVISIBLE to every correctness test -- returning the first n of
+	// a full sort is correct and merely slower. A comparison count is what distinguishes them, and it
+	// is deterministic where a wall-clock benchmark is not.
+	//
+	// Note for anyone writing such a test: the counting fast path performs ZERO comparisons, so a
+	// low-cardinality integer key reports 0 on both the partial and the full path. Use a key the
+	// counting path declines (a real key, or high-cardinality integers), or disable it first with
+	// parquet_debug_set_disable_sort_counting_path.
+	void parquet_debug_set_count_sort_comparisons(int enable)
+	{
+		g_debug_count_sort_comparisons = (enable != 0);
+		g_debug_sort_comparison_count = 0;
+	}
+
+	// Test-only: comparisons counted since the last parquet_debug_set_count_sort_comparisons call.
+	int64_t parquet_debug_get_sort_comparisons(void)
+	{
+		return g_debug_sort_comparison_count;
 	}
 
 	// Test-only: forces the row-group statistics pre-screen (screen_row_groups) to keep every row

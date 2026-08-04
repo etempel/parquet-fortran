@@ -283,6 +283,16 @@ contains
                 test_prefetch_unknown_column_aborts), &
             new_unittest("filter: unknown column aborts", &
                 test_filter_unknown_column_aborts), &
+            new_unittest("sorting: an out-of-range rank aborts", &
+                test_sorting_nth_out_of_range_aborts), &
+            new_unittest("sorting: a negative n aborts (n > size clamps)", &
+                test_sorting_partial_negative_n_aborts), &
+            new_unittest("sorting: a 0-100 quantile aborts", &
+                test_sorting_quantile_out_of_range_aborts), &
+            new_unittest("sorting: an unknown rounding token aborts", &
+                test_sorting_quantile_bad_rounding_aborts), &
+            new_unittest("sorting: an all-null quantile aborts", &
+                test_sorting_quantile_all_null_aborts), &
             new_unittest("sorting: out-of-range permutation index aborts", &
                 test_sorting_permute_index_out_of_range_aborts), &
             new_unittest("sorting: duplicated permutation index aborts", &
@@ -2918,6 +2928,65 @@ contains
             failure_message="opening a reader sorted by an unknown column was expected to abort", &
             required_stderr="unknown column in sort key: nosuch")
     end subroutine test_sort_unknown_column_aborts
+
+    !> pf_nth_element abort path: see scenario_sorting_nth_out_of_range in
+    !> test/error_scenarios.f90 for what it does and why that state is rejected.
+    subroutine test_sorting_nth_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_nth_out_of_range", &
+            expect_abort=.true., &
+            failure_message="asking for a rank the array does not have was expected to abort", &
+            required_stderr="nth is 9, which is outside 1..4")
+    end subroutine test_sorting_nth_out_of_range_aborts
+
+    !> pf_partial_sort abort path: see scenario_sorting_partial_negative_n in
+    !> test/error_scenarios.f90. The scenario clamps n = 99 FIRST, so this also proves the guard
+    !> does not simply refuse every n -- without that control it would pass against one that did.
+    subroutine test_sorting_partial_negative_n_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_partial_negative_n", &
+            expect_abort=.true., &
+            failure_message="a negative n was expected to abort", &
+            required_stderr="n is -1, which is negative")
+    end subroutine test_sorting_partial_negative_n_aborts
+
+    !> pf_nth_quantile abort path: see scenario_sorting_quantile_out_of_range in
+    !> test/error_scenarios.f90. The message names the scale, since 50 is exactly what a caller
+    !> thinking in percentiles would write and 0.5 is valid on both scales meaning different things.
+    subroutine test_sorting_quantile_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_quantile_out_of_range", &
+            expect_abort=.true., &
+            failure_message="a quantile outside 0-1 was expected to abort", &
+            required_stderr="quantile must lie on a 0-1 scale")
+    end subroutine test_sorting_quantile_out_of_range_aborts
+
+    !> pf_nth_quantile abort path: see scenario_sorting_quantile_bad_rounding in
+    !> test/error_scenarios.f90. Asserts the message NAMES the valid tokens -- a string selector is
+    !> only acceptable because an unknown value fails loudly instead of defaulting.
+    subroutine test_sorting_quantile_bad_rounding_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_quantile_bad_rounding", &
+            expect_abort=.true., &
+            failure_message="an unrecognized rounding token was expected to abort", &
+            required_stderr="'nearest' (the default), 'down' or 'up'")
+    end subroutine test_sorting_quantile_bad_rounding_aborts
+
+    !> pf_nth_quantile abort path: see scenario_sorting_quantile_all_null in
+    !> test/error_scenarios.f90. The scenario answers a PARTIALLY null array first, which is the
+    !> control proving n_null still works and only the all-null case is refused.
+    subroutine test_sorting_quantile_all_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_quantile_all_null", &
+            expect_abort=.true., &
+            failure_message="a quantile of an all-null array was expected to abort", &
+            required_stderr="every value is null, so no quantile exists")
+    end subroutine test_sorting_quantile_all_null_aborts
 
     !> pf_permute abort path: see scenario_sorting_permute_index_out_of_range in
     !> test/error_scenarios.f90 for what it does and why that state is rejected.

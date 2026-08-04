@@ -1085,4 +1085,4 @@ contains
         p => self%tsv(:, 1:self%nrows)
     end procedure data_ptr_tsv
     !
-end submodule parquet_columns_access
+end submodule parquet_columns_access ! GCOVR_EXCL_LINE

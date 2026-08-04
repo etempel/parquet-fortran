@@ -47,6 +47,7 @@ done
 CHECKS=(
     "python3 tools/check_bindc_boundary.py"
     "python3 tools/check_doc_anchors.py"
+    "python3 tools/check_source_conventions.py"
     "python3 tools/generate_parquet_columns.py --check"
     "python3 tools/generate_parquet_tables.py --check"
     "bash tools/generate_parquet_maml.sh base --check"

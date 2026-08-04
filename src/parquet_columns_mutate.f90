@@ -557,4 +557,4 @@ contains
         end select
     end procedure paste_storage
     !
-end submodule parquet_columns_mutate
+end submodule parquet_columns_mutate ! GCOVR_EXCL_LINE

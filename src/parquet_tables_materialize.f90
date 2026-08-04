@@ -823,4 +823,4 @@ contains
         end select
     end procedure table_materialize_chunk_kind
     !
-end submodule parquet_tables_materialize
+end submodule parquet_tables_materialize ! GCOVR_EXCL_LINE

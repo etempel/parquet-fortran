@@ -387,6 +387,13 @@ contains
             self%cache%cols(idx)%declared_kind = to_kind
             self%cache%cols(idx)%cast_pending = .true.
             self%cache%cols(idx)%user_populated = .true.
+            ! Bumped here as well as on the eager path below, even though no pointer into this
+            ! column can exist (taking one would have materialized it, which disqualifies the
+            ! deferred path). The counter is documented as advancing on EVERY structural entry
+            ! point precisely so a caller never has to know which internal path a call took --
+            ! and %kind answers differently from here on, which is a structural change by any
+            ! reading. A spare bump costs a re-fetch; a missing one gives false confidence.
+            self%cache%generation = self%cache%generation + 1_int64
             return
         end if
         !

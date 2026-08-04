@@ -75,7 +75,14 @@ stages:
 # one-off manual review (see CLAUDE.md's "bind(C)" boundary notes). tools/check_doc_anchors.py
 # validates every #anchor link in this repository's *.md files against the anchors GitHub would
 # actually generate -- previously a manual-only step (see CONTRIBUTING.md), added here too since
-# it is equally free to run on every push. The three generate_parquet_*.py/.sh --check calls catch
+# it is equally free to run on every push. tools/check_source_conventions.py enforces three
+# structural invariants no compiler and no runtime test can see: parquet_table must gain no
+# allocatable component (it is finalizable, and three confirmed compiler bugs sit in exactly that
+# machinery on exactly this type), every pointer a table accessor hands out must be reached through
+# %cache (otherwise the caller silently needs `target` on their table), and the generated files must
+# carry the doc-comments and GCOVR_EXCL markers their generators are supposed to emit -- a template
+# omission produces output that the --check modes below match perfectly and is wrong in every kind
+# it emits at once. The three generate_parquet_*.py/.sh --check calls catch
 # a committed generated file (src/parquet_columns*.f90, src/parquet_tables*.f90,
 # src/parquet_maml_base.f90) drifting from its own generator -- e.g. a hand-edit to the generated
 # file that never made it back into the generator's template (see CLAUDE.md's "Some src/*.f90
@@ -93,6 +100,7 @@ lint:
   script:
     - python3 tools/check_bindc_boundary.py
     - python3 tools/check_doc_anchors.py
+    - python3 tools/check_source_conventions.py
     - python3 tools/generate_parquet_columns.py --check
     - python3 tools/generate_parquet_tables.py --check
     - bash tools/generate_parquet_maml.sh base --check

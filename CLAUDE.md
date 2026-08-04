@@ -25,6 +25,7 @@ working rules).
   - [Report before implementing on analysis/audit requests](#report-before-implementing-on-analysisaudit-requests)
   - [Only apply low-blast-radius renames/refactors](#only-apply-low-blast-radius-renamesrefactors)
   - [`feature_*.md` planning documents](#feature_md-planning-documents)
+  - [The `feature_risks.md` standing-risks register](#the-feature_risksmd-standing-risks-register)
   - [Don't run the GitLab CI pipeline yourself](#dont-run-the-gitlab-ci-pipeline-yourself)
   - [The CI-environment Docker image: ask for it, never build it](#the-ci-environment-docker-image-ask-for-it-never-build-it)
   - [Don't commit or push on the main/default branch yourself](#dont-commit-or-push-on-the-maindefault-branch-yourself)
@@ -113,6 +114,14 @@ are design/planning documents for features not yet implemented — they are git-
 (`.gitignore`'s `feature_*.md` entry), so they never reach a commit and exist purely as scratch
 design memory between sessions.
 
+**`feature_risks.md` is the one exception and is TRACKED** (`.gitignore` carries an explicit
+`!feature_risks.md` negation) — it is a committed document, not scratch memory, so everything below
+about writing for a future session applies to it doubly, and it must also read correctly for a
+contributor who has never seen a planning document at all. See
+[The `feature_risks.md` standing-risks register](#the-feature_risksmd-standing-risks-register) for
+its structure and the rules for editing it. A *new* `feature_*.md` file is scratch by default: adding
+another negation is a deliberate decision to publish that document, not a formatting choice.
+
 **Whenever asked to write or update a `feature_*.md` file, write it to be fully self-explaining
 without relying on the current session's conversation for context** — a future session opening
 the file has no memory of this one. Concretely: don't reference "this conversation," "as discussed
@@ -122,6 +131,46 @@ someone who was present for the conversation that produced the file. Quote the u
 decisions/wording directly in the document rather than alluding to them. Cross-references to
 other files in the repo (source, other `feature_*.md` docs, `CLAUDE.md` sections) are fine, since
 a future session can read those too.
+
+### The `feature_risks.md` standing-risks register
+
+`feature_risks.md` (repo root, **tracked** — see the previous section) records the properties of the
+shipped code that a future change can break **without any test failing and without an abort**: a
+wrong answer, a stale pointer, a corrupted heap, a silently skipped row group. It is the companion
+to read *before editing an area*, not a to-do list, and it is where the reasoning behind a
+non-obvious invariant lives when that reasoning is too long for a code comment and too specific for
+this file.
+
+Four rules govern it, and all four are easy to break by treating it as an ordinary document:
+
+- **Every risk is `Risk-N`, and the number is permanent.** Numbering runs from `Risk-1` upward
+  across the whole file, independent of which section the entry sits in. Moving an entry between
+  sections **never** renumbers it, so a reference from this file, from `feature_table.md`, from
+  `tools/check_source_conventions.py` or from a code comment stays valid for good. Numbers of
+  deleted entries are **not** reused. Never renumber to make a section contiguous.
+- **Four sections, and an entry moves between them as its status changes**: *1. New risks* (where a
+  newly identified one lands, before anyone has decided whether it is testable — empty is the
+  healthy state), *2. Risks with a proposed testing scenario*, *3. Risks not testable*, and
+  *4. Risks already covered, kept for what they still forbid*. A new risk takes the next unused
+  number and goes in section 1.
+- **Section 4 is pruned, not archived.** A covered entry stays only if it still forbids something —
+  a rule for the next contributor, a trap not visible in the code, or a test whose *design* has to
+  be copied rather than merely kept passing. An entry that has become "this works and is tested" is
+  deleted outright; the test is the record at that point, and a register that accumulates solved
+  problems stops being read.
+- **A verdict is checked against the suite, never inferred.** Before marking anything "proposed",
+  grep the tests for what actually asserts it — several entries once marked proposed turned out to
+  be covered already. Before marking one "covered", name the test.
+
+**When implementing a proposed test from it, update the entry in the same change**: move it to
+section 4 (or delete it, per the pruning rule), name the test that now covers it, and say what the
+test's shape is protecting if that is the interesting part. An entry that still reads "proposed"
+after the test exists is worse than no entry, because the next reader will write the test again.
+
+**When a new silent-failure property is discovered** — typically while fixing a bug whose symptom
+appeared far from its cause — add it as a new `Risk-N` in section 1 rather than only writing a code
+comment. This file (CLAUDE.md) is for rules that apply project-wide; `feature_risks.md` is for a
+specific property of a specific area, with its test status attached.
 
 ### Don't run the GitLab CI pipeline yourself
 

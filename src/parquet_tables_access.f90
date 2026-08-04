@@ -3895,4 +3895,4 @@ contains
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_slice_chrv
     !
-end submodule parquet_tables_access
+end submodule parquet_tables_access ! GCOVR_EXCL_LINE

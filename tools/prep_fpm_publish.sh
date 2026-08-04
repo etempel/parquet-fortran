@@ -83,6 +83,7 @@ fi
 REMOVE_PATHS=(
     CLAUDE.md
     CONTRIBUTING.md
+    feature_risks.md
     .gitlab-ci.yml
     .github
     docs.md
@@ -92,6 +93,7 @@ REMOVE_PATHS=(
     tools/build_ci_test_image.sh
     tools/check_bindc_boundary.py
     tools/check_doc_anchors.py
+    tools/check_source_conventions.py
     tools/count_lines.py
     tools/count_tests.sh
     tools/coverage.sh

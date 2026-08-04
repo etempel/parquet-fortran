@@ -2,6 +2,9 @@ test_run/
 ford-doc/
 docs.tar.gz
 feature_*.md
+# ...except the standing-risks register, which is a tracked, committed document rather than
+# scratch design memory (see CLAUDE.md's "feature_*.md planning documents" for the distinction).
+!feature_risks.md
 __pycache__
 qemu_*.core
 core

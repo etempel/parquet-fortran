@@ -229,7 +229,15 @@ contains
             new_unittest("prefetch reaches the automatic row-index column", &
                 test_prefetch_row_index), &
             new_unittest("per-element nulls written by Arrow survive the read intact", &
-                test_element_nulls_from_arrow) &
+                test_element_nulls_from_arrow), &
+            new_unittest("every structural entry point advances the generation counter", &
+                test_generation_sweep), &
+            new_unittest("kind, width, unit, residency and is_supported answer without reading", &
+                test_metadata_queries_do_not_touch), &
+            new_unittest("a materialized row index survives the in-memory mutations", &
+                test_row_index_recovery), &
+            new_unittest("an in-memory table is never detached, however it is mutated", &
+                test_in_memory_never_detaches) &
             ]
     end subroutine collect_tests_parquet_table
     !
@@ -2225,6 +2233,31 @@ contains
         call sl%get("s_i32", sg)
         call check(error, size(sg) == 1 .and. sg(1) == fg(N), &
             "a one-row slice at the end should read only the last row")
+        if (allocated(error)) return
+        !
+        ! ...and the same at each interior row-group boundary. A single row is where an
+        ! inclusive/exclusive mistake produces zero rows or two, and the last row of a group and
+        ! the first row of the next are trimmed by different ends of different groups (CH = 7, so
+        ! the groups are 1..7, 8..14, 15..20).
+        call parquet_open_table(sl, f, CH, CH)
+        call sl%get("s_i32", sg)
+        call check(error, size(sg) == 1 .and. sg(1) == fg(CH), &
+            "a one-row slice on the last row of a row group should read only that row")
+        if (allocated(error)) return
+        call parquet_open_table(sl, f, CH + 1, CH + 1)
+        call sl%get("s_i32", sg)
+        call check(error, size(sg) == 1 .and. sg(1) == fg(CH + 1), &
+            "a one-row slice on the first row of a row group should read only that row")
+        if (allocated(error)) return
+        call parquet_open_table(sl, f, 2 * CH, 2 * CH)
+        call sl%get("s_i32", sg)
+        call check(error, size(sg) == 1 .and. sg(1) == fg(2 * CH), &
+            "a one-row slice on the last row of the second row group should read only that row")
+        if (allocated(error)) return
+        call parquet_open_table(sl, f, 2 * CH + 1, 2 * CH + 1)
+        call sl%get("s_i32", sg)
+        call check(error, size(sg) == 1 .and. sg(1) == fg(2 * CH + 1), &
+            "a one-row slice on the first row of the last row group should read only that row")
         if (allocated(error)) return
         !
         ! A slice crossing every boundary, read through the pointer path rather than the copy.
@@ -4388,6 +4421,18 @@ contains
         call t%col("i32", p_i64)
         call check(error, all(p_i64 == [(int(i, int64), i = 1, NROW)]), &
             "an eager cast should convert the values already read")
+        if (allocated(error)) return
+        ! %reload discards VALUE edits, not the cast: it re-reads into the column's CURRENT kind,
+        ! so a cast survives it. Re-reading into the FILE's kind instead would silently undo a
+        ! conversion the caller never asked to undo, and would change the column's kind under any
+        ! pointer taken since.
+        call t%set_element("i32", 1, 99_int64)
+        call t%reload("i32")
+        call check(error, t%kind("i32") == PK_INT64, "%reload must keep the column's cast kind")
+        if (allocated(error)) return
+        call t%col("i32", p_i64)
+        call check(error, p_i64(1) == 1_int64, &
+            "%reload should discard the value edit and re-read the file's own value")
     end subroutine test_cast_deferred
     !
     !> An int64 needing more than real32's 24 mantissa bits, so that a trip through float32 is
@@ -6443,5 +6488,285 @@ contains
         inquire(file=sidecar_path, exist=sidecar)
         call check(error, sidecar, "write_maml=.true. should leave a sidecar next to the output")
     end subroutine test_write_table_writer_options
+    !
+    !> `%generation()` must advance on EVERY structural entry point, and on none that changes no row.
+    !!
+    !! The counter is the only signal a caller has that a `%col`/`%ref` pointer they hold may now be
+    !! dangling. The dangling read itself cannot be tested -- dereferencing freed storage may pass,
+    !! crash or return plausible garbage, and none of the three means anything -- so the counter is
+    !! what stands in for it. That makes a mutation added WITHOUT a bump worse than one that bumps
+    !! unnecessarily: the first gives false confidence, the second costs a re-fetch.
+    !!
+    !! Written as a sweep rather than one test per operation, so that adding a mutation means adding
+    !! a `case`, not a test: the assertion is written once and applies to whatever the case did.
+    subroutine test_generation_sweep(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, batch
+        type(parquet_schema) :: sch
+        integer(int64) :: gen0
+        integer(int32) :: extra(NROW)
+        logical :: keep(NROW)
+        integer(int64) :: none(0)
+        integer :: op, i
+        !> Structural entry points, plus the six calls that must NOT bump. Raise this and add a
+        !! `case` below when a new structural operation is added.
+        integer, parameter :: NBUMP = 14, NNOOP = 6
+        !> Named so a failure says WHICH entry point stopped bumping, rather than only that one did.
+        character(len=18), parameter :: bump_names(NBUMP) = [ &
+            "add_column        ", "drop_column       ", "rename_column     ", "copy_column       ", &
+            "cast              ", "evict_column      ", "reload            ", "filter_rows       ", &
+            "sort_by           ", "delete_rows       ", "truncate          ", "append            ", &
+            "append_null_rows  ", "write_table       "]
+        character(len=18), parameter :: noop_names(NNOOP) = [ &
+            "truncate past end ", "filter_rows all   ", "delete_rows none  ", "append_null_rows 0", &
+            "sort_by ordered   ", "append zero rows  "]
+        character(len=*), parameter :: f = "test_run/table_generation_sweep.parquet"
+        character(len=*), parameter :: fout = "test_run/table_generation_sweep_out.parquet"
+        !
+        call write_basic_fixture(f)
+        extra = [(int(i, int32), i = 1, NROW)]
+        call sch%init("gen")
+        call sch%add_field("f64", "float64")
+        call parquet_parse_maml(sch)
+        !
+        ! --- every structural change bumps -----------------------------------------------------
+        do op = 1, NBUMP
+            call parquet_open_table(t, f)
+            ! Each case does whatever setup it needs BEFORE the counter is read, so that only the
+            ! operation under test can be responsible for the bump.
+            select case (op)
+            case (1)
+                gen0 = t%generation()
+                call t%add_column("extra", extra)
+            case (2)
+                gen0 = t%generation()
+                call t%drop_column("i32")
+            case (3)
+                gen0 = t%generation()
+                call t%rename_column("i32", "renamed")
+            case (4)
+                gen0 = t%generation()
+                call t%copy_column("i32", "i32_copy")
+            case (5)
+                gen0 = t%generation()
+                call t%cast("i32", PK_INT64)
+            case (6)
+                call t%prefetch("i32")
+                gen0 = t%generation()
+                call t%evict_column("i32")
+            case (7)
+                call t%prefetch("i32")
+                gen0 = t%generation()
+                call t%reload("i32")
+            case (8)
+                keep = .true.
+                keep(2) = .false.
+                gen0 = t%generation()
+                call t%filter_rows(keep)
+            case (9)
+                call t%materialize_all()
+                gen0 = t%generation()
+                call t%sort_by(["i32"], descending=[.true.])
+            case (10)
+                gen0 = t%generation()
+                call t%delete_rows([1])
+            case (11)
+                gen0 = t%generation()
+                call t%truncate(NROW - 1)
+            case (12)
+                call t%materialize_all()
+                call t%clone_structure(batch)
+                call batch%append_null_rows(1)
+                gen0 = t%generation()
+                call t%append(batch)
+            case (13)
+                gen0 = t%generation()
+                call t%append_null_rows(1)
+            case (14)
+                ! release= (default .true.) evicts the columns THIS WRITE materialized, freeing
+                ! storage a pointer could alias -- the one bump that does not look structural. It
+                ! needs a schema naming a column the table has not read: a write that releases
+                ! nothing must not bump, which is the neighbouring test's own assertion.
+                gen0 = t%generation()
+                call parquet_write_table(t, fout, sch, overwrite=.true.)
+            end select
+            call check(error, t%generation() > gen0, &
+                "%" // trim(bump_names(op)) // " must advance the generation counter -- " // &
+                "a caller cannot re-fetch a pointer it is not told to re-fetch")
+            if (allocated(error)) return
+        end do
+        !
+        ! --- and a call that changes no row bumps nothing ---------------------------------------
+        ! The other direction of the same contract: an unnecessary bump costs a re-fetch, so the
+        ! rule "no rows changed => nothing was invalidated" has to hold too, or the counter starts
+        ! reporting noise and callers learn to ignore it. %sort_by is the one decided by the DATA
+        ! rather than by the arguments.
+        do op = 1, NNOOP
+            call parquet_open_table(t, f)
+            call t%materialize_all()
+            gen0 = t%generation()
+            select case (op)
+            case (1)
+                call t%truncate(NROW + 5)
+            case (2)
+                keep = .true.
+                call t%filter_rows(keep)
+            case (3)
+                call t%delete_rows(none)
+            case (4)
+                call t%append_null_rows(0)
+            case (5)
+                call t%sort_by(["i32"])
+            case (6)
+                call t%clone_structure(batch)
+                call t%append(batch)
+            end select
+            call check(error, t%generation() == gen0, &
+                "%" // trim(noop_names(op)) // " changes no row, so it must not advance the " // &
+                "generation counter")
+            if (allocated(error)) return
+        end do
+    end subroutine test_generation_sweep
+    !
+    !> The five metadata queries answer from the DESCRIPTOR, and reading them reads nothing.
+    !!
+    !! Two properties, and both fail silently. `%kind` returning `PK_NONE` for an untouched column
+    !! makes the documented `select case (t%kind(name))` idiom take `case default` instead of
+    !! aborting -- a wrong branch, not an error. And a query that quietly became touch-triggering
+    !! turns `%residency` or `%unit` into a whole-column read, which no assertion on the VALUE would
+    !! ever notice; only the residency afterwards shows it.
+    !!
+    !! The existing round-trip tests all read their columns, so a regression in either direction
+    !! passes every one of them.
+    subroutine test_metadata_queries_do_not_touch(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        character(len=:), allocatable :: u
+        character(len=3), parameter :: names(6) = ["i32", "i64", "f32", "f64", "b  ", "s  "]
+        integer, parameter :: kinds(6) = [PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64, &
+            PK_LOGICAL, PK_STRING]
+        integer :: i
+        character(len=*), parameter :: f = "test_run/table_metadata_no_touch.parquet"
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t, f)
+        do i = 1, size(names)
+            call check(error, t%residency(trim(names(i))) == RES_EMPTY, &
+                "precondition: opening must not have read " // trim(names(i)))
+            if (allocated(error)) return
+            call check(error, t%kind(trim(names(i))) == kinds(i), &
+                "%kind must answer from the descriptor before the column is read, not PK_NONE")
+            if (allocated(error)) return
+            call check(error, t%width(trim(names(i))) == 1, &
+                "%width must answer from the descriptor before the column is read")
+            if (allocated(error)) return
+            ! The three that must NOT become touch-triggering, unlike %kind/%width on a deferred
+            ! plain-LIST column (whose width has no schema-level answer -- see the LIST tests).
+            call t%unit(trim(names(i)), u)
+            call check(error, t%is_supported(trim(names(i))), &
+                "every column in this fixture is supported")
+            if (allocated(error)) return
+            call check(error, t%residency(trim(names(i))) == RES_EMPTY, &
+                "%kind/%width/%unit/%is_supported/%residency must not read " // trim(names(i)))
+            if (allocated(error)) return
+        end do
+    end subroutine test_metadata_queries_do_not_touch
+    !
+    !> Materializing the row index first is the documented recovery, so it has to keep working.
+    !!
+    !! `parquet_row_index` is derivable only while the table still has its file: every row-structural
+    !! mutation closes the reader, and with it the mask and permutation that are the only record of
+    !! which file row each row came from. Users are told to materialize it BEFORE mutating, after
+    !! which it travels with every other column -- that is what this checks, across the mutations
+    !! that reorder, remove and add rows. Rows an `%append` brings in came from no file row at all,
+    !! so they must be Null rather than 0 or a repeat.
+    subroutine test_row_index_recovery(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, batch
+        integer(int64), allocatable :: ri(:)
+        integer(int32), allocatable :: k(:)
+        logical :: keep(20)
+        integer, parameter :: N = 20, CH = 7
+        character(len=*), parameter :: f = "test_run/table_row_index_recovery.parquet"
+        !
+        call write_slice_xform_fixture(f, N, CH)
+        !
+        ! Reordering: the row index must follow its rows, not stay in place.
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        call t%get(PARQUET_ROW_INDEX, ri)        ! materializes it -- the recovery step
+        call t%sort_by(["k"], descending=[.true.])
+        call t%get(PARQUET_ROW_INDEX, ri)
+        call t%get("k", k)
+        call check(error, all(ri == int(k, int64)), &
+            "a materialized row index must be reordered by %sort_by with every other column")
+        if (allocated(error)) return
+        call check(error, ri(1) == int(N, int64), &
+            "the row that sorted first should still name the file row it came from")
+        if (allocated(error)) return
+        !
+        ! Removing: the survivors keep their own file rows.
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        call t%get(PARQUET_ROW_INDEX, ri)
+        keep = .false.
+        keep(3) = .true.
+        keep(17) = .true.
+        call t%filter_rows(keep)
+        call t%get(PARQUET_ROW_INDEX, ri)
+        call check(error, size(ri) == 2 .and. ri(1) == 3_int64 .and. ri(2) == 17_int64, &
+            "a materialized row index must be filtered with every other column")
+        if (allocated(error)) return
+        !
+        ! Adding: a row that came from no file row has no file row to name.
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        call t%get(PARQUET_ROW_INDEX, ri)
+        call t%clone_structure(batch)
+        call batch%append_null_rows(1)
+        call t%append(batch)
+        call check(error, t%nrows() == int(N + 1, int64), "the append should have added one row")
+        if (allocated(error)) return
+        call check(error, t%is_null(PARQUET_ROW_INDEX, N + 1), &
+            "a row added by %append came from no file row, so its row index must be Null")
+    end subroutine test_row_index_recovery
+    !
+    !> "Detached" means "had a file and can no longer read it", never simply "was mutated".
+    !!
+    !! A table built by `parquet_new_table` has no file to lose, so every mutation must leave
+    !! `%is_detached()` answering `.false.` -- including the ones that reorder and grow it, which are
+    !! exactly the ones that detach a file-backed table. `table_detach` sets the flag only while
+    !! `file_backed` is still true, and the natural "simplification" is to set it unconditionally:
+    !! every from-scratch table would then report itself detached the moment it was filled, and the
+    !! read-after-detach guards would start refusing calls on a table that never had a file.
+    subroutine test_in_memory_never_detaches(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, batch
+        integer(int32) :: v(NROW)
+        logical, allocatable :: keep(:)
+        integer :: i
+        !
+        v = [(int(NROW - i + 1, int32), i = 1, NROW)]    ! descending, so a sort really reorders
+        call parquet_new_table(t)
+        call t%add_column("a", v)
+        call check(error, .not. t%is_detached(), "a freshly built table has no file to lose")
+        if (allocated(error)) return
+        call t%sort_by(["a"])
+        call check(error, .not. t%is_detached(), &
+            "reordering an in-memory table must not report it as detached")
+        if (allocated(error)) return
+        call t%clone_structure(batch)
+        call batch%append_null_rows(2)
+        call t%append(batch)
+        call check(error, .not. t%is_detached(), &
+            "growing an in-memory table must not report it as detached")
+        if (allocated(error)) return
+        allocate(keep(t%nrows()))
+        keep = .false.
+        keep(1) = .true.
+        call t%filter_rows(keep)
+        call check(error, .not. t%is_detached(), &
+            "removing rows from an in-memory table must not report it as detached")
+    end subroutine test_in_memory_never_detaches
     !
 end module test_table

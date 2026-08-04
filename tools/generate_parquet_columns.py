@@ -990,7 +990,7 @@ contains""")
         p => self%{comp}(:, 1:self%nrows)
     end procedure data_ptr_{tag}""")
     w("    !")
-    w("end submodule parquet_columns_access")
+    w("end submodule parquet_columns_access ! GCOVR_EXCL_LINE")
     return "\n".join(o) + "\n"
 
 
@@ -1166,7 +1166,7 @@ contains""")
         end select
     end procedure paste_storage
     !
-end submodule parquet_columns_mutate""")
+end submodule parquet_columns_mutate ! GCOVR_EXCL_LINE""")
     return "\n".join(o) + "\n"
 
 

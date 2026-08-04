@@ -282,4 +282,4 @@ contains
         self%cache%cols(idx)%user_populated = .true.
     end procedure add_column_strcol
     !
-end submodule parquet_tables_addcol
+end submodule parquet_tables_addcol ! GCOVR_EXCL_LINE

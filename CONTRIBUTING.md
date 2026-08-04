@@ -35,6 +35,8 @@ Three project conventions worth knowing before contributing (all are applied in 
 
 **New features need tests and docs.** A new feature should land together with (1) unit-test coverage in the relevant `test/*.f90` suite — plus error-path coverage via `test/error_scenarios.f90` + `test/test_errors.f90` + `tools/run_error_scenarios.sh` if it has failure modes that `error stop` — and (2) documentation updates: a `!>`/`!!` doc-comment on the new public API (picked up automatically by the FORD-generated reference — build it locally with `ford docs.md`, or see whichever published copy your checkout links to: `https://www.4most.eu/readthedocs/etempel/parquet-fortran/main` on canonical GitLab, `https://etempel.github.io/parquet-fortran/` on the GitHub mirror), the relevant [user guide page](doc/pages/index.md) for any new behavior/how-to, the [README](README.md) if the landing-page story changes, and this file if it affects contributor workflow. (`CHANGELOG.md` updates are paused pre-1.0 — see CLAUDE.md.)
 
+**Read `feature_risks.md` before editing an area it covers.** It is this repository's standing-risks register: thirty numbered entries (`Risk-1` … `Risk-30`) recording properties of the shipped code that a future change can break with **no test failing and no abort** — a wrong answer, a stale pointer, a corrupted heap, a silently skipped row group — each with whether a test would catch it today and, where none can, how to check or avoid it instead. It is organised into four sections (new / proposed test / not testable / covered-but-still-forbidding-something), and a risk keeps its number when it moves between them, so `Risk-13` means the same thing in a code comment a year from now. If you implement a proposed test, update its entry in the same change; if you find a new silent-failure property while fixing a bug, add it as a new entry rather than only writing a code comment.
+
 A plain `ford docs.md` run does **not** verify that a new doc-comment was actually added — its undocumented-entity warnings are opt-in and off by default in this project. To actually check coverage before committing, run `ford --warn docs.md` instead; see CLAUDE.md's "FORD doc-comment conventions" for what to expect in its (noisy) output and which warning categories are already-accepted noise.
 
 ## Building and testing this repository
@@ -164,7 +166,7 @@ The `clang++` invocation is unconditional, with no `FPM_CXX`/`CXX` override — 
 
 A few more `tools/` scripts, unrelated to fixtures and not part of the build or test flow:
 
-`tools/run_lint_check.sh` runs the same checks as `.gitlab-ci.yml`'s `lint` stage, locally — `tools/check_bindc_boundary.py`, `tools/check_doc_anchors.py`, and the three generated-file `--check` calls (`generate_parquet_columns.py`, `generate_parquet_tables.py`, `generate_parquet_maml.sh base`). It needs nothing but `python3` and `bash` — no fpm, no gfortran, no Arrow — and finishes in well under a second, so it is worth running before every push:
+`tools/run_lint_check.sh` runs the same checks as `.gitlab-ci.yml`'s `lint` stage, locally — `tools/check_bindc_boundary.py`, `tools/check_doc_anchors.py`, `tools/check_source_conventions.py`, and the three generated-file `--check` calls (`generate_parquet_columns.py`, `generate_parquet_tables.py`, `generate_parquet_maml.sh base`). It needs nothing but `python3` and `bash` — no fpm, no gfortran, no Arrow — and finishes in well under a second, so it is worth running before every push:
 
 ```bash
 tools/run_lint_check.sh              # run every check, then list any that failed
@@ -304,6 +306,18 @@ tools/check_doc_anchors.py
 tools/check_bindc_boundary.py
 ```
 
+`tools/check_source_conventions.py` enforces three structural invariants of `src/*.f90` that no compiler and no runtime test can see — each one's violation compiles cleanly, passes the whole suite, and fails somewhere else entirely:
+
+- **`parquet_table` must gain no allocatable component.** The type is finalizable, and this project has three confirmed compiler bugs in exactly the `intent(out)`/`FINAL` machinery on exactly this type, so new table state goes on `parquet_table_cache` instead (see [New `parquet_table` state goes on the CACHE](CLAUDE.md#new-parquet_table-state-goes-on-the-cache--never-as-an-allocatable-component-of-the-type)).
+- **Every pointer a table accessor hands out must be reached through `self%cache`.** Pointing at `self` directly makes the caller's table need the `target` attribute, and `target` is a requirement on the *caller* — so the library still compiles, every test still passes, and only a user's program corrupts memory.
+- **The generated files must carry the doc-comments and `! GCOVR_EXCL_LINE` markers their generators are supposed to emit.** The generators' own `--check` modes compare the committed file against the generator, so a *template* that drops a convention produces output that matches perfectly and is wrong in every kind it emits at once.
+
+Run it after touching the table layer or a generator template (it is also part of `tools/run_lint_check.sh` and CI's `lint` stage):
+
+```bash
+tools/check_source_conventions.py
+```
+
 `tools/generate_logo_svg.py` regenerates `doc/media/logo.svg`/`logo.png`/`logo-192.png`/
 `favicon.png` from an original raster source: it traces the raster into an editable SVG via
 `vtracer`, then a polish pass recolors/gradient-fills the traced badge shape and adds a shadowed
@@ -364,7 +378,7 @@ fpm test
 
 `.gitlab-ci.yml` runs the full `fpm test` suite (with OpenMP and coverage) on a GitLab Docker-executor runner. It builds the whole toolchain from scratch in the container's `before_script`, so it also serves as an executable, always-current recipe for building this project on a clean Debian/Ubuntu system.
 
-A separate `lint` stage runs first and needs only `python3` — no Arrow/Parquet/fpm/gfortran/git-lfs setup — so it fails fast on the cheap checks: `tools/check_bindc_boundary.py`, `tools/check_doc_anchors.py`, and `--check` for all three of this project's committed-output generators (`tools/generate_parquet_columns.py`, `tools/generate_parquet_tables.py`, `tools/generate_parquet_maml.sh base`) — see [Some `src/*.f90` files are generated](CLAUDE.md#some-srcf90-files-are-generated--edit-the-generator-never-the-output) for what each one regenerates and why a drifted generator is worth catching in CI rather than only at the next regeneration.
+A separate `lint` stage runs first and needs only `python3` — no Arrow/Parquet/fpm/gfortran/git-lfs setup — so it fails fast on the cheap checks: `tools/check_bindc_boundary.py`, `tools/check_doc_anchors.py`, `tools/check_source_conventions.py`, and `--check` for all three of this project's committed-output generators (`tools/generate_parquet_columns.py`, `tools/generate_parquet_tables.py`, `tools/generate_parquet_maml.sh base`) — see [Some `src/*.f90` files are generated](CLAUDE.md#some-srcf90-files-are-generated--edit-the-generator-never-the-output) for what each one regenerates and why a drifted generator is worth catching in CI rather than only at the next regeneration.
 
 A few choices in that file are load-bearing — each one cost a debugging round when it was wrong, so preserve them if you touch it:
 

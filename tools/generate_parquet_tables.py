@@ -505,7 +505,7 @@ module parquet_tables
     w("    !")
     w(gen_spec_interfaces())
     w("    !")
-    w("end module parquet_tables")
+    w("end module parquet_tables ! GCOVR_EXCL_LINE")
     return "\n".join(o) + "\n"
 
 
@@ -1486,6 +1486,10 @@ def gen_spec_interfaces():
             character(len=:), allocatable, intent(out) :: unit_vals(:) !! the unit each one declares.
             integer, intent(out) :: n_units        !! live entries in `unit_cols`/`unit_vals`.
         end subroutine compose_read_transform
+        !> Fills the cache's column slots from the file's own column names, expanding each physical
+        !! column into whatever `extra: remap:` claims it (two internal names may target one
+        !! physical column, so slots can outnumber the file's columns). Walks the file's order, so
+        !! a struct's leaves stay adjacent for the batch release policy.
         module subroutine table_enumerate_columns(cache, names, internal, physical, n_remap, filename)
             type(parquet_table_cache), intent(inout) :: cache !! the column store to fill.
             character(len=*), intent(in) :: names(:) !! the file's own column names, in file order.
@@ -2919,7 +2923,7 @@ contains
     for k in ARRAY_KINDS:
         w(setslice_impl(k))
     w(setslice_str_impl())
-    w("end submodule parquet_tables_access")
+    w("end submodule parquet_tables_access ! GCOVR_EXCL_LINE")
     return "\n".join(o) + "\n"
 
 
@@ -3883,7 +3887,7 @@ contains
         w(add_impl(k))
     w(add_str_impl())
     w(add_strcol_impl())
-    w("end submodule parquet_tables_addcol")
+    w("end submodule parquet_tables_addcol ! GCOVR_EXCL_LINE")
     return "\n".join(o) + "\n"
 
 
@@ -3962,7 +3966,7 @@ contains
     for k in KINDS:
         w(matchunk_impl(k))
     w(gen_dispatch())
-    w("end submodule parquet_tables_materialize")
+    w("end submodule parquet_tables_materialize ! GCOVR_EXCL_LINE")
     return "\n".join(o) + "\n"
 
 

@@ -1473,6 +1473,10 @@ module parquet_tables
             character(len=:), allocatable, intent(out) :: unit_vals(:) !! the unit each one declares.
             integer, intent(out) :: n_units        !! live entries in `unit_cols`/`unit_vals`.
         end subroutine compose_read_transform
+        !> Fills the cache's column slots from the file's own column names, expanding each physical
+        !! column into whatever `extra: remap:` claims it (two internal names may target one
+        !! physical column, so slots can outnumber the file's columns). Walks the file's order, so
+        !! a struct's leaves stay adjacent for the batch release policy.
         module subroutine table_enumerate_columns(cache, names, internal, physical, n_remap, filename)
             type(parquet_table_cache), intent(inout) :: cache !! the column store to fill.
             character(len=*), intent(in) :: names(:) !! the file's own column names, in file order.
@@ -4605,4 +4609,4 @@ module parquet_tables
         end subroutine table_materialize_chunk_kind
     end interface
     !
-end module parquet_tables
+end module parquet_tables ! GCOVR_EXCL_LINE

@@ -283,6 +283,20 @@ contains
                 test_prefetch_unknown_column_aborts), &
             new_unittest("filter: unknown column aborts", &
                 test_filter_unknown_column_aborts), &
+            new_unittest("sorting: out-of-range permutation index aborts", &
+                test_sorting_permute_index_out_of_range_aborts), &
+            new_unittest("sorting: duplicated permutation index aborts", &
+                test_sorting_permute_duplicate_index_aborts), &
+            new_unittest("sorting: wrong-length permutation aborts", &
+                test_sorting_permute_length_mismatch_aborts), &
+            new_unittest("sorting: wrong-length is_valid mask aborts", &
+                test_sorting_valid_length_mismatch_aborts), &
+            new_unittest("sorting: keys of different row counts abort", &
+                test_sorting_keys_row_count_mismatch_aborts), &
+            new_unittest("sorting: an empty key list aborts", &
+                test_sorting_keys_empty_aborts), &
+            new_unittest("sorting: a vector column key aborts", &
+                test_sorting_column_vector_aborts), &
             new_unittest("sort: unknown column aborts", &
                 test_sort_unknown_column_aborts), &
             new_unittest("sort: vector column key aborts", &
@@ -2904,6 +2918,83 @@ contains
             failure_message="opening a reader sorted by an unknown column was expected to abort", &
             required_stderr="unknown column in sort key: nosuch")
     end subroutine test_sort_unknown_column_aborts
+
+    !> pf_permute abort path: see scenario_sorting_permute_index_out_of_range in
+    !> test/error_scenarios.f90 for what it does and why that state is rejected.
+    subroutine test_sorting_permute_index_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_permute_index_out_of_range", &
+            expect_abort=.true., &
+            failure_message="permuting by an out-of-range index was expected to abort", &
+            required_stderr="which is outside the valid index range")
+    end subroutine test_sorting_permute_index_out_of_range_aborts
+
+    !> pf_permute abort path: see scenario_sorting_permute_duplicate_index in
+    !> test/error_scenarios.f90 for what it does and why that state is rejected. This is the one
+    !> that matters most -- a duplicated index is in range, so without the check the array would
+    !> come back silently wrong rather than failing.
+    subroutine test_sorting_permute_duplicate_index_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_permute_duplicate_index", &
+            expect_abort=.true., &
+            failure_message="permuting by a duplicated index was expected to abort", &
+            required_stderr="perm is not a permutation")
+    end subroutine test_sorting_permute_duplicate_index_aborts
+
+    !> pf_permute abort path: see scenario_sorting_permute_length_mismatch in
+    !> test/error_scenarios.f90 for what it does and why that state is rejected.
+    subroutine test_sorting_permute_length_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_permute_length_mismatch", &
+            expect_abort=.true., &
+            failure_message="permuting by a wrong-length permutation was expected to abort", &
+            required_stderr="perm has 3 elements but the values have 4")
+    end subroutine test_sorting_permute_length_mismatch_aborts
+
+    !> pf_argsort abort path: see scenario_sorting_valid_length_mismatch in
+    !> test/error_scenarios.f90 for what it does and why that state is rejected.
+    subroutine test_sorting_valid_length_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_valid_length_mismatch", &
+            expect_abort=.true., &
+            failure_message="sorting with a wrong-length is_valid mask was expected to abort", &
+            required_stderr="is_valid has 3 elements but the values have 4")
+    end subroutine test_sorting_valid_length_mismatch_aborts
+
+    !> pf_sort_keys%add abort path: see scenario_sorting_keys_row_count_mismatch in
+    !> test/error_scenarios.f90 for what it does and why that state is rejected.
+    subroutine test_sorting_keys_row_count_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_keys_row_count_mismatch", &
+            expect_abort=.true., &
+            failure_message="adding a key of a different length was expected to abort", &
+            required_stderr="every key must describe the same number of rows")
+    end subroutine test_sorting_keys_row_count_mismatch_aborts
+
+    !> pf_argsort abort path: see scenario_sorting_keys_empty in test/error_scenarios.f90
+    !> for what it does and why that state is rejected.
+    subroutine test_sorting_keys_empty_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_keys_empty", expect_abort=.true., &
+            failure_message="sorting by an empty key list was expected to abort", &
+            required_stderr="this pf_sort_keys has no key")
+    end subroutine test_sorting_keys_empty_aborts
+
+    !> pf_argsort abort path: see scenario_sorting_column_vector in test/error_scenarios.f90
+    !> for what it does and why that state is rejected.
+    subroutine test_sorting_column_vector_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_column_vector", expect_abort=.true., &
+            failure_message="sorting a vector column was expected to abort", &
+            required_stderr="a vector column cannot be a sort key")
+    end subroutine test_sorting_column_vector_aborts
 
     !> Read-time sort abort path: see scenario_sort_vector_column in test/error_scenarios.f90
     !> for what it does and why that state is rejected.

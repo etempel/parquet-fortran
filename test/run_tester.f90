@@ -25,6 +25,7 @@ program tester
     use test_filter, only : collect_tests_filter
     use test_filter_screen, only : collect_tests_filter_screen
     use test_sort, only : collect_tests_sort
+    use test_sorting, only : collect_tests_parquet_sorting
     use test_temporal, only : collect_tests_parquet_temporal
     use test_table, only : collect_tests_parquet_table
     use test_table_codegen, only : collect_tests_table_codegen
@@ -74,6 +75,7 @@ program tester
         new_testsuite("filter", collect_tests_filter), &
         new_testsuite("filter_screen", collect_tests_filter_screen), &
         new_testsuite("sort", collect_tests_sort), &
+        new_testsuite("sorting", collect_tests_parquet_sorting), &
         new_testsuite("table", collect_tests_parquet_table), &
         new_testsuite("table_codegen", collect_tests_table_codegen) &
         ]
@@ -120,6 +122,13 @@ program tester
     !
 contains
 
+    !> "sorting" is excluded for the same reason as "filter_screen": its counting-fast-path test
+    !> drives parquet_debug_set_disable_sort_counting_path, a process-global hook. Run
+    !> concurrently, a sibling test could disable the counting path during that test's own "fast"
+    !> measurement, leaving it comparing the comparator path against itself -- which PASSES while
+    !> testing nothing, the failure mode this project treats as worst. The suite is pure in-memory
+    !> work and runs in well under a second, so the lost parallelism costs nothing.
+    !>
     !> "filter_screen" is excluded for a different reason from the four below: its two debug hooks
     !> into the row-group statistics screen (parquet_debug_set_disable_statistics_prescreen /
     !> parquet_debug_get_row_groups_pruned) are process-global, since parquet_reader's components
@@ -149,7 +158,7 @@ contains
     logical function suite_is_safe_to_parallelize(name) result(safe)
         character(len=*), intent(in) :: name
         safe = .not. (name == "writing" .or. name == "errors" .or. name == "metadata" .or. name == "maml" &
-            .or. name == "filter_screen")
+            .or. name == "filter_screen" .or. name == "sorting")
     end function suite_is_safe_to_parallelize
 
 end program tester

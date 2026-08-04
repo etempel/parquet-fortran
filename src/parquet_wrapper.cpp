@@ -3253,19 +3253,42 @@ extern "C"
 	// counting fast path.
 	enum class SortValueKind { Integer, Real, Str };
 
-	// One sort key, already extracted from whatever it came from. Exactly one of ints/reals/strs is
-	// populated, matching `kind`.
+	// One sort key. Exactly one of ints/reals/strs describes it, matching `kind` -- but the values
+	// may either be OWNED (copied into the vector below) or BORROWED (ints_ptr/reals_ptr aimed at a
+	// caller's array, with the vector left empty).
+	//
+	// The comparator always reads through ints_ptr/reals_ptr, never through the vectors, so
+	// borrowing costs it nothing at all -- no extra branch in the hottest loop in the engine. Every
+	// place that fills a key must therefore call sort_key_finalize() before the key is used;
+	// sort_build_permutation checks that it happened rather than dereferencing a null pointer.
+	//
+	// Borrowing is only ever safe when the borrowed array outlives the sort, which is why it is
+	// used by the one-shot parquet_sort_argsort_*/parquet_sort_is_sorted_* entry points (the
+	// caller's array is live for the whole call and nothing survives it) and NOT by the
+	// SortBuilderHandle adders, whose keys outlive the call that added them.
 	struct SortKeyData
 	{
 		SortValueKind kind = SortValueKind::Integer;
 		bool descending = false;
 		bool nulls_first = false;
-		std::vector<int64_t> ints;             //!< Integer kind (includes boolean and temporal).
-		std::vector<double> reals;             //!< Real kind (float/double/half_float/uint64/decimal).
-		std::vector<std::string_view> strs;    //!< Str kind; views into `owner`'s buffers.
+		std::vector<int64_t> ints;             //!< Integer kind, when owned (includes boolean and temporal).
+		std::vector<double> reals;             //!< Real kind, when owned (float/double/half_float/uint64/decimal).
+		std::vector<std::string_view> strs;    //!< Str kind; views into `owner`'s buffers, or into a caller's.
 		std::vector<uint8_t> valid;            //!< 1 = valid; EMPTY means "no nulls at all".
-		std::shared_ptr<void> owner;           //!< Keeps whatever backs `strs` alive. Unused otherwise.
+		std::shared_ptr<void> owner;           //!< Keeps whatever backs `strs` alive. Unused when borrowing.
+		const int64_t *ints_ptr = nullptr;     //!< What the comparator reads for Integer. Never null once finalized.
+		const double *reals_ptr = nullptr;     //!< What the comparator reads for Real. Never null once finalized.
 	};
+
+	// Points a key's read pointers at whatever backs it. Call once, after the values are in place
+	// and before the key is used; harmless to call on an already-borrowing key, whose pointer is
+	// left alone. A vector's heap buffer survives the vector being moved, so a key may be moved
+	// into a handle after this without invalidating anything.
+	static inline void sort_key_finalize(SortKeyData &key)
+	{
+		if (key.ints_ptr == nullptr) key.ints_ptr = key.ints.data();
+		if (key.reals_ptr == nullptr) key.reals_ptr = key.reals.data();
+	}
 
 	// Output tier of row `i` under this key: 0 sorts first, 2 last. Absolute -- `descending` never
 	// reaches this, which is exactly Arrow's rule (a descending sort still puts nulls last by
@@ -3273,7 +3296,7 @@ extern "C"
 	static inline int sort_tier_of(const SortKeyData &key, int64_t i)
 	{
 		bool is_null = !key.valid.empty() && key.valid[static_cast<size_t>(i)] == 0;
-		bool is_nan = !is_null && key.kind == SortValueKind::Real && std::isnan(key.reals[static_cast<size_t>(i)]);
+		bool is_nan = !is_null && key.kind == SortValueKind::Real && std::isnan(key.reals_ptr[static_cast<size_t>(i)]);
 		if (key.nulls_first) return is_null ? 0 : (is_nan ? 1 : 2);
 		return is_null ? 2 : (is_nan ? 1 : 0);
 	}
@@ -3290,12 +3313,12 @@ extern "C"
 		int c = 0;
 		if (key.kind == SortValueKind::Integer)
 		{
-			int64_t va = key.ints[static_cast<size_t>(a)], vb = key.ints[static_cast<size_t>(b)];
+			int64_t va = key.ints_ptr[static_cast<size_t>(a)], vb = key.ints_ptr[static_cast<size_t>(b)];
 			c = (va < vb) ? -1 : (va > vb) ? 1 : 0;
 		}
 		else if (key.kind == SortValueKind::Real)
 		{
-			double va = key.reals[static_cast<size_t>(a)], vb = key.reals[static_cast<size_t>(b)];
+			double va = key.reals_ptr[static_cast<size_t>(a)], vb = key.reals_ptr[static_cast<size_t>(b)];
 			c = (va < vb) ? -1 : (va > vb) ? 1 : 0;
 		}
 		else
@@ -3319,11 +3342,11 @@ extern "C"
 		if (keys.size() != 1 || n < 2) return false;
 		const SortKeyData &key = keys[0];
 		if (key.kind != SortValueKind::Integer || !key.valid.empty()) return false;
-		lo = key.ints[0];
-		hi = key.ints[0];
+		lo = key.ints_ptr[0];
+		hi = key.ints_ptr[0];
 		for (int64_t i = 1; i < n; ++i)
 		{
-			int64_t v = key.ints[static_cast<size_t>(i)];
+			int64_t v = key.ints_ptr[static_cast<size_t>(i)];
 			if (v < lo) lo = v;
 			if (v > hi) hi = v;
 		}
@@ -3343,7 +3366,7 @@ extern "C"
 		std::vector<int64_t> counts(nbuckets, 0);
 		for (int64_t i = 0; i < n; ++i)
 		{
-			++counts[static_cast<size_t>(static_cast<uint64_t>(key.ints[static_cast<size_t>(i)]) - static_cast<uint64_t>(lo))];
+			++counts[static_cast<size_t>(static_cast<uint64_t>(key.ints_ptr[static_cast<size_t>(i)]) - static_cast<uint64_t>(lo))];
 		}
 		// Turn counts into each bucket's first output offset: bottom-up ascending, top-down
 		// descending (so the largest value lands at offset 0 while keeping ties in file order).
@@ -3368,7 +3391,7 @@ extern "C"
 		std::vector<int64_t> perm(static_cast<size_t>(n));
 		for (int64_t i = 0; i < n; ++i)
 		{
-			size_t b = static_cast<size_t>(static_cast<uint64_t>(key.ints[static_cast<size_t>(i)]) - static_cast<uint64_t>(lo));
+			size_t b = static_cast<size_t>(static_cast<uint64_t>(key.ints_ptr[static_cast<size_t>(i)]) - static_cast<uint64_t>(lo));
 			perm[static_cast<size_t>(offsets[b]++)] = i;
 		}
 		return perm;
@@ -3383,6 +3406,25 @@ extern "C"
 	// The engine's entry point: 0-based permutation of [0, n) putting the rows in key order.
 	static std::vector<int64_t> sort_build_permutation(const std::vector<SortKeyData> &keys, int64_t n)
 	{
+		// Once per build, not per comparison: turns a forgotten sort_key_finalize() into a named
+		// abort here rather than a null dereference somewhere inside std::sort's comparator. Only
+		// the pointer the key's own kind reads is checked, since the other is legitimately null for
+		// a borrowed key. n == 0 is exempt: nothing is ever dereferenced, and an empty owned vector
+		// may report data() == nullptr.
+		if (n > 0)
+		{
+			for (const auto &key : keys)
+			{
+				bool ok = (key.kind == SortValueKind::Integer)  ? key.ints_ptr != nullptr
+					: (key.kind == SortValueKind::Real) ? key.reals_ptr != nullptr
+					: true;
+				if (!ok)
+				{
+					report_fatal_error("sort_build_permutation",
+						"internal error: a sort key was used without being finalized"); // GCOVR_EXCL_LINE
+				}
+			}
+		}
 		int64_t lo = 0, hi = 0;
 		if (!g_debug_disable_sort_counting_path && sort_counting_candidate(keys, n, lo, hi))
 		{
@@ -3518,6 +3560,7 @@ extern "C"
 				if (array->IsNull(i)) key.valid[static_cast<size_t>(i)] = 0;
 			}
 		}
+		sort_key_finalize(key);
 		out = std::move(key);
 		return true;
 	}
@@ -5659,6 +5702,7 @@ extern "C"
 		key.nulls_first = nulls_first != 0;
 		key.ints.assign(values, values + h->nrows);
 		sort_builder_set_valid(key, valid, h->nrows);
+		sort_key_finalize(key);
 		h->keys.push_back(std::move(key));
 	}
 
@@ -5674,6 +5718,7 @@ extern "C"
 		key.nulls_first = nulls_first != 0;
 		key.reals.assign(values, values + h->nrows);
 		sort_builder_set_valid(key, valid, h->nrows);
+		sort_key_finalize(key);
 		h->keys.push_back(std::move(key));
 	}
 
@@ -5703,6 +5748,7 @@ extern "C"
 		}
 		for (int64_t i = 0; i < h->nrows; ++i) key.strs[static_cast<size_t>(i)] = store[static_cast<size_t>(i)];
 		sort_builder_set_valid(key, valid, h->nrows);
+		sort_key_finalize(key);
 		h->keys.push_back(std::move(key));
 	}
 
@@ -5718,9 +5764,170 @@ extern "C"
 		return 0;
 	}
 
+	// 1 when every row is already in the stated order under the FULL key list, 0 when it is not,
+	// and -1 when no key was added.
+	//
+	// The multi-key counterpart of parquet_sort_is_sorted_* below, and the reason it has to exist:
+	// a parquet_timestamp binds as TWO integer keys (seconds, then nanoseconds), so no single-key
+	// entry point can answer the question for one. Answering it by argsorting and testing the
+	// permutation for identity would be correct but O(n log n), turning a documented O(n) query
+	// into a sort.
+	//
+	// Same rule as sort_is_sorted_key: adjacent rows only, no index tiebreaker, so a run of equal
+	// rows is sorted -- applied across the keys in precedence order, which is exactly what
+	// sort_build_permutation's own comparator does minus that tiebreaker.
+	int64_t parquet_sort_builder_is_sorted(void *handle)
+	{
+		auto *h = static_cast<SortBuilderHandle *>(handle);
+		if (h->keys.empty()) return -1;
+		for (int64_t i = 1; i < h->nrows; ++i)
+		{
+			for (const auto &key : h->keys)
+			{
+				int c = sort_compare_key(key, i - 1, i);
+				if (c > 0) return 0;
+				if (c < 0) break;
+			}
+		}
+		return 1;
+	}
+
 	void parquet_sort_builder_free(void *handle)
 	{
 		delete static_cast<SortBuilderHandle *>(handle);
+	}
+
+	// ---- One-shot single-key entry points (parquet_sorting's direct forms) ----
+	//
+	// Same engine, same comparator, same tiers as everything above -- the only difference is that
+	// nothing outlives the call, which is what makes it safe for these to BORROW the caller's array
+	// instead of copying it. That matters at scale: an argsort over a billion-element array copied
+	// 8 GB of key for values the caller already held.
+	//
+	// The lifetime argument has to be exact, because Fortran can defeat it. A non-contiguous actual
+	// argument (`pf_argsort(a(1:n:2), perm)`) makes the compiler pass a contiguous TEMPORARY, which
+	// it is free to discard the moment the call returns. Borrowing is therefore safe here, where
+	// the borrowed array is used and finished with before returning, and would NOT be safe on the
+	// builder adders above, whose keys outlive the call that added them -- see SortKeyData's own
+	// comment. Do not "unify" these with the builder by having them create one.
+
+	// Fills a borrowed key. `valid` may be null, which the engine reads as "no nulls at all".
+	static SortKeyData sort_borrowed_key(SortValueKind kind, const int64_t *ints, const double *reals,
+		const int8_t *valid, int64_t n, int8_t descending, int8_t nulls_first)
+	{
+		SortKeyData key;
+		key.kind = kind;
+		key.descending = descending != 0;
+		key.nulls_first = nulls_first != 0;
+		key.ints_ptr = ints;
+		key.reals_ptr = reals;
+		sort_builder_set_valid(key, valid, n);
+		sort_key_finalize(key);
+		return key;
+	}
+
+	// Writes the 1-BASED permutation of a single integer key into `perm_out` (sized n by the
+	// caller). Boolean and every temporal kind arrive here too, reduced to their stored integers.
+	void parquet_sort_argsort_int64(int64_t n, const int64_t *values, const int8_t *valid,
+		int8_t descending, int8_t nulls_first, int64_t *perm_out)
+	{
+		if (n <= 0) return;
+		std::vector<SortKeyData> keys;
+		keys.push_back(sort_borrowed_key(SortValueKind::Integer, values, nullptr, valid, n, descending, nulls_first));
+		auto perm = sort_build_permutation(keys, n);
+		for (int64_t i = 0; i < n; ++i) perm_out[i] = perm[static_cast<size_t>(i)] + 1;
+	}
+
+	// The floating-point counterpart. NaNs are ordinary values and are tiered by sort_tier_of.
+	void parquet_sort_argsort_double(int64_t n, const double *values, const int8_t *valid,
+		int8_t descending, int8_t nulls_first, int64_t *perm_out)
+	{
+		if (n <= 0) return;
+		std::vector<SortKeyData> keys;
+		keys.push_back(sort_borrowed_key(SortValueKind::Real, nullptr, values, valid, n, descending, nulls_first));
+		auto perm = sort_build_permutation(keys, n);
+		for (int64_t i = 0; i < n; ++i) perm_out[i] = perm[static_cast<size_t>(i)] + 1;
+	}
+
+	// The string counterpart, over a packed (offsets, data) pair: row i is data[offsets[i] ..
+	// offsets[i+1]), so `offsets` has n+1 entries. The string_views point straight into the
+	// caller's `data` -- the bytes are never copied, unlike the builder's own string adder, which
+	// has to copy because its key outlives the call.
+	void parquet_sort_argsort_string(int64_t n, const int64_t *offsets, const char *data,
+		const int8_t *valid, int8_t descending, int8_t nulls_first, int64_t *perm_out)
+	{
+		if (n <= 0) return;
+		SortKeyData key;
+		key.kind = SortValueKind::Str;
+		key.descending = descending != 0;
+		key.nulls_first = nulls_first != 0;
+		key.strs.resize(static_cast<size_t>(n));
+		for (int64_t i = 0; i < n; ++i)
+		{
+			key.strs[static_cast<size_t>(i)] =
+				std::string_view(data + offsets[i], static_cast<size_t>(offsets[i + 1] - offsets[i]));
+		}
+		sort_builder_set_valid(key, valid, n);
+		sort_key_finalize(key);
+		std::vector<SortKeyData> keys;
+		keys.push_back(std::move(key));
+		auto perm = sort_build_permutation(keys, n);
+		for (int64_t i = 0; i < n; ++i) perm_out[i] = perm[static_cast<size_t>(i)] + 1;
+	}
+
+	// ---- is_sorted ----
+	//
+	// Deliberately NOT routed through the builder: that would copy every value to answer a question
+	// that is O(n) with an early exit. It reuses sort_compare_key WITHOUT the caller's index
+	// tiebreaker, comparing adjacent rows only, so a run of equal values is sorted -- using the
+	// tiebreaker would make every array trivially "sorted". Sharing the comparator is what stops
+	// is_sorted and argsort disagreeing about nulls, NaNs or direction on the same array.
+	static int64_t sort_is_sorted_key(const SortKeyData &key, int64_t n)
+	{
+		for (int64_t i = 1; i < n; ++i)
+		{
+			if (sort_compare_key(key, i - 1, i) > 0) return 0;
+		}
+		return 1;
+	}
+
+	// 1 when the integer key is in the stated order, 0 otherwise.
+	int64_t parquet_sort_is_sorted_int64(int64_t n, const int64_t *values, const int8_t *valid,
+		int8_t descending, int8_t nulls_first)
+	{
+		if (n < 2) return 1;
+		return sort_is_sorted_key(
+			sort_borrowed_key(SortValueKind::Integer, values, nullptr, valid, n, descending, nulls_first), n);
+	}
+
+	// 1 when the floating-point key is in the stated order, 0 otherwise.
+	int64_t parquet_sort_is_sorted_double(int64_t n, const double *values, const int8_t *valid,
+		int8_t descending, int8_t nulls_first)
+	{
+		if (n < 2) return 1;
+		return sort_is_sorted_key(
+			sort_borrowed_key(SortValueKind::Real, nullptr, values, valid, n, descending, nulls_first), n);
+	}
+
+	// 1 when the string key is in the stated order, 0 otherwise. Same packed (offsets, data) layout
+	// as parquet_sort_argsort_string.
+	int64_t parquet_sort_is_sorted_string(int64_t n, const int64_t *offsets, const char *data,
+		const int8_t *valid, int8_t descending, int8_t nulls_first)
+	{
+		if (n < 2) return 1;
+		SortKeyData key;
+		key.kind = SortValueKind::Str;
+		key.descending = descending != 0;
+		key.nulls_first = nulls_first != 0;
+		key.strs.resize(static_cast<size_t>(n));
+		for (int64_t i = 0; i < n; ++i)
+		{
+			key.strs[static_cast<size_t>(i)] =
+				std::string_view(data + offsets[i], static_cast<size_t>(offsets[i + 1] - offsets[i]));
+		}
+		sort_builder_set_valid(key, valid, n);
+		sort_key_finalize(key);
+		return sort_is_sorted_key(key, n);
 	}
 
 	// 1 when a read-time sort is active on this reader, 0 otherwise. This is what the Fortran side's

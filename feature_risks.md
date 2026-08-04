@@ -97,6 +97,8 @@ something a reader is expected to have.
 | [Risk-30](#risk-30--a-filtered-slice-does-not-address-physical-file-rows) | A filtered slice does NOT address physical file rows | 4 — covered |
 | [Risk-31](#risk-31--an-extending-types-own-state-is-silently-lost-by-clone) | An extending type's own state is silently lost by `%clone` | 4 — covered |
 | [Risk-32](#risk-32--a-hand-edit-inside-a-generated-region-survives-until-the-next-regeneration) | A hand edit inside a generated region survives until the next regeneration | 4 — covered |
+| [Risk-33](#risk-33--pf_permute-through-a-col-pointer-desynchronises-a-table) | `pf_permute` through a `%col` pointer desynchronises a table | 3 — not testable |
+| [Risk-34](#risk-34--pf_argsort-and-the-read-time-sort-can-drift-apart) | `pf_argsort` and the read-time sort can drift apart | 4 — covered |
 
 ---
 
@@ -232,6 +234,40 @@ only freeze the current shape.
 choosing between the scoped and unscoped paths, so that "the scoped path is the unscoped path with
 less memory" is never assumed — it is a different trade, not a strictly better one. If either cost is
 ever attacked, measure with the Arrow pool counter (Risk-1), not with RSS.
+
+### Risk-33 — `pf_permute` through a `%col` pointer desynchronises a table
+
+`parquet_table%col` hands back a **writable pointer into a table's live column storage**, and
+`pf_permute` accepts exactly the array types those pointers have. So this compiles, runs, and is
+wrong:
+
+```fortran
+call t%col("mass", p)
+call pf_argsort(p, perm)
+call pf_permute(p, perm)      ! reorders ONE column; every other column stays put
+```
+
+Afterwards the table's row count is unchanged, every column individually holds valid values, and
+row *k* of `mass` no longer belongs with row *k* of anything else. Nothing detects it — not the
+detach guard (no row-structural mutation happened), not `%validate_qc` (each value is still legal),
+not a later write (the schema still matches).
+
+**Why this is not testable.** There is no defect to assert against: every procedure involved does
+exactly what it documents. A test could only demonstrate the misuse, not catch a regression — and
+the API cannot be narrowed to prevent it either, since `%col`'s writability is the entire point of
+having a zero-copy accessor at all (9 of its 17 specifics hand back writable pointers, and the
+table layer cannot tell a legitimate in-place edit from a reorder).
+
+**What still forbids something.** The mitigation is documentation, in the two places a reader
+actually is when they are about to make this mistake, and both must be kept:
+`%col`'s own doc-comment in `tools/generate_parquet_tables.py`'s template (**not** the generated
+`src/parquet_tables.f90`, which is overwritten), and the callout in `doc/pages/sorting.md`'s
+"Sorting a table" section. `parquet_table%sort_by` is the supported way to reorder a table, and it
+reorders every column together.
+
+Note the deliberate asymmetry: permuting a **standalone** `parquet_column` — one built in code, or
+copied out — is entirely safe and is a supported operation. The hazard is the aliasing, not the
+type.
 
 ## 4. Risks already covered, kept for what they still forbid
 
@@ -1228,3 +1264,38 @@ Three properties keep this survivable, and all three are load-bearing:
 **Covered by** the generator's own `--self-test` (a hand-edited generated line, a deleted end
 marker, a deleted window, a stale MAML, and idempotence), run in the lint stage alongside
 `--check` on this project's own committed `src/parquet_table_example.f90`.
+
+---
+
+### Risk-34 — `pf_argsort` and the read-time sort can drift apart
+
+Three entry points now order rows: `parquet_open_reader(..., sort_by=)`, `parquet_table%sort_by`,
+and `pf_argsort`/`pf_sort`. They agree only because all three reduce to `sort_compare_key`
+(`src/parquet_wrapper.cpp`). Nothing in the type system enforces that. A future change that gives
+any one of them its own comparison — a "faster" Fortran-side path for a simple integer array, an
+extra tier rule, a different tie-break — produces two orderings that are each internally
+consistent, each fully tested by their own suite, and different from each other. The symptom is a
+program that returns rows in a different order depending on whether it sorted on the way out of the
+file or afterwards, with nothing reporting a problem.
+
+**Covered by** `pf_argsort matches a read-time sort_by=` (`test/test_sorting.f90`), which is the
+only test in either suite that compares the two paths against each other rather than against its
+own expectations. Its shape is what matters and must be preserved if it is ever rewritten:
+
+- **It sorts the same values twice, by different routes** — once by writing them to a file and
+  reading it back with `sort_by=`, once by `pf_argsort` in memory — and asserts the two row orders
+  are identical. Asserting either one against a hand-written expected order would let both drift
+  together.
+- **The fixture contains ties** (three equal values). Without them the test passes against any
+  correct sort of distinct values and says nothing about stability, which is where two comparators
+  most easily disagree while both looking right.
+- **The `id` column is `id(k) == k`**, so the reader's own output *is* the permutation it applied
+  and the comparison needs nothing decoded from the reader beyond it.
+
+**What this still forbids:** do not give any sorting entry point its own comparison logic. New
+options belong at the Fortran layer, above `sort_compare_key`, and must not change the default
+ordering. The single-key one-shot C entry points
+(`parquet_sort_argsort_*`/`parquet_sort_is_sorted_*`) exist to avoid a *copy*, not to avoid the
+comparator — they route through it exactly as the multi-key builder does, and a future fourth entry
+point must too.
+

@@ -396,6 +396,20 @@ program error_scenarios
         call scenario_filter_row_element_mode_no_whole_column_read()
     case ("filter_scoped_reads_no_whole_column")
         call scenario_filter_scoped_reads_no_whole_column()
+    case ("sorting_permute_index_out_of_range")
+        call scenario_sorting_permute_index_out_of_range()
+    case ("sorting_permute_duplicate_index")
+        call scenario_sorting_permute_duplicate_index()
+    case ("sorting_permute_length_mismatch")
+        call scenario_sorting_permute_length_mismatch()
+    case ("sorting_valid_length_mismatch")
+        call scenario_sorting_valid_length_mismatch()
+    case ("sorting_keys_row_count_mismatch")
+        call scenario_sorting_keys_row_count_mismatch()
+    case ("sorting_keys_empty")
+        call scenario_sorting_keys_empty()
+    case ("sorting_column_vector")
+        call scenario_sorting_column_vector()
     case ("sort_unknown_column")
         call scenario_sort_unknown_column()
     case ("sort_vector_column")
@@ -11061,5 +11075,72 @@ contains
         call plain%clone(ext)   ! -> aborts
         print '(a,i0)', "unexpectedly cloned into another table type, ncols=", ext%ncols()
     end subroutine scenario_table_clone_type_mismatch
+
+    ! ---- parquet_sorting (pf_argsort / pf_sort / pf_permute / pf_is_sorted) ----
+
+    !> An index outside 1..n would read past the array being permuted. Caught before anything is
+    !! written, so the array is never left half-rearranged.
+    subroutine scenario_sorting_permute_index_out_of_range()
+        integer(int32) :: v(4) = [10, 20, 30, 40]
+        integer(int32) :: perm(4) = [1, 2, 9, 4]
+        call pf_permute(v, perm)   ! -> aborts (9 is outside 1..4)
+        print '(a,i0)', "unexpectedly permuted by an out-of-range index, v(1)=", v(1)
+    end subroutine scenario_sorting_permute_index_out_of_range
+
+    !> A repeated index is the dangerous case: it is in range, so nothing crashes -- the array
+    !! simply ends up with one element duplicated and another silently dropped. This is the whole
+    !! reason pf_permute validates by default rather than trusting its caller.
+    subroutine scenario_sorting_permute_duplicate_index()
+        integer(int32) :: v(4) = [10, 20, 30, 40]
+        integer(int32) :: perm(4) = [1, 2, 2, 4]
+        call pf_permute(v, perm)   ! -> aborts (index 2 appears twice)
+        print '(a,i0)', "unexpectedly permuted by a duplicated index, v(3)=", v(3)
+    end subroutine scenario_sorting_permute_duplicate_index
+
+    !> A permutation of the wrong length cannot describe this array at all.
+    subroutine scenario_sorting_permute_length_mismatch()
+        integer(int32) :: v(4) = [10, 20, 30, 40]
+        integer(int32) :: perm(3) = [1, 2, 3]
+        call pf_permute(v, perm)   ! -> aborts (3 indices for 4 values)
+        print '(a,i0)', "unexpectedly permuted by a short permutation, v(1)=", v(1)
+    end subroutine scenario_sorting_permute_length_mismatch
+
+    !> An is_valid mask of the wrong length would silently mark the wrong rows null.
+    subroutine scenario_sorting_valid_length_mismatch()
+        integer(int32) :: v(4) = [10, 20, 30, 40]
+        logical :: ok(3) = [.true., .false., .true.]
+        integer(int32), allocatable :: perm(:)
+        call pf_argsort(v, perm, is_valid=ok)   ! -> aborts (3 flags for 4 values)
+        print '(a,i0)', "unexpectedly sorted with a short is_valid mask, size=", size(perm)
+    end subroutine scenario_sorting_valid_length_mismatch
+
+    !> A pf_sort_keys whose keys describe different row counts cannot be applied to anything.
+    subroutine scenario_sorting_keys_row_count_mismatch()
+        type(pf_sort_keys) :: k
+        integer(int32) :: a(4) = [1, 2, 3, 4]
+        integer(int32) :: b(3) = [1, 2, 3]
+        call k%add(a)
+        call k%add(b)   ! -> aborts (3 rows where the first key has 4)
+        print '(a,i0)', "unexpectedly combined keys of different lengths, nkeys=", k%nkeys_added()
+    end subroutine scenario_sorting_keys_row_count_mismatch
+
+    !> Sorting by an empty key list has no defined answer; returning the identity would quietly
+    !! look like a successful sort.
+    subroutine scenario_sorting_keys_empty()
+        type(pf_sort_keys) :: k
+        integer(int32), allocatable :: perm(:)
+        call pf_argsort(k, perm)   ! -> aborts (no key added)
+        print '(a,i0)', "unexpectedly sorted an empty key list, size=", size(perm)
+    end subroutine scenario_sorting_keys_empty
+
+    !> A vector column has no defined order on a whole row, so it cannot be a sort key -- the
+    !! same rule parquet_table%sort_by applies, enforced here for a bare parquet_column.
+    subroutine scenario_sorting_column_vector()
+        type(parquet_column) :: col
+        integer(int32), allocatable :: perm(:)
+        call col%init(PK_INT32_VEC, 3_int64, width=2)
+        call pf_argsort(col, perm)   ! -> aborts (a vector column cannot be a sort key)
+        print '(a,i0)', "unexpectedly sorted a vector column, size=", size(perm)
+    end subroutine scenario_sorting_column_vector
 
 end program error_scenarios

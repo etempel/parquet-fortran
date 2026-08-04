@@ -616,6 +616,13 @@ def gen_table_type():
     w("        !! `parquet_string_column` pointer aliases a PK_STRING column's packed store: read")
     w("        !! it and edit its values in place, but do NOT change its length or element count")
     w("        !! through the pointer -- the column's own row count would no longer describe it.")
+    w("        !!")
+    w("        !! For the same reason, do NOT REORDER a column through this pointer -- in particular")
+    w("        !! `call pf_permute(p, perm)`, which compiles and runs happily. It reorders that one")
+    w("        !! column and leaves every other column where it was, silently breaking the row")
+    w("        !! correspondence, and nothing detects it: the row count is unchanged and every later")
+    w("        !! read returns values that are individually valid and jointly wrong. Use `%sort_by`,")
+    w("        !! which reorders every column together.")
     w("        generic :: col => " + wrap_list([f"col_ptr_{k[0]}" for k in PTR_KINDS] + ["col_ptr_strcol"], 12,
                                                 first_prefix=len("        generic :: col => ")))
     # get

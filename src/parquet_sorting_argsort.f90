@@ -1,0 +1,501 @@
+!===========================================
+! Author: Elmo Tempel (elmo.tempel@ut.ee)
+!===========================================
+!
+! GENERATED FILE -- DO NOT EDIT BY HAND.
+! Regenerate with:  tools/generate_parquet_sorting.py
+! The type table lives in that script; edit it there, not here.
+!
+!> `pf_argsort` (the permutation that would sort an array) and `pf_sort` (an independent sorted
+!! copy), over every supported element type.
+!!
+!! Both are thin: they extract the values into the engine's canonical key form
+!! (`parquet_sorting_keys`), run the engine, and -- for `pf_sort` -- gather the result. No ordering
+!! decision is made here.
+!!
+!! **The int32 permutation forms exist because a caller with a default-kind `INTEGER` should not be
+!! forced to widen one** (CLAUDE.md's "Public numeric arguments"). They compute in int64 and narrow
+!! at the end, aborting rather than truncating when the array is longer than `huge(1_int32)`.
+submodule (parquet_sorting) parquet_sorting_argsort
+    implicit none
+    !
+contains
+    !
+    module procedure argsort_i32_i32
+        type(sort_key_buf), allocatable :: buf(:)
+        logical :: desc, nlo
+        integer(int64), allocatable :: perm64(:)
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        call extract_i32(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64)
+        call narrow_perm(perm64, "pf_argsort", perm)
+    end procedure argsort_i32_i32
+    !
+    module procedure argsort_i32_i64
+        type(sort_key_buf), allocatable :: buf(:)
+        logical :: desc, nlo
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        call extract_i32(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm)
+    end procedure argsort_i32_i64
+    !
+    module procedure argsort_i64_i32
+        type(sort_key_buf), allocatable :: buf(:)
+        logical :: desc, nlo
+        integer(int64), allocatable :: perm64(:)
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        call extract_i64(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64)
+        call narrow_perm(perm64, "pf_argsort", perm)
+    end procedure argsort_i64_i32
+    !
+    module procedure argsort_i64_i64
+        type(sort_key_buf), allocatable :: buf(:)
+        logical :: desc, nlo
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        call extract_i64(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm)
+    end procedure argsort_i64_i64
+    !
+    module procedure argsort_f32_i32
+        type(sort_key_buf), allocatable :: buf(:)
+        logical :: desc, nlo
+        integer(int64), allocatable :: perm64(:)
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        call extract_f32(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64)
+        call narrow_perm(perm64, "pf_argsort", perm)
+    end procedure argsort_f32_i32
+    !
+    module procedure argsort_f32_i64
+        type(sort_key_buf), allocatable :: buf(:)
+        logical :: desc, nlo
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        call extract_f32(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm)
+    end procedure argsort_f32_i64
+    !
+    module procedure argsort_f64_i32
+        type(sort_key_buf), allocatable :: buf(:)
+        logical :: desc, nlo
+        integer(int64), allocatable :: perm64(:)
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        call extract_f64(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64)
+        call narrow_perm(perm64, "pf_argsort", perm)
+    end procedure argsort_f64_i32
+    !
+    module procedure argsort_f64_i64
+        type(sort_key_buf), allocatable :: buf(:)
+        logical :: desc, nlo
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        call extract_f64(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm)
+    end procedure argsort_f64_i64
+    !
+    module procedure argsort_bool_i32
+        type(sort_key_buf), allocatable :: buf(:)
+        logical :: desc, nlo
+        integer(int64), allocatable :: perm64(:)
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        call extract_bool(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64)
+        call narrow_perm(perm64, "pf_argsort", perm)
+    end procedure argsort_bool_i32
+    !
+    module procedure argsort_bool_i64
+        type(sort_key_buf), allocatable :: buf(:)
+        logical :: desc, nlo
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        call extract_bool(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm)
+    end procedure argsort_bool_i64
+    !
+    module procedure argsort_chr_i32
+        type(sort_key_buf), allocatable :: buf(:)
+        logical :: desc, nlo
+        integer(int64), allocatable :: perm64(:)
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        call extract_chr(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64)
+        call narrow_perm(perm64, "pf_argsort", perm)
+    end procedure argsort_chr_i32
+    !
+    module procedure argsort_chr_i64
+        type(sort_key_buf), allocatable :: buf(:)
+        logical :: desc, nlo
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        call extract_chr(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm)
+    end procedure argsort_chr_i64
+    !
+    module procedure argsort_date_i32
+        type(sort_key_buf), allocatable :: buf(:)
+        logical :: desc, nlo
+        integer(int64), allocatable :: perm64(:)
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        call extract_date(values, buf, desc, nlo, "pf_argsort")
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64)
+        call narrow_perm(perm64, "pf_argsort", perm)
+    end procedure argsort_date_i32
+    !
+    module procedure argsort_date_i64
+        type(sort_key_buf), allocatable :: buf(:)
+        logical :: desc, nlo
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        call extract_date(values, buf, desc, nlo, "pf_argsort")
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm)
+    end procedure argsort_date_i64
+    !
+    module procedure argsort_time_i32
+        type(sort_key_buf), allocatable :: buf(:)
+        logical :: desc, nlo
+        integer(int64), allocatable :: perm64(:)
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        call extract_time(values, buf, desc, nlo, "pf_argsort")
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64)
+        call narrow_perm(perm64, "pf_argsort", perm)
+    end procedure argsort_time_i32
+    !
+    module procedure argsort_time_i64
+        type(sort_key_buf), allocatable :: buf(:)
+        logical :: desc, nlo
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        call extract_time(values, buf, desc, nlo, "pf_argsort")
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm)
+    end procedure argsort_time_i64
+    !
+    module procedure argsort_ts_i32
+        type(sort_key_buf), allocatable :: buf(:)
+        logical :: desc, nlo
+        integer(int64), allocatable :: perm64(:)
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        call extract_ts(values, buf, desc, nlo, "pf_argsort")
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64)
+        call narrow_perm(perm64, "pf_argsort", perm)
+    end procedure argsort_ts_i32
+    !
+    module procedure argsort_ts_i64
+        type(sort_key_buf), allocatable :: buf(:)
+        logical :: desc, nlo
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        call extract_ts(values, buf, desc, nlo, "pf_argsort")
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm)
+    end procedure argsort_ts_i64
+    !
+    module procedure argsort_strcol_i32
+        type(sort_key_buf), allocatable :: buf(:)
+        logical :: desc, nlo
+        integer(int64), allocatable :: perm64(:)
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        call extract_strcol(values, buf, desc, nlo, "pf_argsort")
+        call drive_engine(buf, values%size(), "pf_argsort", perm64)
+        call narrow_perm(perm64, "pf_argsort", perm)
+    end procedure argsort_strcol_i32
+    !
+    module procedure argsort_strcol_i64
+        type(sort_key_buf), allocatable :: buf(:)
+        logical :: desc, nlo
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        call extract_strcol(values, buf, desc, nlo, "pf_argsort")
+        call drive_engine(buf, values%size(), "pf_argsort", perm)
+    end procedure argsort_strcol_i64
+    !
+    module procedure argsort_col_i32
+        type(sort_key_buf), allocatable :: buf(:)
+        logical :: desc, nlo
+        integer(int64), allocatable :: perm64(:)
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        call extract_col(values, buf, desc, nlo, "pf_argsort")
+        call drive_engine(buf, values%length(), "pf_argsort", perm64)
+        call narrow_perm(perm64, "pf_argsort", perm)
+    end procedure argsort_col_i32
+    !
+    module procedure argsort_col_i64
+        type(sort_key_buf), allocatable :: buf(:)
+        logical :: desc, nlo
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        call extract_col(values, buf, desc, nlo, "pf_argsort")
+        call drive_engine(buf, values%length(), "pf_argsort", perm)
+    end procedure argsort_col_i64
+    !
+    module procedure argsort_keys_i32
+        integer(int64), allocatable :: perm64(:)
+        !
+        if (keys%nkeys < 1) then
+            error stop EP // "pf_argsort: this pf_sort_keys has no key; " // &
+                "call keys%add(...) at least once before sorting"
+        end if
+        call drive_engine(keys%keys(1:keys%nkeys), keys%nrows, "pf_argsort", perm64)
+        call narrow_perm(perm64, "pf_argsort", perm)
+    end procedure argsort_keys_i32
+    !
+    module procedure argsort_keys_i64
+        !
+        if (keys%nkeys < 1) then
+            error stop EP // "pf_argsort: this pf_sort_keys has no key; " // &
+                "call keys%add(...) at least once before sorting"
+        end if
+        call drive_engine(keys%keys(1:keys%nkeys), keys%nrows, "pf_argsort", perm)
+    end procedure argsort_keys_i64
+    !
+    module procedure sort_i32
+        type(sort_key_buf), allocatable :: buf(:)
+        integer(int64), allocatable :: perm(:)
+        integer(int64) :: k, n
+        logical :: desc, nlo
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        n = size(values, kind=int64)
+        call extract_i32(values, buf, desc, nlo, "pf_sort", is_valid=is_valid)
+        call drive_engine(buf, n, "pf_sort", perm)
+        allocate(sorted(n))
+        do k = 1_int64, n
+            sorted(k) = values(perm(k))
+        end do
+    end procedure sort_i32
+    !
+    module procedure sort_i64
+        type(sort_key_buf), allocatable :: buf(:)
+        integer(int64), allocatable :: perm(:)
+        integer(int64) :: k, n
+        logical :: desc, nlo
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        n = size(values, kind=int64)
+        call extract_i64(values, buf, desc, nlo, "pf_sort", is_valid=is_valid)
+        call drive_engine(buf, n, "pf_sort", perm)
+        allocate(sorted(n))
+        do k = 1_int64, n
+            sorted(k) = values(perm(k))
+        end do
+    end procedure sort_i64
+    !
+    module procedure sort_f32
+        type(sort_key_buf), allocatable :: buf(:)
+        integer(int64), allocatable :: perm(:)
+        integer(int64) :: k, n
+        logical :: desc, nlo
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        n = size(values, kind=int64)
+        call extract_f32(values, buf, desc, nlo, "pf_sort", is_valid=is_valid)
+        call drive_engine(buf, n, "pf_sort", perm)
+        allocate(sorted(n))
+        do k = 1_int64, n
+            sorted(k) = values(perm(k))
+        end do
+    end procedure sort_f32
+    !
+    module procedure sort_f64
+        type(sort_key_buf), allocatable :: buf(:)
+        integer(int64), allocatable :: perm(:)
+        integer(int64) :: k, n
+        logical :: desc, nlo
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        n = size(values, kind=int64)
+        call extract_f64(values, buf, desc, nlo, "pf_sort", is_valid=is_valid)
+        call drive_engine(buf, n, "pf_sort", perm)
+        allocate(sorted(n))
+        do k = 1_int64, n
+            sorted(k) = values(perm(k))
+        end do
+    end procedure sort_f64
+    !
+    module procedure sort_bool
+        type(sort_key_buf), allocatable :: buf(:)
+        integer(int64), allocatable :: perm(:)
+        integer(int64) :: k, n
+        logical :: desc, nlo
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        n = size(values, kind=int64)
+        call extract_bool(values, buf, desc, nlo, "pf_sort", is_valid=is_valid)
+        call drive_engine(buf, n, "pf_sort", perm)
+        allocate(sorted(n))
+        do k = 1_int64, n
+            sorted(k) = values(perm(k))
+        end do
+    end procedure sort_bool
+    !
+    module procedure sort_chr
+        type(sort_key_buf), allocatable :: buf(:)
+        integer(int64), allocatable :: perm(:)
+        integer(int64) :: k, n
+        logical :: desc, nlo
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        n = size(values, kind=int64)
+        call extract_chr(values, buf, desc, nlo, "pf_sort", is_valid=is_valid)
+        call drive_engine(buf, n, "pf_sort", perm)
+        allocate(character(len=len(values)) :: sorted(n))
+        do k = 1_int64, n
+            sorted(k) = values(perm(k))
+        end do
+    end procedure sort_chr
+    !
+    module procedure sort_date
+        type(sort_key_buf), allocatable :: buf(:)
+        integer(int64), allocatable :: perm(:)
+        integer(int64) :: k, n
+        logical :: desc, nlo
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        n = size(values, kind=int64)
+        call extract_date(values, buf, desc, nlo, "pf_sort")
+        call drive_engine(buf, n, "pf_sort", perm)
+        allocate(sorted(n))
+        do k = 1_int64, n
+            sorted(k) = values(perm(k))
+        end do
+    end procedure sort_date
+    !
+    module procedure sort_time
+        type(sort_key_buf), allocatable :: buf(:)
+        integer(int64), allocatable :: perm(:)
+        integer(int64) :: k, n
+        logical :: desc, nlo
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        n = size(values, kind=int64)
+        call extract_time(values, buf, desc, nlo, "pf_sort")
+        call drive_engine(buf, n, "pf_sort", perm)
+        allocate(sorted(n))
+        do k = 1_int64, n
+            sorted(k) = values(perm(k))
+        end do
+    end procedure sort_time
+    !
+    module procedure sort_ts
+        type(sort_key_buf), allocatable :: buf(:)
+        integer(int64), allocatable :: perm(:)
+        integer(int64) :: k, n
+        logical :: desc, nlo
+        !
+        desc = .false.
+        if (present(descending)) desc = descending
+        nlo = .false.
+        if (present(nulls_first)) nlo = nulls_first
+        n = size(values, kind=int64)
+        call extract_ts(values, buf, desc, nlo, "pf_sort")
+        call drive_engine(buf, n, "pf_sort", perm)
+        allocate(sorted(n))
+        do k = 1_int64, n
+            sorted(k) = values(perm(k))
+        end do
+    end procedure sort_ts
+    !
+end submodule parquet_sorting_argsort ! GCOVR_EXCL_LINE

@@ -491,6 +491,13 @@ module parquet_tables
         !! `parquet_string_column` pointer aliases a PK_STRING column's packed store: read
         !! it and edit its values in place, but do NOT change its length or element count
         !! through the pointer -- the column's own row count would no longer describe it.
+        !!
+        !! For the same reason, do NOT REORDER a column through this pointer -- in particular
+        !! `call pf_permute(p, perm)`, which compiles and runs happily. It reorders that one
+        !! column and leaves every other column where it was, silently breaking the row
+        !! correspondence, and nothing detects it: the row count is unchanged and every later
+        !! read returns values that are individually valid and jointly wrong. Use `%sort_by`,
+        !! which reorders every column together.
         generic :: col => col_ptr_i32, col_ptr_i64, col_ptr_f32, col_ptr_f64, col_ptr_bool, col_ptr_date, col_ptr_time, &
             col_ptr_ts, col_ptr_i32v, col_ptr_i64v, col_ptr_f32v, col_ptr_f64v, col_ptr_boolv, col_ptr_datev, col_ptr_timev, &
             col_ptr_tsv, col_ptr_strcol

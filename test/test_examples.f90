@@ -51,7 +51,8 @@ contains
     !> Layers touched, one name each: parquet_core (parquet_reader/parquet_schema),
     !> parquet_tables (parquet_table), parquet_columns (PK_FLOAT64/parquet_kind_name),
     !> parquet_strings (parquet_string_column), parquet_temporal (parquet_timestamp),
-    !> parquet_maml_base (parquet_maml_file), and the facade's own parquet_get_version.
+    !> parquet_sorting (pf_argsort), parquet_maml_base (parquet_maml_file), and the facade's own
+    !> parquet_get_version.
     subroutine test_facade_covers_every_layer(error)
         type(error_type), allocatable, intent(out) :: error
         character(len=*), parameter :: out_file = "test_run/facade_covers_every_layer.parquet"
@@ -66,6 +67,7 @@ contains
         real(real64), allocatable :: got(:)
         integer(int64) :: nrows
         character(len=:), allocatable :: ver, kname
+        integer(int32), allocatable :: sort_perm(:)
         integer :: i
 
         do i = 1, size(mass)
@@ -94,6 +96,12 @@ contains
         call sc%append_string("facade")
         call check(error, sc%size() == 1_int64, &
             "parquet_string_column must be reachable from use parquet alone")
+        if (allocated(error)) return
+
+        ! parquet_sorting: the raw-array sorting layer, whose public names are pf_*, not parquet_*.
+        call pf_argsort([3_int32, 1_int32, 2_int32], sort_perm)
+        call check(error, all(sort_perm == [2, 3, 1]), &
+            "pf_argsort must be reachable from use parquet alone and order the values")
         if (allocated(error)) return
 
         ! parquet_temporal: one element type, carrying its own null state.

@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Sorting for plain Fortran arrays and column types**, in a new `parquet_sorting` module
+  re-exported by `use parquet`. `pf_argsort` returns the permutation that would sort an array,
+  `pf_sort` an independent sorted copy, `pf_permute` applies a permutation in place and
+  `pf_is_sorted` tests an existing order — over eleven element types: the four numeric kinds,
+  `logical`, `character(len=*)`, `parquet_date`/`parquet_time`/`parquet_timestamp`,
+  `parquet_string_column` and `parquet_column`. Multi-key sorting goes through `pf_sort_keys`
+  (`k%add(...)` once per key, keys of any mix of types, each with its own direction), since a
+  Fortran generic cannot offer "an optional second array of any type". These run on the **same C++
+  engine** as a read-time `parquet_open_reader(..., sort_by=)` and `parquet_table%sort_by`, so the
+  three can never disagree about null placement, NaN placement or tie order; every sort is stable,
+  `descending=` reverses the values without moving the null/NaN tiers, and the six types with no
+  null state of their own take an optional `is_valid=` mask. `pf_permute` validates that its
+  permutation really is one before writing anything, since an invalid one silently duplicates some
+  elements and drops others; pass `assume_valid=.true.` to skip that for a permutation from
+  `pf_argsort`. Public names here carry a `pf_` prefix rather than `parquet_`, because their
+  subject is not a parquet file. See [Sorting arrays and columns](doc/pages/sorting.md).
 - **Generated table types.** `tools/generate_user_table_code.py` turns a MAML schema into a named
   `parquet_table` extension with one accessor per declared column, so a program that always reads
   the same columns can write `t%ra()` instead of naming strings everywhere. Each accessor comes in

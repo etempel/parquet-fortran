@@ -58,7 +58,9 @@ module parquet_bindings
     public :: c_reader_set_sort, parquet_reader_has_sort
     public :: parquet_sort_builder_new, parquet_sort_builder_add_key_int64
     public :: parquet_sort_builder_add_key_double, parquet_sort_builder_add_key_string
-    public :: parquet_sort_builder_build, parquet_sort_builder_free
+    public :: parquet_sort_builder_build, parquet_sort_builder_is_sorted, parquet_sort_builder_free
+    public :: parquet_sort_argsort_int64, parquet_sort_argsort_double, parquet_sort_argsort_string
+    public :: parquet_sort_is_sorted_int64, parquet_sort_is_sorted_double, parquet_sort_is_sorted_string
     public :: parquet_reader_set_sample
     public :: parquet_reader_set_qc
     public :: parquet_read_int32_column, parquet_read_int64_column
@@ -665,12 +667,117 @@ module parquet_bindings
             integer(c_long_long) :: status !! 0 on success, 1 when no key was added.
         end function
 
+        !> Whether every row is already in the stated order under the full key
+        !> list. The multi-key counterpart of `parquet_sort_is_sorted_*`, needed
+        !> because a `parquet_timestamp` binds as TWO integer keys, so no
+        !> single-key entry point can answer the question for one. O(n) with an
+        !> early exit, using the same comparator the sort does.
+        function parquet_sort_builder_is_sorted(builder) &
+                bind(C, name="parquet_sort_builder_is_sorted") result(sorted)
+            import
+            type(c_ptr), value :: builder !! builder handle.
+            integer(c_long_long) :: sorted !! 1 in order, 0 not, -1 when no key was added.
+        end function
+
         !> Releases a sort builder and everything it copied.
         subroutine parquet_sort_builder_free(builder) &
                 bind(C, name="parquet_sort_builder_free")
             import
             type(c_ptr), value :: builder !! builder handle.
         end subroutine
+
+        !> One-shot single-key argsort over an integer key: writes the 1-based
+        !> permutation of `values` into `perm`. Boolean and every temporal kind
+        !> come through here too, reduced to their stored integers. `valid` may
+        !> be C_NULL_PTR for a key with no nulls, which is the engine's own fast
+        !> path.
+        !>
+        !> Unlike the builder above this BORROWS `values` rather than copying
+        !> it, which it can because nothing outlives the call. The actual
+        !> argument must therefore be contiguous -- a non-contiguous section
+        !> would be passed as a compiler temporary, which is fine here (the
+        !> temporary lives for the call) but would not be on the builder.
+        subroutine parquet_sort_argsort_int64(n, values, valid, descending, nulls_first, perm) &
+                bind(C, name="parquet_sort_argsort_int64")
+            import
+            integer(c_long_long), value :: n !! number of rows.
+            integer(c_long_long) :: values(*) !! one value per row.
+            type(c_ptr), value :: valid !! int8 per row (1 = valid), or C_NULL_PTR.
+            integer(c_int8_t), value :: descending !! nonzero for descending order.
+            integer(c_int8_t), value :: nulls_first !! nonzero to place nulls before values.
+            integer(c_long_long) :: perm(*) !! receives the 1-based permutation.
+        end subroutine
+
+        !> One-shot single-key argsort over a floating-point key. NaNs are
+        !> ordinary values and are placed by the engine's own tier rule.
+        subroutine parquet_sort_argsort_double(n, values, valid, descending, nulls_first, perm) &
+                bind(C, name="parquet_sort_argsort_double")
+            import
+            integer(c_long_long), value :: n !! number of rows.
+            real(c_double) :: values(*) !! one value per row.
+            type(c_ptr), value :: valid !! int8 per row (1 = valid), or C_NULL_PTR.
+            integer(c_int8_t), value :: descending !! nonzero for descending order.
+            integer(c_int8_t), value :: nulls_first !! nonzero to place nulls before values.
+            integer(c_long_long) :: perm(*) !! receives the 1-based permutation.
+        end subroutine
+
+        !> One-shot single-key argsort over a string key, from a packed
+        !> offsets/data pair: row i is `data(offsets(i) .. offsets(i+1)-1)`, so
+        !> `offsets` has n+1 entries and both are 0-based on the C side. The
+        !> bytes are NOT copied -- they are read in place for the duration of
+        !> the call.
+        subroutine parquet_sort_argsort_string(n, offsets, data, valid, descending, nulls_first, perm) &
+                bind(C, name="parquet_sort_argsort_string")
+            import
+            integer(c_long_long), value :: n !! number of rows.
+            integer(c_long_long) :: offsets(*) !! n+1 byte offsets into `data`.
+            character(kind=c_char) :: data(*) !! the packed bytes of every row.
+            type(c_ptr), value :: valid !! int8 per row (1 = valid), or C_NULL_PTR.
+            integer(c_int8_t), value :: descending !! nonzero for descending order.
+            integer(c_int8_t), value :: nulls_first !! nonzero to place nulls before values.
+            integer(c_long_long) :: perm(*) !! receives the 1-based permutation.
+        end subroutine
+
+        !> Whether an integer key is already in the stated order (1) or not (0).
+        !> Uses the SAME comparator the sort does, minus its row-index
+        !> tiebreaker, so the two can never disagree about nulls, NaNs or
+        !> direction on one array. O(n) with an early exit, and no copy.
+        function parquet_sort_is_sorted_int64(n, values, valid, descending, nulls_first) &
+                bind(C, name="parquet_sort_is_sorted_int64") result(sorted)
+            import
+            integer(c_long_long), value :: n !! number of rows.
+            integer(c_long_long) :: values(*) !! one value per row.
+            type(c_ptr), value :: valid !! int8 per row (1 = valid), or C_NULL_PTR.
+            integer(c_int8_t), value :: descending !! nonzero for descending order.
+            integer(c_int8_t), value :: nulls_first !! nonzero to place nulls before values.
+            integer(c_long_long) :: sorted !! 1 when in order, 0 otherwise.
+        end function
+
+        !> Whether a floating-point key is already in the stated order.
+        function parquet_sort_is_sorted_double(n, values, valid, descending, nulls_first) &
+                bind(C, name="parquet_sort_is_sorted_double") result(sorted)
+            import
+            integer(c_long_long), value :: n !! number of rows.
+            real(c_double) :: values(*) !! one value per row.
+            type(c_ptr), value :: valid !! int8 per row (1 = valid), or C_NULL_PTR.
+            integer(c_int8_t), value :: descending !! nonzero for descending order.
+            integer(c_int8_t), value :: nulls_first !! nonzero to place nulls before values.
+            integer(c_long_long) :: sorted !! 1 when in order, 0 otherwise.
+        end function
+
+        !> Whether a string key is already in the stated order. Same packed
+        !> offsets/data layout as `parquet_sort_argsort_string`.
+        function parquet_sort_is_sorted_string(n, offsets, data, valid, descending, nulls_first) &
+                bind(C, name="parquet_sort_is_sorted_string") result(sorted)
+            import
+            integer(c_long_long), value :: n !! number of rows.
+            integer(c_long_long) :: offsets(*) !! n+1 byte offsets into `data`.
+            character(kind=c_char) :: data(*) !! the packed bytes of every row.
+            type(c_ptr), value :: valid !! int8 per row (1 = valid), or C_NULL_PTR.
+            integer(c_int8_t), value :: descending !! nonzero for descending order.
+            integer(c_int8_t), value :: nulls_first !! nonzero to place nulls before values.
+            integer(c_long_long) :: sorted !! 1 when in order, 0 otherwise.
+        end function
 
         !> Whether any column of `reader` has already been decoded into its
         !> column cache (1) or not (0) -- the guard parquet_reader_set_filter

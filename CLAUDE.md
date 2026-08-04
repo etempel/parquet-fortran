@@ -543,7 +543,10 @@ template inside the script — and re-run it. Currently generated: `src/parquet_
 `tools/generate_parquet_columns.py`, whose kind table is the single place a supported column kind is
 declared), and `src/parquet_tables.f90`, `src/parquet_tables_access.f90`,
 `src/parquet_tables_addcol.f90`, `src/parquet_tables_materialize.f90` (from
-`tools/generate_parquet_tables.py`, which imports that same kind table). `src/parquet_table_example.f90` is emitted by
+`tools/generate_parquet_tables.py`, which imports that same kind table), and `src/parquet_sorting.f90`,
+`src/parquet_sorting_keys.f90`, `src/parquet_sorting_argsort.f90`, `src/parquet_sorting_permute.f90`
+(from `tools/generate_parquet_sorting.py`, which imports the nine SCALAR rows of that same kind table
+and adds the three types that are not `parquet_column` storage kinds at all). `src/parquet_table_example.f90` is emitted by
 `tools/generate_user_table_code.py` from `table_types/maml_example4.maml` (see "Role-A MAMLs live in
 `table_types/`" below) — it ships as a worked example and nothing else in the library uses it, but it
 is committed and `--check`ed exactly like the rest. **`src/parquet_tables.f90` is
@@ -564,6 +567,24 @@ Working rules for this class of file:
 - **Sibling generators should share one source of truth rather than each carrying its own copy.** A
   second generator over the same kind table imports it from the existing script instead of duplicating
   it; two drifting copies of a kind list is a much worse failure than one slightly awkward import.
+  **A CONSUMER-FACING generator cannot do that**, because it is copied into projects where this
+  repository's files do not exist — so it bakes the copy in and has `--self-test` cross-check it
+  against the real source *when that source is present*, which is always here and never downstream.
+  `tools/generate_user_table_code.py` carries `parquet_table`'s ~264 type-bound procedure names
+  that way (a field name colliding with one cannot become an accessor), so **adding a binding to
+  `parquet_table` fails the lint stage until that list is updated** — which is the point: the
+  staleness is closed by a test rather than by remembering.
+- **A generator whose output is USER-EDITABLE needs marker-delimited windows, and three rules
+  that make them safe.** Most generated files here are machine-owned; `tools/generate_user_table_code.py`
+  emits a module a user is expected to extend, which is a different problem. The windows are the
+  generator's **input**, not decoration — it lifts them out of the existing file, re-emits
+  everything else, and puts them back; it also *reads* one of them to write the matching
+  `%clone`/reset statements. So: a malformed marker set (missing, duplicated, unbalanced) must be
+  refused **before** anything is rewritten, since that is the one state in which regenerating
+  destroys user code; `--check` belongs in CI, because an edit outside a window otherwise works
+  perfectly until the next regeneration silently deletes it; and the header carries a digest of the
+  source input, so `--check` can say "you edited generated text" rather than "this file is stale"
+  — without it both look identical and the message has to guess. See `feature_risks.md` Risk-32.
 - **A generator that is maintainer-only belongs in `tools/prep_fpm_publish.sh`'s `REMOVE_PATHS`**
   (downstream projects consume the committed output). One that is consumer-facing — like
   `tools/generate_parquet_maml.sh`, which downstream projects run on their own schemas — does not. See
@@ -700,6 +721,22 @@ Follow these when adding new public API, types, or internal helpers:
 - **Public module-level API** (anything in `src/parquet_core.f90`'s `public ::` list — functions,
   subroutines, types) always carries the `parquet_` prefix, e.g. `parquet_get_metadata`,
   `parquet_open_reader`, `parquet_schema`.
+- **One prefix per module, applied to everything public in it — and `parquet_` is not the only
+  one.** `parquet_` is for the parquet-file-facing modules (the reader/writer/schema/table/element
+  domains: everything listed under "Nested submodule tree"). **`pf_`** — for parquet-fortran, the
+  library as a whole — is for *library-wide utility* modules whose subject is not a parquet file at
+  all. `parquet_sorting` (a general-purpose sorting API over plain Fortran arrays, see
+  `feature_sort.md`) is the first and currently only `pf_` module: its procedures are `pf_sort`,
+  `pf_argsort`, `pf_permute`, …, and its type is `pf_sort_keys`. **Do not "correct" a `pf_` name to
+  `parquet_`** — nothing in `tools/check_source_conventions.py` enforces either prefix, so the rule
+  lives here and nowhere else. Two things this rule is *not*: it is not a licence to mix prefixes
+  inside one module (pick one and apply it to every public name there), and it is **not** a reason
+  to rename the existing library-level `parquet_`-named procedures (`parquet_get_version`,
+  `parquet_kind_name`), which are deliberately left alone — renaming them would be a public API
+  break for a naming preference.
+  Note the constraint that shapes such a module's own name: **a module cannot share its name with a
+  procedure it declares**, which is why the module is `parquet_sorting` and not `parquet_sort` (see
+  the `parquet_strings`/`parquet_string` bullet further down).
 - **Type-bound procedures** (`schema%init`, `schema%add_field`, `reader%...`) do *not* need a
   `parquet_` prefix — the type itself namespaces them. If the natural short name collides
   with another type's backing implementation, keep the short name as the type-bound binding
@@ -730,6 +767,12 @@ Follow these when adding new public API, types, or internal helpers:
   it — e.g. `parquet_temporal` for `parquet_date`/`parquet_time`/`parquet_timestamp`. See "The
   `parquet_temporal` module" below for the reasoning and the sibling modules (`parquet_map`,
   `parquet_list`) this leaves room for.
+
+- **A module cannot share its name with a type (or a procedure) it declares** — gfortran rejects
+  it outright. This has bitten twice: it is why the `parquet_strings` module is plural while its
+  type is `parquet_string` (see "The `parquet_strings` module" below for that instance), and it
+  constrains a generated table type's MAML, where `dataset:` names the module and `table:` derives
+  the type. Check the pair whenever you name a module after what it holds.
 
 When in doubt, grep for an existing analogous name before inventing a new convention.
 
@@ -1740,6 +1783,19 @@ change that invalidates it — watch for these triggers:
 - **A new maintainer/CI-only file lands at the repo root** (another CI config, another
   AI-instructions-style file, etc.) — same call: add to `REMOVE_PATHS` if it's not
   consumer-relevant.
+- **A new module is added to `src/`.** It must be named `parquet` or start with `parquet_`, and
+  **nothing on `main` will tell you otherwise**: `fpm.toml` carries `module-naming = false` there,
+  so a badly-named module builds, tests and ships in the working tree indefinitely — the
+  constraint only appears when this script flips the setting to `"parquet"` for the registry,
+  which may be months later and after the name is already in downstream code. Confirmed by
+  flipping the setting and adding a `module example` to `src/`:
+  `ERROR: Module example in ./src/example.f90 does not match its package name (parquet-fortran)
+  or custom prefix (parquet)`. **`test/*.f90` is exempt** — test modules are not checked, which is
+  why `test_table` and friends are fine and why the asymmetry is easy to mistake for "the rule
+  does not apply to us". This matters most for a *generated* module, where the name comes from
+  data rather than from a person: `tools/generate_user_table_code.py` takes it from its MAML's
+  `dataset:` key, so a schema naming a module `example` produces a package that cannot be
+  published.
 - **Any `REMOVE_PATHS` entry is renamed or moved.** Update the path string. The script's
   pre-flight existence check turns a stale entry into an immediate, zero-side-effect failure
   rather than a silently-wrong tarball — but only once you actually run it; nothing catches this

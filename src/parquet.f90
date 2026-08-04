@@ -16,6 +16,8 @@
 !>   * `parquet_strings` -- `parquet_string_column`/`parquet_string`.
 !>   * `parquet_temporal`-- `parquet_date`/`parquet_time`/`parquet_timestamp`
 !>                          and the `parquet_unit_*`/`parquet_ns_*` constants.
+!>   * `parquet_sorting` -- `pf_sort`/`pf_argsort`/`pf_permute`/`pf_is_sorted`
+!>                          and the `pf_sort_keys` multi-key builder.
 !>   * `parquet_maml_base` -- `parquet_maml_file`, for embedded MAML schemas.
 !>
 !> Those modules remain individually usable (`use parquet_temporal` still works
@@ -33,6 +35,7 @@ module parquet
     use parquet_columns
     use parquet_strings
     use parquet_temporal
+    use parquet_sorting
     ! parquet_maml_base is the one sibling imported with an `only:` list rather than in full. Its
     ! other public names (get_parquet_maml and the parquet_maml_maml_example* accessors) return
     ! THIS library's own embedded MAML test fixtures -- they were never part of the public surface,
@@ -52,7 +55,7 @@ module parquet
     private :: parquet_get_arrow_version, parquet_get_parquet_version
     private :: cversion
     !
-    character(len=*),parameter:: cversion = "v1.3.0 (2026-08-03)" !! version info
+    character(len=*),parameter:: cversion = "v1.4.0 (2026-08-04)" !! version info
 #ifndef RELEASE_VERSION
 #  define RELEASE_VERSION 0.1
 #endif

@@ -2,9 +2,9 @@
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
 !===========================================
 !
-!> Unit tests for a GENERATED table type: `parquet_table_example`, emitted from
+!> Unit tests for a GENERATED table type: `parquet_table_test`, emitted from
 !! `table_types/maml_example4.maml` by `tools/generate_user_table_code.py` into
-!! `test/parquet_table_test.f90`.
+!! `src/parquet_table_example.f90`.
 !!
 !! The generated module is committed and `--check`ed in CI, so this suite tests the code a
 !! downstream project would actually compile, not a hand-written approximation of it. Two things
@@ -13,7 +13,7 @@
 !! * **every emitted accessor shape works** -- scalar and vector, all nine data types, the whole
 !!   column / one row / a row range forms, both index kinds, and the two string forms. A generator
 !!   bug that only affects one shape has nowhere to hide;
-!! * **the user windows do their job** -- `test/parquet_table_test.f90`'s own `components` window
+!! * **the user windows do their job** -- `src/parquet_table_example.f90`'s own `components` window
 !!   carries a test-only parameter, so the round trip through `clone_extra`/`init_extra` that
 !!   `%clone` and `%init` depend on is exercised rather than described.
 !!
@@ -24,7 +24,7 @@
 !! would let one test truncate the file another is reading (CLAUDE.md, "Tests run concurrently").
 module test_table_codegen
     use parquet
-    use parquet_table_test, only : parquet_table_example
+    use parquet_table_example, only : parquet_table_test
     use parquet_columns, only : PK_INT64, PK_FLOAT64, PK_FLOAT32_VEC, PK_STRING
     use iso_fortran_env, only : int32, int64, real32, real64
     use testdrive, only : new_unittest, unittest_type, error_type, check
@@ -62,7 +62,11 @@ contains
             new_unittest("init_slice covers its row range and binds the same columns", &
                 test_init_slice), &
             new_unittest("a generated table writes itself and survives inherited mutations", &
-                test_write_and_mutate) &
+                test_write_and_mutate), &
+            new_unittest("every numeric/temporal field's five accessor forms agree", &
+                test_every_field_every_form), &
+            new_unittest("every constructor and both index kinds of init_empty are reachable", &
+                test_every_constructor) &
             ]
     end subroutine collect_tests_table_codegen
     !
@@ -131,7 +135,7 @@ contains
     !> Every predefined column is present and fully read by the time `%init` returns.
     subroutine test_init_binds_everything(error)
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_table_example) :: t
+        type(parquet_table_test) :: t
         character(len=*), parameter :: f = "test_run/codegen_init.parquet"
         character(len=:), allocatable :: names(:)
         integer :: i
@@ -154,7 +158,7 @@ contains
     !> The whole-column accessor of every emitted shape returns the right kind, rank and values.
     subroutine test_whole_column_accessors(error)
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_table_example) :: t
+        type(parquet_table_test) :: t
         character(len=*), parameter :: f = "test_run/codegen_whole.parquet"
         integer(int64), pointer :: p_uberid(:)
         integer(int32), pointer :: p_idx(:), p_counts(:,:)
@@ -226,7 +230,7 @@ contains
     !! coexist with the range form, since `%crd(3,6)` would then mean two different things.
     subroutine test_indexed_accessors(error)
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_table_example) :: t
+        type(parquet_table_test) :: t
         character(len=*), parameter :: f = "test_run/codegen_indexed.parquet"
         real(real64), pointer :: whole(:), one, rng(:)
         real(real32), pointer :: vwhole(:,:), vone(:), vrng(:,:)
@@ -266,12 +270,21 @@ contains
         if (allocated(error)) return
         call check(error, all(abs(vrng - vwhole(:, 2:4)) < 1.0e-5_real32), &
             "%crd(2,4) should be the same values as %crd()(:,2:4)")
+        if (allocated(error)) return
+        ! An EMPTY range is accepted and yields a zero-length pointer, matching Fortran's own
+        ! section rules -- the bounds guard returns before it can complain about `hi`.
+        rng => t%ra(3, 2)
+        call check(error, size(rng) == 0, "%ra(3,2) should be an empty, not an invalid, range")
+        if (allocated(error)) return
+        vrng => t%crd(3, 2)
+        call check(error, size(vrng, 2) == 0, &
+            "an empty range on a vector column should be empty too")
     end subroutine test_indexed_accessors
     !
     !> An accessor aliases the live storage, so writing through it changes the column.
     subroutine test_accessor_writes_through(error)
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_table_example) :: t
+        type(parquet_table_test) :: t
         character(len=*), parameter :: f = "test_run/codegen_write_through.parquet"
         real(real64), allocatable :: got(:)
         real(real64), pointer :: one
@@ -293,7 +306,7 @@ contains
     !! `%col` has no PK_STRING_VEC specific to alias.
     subroutine test_string_accessors(error)
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_table_example) :: t
+        type(parquet_table_test) :: t
         character(len=*), parameter :: f = "test_run/codegen_string.parquet"
         type(parquet_string_column), pointer :: store
         type(parquet_string) :: h
@@ -333,7 +346,7 @@ contains
     !> A `source: computed` column is created rather than read, with every row null.
     subroutine test_computed_column(error)
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_table_example) :: t
+        type(parquet_table_test) :: t
         character(len=*), parameter :: f = "test_run/codegen_computed.parquet"
         real(real64), pointer :: p(:)
         character(len=:), allocatable :: u
@@ -370,7 +383,7 @@ contains
     !! the hook itself. Mutation-test it by deleting the generated assignment: this must fail.
     subroutine test_clone_carries_user_state(error)
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_table_example) :: t, c, batch
+        type(parquet_table_test) :: t, c, batch
         character(len=*), parameter :: f = "test_run/codegen_clone.parquet"
         integer(int32), allocatable :: got(:)
         !
@@ -401,7 +414,7 @@ contains
     !! must be back at its declared default.
     subroutine test_init_resets_user_state(error)
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_table_example) :: t
+        type(parquet_table_test) :: t
         character(len=*), parameter :: f = "test_run/codegen_reset_a.parquet"
         character(len=*), parameter :: g = "test_run/codegen_reset_b.parquet"
         !
@@ -417,7 +430,7 @@ contains
     !> `%init_empty` builds the same columns with no file behind them.
     subroutine test_init_empty(error)
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_table_example) :: t, n
+        type(parquet_table_test) :: t, n
         real(real64), pointer :: p(:)
         integer :: i
         !
@@ -451,7 +464,7 @@ contains
     !> `%init_slice` covers its row range and binds the same columns.
     subroutine test_init_slice(error)
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_table_example) :: t
+        type(parquet_table_test) :: t
         character(len=*), parameter :: f = "test_run/codegen_slice.parquet"
         integer(int32), pointer :: p(:)
         !
@@ -474,7 +487,7 @@ contains
     !> A generated table is an ordinary `parquet_table` for everything it inherits.
     subroutine test_write_and_mutate(error)
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_table_example) :: t
+        type(parquet_table_test) :: t
         type(parquet_table) :: back
         character(len=*), parameter :: f = "test_run/codegen_rw_src.parquet"
         character(len=*), parameter :: g = "test_run/codegen_rw_out.parquet"
@@ -502,5 +515,215 @@ contains
         call check(error, all(p == [1_int32, 3_int32, 5_int32]), &
             "an accessor taken after a mutation should see the surviving rows")
     end subroutine test_write_and_mutate
+    !
+    !> Calls all five accessor forms on EVERY field the schema declares, not one representative
+    !! per shape class.
+    !!
+    !! The generated module lives in `src/`, so it is measured by `tools/coverage.sh` like the rest
+    !! of the library -- and a generator bug that reaches only, say, the int64 range form of a
+    !! logical vector column has nowhere to hide if every specific is called. Each form is checked
+    !! against the whole-column form, which is the one an earlier test already pinned to the file's
+    !! values, so this is a consistency sweep rather than a re-assertion of the data.
+    subroutine test_every_field_every_form(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table_test) :: t
+        character(len=*), parameter :: f = "test_run/codegen_all_forms.parquet"
+        integer(int64), pointer :: w_i64(:), o_i64, r_i64(:)
+        integer(int32), pointer :: w_i32(:), o_i32, r_i32(:)
+        logical, pointer :: w_b(:), o_b, r_b(:)
+        real(real64), pointer :: w_f64(:), o_f64, r_f64(:)
+        real(real32), pointer :: w_f32v(:,:), o_f32v(:), r_f32v(:,:)
+        integer(int32), pointer :: w_i32v(:,:), o_i32v(:), r_i32v(:,:)
+        logical, pointer :: w_bv(:,:), o_bv(:), r_bv(:,:)
+        type(parquet_date), pointer :: w_d(:), o_d, r_d(:)
+        type(parquet_time), pointer :: w_tm(:), o_tm, r_tm(:)
+        type(parquet_timestamp), pointer :: w_ts(:), o_ts, r_ts(:)
+        integer, parameter :: LO = 2, HI = 5
+        !
+        call write_codegen_fixture(f)
+        call t%init(f)
+        !
+        ! --- int64 scalar: uberid
+        w_i64 => t%uberid()
+        o_i64 => t%uberid(3);            call check(error, o_i64 == w_i64(3), "uberid(3)")
+        if (allocated(error)) return
+        o_i64 => t%uberid(3_int64);      call check(error, o_i64 == w_i64(3), "uberid(3_int64)")
+        if (allocated(error)) return
+        r_i64 => t%uberid(LO, HI);       call check(error, all(r_i64 == w_i64(LO:HI)), "uberid(lo,hi)")
+        if (allocated(error)) return
+        r_i64 => t%uberid(int(LO, int64), int(HI, int64))
+        call check(error, all(r_i64 == w_i64(LO:HI)), "uberid(lo,hi) int64")
+        if (allocated(error)) return
+        !
+        ! --- int32 scalar: idx
+        w_i32 => t%idx()
+        o_i32 => t%idx(3);               call check(error, o_i32 == w_i32(3), "idx(3)")
+        if (allocated(error)) return
+        o_i32 => t%idx(3_int64);         call check(error, o_i32 == w_i32(3), "idx(3_int64)")
+        if (allocated(error)) return
+        r_i32 => t%idx(LO, HI);          call check(error, all(r_i32 == w_i32(LO:HI)), "idx(lo,hi)")
+        if (allocated(error)) return
+        r_i32 => t%idx(int(LO, int64), int(HI, int64))
+        call check(error, all(r_i32 == w_i32(LO:HI)), "idx(lo,hi) int64")
+        if (allocated(error)) return
+        !
+        ! --- logical scalar: flag
+        w_b => t%flag()
+        o_b => t%flag(3);                call check(error, o_b .eqv. w_b(3), "flag(3)")
+        if (allocated(error)) return
+        o_b => t%flag(3_int64);          call check(error, o_b .eqv. w_b(3), "flag(3_int64)")
+        if (allocated(error)) return
+        r_b => t%flag(LO, HI);           call check(error, all(r_b .eqv. w_b(LO:HI)), "flag(lo,hi)")
+        if (allocated(error)) return
+        r_b => t%flag(int(LO, int64), int(HI, int64))
+        call check(error, all(r_b .eqv. w_b(LO:HI)), "flag(lo,hi) int64")
+        if (allocated(error)) return
+        !
+        ! --- float64 scalars: ra, dec, and the computed flux
+        call check_f64_forms(error, t%ra(), t%ra(3), t%ra(3_int64), t%ra(LO, HI), &
+            t%ra(int(LO, int64), int(HI, int64)), "ra")
+        if (allocated(error)) return
+        call check_f64_forms(error, t%dec(), t%dec(3), t%dec(3_int64), t%dec(LO, HI), &
+            t%dec(int(LO, int64), int(HI, int64)), "dec")
+        if (allocated(error)) return
+        call check_f64_forms(error, t%flux(), t%flux(3), t%flux(3_int64), t%flux(LO, HI), &
+            t%flux(int(LO, int64), int(HI, int64)), "flux")
+        if (allocated(error)) return
+        !
+        ! --- float32 vector: crd
+        w_f32v => t%crd()
+        o_f32v => t%crd(3)
+        call check(error, all(abs(o_f32v - w_f32v(:, 3)) < 1.0e-6_real32), "crd(3)")
+        if (allocated(error)) return
+        o_f32v => t%crd(3_int64)
+        call check(error, all(abs(o_f32v - w_f32v(:, 3)) < 1.0e-6_real32), "crd(3_int64)")
+        if (allocated(error)) return
+        r_f32v => t%crd(LO, HI)
+        call check(error, all(abs(r_f32v - w_f32v(:, LO:HI)) < 1.0e-6_real32), "crd(lo,hi)")
+        if (allocated(error)) return
+        r_f32v => t%crd(int(LO, int64), int(HI, int64))
+        call check(error, all(abs(r_f32v - w_f32v(:, LO:HI)) < 1.0e-6_real32), "crd(lo,hi) int64")
+        if (allocated(error)) return
+        !
+        ! --- int32 vector: counts
+        w_i32v => t%counts()
+        o_i32v => t%counts(3);           call check(error, all(o_i32v == w_i32v(:, 3)), "counts(3)")
+        if (allocated(error)) return
+        o_i32v => t%counts(3_int64);     call check(error, all(o_i32v == w_i32v(:, 3)), "counts(3_int64)")
+        if (allocated(error)) return
+        r_i32v => t%counts(LO, HI)
+        call check(error, all(r_i32v == w_i32v(:, LO:HI)), "counts(lo,hi)")
+        if (allocated(error)) return
+        r_i32v => t%counts(int(LO, int64), int(HI, int64))
+        call check(error, all(r_i32v == w_i32v(:, LO:HI)), "counts(lo,hi) int64")
+        if (allocated(error)) return
+        !
+        ! --- logical vector: passed
+        w_bv => t%passed()
+        o_bv => t%passed(3);             call check(error, all(o_bv .eqv. w_bv(:, 3)), "passed(3)")
+        if (allocated(error)) return
+        o_bv => t%passed(3_int64);       call check(error, all(o_bv .eqv. w_bv(:, 3)), "passed(3_int64)")
+        if (allocated(error)) return
+        r_bv => t%passed(LO, HI)
+        call check(error, all(r_bv .eqv. w_bv(:, LO:HI)), "passed(lo,hi)")
+        if (allocated(error)) return
+        r_bv => t%passed(int(LO, int64), int(HI, int64))
+        call check(error, all(r_bv .eqv. w_bv(:, LO:HI)), "passed(lo,hi) int64")
+        if (allocated(error)) return
+        !
+        ! --- the three temporal kinds, compared through their raw day/second counts
+        w_d => t%obsdate()
+        o_d => t%obsdate(3);             call check(error, o_d%raw() == w_d(3)%raw(), "obsdate(3)")
+        if (allocated(error)) return
+        o_d => t%obsdate(3_int64);       call check(error, o_d%raw() == w_d(3)%raw(), "obsdate(3_int64)")
+        if (allocated(error)) return
+        r_d => t%obsdate(LO, HI)
+        call check(error, all(r_d%raw() == w_d(LO:HI)%raw()), "obsdate(lo,hi)")
+        if (allocated(error)) return
+        r_d => t%obsdate(int(LO, int64), int(HI, int64))
+        call check(error, all(r_d%raw() == w_d(LO:HI)%raw()), "obsdate(lo,hi) int64")
+        if (allocated(error)) return
+        w_tm => t%obstime()
+        o_tm => t%obstime(3);            call check(error, o_tm%second() == w_tm(3)%second(), "obstime(3)")
+        if (allocated(error)) return
+        o_tm => t%obstime(3_int64);      call check(error, o_tm%second() == w_tm(3)%second(), "obstime(3_int64)")
+        if (allocated(error)) return
+        r_tm => t%obstime(LO, HI)
+        call check(error, size(r_tm) == HI - LO + 1, "obstime(lo,hi)")
+        if (allocated(error)) return
+        r_tm => t%obstime(int(LO, int64), int(HI, int64))
+        call check(error, size(r_tm) == HI - LO + 1, "obstime(lo,hi) int64")
+        if (allocated(error)) return
+        w_ts => t%obsstamp()
+        o_ts => t%obsstamp(3);           call check(error, o_ts%is_null() .eqv. w_ts(3)%is_null(), "obsstamp(3)")
+        if (allocated(error)) return
+        o_ts => t%obsstamp(3_int64);     call check(error, o_ts%is_null() .eqv. w_ts(3)%is_null(), "obsstamp(3_int64)")
+        if (allocated(error)) return
+        r_ts => t%obsstamp(LO, HI)
+        call check(error, size(r_ts) == HI - LO + 1, "obsstamp(lo,hi)")
+        if (allocated(error)) return
+        r_ts => t%obsstamp(int(LO, int64), int(HI, int64))
+        call check(error, size(r_ts) == HI - LO + 1, "obsstamp(lo,hi) int64")
+        if (allocated(error)) return
+        !
+        ! --- the string scalar's int64 index forms (the int32 ones are covered above)
+        call check_string_forms(error, t)
+    end subroutine test_every_field_every_form
+    !
+    !> The float64 accessor sweep, shared by `ra`, `dec` and the computed `flux`.
+    subroutine check_f64_forms(error, whole, one32, one64, rng32, rng64, what)
+        type(error_type), allocatable, intent(out) :: error
+        real(real64), intent(in) :: whole(:)   !! %x()
+        real(real64), intent(in) :: one32      !! %x(i), int32 index
+        real(real64), intent(in) :: one64      !! %x(i), int64 index
+        real(real64), intent(in) :: rng32(:)   !! %x(lo, hi), int32 bounds
+        real(real64), intent(in) :: rng64(:)   !! %x(lo, hi), int64 bounds
+        character(len=*), intent(in) :: what   !! column name, for the message
+        integer, parameter :: LO = 2, HI = 5
+        !
+        call check(error, abs(one32 - whole(3)) < 1.0e-12_real64, what // "(3)")
+        if (allocated(error)) return
+        call check(error, abs(one64 - whole(3)) < 1.0e-12_real64, what // "(3_int64)")
+        if (allocated(error)) return
+        call check(error, all(abs(rng32 - whole(LO:HI)) < 1.0e-12_real64), what // "(lo,hi)")
+        if (allocated(error)) return
+        call check(error, all(abs(rng64 - whole(LO:HI)) < 1.0e-12_real64), what // "(lo,hi) int64")
+    end subroutine check_f64_forms
+    !
+    !> The string column's int64 handle forms, which the shape-class test does not reach.
+    subroutine check_string_forms(error, t)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table_test), intent(in), target :: t !! an initialized table.
+        type(parquet_string) :: h
+        type(parquet_string), allocatable :: hs(:)
+        character(len=:), allocatable :: s
+        !
+        h = t%name(4_int64)
+        call h%to_string(s)
+        call check(error, s == "ghijk", "name(4_int64) should view the same value as name(4)")
+        if (allocated(error)) return
+        hs = t%name(2_int64, 4_int64)
+        call check(error, size(hs) == 3, "name(lo,hi) int64 should return one handle per row")
+        if (allocated(error)) return
+        call hs(1)%to_string(s)
+        call check(error, s == "bcd", "name(lo,hi) int64 should be in row order")
+    end subroutine check_string_forms
+    !
+    !> Every constructor specific, including the int64 `%init_empty` the other tests do not reach.
+    subroutine test_every_constructor(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table_test) :: a, b, c
+        character(len=*), parameter :: f = "test_run/codegen_ctors.parquet"
+        !
+        call write_codegen_fixture(f)
+        call a%init_slice(f, 2_int64, 4_int64)
+        call check(error, a%nrows() == 3, "the int64 slice constructor should cover its range")
+        if (allocated(error)) return
+        call b%init_empty(5_int64)
+        call check(error, b%nrows() == 5, "the int64 init_empty should create its rows")
+        if (allocated(error)) return
+        call c%init_empty(0)
+        call check(error, c%nrows() == 0, "init_empty(0) should create no rows")
+    end subroutine test_every_constructor
     !
 end module test_table_codegen

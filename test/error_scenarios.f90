@@ -13,7 +13,7 @@ program error_scenarios
     use parquet_maml_base, only: parquet_maml_file, get_parquet_maml
     use parquet_strings, only : parquet_string_column, parquet_string
     use parquet_columns
-    use parquet_table_test, only : parquet_table_example
+    use parquet_table_example, only : parquet_table_test
     use parquet_tables
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp, &
         parquet_unit_seconds, parquet_unit_millis, parquet_unit_nanos
@@ -10597,7 +10597,7 @@ contains
     !> An indexed accessor returns a POINTER to one element, so an out-of-range index would be
     !! undefined behaviour rather than a wrong answer. The generated guard must abort first.
     subroutine scenario_codegen_row_index_out_of_range()
-        type(parquet_table_example) :: t
+        type(parquet_table_test) :: t
         real(real64), pointer :: p
         call write_codegen_scenario_fixture("test_run/es_codegen_row.parquet")
         call t%init("test_run/es_codegen_row.parquet")
@@ -10607,7 +10607,7 @@ contains
 
     !> The same guard for the range form.
     subroutine scenario_codegen_range_out_of_range()
-        type(parquet_table_example) :: t
+        type(parquet_table_test) :: t
         real(real64), pointer :: p(:)
         call write_codegen_scenario_fixture("test_run/es_codegen_range.parquet")
         call t%init("test_run/es_codegen_range.parquet")
@@ -10618,7 +10618,7 @@ contains
     !> A generated type declares its columns up front, so opening it on a file that lacks one is a
     !! mismatch between schema and data -- caught by %init, not by the first accessor call.
     subroutine scenario_codegen_missing_file_column()
-        type(parquet_table_example) :: t
+        type(parquet_table_test) :: t
         type(parquet_writer) :: w
         integer(int32) :: idx(3)
         idx = [1_int32, 2_int32, 3_int32]

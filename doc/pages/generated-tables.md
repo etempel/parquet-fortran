@@ -6,9 +6,9 @@ A program that always reads the same columns can have them as **named accessors 
 
 ```fortran
 use parquet
-use parquet_table_test, only : parquet_table_example   ! the generated module
+use parquet_table_example, only : parquet_table_test   ! the generated module
 
-type(parquet_table_example) :: t
+type(parquet_table_test) :: t
 real(real64), pointer :: ra(:)
 
 call t%init("catalogue.parquet")   ! opens, checks every declared column, converts, reads
@@ -25,8 +25,8 @@ Like [`tools/generate_parquet_maml.sh`](embedding-maml-schemas.html), this scrip
 A table-type schema is an ordinary MAML file. Put these in their own directory — `table_types/` by convention, kept separate from `schemas/` because the two are read for opposite purposes: `schemas/` describes files you *write*, `table_types/` describes types you *generate*.
 
 ```yaml
-dataset: parquet_table_test    # the MODULE to generate (and the file name)
-table: example                 # the TYPE: parquet_table_example
+dataset: parquet_table_example  # the MODULE to generate (and the file name)
+table: test                     # the TYPE: parquet_table_<table>, i.e. parquet_table_test
 author: A Maintainer <a@example.org>   # replaces the `! Author:` header line
 fields:
 - name: uberid
@@ -48,7 +48,9 @@ fields:
   source: computed             # no file column is read for it; your program fills it
 ```
 
-- **`dataset:`** names the generated module, and therefore the file (`parquet_table_test.f90`). **`table:`** names the type, as `parquet_table_<table>`. Two schemas that pick the same `dataset:` are refused.
+- **`dataset:`** names the generated module, and therefore the file (`parquet_table_example.f90`). **`table:`** names the type, as `parquet_table_<table>`. Two schemas that pick the same `dataset:` are refused.
+- **`dataset:` may not name what `table:` derives.** A module cannot declare a type — or a procedure — of its own name, so `dataset: parquet_table_x` together with `table: x` would not compile; the generator refuses it up front rather than emitting a broken module. Note this is *not* "`dataset:` and `table:` must differ": `dataset: foo` with `table: foo` is fine, because the type is `parquet_table_foo`. If you hit the collision, give `dataset:` a different name — this library's own precedent is a plural (module `parquet_strings` holds type `parquet_string`).
+- **If you publish your package, the module name must satisfy your own module-naming rule.** fpm's registry enforces a package prefix, so a module called `example` inside a published `src/` is rejected while `parquet_table_example` is fine. `fpm build` reports this immediately, so it is not a silent trap — but it is worth knowing before choosing `dataset:`.
 - **`author:`** becomes the generated file's `! Author:` header line. Without it the header says the file was generated and names no author.
 - **`source:`** is `file` (the default) or `computed`. A computed column gets its accessor and a slot of all-null rows, but is never looked for in the file — so a column your program calculates is a *declared intent* rather than an error.
 - Everything else is ordinary MAML (see [The MAML metadata format](maml-format.html)), and the same file still works as a **write schema** — which is convenient, since a program that reads a catalogue usually writes one with the same columns.
@@ -59,7 +61,7 @@ fields:
 ```console
 $ tools/generate_user_table_code.py                     # every *.maml in table_types/ -> src/
 $ tools/generate_user_table_code.py --dir=my_types      # a different input directory
-$ tools/generate_user_table_code.py --out-dir=test      # a different output directory
+$ tools/generate_user_table_code.py --out-dir=lib       # a different output directory
 $ tools/generate_user_table_code.py --check             # verify the committed output is current
 $ tools/generate_user_table_code.py --self-test         # run the generator's own tests
 ```
@@ -168,3 +170,14 @@ An empty (or absent) `fields:` is valid, and generates a **bare `parquet_table` 
 ## What the library side does
 
 The generated code is deliberately thin — a data table and one delegation per accessor. Every rule lives in the library, in [`%bind_predefined`](table.html), so a downstream project gets a fixed rule by upgrading rather than by regenerating. The same is true of `clone_extra`, which is an ordinary overridable binding on `parquet_table`: you can extend `parquet_table` by hand and use both without the generator at all.
+
+## This library's own example
+
+`table_types/maml_example4.maml` generates `src/parquet_table_example.f90` — module
+`parquet_table_example`, holding `type :: parquet_table_test` — which ships with the library as a
+worked example. Nothing else in the library uses it; it is there to be read, and to be exercised by
+the `table_codegen` test suite, which calls all five accessor forms on every one of its fourteen
+declared columns. It is generated, committed and `--check`ed like any other generated file, so it
+is also a live demonstration that the round trip works: its `components` window carries a
+`zeropoint` parameter, and the `clone_extra`/`init_extra` statements next to it were written by the
+generator from that declaration.

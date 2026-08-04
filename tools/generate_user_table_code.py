@@ -354,8 +354,56 @@ def parse_maml(text, path):
         raise MamlError(f"{where}: `table: {top['table']}` makes a type name longer than "
                         f"Fortran's 63-character identifier limit")
 
-    return Schema(top["dataset"], top["table"], top.get("author", ""), out_fields, path,
-                  hashlib.sha256(text.encode("utf-8")).hexdigest())
+    schema = Schema(top["dataset"], top["table"], top.get("author", ""), out_fields, path,
+                    hashlib.sha256(text.encode("utf-8")).hexdigest())
+    _check_module_name_free(schema, where)
+    return schema
+
+
+def _check_module_name_free(schema, where):
+    """Refuses a `dataset:` that collides with something the generated module declares.
+
+    A module's own name is a local entity inside it, so **a module cannot declare a type or a
+    procedure of the same name** -- gfortran rejects it outright ("PUBLIC attribute applied to
+    MODULE ..."). The case that actually bites is `dataset:` naming the same thing `table:`
+    derives, i.e. `dataset: parquet_table_x` with `table: x`, which is the natural thing to write
+    and produces a module that cannot compile. This project hit exactly that collision once
+    before, between the `parquet_strings` module and its `parquet_string` type, which is why that
+    module is plural.
+
+    Note the rule is NOT "dataset and table must differ": `dataset: foo` with `table: foo` is
+    perfectly fine, since the type is `parquet_table_foo`. The comparison has to be against the
+    DERIVED names, and it is case-insensitive because Fortran identifiers are.
+    """
+    module = schema.dataset.lower()
+    if module == schema.type_name.lower():
+        raise MamlError(
+            f"{where}: `dataset: {schema.dataset}` names the module, and `table: {schema.table}` "
+            f"makes the type `{schema.type_name}` -- a module cannot declare a type of its own "
+            f"name, so this would not compile. Give `dataset:` a different name (this project's "
+            f"own precedent is a plural: module `parquet_strings` holds type `parquet_string`)")
+    for name in _module_level_names(schema):
+        if module == name.lower():
+            raise MamlError(
+                f"{where}: `dataset: {schema.dataset}` names the module, which would also declare "
+                f"a procedure called `{name}` -- a module cannot declare a procedure of its own "
+                f"name. Rename `dataset:`, or rename the field it comes from")
+
+
+def _module_level_names(schema):
+    """Every module-level procedure name the generator emits, for the collision check above."""
+    t = schema.type_name
+    names = [f"{t}_init", f"{t}_init_slice_i32", f"{t}_init_slice_i64", f"{t}_init_empty_none",
+             f"{t}_init_empty_i32", f"{t}_init_empty_i64", f"{t}_init_extra", f"{t}_clone_extra",
+             f"{t}_check_row", f"{t}_check_range"]
+    for f in schema.fields:
+        if f.family == "str":
+            names.append(f"{t}_{f.name}_chr")
+            if f.is_vector:
+                continue
+        for suffix in ("all", "at_i32", "at_i64", "rng_i32", "rng_i64"):
+            names.append(f"{t}_{f.name}_{suffix}")
+    return names
 
 
 # --------------------------------------------------------------------------------------
@@ -1359,8 +1407,26 @@ def self_test():
              "a field with no data_type"),
             ("dataset: m\ntable: t\nfields:\n- name: a\n  data_type: int32\n  source: guess\n",
              "expected", "an unknown source:"),
+            # The module/type name collision: `dataset:` naming what `table:` derives. A module
+            # cannot declare a type of its own name, so this would not compile.
+            ("dataset: parquet_table_x\ntable: x\nfields:\n- name: a\n  data_type: int32\n",
+             "cannot declare a type of its own name", "dataset: colliding with the derived type"),
+            ("dataset: PARQUET_TABLE_X\ntable: x\nfields:\n- name: a\n  data_type: int32\n",
+             "cannot declare a type of its own name",
+             "the same collision in a different case"),
+            # And the sibling case: `dataset:` naming a procedure the module declares.
+            ("dataset: parquet_table_x_a_all\ntable: x\nfields:\n- name: a\n"
+             "  data_type: int32\n", "cannot declare a procedure of its own name",
+             "dataset: colliding with a generated procedure"),
         ):
             expect_error(lambda ti=text_in: parse_maml(ti, pathlib.Path("t.maml")), fragment, what)
+
+        # --- `dataset:` equal to `table:` is NOT the collision, and must stay accepted ---
+        same = _tmp_schema(tmp, "dataset: foo\ntable: foo\nfields:\n- name: a\n"
+                                "  data_type: int32\n", "same.maml")
+        _p6, text6, _s6 = build(same, out)
+        check("module foo" in text6 and "type, extends(parquet_table) :: parquet_table_foo" in text6,
+              "dataset: and table: sharing a name is fine -- the type is parquet_table_<table>")
 
         # --- an empty fields: is a valid bare template --------------------------------
         empty = _tmp_schema(tmp, "dataset: bare_mod\ntable: bare\n", "bare.maml")

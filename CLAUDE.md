@@ -543,10 +543,10 @@ template inside the script — and re-run it. Currently generated: `src/parquet_
 `tools/generate_parquet_columns.py`, whose kind table is the single place a supported column kind is
 declared), and `src/parquet_tables.f90`, `src/parquet_tables_access.f90`,
 `src/parquet_tables_addcol.f90`, `src/parquet_tables_materialize.f90` (from
-`tools/generate_parquet_tables.py`, which imports that same kind table). **A generated file can also
-live outside `src/`**: `test/parquet_table_test.f90` is emitted by `tools/generate_user_table_code.py`
-from `table_types/maml_example4.maml` (see "Role-A MAMLs live in `table_types/`" below), and is
-committed and `--check`ed exactly like the rest. **`src/parquet_tables.f90` is
+`tools/generate_parquet_tables.py`, which imports that same kind table). `src/parquet_table_example.f90` is emitted by
+`tools/generate_user_table_code.py` from `table_types/maml_example4.maml` (see "Role-A MAMLs live in
+`table_types/`" below) — it ships as a worked example and nothing else in the library uses it, but it
+is committed and `--check`ed exactly like the rest. **`src/parquet_tables.f90` is
 the one most likely to be edited by mistake**, because it is the table layer's module spec — every
 type-bound binding and every interface body lives there, so adding a `parquet_table` procedure means
 editing the generator's literal template text, not the file it emits. Treat this list as a snapshot —

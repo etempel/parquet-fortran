@@ -1227,4 +1227,4 @@ Three properties keep this survivable, and all three are load-bearing:
 
 **Covered by** the generator's own `--self-test` (a hand-edited generated line, a deleted end
 marker, a deleted window, a stale MAML, and idempotence), run in the lint stage alongside
-`--check` on this project's own committed `test/parquet_table_test.f90`.
+`--check` on this project's own committed `src/parquet_table_example.f90`.

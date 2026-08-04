@@ -6,8 +6,8 @@
 # It is deliberately also a perfectly ordinary MAML -- parquet_parse_maml accepts it as a write
 # schema, which is what lets the tests use one file both to generate the type and to write the
 # fixture that type is opened on.
-dataset: parquet_table_test # module name (matches filename without extension)
-table: example # table name, e.g. type(parquet_table_example)
+dataset: parquet_table_example # module name (matches filename without extension)
+table: test # type name: parquet_table_<table>, i.e. type(parquet_table_test)
 author: Elmo Tempel (elmo.tempel@ut.ee)
 description: Developer description, not used anywhere.
 comments: # add additional comments here, e.g. history of changes.

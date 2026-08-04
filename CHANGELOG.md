@@ -27,7 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are usable from hand-written extensions too: `clone_extra`, the hook `%clone`/`%clone_structure`
   call so an extending type's own components are copied rather than silently default-initialized,
   and `%bind_predefined`, which performs the column binding. `parquet_write_table` now accepts any
-  type extending `parquet_table`. See
+  type extending `parquet_table`. A worked example of the generator's output ships as
+  `src/parquet_table_example.f90` — nothing else in the library uses it and `use parquet` does not
+  re-export it, so it is an example rather than part of the API. See
   [Generated table types](doc/pages/generated-tables.md).
 - Row filters are now boolean **expressions** over the file's columns, not just AND-combined
   clauses: `filt%add("(ra > 180 and dec <= 0) or id is_null")`, with `and`/`or`/`not` (any

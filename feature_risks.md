@@ -100,6 +100,9 @@ something a reader is expected to have.
 | [Risk-33](#risk-33--pf_permute-through-a-col-pointer-desynchronises-a-table) | `pf_permute` through a `%col` pointer desynchronises a table | 3 — not testable |
 | [Risk-34](#risk-34--pf_argsort-and-the-read-time-sort-can-drift-apart) | `pf_argsort` and the read-time sort can drift apart | 4 — covered |
 | [Risk-35](#risk-35--nth_elements-determinism-rests-on-the-comparators-index-tiebreaker) | `nth_element`'s determinism rests on the comparator's index tiebreaker | 4 — covered |
+| [Risk-36](#risk-36--a-binary-search-over-unsorted-input-answers-with-no-symptom) | A binary search over unsorted input answers with no symptom | 4 — covered |
+| [Risk-37](#risk-37--the-merge-tie-rule-is-invisible-to-a-value-only-assertion) | The merge tie rule is invisible to a value-only assertion | 4 — covered |
+| [Risk-38](#risk-38--pf_argminmaxs-two-ends-must-ask-the-same-question) | `pf_argminmax`'s two ends must ask the same question | 4 — covered |
 
 ---
 
@@ -107,7 +110,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-35**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-39**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -1337,4 +1340,89 @@ point, and both halves were arrived at by a mutation surviving the test:**
 stability test is meaningful without checking *which code path it actually reaches*. The last point
 generalises past sorting — any fast path that skips the machinery under test makes a test that
 exercises it vacuous while still reporting green.
+
+---
+
+### Risk-36 — A binary search over unsorted input answers with no symptom
+
+`pf_lower_bound`/`pf_upper_bound`/`pf_equal_range` are the only operations in this library whose
+precondition **cannot be inferred from the data they are given**. An unsorted array is a perfectly
+well-formed array; the search halves it, follows whichever branch the comparison suggests, and
+returns an index in range. No abort, no warning, no wrong-looking value — just a position that
+happens to be meaningless.
+
+That is why `assume_sorted` defaults to `.false.` and every call runs an **O(n) check in front of an
+O(log n) search**. The default looks indefensible on complexity grounds and is not: it turns a silent
+wrong answer into a named abort, and the caller who cannot afford it says so explicitly. The
+documented escape is to check once with `pf_is_sorted` and pass `assume_sorted=.true.` inside the
+loop — which is a deliverable of the guide page, not a footnote, because without it `m` searches cost
+`O(m·N)` and the feature simply looks broken.
+
+**Covered by** `searches agree with a counting oracle` and `assume_sorted changes no answer`
+(`test/test_sorting.f90`), plus `sorting_search_unsorted` (`test/error_scenarios.f90`), whose sorted
+call *before* the unsorted one is the negative control — a check that fired unconditionally would
+pass the abort test just as happily while making every search unusable.
+
+**What this still forbids:**
+
+- **Never flip the default.** A future "optimisation" that makes `assume_sorted` default `.true.`,
+  or that skips the check for a "trusted" caller, converts every misuse into a silent wrong answer.
+- **`descending`/`nulls_first` select the comparison, they do not reorder anything.** They must
+  describe the order the array is genuinely in; the check is what enforces that, so weakening the
+  check also removes the only thing that catches a mismatched direction.
+- **`pf_merge` inherits all of this, for BOTH inputs.** Its check names which argument was wrong
+  (`a` or `b`), and the error-scenario test asserts that name — a merge that says only "not sorted"
+  leaves the caller to guess.
+
+---
+
+### Risk-37 — The merge tie rule is invisible to a value-only assertion
+
+`parquet_sort_builder_merge` takes from the first input when the two compare EQUAL (`<= 0`, not
+`< 0`), which is `std::merge`'s own stability guarantee and what makes `pf_merge` agree with
+`pf_sort` of the concatenation element for element.
+
+**Flipping it is undetectable by the obvious test.** If two elements compare equal, then swapping
+which one is emitted first leaves the result's *values* identical — so `all(merged == sorted_cat)`
+passes, and so does any assertion on the validity mask when both tied elements are null. This was
+confirmed by mutation, not reasoned about: `<= 0` → `< 0` survived the entire suite, including the
+merge-equals-sort oracle and the validity test, until an assertion on the **full** merged array was
+added.
+
+Equal-comparing elements are routinely distinguishable in this library — a `character` array's
+trailing blanks, a `parquet_string_column`'s empty strings, and above all a **null**, whose stored
+value is arbitrary. That is what makes the rule observable at all, and what makes losing it a real
+defect rather than a philosophical one.
+
+**Covered by** `merge tracks validity` (`test/test_sorting.f90`), specifically its
+`all(m == [1, 2, 3, 99, 88])` assertion over two tied nulls carrying different stored values.
+
+**What this still forbids:** never assert a merge only through its values or only through its mask —
+one full-array assertion over elements that compare equal but are distinguishable is what pins the
+rule. The same trap applies to any future operation whose contract is about *which* of two equal
+things is chosen.
+
+---
+
+### Risk-38 — `pf_argminmax`'s two ends must ask the same question
+
+The minimum is rank 1 of the ascending order. The maximum looks like rank `n_value` of that same
+order — and it names the right **value**. It names the wrong **index**: a stable ascending sort puts
+the *last* member of a tied run at the end, so `imin` would report the first equal minimum while
+`imax` reported the last equal maximum. One call, two different questions at its two ends, and the
+values it hands back are correct throughout.
+
+The implementation therefore flips the key's own `descending` flag and asks for **rank 1 again**, so
+both ends report the first occurrence. This is safe because the tiers are absolute — `sort_tier_of`
+never consults `descending`, so no null and no NaN moves into rank 1's way.
+
+This shipped as a bug in the first version and was caught only by a test asserting first-occurrence
+at *both* ends; a test checking `values(imax) == maxval(values)` would have passed.
+
+**Covered by** `argminmax reports the first of a tie` and `argminmax accepts a parquet_column`
+(`test/test_sorting.f90`), both over fixtures with duplicated extremes at both ends.
+
+**What this still forbids:** when one procedure answers a question at two ends of an order, assert
+the *index* at both ends over a tied fixture, not the value. A value assertion cannot distinguish
+"first" from "last" and so cannot see the asymmetry at all.
 

@@ -544,7 +544,9 @@ template inside the script — and re-run it. Currently generated: `src/parquet_
 declared), and `src/parquet_tables.f90`, `src/parquet_tables_access.f90`,
 `src/parquet_tables_addcol.f90`, `src/parquet_tables_materialize.f90` (from
 `tools/generate_parquet_tables.py`, which imports that same kind table), and `src/parquet_sorting.f90`,
-`src/parquet_sorting_keys.f90`, `src/parquet_sorting_argsort.f90`, `src/parquet_sorting_permute.f90`
+`src/parquet_sorting_keys.f90`, `src/parquet_sorting_argsort.f90`, `src/parquet_sorting_permute.f90`,
+`src/parquet_sorting_select.f90`, `src/parquet_sorting_search.f90`, `src/parquet_sorting_unique.f90`,
+`src/parquet_sorting_reduce.f90`
 (from `tools/generate_parquet_sorting.py`, which imports the nine SCALAR rows of that same kind table
 and adds the three types that are not `parquet_column` storage kinds at all). `src/parquet_table_example.f90` is emitted by
 `tools/generate_user_table_code.py` from `table_types/maml_example4.maml` (see "Role-A MAMLs live in

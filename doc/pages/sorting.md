@@ -30,9 +30,22 @@ declares.
 | `pf_partial_argsort(values, perm, n)` | their indices instead |
 | `pf_nth_element(values, nth, p_value, [index])` | the value a full sort puts at rank `nth` |
 | `pf_nth_quantile(values, quantile, p_value, [index])` | a quantile of the non-null values |
+| `pf_lower_bound(values, target, pos)` | where `target` belongs in an already-sorted array |
+| `pf_upper_bound(values, target, pos)` | one past the last element equal to `target` |
+| `pf_equal_range(values, target, first, last)` | both bounds, as an inclusive range |
+| `pf_unique_count(values, count, [n_null])` | how many distinct non-null values there are |
+| `pf_unique(values, distinct, [n_null])` | those values themselves, in order |
+| `pf_rank(values, ranks, [method])` | the rank of every element, in place order |
+| `pf_minmax(values, vmin, vmax)` | the smallest and largest value |
+| `pf_argminmax(values, imin, imax)` | where those two are |
+| `pf_merge(a, b, merged)` | merges two already-sorted arrays in linear time |
 
-The first four are covered immediately below; the selection operations have their own section,
-[Selecting without sorting](#selecting-without-sorting).
+The first four are covered immediately below; the rest have their own sections —
+[Selecting without sorting](#selecting-without-sorting),
+[Searching a sorted array](#searching-a-sorted-array),
+[Distinct values and ranks](#distinct-values-and-ranks),
+[Extremes](#extremes) and
+[Merging two sorted arrays](#merging-two-sorted-arrays).
 
 Optional arguments are shown in square brackets below — they are optional at the call site, not
 part of the syntax.
@@ -77,6 +90,24 @@ Eleven element types, in three groups.
 `pf_argsort`, `pf_partial_argsort`, `pf_permute` and `pf_is_sorted` apply to **all eleven**: their
 answer is a permutation, a boolean or an index, never a value, so a runtime element type is no
 obstacle.
+
+The remaining operations follow the same two rules — a type is out wherever the answer would need
+a compile-time element type it does not have, and stays in wherever the answer is a permutation, a
+boolean or an integer:
+
+| Type | search | `pf_unique_count` | `pf_unique` | `pf_rank` | `pf_minmax` | `pf_argminmax` | `pf_merge` |
+|---|---|---|---|---|---|---|---|
+| `integer(int32/int64)`, `real(real32/real64)` | yes | yes | yes | yes | yes | yes | yes |
+| `logical` | yes | yes | yes | yes | no | no | yes |
+| `character(len=*)` | yes | yes | yes | yes | yes | yes | yes |
+| `parquet_date`, `parquet_time`, `parquet_timestamp` | yes | yes | yes | yes | yes | yes | yes |
+| `parquet_string_column` | yes | yes | yes | yes | yes | yes | no |
+| `parquet_column` | no | yes | no | yes | no | yes | no |
+
+`logical` is left out of `pf_minmax`/`pf_argminmax` as vacuous — "where is the first `.false.`" is
+not a question worth an API, and letting one of the pair accept it while the other could not would
+be worse than either. `pf_merge` is defined on plain arrays only: merging two columns is
+`%append_column` followed by a sort.
 
 The `is_valid=` column says where nullness comes from. The six types with no null state of their
 own take an **optional** `is_valid(:)` mask; the temporal types and the two column types carry
@@ -289,11 +320,162 @@ which case it is all `.true.`). That differs from the "unallocated means no null
 for *inputs*, deliberately: an input you leave unallocated is you declining to supply information,
 while an output you explicitly asked for is a direct question.
 
+## Searching a sorted array
+
+`pf_lower_bound`, `pf_upper_bound` and `pf_equal_range` locate a value in an array that is
+**already sorted**. All three answer with 1-based positions in `1 .. size(values)+1`, so the
+answer is an *insertion point*: where the target belongs, whether or not it is there.
+
+```fortran
+integer(int32) :: v(9) = [10, 20, 20, 20, 30, 40, 40, 50, 60]
+integer :: lo, hi, first, last
+
+call pf_lower_bound(v, 20_int32, lo)        ! lo = 2   -- the first 20
+call pf_upper_bound(v, 20_int32, hi)        ! hi = 5   -- one past the last 20
+call pf_equal_range(v, 20_int32, first, last)   ! first = 2, last = 4
+call pf_equal_range(v, 25_int32, first, last)   ! first = 5, last = 4  -- absent
+```
+
+`hi - lo` is how many elements equal the target, and `pf_equal_range` returns the same information
+as an **inclusive** range from one pass. When the target is absent, `last == first - 1`, so
+`last - first + 1` is zero — **check that count before reading `values(first)`**.
+
+### Check the order once, not on every call
+
+By default each search runs an **O(n) sortedness check in front of an O(log n) search**. That
+default is deliberate and should not be flipped: searching unsorted input does not fail, it returns
+a plausible index with no abort and no symptom at all — the worst failure mode this module has.
+
+The cost is meant to be paid **once**, not per call:
+
+```fortran
+call pf_is_sorted(v, ok)                        ! O(N), once
+if (.not. ok) call pf_sort(v, v)
+
+do k = 1, m
+    call pf_lower_bound(v, targets(k), pos, assume_sorted=.true.)   ! O(log N) each
+end do
+```
+
+Without `assume_sorted=.true.` in that loop, `m` searches cost `O(m·N)` rather than `O(m·log N)`
+and the feature looks broken. Only pass it for an order you have actually established.
+
+`descending=` and `nulls_first=` **select the comparison, they do not reorder anything** — they
+must describe the order the array is genuinely in, or the check rejects it. A null is ordered after
+every value by default, so a target larger than every value lands *before* the nulls rather than at
+the end of the array.
+
+A `character` target is compared at the **array's** element length: a shorter target is
+blank-padded, exactly as a Fortran comparison would pad it. A target carrying non-blank characters
+past that length has no exact answer and is refused rather than silently truncated. A
+`parquet_string_column` stores bytes verbatim and has no declared width, so its target is used
+verbatim too, trailing blanks included.
+
+## Distinct values and ranks
+
+```fortran
+integer(int32) :: v(8) = [30, 10, 20, 10, 30, 30, 40, 20]
+integer(int32), allocatable :: d(:)
+integer, allocatable :: r(:)
+integer :: c
+
+call pf_unique_count(v, c)          ! c = 4
+call pf_unique(v, d)                ! d = [10, 20, 30, 40]
+call pf_rank(v, r)                  ! r = [3, 1, 2, 1, 3, 3, 4, 2]
+```
+
+**Nulls are outside the population in all three.** They are excluded from the count, absent from
+the distinct values, and given **rank 0** — which is why none of the three takes `nulls_first`:
+there is no null tier to position. `pf_unique_count` and `pf_unique` report how many were dropped
+through an optional `n_null=`.
+
+`pf_unique` returns the distinct values **sorted**; `descending=` reverses that order.
+`pf_unique_count` takes no `descending` at all, since a count does not depend on direction.
+
+Distinctness is the sort comparator's own equality, which on floating point is **exact**:
+
+```fortran
+real(real64) :: v(2) = [0.1_real64 + 0.2_real64, 0.3_real64]
+call pf_unique_count(v, c)          ! c = 2, not 1
+```
+
+That is correct and surprising, and it is the same equality every other operation here uses. In the
+other direction, every NaN counts as **one** value collectively — NaNs compare equal to each other
+under this comparator even though `==` reports every NaN pair as unequal.
+
+### Tie handling in `pf_rank`
+
+`method=` chooses how ties are ranked, matched case-insensitively:
+
+| `method=` | ranks of `10, 20, 20, 30` |
+|---|---|
+| `"competition"` (the default) | 1, 2, 2, 4 |
+| `"dense"` | 1, 2, 2, 3 |
+| `"ordinal"` | 1, 2, 3, 4 |
+
+An unrecognized token aborts, naming the valid ones. `"ordinal"` ranks are exactly the inverse of
+`pf_argsort`'s permutation — `r(perm(k)) == k` — so reach for `pf_argsort` when you want the order
+and `pf_rank` when you want a per-element answer that stays aligned with the input.
+
+NaNs are ranked as ordinary values (all tying with each other), unlike nulls.
+
+## Extremes
+
+```fortran
+call pf_minmax(v, vmin, vmax)       ! the values
+call pf_argminmax(v, imin, imax)    ! where they are
+```
+
+Two procedures rather than one call with optional index arguments: optional `imin`/`imax` varying
+only by integer kind would make a positional call ambiguous, and each name says what it returns. A
+caller who wants both pays one extra call rather than every caller paying for indices they did not
+ask for.
+
+Both **skip nulls and NaNs** — a NaN is an ordinary value everywhere else in this module, but it is
+not the minimum or maximum of anything. Both report the **first** occurrence of a tied extreme, at
+either end. Neither takes `descending`/`nulls_first`: a minimum and a maximum are absolute, and
+reversing the order would only exchange the two answers.
+
+**Both abort when every value is null or NaN.** There is nothing to return and no sentinel that
+works across all nine types — the same decision `pf_nth_quantile` makes for the same unanswerable
+question. Guard with `count(is_valid)` where that can happen.
+
+## Merging two sorted arrays
+
+`pf_merge` merges two **already-sorted** arrays in `O(size(a) + size(b))`, rather than the
+`O(n log n)` of sorting their concatenation:
+
+```fortran
+integer(int32) :: a(4) = [1, 4, 6, 9], b(5) = [2, 3, 6, 7, 10]
+integer(int32), allocatable :: m(:)
+
+call pf_merge(a, b, m)              ! m = [1, 2, 3, 4, 6, 6, 7, 9, 10]
+```
+
+Ties take from `a` first, so the result matches `pf_sort` of the concatenation element for element.
+`descending=`/`nulls_first=` select the comparison exactly as in the searches, and both inputs are
+checked for sortedness unless `assume_sorted=.true.`.
+
+**Supply `is_valid_a`/`is_valid_b` whenever either input has nulls.** A sorted array containing
+nulls is precisely what `pf_sort(..., is_valid=)` produces, and a merge that is not told which
+elements are null compares them as ordinary values and interleaves them into the middle of the
+result. The precondition cannot be checked either — a null's stored value is indistinguishable from
+a real one without the mask.
+
+```fortran
+call pf_merge(a, b, m, is_valid_a=ma, is_valid_b=mb, merged_valid=mv)
+```
+
+`merged_valid` follows the same rule as `pf_sort`'s `sorted_valid`: **always allocated** when you
+ask for it, all `.true.` when neither input mask was supplied.
+
+Two `character` arrays of different declared lengths merge into the wider one, so `merged` is
+declared `character(len=:), allocatable` rather than at a fixed width — the one output in this
+module whose length comes from two inputs rather than one.
+
 ## What is not here yet
 
-Binary search (`pf_lower_bound`/`pf_upper_bound`/`pf_equal_range`), `pf_merge`, `pf_unique` and
-`pf_rank` are planned but not implemented. The `assume_sorted` argument described for them does not
-exist yet either.
+Threaded sorting (a `threads=` argument) is planned but not implemented.
 
 `pf_partial_sort` and `pf_partial_argsort` are not defined for `parquet_string_column` or
 `parquet_column`, for the same reason `pf_sort` is not. `pf_nth_element` and `pf_nth_quantile` are

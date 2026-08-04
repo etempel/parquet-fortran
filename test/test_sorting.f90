@@ -82,7 +82,34 @@ contains
             new_unittest("quantile endpoints are exact", test_quantile_endpoints), &
             new_unittest("quantile excludes nulls and counts them", test_quantile_nulls), &
             new_unittest("each rounding token resolves differently", test_quantile_rounding), &
-            new_unittest("rounding tokens are case-insensitive", test_quantile_rounding_case) &
+            new_unittest("rounding tokens are case-insensitive", test_quantile_rounding_case), &
+            new_unittest("searches agree with a counting oracle", test_search_linear_oracle), &
+            new_unittest("equal_range brackets duplicates", test_equal_range_duplicates), &
+            new_unittest("searches follow a descending order", test_search_descending), &
+            new_unittest("searches respect the null tier", test_search_nulls), &
+            new_unittest("assume_sorted changes no answer", test_search_assume_sorted), &
+            new_unittest("int32 and int64 searches agree", test_search_index_kinds), &
+            new_unittest("strings and dates are searchable", test_search_other_types), &
+            new_unittest("an empty array still gives an insertion point", test_search_degenerate), &
+            new_unittest("unique reports distinct values in order", test_unique_basic), &
+            new_unittest("unique excludes and counts nulls", test_unique_nulls), &
+            new_unittest("unique agrees on both sort paths", test_unique_both_paths), &
+            new_unittest("float distinctness is exact", test_unique_float_exact), &
+            new_unittest("a string column's distinct values", test_unique_string_column), &
+            new_unittest("the three rank methods differ on ties", test_rank_methods), &
+            new_unittest("a null ranks 0", test_rank_nulls_zero), &
+            new_unittest("ordinal ranks invert argsort", test_rank_inverts_argsort), &
+            new_unittest("descending ranks from the top", test_rank_descending), &
+            new_unittest("rank agrees on both sort paths", test_rank_both_paths), &
+            new_unittest("minmax agrees with minval/maxval", test_minmax_basic), &
+            new_unittest("minmax skips nulls and NaNs", test_minmax_skips), &
+            new_unittest("argminmax reports the first of a tie", test_argminmax_ties), &
+            new_unittest("argminmax accepts a parquet_column", test_argminmax_column), &
+            new_unittest("merge equals a sort of the concatenation", test_merge_matches_sort), &
+            new_unittest("merge tracks validity", test_merge_validity), &
+            new_unittest("merge follows a descending order", test_merge_descending), &
+            new_unittest("merge handles an empty input", test_merge_empty), &
+            new_unittest("merge widens two string lengths", test_merge_string_widths) &
             ]
     end subroutine collect_tests_parquet_sorting
     !
@@ -933,5 +960,566 @@ contains
         call pf_nth_quantile(v, 0.5_real64, upper, rounding="DoWn")
         call check(error, lower == upper, "a rounding token must match regardless of case")
     end subroutine test_quantile_rounding_case
+    !
+    ! ==================================================================================
+    ! M3: searching a sorted array
+    ! ==================================================================================
+    !
+    !> **The oracle is `count`, not a second engine call.** For an ascending array the lower bound
+    !> of `t` is `1 + count(v < t)` and the upper bound `1 + count(v <= t)` -- arithmetic this
+    !> module has no part in, so it catches an off-by-one that comparing two searches against each
+    !> other never could. Every target from below the smallest to above the largest is swept,
+    !> including the gaps between elements and the duplicated value.
+    subroutine test_search_linear_oracle(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(9) = [10, 20, 20, 20, 30, 40, 40, 50, 60]
+        integer(int32) :: t
+        integer :: lo, hi
+
+        do t = 5_int32, 65_int32, 5_int32
+            call pf_lower_bound(v, t, lo)
+            call pf_upper_bound(v, t, hi)
+            call check(error, lo == 1 + count(v < t), &
+                "pf_lower_bound must equal 1 + count(v < target)")
+            if (allocated(error)) return
+            call check(error, hi == 1 + count(v <= t), &
+                "pf_upper_bound must equal 1 + count(v <= target)")
+            if (allocated(error)) return
+        end do
+    end subroutine test_search_linear_oracle
+    !
+    !> Both halves of the contract: a value with duplicates comes back as a non-empty inclusive
+    !> range, and an ABSENT value as `last == first - 1` -- the empty-range convention a caller
+    !> must check before reading `values(first)`.
+    subroutine test_equal_range_duplicates(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(9) = [10, 20, 20, 20, 30, 40, 40, 50, 60]
+        integer :: first, last
+
+        call pf_equal_range(v, 20_int32, first, last)
+        call check(error, first == 2 .and. last == 4, &
+            "equal_range must bracket every element equal to the target")
+        if (allocated(error)) return
+        call check(error, last - first + 1 == count(v == 20_int32), &
+            "the range width must equal how many elements match")
+        if (allocated(error)) return
+        call pf_equal_range(v, 25_int32, first, last)
+        call check(error, last == first - 1, "an absent target must give an empty range")
+        if (allocated(error)) return
+        call check(error, first == 5, "an absent target's range must start at its insertion point")
+    end subroutine test_equal_range_duplicates
+    !
+    !> `descending` selects the comparison, it does not reorder anything -- so on a descending
+    !> array the oracle flips to `count(v > t)`. Getting this wrong still passes on an ascending
+    !> fixture, which is why it has its own test.
+    subroutine test_search_descending(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(7) = [60, 50, 40, 30, 30, 20, 10]
+        integer(int32) :: t
+        integer :: lo, hi
+
+        do t = 5_int32, 65_int32, 5_int32
+            call pf_lower_bound(v, t, lo, descending=.true.)
+            call pf_upper_bound(v, t, hi, descending=.true.)
+            call check(error, lo == 1 + count(v > t), &
+                "a descending lower bound must equal 1 + count(v > target)")
+            if (allocated(error)) return
+            call check(error, hi == 1 + count(v >= t), &
+                "a descending upper bound must equal 1 + count(v >= target)")
+            if (allocated(error)) return
+        end do
+    end subroutine test_search_descending
+    !
+    !> A null is ordered AFTER every value by default, so a target larger than every value lands
+    !> before the nulls rather than at the end of the array.
+    subroutine test_search_nulls(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(5) = [10, 20, 30, 999, 888]
+        logical :: mask(5) = [.true., .true., .true., .false., .false.]
+        integer :: pos
+
+        call pf_lower_bound(v, 20_int32, pos, is_valid=mask)
+        call check(error, pos == 2, "a present target must be found before the null tier")
+        if (allocated(error)) return
+        call pf_upper_bound(v, 30_int32, pos, is_valid=mask)
+        call check(error, pos == 4, &
+            "a target past every value must land before the nulls, not at the end")
+        if (allocated(error)) return
+        call pf_lower_bound(v, 25_int32, pos, is_valid=mask)
+        call check(error, pos == 3, "an absent target must land between the values it falls between")
+    end subroutine test_search_nulls
+    !
+    !> `assume_sorted` is a promise about the input, not a change of behaviour: on input that IS
+    !> sorted, every answer must be identical with and without it.
+    subroutine test_search_assume_sorted(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(6) = [1, 3, 3, 7, 9, 11]
+        integer(int32) :: t
+        integer :: checked, promised
+
+        do t = 0_int32, 12_int32
+            call pf_lower_bound(v, t, checked)
+            call pf_lower_bound(v, t, promised, assume_sorted=.true.)
+            call check(error, checked == promised, &
+                "assume_sorted must not change the answer for genuinely sorted input")
+            if (allocated(error)) return
+        end do
+    end subroutine test_search_assume_sorted
+    !
+    !> The int32 and int64 forms are separate specifics, so each needs proving against the other.
+    subroutine test_search_index_kinds(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(5) = [2, 4, 6, 8, 10]
+        integer(int32) :: small, f32, l32
+        integer(int64) :: big, f64, l64
+
+        call pf_lower_bound(v, 6_int32, small)
+        call pf_lower_bound(v, 6_int32, big)
+        call check(error, int(small, int64) == big, &
+            "the int32 and int64 lower-bound forms must agree")
+        if (allocated(error)) return
+        call pf_equal_range(v, 8_int32, f32, l32)
+        call pf_equal_range(v, 8_int32, f64, l64)
+        call check(error, int(f32, int64) == f64 .and. int(l32, int64) == l64, &
+            "the int32 and int64 equal_range forms must agree")
+    end subroutine test_search_index_kinds
+    !
+    !> The three non-numeric shapes a search has to cope with: a blank-padded `character` array
+    !> (where the target is padded to the array's own width), a `parquet_string_column` (stored
+    !> verbatim, no width to pad to) and a temporal type reaching the engine as a raw integer.
+    subroutine test_search_other_types(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=4) :: names(4) = ["ada ", "bob ", "bob ", "cid "]
+        type(parquet_string_column) :: sc
+        type(parquet_date) :: days(3), want
+        integer :: lo, hi
+
+        call pf_lower_bound(names, "bob", lo)
+        call pf_upper_bound(names, "bob", hi)
+        call check(error, lo == 2 .and. hi == 4, &
+            "a shorter target must be blank-padded to the array's element length")
+        if (allocated(error)) return
+        call sc%append_string("ada")
+        call sc%append_string("bob")
+        call sc%append_string("bob")
+        call sc%append_string("cid")
+        call pf_lower_bound(sc, "bob", lo)
+        call pf_upper_bound(sc, "bob", hi)
+        call check(error, lo == 2 .and. hi == 4, "a string column must bracket its duplicates too")
+        if (allocated(error)) return
+        call days(1)%set(2020, 1, 1)
+        call days(2)%set(2021, 6, 15)
+        call days(3)%set(2022, 12, 31)
+        call want%set(2021, 6, 15)
+        call pf_lower_bound(days, want, lo)
+        call check(error, lo == 2, "a date target must be located by its raw day count")
+    end subroutine test_search_other_types
+    !
+    !> An empty array has exactly one insertion point, and a one-element array two. Both are easy
+    !> to get wrong by clamping the range to `size(values)`.
+    subroutine test_search_degenerate(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: empty(:)
+        integer(int32) :: one(1) = [5]
+        integer :: pos
+
+        allocate(empty(0))
+        call pf_lower_bound(empty, 3_int32, pos)
+        call check(error, pos == 1, "an empty array's only insertion point is 1")
+        if (allocated(error)) return
+        call pf_lower_bound(one, 3_int32, pos)
+        call check(error, pos == 1, "a target below the single element must insert before it")
+        if (allocated(error)) return
+        call pf_upper_bound(one, 9_int32, pos)
+        call check(error, pos == 2, "a target above the single element must insert after it")
+    end subroutine test_search_degenerate
+    !
+    ! ==================================================================================
+    ! M3: distinct values and ranks
+    ! ==================================================================================
+    !
+    !> The distinct values come back SORTED, and `descending` reverses that order without changing
+    !> which values they are.
+    subroutine test_unique_basic(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(8) = [30, 10, 20, 10, 30, 30, 40, 20]
+        integer(int32), allocatable :: d(:)
+        integer :: c
+
+        call pf_unique_count(v, c)
+        call check(error, c == 4, "pf_unique_count must count each repeated value once")
+        if (allocated(error)) return
+        call pf_unique(v, d)
+        call check(error, size(d) == 4, "pf_unique must return exactly the distinct values")
+        if (allocated(error)) return
+        call check(error, all(d == [10, 20, 30, 40]), "the distinct values must come back in order")
+        if (allocated(error)) return
+        call pf_unique(v, d, descending=.true.)
+        call check(error, all(d == [40, 30, 20, 10]), "descending must reverse the distinct values")
+    end subroutine test_unique_basic
+    !
+    !> Nulls are outside the population: excluded from the count, absent from the distinct values,
+    !> and reported separately -- and a null's stored value must not sneak in as a value of its own.
+    subroutine test_unique_nulls(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(6) = [10, 20, 99, 10, 99, 30]
+        logical :: mask(6) = [.true., .true., .false., .true., .false., .true.]
+        integer(int32), allocatable :: d(:)
+        integer :: c
+        integer(int64) :: nn
+
+        call pf_unique_count(v, c, is_valid=mask, n_null=nn)
+        call check(error, c == 3, "nulls must not count as distinct values")
+        if (allocated(error)) return
+        call check(error, nn == 2_int64, "n_null must report how many values were null")
+        if (allocated(error)) return
+        call pf_unique(v, d, is_valid=mask)
+        call check(error, all(d == [10, 20, 30]), &
+            "a null's stored value must not appear among the distinct values")
+    end subroutine test_unique_nulls
+    !
+    !> **Risk-35 discipline.** A low-cardinality integer array takes the counting fast path, which
+    !> performs zero comparisons -- so a test that only ever runs it proves nothing about the
+    !> comparator's run detection. Both paths are forced and required to agree.
+    subroutine test_unique_both_paths(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(60)
+        integer(int32), allocatable :: fast(:), slow(:)
+        integer :: k, c_fast, c_slow
+        interface
+            subroutine disable_counting(enable) bind(C, name="parquet_debug_set_disable_sort_counting_path")
+                use iso_c_binding, only : c_int
+                integer(c_int), value :: enable !! nonzero forces the comparator path.
+            end subroutine disable_counting
+        end interface
+
+        do k = 1, 60
+            v(k) = int(mod(k * 7, 6), int32)   ! six distinct values: the counting path's case
+        end do
+        call pf_unique_count(v, c_fast)
+        call pf_unique(v, fast)
+        call disable_counting(1)
+        call pf_unique_count(v, c_slow)
+        call pf_unique(v, slow)
+        call disable_counting(0)
+        call check(error, c_fast == 6 .and. c_slow == 6, &
+            "both sort paths must find the same six distinct values")
+        if (allocated(error)) return
+        call check(error, size(fast) == size(slow), "both paths must return the same number of values")
+        if (allocated(error)) return
+        call check(error, all(fast == slow), "both paths must return the same distinct values")
+    end subroutine test_unique_both_paths
+    !
+    !> Distinctness is the sort comparator's equality, which on reals is EXACT -- and separately,
+    !> every NaN is one value collectively, even though `==` reports every NaN pair as unequal.
+    subroutine test_unique_float_exact(error)
+        type(error_type), allocatable, intent(out) :: error
+        real(real64) :: v(3) = [0.1_real64 + 0.2_real64, 0.3_real64, 0.3_real64]
+        real(real64) :: w(4)
+        integer :: c
+
+        call pf_unique_count(v, c)
+        call check(error, c == 2, "0.1 + 0.2 and 0.3 must count as two distinct values")
+        if (allocated(error)) return
+        w(1) = 1.0_real64
+        w(2) = ieee_value(1.0_real64, ieee_quiet_nan)
+        w(3) = ieee_value(1.0_real64, ieee_quiet_nan)
+        w(4) = 2.0_real64
+        call pf_unique_count(w, c)
+        call check(error, c == 3, "every NaN must collapse into one distinct value")
+    end subroutine test_unique_float_exact
+    !
+    !> A `parquet_string_column` answers with a column of its own, so its distinct values keep the
+    !> variable-length storage rather than being flattened to a padded array.
+    subroutine test_unique_string_column(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: sc, d
+        character(len=:), allocatable :: s
+        integer :: c
+
+        call sc%append_string("pear")
+        call sc%append_string("fig")
+        call sc%append_string("pear")
+        call sc%append_string("apple")
+        call sc%append_string("fig")
+        call pf_unique_count(sc, c)
+        call check(error, c == 3, "a string column's repeated values must count once")
+        if (allocated(error)) return
+        call pf_unique(sc, d)
+        call check(error, d%size() == 3_int64, "the distinct column must hold three elements")
+        if (allocated(error)) return
+        call d%get(1_int64, s)
+        call check(error, s == "apple", "the distinct values must come back in sorted order")
+        if (allocated(error)) return
+        call d%get(3_int64, s)
+        call check(error, s == "pear", "the last distinct value must be the largest")
+    end subroutine test_unique_string_column
+    !
+    !> **The three methods must genuinely differ on the same fixture**, or the selector is untested:
+    !> a fixture without duplicates gives 1,2,3,4 for all three.
+    subroutine test_rank_methods(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(4) = [10, 20, 20, 30]
+        integer, allocatable :: r(:)
+
+        call pf_rank(v, r)
+        call check(error, all(r == [1, 2, 2, 4]), "the default method must be competition ranking")
+        if (allocated(error)) return
+        call pf_rank(v, r, method="dense")
+        call check(error, all(r == [1, 2, 2, 3]), "dense ranking must skip no rank")
+        if (allocated(error)) return
+        call pf_rank(v, r, method="ordinal")
+        call check(error, all(r == [1, 2, 3, 4]), "ordinal ranking must give every element its own rank")
+        if (allocated(error)) return
+        call pf_rank(v, r, method="DeNsE")
+        call check(error, all(r == [1, 2, 2, 3]), "a method token must match regardless of case")
+    end subroutine test_rank_methods
+    !
+    !> Rank 0 means "no rank", which is why `pf_rank` takes no `nulls_first`: a null is outside the
+    !> ranking rather than placed at one end of it.
+    subroutine test_rank_nulls_zero(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(4) = [10, 99, 20, 30]
+        logical :: mask(4) = [.true., .false., .true., .true.]
+        integer, allocatable :: r(:)
+
+        call pf_rank(v, r, is_valid=mask)
+        call check(error, r(2) == 0, "a null must get rank 0")
+        if (allocated(error)) return
+        call check(error, all(r == [1, 0, 2, 3]), &
+            "the remaining ranks must be consecutive, as if the null were absent")
+    end subroutine test_rank_nulls_zero
+    !
+    !> A free cross-check between two independently generated families: ordinal rank is exactly the
+    !> inverse permutation of `pf_argsort`, so `r(perm(k)) == k` for every k.
+    subroutine test_rank_inverts_argsort(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(8) = [30, 10, 50, 10, 60, 40, 15, 55]
+        integer, allocatable :: r(:), perm(:)
+        integer :: k
+        logical :: ok
+
+        call pf_argsort(v, perm)
+        call pf_rank(v, r, method="ordinal")
+        ok = .true.
+        do k = 1, 8
+            if (r(perm(k)) /= k) ok = .false.
+        end do
+        call check(error, ok, "ordinal ranks must be the inverse of pf_argsort's permutation")
+    end subroutine test_rank_inverts_argsort
+    !
+    !> `descending` ranks from the largest value down, without moving nulls or changing tie rules.
+    subroutine test_rank_descending(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(4) = [10, 20, 20, 30]
+        integer, allocatable :: r(:)
+
+        call pf_rank(v, r, descending=.true.)
+        call check(error, all(r == [4, 2, 2, 1]), &
+            "descending competition ranking must rank the largest value 1")
+        if (allocated(error)) return
+        call pf_rank(v, r, method="dense", descending=.true.)
+        call check(error, all(r == [3, 2, 2, 1]), "descending dense ranking must skip no rank")
+    end subroutine test_rank_descending
+    !
+    !> **Risk-35 discipline**, for the same reason as `test_unique_both_paths`: ranking turns on
+    !> run detection, and a counting-path fixture never invokes the comparator that finds the runs.
+    subroutine test_rank_both_paths(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(50)
+        integer, allocatable :: fast(:), slow(:)
+        integer :: k
+        interface
+            subroutine disable_counting(enable) bind(C, name="parquet_debug_set_disable_sort_counting_path")
+                use iso_c_binding, only : c_int
+                integer(c_int), value :: enable !! nonzero forces the comparator path.
+            end subroutine disable_counting
+        end interface
+
+        do k = 1, 50
+            v(k) = int(mod(k * 3, 4), int32)   ! four distinct values, heavily tied
+        end do
+        call pf_rank(v, fast)
+        call disable_counting(1)
+        call pf_rank(v, slow)
+        call disable_counting(0)
+        call check(error, all(fast == slow), &
+            "both sort paths must produce the same competition ranks")
+        if (allocated(error)) return
+        call check(error, maxval(fast) == 50 - count(v == maxval(v)) + 1, &
+            "the largest competition rank must be one past the count below the top run")
+    end subroutine test_rank_both_paths
+    !
+    ! ==================================================================================
+    ! M3: extremes and merging
+    ! ==================================================================================
+    !
+    !> The oracle is `minval`/`maxval`, which share nothing with the sort engine.
+    subroutine test_minmax_basic(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(6) = [30, 10, 50, 20, 60, 40]
+        character(len=3) :: s(4) = ["cat", "ant", "dog", "bee"]
+        integer(int32) :: lo, hi
+        character(len=:), allocatable :: slo, shi
+
+        call pf_minmax(v, lo, hi)
+        call check(error, lo == minval(v), "pf_minmax must agree with minval")
+        if (allocated(error)) return
+        call check(error, hi == maxval(v), "pf_minmax must agree with maxval")
+        if (allocated(error)) return
+        call pf_minmax(s, slo, shi)
+        call check(error, slo == "ant" .and. shi == "dog", &
+            "a character array's extremes must be its lexicographic ends")
+    end subroutine test_minmax_basic
+    !
+    !> A NaN is an ordinary value everywhere else in this module, but it is not the minimum or the
+    !> maximum of anything -- so both it and every null are skipped here.
+    subroutine test_minmax_skips(error)
+        type(error_type), allocatable, intent(out) :: error
+        real(real64) :: v(5)
+        logical :: mask(5) = [.true., .true., .true., .false., .true.]
+        real(real64) :: lo, hi
+
+        v(1) = 3.0_real64
+        v(2) = ieee_value(1.0_real64, ieee_quiet_nan)
+        v(3) = 1.0_real64
+        v(4) = 999.0_real64
+        v(5) = 5.0_real64
+        call pf_minmax(v, lo, hi, is_valid=mask)
+        call check(error, lo == 1.0_real64, "a NaN must not be reported as the minimum")
+        if (allocated(error)) return
+        call check(error, hi == 5.0_real64, &
+            "neither a NaN nor a null's stored value may be reported as the maximum")
+    end subroutine test_minmax_skips
+    !
+    !> Ties report the FIRST occurrence at both ends -- the element a full stable sort would place
+    !> there, which is what makes the index deterministic rather than whichever one was seen last.
+    subroutine test_argminmax_ties(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(6) = [10, 5, 20, 5, 20, 7]
+        integer :: i1, i2
+        integer(int64) :: j1, j2
+
+        call pf_argminmax(v, i1, i2)
+        call check(error, i1 == 2, "argmin must report the first of the tied smallest values")
+        if (allocated(error)) return
+        call check(error, i2 == 3, "argmax must report the first of the tied largest values")
+        if (allocated(error)) return
+        call pf_argminmax(v, j1, j2)
+        call check(error, int(i1, int64) == j1 .and. int(i2, int64) == j2, &
+            "the int32 and int64 argminmax forms must agree")
+    end subroutine test_argminmax_ties
+    !
+    !> `parquet_column` is in `pf_argminmax` but not `pf_minmax`: an index needs no compile-time
+    !> element type, a value does. This is the only place that asymmetry is exercised.
+    subroutine test_argminmax_column(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: col
+        integer :: i1, i2
+
+        call col%init(PK_FLOAT64, 5_int64)
+        call col%set_all([2.5_real64, 9.5_real64, 0.5_real64, 9.5_real64, 4.5_real64])
+        call pf_argminmax(col, i1, i2)
+        call check(error, i1 == 3, "a column's argmin must be found by its runtime kind")
+        if (allocated(error)) return
+        call check(error, i2 == 2, "a column's argmax must report the first of its tied maxima")
+    end subroutine test_argminmax_column
+    !
+    !> **The merge oracle**: merging two sorted halves must equal sorting their concatenation, value
+    !> for value. That is what a stable merge means, and it needs no hand-written expectation.
+    subroutine test_merge_matches_sort(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: a(4) = [1, 4, 6, 9]
+        integer(int32) :: b(5) = [2, 3, 6, 7, 10]
+        integer(int32) :: cat(9)
+        integer(int32), allocatable :: m(:), s(:)
+
+        cat(1:4) = a
+        cat(5:9) = b
+        call pf_merge(a, b, m)
+        call pf_sort(cat, s)
+        call check(error, size(m) == 9, "a merge must return every element of both inputs")
+        if (allocated(error)) return
+        call check(error, all(m == s), "a merge must equal a sort of the concatenation")
+    end subroutine test_merge_matches_sort
+    !
+    !> Nulls sit last in each already-sorted input, so they end up last in the result -- and
+    !> `merged_valid` is allocated even when neither input supplied a mask.
+    subroutine test_merge_validity(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: a(3) = [1, 3, 99]
+        integer(int32) :: b(2) = [2, 88]
+        logical :: ma(3) = [.true., .true., .false.]
+        logical :: mb(2) = [.true., .false.]
+        integer(int32), allocatable :: m(:)
+        logical, allocatable :: mv(:)
+
+        call pf_merge(a, b, m, is_valid_a=ma, is_valid_b=mb, merged_valid=mv)
+        call check(error, all(m(1:3) == [1, 2, 3]), "the non-null values must merge in order")
+        if (allocated(error)) return
+        ! The two nulls compare EQUAL to each other, so which of them lands first is decided purely
+        ! by the tie rule -- and taking from `b` instead would produce a result whose values are
+        ! still "sorted" and whose validity mask is still identical. This is the only assertion in
+        ! the suite that pins stability for the merge; a mutation of that rule survives without it.
+        call check(error, all(m == [1, 2, 3, 99, 88]), &
+            "a tie must take from `a` first, so a's null precedes b's")
+        if (allocated(error)) return
+        call check(error, all(mv .eqv. [.true., .true., .true., .false., .false.]), &
+            "merged_valid must mark exactly the rows that came from a null")
+        if (allocated(error)) return
+        call pf_merge(a, b, m, merged_valid=mv)
+        call check(error, allocated(mv) .and. all(mv), &
+            "merged_valid must be allocated and all .true. when no input mask was supplied")
+    end subroutine test_merge_validity
+    !
+    !> `descending` selects the comparison, exactly as in the searches -- the inputs must already
+    !> be in that order for the result to be.
+    subroutine test_merge_descending(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: a(3) = [9, 5, 1]
+        integer(int32) :: b(3) = [8, 4, 2]
+        integer(int32), allocatable :: m(:)
+
+        call pf_merge(a, b, m, descending=.true.)
+        call check(error, all(m == [9, 8, 5, 4, 2, 1]), &
+            "a descending merge must interleave two descending inputs")
+    end subroutine test_merge_descending
+    !
+    !> An empty input contributes nothing and must not shift the other one.
+    subroutine test_merge_empty(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: empty(:)
+        integer(int32) :: b(3) = [2, 4, 6]
+        integer(int32), allocatable :: m(:)
+
+        allocate(empty(0))
+        call pf_merge(empty, b, m)
+        call check(error, size(m) == 3 .and. all(m == b), &
+            "merging an empty array must return the other one unchanged")
+        if (allocated(error)) return
+        call pf_merge(b, empty, m)
+        call check(error, size(m) == 3 .and. all(m == b), &
+            "an empty second input must be handled the same way")
+        if (allocated(error)) return
+        call pf_merge(empty, empty, m)
+        call check(error, size(m) == 0, "merging two empty arrays must give an empty result")
+    end subroutine test_merge_empty
+    !
+    !> Two `character` arrays of different declared lengths merge into the wider one. Comparing the
+    !> packed keys at two different widths would misorder them, so both halves are widened first.
+    subroutine test_merge_string_widths(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=3) :: a(2) = ["abc", "xyz"]
+        character(len=5) :: b(2) = ["aaaaa", "mmmmm"]
+        character(len=:), allocatable :: m(:)
+
+        call pf_merge(a, b, m)
+        call check(error, len(m) == 5, "the merged array must be as wide as the wider input")
+        if (allocated(error)) return
+        call check(error, size(m) == 4, "the merged array must hold every element of both inputs")
+        if (allocated(error)) return
+        call check(error, all(m == ["aaaaa", "abc  ", "mmmmm", "xyz  "]), &
+            "a shorter element must order as if blank-padded to the merged width")
+    end subroutine test_merge_string_widths
     !
 end module test_sorting

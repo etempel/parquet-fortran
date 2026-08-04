@@ -307,6 +307,16 @@ contains
                 test_sorting_keys_empty_aborts), &
             new_unittest("sorting: a vector column key aborts", &
                 test_sorting_column_vector_aborts), &
+            new_unittest("sorting: searching unsorted input aborts", &
+                test_sorting_search_unsorted_aborts), &
+            new_unittest("sorting: an over-long search target aborts", &
+                test_sorting_search_target_too_long_aborts), &
+            new_unittest("sorting: an unknown rank method aborts", &
+                test_sorting_rank_bad_method_aborts), &
+            new_unittest("sorting: an all-null minmax aborts", &
+                test_sorting_minmax_all_null_aborts), &
+            new_unittest("sorting: merging unsorted input aborts", &
+                test_sorting_merge_unsorted_aborts), &
             new_unittest("sort: unknown column aborts", &
                 test_sort_unknown_column_aborts), &
             new_unittest("sort: vector column key aborts", &
@@ -3064,6 +3074,64 @@ contains
             failure_message="sorting a vector column was expected to abort", &
             required_stderr="a vector column cannot be a sort key")
     end subroutine test_sorting_column_vector_aborts
+
+    !> pf_lower_bound abort path: see scenario_sorting_search_unsorted in test/error_scenarios.f90.
+    !> The scenario searches SORTED input first, which is the control proving the check is not
+    !> firing unconditionally -- a guard that always fired would pass this test while making every
+    !> search unusable.
+    subroutine test_sorting_search_unsorted_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_search_unsorted", &
+            expect_abort=.true., &
+            failure_message="searching unsorted input was expected to abort", &
+            required_stderr="values is not sorted")
+    end subroutine test_sorting_search_unsorted_aborts
+
+    !> pf_lower_bound abort path: see scenario_sorting_search_target_too_long in
+    !> test/error_scenarios.f90. A shorter target answers first, as the control.
+    subroutine test_sorting_search_target_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_search_target_too_long", &
+            expect_abort=.true., &
+            failure_message="an over-long search target was expected to abort", &
+            required_stderr="so no exact comparison exists")
+    end subroutine test_sorting_search_target_too_long_aborts
+
+    !> pf_rank abort path: see scenario_sorting_rank_bad_method in test/error_scenarios.f90.
+    !> Asserts the message NAMES the valid tokens, the same standard `rounding=` is held to.
+    subroutine test_sorting_rank_bad_method_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_rank_bad_method", &
+            expect_abort=.true., &
+            failure_message="an unrecognized rank method was expected to abort", &
+            required_stderr="'competition' (the default), 'dense' or 'ordinal'")
+    end subroutine test_sorting_rank_bad_method_aborts
+
+    !> pf_minmax abort path: see scenario_sorting_minmax_all_null in test/error_scenarios.f90.
+    !> The scenario answers a partially null array first, as the control.
+    subroutine test_sorting_minmax_all_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_minmax_all_null", &
+            expect_abort=.true., &
+            failure_message="reducing an all-null array was expected to abort", &
+            required_stderr="every value is null or NaN")
+    end subroutine test_sorting_minmax_all_null_aborts
+
+    !> pf_merge abort path: see scenario_sorting_merge_unsorted in test/error_scenarios.f90.
+    !> Requires the message to name `b`, since a merge has two inputs and saying only "not sorted"
+    !> leaves the caller to guess which one.
+    subroutine test_sorting_merge_unsorted_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_merge_unsorted", &
+            expect_abort=.true., &
+            failure_message="merging unsorted input was expected to abort", &
+            required_stderr="b is not sorted")
+    end subroutine test_sorting_merge_unsorted_aborts
 
     !> Read-time sort abort path: see scenario_sort_vector_column in test/error_scenarios.f90
     !> for what it does and why that state is rejected.

@@ -420,6 +420,16 @@ program error_scenarios
         call scenario_sorting_keys_empty()
     case ("sorting_column_vector")
         call scenario_sorting_column_vector()
+    case ("sorting_search_unsorted")
+        call scenario_sorting_search_unsorted()
+    case ("sorting_search_target_too_long")
+        call scenario_sorting_search_target_too_long()
+    case ("sorting_rank_bad_method")
+        call scenario_sorting_rank_bad_method()
+    case ("sorting_minmax_all_null")
+        call scenario_sorting_minmax_all_null()
+    case ("sorting_merge_unsorted")
+        call scenario_sorting_merge_unsorted()
     case ("sort_unknown_column")
         call scenario_sort_unknown_column()
     case ("sort_vector_column")
@@ -11205,5 +11215,75 @@ contains
         call pf_argsort(col, perm)   ! -> aborts (a vector column cannot be a sort key)
         print '(a,i0)', "unexpectedly sorted a vector column, size=", size(perm)
     end subroutine scenario_sorting_column_vector
+
+    !> **The worst failure this module could have**, and the reason the check is on by default: a
+    !! binary search over unsorted input returns a plausible index with no abort and no symptom at
+    !! all. The sorted call first is the negative control -- without it, a check that fired
+    !! unconditionally would pass this scenario just as happily while making the feature unusable.
+    subroutine scenario_sorting_search_unsorted()
+        integer(int32) :: sorted_v(5) = [10, 20, 30, 40, 50]
+        integer(int32) :: jumbled(5) = [10, 40, 20, 50, 30]
+        integer(int32) :: pos
+        call pf_lower_bound(sorted_v, 30_int32, pos)
+        print '(a,i0)', "sorted input answered pos=", pos
+        call pf_lower_bound(jumbled, 30_int32, pos)   ! -> aborts (not sorted)
+        print '(a,i0)', "unexpectedly searched unsorted input, pos=", pos
+    end subroutine scenario_sorting_search_unsorted
+
+    !> A `character` target is compared at the ARRAY's element length, so a target carrying
+    !! non-blank characters past that length has no exact answer -- it is refused rather than
+    !! truncated into a different value. A target that FITS is the control.
+    subroutine scenario_sorting_search_target_too_long()
+        character(len=3) :: v(3) = ["aaa", "bbb", "ccc"]
+        integer(int32) :: pos
+        call pf_lower_bound(v, "bb", pos)
+        print '(a,i0)', "a shorter target answered pos=", pos
+        call pf_lower_bound(v, "bbbb", pos)   ! -> aborts (4 non-blank characters, 3 per element)
+        print '(a,i0)', "unexpectedly searched with an over-long target, pos=", pos
+    end subroutine scenario_sorting_search_target_too_long
+
+    !> An unrecognized `method=` token aborts naming the valid ones, exactly as `rounding=` does --
+    !! a string selector is only acceptable because an unknown value fails loudly.
+    subroutine scenario_sorting_rank_bad_method()
+        integer(int32) :: v(4) = [10, 20, 20, 30]
+        integer(int32), allocatable :: r(:)
+        call pf_rank(v, r, method="Dense")
+        print '(a,i0)', "a known token answered, largest rank=", maxval(r)
+        call pf_rank(v, r, method="modified competition")   ! -> aborts
+        print '(a,i0)', "unexpectedly ranked with an unknown method, largest rank=", maxval(r)
+    end subroutine scenario_sorting_rank_bad_method
+
+    !> No value to return and no sentinel that works across nine types -- the same unanswerable
+    !! question `pf_nth_quantile` refuses, answered the same way. A NaN counts as absent here too,
+    !! which is why the aborting array holds one rather than being purely null.
+    subroutine scenario_sorting_minmax_all_null()
+        use ieee_arithmetic, only : ieee_value, ieee_quiet_nan
+        real(real64) :: v(3)
+        logical :: none(3) = [.false., .false., .true.]
+        logical :: some(3) = [.true., .false., .false.]
+        real(real64) :: lo, hi
+        v(1) = 1.0_real64
+        v(2) = 2.0_real64
+        v(3) = ieee_value(1.0_real64, ieee_quiet_nan)
+        ! Negative control: a partially null array still answers.
+        call pf_minmax(v, lo, hi, is_valid=some)
+        print '(a,f0.3,a,f0.3)', "partial nulls answered lo=", lo, " hi=", hi
+        call pf_minmax(v, lo, hi, is_valid=none)   ! -> aborts (the only non-null value is a NaN)
+        print '(a,f0.3)', "unexpectedly reduced an all-null array, lo=", lo
+    end subroutine scenario_sorting_minmax_all_null
+
+    !> `pf_merge` checks BOTH inputs, not just the first -- an unsorted second input is the same
+    !! silent-wrong-answer class as an unsorted array in a binary search. The all-sorted call is
+    !! the control, and the message must name WHICH argument was wrong.
+    subroutine scenario_sorting_merge_unsorted()
+        integer(int32) :: a(3) = [1, 3, 5]
+        integer(int32) :: b(3) = [2, 6, 4]
+        integer(int32) :: b_ok(3) = [2, 4, 6]
+        integer(int32), allocatable :: m(:)
+        call pf_merge(a, b_ok, m)
+        print '(a,i0)', "two sorted inputs merged, size=", size(m)
+        call pf_merge(a, b, m)   ! -> aborts (b is not sorted)
+        print '(a,i0)', "unexpectedly merged an unsorted input, size=", size(m)
+    end subroutine scenario_sorting_merge_unsorted
 
 end program error_scenarios

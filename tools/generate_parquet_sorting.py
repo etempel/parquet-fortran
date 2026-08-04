@@ -15,6 +15,11 @@ is generated at build time, so the fpm build stays dependency-free):
   src/parquet_sorting_keys.f90      key extraction (one per type) + pf_sort_keys%add.
   src/parquet_sorting_argsort.f90   pf_argsort and pf_sort.
   src/parquet_sorting_permute.f90   pf_permute and pf_is_sorted.
+  src/parquet_sorting_select.f90    pf_partial_sort, pf_partial_argsort, pf_nth_element,
+                                    pf_nth_quantile.
+  src/parquet_sorting_search.f90    pf_lower_bound, pf_upper_bound, pf_equal_range.
+  src/parquet_sorting_unique.f90    pf_unique_count, pf_unique, pf_rank.
+  src/parquet_sorting_reduce.f90    pf_minmax, pf_argminmax, pf_merge.
 
 THE KIND TABLE: the nine scalar rows are imported from tools/generate_parquet_columns.py --
 the single place a supported column kind is declared -- and the three extras this module adds
@@ -128,6 +133,40 @@ def has_nth(t):
     return t[0] != "col"
 
 
+#: Types the M3 families apply to. Each exclusion comes from feature_sort.md section 6's own two
+#: rules -- a type is out wherever the answer would need a compile-time element type it does not
+#: have, and it stays in wherever the answer is a permutation, a boolean or an integer -- so these
+#: are derived, not chosen. `pf_argminmax` keeping `parquet_column` while `pf_minmax` drops it is
+#: that second rule; `logical` is out of both as vacuous (the index of the first .false. is not a
+#: question worth an API).
+def has_search(t):
+    return t[0] != "col"       # a search needs a target value of the element's own type
+
+
+def has_unique(t):
+    return t[0] != "col"       # `distinct` needs a compile-time element type
+
+
+def has_minmax(t):
+    return t[0] not in ("col", "bool")
+
+
+def has_argminmax(t):
+    return t[0] != "bool"
+
+
+def has_merge(t):
+    return t[3] not in ("strcol", "col")   # merging is defined on plain arrays only
+
+
+def tgt_decl(t, name="target"):
+    """Declaration of ONE search target of type `t`, as an intent(in) scalar."""
+    tag, decl, what, family, nulls, _, _ = t
+    if family in ("chr", "strcol"):
+        return f"        character(len=*), intent(in) :: {name}"
+    return f"        {decl}, intent(in) :: {name}"
+
+
 def pval_decl(t, name="p_value"):
     """Declaration of ONE element of type `t`, as an intent(out) result."""
     tag, decl, what, family, nulls, _, _ = t
@@ -208,7 +247,9 @@ module parquet_sorting
         parquet_sort_builder_build_partial, parquet_sort_builder_nth_element, &
         parquet_sort_partial_argsort_int64, parquet_sort_partial_argsort_double, &
         parquet_sort_partial_argsort_string, parquet_sort_nth_index_int64, &
-        parquet_sort_nth_index_double, parquet_sort_nth_index_string
+        parquet_sort_nth_index_double, parquet_sort_nth_index_string, &
+        parquet_sort_builder_build_runs, parquet_sort_builder_search, parquet_sort_builder_merge
+    use, intrinsic :: ieee_arithmetic, only : ieee_is_nan
     use parquet_strings, only : parquet_string_column
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp
     use parquet_columns, only : parquet_column, parquet_kind_name, PK_INT32, PK_INT64, PK_FLOAT32, &
@@ -226,6 +267,15 @@ module parquet_sorting
     public :: pf_partial_argsort
     public :: pf_nth_element
     public :: pf_nth_quantile
+    public :: pf_lower_bound
+    public :: pf_upper_bound
+    public :: pf_equal_range
+    public :: pf_unique_count
+    public :: pf_unique
+    public :: pf_rank
+    public :: pf_minmax
+    public :: pf_argminmax
+    public :: pf_merge
     !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_sorting: "
@@ -239,6 +289,16 @@ module parquet_sorting
     integer, parameter :: RND_NEAREST = 1 !! round a fractional rank to the nearest whole one.
     integer, parameter :: RND_DOWN = 2    !! round a fractional rank down.
     integer, parameter :: RND_UP = 3      !! round a fractional rank up.
+    !
+    ! ---- Tie handling for pf_rank ----
+    integer, parameter :: RANK_COMPETITION = 1 !! ties share the lower rank; the next gap is skipped.
+    integer, parameter :: RANK_DENSE = 2       !! ties share a rank and no rank is skipped.
+    integer, parameter :: RANK_ORDINAL = 3     !! every element gets its own rank, ties in file order.
+    !
+    ! ---- Which bound pf_lower_bound/pf_upper_bound/pf_equal_range want ----
+    integer, parameter :: SRCH_LOWER = 1 !! the first position not ordered before the target.
+    integer, parameter :: SRCH_UPPER = 2 !! the first position the target is ordered before.
+    integer, parameter :: SRCH_BOTH = 3  !! both, from one extraction.
     !
     !> One extracted sort key, in the canonical form the C++ engine takes.
     !!
@@ -413,6 +473,162 @@ module parquet_sorting
     w("    end interface pf_nth_quantile")
     w("    !")
 
+    # ---- M3 generics ----
+    for gname, blurb in (
+        ("pf_lower_bound",
+         ["The first position at which `target` could be inserted into an already-sorted",
+          "`values` without breaking its order -- i.e. the first element not ordered BEFORE it.",
+          "",
+          "`pos` lands in `1 .. size(values)+1`; it is `size(values)+1` when every element is",
+          "ordered before the target. Together with `pf_upper_bound` it brackets every element",
+          "equal to the target, which is what `pf_equal_range` returns in one call.",
+          "",
+          "**`values` is checked for sortedness first, and that check is O(n).** Searching an",
+          "unsorted array returns a plausible index with no symptom at all, so the check is on by",
+          "default. Check once with `pf_is_sorted` and pass `assume_sorted=.true.` in a loop:",
+          "",
+          "```fortran",
+          "call pf_is_sorted(v, ok)                       ! O(N), once",
+          "do k = 1, m",
+          "    call pf_lower_bound(v, targets(k), pos, assume_sorted=.true.)   ! O(log N) each",
+          "end do",
+          "```",
+          "",
+          "`descending`/`nulls_first` must describe the order `values` is ACTUALLY in -- they",
+          "select the comparison, they do not reorder anything."]),
+        ("pf_upper_bound",
+         ["The first position at which `target` is ordered BEFORE the element there -- i.e. one",
+          "past the last element equal to the target.",
+          "",
+          "Same arguments, same sortedness rule and same `1 .. size(values)+1` range as",
+          "`pf_lower_bound`; `pf_upper_bound - pf_lower_bound` is how many elements equal the",
+          "target."]),
+        ("pf_equal_range",
+         ["The INCLUSIVE range `first .. last` of elements equal to `target`, from one pass.",
+          "",
+          "`first` is `pf_lower_bound`'s answer and `last` is `pf_upper_bound`'s minus one, so a",
+          "target that is absent comes back with `last == first - 1` and `last - first + 1 == 0`.",
+          "Do not read `values(first)` without checking that count first.",
+          "",
+          "Cheaper than calling the two bounds separately: the values are extracted once."]),
+        ("pf_unique_count",
+         ["How many DISTINCT non-null values `values` holds. `n_null` optionally reports how many",
+          "were null.",
+          "",
+          "**Nulls are excluded from the population, not counted as one value** -- the same rule",
+          "`pf_nth_quantile` follows, and the reason this takes neither `descending` (a count does",
+          "not depend on direction) nor `nulls_first` (there is no null tier to place).",
+          "",
+          "Distinctness is the sort comparator's own equality, so on a floating-point array it is",
+          "EXACT: `0.1 + 0.2` and `0.3` are two distinct values. Every NaN counts as one value,",
+          "collectively, since NaNs compare equal to each other here (they do not under `==`)."]),
+        ("pf_unique",
+         ["The distinct non-null values of `values`, in order, as an independent copy.",
+          "",
+          "Same distinctness rule as `pf_unique_count` -- exact for reals, all NaNs collapsing to",
+          "one. `descending` chooses the order the distinct values come back in; there is no",
+          "`nulls_first`, because nulls are excluded rather than placed.",
+          "",
+          "Each distinct value is taken from its FIRST occurrence in the sorted order, which for",
+          "equal-comparing-but-not-identical values (a `character` array's trailing blanks, a",
+          "`parquet_string_column`'s empty strings) is the earliest such element of `values`."]),
+        ("pf_rank",
+         ["The rank of every element of `values`, without reordering it. `ranks(i)` is the rank of",
+          "`values(i)`, so this is a per-element answer rather than a permutation.",
+          "",
+          "`method=` chooses how ties are handled, matched case-insensitively:",
+          "",
+          "| token | ranks of `10, 20, 20, 30` |",
+          "|---|---|",
+          "| `\"competition\"` (the default) | 1, 2, 2, 4 |",
+          "| `\"dense\"` | 1, 2, 2, 3 |",
+          "| `\"ordinal\"` | 1, 2, 3, 4 |",
+          "",
+          "**A null gets rank 0**, which is why this takes `descending` but NOT `nulls_first`: a",
+          "null has no rank at all, so there is no position for `nulls_first` to choose. NaNs are",
+          "ranked as ordinary values (all tying with each other), unlike nulls.",
+          "",
+          "`\"ordinal\"` ranks are exactly the inverse of `pf_argsort`'s permutation."]),
+        ("pf_minmax",
+         ["The smallest and largest value in `values`, skipping nulls and NaNs.",
+          "",
+          "Takes no `descending`/`nulls_first`: a minimum and a maximum are absolute, and reversing",
+          "the order would only exchange the two answers.",
+          "",
+          "**Aborts when every value is null or NaN** -- there is nothing to return, and no",
+          "sentinel exists across all nine types. This matches `pf_nth_quantile`'s decision for the",
+          "same degenerate case; guard with `count(is_valid)` where that can happen.",
+          "",
+          "Use `pf_argminmax` when the positions matter rather than the values."]),
+        ("pf_argminmax",
+         ["WHERE the smallest and largest value of `values` are: `imin`/`imax` are 1-based indices",
+          "into `values`, skipping nulls and NaNs.",
+          "",
+          "The index-returning twin of `pf_minmax`, split off because Fortran cannot offer both",
+          "answers from one generic -- optional `imin`/`imax` varying only by integer kind would",
+          "make a positional call ambiguous. A caller wanting both pays one extra call.",
+          "",
+          "Ties report the FIRST occurrence, which is the element a full stable sort would place at",
+          "either end. Aborts on an all-null-or-NaN input, exactly as `pf_minmax` does. Defined for",
+          "`parquet_column` as well, since an index needs no compile-time element type."]),
+        ("pf_merge",
+         ["Merges two ALREADY-SORTED arrays into one sorted array, in O(size(a) + size(b)) rather",
+          "than the O(n log n) of sorting their concatenation.",
+          "",
+          "`descending`/`nulls_first` must match the order `a` and `b` are actually in -- they",
+          "select the comparison, exactly as in the searches. Both inputs are checked for",
+          "sortedness unless `assume_sorted=.true.`.",
+          "",
+          "**Supply `is_valid_a`/`is_valid_b` whenever either input has nulls.** A sorted array",
+          "containing nulls is what `pf_sort(..., is_valid=)` produces, and a merge that is not told",
+          "which elements are null compares them as ordinary values and interleaves them into the",
+          "middle of the result. The precondition cannot be checked, either: a null's stored value",
+          "is indistinguishable from a real one without the mask.",
+          "",
+          "`merged_valid` reports the result's validity and is ALWAYS allocated when asked for, all",
+          "`.true.` when neither input mask was supplied. Ties take from `a` first, so the result",
+          "matches `pf_sort` of the concatenation element for element."]),
+    ):
+        for line in blurb:
+            w(("    !> " + line).rstrip())
+        w(f"    interface {gname}")
+        if gname in ("pf_lower_bound", "pf_upper_bound", "pf_equal_range"):
+            base = {"pf_lower_bound": "lower_bound", "pf_upper_bound": "upper_bound",
+                    "pf_equal_range": "equal_range"}[gname]
+            for t in TYPES:
+                if not has_search(t):
+                    continue
+                for ik, _, _ in IDX_KINDS:
+                    w(f"        module procedure {base}_{t[0]}_{ik}")
+        elif gname == "pf_unique_count":
+            for t in TYPES:
+                for ik, _, _ in IDX_KINDS:
+                    w(f"        module procedure unique_count_{t[0]}_{ik}")
+        elif gname == "pf_unique":
+            for t in TYPES:
+                if has_unique(t):
+                    w(f"        module procedure unique_{t[0]}")
+        elif gname == "pf_rank":
+            for t in TYPES:
+                for ik, _, _ in IDX_KINDS:
+                    w(f"        module procedure rank_{t[0]}_{ik}")
+        elif gname == "pf_minmax":
+            for t in TYPES:
+                if has_minmax(t):
+                    w(f"        module procedure minmax_{t[0]}")
+        elif gname == "pf_argminmax":
+            for t in TYPES:
+                if not has_argminmax(t):
+                    continue
+                for ik, _, _ in IDX_KINDS:
+                    w(f"        module procedure argminmax_{t[0]}_{ik}")
+        else:
+            for t in TYPES:
+                if has_merge(t):
+                    w(f"        module procedure merge_{t[0]}")
+        w(f"    end interface {gname}")
+        w("    !")
+
     # ---- interface bodies ----
     w("    ! ---- Key extraction and pf_sort_keys%add (parquet_sorting_keys) ----")
     w("    interface")
@@ -534,6 +750,91 @@ module parquet_sorting
     w("            integer(int64), intent(in) :: n       !! expected length.")
     w("            character(len=*), intent(in) :: proc  !! calling procedure, for messages.")
     w("        end subroutine check_permutation")
+    w("        !> Sorts, and reports where the runs of EQUAL rows are: `tie(k)` is 1 when output")
+    w("        !! position k holds a row comparing equal to the one before it. One call, because")
+    w("        !! `pf_unique`/`pf_rank` need both and would otherwise build the permutation twice.")
+    w("        module subroutine engine_build_runs(keys, nrows, proc, perm, tie)")
+    w("            type(sort_key_buf), intent(in), target :: keys(:)   !! the keys, primary first.")
+    w("            integer(int64), intent(in) :: nrows                 !! rows each key describes.")
+    w("            character(len=*), intent(in) :: proc                !! calling procedure, for messages.")
+    w("            integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.")
+    w("            integer(c_int8_t), allocatable, intent(out) :: tie(:) !! 1 where a row ties the previous.")
+    w("        end subroutine engine_build_runs")
+    w("        !> Binary-searches `keys`, whose LAST row is the target the caller appended.")
+    w("        module subroutine engine_search(keys, nrows, n_search, upper, proc, pos)")
+    w("            type(sort_key_buf), intent(in), target :: keys(:) !! the keys, primary first.")
+    w("            integer(int64), intent(in) :: nrows               !! rows each key has, target included.")
+    w("            integer(int64), intent(in) :: n_search            !! rows to search, target excluded.")
+    w("            logical, intent(in) :: upper                      !! .true. for upper_bound.")
+    w("            character(len=*), intent(in) :: proc              !! calling procedure, for messages.")
+    w("            integer(int64), intent(out) :: pos                !! 1-based insertion point.")
+    w("        end subroutine engine_search")
+    w("        !> Merges rows 1..`na` of `keys` with the rest, both already in order.")
+    w("        module subroutine engine_merge(keys, nrows, na, proc, perm)")
+    w("            type(sort_key_buf), intent(in), target :: keys(:)   !! the keys, primary first.")
+    w("            integer(int64), intent(in) :: nrows                 !! rows each key describes.")
+    w("            integer(int64), intent(in) :: na                    !! rows belonging to the first input.")
+    w("            character(len=*), intent(in) :: proc                !! calling procedure, for messages.")
+    w("            integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.")
+    w("        end subroutine engine_merge")
+    w("        !> Appends `src`'s rows to `dst`'s, key for key -- how a search target joins the array")
+    w("        !! it is searched for in, and how `pf_merge` concatenates its two inputs. Both must")
+    w("        !! describe the same number of keys, of the same families.")
+    w("        module subroutine buf_append(dst, nd, src, ns, proc)")
+    w("            type(sort_key_buf), allocatable, intent(inout) :: dst(:) !! grown in place.")
+    w("            integer(int64), intent(in) :: nd                     !! rows currently in `dst`.")
+    w("            type(sort_key_buf), allocatable, intent(in) :: src(:) !! keys to append.")
+    w("            integer(int64), intent(in) :: ns                     !! rows in `src`.")
+    w("            character(len=*), intent(in) :: proc                 !! calling procedure, for messages.")
+    w("        end subroutine buf_append")
+    w("        !> How many of a key's rows hold an actual VALUE -- neither null nor NaN, i.e. the")
+    w("        !! population `pf_minmax` reduces over.")
+    w("        module subroutine key_value_count(keys, nrows, n_value)")
+    w("            type(sort_key_buf), intent(in) :: keys(:) !! the keys; only the first is consulted.")
+    w("            integer(int64), intent(in) :: nrows       !! the array size.")
+    w("            integer(int64), intent(out) :: n_value    !! rows that are neither null nor NaN.")
+    w("        end subroutine key_value_count")
+    w("        !> Which rows of a key are null, as a plain mask. Every element is `.false.` when the")
+    w("        !! key has no nulls at all (the module's unallocated-`valid` convention).")
+    w("        module subroutine key_null_mask(keys, nrows, isnull)")
+    w("            type(sort_key_buf), intent(in) :: keys(:) !! the keys; only the first is consulted.")
+    w("            integer(int64), intent(in) :: nrows       !! the array size.")
+    w("            logical, allocatable, intent(out) :: isnull(:) !! .true. where the row is null.")
+    w("        end subroutine key_null_mask")
+    w("        !> Lower-cases a trimmed token, the one case-folding site the module has.")
+    w("        module subroutine fold_token(text, tok)")
+    w("            character(len=*), intent(in) :: text              !! the raw token.")
+    w("            character(len=:), allocatable, intent(out) :: tok !! trimmed and lower-cased.")
+    w("        end subroutine fold_token")
+    w("        !> Turns a `method=` token into a RANK_* mode, aborting on an unrecognized one.")
+    w("        module subroutine resolve_rank_method(method, proc, mode)")
+    w("            character(len=*), intent(in), optional :: method !! token; default \"competition\".")
+    w("            character(len=*), intent(in) :: proc             !! calling procedure, for messages.")
+    w("            integer, intent(out) :: mode                     !! RANK_COMPETITION/_DENSE/_ORDINAL.")
+    w("        end subroutine resolve_rank_method")
+    w("        !> Aborts unless the extracted key is in the order the caller says it is. `what` names")
+    w("        !! the argument, since `pf_merge` has two arrays to tell apart.")
+    w("        module subroutine check_sorted_input(keys, nrows, proc, what)")
+    w("            type(sort_key_buf), intent(in), target :: keys(:) !! the extracted key.")
+    w("            integer(int64), intent(in) :: nrows               !! its row count.")
+    w("            character(len=*), intent(in) :: proc              !! calling procedure, for messages.")
+    w("            character(len=*), intent(in) :: what              !! the argument's name.")
+    w("        end subroutine check_sorted_input")
+    w("        !> Narrows one int64 answer to int32, aborting rather than truncating. `noun` names")
+    w("        !! what the number is, so the message says which argument to widen.")
+    w("        module subroutine narrow_i64(value, proc, noun, dst)")
+    w("            integer(int64), intent(in) :: value  !! the answer.")
+    w("            character(len=*), intent(in) :: proc !! calling procedure, for messages.")
+    w("            character(len=*), intent(in) :: noun !! what the number is, for the message.")
+    w("            integer(int32), intent(out) :: dst   !! the narrowed copy.")
+    w("        end subroutine narrow_i64")
+    w("        !> The array counterpart of `narrow_i64`.")
+    w("        module subroutine narrow_i64_array(src, proc, noun, dst)")
+    w("            integer(int64), intent(in) :: src(:) !! the answers.")
+    w("            character(len=*), intent(in) :: proc !! calling procedure, for messages.")
+    w("            character(len=*), intent(in) :: noun !! what the numbers are, for the message.")
+    w("            integer(int32), allocatable, intent(out) :: dst(:) !! the narrowed copy.")
+    w("        end subroutine narrow_i64_array")
     w("        !> Narrows a 1-based int64 permutation to int32, aborting rather than truncating.")
     w("        module subroutine narrow_perm(perm64, proc, perm32)")
     w("            integer(int64), intent(in) :: perm64(:)                !! the permutation.")
@@ -690,8 +991,165 @@ module parquet_sorting
         w(f"        end subroutine is_sorted_{tag}")
     w("    end interface")
     w("    !")
+    emit_m3_interfaces(w)
     w("end module parquet_sorting ! GCOVR_EXCL_LINE")
     return "\n".join(o) + "\n"
+
+
+DESC_DOC = "            logical, intent(in), optional :: descending !! .true. for high-to-low order."
+NLO_DOC = "            logical, intent(in), optional :: nulls_first !! .true. when nulls come first."
+VALID_DOC = "            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null."
+SORTED_DOC = ("            logical, intent(in), optional :: assume_sorted\n"
+              "            !! .true. skips the O(n) sortedness check. Only pass it for an order you have\n"
+              "            !! already established -- searching unsorted input answers with a plausible\n"
+              "            !! index and no symptom at all.")
+
+
+def merged_decl(t):
+    """Declaration of pf_merge's result array."""
+    tag, decl, what, family, nulls, _, _ = t
+    if family == "chr":
+        return ("            character(len=:), allocatable, intent(out) :: merged(:)\n"
+                "            !! the merged copy, widened to `max(len(a), len(b))`. DEFERRED-length,\n"
+                "            !! unlike `pf_sort`'s output, because the width comes from two inputs\n"
+                "            !! rather than one -- so declare it `character(len=:), allocatable`.")
+    return f"            {decl}, allocatable, intent(out) :: merged(:) !! the merged copy."
+
+
+def distinct_decl(t):
+    """Declaration of pf_unique's result."""
+    tag, decl, what, family, nulls, _, _ = t
+    if family == "chr":
+        return "            character(len=len(values)), allocatable, intent(out) :: distinct(:) !! the distinct values."
+    if family == "strcol":
+        return "            type(parquet_string_column), intent(out) :: distinct !! the distinct values."
+    return f"            {decl}, allocatable, intent(out) :: distinct(:) !! the distinct values, in order."
+
+
+def emit_m3_interfaces(w):
+    """Interface bodies for the M3 families (search, unique/rank, minmax/merge)."""
+    w("    ! ---- Searching a sorted array (parquet_sorting_search) ----")
+    w("    interface")
+    for base, out in (("lower_bound", "lower"), ("upper_bound", "upper"), ("equal_range", "range")):
+        for t in TYPES:
+            if not has_search(t):
+                continue
+            tag, decl, what, family, nulls, _, _ = t
+            for ik, idecl, iname in IDX_KINDS:
+                res = "first, last" if out == "range" else "pos"
+                w(f"        !> pf_{base} over a sorted {what} array, with {iname} result(s).")
+                w(f"        module subroutine {base}_{tag}_{ik}(values, target, {res}, descending, " +
+                  f"nulls_first{', is_valid' if nulls == 'arg' else ''}, assume_sorted)")
+                w(val_decl(t, "in"))
+                w(tgt_decl(t) + " !! the value to look for.")
+                if out == "range":
+                    w(f"            {idecl}, intent(out) :: first !! first element equal to `target`.")
+                    w(f"            {idecl}, intent(out) :: last  !! last one; `first - 1` when absent.")
+                else:
+                    w(f"            {idecl}, intent(out) :: pos !! 1-based insertion point.")
+                w(DESC_DOC)
+                w(NLO_DOC)
+                if nulls == "arg":
+                    w(VALID_DOC)
+                w(SORTED_DOC)
+                w(f"        end subroutine {base}_{tag}_{ik}")
+    w("    end interface")
+    w("    !")
+    w("    ! ---- Distinct values and ranks (parquet_sorting_unique) ----")
+    w("    interface")
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        for ik, idecl, iname in IDX_KINDS:
+            w(f"        !> pf_unique_count over a {what} array, with an {iname} count.")
+            w(f"        module subroutine unique_count_{tag}_{ik}(values, count" +
+              f"{', is_valid' if nulls == 'arg' else ''}, n_null)")
+            w(val_decl(t, "in"))
+            w(f"            {idecl}, intent(out) :: count !! how many distinct non-null values.")
+            if nulls == "arg":
+                w(VALID_DOC)
+            w("            integer(int64), intent(out), optional :: n_null !! how many values were null.")
+            w(f"        end subroutine unique_count_{tag}_{ik}")
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        if not has_unique(t):
+            continue
+        w(f"        !> pf_unique over a {what} array: its distinct non-null values, in order.")
+        w(f"        module subroutine unique_{tag}(values, distinct, descending" +
+          f"{', is_valid' if nulls == 'arg' else ''}, n_null)")
+        w(val_decl(t, "in"))
+        w(distinct_decl(t))
+        w(DESC_DOC)
+        if nulls == "arg":
+            w(VALID_DOC)
+        w("            integer(int64), intent(out), optional :: n_null !! how many values were null.")
+        w(f"        end subroutine unique_{tag}")
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        for ik, idecl, iname in IDX_KINDS:
+            w(f"        !> pf_rank over a {what} array, with {iname} ranks.")
+            w(f"        module subroutine rank_{tag}_{ik}(values, ranks, method, descending" +
+              f"{', is_valid' if nulls == 'arg' else ''})")
+            w(val_decl(t, "in"))
+            w(f"            {idecl}, allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.")
+            w("            character(len=*), intent(in), optional :: method")
+            w("            !! \"competition\" (the default), \"dense\" or \"ordinal\", case-insensitive.")
+            w(DESC_DOC)
+            if nulls == "arg":
+                w(VALID_DOC)
+            w(f"        end subroutine rank_{tag}_{ik}")
+    w("    end interface")
+    w("    !")
+    w("    ! ---- Extremes and merging (parquet_sorting_reduce) ----")
+    w("    interface")
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        if not has_minmax(t):
+            continue
+        w(f"        !> pf_minmax over a {what} array: its smallest and largest value.")
+        w(f"        module subroutine minmax_{tag}(values, vmin, vmax{', is_valid' if nulls == 'arg' else ''})")
+        w(val_decl(t, "in"))
+        w(pval_decl(t, "vmin") + " !! the smallest value.")
+        w(pval_decl(t, "vmax") + " !! the largest value.")
+        if nulls == "arg":
+            w(VALID_DOC)
+        w(f"        end subroutine minmax_{tag}")
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        if not has_argminmax(t):
+            continue
+        for ik, idecl, iname in IDX_KINDS:
+            w(f"        !> pf_argminmax over a {what} array, with {iname} indices.")
+            w(f"        module subroutine argminmax_{tag}_{ik}(values, imin, imax" +
+              f"{', is_valid' if nulls == 'arg' else ''})")
+            w(val_decl(t, "in"))
+            w(f"            {idecl}, intent(out) :: imin !! where the smallest value is.")
+            w(f"            {idecl}, intent(out) :: imax !! where the largest value is.")
+            if nulls == "arg":
+                w(VALID_DOC)
+            w(f"        end subroutine argminmax_{tag}_{ik}")
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        if not has_merge(t):
+            continue
+        masks = ", is_valid_a, is_valid_b, merged_valid" if nulls == "arg" else ""
+        w(f"        !> pf_merge over two sorted {what} arrays.")
+        w(f"        module subroutine merge_{tag}(a, b, merged{masks}, descending, nulls_first, assume_sorted)")
+        w(val_decl(t, "in", "a"))
+        w(val_decl(t, "in", "b"))
+        w(merged_decl(t))
+        if nulls == "arg":
+            w("            logical, intent(in), optional :: is_valid_a(:) !! `a`'s validity; absent means none.")
+            w("            logical, intent(in), optional :: is_valid_b(:) !! `b`'s validity; absent means none.")
+            w("            logical, allocatable, intent(out), optional :: merged_valid(:)")
+            w("            !! validity of `merged`. ALWAYS ALLOCATED when asked for -- all .true. when")
+            w("            !! neither input mask was supplied, since the caller asked a direct question.")
+        w(DESC_DOC)
+        w(NLO_DOC)
+        w("            logical, intent(in), optional :: assume_sorted")
+        w("            !! .true. skips the O(n) sortedness check on BOTH inputs.")
+        w(f"        end subroutine merge_{tag}")
+    w("    end interface")
+    w("    !")
 
 
 # --------------------------------------------------------------------------------------
@@ -1443,19 +1901,22 @@ contains
         end do
     end procedure key_valid_count
     !
-    module procedure resolve_rounding
-        character(len=:), allocatable :: tok, shown
+    module procedure fold_token
         integer :: k, ic
         !
-        mode = RND_NEAREST
-        if (.not. present(rounding)) return
-        ! Lower-cased in place rather than with a helper: this is the only case-folding site in the
-        ! module, and parquet_sortkey's own direction words are matched the same way.
-        tok = trim(adjustl(rounding))
+        tok = trim(adjustl(text))
         do k = 1, len(tok)
             ic = iachar(tok(k:k))
             if (ic >= iachar("A") .and. ic <= iachar("Z")) tok(k:k) = achar(ic + 32)
         end do
+    end procedure fold_token
+    !
+    module procedure resolve_rounding
+        character(len=:), allocatable :: tok, shown
+        !
+        mode = RND_NEAREST
+        if (.not. present(rounding)) return
+        call fold_token(rounding, tok)
         select case (tok)
         case ("nearest")
             mode = RND_NEAREST
@@ -1549,6 +2010,243 @@ contains
         allocate(perm32(n))
         perm32 = int(perm64, int32)
     end procedure narrow_perm
+    !
+    module procedure narrow_i64
+        character(len=32) :: v_str
+        !
+        if (value > int(huge(1_int32), int64)) then
+            write (v_str, "(i0)") value
+            error stop EP // proc // ": the " // noun // " is " // trim(v_str) // ", which does " // &
+                "not fit an int32; declare that argument as integer(int64)"
+        end if
+        dst = int(value, int32)
+    end procedure narrow_i64
+    !
+    module procedure narrow_i64_array
+        integer(int64) :: n, biggest
+        character(len=32) :: v_str
+        !
+        n = size(src, kind=int64)
+        if (n > 0_int64) then
+            biggest = maxval(src)
+            if (biggest > int(huge(1_int32), int64)) then
+                write (v_str, "(i0)") biggest
+                error stop EP // proc // ": the largest " // noun // " is " // trim(v_str) // &
+                    ", which does not fit an int32; declare that argument as integer(int64)"
+            end if
+        end if
+        allocate(dst(n))
+        dst = int(src, int32)
+    end procedure narrow_i64_array
+    !
+    module procedure resolve_rank_method
+        character(len=:), allocatable :: tok, shown
+        !
+        mode = RANK_COMPETITION
+        if (.not. present(method)) return
+        call fold_token(method, tok)
+        select case (tok)
+        case ("competition")
+            mode = RANK_COMPETITION
+        case ("dense")
+            mode = RANK_DENSE
+        case ("ordinal")
+            mode = RANK_ORDINAL
+        case default
+            ! Capped to a short preview, exactly as resolve_rounding is: the caller controls this
+            ! string's length and ifx's ERROR STOP runtime corrupts the heap at 8192 bytes.
+            shown = trim(adjustl(method))
+            if (len(shown) > 100) shown = shown(1:100) // "..."
+            error stop EP // proc // ": method='" // shown // "' is not recognized; use " // &
+                "'competition' (the default), 'dense' or 'ordinal'"
+        end select
+    end procedure resolve_rank_method
+    !
+    module procedure key_null_mask
+        integer(int64) :: k
+        !
+        allocate(isnull(max(nrows, 1_int64)))
+        isnull = .false.
+        if (.not. allocated(keys(1)%valid)) return
+        do k = 1_int64, nrows
+            isnull(k) = keys(1)%valid(k) == 0_c_int8_t
+        end do
+    end procedure key_null_mask
+    !
+    module procedure key_value_count
+        integer(int64) :: k
+        logical :: has_valid, is_real
+        !
+        ! Tier 0 of sort_tier_of, counted on the Fortran side rather than asked of the engine: it
+        ! is the same two questions (is this row null, and -- for a real key only -- is it a NaN)
+        ! and neither needs a comparison. A NaN is skipped because it is not a minimum or a maximum
+        ! of anything, while remaining an ordinary value everywhere else in this module.
+        has_valid = allocated(keys(1)%valid)
+        is_real = keys(1)%family == SK_REAL
+        n_value = 0_int64
+        do k = 1_int64, nrows
+            if (has_valid) then
+                if (keys(1)%valid(k) == 0_c_int8_t) cycle
+            end if
+            if (is_real) then
+                if (ieee_is_nan(keys(1)%reals(k))) cycle
+            end if
+            n_value = n_value + 1_int64
+        end do
+    end procedure key_value_count
+    !
+    module procedure check_sorted_input
+        logical :: ok
+        !
+        call engine_is_sorted(keys, nrows, proc, ok)
+        if (.not. ok) then
+            error stop EP // proc // ": " // what // " is not sorted in the order given by " // &
+                "descending/nulls_first; sort it first, or pass assume_sorted=.true. only for " // &
+                "an order you have already established"
+        end if
+    end procedure check_sorted_input
+    !
+    module procedure buf_append
+        integer :: ik
+        integer(int64) :: total_d, total_s, k, n
+        integer(int64), allocatable :: newoff(:), newints(:)
+        real(real64), allocatable :: newreals(:)
+        character(kind=c_char), allocatable :: newdata(:)
+        integer(c_int8_t), allocatable :: newvalid(:)
+        !
+        if (.not. allocated(dst) .or. .not. allocated(src)) then
+            ! Both come straight from an extract_* call, which always allocates.
+            error stop EP // proc // ": internal error: a sort key was not extracted" ! GCOVR_EXCL_LINE
+        end if
+        if (size(dst) /= size(src)) then
+            ! Only reachable if two different types were extracted into one pair, which no
+            ! generated caller does -- every one extracts both sides with the same extractor.
+            error stop EP // proc // ": internal error: mismatched key counts" ! GCOVR_EXCL_LINE
+        end if
+        n = nd + ns
+        do ik = 1, size(dst)
+            select case (dst(ik)%family)
+            case (SK_REAL)
+                allocate(newreals(max(n, 1_int64)))
+                newreals = 0.0_real64
+                if (nd > 0_int64) newreals(1:nd) = dst(ik)%reals(1:nd)
+                if (ns > 0_int64) newreals(nd + 1_int64:n) = src(ik)%reals(1:ns)
+                call move_alloc(newreals, dst(ik)%reals)
+            case (SK_STR)
+                ! The offsets are byte positions into `data`, so the appended half's have to be
+                ! rebased by however many bytes the first half occupies -- this is the one family
+                ! where concatenating two keys is not just concatenating two arrays.
+                total_d = dst(ik)%offsets(nd + 1_int64)
+                total_s = src(ik)%offsets(ns + 1_int64)
+                allocate(newoff(n + 1_int64))
+                newoff(1:nd + 1_int64) = dst(ik)%offsets(1:nd + 1_int64)
+                do k = 1_int64, ns
+                    newoff(nd + 1_int64 + k) = total_d + src(ik)%offsets(k + 1_int64)
+                end do
+                allocate(newdata(max(total_d + total_s, 1_int64)))
+                if (total_d > 0_int64) newdata(1:total_d) = dst(ik)%data(1:total_d)
+                if (total_s > 0_int64) newdata(total_d + 1_int64:total_d + total_s) = src(ik)%data(1:total_s)
+                call move_alloc(newoff, dst(ik)%offsets)
+                call move_alloc(newdata, dst(ik)%data)
+            case default
+                allocate(newints(max(n, 1_int64)))
+                newints = 0_int64
+                if (nd > 0_int64) newints(1:nd) = dst(ik)%ints(1:nd)
+                if (ns > 0_int64) newints(nd + 1_int64:n) = src(ik)%ints(1:ns)
+                call move_alloc(newints, dst(ik)%ints)
+            end select
+            ! Materialized only when at least one side has nulls, so a null-free append stays on
+            ! the engine's no-nulls fast path. An absent half is all-valid, which is exactly what
+            ! the unallocated convention means.
+            if (allocated(dst(ik)%valid) .or. allocated(src(ik)%valid)) then
+                allocate(newvalid(max(n, 1_int64)))
+                newvalid = 1_c_int8_t
+                if (allocated(dst(ik)%valid) .and. nd > 0_int64) newvalid(1:nd) = dst(ik)%valid(1:nd)
+                if (allocated(src(ik)%valid) .and. ns > 0_int64) newvalid(nd + 1_int64:n) = src(ik)%valid(1:ns)
+                call move_alloc(newvalid, dst(ik)%valid)
+            end if
+        end do
+    end procedure buf_append
+    !
+    ! ---- The M3 engine drivers ----
+    !
+    ! Unlike drive_engine above, these three always go through the builder, even for a single key.
+    ! The one-shot entry points exist to skip a copy on the hottest path in the library, and none
+    ! of these is it -- run detection, binary search and merging each cost one extra copy of an
+    ! already-extracted buffer in exchange for one entry point per operation instead of three.
+    !
+    module procedure engine_build_runs
+        type(c_ptr) :: builder
+        integer(int64) :: status, k
+        integer :: ik
+        !
+        if (size(keys) < 1) then
+            error stop EP // proc // ": no sort key was given" ! GCOVR_EXCL_LINE
+        end if
+        allocate(perm(nrows))
+        allocate(tie(max(nrows, 1_int64)))
+        tie = 0_c_int8_t
+        do k = 1_int64, nrows
+            perm(k) = k
+        end do
+        if (nrows < 2_int64) return
+        builder = parquet_sort_builder_new(nrows)
+        do ik = 1, size(keys)
+            call engine_add_key(builder, keys(ik), nrows)
+        end do
+        status = parquet_sort_builder_build_runs(builder, perm, tie)
+        call parquet_sort_builder_free(builder)
+        if (status /= 0_int64) then
+            ! Only reachable with an empty key list, which the guard above already rejects.
+            error stop EP // proc // ": the sort engine could not build a permutation" ! GCOVR_EXCL_LINE
+        end if
+    end procedure engine_build_runs
+    !
+    module procedure engine_search
+        type(c_ptr) :: builder
+        integer(c_int8_t) :: wflag
+        integer :: ik
+        !
+        if (size(keys) < 1) then
+            error stop EP // proc // ": no sort key was given" ! GCOVR_EXCL_LINE
+        end if
+        wflag = merge(1_c_int8_t, 0_c_int8_t, upper)
+        builder = parquet_sort_builder_new(nrows)
+        do ik = 1, size(keys)
+            call engine_add_key(builder, keys(ik), nrows)
+        end do
+        pos = parquet_sort_builder_search(builder, n_search, wflag)
+        call parquet_sort_builder_free(builder)
+        if (pos < 1_int64) then
+            ! The C side answers -1 only for an empty key list, rejected above.
+            error stop EP // proc // ": the sort engine had no key to search" ! GCOVR_EXCL_LINE
+        end if
+    end procedure engine_search
+    !
+    module procedure engine_merge
+        type(c_ptr) :: builder
+        integer(int64) :: status, k
+        integer :: ik
+        !
+        if (size(keys) < 1) then
+            error stop EP // proc // ": no sort key was given" ! GCOVR_EXCL_LINE
+        end if
+        allocate(perm(nrows))
+        do k = 1_int64, nrows
+            perm(k) = k
+        end do
+        if (nrows < 2_int64) return
+        builder = parquet_sort_builder_new(nrows)
+        do ik = 1, size(keys)
+            call engine_add_key(builder, keys(ik), nrows)
+        end do
+        status = parquet_sort_builder_merge(builder, na, perm)
+        call parquet_sort_builder_free(builder)
+        if (status /= 0_int64) then
+            ! Only reachable with an empty key list, which the guard above already rejects.
+            error stop EP // proc // ": the sort engine could not merge" ! GCOVR_EXCL_LINE
+        end if
+    end procedure engine_merge
     !
 end submodule parquet_sorting_keys ! GCOVR_EXCL_LINE''')
     return "\n".join(o) + "\n"
@@ -1969,6 +2667,511 @@ contains
     return "\n".join(o) + "\n"
 
 
+# --------------------------------------------------------------------------------------
+# src/parquet_sorting_search.f90 -- pf_lower_bound, pf_upper_bound, pf_equal_range
+# --------------------------------------------------------------------------------------
+def emit_target_extract(w, t, indent="        "):
+    """Extracts ONE search target into `tbuf`, as a one-row key matching `buf`."""
+    tag, decl, what, family, nulls, _, _ = t
+    if family == "chr":
+        w(indent + "! Compared at the ARRAY's element length, which is what makes this agree with")
+        w(indent + "! Fortran's own `<` on the same two operands: a shorter target is blank-padded,")
+        w(indent + "! exactly as a comparison would pad it. A target with non-blank characters past")
+        w(indent + "! that length has no exact answer here at all, so it is refused rather than")
+        w(indent + "! silently truncated into a different value.")
+        w(indent + "if (len_trim(target) > len(values)) then")
+        w(indent + "    write (a_str, \"(i0)\") len_trim(target)")
+        w(indent + "    write (b_str, \"(i0)\") len(values)")
+        w(indent + "    error stop EP // proc // \": target has \" // trim(a_str) // \" non-blank \" // &")
+        w(indent + "        \"characters but values holds \" // trim(b_str) // \" per element, so no \" // &")
+        w(indent + "        \"exact comparison exists; widen values or trim target\"")
+        w(indent + "end if")
+        w(indent + "padded = target")
+        w(indent + "call extract_chr([padded], tbuf, desc, nlo, proc)")
+    elif family == "strcol":
+        w(indent + "! A parquet_string_column stores bytes verbatim, so the target is used verbatim")
+        w(indent + "! too -- trailing blanks included. There is no declared width to pad to.")
+        w(indent + "call extract_chr([target], tbuf, desc, nlo, proc)")
+    else:
+        w(indent + f"call extract_{tag}([target], tbuf, desc, nlo, proc)")
+
+
+def gen_search():
+    o = []
+    w = o.append
+    w(BANNER)
+    w('''!> `pf_lower_bound`, `pf_upper_bound` and `pf_equal_range` -- locating a value in an array that
+!! is ALREADY sorted.
+!!
+!! **The target is appended to the array's own key and compared as row n+1.** That is the whole
+!! design: there is no compare-a-row-against-a-value arm anywhere, so a search cannot drift from
+!! the order `pf_sort` produces (`feature_risks.md` Risk-34). It costs one element of copy.
+!!
+!! **Searching unsorted input is the worst failure this module can have** -- a plausible index, no
+!! abort, no symptom. So sortedness is checked by default, at O(n) in front of an O(log n) search,
+!! and `assume_sorted=.true.` is the caller's explicit statement that they have established the
+!! order themselves. Do not flip that default.
+submodule (parquet_sorting) parquet_sorting_search
+    implicit none
+    !
+contains
+    !''')
+
+    for base, want, res in (("lower_bound", "SRCH_LOWER", "pos"),
+                            ("upper_bound", "SRCH_UPPER", "pos"),
+                            ("equal_range", "SRCH_BOTH", "range")):
+        for t in TYPES:
+            if not has_search(t):
+                continue
+            tag, decl, what, family, nulls, _, _ = t
+            iv = ", is_valid=is_valid" if nulls == "arg" else ""
+            for ik, idecl, iname in IDX_KINDS:
+                w(f"    module procedure {base}_{tag}_{ik}")
+                w("        integer(int64) :: lo, hi")
+                w("        !")
+                w(f"        call search_impl_{tag}(values, target, {want}, descending, nulls_first, &")
+                w(f"            assume_sorted, \"pf_{base}\", lo, hi{iv})")
+                if res == "range":
+                    if ik == "i32":
+                        w(f"        call narrow_i64(lo, \"pf_{base}\", \"first matching index\", first)")
+                        w(f"        call narrow_i64(hi - 1_int64, \"pf_{base}\", \"last matching index\", last)")
+                    else:
+                        w("        first = lo")
+                        w("        last = hi - 1_int64")
+                else:
+                    src = "lo" if want == "SRCH_LOWER" else "hi"
+                    if ik == "i32":
+                        w(f"        call narrow_i64({src}, \"pf_{base}\", \"insertion point\", pos)")
+                    else:
+                        w(f"        pos = {src}")
+                w(f"    end procedure {base}_{tag}_{ik}")
+                w("    !")
+
+    for t in TYPES:
+        if not has_search(t):
+            continue
+        tag, decl, what, family, nulls, _, _ = t
+        iv = ", is_valid=is_valid" if nulls == "arg" else ""
+        iarg = ", is_valid" if nulls == "arg" else ""
+        w(f"    !> Shared worker behind every search specific for a {what} array. Extracts once,")
+        w("    !! checks the order once, and runs one or both binary searches over the result.")
+        w(f"    subroutine search_impl_{tag}(values, target, want, descending, nulls_first, &")
+        w(f"            assume_sorted, proc, lo, hi{iarg})")
+        w(val_decl(t, "in"))
+        w(tgt_decl(t) + " !! the value to look for.")
+        w("        integer, intent(in) :: want                       !! SRCH_LOWER / SRCH_UPPER / SRCH_BOTH.")
+        w("        logical, intent(in), optional :: descending       !! .true. for high-to-low order.")
+        w("        logical, intent(in), optional :: nulls_first      !! .true. when nulls come first.")
+        w("        logical, intent(in), optional :: assume_sorted    !! .true. skips the order check.")
+        w("        character(len=*), intent(in) :: proc              !! calling procedure, for messages.")
+        w("        integer(int64), intent(out) :: lo                 !! lower-bound answer, or 0.")
+        w("        integer(int64), intent(out) :: hi                 !! upper-bound answer, or 0.")
+        if nulls == "arg":
+            w("        logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
+        w("        type(sort_key_buf), allocatable :: buf(:), tbuf(:)")
+        w("        integer(int64) :: n")
+        w("        logical :: desc, nlo, check")
+        if family == "chr":
+            w("        character(len=len(values)) :: padded")
+            w("        character(len=32) :: a_str, b_str")
+        w("        !")
+        w("        desc = .false.")
+        w("        if (present(descending)) desc = descending")
+        w("        nlo = .false.")
+        w("        if (present(nulls_first)) nlo = nulls_first")
+        w("        check = .true.")
+        w("        if (present(assume_sorted)) check = .not. assume_sorted")
+        w(f"        n = {rows_expr(t)}")
+        w(f"        call extract_{tag}(values, buf, desc, nlo, proc{iv})")
+        w("        if (check) call check_sorted_input(buf, n, proc, \"values\")")
+        emit_target_extract(w, t)
+        w("        call buf_append(buf, n, tbuf, 1_int64, proc)")
+        w("        lo = 0_int64")
+        w("        hi = 0_int64")
+        w("        if (want /= SRCH_UPPER) call engine_search(buf, n + 1_int64, n, .false., proc, lo)")
+        w("        if (want /= SRCH_LOWER) call engine_search(buf, n + 1_int64, n, .true., proc, hi)")
+        w(f"    end subroutine search_impl_{tag}")
+        w("    !")
+
+    w("end submodule parquet_sorting_search ! GCOVR_EXCL_LINE")
+    return "\n".join(o) + "\n"
+
+
+# --------------------------------------------------------------------------------------
+# src/parquet_sorting_unique.f90 -- pf_unique_count, pf_unique, pf_rank
+# --------------------------------------------------------------------------------------
+def gen_unique():
+    o = []
+    w = o.append
+    w(BANNER)
+    w('''!> `pf_unique_count`, `pf_unique` and `pf_rank` -- questions about repeated values.
+!!
+!! All three rest on one engine call (`engine_build_runs`), which sorts and reports where the runs
+!! of EQUAL rows are in the same pass. Equality is the sort comparator's own, minus the index
+!! tiebreaker that makes it a total order -- so "distinct" here means exactly "the sort would not
+!! have to choose between them", and two NaNs are one value even though `==` says otherwise.
+!!
+!! **Nulls are outside the population, in all three.** They are excluded from a count, excluded
+!! from the distinct values, and given rank 0 rather than a place in the ranking. That is why none
+!! of the three takes `nulls_first`: there is no null tier to position. Extraction is therefore
+!! always `nulls_first=.false.`, which puts every null last and contiguous -- the property the
+!! walks below rely on to stop counting.
+submodule (parquet_sorting) parquet_sorting_unique
+    implicit none
+    !
+contains
+    !''')
+
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        iv = ", is_valid=is_valid" if nulls == "arg" else ""
+        for ik, idecl, iname in IDX_KINDS:
+            w(f"    module procedure unique_count_{tag}_{ik}")
+            w("        integer(int64), allocatable :: idxs(:)")
+            w("        integer(int64) :: nd, nn")
+            w("        !")
+            w(f"        call unique_impl_{tag}(values, .false., \"pf_unique_count\", idxs, nd, nn{iv})")
+            w("        if (present(n_null)) n_null = nn")
+            if ik == "i32":
+                w("        call narrow_i64(nd, \"pf_unique_count\", \"distinct-value count\", count)")
+            else:
+                w("        count = nd")
+            w(f"    end procedure unique_count_{tag}_{ik}")
+            w("    !")
+
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        if not has_unique(t):
+            continue
+        iv = ", is_valid=is_valid" if nulls == "arg" else ""
+        w(f"    module procedure unique_{tag}")
+        w("        integer(int64), allocatable :: idxs(:)")
+        w("        integer(int64) :: k, nd, nn")
+        w("        logical :: desc")
+        if family == "strcol":
+            w("        character(len=:), allocatable :: s")
+        w("        !")
+        w("        desc = .false.")
+        w("        if (present(descending)) desc = descending")
+        w(f"        call unique_impl_{tag}(values, desc, \"pf_unique\", idxs, nd, nn{iv})")
+        w("        if (present(n_null)) n_null = nn")
+        if family == "chr":
+            w("        allocate(character(len=len(values)) :: distinct(nd))")
+        elif family == "strcol":
+            w("        call distinct%clear()")
+        else:
+            w("        allocate(distinct(nd))")
+        w("        do k = 1_int64, nd")
+        if family == "strcol":
+            w("            call values%get(idxs(k), s, allow_null=.true.)")
+            w("            call distinct%append_string(s)")
+        else:
+            w("            distinct(k) = values(idxs(k))")
+        w("        end do")
+        w(f"    end procedure unique_{tag}")
+        w("    !")
+
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        iv = ", is_valid=is_valid" if nulls == "arg" else ""
+        for ik, idecl, iname in IDX_KINDS:
+            w(f"    module procedure rank_{tag}_{ik}")
+            w("        integer(int64), allocatable :: r64(:)")
+            w("        logical :: desc")
+            w("        !")
+            w("        desc = .false.")
+            w("        if (present(descending)) desc = descending")
+            w(f"        call rank_impl_{tag}(values, method, desc, \"pf_rank\", r64{iv})")
+            if ik == "i32":
+                w("        call narrow_i64_array(r64, \"pf_rank\", \"rank\", ranks)")
+            else:
+                w("        call move_alloc(r64, ranks)")
+            w(f"    end procedure rank_{tag}_{ik}")
+            w("    !")
+
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        iv = ", is_valid=is_valid" if nulls == "arg" else ""
+        iarg = ", is_valid" if nulls == "arg" else ""
+        w(f"    !> Shared worker behind pf_unique_count and pf_unique for a {what} array: the")
+        w("    !! 1-based index of the FIRST occurrence of each distinct non-null value, in order.")
+        w(f"    subroutine unique_impl_{tag}(values, descending, proc, first_idx, ndist, nnull{iarg})")
+        w(val_decl(t, "in"))
+        w("        logical, intent(in) :: descending    !! .true. reports the distinct values high to low.")
+        w("        character(len=*), intent(in) :: proc !! calling procedure, for messages.")
+        w("        integer(int64), allocatable, intent(out) :: first_idx(:) !! where each distinct value is.")
+        w("        integer(int64), intent(out) :: ndist !! how many distinct non-null values.")
+        w("        integer(int64), intent(out) :: nnull !! how many values were null.")
+        if nulls == "arg":
+            w("        logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
+        w("        type(sort_key_buf), allocatable :: buf(:)")
+        w("        integer(int64), allocatable :: perm(:)")
+        w("        integer(c_int8_t), allocatable :: tie(:)")
+        w("        logical, allocatable :: isnull(:)")
+        w("        integer(int64) :: k, n")
+        w("        !")
+        w(f"        n = {rows_expr(t)}")
+        w(f"        call extract_{tag}(values, buf, descending, .false., proc{iv})")
+        w("        call engine_build_runs(buf, n, proc, perm, tie)")
+        w("        call key_null_mask(buf, n, isnull)")
+        w("        allocate(first_idx(max(n, 1_int64)))")
+        w("        first_idx = 0_int64")
+        w("        ndist = 0_int64")
+        w("        nnull = 0_int64")
+        w("        do k = 1_int64, n")
+        w("            ! nulls_first=.false. puts every null in the last tier, so the first one ends")
+        w("            ! the walk and the rest of the array is exactly the null count.")
+        w("            if (isnull(perm(k))) then")
+        w("                nnull = n - k + 1_int64")
+        w("                exit")
+        w("            end if")
+        w("            if (tie(k) == 0_c_int8_t) then")
+        w("                ndist = ndist + 1_int64")
+        w("                first_idx(ndist) = perm(k)")
+        w("            end if")
+        w("        end do")
+        w(f"    end subroutine unique_impl_{tag}")
+        w("    !")
+        w(f"    !> Shared worker behind every pf_rank specific for a {what} array.")
+        w(f"    subroutine rank_impl_{tag}(values, method, descending, proc, ranks{iarg})")
+        w(val_decl(t, "in"))
+        w("        character(len=*), intent(in), optional :: method !! tie-handling token.")
+        w("        logical, intent(in) :: descending    !! .true. ranks high to low.")
+        w("        character(len=*), intent(in) :: proc !! calling procedure, for messages.")
+        w("        integer(int64), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.")
+        if nulls == "arg":
+            w("        logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
+        w("        type(sort_key_buf), allocatable :: buf(:)")
+        w("        integer(int64), allocatable :: perm(:)")
+        w("        integer(c_int8_t), allocatable :: tie(:)")
+        w("        logical, allocatable :: isnull(:)")
+        w("        integer(int64) :: k, i, n, seen, dense, run_start")
+        w("        integer :: mode")
+        w("        !")
+        w("        call resolve_rank_method(method, proc, mode)")
+        w(f"        n = {rows_expr(t)}")
+        w(f"        call extract_{tag}(values, buf, descending, .false., proc{iv})")
+        w("        call engine_build_runs(buf, n, proc, perm, tie)")
+        w("        call key_null_mask(buf, n, isnull)")
+        w("        allocate(ranks(n))")
+        w("        if (n < 1_int64) return")
+        w("        ranks = 0_int64")
+        w("        seen = 0_int64")
+        w("        dense = 0_int64")
+        w("        run_start = 0_int64")
+        w("        do k = 1_int64, n")
+        w("            i = perm(k)")
+        w("            ! A null keeps rank 0. `cycle` rather than `exit` even though the nulls are")
+        w("            ! contiguous at the end: the walk should not depend on that placement twice.")
+        w("            if (isnull(i)) cycle")
+        w("            if (tie(k) == 0_c_int8_t) then")
+        w("                run_start = seen + 1_int64")
+        w("                dense = dense + 1_int64")
+        w("            end if")
+        w("            seen = seen + 1_int64")
+        w("            select case (mode)")
+        w("            case (RANK_DENSE)")
+        w("                ranks(i) = dense")
+        w("            case (RANK_ORDINAL)")
+        w("                ranks(i) = seen")
+        w("            case default")
+        w("                ranks(i) = run_start")
+        w("            end select")
+        w("        end do")
+        w(f"    end subroutine rank_impl_{tag}")
+        w("    !")
+
+    w("end submodule parquet_sorting_unique ! GCOVR_EXCL_LINE")
+    return "\n".join(o) + "\n"
+
+
+# --------------------------------------------------------------------------------------
+# src/parquet_sorting_reduce.f90 -- pf_minmax, pf_argminmax, pf_merge
+# --------------------------------------------------------------------------------------
+def gen_reduce():
+    o = []
+    w = o.append
+    w(BANNER)
+    w('''!> `pf_minmax`, `pf_argminmax` and `pf_merge`.
+!!
+!! **The extremes are two `nth_element` calls, not a hand-written scan.** Rank 1 ascending is the
+!! minimum and rank 1 DESCENDING is the maximum, so reaching them through the engine means the
+!! answers cannot disagree with `pf_sort`'s own ends (`feature_risks.md` Risk-34). Both calls are
+!! O(n), the same as the scan would be, and neither needs a per-type comparison written here.
+!!
+!! Rank `n_value` of the ascending order would name the same maximum VALUE, but the last of a tied
+!! run rather than the first -- see `minmax_impl_*`'s own comment for why that asymmetry is not
+!! acceptable in a pair of answers a caller reads together.
+!!
+!! `n_value` counts rows that are neither null nor NaN. A NaN is skipped because it is not the
+!! minimum or maximum of anything -- while staying an ordinary value everywhere else in this
+!! module, which is exactly the asymmetry `sort_tier_of` already encodes.
+!!
+!! **`pf_merge` concatenates the two inputs into one key and merges the halves.** The alternative,
+!! comparing an element of `a` against an element of `b` through a second comparison path, is the
+!! drift this module has spent three milestones avoiding.
+submodule (parquet_sorting) parquet_sorting_reduce
+    implicit none
+    !
+contains
+    !''')
+
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        if not has_minmax(t):
+            continue
+        iv = ", is_valid=is_valid" if nulls == "arg" else ""
+        w(f"    module procedure minmax_{tag}")
+        w("        integer(int64) :: i1, i2")
+        w("        !")
+        w(f"        call minmax_impl_{tag}(values, \"pf_minmax\", i1, i2{iv})")
+        if family == "strcol":
+            w("        call values%get(i1, vmin, allow_null=.true.)")
+            w("        call values%get(i2, vmax, allow_null=.true.)")
+        else:
+            w("        vmin = values(i1)")
+            w("        vmax = values(i2)")
+        w(f"    end procedure minmax_{tag}")
+        w("    !")
+
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        if not has_argminmax(t):
+            continue
+        iv = ", is_valid=is_valid" if nulls == "arg" else ""
+        for ik, idecl, iname in IDX_KINDS:
+            w(f"    module procedure argminmax_{tag}_{ik}")
+            w("        integer(int64) :: i1, i2")
+            w("        !")
+            w(f"        call minmax_impl_{tag}(values, \"pf_argminmax\", i1, i2{iv})")
+            if ik == "i32":
+                w("        call narrow_i64(i1, \"pf_argminmax\", \"index of the smallest value\", imin)")
+                w("        call narrow_i64(i2, \"pf_argminmax\", \"index of the largest value\", imax)")
+            else:
+                w("        imin = i1")
+                w("        imax = i2")
+            w(f"    end procedure argminmax_{tag}_{ik}")
+            w("    !")
+
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        if not has_merge(t):
+            continue
+        iva = ", is_valid=is_valid_a" if nulls == "arg" else ""
+        ivb = ", is_valid=is_valid_b" if nulls == "arg" else ""
+        w(f"    module procedure merge_{tag}")
+        w("        type(sort_key_buf), allocatable :: bufa(:), bufb(:)")
+        w("        integer(int64), allocatable :: perm(:)")
+        w("        integer(int64) :: k, j, na, nb, n")
+        w("        logical :: desc, nlo, check")
+        if family == "chr":
+            w("        character(len=max(len(a), len(b))), allocatable :: pa(:), pb(:)")
+        w("        !")
+        w("        desc = .false.")
+        w("        if (present(descending)) desc = descending")
+        w("        nlo = .false.")
+        w("        if (present(nulls_first)) nlo = nulls_first")
+        w("        check = .true.")
+        w("        if (present(assume_sorted)) check = .not. assume_sorted")
+        w("        na = size(a, kind=int64)")
+        w("        nb = size(b, kind=int64)")
+        w("        n = na + nb")
+        if family == "chr":
+            w("        ! Both halves are widened to one common element length before extraction, or")
+            w("        ! the packed keys would compare strings of two different widths against each")
+            w("        ! other. Element by element, because a whole-array assignment into an")
+            w("        ! allocatable is the reallocation hazard CLAUDE.md documents.")
+            w("        allocate(pa(na), pb(nb))")
+            w("        do k = 1_int64, na")
+            w("            pa(k) = a(k)")
+            w("        end do")
+            w("        do k = 1_int64, nb")
+            w("            pb(k) = b(k)")
+            w("        end do")
+            w(f"        call extract_chr(pa, bufa, desc, nlo, \"pf_merge\"{iva})")
+            w(f"        call extract_chr(pb, bufb, desc, nlo, \"pf_merge\"{ivb})")
+        else:
+            w(f"        call extract_{tag}(a, bufa, desc, nlo, \"pf_merge\"{iva})")
+            w(f"        call extract_{tag}(b, bufb, desc, nlo, \"pf_merge\"{ivb})")
+        w("        if (check) then")
+        w("            call check_sorted_input(bufa, na, \"pf_merge\", \"a\")")
+        w("            call check_sorted_input(bufb, nb, \"pf_merge\", \"b\")")
+        w("        end if")
+        w("        call buf_append(bufa, na, bufb, nb, \"pf_merge\")")
+        w("        call engine_merge(bufa, n, na, \"pf_merge\", perm)")
+        if family == "chr":
+            w("        allocate(character(len=max(len(a), len(b))) :: merged(n))")
+        else:
+            w("        allocate(merged(n))")
+        w("        do k = 1_int64, n")
+        w("            if (perm(k) <= na) then")
+        w("                merged(k) = a(perm(k))")
+        w("            else")
+        w("                merged(k) = b(perm(k) - na)")
+        w("            end if")
+        w("        end do")
+        if nulls == "arg":
+            w("        ! Always allocated when asked for, all .true. when neither input mask was")
+            w("        ! supplied -- the same rule pf_sort's own sorted_valid follows.")
+            w("        if (present(merged_valid)) then")
+            w("            allocate(merged_valid(n))")
+            w("            merged_valid = .true.")
+            w("            do k = 1_int64, n")
+            w("                j = perm(k)")
+            w("                if (j <= na) then")
+            w("                    if (present(is_valid_a)) merged_valid(k) = is_valid_a(j)")
+            w("                else")
+            w("                    if (present(is_valid_b)) merged_valid(k) = is_valid_b(j - na)")
+            w("                end if")
+            w("            end do")
+            w("        end if")
+        w(f"    end procedure merge_{tag}")
+        w("    !")
+
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        if not has_argminmax(t):
+            continue
+        iv = ", is_valid=is_valid" if nulls == "arg" else ""
+        iarg = ", is_valid" if nulls == "arg" else ""
+        w(f"    !> Shared worker behind pf_minmax and pf_argminmax for a {what} array.")
+        w(f"    subroutine minmax_impl_{tag}(values, proc, imin, imax{iarg})")
+        w(val_decl(t, "in"))
+        w("        character(len=*), intent(in) :: proc !! calling procedure, for messages.")
+        w("        integer(int64), intent(out) :: imin  !! where the smallest value is.")
+        w("        integer(int64), intent(out) :: imax  !! where the largest value is.")
+        if nulls == "arg":
+            w("        logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
+        w("        type(sort_key_buf), allocatable :: buf(:)")
+        w("        integer(int64) :: n, n_value")
+        w("        !")
+        w(f"        n = {rows_expr(t)}")
+        w("        ! Ascending with nulls LAST, unconditionally: the population is the values, so")
+        w("        ! ranks 1 and n_value address them and nothing else.")
+        w(f"        call extract_{tag}(values, buf, .false., .false., proc{iv})")
+        w("        call key_value_count(buf, n, n_value)")
+        w("        if (n_value < 1_int64) then")
+        w("            error stop EP // proc // \": every value is null or NaN, so there is no \" // &")
+        w("                \"minimum or maximum; guard with count(is_valid) (or the column's own \" // &")
+        w("                \"null count) if that can happen\"")
+        w("        end if")
+        w("        call engine_nth_index(buf, n, 1_int64, proc, imin)")
+        w("        ! The maximum is rank 1 of the DESCENDING order, not rank n_value of the")
+        w("        ! ascending one. Both name the same value, but a stable ascending sort puts the")
+        w("        ! LAST of a tied run at the end, so rank n_value would report the last equal")
+        w("        ! maximum while imin reported the first equal minimum -- the same call answering")
+        w("        ! two different questions at the two ends. Flipping the key's own direction keeps")
+        w("        ! both as \"rank 1\", so both report the first occurrence. Tiers are absolute, so")
+        w("        ! this moves no null and no NaN out of the way of rank 1.")
+        w("        buf(:)%descending = .true.")
+        w("        call engine_nth_index(buf, n, 1_int64, proc, imax)")
+        w(f"    end subroutine minmax_impl_{tag}")
+        w("    !")
+
+    w("end submodule parquet_sorting_reduce ! GCOVR_EXCL_LINE")
+    return "\n".join(o) + "\n"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--check", action="store_true",
@@ -2002,6 +3205,9 @@ def main():
         REPO_ROOT / "src" / "parquet_sorting_argsort.f90": gen_argsort(),
         REPO_ROOT / "src" / "parquet_sorting_permute.f90": gen_permute(),
         REPO_ROOT / "src" / "parquet_sorting_select.f90": gen_select(),
+        REPO_ROOT / "src" / "parquet_sorting_search.f90": gen_search(),
+        REPO_ROOT / "src" / "parquet_sorting_unique.f90": gen_unique(),
+        REPO_ROOT / "src" / "parquet_sorting_reduce.f90": gen_reduce(),
     }
 
     if args.check:

@@ -3444,6 +3444,24 @@ extern "C"
 		}
 	};
 
+	// The same ordering as SortRowLess, as a THREE-WAY answer and WITHOUT its index tiebreaker --
+	// which is what every operation that has to recognize "these two rows are equal" needs, since
+	// under the tiebreaker no two rows ever are. Binary search, run detection (pf_unique/pf_rank),
+	// merging and is_sorted all key on that distinction; sorting is the only caller that must not.
+	//
+	// Keep this beside SortRowLess. The two are one decision expressed twice, and feature_risks.md
+	// Risk-34 is about them never drifting apart: both walk the keys in precedence order and both
+	// delegate every actual comparison to sort_compare_key.
+	static inline int sort_keys_compare(const std::vector<SortKeyData> &keys, int64_t a, int64_t b)
+	{
+		for (const auto &key : keys)
+		{
+			int c = sort_compare_key(key, a, b);
+			if (c != 0) return c;
+		}
+		return 0;
+	}
+
 	// Once per build, not per comparison: turns a forgotten sort_key_finalize() into a named abort
 	// rather than a null dereference somewhere inside std::sort's comparator. Only the pointer the
 	// key's own kind reads is checked, since the other is legitimately null for a borrowed key.
@@ -5869,12 +5887,7 @@ extern "C"
 		if (h->keys.empty()) return -1;
 		for (int64_t i = 1; i < h->nrows; ++i)
 		{
-			for (const auto &key : h->keys)
-			{
-				int c = sort_compare_key(key, i - 1, i);
-				if (c > 0) return 0;
-				if (c < 0) break;
-			}
+			if (sort_keys_compare(h->keys, i - 1, i) > 0) return 0;
 		}
 		return 1;
 	}
@@ -5902,6 +5915,96 @@ extern "C"
 		if (h->keys.empty()) return 0;
 		if (nth < 1 || nth > h->nrows) return 0;
 		return sort_nth_index(h->keys, h->nrows, nth - 1) + 1;
+	}
+
+	// ---- The M3 "extras": run detection, binary search and merge ----
+	//
+	// All three answer questions plain ordering cannot, and all three route through
+	// sort_keys_compare rather than SortRowLess, because each turns on rows comparing EQUAL -- the
+	// one relation the sort comparator's index tiebreaker deliberately destroys.
+	//
+	// Each is builder-only, with no one-shot single-key twin like the argsorts above. That is a
+	// considered trade: the one-shot forms exist to skip a copy of the key on the hottest path in
+	// the library, and these are not it. Sharing one entry point per operation across every element
+	// type (a timestamp's two keys included) is worth one extra copy of an already-extracted buffer.
+
+	// Sorts, then reports where the runs of EQUAL rows are: perm_out receives the 1-based
+	// permutation and tie_out[k] is 1 when the row at output position k compares equal to the row
+	// before it. Returns 0, or 1 when no key was added.
+	//
+	// One call rather than a sort followed by a separate comparison pass, because the caller
+	// (pf_unique, pf_rank) needs both and building the permutation twice would double the cost of
+	// the operation. tie_out[0] is always 0 -- the first row starts a run by definition.
+	int64_t parquet_sort_builder_build_runs(void *handle, int64_t *perm_out, int8_t *tie_out)
+	{
+		auto *h = static_cast<SortBuilderHandle *>(handle);
+		if (h->keys.empty()) return 1;
+		auto perm = sort_build_permutation(h->keys, h->nrows);
+		for (int64_t i = 0; i < h->nrows; ++i) perm_out[i] = perm[static_cast<size_t>(i)] + 1;
+		if (h->nrows > 0) tie_out[0] = 0;
+		for (int64_t i = 1; i < h->nrows; ++i)
+		{
+			tie_out[i] = sort_keys_compare(h->keys,
+				perm[static_cast<size_t>(i - 1)], perm[static_cast<size_t>(i)]) == 0 ? 1 : 0;
+		}
+		return 0;
+	}
+
+	// Binary search. The builder holds n_search + 1 rows: [0, n_search) is the array being searched
+	// and the LAST row is the target value, appended by the caller. That is what makes drift from
+	// the sort comparator structurally impossible -- the target is compared by the very same
+	// sort_compare_key over the very same key layout, with no compare-a-row-against-a-value arm to
+	// keep in step (feature_risks.md Risk-34).
+	//
+	// `which` is 0 for lower_bound (first position not ordered before the target) and 1 for
+	// upper_bound (first position the target is ordered before). Returns a 1-BASED insertion point
+	// in 1 .. n_search+1, or -1 when no key was added.
+	//
+	// Written as an explicit loop rather than std::lower_bound: that would need an iterator over a
+	// materialized [0, n) index vector, which is O(n) time and memory to set up for an O(log n)
+	// search -- the whole point of the operation.
+	int64_t parquet_sort_builder_search(void *handle, int64_t n_search, int8_t which)
+	{
+		auto *h = static_cast<SortBuilderHandle *>(handle);
+		if (h->keys.empty()) return -1;
+		int64_t target = h->nrows - 1;
+		if (n_search < 0) n_search = 0;
+		if (n_search > target) n_search = target;
+		int64_t lo = 0, hi = n_search;
+		while (lo < hi)
+		{
+			int64_t mid = lo + (hi - lo) / 2;
+			int c = sort_keys_compare(h->keys, mid, target);
+			bool before = (which == 0) ? (c < 0) : (c <= 0);
+			if (before) lo = mid + 1;
+			else hi = mid;
+		}
+		return lo + 1;
+	}
+
+	// Merges two already-ordered ranges of one builder into a 1-based permutation of all its rows:
+	// [0, na) is the first input and [na, nrows) the second, concatenated by the caller. Returns 0,
+	// or 1 when no key was added.
+	//
+	// Hand-rolled rather than std::merge for the same reason parquet_sort_builder_search is: merging
+	// INDICES with std::merge needs two materialized index vectors, and the loop that avoids them is
+	// six lines. `<= 0` takes from the first input on a tie, which is std::merge's own stability
+	// guarantee and what makes pf_merge agree with pf_sort of the concatenation element for element.
+	int64_t parquet_sort_builder_merge(void *handle, int64_t na, int64_t *perm_out)
+	{
+		auto *h = static_cast<SortBuilderHandle *>(handle);
+		if (h->keys.empty()) return 1;
+		if (na < 0) na = 0;
+		if (na > h->nrows) na = h->nrows;
+		int64_t i = 0, j = na, k = 0;
+		while (i < na && j < h->nrows)
+		{
+			if (sort_keys_compare(h->keys, i, j) <= 0) perm_out[k++] = (i++) + 1;
+			else perm_out[k++] = (j++) + 1;
+		}
+		while (i < na) perm_out[k++] = (i++) + 1;
+		while (j < h->nrows) perm_out[k++] = (j++) + 1;
+		return 0;
 	}
 
 	void parquet_sort_builder_free(void *handle)

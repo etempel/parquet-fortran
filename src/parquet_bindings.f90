@@ -60,6 +60,8 @@ module parquet_bindings
     public :: parquet_sort_builder_add_key_double, parquet_sort_builder_add_key_string
     public :: parquet_sort_builder_build, parquet_sort_builder_is_sorted, parquet_sort_builder_free
     public :: parquet_sort_builder_build_partial, parquet_sort_builder_nth_element
+    public :: parquet_sort_builder_build_runs, parquet_sort_builder_search
+    public :: parquet_sort_builder_merge
     public :: parquet_sort_partial_argsort_int64, parquet_sort_partial_argsort_double
     public :: parquet_sort_partial_argsort_string
     public :: parquet_sort_nth_index_int64, parquet_sort_nth_index_double, parquet_sort_nth_index_string
@@ -707,6 +709,48 @@ module parquet_bindings
             type(c_ptr), value :: builder !! builder handle.
             integer(c_long_long), value :: nth !! 1-based rank wanted.
             integer(c_long_long) :: idx !! 1-based row index at that rank, or 0.
+        end function
+
+        !> Sorts, then reports where the runs of EQUAL rows are: `perm` receives
+        !> the 1-based permutation and `tie(k)` is 1 when the row at output
+        !> position k compares equal to the one before it (`tie(1)` is always 0).
+        !> One call rather than a sort plus a separate comparison pass, since
+        !> `pf_unique`/`pf_rank` need both and would otherwise sort twice.
+        function parquet_sort_builder_build_runs(builder, perm, tie) &
+                bind(C, name="parquet_sort_builder_build_runs") result(status)
+            import
+            type(c_ptr), value :: builder !! builder handle.
+            integer(c_long_long) :: perm(*) !! receives the 1-based permutation.
+            integer(c_int8_t) :: tie(*) !! receives 1 where a row ties the previous one.
+            integer(c_long_long) :: status !! 0 on success, 1 when no key was added.
+        end function
+
+        !> Binary search over a builder holding `n_search`+1 rows, where the LAST
+        !> row is the target value the caller appended. Comparing the target
+        !> through the ordinary key layout is what makes drift from the sort
+        !> comparator impossible -- there is no compare-a-row-against-a-value arm.
+        !> `which` is 0 for lower_bound, 1 for upper_bound.
+        function parquet_sort_builder_search(builder, n_search, which) &
+                bind(C, name="parquet_sort_builder_search") result(pos)
+            import
+            type(c_ptr), value :: builder !! builder handle.
+            integer(c_long_long), value :: n_search !! rows to search, excluding the target.
+            integer(c_int8_t), value :: which !! 0 = lower_bound, 1 = upper_bound.
+            integer(c_long_long) :: pos !! 1-based insertion point, or -1 when no key was added.
+        end function
+
+        !> Merges two already-ordered ranges of one builder into a 1-based
+        !> permutation of all its rows: rows 1..`na` are the first input and the
+        !> rest the second, concatenated by the caller. Ties take from the first
+        !> input, which is what makes `pf_merge` agree with `pf_sort` of the
+        !> concatenation element for element.
+        function parquet_sort_builder_merge(builder, na, perm) &
+                bind(C, name="parquet_sort_builder_merge") result(status)
+            import
+            type(c_ptr), value :: builder !! builder handle.
+            integer(c_long_long), value :: na !! rows belonging to the first input.
+            integer(c_long_long) :: perm(*) !! receives the 1-based permutation.
+            integer(c_long_long) :: status !! 0 on success, 1 when no key was added.
         end function
 
         !> One-shot single-key partial argsort over an integer key: writes the

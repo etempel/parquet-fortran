@@ -933,19 +933,22 @@ contains
         end do
     end procedure key_valid_count
     !
-    module procedure resolve_rounding
-        character(len=:), allocatable :: tok, shown
+    module procedure fold_token
         integer :: k, ic
         !
-        mode = RND_NEAREST
-        if (.not. present(rounding)) return
-        ! Lower-cased in place rather than with a helper: this is the only case-folding site in the
-        ! module, and parquet_sortkey's own direction words are matched the same way.
-        tok = trim(adjustl(rounding))
+        tok = trim(adjustl(text))
         do k = 1, len(tok)
             ic = iachar(tok(k:k))
             if (ic >= iachar("A") .and. ic <= iachar("Z")) tok(k:k) = achar(ic + 32)
         end do
+    end procedure fold_token
+    !
+    module procedure resolve_rounding
+        character(len=:), allocatable :: tok, shown
+        !
+        mode = RND_NEAREST
+        if (.not. present(rounding)) return
+        call fold_token(rounding, tok)
         select case (tok)
         case ("nearest")
             mode = RND_NEAREST
@@ -1039,5 +1042,242 @@ contains
         allocate(perm32(n))
         perm32 = int(perm64, int32)
     end procedure narrow_perm
+    !
+    module procedure narrow_i64
+        character(len=32) :: v_str
+        !
+        if (value > int(huge(1_int32), int64)) then
+            write (v_str, "(i0)") value
+            error stop EP // proc // ": the " // noun // " is " // trim(v_str) // ", which does " // &
+                "not fit an int32; declare that argument as integer(int64)"
+        end if
+        dst = int(value, int32)
+    end procedure narrow_i64
+    !
+    module procedure narrow_i64_array
+        integer(int64) :: n, biggest
+        character(len=32) :: v_str
+        !
+        n = size(src, kind=int64)
+        if (n > 0_int64) then
+            biggest = maxval(src)
+            if (biggest > int(huge(1_int32), int64)) then
+                write (v_str, "(i0)") biggest
+                error stop EP // proc // ": the largest " // noun // " is " // trim(v_str) // &
+                    ", which does not fit an int32; declare that argument as integer(int64)"
+            end if
+        end if
+        allocate(dst(n))
+        dst = int(src, int32)
+    end procedure narrow_i64_array
+    !
+    module procedure resolve_rank_method
+        character(len=:), allocatable :: tok, shown
+        !
+        mode = RANK_COMPETITION
+        if (.not. present(method)) return
+        call fold_token(method, tok)
+        select case (tok)
+        case ("competition")
+            mode = RANK_COMPETITION
+        case ("dense")
+            mode = RANK_DENSE
+        case ("ordinal")
+            mode = RANK_ORDINAL
+        case default
+            ! Capped to a short preview, exactly as resolve_rounding is: the caller controls this
+            ! string's length and ifx's ERROR STOP runtime corrupts the heap at 8192 bytes.
+            shown = trim(adjustl(method))
+            if (len(shown) > 100) shown = shown(1:100) // "..."
+            error stop EP // proc // ": method='" // shown // "' is not recognized; use " // &
+                "'competition' (the default), 'dense' or 'ordinal'"
+        end select
+    end procedure resolve_rank_method
+    !
+    module procedure key_null_mask
+        integer(int64) :: k
+        !
+        allocate(isnull(max(nrows, 1_int64)))
+        isnull = .false.
+        if (.not. allocated(keys(1)%valid)) return
+        do k = 1_int64, nrows
+            isnull(k) = keys(1)%valid(k) == 0_c_int8_t
+        end do
+    end procedure key_null_mask
+    !
+    module procedure key_value_count
+        integer(int64) :: k
+        logical :: has_valid, is_real
+        !
+        ! Tier 0 of sort_tier_of, counted on the Fortran side rather than asked of the engine: it
+        ! is the same two questions (is this row null, and -- for a real key only -- is it a NaN)
+        ! and neither needs a comparison. A NaN is skipped because it is not a minimum or a maximum
+        ! of anything, while remaining an ordinary value everywhere else in this module.
+        has_valid = allocated(keys(1)%valid)
+        is_real = keys(1)%family == SK_REAL
+        n_value = 0_int64
+        do k = 1_int64, nrows
+            if (has_valid) then
+                if (keys(1)%valid(k) == 0_c_int8_t) cycle
+            end if
+            if (is_real) then
+                if (ieee_is_nan(keys(1)%reals(k))) cycle
+            end if
+            n_value = n_value + 1_int64
+        end do
+    end procedure key_value_count
+    !
+    module procedure check_sorted_input
+        logical :: ok
+        !
+        call engine_is_sorted(keys, nrows, proc, ok)
+        if (.not. ok) then
+            error stop EP // proc // ": " // what // " is not sorted in the order given by " // &
+                "descending/nulls_first; sort it first, or pass assume_sorted=.true. only for " // &
+                "an order you have already established"
+        end if
+    end procedure check_sorted_input
+    !
+    module procedure buf_append
+        integer :: ik
+        integer(int64) :: total_d, total_s, k, n
+        integer(int64), allocatable :: newoff(:), newints(:)
+        real(real64), allocatable :: newreals(:)
+        character(kind=c_char), allocatable :: newdata(:)
+        integer(c_int8_t), allocatable :: newvalid(:)
+        !
+        if (.not. allocated(dst) .or. .not. allocated(src)) then
+            ! Both come straight from an extract_* call, which always allocates.
+            error stop EP // proc // ": internal error: a sort key was not extracted" ! GCOVR_EXCL_LINE
+        end if
+        if (size(dst) /= size(src)) then
+            ! Only reachable if two different types were extracted into one pair, which no
+            ! generated caller does -- every one extracts both sides with the same extractor.
+            error stop EP // proc // ": internal error: mismatched key counts" ! GCOVR_EXCL_LINE
+        end if
+        n = nd + ns
+        do ik = 1, size(dst)
+            select case (dst(ik)%family)
+            case (SK_REAL)
+                allocate(newreals(max(n, 1_int64)))
+                newreals = 0.0_real64
+                if (nd > 0_int64) newreals(1:nd) = dst(ik)%reals(1:nd)
+                if (ns > 0_int64) newreals(nd + 1_int64:n) = src(ik)%reals(1:ns)
+                call move_alloc(newreals, dst(ik)%reals)
+            case (SK_STR)
+                ! The offsets are byte positions into `data`, so the appended half's have to be
+                ! rebased by however many bytes the first half occupies -- this is the one family
+                ! where concatenating two keys is not just concatenating two arrays.
+                total_d = dst(ik)%offsets(nd + 1_int64)
+                total_s = src(ik)%offsets(ns + 1_int64)
+                allocate(newoff(n + 1_int64))
+                newoff(1:nd + 1_int64) = dst(ik)%offsets(1:nd + 1_int64)
+                do k = 1_int64, ns
+                    newoff(nd + 1_int64 + k) = total_d + src(ik)%offsets(k + 1_int64)
+                end do
+                allocate(newdata(max(total_d + total_s, 1_int64)))
+                if (total_d > 0_int64) newdata(1:total_d) = dst(ik)%data(1:total_d)
+                if (total_s > 0_int64) newdata(total_d + 1_int64:total_d + total_s) = src(ik)%data(1:total_s)
+                call move_alloc(newoff, dst(ik)%offsets)
+                call move_alloc(newdata, dst(ik)%data)
+            case default
+                allocate(newints(max(n, 1_int64)))
+                newints = 0_int64
+                if (nd > 0_int64) newints(1:nd) = dst(ik)%ints(1:nd)
+                if (ns > 0_int64) newints(nd + 1_int64:n) = src(ik)%ints(1:ns)
+                call move_alloc(newints, dst(ik)%ints)
+            end select
+            ! Materialized only when at least one side has nulls, so a null-free append stays on
+            ! the engine's no-nulls fast path. An absent half is all-valid, which is exactly what
+            ! the unallocated convention means.
+            if (allocated(dst(ik)%valid) .or. allocated(src(ik)%valid)) then
+                allocate(newvalid(max(n, 1_int64)))
+                newvalid = 1_c_int8_t
+                if (allocated(dst(ik)%valid) .and. nd > 0_int64) newvalid(1:nd) = dst(ik)%valid(1:nd)
+                if (allocated(src(ik)%valid) .and. ns > 0_int64) newvalid(nd + 1_int64:n) = src(ik)%valid(1:ns)
+                call move_alloc(newvalid, dst(ik)%valid)
+            end if
+        end do
+    end procedure buf_append
+    !
+    ! ---- The M3 engine drivers ----
+    !
+    ! Unlike drive_engine above, these three always go through the builder, even for a single key.
+    ! The one-shot entry points exist to skip a copy on the hottest path in the library, and none
+    ! of these is it -- run detection, binary search and merging each cost one extra copy of an
+    ! already-extracted buffer in exchange for one entry point per operation instead of three.
+    !
+    module procedure engine_build_runs
+        type(c_ptr) :: builder
+        integer(int64) :: status, k
+        integer :: ik
+        !
+        if (size(keys) < 1) then
+            error stop EP // proc // ": no sort key was given" ! GCOVR_EXCL_LINE
+        end if
+        allocate(perm(nrows))
+        allocate(tie(max(nrows, 1_int64)))
+        tie = 0_c_int8_t
+        do k = 1_int64, nrows
+            perm(k) = k
+        end do
+        if (nrows < 2_int64) return
+        builder = parquet_sort_builder_new(nrows)
+        do ik = 1, size(keys)
+            call engine_add_key(builder, keys(ik), nrows)
+        end do
+        status = parquet_sort_builder_build_runs(builder, perm, tie)
+        call parquet_sort_builder_free(builder)
+        if (status /= 0_int64) then
+            ! Only reachable with an empty key list, which the guard above already rejects.
+            error stop EP // proc // ": the sort engine could not build a permutation" ! GCOVR_EXCL_LINE
+        end if
+    end procedure engine_build_runs
+    !
+    module procedure engine_search
+        type(c_ptr) :: builder
+        integer(c_int8_t) :: wflag
+        integer :: ik
+        !
+        if (size(keys) < 1) then
+            error stop EP // proc // ": no sort key was given" ! GCOVR_EXCL_LINE
+        end if
+        wflag = merge(1_c_int8_t, 0_c_int8_t, upper)
+        builder = parquet_sort_builder_new(nrows)
+        do ik = 1, size(keys)
+            call engine_add_key(builder, keys(ik), nrows)
+        end do
+        pos = parquet_sort_builder_search(builder, n_search, wflag)
+        call parquet_sort_builder_free(builder)
+        if (pos < 1_int64) then
+            ! The C side answers -1 only for an empty key list, rejected above.
+            error stop EP // proc // ": the sort engine had no key to search" ! GCOVR_EXCL_LINE
+        end if
+    end procedure engine_search
+    !
+    module procedure engine_merge
+        type(c_ptr) :: builder
+        integer(int64) :: status, k
+        integer :: ik
+        !
+        if (size(keys) < 1) then
+            error stop EP // proc // ": no sort key was given" ! GCOVR_EXCL_LINE
+        end if
+        allocate(perm(nrows))
+        do k = 1_int64, nrows
+            perm(k) = k
+        end do
+        if (nrows < 2_int64) return
+        builder = parquet_sort_builder_new(nrows)
+        do ik = 1, size(keys)
+            call engine_add_key(builder, keys(ik), nrows)
+        end do
+        status = parquet_sort_builder_merge(builder, na, perm)
+        call parquet_sort_builder_free(builder)
+        if (status /= 0_int64) then
+            ! Only reachable with an empty key list, which the guard above already rejects.
+            error stop EP // proc // ": the sort engine could not merge" ! GCOVR_EXCL_LINE
+        end if
+    end procedure engine_merge
     !
 end submodule parquet_sorting_keys ! GCOVR_EXCL_LINE

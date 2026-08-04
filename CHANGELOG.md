@@ -32,7 +32,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a `rounding=` of `"nearest"`/`"down"`/`"up"` and an optional `n_null=`; it aborts rather than
   return an undefined value when every value is null. `pf_sort`/`pf_partial_sort` also take an
   optional `sorted_valid=` reporting which of the *sorted* values are null, since the mask handed
-  in describes the input order. See [Sorting arrays and columns](doc/pages/sorting.md).
+  in describes the input order. The module also **searches, deduplicates, ranks, reduces and
+  merges**: `pf_lower_bound`/`pf_upper_bound`/`pf_equal_range` locate a value in an already-sorted
+  array in O(log n) — each checking that the array really is sorted first, since searching unsorted
+  input returns a plausible index with no symptom, with `assume_sorted=.true.` to pay that O(n)
+  check once rather than per call; `pf_unique_count`/`pf_unique` report the distinct non-null
+  values (exact equality, so `0.1 + 0.2` and `0.3` are two values, while every NaN is one), with an
+  optional `n_null=`; `pf_rank` gives every element its rank in place order, with
+  `method=`"competition"/"dense"/"ordinal" and rank 0 for a null; `pf_minmax`/`pf_argminmax` give
+  the smallest and largest value, and where they are, skipping nulls and NaNs and aborting when
+  nothing is left; and `pf_merge` merges two sorted arrays in linear time, taking each input's
+  validity mask and producing a merged one. See
+  [Sorting arrays and columns](doc/pages/sorting.md).
 - **Generated table types.** `tools/generate_user_table_code.py` turns a MAML schema into a named
   `parquet_table` extension with one accessor per declared column, so a program that always reads
   the same columns can write `t%ra()` instead of naming strings everywhere. Each accessor comes in

@@ -50,7 +50,9 @@ module parquet_sorting
         parquet_sort_builder_build_partial, parquet_sort_builder_nth_element, &
         parquet_sort_partial_argsort_int64, parquet_sort_partial_argsort_double, &
         parquet_sort_partial_argsort_string, parquet_sort_nth_index_int64, &
-        parquet_sort_nth_index_double, parquet_sort_nth_index_string
+        parquet_sort_nth_index_double, parquet_sort_nth_index_string, &
+        parquet_sort_builder_build_runs, parquet_sort_builder_search, parquet_sort_builder_merge
+    use, intrinsic :: ieee_arithmetic, only : ieee_is_nan
     use parquet_strings, only : parquet_string_column
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp
     use parquet_columns, only : parquet_column, parquet_kind_name, PK_INT32, PK_INT64, PK_FLOAT32, &
@@ -68,6 +70,15 @@ module parquet_sorting
     public :: pf_partial_argsort
     public :: pf_nth_element
     public :: pf_nth_quantile
+    public :: pf_lower_bound
+    public :: pf_upper_bound
+    public :: pf_equal_range
+    public :: pf_unique_count
+    public :: pf_unique
+    public :: pf_rank
+    public :: pf_minmax
+    public :: pf_argminmax
+    public :: pf_merge
     !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_sorting: "
@@ -81,6 +92,16 @@ module parquet_sorting
     integer, parameter :: RND_NEAREST = 1 !! round a fractional rank to the nearest whole one.
     integer, parameter :: RND_DOWN = 2    !! round a fractional rank down.
     integer, parameter :: RND_UP = 3      !! round a fractional rank up.
+    !
+    ! ---- Tie handling for pf_rank ----
+    integer, parameter :: RANK_COMPETITION = 1 !! ties share the lower rank; the next gap is skipped.
+    integer, parameter :: RANK_DENSE = 2       !! ties share a rank and no rank is skipped.
+    integer, parameter :: RANK_ORDINAL = 3     !! every element gets its own rank, ties in file order.
+    !
+    ! ---- Which bound pf_lower_bound/pf_upper_bound/pf_equal_range want ----
+    integer, parameter :: SRCH_LOWER = 1 !! the first position not ordered before the target.
+    integer, parameter :: SRCH_UPPER = 2 !! the first position the target is ordered before.
+    integer, parameter :: SRCH_BOTH = 3  !! both, from one extraction.
     !
     !> One extracted sort key, in the canonical form the C++ engine takes.
     !!
@@ -417,6 +438,289 @@ module parquet_sorting
         module procedure quantile_strcol_i64
     end interface pf_nth_quantile
     !
+    !> The first position at which `target` could be inserted into an already-sorted
+    !> `values` without breaking its order -- i.e. the first element not ordered BEFORE it.
+    !>
+    !> `pos` lands in `1 .. size(values)+1`; it is `size(values)+1` when every element is
+    !> ordered before the target. Together with `pf_upper_bound` it brackets every element
+    !> equal to the target, which is what `pf_equal_range` returns in one call.
+    !>
+    !> **`values` is checked for sortedness first, and that check is O(n).** Searching an
+    !> unsorted array returns a plausible index with no symptom at all, so the check is on by
+    !> default. Check once with `pf_is_sorted` and pass `assume_sorted=.true.` in a loop:
+    !>
+    !> ```fortran
+    !> call pf_is_sorted(v, ok)                       ! O(N), once
+    !> do k = 1, m
+    !>     call pf_lower_bound(v, targets(k), pos, assume_sorted=.true.)   ! O(log N) each
+    !> end do
+    !> ```
+    !>
+    !> `descending`/`nulls_first` must describe the order `values` is ACTUALLY in -- they
+    !> select the comparison, they do not reorder anything.
+    interface pf_lower_bound
+        module procedure lower_bound_i32_i32
+        module procedure lower_bound_i32_i64
+        module procedure lower_bound_i64_i32
+        module procedure lower_bound_i64_i64
+        module procedure lower_bound_f32_i32
+        module procedure lower_bound_f32_i64
+        module procedure lower_bound_f64_i32
+        module procedure lower_bound_f64_i64
+        module procedure lower_bound_bool_i32
+        module procedure lower_bound_bool_i64
+        module procedure lower_bound_chr_i32
+        module procedure lower_bound_chr_i64
+        module procedure lower_bound_date_i32
+        module procedure lower_bound_date_i64
+        module procedure lower_bound_time_i32
+        module procedure lower_bound_time_i64
+        module procedure lower_bound_ts_i32
+        module procedure lower_bound_ts_i64
+        module procedure lower_bound_strcol_i32
+        module procedure lower_bound_strcol_i64
+    end interface pf_lower_bound
+    !
+    !> The first position at which `target` is ordered BEFORE the element there -- i.e. one
+    !> past the last element equal to the target.
+    !>
+    !> Same arguments, same sortedness rule and same `1 .. size(values)+1` range as
+    !> `pf_lower_bound`; `pf_upper_bound - pf_lower_bound` is how many elements equal the
+    !> target.
+    interface pf_upper_bound
+        module procedure upper_bound_i32_i32
+        module procedure upper_bound_i32_i64
+        module procedure upper_bound_i64_i32
+        module procedure upper_bound_i64_i64
+        module procedure upper_bound_f32_i32
+        module procedure upper_bound_f32_i64
+        module procedure upper_bound_f64_i32
+        module procedure upper_bound_f64_i64
+        module procedure upper_bound_bool_i32
+        module procedure upper_bound_bool_i64
+        module procedure upper_bound_chr_i32
+        module procedure upper_bound_chr_i64
+        module procedure upper_bound_date_i32
+        module procedure upper_bound_date_i64
+        module procedure upper_bound_time_i32
+        module procedure upper_bound_time_i64
+        module procedure upper_bound_ts_i32
+        module procedure upper_bound_ts_i64
+        module procedure upper_bound_strcol_i32
+        module procedure upper_bound_strcol_i64
+    end interface pf_upper_bound
+    !
+    !> The INCLUSIVE range `first .. last` of elements equal to `target`, from one pass.
+    !>
+    !> `first` is `pf_lower_bound`'s answer and `last` is `pf_upper_bound`'s minus one, so a
+    !> target that is absent comes back with `last == first - 1` and `last - first + 1 == 0`.
+    !> Do not read `values(first)` without checking that count first.
+    !>
+    !> Cheaper than calling the two bounds separately: the values are extracted once.
+    interface pf_equal_range
+        module procedure equal_range_i32_i32
+        module procedure equal_range_i32_i64
+        module procedure equal_range_i64_i32
+        module procedure equal_range_i64_i64
+        module procedure equal_range_f32_i32
+        module procedure equal_range_f32_i64
+        module procedure equal_range_f64_i32
+        module procedure equal_range_f64_i64
+        module procedure equal_range_bool_i32
+        module procedure equal_range_bool_i64
+        module procedure equal_range_chr_i32
+        module procedure equal_range_chr_i64
+        module procedure equal_range_date_i32
+        module procedure equal_range_date_i64
+        module procedure equal_range_time_i32
+        module procedure equal_range_time_i64
+        module procedure equal_range_ts_i32
+        module procedure equal_range_ts_i64
+        module procedure equal_range_strcol_i32
+        module procedure equal_range_strcol_i64
+    end interface pf_equal_range
+    !
+    !> How many DISTINCT non-null values `values` holds. `n_null` optionally reports how many
+    !> were null.
+    !>
+    !> **Nulls are excluded from the population, not counted as one value** -- the same rule
+    !> `pf_nth_quantile` follows, and the reason this takes neither `descending` (a count does
+    !> not depend on direction) nor `nulls_first` (there is no null tier to place).
+    !>
+    !> Distinctness is the sort comparator's own equality, so on a floating-point array it is
+    !> EXACT: `0.1 + 0.2` and `0.3` are two distinct values. Every NaN counts as one value,
+    !> collectively, since NaNs compare equal to each other here (they do not under `==`).
+    interface pf_unique_count
+        module procedure unique_count_i32_i32
+        module procedure unique_count_i32_i64
+        module procedure unique_count_i64_i32
+        module procedure unique_count_i64_i64
+        module procedure unique_count_f32_i32
+        module procedure unique_count_f32_i64
+        module procedure unique_count_f64_i32
+        module procedure unique_count_f64_i64
+        module procedure unique_count_bool_i32
+        module procedure unique_count_bool_i64
+        module procedure unique_count_chr_i32
+        module procedure unique_count_chr_i64
+        module procedure unique_count_date_i32
+        module procedure unique_count_date_i64
+        module procedure unique_count_time_i32
+        module procedure unique_count_time_i64
+        module procedure unique_count_ts_i32
+        module procedure unique_count_ts_i64
+        module procedure unique_count_strcol_i32
+        module procedure unique_count_strcol_i64
+        module procedure unique_count_col_i32
+        module procedure unique_count_col_i64
+    end interface pf_unique_count
+    !
+    !> The distinct non-null values of `values`, in order, as an independent copy.
+    !>
+    !> Same distinctness rule as `pf_unique_count` -- exact for reals, all NaNs collapsing to
+    !> one. `descending` chooses the order the distinct values come back in; there is no
+    !> `nulls_first`, because nulls are excluded rather than placed.
+    !>
+    !> Each distinct value is taken from its FIRST occurrence in the sorted order, which for
+    !> equal-comparing-but-not-identical values (a `character` array's trailing blanks, a
+    !> `parquet_string_column`'s empty strings) is the earliest such element of `values`.
+    interface pf_unique
+        module procedure unique_i32
+        module procedure unique_i64
+        module procedure unique_f32
+        module procedure unique_f64
+        module procedure unique_bool
+        module procedure unique_chr
+        module procedure unique_date
+        module procedure unique_time
+        module procedure unique_ts
+        module procedure unique_strcol
+    end interface pf_unique
+    !
+    !> The rank of every element of `values`, without reordering it. `ranks(i)` is the rank of
+    !> `values(i)`, so this is a per-element answer rather than a permutation.
+    !>
+    !> `method=` chooses how ties are handled, matched case-insensitively:
+    !>
+    !> | token | ranks of `10, 20, 20, 30` |
+    !> |---|---|
+    !> | `"competition"` (the default) | 1, 2, 2, 4 |
+    !> | `"dense"` | 1, 2, 2, 3 |
+    !> | `"ordinal"` | 1, 2, 3, 4 |
+    !>
+    !> **A null gets rank 0**, which is why this takes `descending` but NOT `nulls_first`: a
+    !> null has no rank at all, so there is no position for `nulls_first` to choose. NaNs are
+    !> ranked as ordinary values (all tying with each other), unlike nulls.
+    !>
+    !> `"ordinal"` ranks are exactly the inverse of `pf_argsort`'s permutation.
+    interface pf_rank
+        module procedure rank_i32_i32
+        module procedure rank_i32_i64
+        module procedure rank_i64_i32
+        module procedure rank_i64_i64
+        module procedure rank_f32_i32
+        module procedure rank_f32_i64
+        module procedure rank_f64_i32
+        module procedure rank_f64_i64
+        module procedure rank_bool_i32
+        module procedure rank_bool_i64
+        module procedure rank_chr_i32
+        module procedure rank_chr_i64
+        module procedure rank_date_i32
+        module procedure rank_date_i64
+        module procedure rank_time_i32
+        module procedure rank_time_i64
+        module procedure rank_ts_i32
+        module procedure rank_ts_i64
+        module procedure rank_strcol_i32
+        module procedure rank_strcol_i64
+        module procedure rank_col_i32
+        module procedure rank_col_i64
+    end interface pf_rank
+    !
+    !> The smallest and largest value in `values`, skipping nulls and NaNs.
+    !>
+    !> Takes no `descending`/`nulls_first`: a minimum and a maximum are absolute, and reversing
+    !> the order would only exchange the two answers.
+    !>
+    !> **Aborts when every value is null or NaN** -- there is nothing to return, and no
+    !> sentinel exists across all nine types. This matches `pf_nth_quantile`'s decision for the
+    !> same degenerate case; guard with `count(is_valid)` where that can happen.
+    !>
+    !> Use `pf_argminmax` when the positions matter rather than the values.
+    interface pf_minmax
+        module procedure minmax_i32
+        module procedure minmax_i64
+        module procedure minmax_f32
+        module procedure minmax_f64
+        module procedure minmax_chr
+        module procedure minmax_date
+        module procedure minmax_time
+        module procedure minmax_ts
+        module procedure minmax_strcol
+    end interface pf_minmax
+    !
+    !> WHERE the smallest and largest value of `values` are: `imin`/`imax` are 1-based indices
+    !> into `values`, skipping nulls and NaNs.
+    !>
+    !> The index-returning twin of `pf_minmax`, split off because Fortran cannot offer both
+    !> answers from one generic -- optional `imin`/`imax` varying only by integer kind would
+    !> make a positional call ambiguous. A caller wanting both pays one extra call.
+    !>
+    !> Ties report the FIRST occurrence, which is the element a full stable sort would place at
+    !> either end. Aborts on an all-null-or-NaN input, exactly as `pf_minmax` does. Defined for
+    !> `parquet_column` as well, since an index needs no compile-time element type.
+    interface pf_argminmax
+        module procedure argminmax_i32_i32
+        module procedure argminmax_i32_i64
+        module procedure argminmax_i64_i32
+        module procedure argminmax_i64_i64
+        module procedure argminmax_f32_i32
+        module procedure argminmax_f32_i64
+        module procedure argminmax_f64_i32
+        module procedure argminmax_f64_i64
+        module procedure argminmax_chr_i32
+        module procedure argminmax_chr_i64
+        module procedure argminmax_date_i32
+        module procedure argminmax_date_i64
+        module procedure argminmax_time_i32
+        module procedure argminmax_time_i64
+        module procedure argminmax_ts_i32
+        module procedure argminmax_ts_i64
+        module procedure argminmax_strcol_i32
+        module procedure argminmax_strcol_i64
+        module procedure argminmax_col_i32
+        module procedure argminmax_col_i64
+    end interface pf_argminmax
+    !
+    !> Merges two ALREADY-SORTED arrays into one sorted array, in O(size(a) + size(b)) rather
+    !> than the O(n log n) of sorting their concatenation.
+    !>
+    !> `descending`/`nulls_first` must match the order `a` and `b` are actually in -- they
+    !> select the comparison, exactly as in the searches. Both inputs are checked for
+    !> sortedness unless `assume_sorted=.true.`.
+    !>
+    !> **Supply `is_valid_a`/`is_valid_b` whenever either input has nulls.** A sorted array
+    !> containing nulls is what `pf_sort(..., is_valid=)` produces, and a merge that is not told
+    !> which elements are null compares them as ordinary values and interleaves them into the
+    !> middle of the result. The precondition cannot be checked, either: a null's stored value
+    !> is indistinguishable from a real one without the mask.
+    !>
+    !> `merged_valid` reports the result's validity and is ALWAYS allocated when asked for, all
+    !> `.true.` when neither input mask was supplied. Ties take from `a` first, so the result
+    !> matches `pf_sort` of the concatenation element for element.
+    interface pf_merge
+        module procedure merge_i32
+        module procedure merge_i64
+        module procedure merge_f32
+        module procedure merge_f64
+        module procedure merge_bool
+        module procedure merge_chr
+        module procedure merge_date
+        module procedure merge_time
+        module procedure merge_ts
+    end interface pf_merge
+    !
     ! ---- Key extraction and pf_sort_keys%add (parquet_sorting_keys) ----
     interface
         !> Extracts a 32-bit integer key into the canonical form the engine takes.
@@ -691,6 +995,91 @@ module parquet_sorting
             integer(int64), intent(in) :: n       !! expected length.
             character(len=*), intent(in) :: proc  !! calling procedure, for messages.
         end subroutine check_permutation
+        !> Sorts, and reports where the runs of EQUAL rows are: `tie(k)` is 1 when output
+        !! position k holds a row comparing equal to the one before it. One call, because
+        !! `pf_unique`/`pf_rank` need both and would otherwise build the permutation twice.
+        module subroutine engine_build_runs(keys, nrows, proc, perm, tie)
+            type(sort_key_buf), intent(in), target :: keys(:)   !! the keys, primary first.
+            integer(int64), intent(in) :: nrows                 !! rows each key describes.
+            character(len=*), intent(in) :: proc                !! calling procedure, for messages.
+            integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
+            integer(c_int8_t), allocatable, intent(out) :: tie(:) !! 1 where a row ties the previous.
+        end subroutine engine_build_runs
+        !> Binary-searches `keys`, whose LAST row is the target the caller appended.
+        module subroutine engine_search(keys, nrows, n_search, upper, proc, pos)
+            type(sort_key_buf), intent(in), target :: keys(:) !! the keys, primary first.
+            integer(int64), intent(in) :: nrows               !! rows each key has, target included.
+            integer(int64), intent(in) :: n_search            !! rows to search, target excluded.
+            logical, intent(in) :: upper                      !! .true. for upper_bound.
+            character(len=*), intent(in) :: proc              !! calling procedure, for messages.
+            integer(int64), intent(out) :: pos                !! 1-based insertion point.
+        end subroutine engine_search
+        !> Merges rows 1..`na` of `keys` with the rest, both already in order.
+        module subroutine engine_merge(keys, nrows, na, proc, perm)
+            type(sort_key_buf), intent(in), target :: keys(:)   !! the keys, primary first.
+            integer(int64), intent(in) :: nrows                 !! rows each key describes.
+            integer(int64), intent(in) :: na                    !! rows belonging to the first input.
+            character(len=*), intent(in) :: proc                !! calling procedure, for messages.
+            integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
+        end subroutine engine_merge
+        !> Appends `src`'s rows to `dst`'s, key for key -- how a search target joins the array
+        !! it is searched for in, and how `pf_merge` concatenates its two inputs. Both must
+        !! describe the same number of keys, of the same families.
+        module subroutine buf_append(dst, nd, src, ns, proc)
+            type(sort_key_buf), allocatable, intent(inout) :: dst(:) !! grown in place.
+            integer(int64), intent(in) :: nd                     !! rows currently in `dst`.
+            type(sort_key_buf), allocatable, intent(in) :: src(:) !! keys to append.
+            integer(int64), intent(in) :: ns                     !! rows in `src`.
+            character(len=*), intent(in) :: proc                 !! calling procedure, for messages.
+        end subroutine buf_append
+        !> How many of a key's rows hold an actual VALUE -- neither null nor NaN, i.e. the
+        !! population `pf_minmax` reduces over.
+        module subroutine key_value_count(keys, nrows, n_value)
+            type(sort_key_buf), intent(in) :: keys(:) !! the keys; only the first is consulted.
+            integer(int64), intent(in) :: nrows       !! the array size.
+            integer(int64), intent(out) :: n_value    !! rows that are neither null nor NaN.
+        end subroutine key_value_count
+        !> Which rows of a key are null, as a plain mask. Every element is `.false.` when the
+        !! key has no nulls at all (the module's unallocated-`valid` convention).
+        module subroutine key_null_mask(keys, nrows, isnull)
+            type(sort_key_buf), intent(in) :: keys(:) !! the keys; only the first is consulted.
+            integer(int64), intent(in) :: nrows       !! the array size.
+            logical, allocatable, intent(out) :: isnull(:) !! .true. where the row is null.
+        end subroutine key_null_mask
+        !> Lower-cases a trimmed token, the one case-folding site the module has.
+        module subroutine fold_token(text, tok)
+            character(len=*), intent(in) :: text              !! the raw token.
+            character(len=:), allocatable, intent(out) :: tok !! trimmed and lower-cased.
+        end subroutine fold_token
+        !> Turns a `method=` token into a RANK_* mode, aborting on an unrecognized one.
+        module subroutine resolve_rank_method(method, proc, mode)
+            character(len=*), intent(in), optional :: method !! token; default "competition".
+            character(len=*), intent(in) :: proc             !! calling procedure, for messages.
+            integer, intent(out) :: mode                     !! RANK_COMPETITION/_DENSE/_ORDINAL.
+        end subroutine resolve_rank_method
+        !> Aborts unless the extracted key is in the order the caller says it is. `what` names
+        !! the argument, since `pf_merge` has two arrays to tell apart.
+        module subroutine check_sorted_input(keys, nrows, proc, what)
+            type(sort_key_buf), intent(in), target :: keys(:) !! the extracted key.
+            integer(int64), intent(in) :: nrows               !! its row count.
+            character(len=*), intent(in) :: proc              !! calling procedure, for messages.
+            character(len=*), intent(in) :: what              !! the argument's name.
+        end subroutine check_sorted_input
+        !> Narrows one int64 answer to int32, aborting rather than truncating. `noun` names
+        !! what the number is, so the message says which argument to widen.
+        module subroutine narrow_i64(value, proc, noun, dst)
+            integer(int64), intent(in) :: value  !! the answer.
+            character(len=*), intent(in) :: proc !! calling procedure, for messages.
+            character(len=*), intent(in) :: noun !! what the number is, for the message.
+            integer(int32), intent(out) :: dst   !! the narrowed copy.
+        end subroutine narrow_i64
+        !> The array counterpart of `narrow_i64`.
+        module subroutine narrow_i64_array(src, proc, noun, dst)
+            integer(int64), intent(in) :: src(:) !! the answers.
+            character(len=*), intent(in) :: proc !! calling procedure, for messages.
+            character(len=*), intent(in) :: noun !! what the numbers are, for the message.
+            integer(int32), allocatable, intent(out) :: dst(:) !! the narrowed copy.
+        end subroutine narrow_i64_array
         !> Narrows a 1-based int64 permutation to int32, aborting rather than truncating.
         module subroutine narrow_perm(perm64, proc, perm32)
             integer(int64), intent(in) :: perm64(:)                !! the permutation.
@@ -2419,6 +2808,1514 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. tests high-to-low order.
             logical, intent(in), optional :: nulls_first !! .true. expects nulls before values.
         end subroutine is_sorted_col
+    end interface
+    !
+    ! ---- Searching a sorted array (parquet_sorting_search) ----
+    interface
+        !> pf_lower_bound over a sorted 32-bit integer array, with int32 result(s).
+        module subroutine lower_bound_i32_i32(values, target, pos, descending, nulls_first, is_valid, assume_sorted)
+        integer(int32), intent(in) :: values(:)
+        integer(int32), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_i32_i32
+        !> pf_lower_bound over a sorted 32-bit integer array, with int64 result(s).
+        module subroutine lower_bound_i32_i64(values, target, pos, descending, nulls_first, is_valid, assume_sorted)
+        integer(int32), intent(in) :: values(:)
+        integer(int32), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_i32_i64
+        !> pf_lower_bound over a sorted 64-bit integer array, with int32 result(s).
+        module subroutine lower_bound_i64_i32(values, target, pos, descending, nulls_first, is_valid, assume_sorted)
+        integer(int64), intent(in) :: values(:)
+        integer(int64), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_i64_i32
+        !> pf_lower_bound over a sorted 64-bit integer array, with int64 result(s).
+        module subroutine lower_bound_i64_i64(values, target, pos, descending, nulls_first, is_valid, assume_sorted)
+        integer(int64), intent(in) :: values(:)
+        integer(int64), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_i64_i64
+        !> pf_lower_bound over a sorted 32-bit real array, with int32 result(s).
+        module subroutine lower_bound_f32_i32(values, target, pos, descending, nulls_first, is_valid, assume_sorted)
+        real(real32), intent(in) :: values(:)
+        real(real32), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_f32_i32
+        !> pf_lower_bound over a sorted 32-bit real array, with int64 result(s).
+        module subroutine lower_bound_f32_i64(values, target, pos, descending, nulls_first, is_valid, assume_sorted)
+        real(real32), intent(in) :: values(:)
+        real(real32), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_f32_i64
+        !> pf_lower_bound over a sorted 64-bit real array, with int32 result(s).
+        module subroutine lower_bound_f64_i32(values, target, pos, descending, nulls_first, is_valid, assume_sorted)
+        real(real64), intent(in) :: values(:)
+        real(real64), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_f64_i32
+        !> pf_lower_bound over a sorted 64-bit real array, with int64 result(s).
+        module subroutine lower_bound_f64_i64(values, target, pos, descending, nulls_first, is_valid, assume_sorted)
+        real(real64), intent(in) :: values(:)
+        real(real64), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_f64_i64
+        !> pf_lower_bound over a sorted logical array, with int32 result(s).
+        module subroutine lower_bound_bool_i32(values, target, pos, descending, nulls_first, is_valid, assume_sorted)
+        logical, intent(in) :: values(:)
+        logical, intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_bool_i32
+        !> pf_lower_bound over a sorted logical array, with int64 result(s).
+        module subroutine lower_bound_bool_i64(values, target, pos, descending, nulls_first, is_valid, assume_sorted)
+        logical, intent(in) :: values(:)
+        logical, intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_bool_i64
+        !> pf_lower_bound over a sorted string array, with int32 result(s).
+        module subroutine lower_bound_chr_i32(values, target, pos, descending, nulls_first, is_valid, assume_sorted)
+        character(len=*), intent(in) :: values(:)
+        character(len=*), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_chr_i32
+        !> pf_lower_bound over a sorted string array, with int64 result(s).
+        module subroutine lower_bound_chr_i64(values, target, pos, descending, nulls_first, is_valid, assume_sorted)
+        character(len=*), intent(in) :: values(:)
+        character(len=*), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_chr_i64
+        !> pf_lower_bound over a sorted date array, with int32 result(s).
+        module subroutine lower_bound_date_i32(values, target, pos, descending, nulls_first, assume_sorted)
+        type(parquet_date), intent(in) :: values(:)
+        type(parquet_date), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_date_i32
+        !> pf_lower_bound over a sorted date array, with int64 result(s).
+        module subroutine lower_bound_date_i64(values, target, pos, descending, nulls_first, assume_sorted)
+        type(parquet_date), intent(in) :: values(:)
+        type(parquet_date), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_date_i64
+        !> pf_lower_bound over a sorted time array, with int32 result(s).
+        module subroutine lower_bound_time_i32(values, target, pos, descending, nulls_first, assume_sorted)
+        type(parquet_time), intent(in) :: values(:)
+        type(parquet_time), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_time_i32
+        !> pf_lower_bound over a sorted time array, with int64 result(s).
+        module subroutine lower_bound_time_i64(values, target, pos, descending, nulls_first, assume_sorted)
+        type(parquet_time), intent(in) :: values(:)
+        type(parquet_time), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_time_i64
+        !> pf_lower_bound over a sorted timestamp array, with int32 result(s).
+        module subroutine lower_bound_ts_i32(values, target, pos, descending, nulls_first, assume_sorted)
+        type(parquet_timestamp), intent(in) :: values(:)
+        type(parquet_timestamp), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_ts_i32
+        !> pf_lower_bound over a sorted timestamp array, with int64 result(s).
+        module subroutine lower_bound_ts_i64(values, target, pos, descending, nulls_first, assume_sorted)
+        type(parquet_timestamp), intent(in) :: values(:)
+        type(parquet_timestamp), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_ts_i64
+        !> pf_lower_bound over a sorted packed string column array, with int32 result(s).
+        module subroutine lower_bound_strcol_i32(values, target, pos, descending, nulls_first, assume_sorted)
+        type(parquet_string_column), intent(in) :: values
+        character(len=*), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_strcol_i32
+        !> pf_lower_bound over a sorted packed string column array, with int64 result(s).
+        module subroutine lower_bound_strcol_i64(values, target, pos, descending, nulls_first, assume_sorted)
+        type(parquet_string_column), intent(in) :: values
+        character(len=*), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_strcol_i64
+        !> pf_upper_bound over a sorted 32-bit integer array, with int32 result(s).
+        module subroutine upper_bound_i32_i32(values, target, pos, descending, nulls_first, is_valid, assume_sorted)
+        integer(int32), intent(in) :: values(:)
+        integer(int32), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_i32_i32
+        !> pf_upper_bound over a sorted 32-bit integer array, with int64 result(s).
+        module subroutine upper_bound_i32_i64(values, target, pos, descending, nulls_first, is_valid, assume_sorted)
+        integer(int32), intent(in) :: values(:)
+        integer(int32), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_i32_i64
+        !> pf_upper_bound over a sorted 64-bit integer array, with int32 result(s).
+        module subroutine upper_bound_i64_i32(values, target, pos, descending, nulls_first, is_valid, assume_sorted)
+        integer(int64), intent(in) :: values(:)
+        integer(int64), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_i64_i32
+        !> pf_upper_bound over a sorted 64-bit integer array, with int64 result(s).
+        module subroutine upper_bound_i64_i64(values, target, pos, descending, nulls_first, is_valid, assume_sorted)
+        integer(int64), intent(in) :: values(:)
+        integer(int64), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_i64_i64
+        !> pf_upper_bound over a sorted 32-bit real array, with int32 result(s).
+        module subroutine upper_bound_f32_i32(values, target, pos, descending, nulls_first, is_valid, assume_sorted)
+        real(real32), intent(in) :: values(:)
+        real(real32), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_f32_i32
+        !> pf_upper_bound over a sorted 32-bit real array, with int64 result(s).
+        module subroutine upper_bound_f32_i64(values, target, pos, descending, nulls_first, is_valid, assume_sorted)
+        real(real32), intent(in) :: values(:)
+        real(real32), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_f32_i64
+        !> pf_upper_bound over a sorted 64-bit real array, with int32 result(s).
+        module subroutine upper_bound_f64_i32(values, target, pos, descending, nulls_first, is_valid, assume_sorted)
+        real(real64), intent(in) :: values(:)
+        real(real64), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_f64_i32
+        !> pf_upper_bound over a sorted 64-bit real array, with int64 result(s).
+        module subroutine upper_bound_f64_i64(values, target, pos, descending, nulls_first, is_valid, assume_sorted)
+        real(real64), intent(in) :: values(:)
+        real(real64), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_f64_i64
+        !> pf_upper_bound over a sorted logical array, with int32 result(s).
+        module subroutine upper_bound_bool_i32(values, target, pos, descending, nulls_first, is_valid, assume_sorted)
+        logical, intent(in) :: values(:)
+        logical, intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_bool_i32
+        !> pf_upper_bound over a sorted logical array, with int64 result(s).
+        module subroutine upper_bound_bool_i64(values, target, pos, descending, nulls_first, is_valid, assume_sorted)
+        logical, intent(in) :: values(:)
+        logical, intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_bool_i64
+        !> pf_upper_bound over a sorted string array, with int32 result(s).
+        module subroutine upper_bound_chr_i32(values, target, pos, descending, nulls_first, is_valid, assume_sorted)
+        character(len=*), intent(in) :: values(:)
+        character(len=*), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_chr_i32
+        !> pf_upper_bound over a sorted string array, with int64 result(s).
+        module subroutine upper_bound_chr_i64(values, target, pos, descending, nulls_first, is_valid, assume_sorted)
+        character(len=*), intent(in) :: values(:)
+        character(len=*), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_chr_i64
+        !> pf_upper_bound over a sorted date array, with int32 result(s).
+        module subroutine upper_bound_date_i32(values, target, pos, descending, nulls_first, assume_sorted)
+        type(parquet_date), intent(in) :: values(:)
+        type(parquet_date), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_date_i32
+        !> pf_upper_bound over a sorted date array, with int64 result(s).
+        module subroutine upper_bound_date_i64(values, target, pos, descending, nulls_first, assume_sorted)
+        type(parquet_date), intent(in) :: values(:)
+        type(parquet_date), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_date_i64
+        !> pf_upper_bound over a sorted time array, with int32 result(s).
+        module subroutine upper_bound_time_i32(values, target, pos, descending, nulls_first, assume_sorted)
+        type(parquet_time), intent(in) :: values(:)
+        type(parquet_time), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_time_i32
+        !> pf_upper_bound over a sorted time array, with int64 result(s).
+        module subroutine upper_bound_time_i64(values, target, pos, descending, nulls_first, assume_sorted)
+        type(parquet_time), intent(in) :: values(:)
+        type(parquet_time), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_time_i64
+        !> pf_upper_bound over a sorted timestamp array, with int32 result(s).
+        module subroutine upper_bound_ts_i32(values, target, pos, descending, nulls_first, assume_sorted)
+        type(parquet_timestamp), intent(in) :: values(:)
+        type(parquet_timestamp), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_ts_i32
+        !> pf_upper_bound over a sorted timestamp array, with int64 result(s).
+        module subroutine upper_bound_ts_i64(values, target, pos, descending, nulls_first, assume_sorted)
+        type(parquet_timestamp), intent(in) :: values(:)
+        type(parquet_timestamp), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_ts_i64
+        !> pf_upper_bound over a sorted packed string column array, with int32 result(s).
+        module subroutine upper_bound_strcol_i32(values, target, pos, descending, nulls_first, assume_sorted)
+        type(parquet_string_column), intent(in) :: values
+        character(len=*), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_strcol_i32
+        !> pf_upper_bound over a sorted packed string column array, with int64 result(s).
+        module subroutine upper_bound_strcol_i64(values, target, pos, descending, nulls_first, assume_sorted)
+        type(parquet_string_column), intent(in) :: values
+        character(len=*), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: pos !! 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_strcol_i64
+        !> pf_equal_range over a sorted 32-bit integer array, with int32 result(s).
+        module subroutine equal_range_i32_i32(values, target, first, last, descending, nulls_first, is_valid, assume_sorted)
+        integer(int32), intent(in) :: values(:)
+        integer(int32), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: first !! first element equal to `target`.
+            integer(int32), intent(out) :: last  !! last one; `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_i32_i32
+        !> pf_equal_range over a sorted 32-bit integer array, with int64 result(s).
+        module subroutine equal_range_i32_i64(values, target, first, last, descending, nulls_first, is_valid, assume_sorted)
+        integer(int32), intent(in) :: values(:)
+        integer(int32), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: first !! first element equal to `target`.
+            integer(int64), intent(out) :: last  !! last one; `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_i32_i64
+        !> pf_equal_range over a sorted 64-bit integer array, with int32 result(s).
+        module subroutine equal_range_i64_i32(values, target, first, last, descending, nulls_first, is_valid, assume_sorted)
+        integer(int64), intent(in) :: values(:)
+        integer(int64), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: first !! first element equal to `target`.
+            integer(int32), intent(out) :: last  !! last one; `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_i64_i32
+        !> pf_equal_range over a sorted 64-bit integer array, with int64 result(s).
+        module subroutine equal_range_i64_i64(values, target, first, last, descending, nulls_first, is_valid, assume_sorted)
+        integer(int64), intent(in) :: values(:)
+        integer(int64), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: first !! first element equal to `target`.
+            integer(int64), intent(out) :: last  !! last one; `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_i64_i64
+        !> pf_equal_range over a sorted 32-bit real array, with int32 result(s).
+        module subroutine equal_range_f32_i32(values, target, first, last, descending, nulls_first, is_valid, assume_sorted)
+        real(real32), intent(in) :: values(:)
+        real(real32), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: first !! first element equal to `target`.
+            integer(int32), intent(out) :: last  !! last one; `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_f32_i32
+        !> pf_equal_range over a sorted 32-bit real array, with int64 result(s).
+        module subroutine equal_range_f32_i64(values, target, first, last, descending, nulls_first, is_valid, assume_sorted)
+        real(real32), intent(in) :: values(:)
+        real(real32), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: first !! first element equal to `target`.
+            integer(int64), intent(out) :: last  !! last one; `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_f32_i64
+        !> pf_equal_range over a sorted 64-bit real array, with int32 result(s).
+        module subroutine equal_range_f64_i32(values, target, first, last, descending, nulls_first, is_valid, assume_sorted)
+        real(real64), intent(in) :: values(:)
+        real(real64), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: first !! first element equal to `target`.
+            integer(int32), intent(out) :: last  !! last one; `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_f64_i32
+        !> pf_equal_range over a sorted 64-bit real array, with int64 result(s).
+        module subroutine equal_range_f64_i64(values, target, first, last, descending, nulls_first, is_valid, assume_sorted)
+        real(real64), intent(in) :: values(:)
+        real(real64), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: first !! first element equal to `target`.
+            integer(int64), intent(out) :: last  !! last one; `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_f64_i64
+        !> pf_equal_range over a sorted logical array, with int32 result(s).
+        module subroutine equal_range_bool_i32(values, target, first, last, descending, nulls_first, is_valid, assume_sorted)
+        logical, intent(in) :: values(:)
+        logical, intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: first !! first element equal to `target`.
+            integer(int32), intent(out) :: last  !! last one; `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_bool_i32
+        !> pf_equal_range over a sorted logical array, with int64 result(s).
+        module subroutine equal_range_bool_i64(values, target, first, last, descending, nulls_first, is_valid, assume_sorted)
+        logical, intent(in) :: values(:)
+        logical, intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: first !! first element equal to `target`.
+            integer(int64), intent(out) :: last  !! last one; `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_bool_i64
+        !> pf_equal_range over a sorted string array, with int32 result(s).
+        module subroutine equal_range_chr_i32(values, target, first, last, descending, nulls_first, is_valid, assume_sorted)
+        character(len=*), intent(in) :: values(:)
+        character(len=*), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: first !! first element equal to `target`.
+            integer(int32), intent(out) :: last  !! last one; `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_chr_i32
+        !> pf_equal_range over a sorted string array, with int64 result(s).
+        module subroutine equal_range_chr_i64(values, target, first, last, descending, nulls_first, is_valid, assume_sorted)
+        character(len=*), intent(in) :: values(:)
+        character(len=*), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: first !! first element equal to `target`.
+            integer(int64), intent(out) :: last  !! last one; `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_chr_i64
+        !> pf_equal_range over a sorted date array, with int32 result(s).
+        module subroutine equal_range_date_i32(values, target, first, last, descending, nulls_first, assume_sorted)
+        type(parquet_date), intent(in) :: values(:)
+        type(parquet_date), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: first !! first element equal to `target`.
+            integer(int32), intent(out) :: last  !! last one; `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_date_i32
+        !> pf_equal_range over a sorted date array, with int64 result(s).
+        module subroutine equal_range_date_i64(values, target, first, last, descending, nulls_first, assume_sorted)
+        type(parquet_date), intent(in) :: values(:)
+        type(parquet_date), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: first !! first element equal to `target`.
+            integer(int64), intent(out) :: last  !! last one; `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_date_i64
+        !> pf_equal_range over a sorted time array, with int32 result(s).
+        module subroutine equal_range_time_i32(values, target, first, last, descending, nulls_first, assume_sorted)
+        type(parquet_time), intent(in) :: values(:)
+        type(parquet_time), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: first !! first element equal to `target`.
+            integer(int32), intent(out) :: last  !! last one; `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_time_i32
+        !> pf_equal_range over a sorted time array, with int64 result(s).
+        module subroutine equal_range_time_i64(values, target, first, last, descending, nulls_first, assume_sorted)
+        type(parquet_time), intent(in) :: values(:)
+        type(parquet_time), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: first !! first element equal to `target`.
+            integer(int64), intent(out) :: last  !! last one; `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_time_i64
+        !> pf_equal_range over a sorted timestamp array, with int32 result(s).
+        module subroutine equal_range_ts_i32(values, target, first, last, descending, nulls_first, assume_sorted)
+        type(parquet_timestamp), intent(in) :: values(:)
+        type(parquet_timestamp), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: first !! first element equal to `target`.
+            integer(int32), intent(out) :: last  !! last one; `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_ts_i32
+        !> pf_equal_range over a sorted timestamp array, with int64 result(s).
+        module subroutine equal_range_ts_i64(values, target, first, last, descending, nulls_first, assume_sorted)
+        type(parquet_timestamp), intent(in) :: values(:)
+        type(parquet_timestamp), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: first !! first element equal to `target`.
+            integer(int64), intent(out) :: last  !! last one; `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_ts_i64
+        !> pf_equal_range over a sorted packed string column array, with int32 result(s).
+        module subroutine equal_range_strcol_i32(values, target, first, last, descending, nulls_first, assume_sorted)
+        type(parquet_string_column), intent(in) :: values
+        character(len=*), intent(in) :: target !! the value to look for.
+            integer(int32), intent(out) :: first !! first element equal to `target`.
+            integer(int32), intent(out) :: last  !! last one; `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_strcol_i32
+        !> pf_equal_range over a sorted packed string column array, with int64 result(s).
+        module subroutine equal_range_strcol_i64(values, target, first, last, descending, nulls_first, assume_sorted)
+        type(parquet_string_column), intent(in) :: values
+        character(len=*), intent(in) :: target !! the value to look for.
+            integer(int64), intent(out) :: first !! first element equal to `target`.
+            integer(int64), intent(out) :: last  !! last one; `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_strcol_i64
+    end interface
+    !
+    ! ---- Distinct values and ranks (parquet_sorting_unique) ----
+    interface
+        !> pf_unique_count over a 32-bit integer array, with an int32 count.
+        module subroutine unique_count_i32_i32(values, count, is_valid, n_null)
+        integer(int32), intent(in) :: values(:)
+            integer(int32), intent(out) :: count !! how many distinct non-null values.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_count_i32_i32
+        !> pf_unique_count over a 32-bit integer array, with an int64 count.
+        module subroutine unique_count_i32_i64(values, count, is_valid, n_null)
+        integer(int32), intent(in) :: values(:)
+            integer(int64), intent(out) :: count !! how many distinct non-null values.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_count_i32_i64
+        !> pf_unique_count over a 64-bit integer array, with an int32 count.
+        module subroutine unique_count_i64_i32(values, count, is_valid, n_null)
+        integer(int64), intent(in) :: values(:)
+            integer(int32), intent(out) :: count !! how many distinct non-null values.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_count_i64_i32
+        !> pf_unique_count over a 64-bit integer array, with an int64 count.
+        module subroutine unique_count_i64_i64(values, count, is_valid, n_null)
+        integer(int64), intent(in) :: values(:)
+            integer(int64), intent(out) :: count !! how many distinct non-null values.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_count_i64_i64
+        !> pf_unique_count over a 32-bit real array, with an int32 count.
+        module subroutine unique_count_f32_i32(values, count, is_valid, n_null)
+        real(real32), intent(in) :: values(:)
+            integer(int32), intent(out) :: count !! how many distinct non-null values.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_count_f32_i32
+        !> pf_unique_count over a 32-bit real array, with an int64 count.
+        module subroutine unique_count_f32_i64(values, count, is_valid, n_null)
+        real(real32), intent(in) :: values(:)
+            integer(int64), intent(out) :: count !! how many distinct non-null values.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_count_f32_i64
+        !> pf_unique_count over a 64-bit real array, with an int32 count.
+        module subroutine unique_count_f64_i32(values, count, is_valid, n_null)
+        real(real64), intent(in) :: values(:)
+            integer(int32), intent(out) :: count !! how many distinct non-null values.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_count_f64_i32
+        !> pf_unique_count over a 64-bit real array, with an int64 count.
+        module subroutine unique_count_f64_i64(values, count, is_valid, n_null)
+        real(real64), intent(in) :: values(:)
+            integer(int64), intent(out) :: count !! how many distinct non-null values.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_count_f64_i64
+        !> pf_unique_count over a logical array, with an int32 count.
+        module subroutine unique_count_bool_i32(values, count, is_valid, n_null)
+        logical, intent(in) :: values(:)
+            integer(int32), intent(out) :: count !! how many distinct non-null values.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_count_bool_i32
+        !> pf_unique_count over a logical array, with an int64 count.
+        module subroutine unique_count_bool_i64(values, count, is_valid, n_null)
+        logical, intent(in) :: values(:)
+            integer(int64), intent(out) :: count !! how many distinct non-null values.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_count_bool_i64
+        !> pf_unique_count over a string array, with an int32 count.
+        module subroutine unique_count_chr_i32(values, count, is_valid, n_null)
+        character(len=*), intent(in) :: values(:)
+            integer(int32), intent(out) :: count !! how many distinct non-null values.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_count_chr_i32
+        !> pf_unique_count over a string array, with an int64 count.
+        module subroutine unique_count_chr_i64(values, count, is_valid, n_null)
+        character(len=*), intent(in) :: values(:)
+            integer(int64), intent(out) :: count !! how many distinct non-null values.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_count_chr_i64
+        !> pf_unique_count over a date array, with an int32 count.
+        module subroutine unique_count_date_i32(values, count, n_null)
+        type(parquet_date), intent(in) :: values(:)
+            integer(int32), intent(out) :: count !! how many distinct non-null values.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_count_date_i32
+        !> pf_unique_count over a date array, with an int64 count.
+        module subroutine unique_count_date_i64(values, count, n_null)
+        type(parquet_date), intent(in) :: values(:)
+            integer(int64), intent(out) :: count !! how many distinct non-null values.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_count_date_i64
+        !> pf_unique_count over a time array, with an int32 count.
+        module subroutine unique_count_time_i32(values, count, n_null)
+        type(parquet_time), intent(in) :: values(:)
+            integer(int32), intent(out) :: count !! how many distinct non-null values.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_count_time_i32
+        !> pf_unique_count over a time array, with an int64 count.
+        module subroutine unique_count_time_i64(values, count, n_null)
+        type(parquet_time), intent(in) :: values(:)
+            integer(int64), intent(out) :: count !! how many distinct non-null values.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_count_time_i64
+        !> pf_unique_count over a timestamp array, with an int32 count.
+        module subroutine unique_count_ts_i32(values, count, n_null)
+        type(parquet_timestamp), intent(in) :: values(:)
+            integer(int32), intent(out) :: count !! how many distinct non-null values.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_count_ts_i32
+        !> pf_unique_count over a timestamp array, with an int64 count.
+        module subroutine unique_count_ts_i64(values, count, n_null)
+        type(parquet_timestamp), intent(in) :: values(:)
+            integer(int64), intent(out) :: count !! how many distinct non-null values.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_count_ts_i64
+        !> pf_unique_count over a packed string column array, with an int32 count.
+        module subroutine unique_count_strcol_i32(values, count, n_null)
+        type(parquet_string_column), intent(in) :: values
+            integer(int32), intent(out) :: count !! how many distinct non-null values.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_count_strcol_i32
+        !> pf_unique_count over a packed string column array, with an int64 count.
+        module subroutine unique_count_strcol_i64(values, count, n_null)
+        type(parquet_string_column), intent(in) :: values
+            integer(int64), intent(out) :: count !! how many distinct non-null values.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_count_strcol_i64
+        !> pf_unique_count over a type-erased column array, with an int32 count.
+        module subroutine unique_count_col_i32(values, count, n_null)
+        type(parquet_column), intent(in) :: values
+            integer(int32), intent(out) :: count !! how many distinct non-null values.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_count_col_i32
+        !> pf_unique_count over a type-erased column array, with an int64 count.
+        module subroutine unique_count_col_i64(values, count, n_null)
+        type(parquet_column), intent(in) :: values
+            integer(int64), intent(out) :: count !! how many distinct non-null values.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_count_col_i64
+        !> pf_unique over a 32-bit integer array: its distinct non-null values, in order.
+        module subroutine unique_i32(values, distinct, descending, is_valid, n_null)
+        integer(int32), intent(in) :: values(:)
+            integer(int32), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_i32
+        !> pf_unique over a 64-bit integer array: its distinct non-null values, in order.
+        module subroutine unique_i64(values, distinct, descending, is_valid, n_null)
+        integer(int64), intent(in) :: values(:)
+            integer(int64), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_i64
+        !> pf_unique over a 32-bit real array: its distinct non-null values, in order.
+        module subroutine unique_f32(values, distinct, descending, is_valid, n_null)
+        real(real32), intent(in) :: values(:)
+            real(real32), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_f32
+        !> pf_unique over a 64-bit real array: its distinct non-null values, in order.
+        module subroutine unique_f64(values, distinct, descending, is_valid, n_null)
+        real(real64), intent(in) :: values(:)
+            real(real64), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_f64
+        !> pf_unique over a logical array: its distinct non-null values, in order.
+        module subroutine unique_bool(values, distinct, descending, is_valid, n_null)
+        logical, intent(in) :: values(:)
+            logical, allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_bool
+        !> pf_unique over a string array: its distinct non-null values, in order.
+        module subroutine unique_chr(values, distinct, descending, is_valid, n_null)
+        character(len=*), intent(in) :: values(:)
+            character(len=len(values)), allocatable, intent(out) :: distinct(:) !! the distinct values.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_chr
+        !> pf_unique over a date array: its distinct non-null values, in order.
+        module subroutine unique_date(values, distinct, descending, n_null)
+        type(parquet_date), intent(in) :: values(:)
+            type(parquet_date), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_date
+        !> pf_unique over a time array: its distinct non-null values, in order.
+        module subroutine unique_time(values, distinct, descending, n_null)
+        type(parquet_time), intent(in) :: values(:)
+            type(parquet_time), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_time
+        !> pf_unique over a timestamp array: its distinct non-null values, in order.
+        module subroutine unique_ts(values, distinct, descending, n_null)
+        type(parquet_timestamp), intent(in) :: values(:)
+            type(parquet_timestamp), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_ts
+        !> pf_unique over a packed string column array: its distinct non-null values, in order.
+        module subroutine unique_strcol(values, distinct, descending, n_null)
+        type(parquet_string_column), intent(in) :: values
+            type(parquet_string_column), intent(out) :: distinct !! the distinct values.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+        end subroutine unique_strcol
+        !> pf_rank over a 32-bit integer array, with int32 ranks.
+        module subroutine rank_i32_i32(values, ranks, method, descending, is_valid)
+        integer(int32), intent(in) :: values(:)
+            integer(int32), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
+            character(len=*), intent(in), optional :: method
+            !! "competition" (the default), "dense" or "ordinal", case-insensitive.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine rank_i32_i32
+        !> pf_rank over a 32-bit integer array, with int64 ranks.
+        module subroutine rank_i32_i64(values, ranks, method, descending, is_valid)
+        integer(int32), intent(in) :: values(:)
+            integer(int64), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
+            character(len=*), intent(in), optional :: method
+            !! "competition" (the default), "dense" or "ordinal", case-insensitive.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine rank_i32_i64
+        !> pf_rank over a 64-bit integer array, with int32 ranks.
+        module subroutine rank_i64_i32(values, ranks, method, descending, is_valid)
+        integer(int64), intent(in) :: values(:)
+            integer(int32), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
+            character(len=*), intent(in), optional :: method
+            !! "competition" (the default), "dense" or "ordinal", case-insensitive.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine rank_i64_i32
+        !> pf_rank over a 64-bit integer array, with int64 ranks.
+        module subroutine rank_i64_i64(values, ranks, method, descending, is_valid)
+        integer(int64), intent(in) :: values(:)
+            integer(int64), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
+            character(len=*), intent(in), optional :: method
+            !! "competition" (the default), "dense" or "ordinal", case-insensitive.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine rank_i64_i64
+        !> pf_rank over a 32-bit real array, with int32 ranks.
+        module subroutine rank_f32_i32(values, ranks, method, descending, is_valid)
+        real(real32), intent(in) :: values(:)
+            integer(int32), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
+            character(len=*), intent(in), optional :: method
+            !! "competition" (the default), "dense" or "ordinal", case-insensitive.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine rank_f32_i32
+        !> pf_rank over a 32-bit real array, with int64 ranks.
+        module subroutine rank_f32_i64(values, ranks, method, descending, is_valid)
+        real(real32), intent(in) :: values(:)
+            integer(int64), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
+            character(len=*), intent(in), optional :: method
+            !! "competition" (the default), "dense" or "ordinal", case-insensitive.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine rank_f32_i64
+        !> pf_rank over a 64-bit real array, with int32 ranks.
+        module subroutine rank_f64_i32(values, ranks, method, descending, is_valid)
+        real(real64), intent(in) :: values(:)
+            integer(int32), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
+            character(len=*), intent(in), optional :: method
+            !! "competition" (the default), "dense" or "ordinal", case-insensitive.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine rank_f64_i32
+        !> pf_rank over a 64-bit real array, with int64 ranks.
+        module subroutine rank_f64_i64(values, ranks, method, descending, is_valid)
+        real(real64), intent(in) :: values(:)
+            integer(int64), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
+            character(len=*), intent(in), optional :: method
+            !! "competition" (the default), "dense" or "ordinal", case-insensitive.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine rank_f64_i64
+        !> pf_rank over a logical array, with int32 ranks.
+        module subroutine rank_bool_i32(values, ranks, method, descending, is_valid)
+        logical, intent(in) :: values(:)
+            integer(int32), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
+            character(len=*), intent(in), optional :: method
+            !! "competition" (the default), "dense" or "ordinal", case-insensitive.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine rank_bool_i32
+        !> pf_rank over a logical array, with int64 ranks.
+        module subroutine rank_bool_i64(values, ranks, method, descending, is_valid)
+        logical, intent(in) :: values(:)
+            integer(int64), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
+            character(len=*), intent(in), optional :: method
+            !! "competition" (the default), "dense" or "ordinal", case-insensitive.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine rank_bool_i64
+        !> pf_rank over a string array, with int32 ranks.
+        module subroutine rank_chr_i32(values, ranks, method, descending, is_valid)
+        character(len=*), intent(in) :: values(:)
+            integer(int32), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
+            character(len=*), intent(in), optional :: method
+            !! "competition" (the default), "dense" or "ordinal", case-insensitive.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine rank_chr_i32
+        !> pf_rank over a string array, with int64 ranks.
+        module subroutine rank_chr_i64(values, ranks, method, descending, is_valid)
+        character(len=*), intent(in) :: values(:)
+            integer(int64), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
+            character(len=*), intent(in), optional :: method
+            !! "competition" (the default), "dense" or "ordinal", case-insensitive.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine rank_chr_i64
+        !> pf_rank over a date array, with int32 ranks.
+        module subroutine rank_date_i32(values, ranks, method, descending)
+        type(parquet_date), intent(in) :: values(:)
+            integer(int32), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
+            character(len=*), intent(in), optional :: method
+            !! "competition" (the default), "dense" or "ordinal", case-insensitive.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+        end subroutine rank_date_i32
+        !> pf_rank over a date array, with int64 ranks.
+        module subroutine rank_date_i64(values, ranks, method, descending)
+        type(parquet_date), intent(in) :: values(:)
+            integer(int64), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
+            character(len=*), intent(in), optional :: method
+            !! "competition" (the default), "dense" or "ordinal", case-insensitive.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+        end subroutine rank_date_i64
+        !> pf_rank over a time array, with int32 ranks.
+        module subroutine rank_time_i32(values, ranks, method, descending)
+        type(parquet_time), intent(in) :: values(:)
+            integer(int32), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
+            character(len=*), intent(in), optional :: method
+            !! "competition" (the default), "dense" or "ordinal", case-insensitive.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+        end subroutine rank_time_i32
+        !> pf_rank over a time array, with int64 ranks.
+        module subroutine rank_time_i64(values, ranks, method, descending)
+        type(parquet_time), intent(in) :: values(:)
+            integer(int64), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
+            character(len=*), intent(in), optional :: method
+            !! "competition" (the default), "dense" or "ordinal", case-insensitive.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+        end subroutine rank_time_i64
+        !> pf_rank over a timestamp array, with int32 ranks.
+        module subroutine rank_ts_i32(values, ranks, method, descending)
+        type(parquet_timestamp), intent(in) :: values(:)
+            integer(int32), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
+            character(len=*), intent(in), optional :: method
+            !! "competition" (the default), "dense" or "ordinal", case-insensitive.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+        end subroutine rank_ts_i32
+        !> pf_rank over a timestamp array, with int64 ranks.
+        module subroutine rank_ts_i64(values, ranks, method, descending)
+        type(parquet_timestamp), intent(in) :: values(:)
+            integer(int64), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
+            character(len=*), intent(in), optional :: method
+            !! "competition" (the default), "dense" or "ordinal", case-insensitive.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+        end subroutine rank_ts_i64
+        !> pf_rank over a packed string column array, with int32 ranks.
+        module subroutine rank_strcol_i32(values, ranks, method, descending)
+        type(parquet_string_column), intent(in) :: values
+            integer(int32), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
+            character(len=*), intent(in), optional :: method
+            !! "competition" (the default), "dense" or "ordinal", case-insensitive.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+        end subroutine rank_strcol_i32
+        !> pf_rank over a packed string column array, with int64 ranks.
+        module subroutine rank_strcol_i64(values, ranks, method, descending)
+        type(parquet_string_column), intent(in) :: values
+            integer(int64), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
+            character(len=*), intent(in), optional :: method
+            !! "competition" (the default), "dense" or "ordinal", case-insensitive.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+        end subroutine rank_strcol_i64
+        !> pf_rank over a type-erased column array, with int32 ranks.
+        module subroutine rank_col_i32(values, ranks, method, descending)
+        type(parquet_column), intent(in) :: values
+            integer(int32), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
+            character(len=*), intent(in), optional :: method
+            !! "competition" (the default), "dense" or "ordinal", case-insensitive.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+        end subroutine rank_col_i32
+        !> pf_rank over a type-erased column array, with int64 ranks.
+        module subroutine rank_col_i64(values, ranks, method, descending)
+        type(parquet_column), intent(in) :: values
+            integer(int64), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
+            character(len=*), intent(in), optional :: method
+            !! "competition" (the default), "dense" or "ordinal", case-insensitive.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+        end subroutine rank_col_i64
+    end interface
+    !
+    ! ---- Extremes and merging (parquet_sorting_reduce) ----
+    interface
+        !> pf_minmax over a 32-bit integer array: its smallest and largest value.
+        module subroutine minmax_i32(values, vmin, vmax, is_valid)
+        integer(int32), intent(in) :: values(:)
+        integer(int32), intent(out) :: vmin !! the smallest value.
+        integer(int32), intent(out) :: vmax !! the largest value.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine minmax_i32
+        !> pf_minmax over a 64-bit integer array: its smallest and largest value.
+        module subroutine minmax_i64(values, vmin, vmax, is_valid)
+        integer(int64), intent(in) :: values(:)
+        integer(int64), intent(out) :: vmin !! the smallest value.
+        integer(int64), intent(out) :: vmax !! the largest value.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine minmax_i64
+        !> pf_minmax over a 32-bit real array: its smallest and largest value.
+        module subroutine minmax_f32(values, vmin, vmax, is_valid)
+        real(real32), intent(in) :: values(:)
+        real(real32), intent(out) :: vmin !! the smallest value.
+        real(real32), intent(out) :: vmax !! the largest value.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine minmax_f32
+        !> pf_minmax over a 64-bit real array: its smallest and largest value.
+        module subroutine minmax_f64(values, vmin, vmax, is_valid)
+        real(real64), intent(in) :: values(:)
+        real(real64), intent(out) :: vmin !! the smallest value.
+        real(real64), intent(out) :: vmax !! the largest value.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine minmax_f64
+        !> pf_minmax over a string array: its smallest and largest value.
+        module subroutine minmax_chr(values, vmin, vmax, is_valid)
+        character(len=*), intent(in) :: values(:)
+        character(len=:), allocatable, intent(out) :: vmin !! the smallest value.
+        character(len=:), allocatable, intent(out) :: vmax !! the largest value.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine minmax_chr
+        !> pf_minmax over a date array: its smallest and largest value.
+        module subroutine minmax_date(values, vmin, vmax)
+        type(parquet_date), intent(in) :: values(:)
+        type(parquet_date), intent(out) :: vmin !! the smallest value.
+        type(parquet_date), intent(out) :: vmax !! the largest value.
+        end subroutine minmax_date
+        !> pf_minmax over a time array: its smallest and largest value.
+        module subroutine minmax_time(values, vmin, vmax)
+        type(parquet_time), intent(in) :: values(:)
+        type(parquet_time), intent(out) :: vmin !! the smallest value.
+        type(parquet_time), intent(out) :: vmax !! the largest value.
+        end subroutine minmax_time
+        !> pf_minmax over a timestamp array: its smallest and largest value.
+        module subroutine minmax_ts(values, vmin, vmax)
+        type(parquet_timestamp), intent(in) :: values(:)
+        type(parquet_timestamp), intent(out) :: vmin !! the smallest value.
+        type(parquet_timestamp), intent(out) :: vmax !! the largest value.
+        end subroutine minmax_ts
+        !> pf_minmax over a packed string column array: its smallest and largest value.
+        module subroutine minmax_strcol(values, vmin, vmax)
+        type(parquet_string_column), intent(in) :: values
+        character(len=:), allocatable, intent(out) :: vmin !! the smallest value.
+        character(len=:), allocatable, intent(out) :: vmax !! the largest value.
+        end subroutine minmax_strcol
+        !> pf_argminmax over a 32-bit integer array, with int32 indices.
+        module subroutine argminmax_i32_i32(values, imin, imax, is_valid)
+        integer(int32), intent(in) :: values(:)
+            integer(int32), intent(out) :: imin !! where the smallest value is.
+            integer(int32), intent(out) :: imax !! where the largest value is.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine argminmax_i32_i32
+        !> pf_argminmax over a 32-bit integer array, with int64 indices.
+        module subroutine argminmax_i32_i64(values, imin, imax, is_valid)
+        integer(int32), intent(in) :: values(:)
+            integer(int64), intent(out) :: imin !! where the smallest value is.
+            integer(int64), intent(out) :: imax !! where the largest value is.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine argminmax_i32_i64
+        !> pf_argminmax over a 64-bit integer array, with int32 indices.
+        module subroutine argminmax_i64_i32(values, imin, imax, is_valid)
+        integer(int64), intent(in) :: values(:)
+            integer(int32), intent(out) :: imin !! where the smallest value is.
+            integer(int32), intent(out) :: imax !! where the largest value is.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine argminmax_i64_i32
+        !> pf_argminmax over a 64-bit integer array, with int64 indices.
+        module subroutine argminmax_i64_i64(values, imin, imax, is_valid)
+        integer(int64), intent(in) :: values(:)
+            integer(int64), intent(out) :: imin !! where the smallest value is.
+            integer(int64), intent(out) :: imax !! where the largest value is.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine argminmax_i64_i64
+        !> pf_argminmax over a 32-bit real array, with int32 indices.
+        module subroutine argminmax_f32_i32(values, imin, imax, is_valid)
+        real(real32), intent(in) :: values(:)
+            integer(int32), intent(out) :: imin !! where the smallest value is.
+            integer(int32), intent(out) :: imax !! where the largest value is.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine argminmax_f32_i32
+        !> pf_argminmax over a 32-bit real array, with int64 indices.
+        module subroutine argminmax_f32_i64(values, imin, imax, is_valid)
+        real(real32), intent(in) :: values(:)
+            integer(int64), intent(out) :: imin !! where the smallest value is.
+            integer(int64), intent(out) :: imax !! where the largest value is.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine argminmax_f32_i64
+        !> pf_argminmax over a 64-bit real array, with int32 indices.
+        module subroutine argminmax_f64_i32(values, imin, imax, is_valid)
+        real(real64), intent(in) :: values(:)
+            integer(int32), intent(out) :: imin !! where the smallest value is.
+            integer(int32), intent(out) :: imax !! where the largest value is.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine argminmax_f64_i32
+        !> pf_argminmax over a 64-bit real array, with int64 indices.
+        module subroutine argminmax_f64_i64(values, imin, imax, is_valid)
+        real(real64), intent(in) :: values(:)
+            integer(int64), intent(out) :: imin !! where the smallest value is.
+            integer(int64), intent(out) :: imax !! where the largest value is.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine argminmax_f64_i64
+        !> pf_argminmax over a string array, with int32 indices.
+        module subroutine argminmax_chr_i32(values, imin, imax, is_valid)
+        character(len=*), intent(in) :: values(:)
+            integer(int32), intent(out) :: imin !! where the smallest value is.
+            integer(int32), intent(out) :: imax !! where the largest value is.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine argminmax_chr_i32
+        !> pf_argminmax over a string array, with int64 indices.
+        module subroutine argminmax_chr_i64(values, imin, imax, is_valid)
+        character(len=*), intent(in) :: values(:)
+            integer(int64), intent(out) :: imin !! where the smallest value is.
+            integer(int64), intent(out) :: imax !! where the largest value is.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        end subroutine argminmax_chr_i64
+        !> pf_argminmax over a date array, with int32 indices.
+        module subroutine argminmax_date_i32(values, imin, imax)
+        type(parquet_date), intent(in) :: values(:)
+            integer(int32), intent(out) :: imin !! where the smallest value is.
+            integer(int32), intent(out) :: imax !! where the largest value is.
+        end subroutine argminmax_date_i32
+        !> pf_argminmax over a date array, with int64 indices.
+        module subroutine argminmax_date_i64(values, imin, imax)
+        type(parquet_date), intent(in) :: values(:)
+            integer(int64), intent(out) :: imin !! where the smallest value is.
+            integer(int64), intent(out) :: imax !! where the largest value is.
+        end subroutine argminmax_date_i64
+        !> pf_argminmax over a time array, with int32 indices.
+        module subroutine argminmax_time_i32(values, imin, imax)
+        type(parquet_time), intent(in) :: values(:)
+            integer(int32), intent(out) :: imin !! where the smallest value is.
+            integer(int32), intent(out) :: imax !! where the largest value is.
+        end subroutine argminmax_time_i32
+        !> pf_argminmax over a time array, with int64 indices.
+        module subroutine argminmax_time_i64(values, imin, imax)
+        type(parquet_time), intent(in) :: values(:)
+            integer(int64), intent(out) :: imin !! where the smallest value is.
+            integer(int64), intent(out) :: imax !! where the largest value is.
+        end subroutine argminmax_time_i64
+        !> pf_argminmax over a timestamp array, with int32 indices.
+        module subroutine argminmax_ts_i32(values, imin, imax)
+        type(parquet_timestamp), intent(in) :: values(:)
+            integer(int32), intent(out) :: imin !! where the smallest value is.
+            integer(int32), intent(out) :: imax !! where the largest value is.
+        end subroutine argminmax_ts_i32
+        !> pf_argminmax over a timestamp array, with int64 indices.
+        module subroutine argminmax_ts_i64(values, imin, imax)
+        type(parquet_timestamp), intent(in) :: values(:)
+            integer(int64), intent(out) :: imin !! where the smallest value is.
+            integer(int64), intent(out) :: imax !! where the largest value is.
+        end subroutine argminmax_ts_i64
+        !> pf_argminmax over a packed string column array, with int32 indices.
+        module subroutine argminmax_strcol_i32(values, imin, imax)
+        type(parquet_string_column), intent(in) :: values
+            integer(int32), intent(out) :: imin !! where the smallest value is.
+            integer(int32), intent(out) :: imax !! where the largest value is.
+        end subroutine argminmax_strcol_i32
+        !> pf_argminmax over a packed string column array, with int64 indices.
+        module subroutine argminmax_strcol_i64(values, imin, imax)
+        type(parquet_string_column), intent(in) :: values
+            integer(int64), intent(out) :: imin !! where the smallest value is.
+            integer(int64), intent(out) :: imax !! where the largest value is.
+        end subroutine argminmax_strcol_i64
+        !> pf_argminmax over a type-erased column array, with int32 indices.
+        module subroutine argminmax_col_i32(values, imin, imax)
+        type(parquet_column), intent(in) :: values
+            integer(int32), intent(out) :: imin !! where the smallest value is.
+            integer(int32), intent(out) :: imax !! where the largest value is.
+        end subroutine argminmax_col_i32
+        !> pf_argminmax over a type-erased column array, with int64 indices.
+        module subroutine argminmax_col_i64(values, imin, imax)
+        type(parquet_column), intent(in) :: values
+            integer(int64), intent(out) :: imin !! where the smallest value is.
+            integer(int64), intent(out) :: imax !! where the largest value is.
+        end subroutine argminmax_col_i64
+        !> pf_merge over two sorted 32-bit integer arrays.
+        module subroutine merge_i32(a, b, merged, is_valid_a, is_valid_b, merged_valid, descending, nulls_first, assume_sorted)
+        integer(int32), intent(in) :: a(:)
+        integer(int32), intent(in) :: b(:)
+            integer(int32), allocatable, intent(out) :: merged(:) !! the merged copy.
+            logical, intent(in), optional :: is_valid_a(:) !! `a`'s validity; absent means none.
+            logical, intent(in), optional :: is_valid_b(:) !! `b`'s validity; absent means none.
+            logical, allocatable, intent(out), optional :: merged_valid(:)
+            !! validity of `merged`. ALWAYS ALLOCATED when asked for -- all .true. when
+            !! neither input mask was supplied, since the caller asked a direct question.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check on BOTH inputs.
+        end subroutine merge_i32
+        !> pf_merge over two sorted 64-bit integer arrays.
+        module subroutine merge_i64(a, b, merged, is_valid_a, is_valid_b, merged_valid, descending, nulls_first, assume_sorted)
+        integer(int64), intent(in) :: a(:)
+        integer(int64), intent(in) :: b(:)
+            integer(int64), allocatable, intent(out) :: merged(:) !! the merged copy.
+            logical, intent(in), optional :: is_valid_a(:) !! `a`'s validity; absent means none.
+            logical, intent(in), optional :: is_valid_b(:) !! `b`'s validity; absent means none.
+            logical, allocatable, intent(out), optional :: merged_valid(:)
+            !! validity of `merged`. ALWAYS ALLOCATED when asked for -- all .true. when
+            !! neither input mask was supplied, since the caller asked a direct question.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check on BOTH inputs.
+        end subroutine merge_i64
+        !> pf_merge over two sorted 32-bit real arrays.
+        module subroutine merge_f32(a, b, merged, is_valid_a, is_valid_b, merged_valid, descending, nulls_first, assume_sorted)
+        real(real32), intent(in) :: a(:)
+        real(real32), intent(in) :: b(:)
+            real(real32), allocatable, intent(out) :: merged(:) !! the merged copy.
+            logical, intent(in), optional :: is_valid_a(:) !! `a`'s validity; absent means none.
+            logical, intent(in), optional :: is_valid_b(:) !! `b`'s validity; absent means none.
+            logical, allocatable, intent(out), optional :: merged_valid(:)
+            !! validity of `merged`. ALWAYS ALLOCATED when asked for -- all .true. when
+            !! neither input mask was supplied, since the caller asked a direct question.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check on BOTH inputs.
+        end subroutine merge_f32
+        !> pf_merge over two sorted 64-bit real arrays.
+        module subroutine merge_f64(a, b, merged, is_valid_a, is_valid_b, merged_valid, descending, nulls_first, assume_sorted)
+        real(real64), intent(in) :: a(:)
+        real(real64), intent(in) :: b(:)
+            real(real64), allocatable, intent(out) :: merged(:) !! the merged copy.
+            logical, intent(in), optional :: is_valid_a(:) !! `a`'s validity; absent means none.
+            logical, intent(in), optional :: is_valid_b(:) !! `b`'s validity; absent means none.
+            logical, allocatable, intent(out), optional :: merged_valid(:)
+            !! validity of `merged`. ALWAYS ALLOCATED when asked for -- all .true. when
+            !! neither input mask was supplied, since the caller asked a direct question.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check on BOTH inputs.
+        end subroutine merge_f64
+        !> pf_merge over two sorted logical arrays.
+        module subroutine merge_bool(a, b, merged, is_valid_a, is_valid_b, merged_valid, descending, nulls_first, assume_sorted)
+        logical, intent(in) :: a(:)
+        logical, intent(in) :: b(:)
+            logical, allocatable, intent(out) :: merged(:) !! the merged copy.
+            logical, intent(in), optional :: is_valid_a(:) !! `a`'s validity; absent means none.
+            logical, intent(in), optional :: is_valid_b(:) !! `b`'s validity; absent means none.
+            logical, allocatable, intent(out), optional :: merged_valid(:)
+            !! validity of `merged`. ALWAYS ALLOCATED when asked for -- all .true. when
+            !! neither input mask was supplied, since the caller asked a direct question.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check on BOTH inputs.
+        end subroutine merge_bool
+        !> pf_merge over two sorted string arrays.
+        module subroutine merge_chr(a, b, merged, is_valid_a, is_valid_b, merged_valid, descending, nulls_first, assume_sorted)
+        character(len=*), intent(in) :: a(:)
+        character(len=*), intent(in) :: b(:)
+            character(len=:), allocatable, intent(out) :: merged(:)
+            !! the merged copy, widened to `max(len(a), len(b))`. DEFERRED-length,
+            !! unlike `pf_sort`'s output, because the width comes from two inputs
+            !! rather than one -- so declare it `character(len=:), allocatable`.
+            logical, intent(in), optional :: is_valid_a(:) !! `a`'s validity; absent means none.
+            logical, intent(in), optional :: is_valid_b(:) !! `b`'s validity; absent means none.
+            logical, allocatable, intent(out), optional :: merged_valid(:)
+            !! validity of `merged`. ALWAYS ALLOCATED when asked for -- all .true. when
+            !! neither input mask was supplied, since the caller asked a direct question.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check on BOTH inputs.
+        end subroutine merge_chr
+        !> pf_merge over two sorted date arrays.
+        module subroutine merge_date(a, b, merged, descending, nulls_first, assume_sorted)
+        type(parquet_date), intent(in) :: a(:)
+        type(parquet_date), intent(in) :: b(:)
+            type(parquet_date), allocatable, intent(out) :: merged(:) !! the merged copy.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check on BOTH inputs.
+        end subroutine merge_date
+        !> pf_merge over two sorted time arrays.
+        module subroutine merge_time(a, b, merged, descending, nulls_first, assume_sorted)
+        type(parquet_time), intent(in) :: a(:)
+        type(parquet_time), intent(in) :: b(:)
+            type(parquet_time), allocatable, intent(out) :: merged(:) !! the merged copy.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check on BOTH inputs.
+        end subroutine merge_time
+        !> pf_merge over two sorted timestamp arrays.
+        module subroutine merge_ts(a, b, merged, descending, nulls_first, assume_sorted)
+        type(parquet_timestamp), intent(in) :: a(:)
+        type(parquet_timestamp), intent(in) :: b(:)
+            type(parquet_timestamp), allocatable, intent(out) :: merged(:) !! the merged copy.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check on BOTH inputs.
+        end subroutine merge_ts
     end interface
     !
 end module parquet_sorting ! GCOVR_EXCL_LINE

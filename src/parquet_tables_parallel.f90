@@ -86,6 +86,19 @@ contains
 #endif
     end procedure table_unlock
     !
+    module procedure parquet_debug_table_set_inflight
+        ! Written through the cache POINTER, which is why `table` is intent(in): the counters are
+        ! not part of the table's own value, so this needs neither intent(inout) nor any of the
+        ! finalization care a finalizable dummy would otherwise call for.
+        if (.not. associated(table%cache)) return
+        if (present(appending)) then
+            table%cache%append_active = merge(1, 0, appending)
+        end if
+        if (present(reading)) then
+            table%cache%readers_active = merge(1, 0, reading)
+        end if
+    end procedure parquet_debug_table_set_inflight
+    !
     module procedure table_check_no_append
         integer :: active
         !

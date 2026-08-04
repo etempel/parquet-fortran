@@ -1157,6 +1157,71 @@ static bool generate_element_nulls_fixture()
     return status.ok();
 }
 
+// test/fixtures/screen_declined_nulls.parquet: the row-group statistics screen's null tests, on
+// column types the screen otherwise DECLINES to reason about.
+//
+// The point is a short-circuit that is easy to miss: `is_null`/`is_not_null` are answered from the
+// chunk's recorded null count alone, so `resolve_screen_leaf` returns "usable" for them BEFORE it
+// looks at the column's Arrow type and before the sort-order gate. That means they genuinely prune
+// on a UINT32/DECIMAL/HALF_FLOAT column -- the very types every comparison operator declines. A
+// change that moved the null tests below the type switch would silently stop pruning (slow, but
+// correct), while one that moved the type switch's decline above them would silently prune wrongly
+// (fast, and a wrong answer). Only a fixture with such a column AND real nulls can tell the two
+// apart, and this library's own writer cannot produce any of these three types.
+//
+// 40 rows in 4 row groups of 10, statistics on. Each declined-type column is null in exactly ONE
+// row group, and a different one per column, so the expected pruned count is unambiguous:
+//   id        INT32,          1..40, never null   -- the screenable control
+//   v_uint32  UINT32,         null in row group 2 (rows 11-20)
+//   v_decimal DECIMAL128(10,2), null in row group 3 (rows 21-30)
+//   v_half    HALF_FLOAT,     null in row group 4 (rows 31-40)
+// So `v_uint32 is_null` can prune 3 row groups and `v_uint32 is_not_null` exactly 1, and likewise
+// for the other two on their own row groups. Per CLAUDE.md's "sized/typed from the first element"
+// convention the nulls are deliberately never in row group 1.
+static bool generate_screen_declined_nulls_fixture()
+{
+    const int nrows = 40;
+    const int chunk = 10;
+    arrow::Status st;
+
+    arrow::Int32Builder id_builder;
+    arrow::UInt32Builder uint32_builder;
+    auto decimal_type = arrow::decimal128(10, 2);
+    arrow::Decimal128Builder decimal_builder(decimal_type);
+    arrow::HalfFloatBuilder half_builder;
+
+    for (int row = 1; row <= nrows; ++row)
+    {
+        const int row_group = (row - 1) / chunk + 1;   // 1-based, matching the reader's numbering
+        st = id_builder.Append(row);
+        if (row_group == 2) st = uint32_builder.AppendNull();
+        else st = uint32_builder.Append(static_cast<uint32_t>(row) * 100u);
+        if (row_group == 3) st = decimal_builder.AppendNull();
+        else st = decimal_builder.Append(arrow::Decimal128(int64_t{row} * 25));
+        if (row_group == 4) st = half_builder.AppendNull();
+        else st = half_builder.Append(arrow::util::Float16(static_cast<float>(row) * 0.5f).bits());
+    }
+
+    std::shared_ptr<arrow::Array> id_arr, uint32_arr, decimal_arr, half_arr;
+    st = id_builder.Finish(&id_arr);
+    st = uint32_builder.Finish(&uint32_arr);
+    st = decimal_builder.Finish(&decimal_arr);
+    st = half_builder.Finish(&half_arr);
+
+    auto schema = arrow::schema({
+        arrow::field("id", arrow::int32(), false),
+        arrow::field("v_uint32", arrow::uint32()),
+        arrow::field("v_decimal", decimal_type),
+        arrow::field("v_half", arrow::float16()),
+    });
+    auto table = arrow::Table::Make(schema, {id_arr, uint32_arr, decimal_arr, half_arr});
+
+    auto maybe_outfile = arrow::io::FileOutputStream::Open("test/fixtures/screen_declined_nulls.parquet");
+    auto outfile = *maybe_outfile;
+    auto status = parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile, chunk);
+    return status.ok();
+}
+
 int main()
 {
     struct Fixture
@@ -1175,6 +1240,7 @@ int main()
         {"test/fixtures/nested_struct.parquet", generate_nested_struct_fixture},
         {"test/fixtures/map_list_types.parquet", generate_map_list_types_fixture},
         {"test/fixtures/element_nulls.parquet", generate_element_nulls_fixture},
+        {"test/fixtures/screen_declined_nulls.parquet", generate_screen_declined_nulls_fixture},
     };
 
     int failures = 0;

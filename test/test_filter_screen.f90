@@ -107,7 +107,16 @@ contains
             new_unittest("prefetch and a second column read see the pruned row set", test_prefetch_under_pruning), &
             new_unittest("parquet_get_num_row_groups still reports every row group", test_num_row_groups_unchanged), &
             new_unittest("a scoped filter's retained mask scales with its scope, not the file", &
-                test_scoped_mask_memory_scales_with_scope) &
+                test_scoped_mask_memory_scales_with_scope), &
+            new_unittest("the null tests prune on a column type every comparison declines", &
+                test_declined_type_null_tests_prune), &
+            new_unittest("an int64 column prunes on every ordering operator", &
+                test_int64_statistics_operators), &
+            new_unittest("time and timestamp columns prune on an ISO literal", &
+                test_time_timestamp_operators), &
+            new_unittest("every ordering operator on a float64 and a float32 column", &
+                test_float_all_operators), &
+            new_unittest("every ordering operator on a string column", test_string_all_operators) &
             ]
     end subroutine collect_tests_filter_screen
     !
@@ -235,6 +244,10 @@ contains
         integer(int64) :: pruned
         integer :: nrows, i
         character(len=16) :: ops(6) = [character(len=16) :: ">", ">=", "<", "<=", "==", "/="]
+        !> Row groups each bound rules out, with ids 1..100 in groups of 10 and the bound at 20 --
+        !> the last id of row group 2. `>` rules out groups 1-2 but `>=` only group 1, and that one
+        !> difference is the off-by-one this bound placement exists to catch.
+        integer(int64), parameter :: want(6) = [2_int64, 1_int64, 8_int64, 8_int64, 9_int64, 0_int64]
         character(len=*), parameter :: file = "test_run/screen_all_ops.parquet"
 
         call write_screen_fixture(file, 100, 10)
@@ -243,6 +256,11 @@ contains
             ! sits on the boundary for every one of the six.
             call compare_screened(file, "id " // trim(ops(i)) // " 20", "id", agree, pruned, nrows)
             call check(error, agree, "operator " // trim(ops(i)) // ": pruned and unpruned reads must be identical")
+            if (allocated(error)) return
+            ! Equality alone would pass just as happily against a screen that never pruned
+            ! anything, which is indistinguishable from one that silently stopped working.
+            call check(error, pruned == want(i), &
+                "operator " // trim(ops(i)) // " 20: wrong number of row groups pruned")
             if (allocated(error)) return
         end do
     end subroutine test_all_operators_equality
@@ -669,6 +687,13 @@ contains
                     "struct leaf '" // trim(rules(i)) // "': pruned and unpruned values must agree")
                 if (allocated(error)) return
             end if
+            ! The fixture is 5 rows in ONE row group, so "pruned" here can only ever be 0 or 1 --
+            ! and 1 would mean the whole file was ruled out. Asserting it is the only way to tell
+            ! "the screen agreed" from "the screen was never consulted for a struct leaf at all",
+            ! which is exactly the regression a dotted path would suffer.
+            call check(error, pruned == 0_int64, &
+                "struct leaf '" // trim(rules(i)) // "': the single row group must not be pruned")
+            if (allocated(error)) return
             deallocate(screened, plain)
         end do
     end subroutine test_struct_leaf_equality
@@ -864,6 +889,7 @@ contains
         integer(int32) :: id(60), vec(3, 60)
         integer(int32) :: row_screened(3), row_plain(3), elem_screened(20), elem_plain(20)
         integer :: i, j
+        integer(int64) :: pruned_screened
         character(len=*), parameter :: file = "test_run/screen_row_element.parquet"
 
         do i = 1, 60
@@ -880,6 +906,7 @@ contains
         call filt%add("id > 40")
         call parquet_debug_set_disable_statistics_prescreen(0_c_int)
         call parquet_open_reader(reader, file, filter=filt)
+        pruned_screened = parquet_debug_get_row_groups_pruned()
         call parquet_read_array_row_mode(reader, "vec", row_screened, 1)
         call parquet_read_array_element_mode(reader, "vec", elem_screened, 2)
         call parquet_close_reader(reader)
@@ -895,6 +922,12 @@ contains
         if (allocated(error)) return
         call check(error, all(elem_screened == elem_plain), "element mode under pruning must match an unpruned read")
         if (allocated(error)) return
+        ! ...and that pruning actually happened: `id > 40` rules out the four row groups holding
+        ! ids 1..40. Without this, both assertions above would pass against a screen that pruned
+        ! nothing, which is what a silently broken screen looks like.
+        call check(error, pruned_screened == 4_int64, &
+            "row/element mode: expected 4 of 6 row groups pruned by id > 40")
+        if (allocated(error)) return
         call check(error, all(row_screened == [4101, 4102, 4103]), "row mode under pruning: filtered row 1 is physical row 41")
     end subroutine test_row_element_mode_under_pruning
     !
@@ -904,7 +937,7 @@ contains
         type(error_type), allocatable, intent(out) :: error
         type(parquet_reader) :: reader
         type(parquet_filter) :: filt
-        integer(int64) :: n_screened, n_plain
+        integer(int64) :: n_screened, n_plain, pruned
         integer(int32), allocatable :: screened(:), plain(:)
         character(len=*), parameter :: file = "test_run/screen_sample.parquet"
 
@@ -912,6 +945,7 @@ contains
         call filt%add("id > 75")
         call parquet_debug_set_disable_statistics_prescreen(0_c_int)
         call parquet_open_reader(reader, file, filter=filt, sample_fraction=0.5_real64, sample_seed=7)
+        pruned = parquet_debug_get_row_groups_pruned()
         call parquet_get_nrows(reader, n_screened)
         allocate(screened(n_screened))
         if (n_screened > 0) call parquet_read_column(reader, "id", screened)
@@ -928,6 +962,12 @@ contains
         call check(error, n_screened == n_plain, "filter + sample under pruning: same row count as unpruned")
         if (allocated(error)) return
         call check(error, all(screened == plain), "filter + sample under pruning: same rows as unpruned")
+        if (allocated(error)) return
+        ! The composition is only interesting if pruning happened at all: `id > 75` rules out the
+        ! seven row groups holding ids 1..70, and a screen that pruned nothing would satisfy both
+        ! assertions above while proving nothing about the interaction.
+        call check(error, pruned == 7_int64, &
+            "filter + sample: expected 7 of 10 row groups pruned by id > 75")
     end subroutine test_sample_composes
     !
     !> A sort runs after the mask and reads its key column through the normal path -- which now
@@ -937,7 +977,7 @@ contains
         type(parquet_reader) :: reader
         type(parquet_filter) :: filt
         type(parquet_sortkey) :: srt
-        integer(int64) :: n
+        integer(int64) :: n, pruned
         integer(int32) :: screened(25), plain(25)
         character(len=*), parameter :: file = "test_run/screen_sort.parquet"
 
@@ -946,6 +986,7 @@ contains
         call srt%add("id desc")
         call parquet_debug_set_disable_statistics_prescreen(0_c_int)
         call parquet_open_reader(reader, file, filter=filt, sort_by=srt)
+        pruned = parquet_debug_get_row_groups_pruned()
         call parquet_get_nrows(reader, n)
         call parquet_read_column(reader, "payload", screened)
         call parquet_close_reader(reader)
@@ -961,6 +1002,11 @@ contains
         call check(error, all(screened == plain), "filter + sort under pruning: same order as unpruned")
         if (allocated(error)) return
         call check(error, screened(1) == 1100, "filter + sort under pruning: descending id puts row 100 first")
+        if (allocated(error)) return
+        ! As in the sample test: the ordering agreeing means nothing unless row groups were
+        ! actually skipped underneath it. `id > 75` rules out the seven holding ids 1..70.
+        call check(error, pruned == 7_int64, &
+            "filter + sort: expected 7 of 10 row groups pruned by id > 75")
     end subroutine test_sort_composes
     !
     !> A scoped filter's out-of-range row groups are all-false by construction, so they are pruned
@@ -1101,5 +1147,260 @@ contains
         call parquet_close_reader(reader)
         bytes = after - before
     end subroutine retained_mask_bytes
+    !
+    !> The null tests answer from the footer's null count alone, so they prune on a column type
+    !> every COMPARISON declines -- and that short-circuit is the thing worth pinning.
+    !>
+    !> `resolve_screen_leaf` returns "usable" for is_null/is_not_null BEFORE it looks at the Arrow
+    !> type and before the sort-order gate, which is what lets them prune a UINT32/DECIMAL/
+    !> HALF_FLOAT column whose bounds the screen refuses to reason about at all. Two opposite
+    !> regressions hide here: moving the null tests below the type switch would silently stop
+    !> pruning (slow but correct), while letting the type switch's decline reach them would silently
+    !> prune wrongly (fast, and a wrong answer). The comparison case at the end is what tells this
+    !> test apart from one that simply found the column screenable after all.
+    !>
+    !> test/fixtures/screen_declined_nulls.parquet is 40 rows in 4 row groups of 10, with each
+    !> declined-type column null in exactly ONE row group -- a different one per column, so every
+    !> expected count below is exact rather than approximate.
+    subroutine test_declined_type_null_tests_prune(error)
+        type(error_type), allocatable, intent(out) :: error
+        logical :: agree
+        integer(int64) :: pruned
+        integer :: nrows
+        character(len=*), parameter :: file = "test/fixtures/screen_declined_nulls.parquet"
+
+        ! uint32: null in row group 2, so is_null rules out the other three...
+        call compare_screened(file, "v_uint32 is_null", "id", agree, pruned, nrows)
+        call check(error, agree, "uint32 is_null: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, nrows == 10, "uint32 is_null: expected the 10 null rows")
+        if (allocated(error)) return
+        call check(error, pruned == 3_int64, &
+            "uint32 is_null: expected 3 of 4 row groups pruned -- the null tests must stay usable " // &
+            "on a type whose bounds the screen declines")
+        if (allocated(error)) return
+        ! ...and is_not_null rules out that one.
+        call compare_screened(file, "v_uint32 is_not_null", "id", agree, pruned, nrows)
+        call check(error, agree, "uint32 is_not_null: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, nrows == 30, "uint32 is_not_null: expected the 30 non-null rows")
+        if (allocated(error)) return
+        call check(error, pruned == 1_int64, "uint32 is_not_null: expected the all-null row group pruned")
+        if (allocated(error)) return
+        !
+        ! A decimal column, null in row group 3 instead.
+        call compare_screened(file, "v_decimal is_null", "id", agree, pruned, nrows)
+        call check(error, agree, "decimal is_null: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, pruned == 3_int64, "decimal is_null: expected 3 of 4 row groups pruned")
+        if (allocated(error)) return
+        call compare_screened(file, "v_decimal is_not_null", "id", agree, pruned, nrows)
+        call check(error, agree, "decimal is_not_null: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, pruned == 1_int64, "decimal is_not_null: expected the all-null row group pruned")
+        if (allocated(error)) return
+        !
+        ! A half_float column, null in row group 4.
+        call compare_screened(file, "v_half is_null", "id", agree, pruned, nrows)
+        call check(error, agree, "half_float is_null: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, pruned == 3_int64, "half_float is_null: expected 3 of 4 row groups pruned")
+        if (allocated(error)) return
+        !
+        ! The control, and the reason the counts above mean what they say: the SAME columns must
+        ! prune nothing under an ordering comparison, because the screen declines their bounds.
+        call compare_screened(file, "v_uint32 > 500", "id", agree, pruned, nrows)
+        call check(error, agree, "uint32 >: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, pruned == 0_int64, &
+            "uint32 >: an unsigned column's bounds must be declined, so nothing may be pruned")
+        if (allocated(error)) return
+        call compare_screened(file, "v_decimal > 100", "id", agree, pruned, nrows)
+        call check(error, agree, "decimal >: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, pruned == 0_int64, "decimal >: a decimal column's bounds must be declined")
+    end subroutine test_declined_type_null_tests_prune
+    !
+    !> Every ordering operator against an INT64 column, which reaches a different statistics branch
+    !> from every other integer test in this file.
+    !>
+    !> `Int32Statistics` and `Int64Statistics` are separate reads of separate footer types, and
+    !> until this test the int64 one was never exercised: a mistake there would have been invisible.
+    !> The fixture is monotone in row groups of 10, so each expected count follows from the bound
+    !> alone -- ids 1..100 scaled, bound at 55, so ordering-below prunes 5 groups, ordering-above 4,
+    !> equality 9, and `/=` none (every row group holds some other value).
+    subroutine test_int64_statistics_operators(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        logical :: agree
+        integer(int64) :: pruned
+        integer :: nrows, i
+        integer(int64) :: big(100)
+        integer(int32) :: u(100)
+        character(len=8), parameter :: ops(6) = ["> 55    ", ">= 55   ", "< 55    ", "<= 55   ", &
+            "== 55   ", "/= 55   "]
+        integer(int64), parameter :: want(6) = [5_int64, 5_int64, 4_int64, 4_int64, 9_int64, 0_int64]
+        character(len=*), parameter :: file = "test_run/screen_int64.parquet"
+
+        do i = 1, 100
+            big(i) = int(i, int64)
+            u(i) = i
+        end do
+        call parquet_open_writer(writer, file, chunk_size=10)
+        call parquet_write_column(writer, "big", big)
+        call parquet_write_column(writer, "u", u)
+        call parquet_close_writer(writer)
+
+        do i = 1, size(ops)
+            call compare_screened(file, "big " // trim(ops(i)), "u", agree, pruned, nrows)
+            call check(error, agree, &
+                "int64 " // trim(ops(i)) // ": pruned and unpruned reads must be identical")
+            if (allocated(error)) return
+            call check(error, pruned == want(i), &
+                "int64 " // trim(ops(i)) // ": wrong number of row groups pruned")
+            if (allocated(error)) return
+        end do
+    end subroutine test_int64_statistics_operators
+    !
+    !> TIME and TIMESTAMP columns, which the screen handles through the same integer path as DATE
+    !> but reach it through their own Arrow type cases.
+    !>
+    !> Both are stored as an integer count of their unit, so a literal finer than the column's unit
+    !> is rejected rather than truncated -- these use whole seconds, which every supported unit can
+    !> represent exactly.
+    subroutine test_time_timestamp_operators(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        logical :: agree
+        integer(int64) :: pruned
+        integer :: nrows, i
+        type(parquet_time) :: tm(100)
+        type(parquet_timestamp) :: ts(100)
+        integer(int32) :: u(100)
+        character(len=*), parameter :: file = "test_run/screen_time_ts.parquet"
+
+        do i = 1, 100
+            ! One second apart from 00:00:00, so row group k covers seconds (k-1)*10 .. k*10-1.
+            tm(i) = parquet_time(0, (i - 1) / 60, mod(i - 1, 60))
+            ts(i) = parquet_timestamp(2024, 1, 1, 0, (i - 1) / 60, mod(i - 1, 60))
+            u(i) = i
+        end do
+        call parquet_open_writer(writer, file, chunk_size=10)
+        call parquet_write_column(writer, "tm", tm)
+        call parquet_write_column(writer, "ts", ts)
+        call parquet_write_column(writer, "u", u)
+        call parquet_close_writer(writer)
+
+        ! Second 54 sits in row group 6 (rows 51..60 hold seconds 50..59), so > keeps rows 56..100
+        ! and the first five row groups are ruled out from the footer alone.
+        call compare_screened(file, 'tm > "00:00:54"', "u", agree, pruned, nrows)
+        call check(error, agree, "time >: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, nrows == 45, "time >: expected 45 surviving rows")
+        if (allocated(error)) return
+        call check(error, pruned == 5_int64, "time >: expected 5 of 10 row groups pruned")
+        if (allocated(error)) return
+        call compare_screened(file, 'tm <= "00:00:24"', "u", agree, pruned, nrows)
+        call check(error, agree, "time <=: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, pruned == 7_int64, "time <=: expected 7 of 10 row groups pruned")
+        if (allocated(error)) return
+        !
+        call compare_screened(file, 'ts >= "2024-01-01T00:00:54"', "u", agree, pruned, nrows)
+        call check(error, agree, "timestamp >=: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, nrows == 46, "timestamp >=: expected 46 surviving rows")
+        if (allocated(error)) return
+        call check(error, pruned == 5_int64, "timestamp >=: expected 5 of 10 row groups pruned")
+        if (allocated(error)) return
+        call compare_screened(file, 'ts == "2024-01-01T00:00:33"', "u", agree, pruned, nrows)
+        call check(error, agree, "timestamp ==: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, pruned == 9_int64, "timestamp ==: expected 9 of 10 row groups pruned")
+    end subroutine test_time_timestamp_operators
+    !
+    !> The four ordering operators the float tests above never used, on both float widths.
+    !>
+    !> `FloatStatistics` and `DoubleStatistics` are separate branches, and float32 had been reached
+    !> by exactly one `>` before this. The float rule that `may_false` is unconditional applies to
+    !> `not` and `/=` only (covered by their own tests); ordinary comparisons still prune from the
+    !> bounds, and these are the counts that proves.
+    subroutine test_float_all_operators(error)
+        type(error_type), allocatable, intent(out) :: error
+        logical :: agree
+        integer(int64) :: pruned
+        integer :: nrows, i
+        character(len=12), parameter :: ops(4) = [">= 55.0     ", "< 55.0      ", "<= 55.0     ", &
+            "== 55.0     "]
+        integer(int64), parameter :: want(4) = [5_int64, 4_int64, 4_int64, 9_int64]
+        character(len=*), parameter :: file = "test_run/screen_float_ops.parquet"
+
+        call write_float_fixture(file, .false.)
+        do i = 1, size(ops)
+            call compare_screened(file, "x " // trim(ops(i)), "u", agree, pruned, nrows)
+            call check(error, agree, &
+                "float64 " // trim(ops(i)) // ": pruned and unpruned reads must be identical")
+            if (allocated(error)) return
+            call check(error, pruned == want(i), &
+                "float64 " // trim(ops(i)) // ": wrong number of row groups pruned")
+            if (allocated(error)) return
+            call compare_screened(file, "xf " // trim(ops(i)), "u", agree, pruned, nrows)
+            call check(error, agree, &
+                "float32 " // trim(ops(i)) // ": pruned and unpruned reads must be identical")
+            if (allocated(error)) return
+            call check(error, pruned == want(i), &
+                "float32 " // trim(ops(i)) // ": wrong number of row groups pruned")
+            if (allocated(error)) return
+        end do
+    end subroutine test_float_all_operators
+    !
+    !> The four ordering operators the string test above never used.
+    !>
+    !> A string column's bounds are compared lexicographically and require an UNSIGNED sort order,
+    !> so it is the one family where a mis-read ordering would still produce plausible answers on
+    !> some inputs. `/=` prunes nothing here because no row group holds a single repeated value.
+    subroutine test_string_all_operators(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        logical :: agree
+        integer(int64) :: pruned
+        integer :: nrows, i
+        character(len=8) :: name(100)
+        integer(int32) :: u(100)
+        character(len=16), parameter :: ops(4) = ['>= "obj055"     ', '< "obj055"      ', &
+            '<= "obj055"     ', '/= "obj055"     ']
+        integer(int64), parameter :: want(4) = [5_int64, 4_int64, 4_int64, 0_int64]
+        character(len=*), parameter :: file = "test_run/screen_string_ops.parquet"
+
+        do i = 1, 100
+            write(name(i), '(a,i3.3)') "obj", i
+            u(i) = i
+        end do
+        call parquet_open_writer(writer, file, chunk_size=10)
+        call parquet_write_column(writer, "name", name)
+        call parquet_write_column(writer, "u", u)
+        call parquet_close_writer(writer)
+
+        do i = 1, size(ops)
+            call compare_screened(file, "name " // trim(ops(i)), "u", agree, pruned, nrows)
+            call check(error, agree, &
+                "string " // trim(ops(i)) // ": pruned and unpruned reads must be identical")
+            if (allocated(error)) return
+            call check(error, pruned == want(i), &
+                "string " // trim(ops(i)) // ": wrong number of row groups pruned")
+            if (allocated(error)) return
+        end do
+    end subroutine test_string_all_operators
+    !
+    !> **Why there is no test here for the screen's boolean ordering-reject arm.**
+    !>
+    !> `screen_compare_from_bounds` accepts only `==`/`/=` on a boolean leaf and declines the four
+    !> ordering operators -- but that arm cannot be reached through the public API at all: the
+    !> filter parser rejects `flag > false` at OPEN time with its own abort, before a row group is
+    !> ever screened. So the C++ arm is defensive code behind a Fortran-side pre-check, exactly the
+    !> pattern CLAUDE.md describes for unreachable `report_fatal_error` sites, and the behaviour a
+    !> test can actually observe is the abort -- which lives out of process as the
+    !> `filter_bool_ordering` scenario (test/error_scenarios.f90) rather than here.
+    !
     !
 end module test_filter_screen

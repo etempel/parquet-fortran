@@ -593,6 +593,12 @@ contains
                 test_columns_reindex_length_mismatch_aborts), &
             new_unittest("copying a parquet_table by assignment aborts", &
                 test_table_assignment_blocked_aborts), &
+            new_unittest("an ordering comparison on a boolean column aborts", &
+                test_filter_bool_ordering_aborts), &
+            new_unittest("reading a parquet_table while an append is in flight aborts", &
+                test_table_read_during_append_aborts), &
+            new_unittest("appending to a parquet_table while a read is in flight aborts", &
+                test_table_append_during_read_aborts), &
             new_unittest("using a never-opened parquet_table aborts", &
                 test_table_not_opened_aborts), &
             new_unittest("parquet_table %col with a mismatched pointer kind aborts", &
@@ -982,6 +988,39 @@ contains
             failure_message="copying a parquet_table by intrinsic assignment was expected to abort", &
             required_stderr="parquet_table: assignment is not supported")
     end subroutine test_table_assignment_blocked_aborts
+
+    !> `>`/`<` on a boolean are rejected when the filter is parsed, which is also why the row-group
+    !! screen's own boolean ordering-reject arm is unreachable -- see test/test_filter_screen.f90.
+    subroutine test_filter_bool_ordering_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "filter_bool_ordering", &
+            expect_abort=.true., &
+            failure_message="an ordering comparison on a boolean column was expected to abort", &
+            required_stderr="ordering comparisons ('>', '>=', '<', '<=') are not supported for boolean")
+    end subroutine test_filter_bool_ordering_aborts
+
+    !> The append/read contract's two aborts, made deterministic by the in-flight debug hook.
+    !!
+    !! Both scenarios do a successful call FIRST, with the hook clear, and only then set it -- that
+    !! is the negative control, and without it either test would pass just as happily against a
+    !! guard that fired on every call. Neither uses threads: the guard reads a counter and does not
+    !! care which thread set it, which is exactly what makes the hook enough (feature_risks.md
+    !! Risk-6).
+    subroutine test_table_read_during_append_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_read_during_append", &
+            expect_abort=.true., &
+            failure_message="reading a table while an append was in flight was expected to abort", &
+            required_stderr="another thread is appending to this table right now")
+    end subroutine test_table_read_during_append_aborts
+
+    subroutine test_table_append_during_read_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_append_during_read", &
+            expect_abort=.true., &
+            failure_message="appending to a table while a read was in flight was expected to abort", &
+            required_stderr="another thread is reading this table right now")
+    end subroutine test_table_append_during_read_aborts
 
     subroutine test_table_not_opened_aborts(error)
         type(error_type), allocatable, intent(out) :: error

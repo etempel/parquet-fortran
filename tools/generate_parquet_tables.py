@@ -232,6 +232,9 @@ module parquet_tables
     public :: PARQUET_ROW_INDEX
     public :: REGIME_FULL, REGIME_SLICE
     public :: RES_EMPTY, RES_PARTIAL, RES_FULL
+    !> TEST-ONLY debug hook; deliberately NOT in README.md's API overview. See its own
+    !! doc-comment for why it has to be public at all.
+    public :: parquet_debug_table_set_inflight
     !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_table: "
@@ -1597,6 +1600,26 @@ def gen_spec_interfaces():
         module subroutine table_unlock(cache)
             type(parquet_table_cache), intent(inout) :: cache !! the column store.
         end subroutine table_unlock
+        !> TEST-ONLY: forces this table's "an append is in flight"/"a read is in flight" counters,
+        !! so the two concurrency aborts can be provoked from ONE thread, deterministically.
+        !!
+        !! **This is a debug hook, not API.** It exists because the guards it drives
+        !! (`table_check_no_append`, and `%append`'s own reader check) can otherwise only be
+        !! triggered by two threads overlapping on demand, and a timing-dependent test is worse than
+        !! no test -- it fails on a busy machine and gets disabled. Unlike the C++ `parquet_debug_*`
+        !! hooks, which a test reaches through its own local `bind(C)` interface, a Fortran-side hook
+        !! has no such escape hatch: these counters live on `parquet_table_cache`, whose components
+        !! are private to this module, so forcing them requires a public procedure here. That cost
+        !! was accepted deliberately (feature_risks.md Risk-6); it is excluded from README.md's API
+        !! overview and no library code calls it.
+        !!
+        !! Both arguments are optional and independent: `appending=.true.` makes every READ on this
+        !! table abort, `reading=.true.` makes every `%append` abort. Pass `.false.` to clear.
+        module subroutine parquet_debug_table_set_inflight(table, appending, reading)
+            type(parquet_table), intent(in) :: table   !! the table whose counters to force.
+            logical, intent(in), optional :: appending !! .true.: pretend an append is in flight.
+            logical, intent(in), optional :: reading   !! .true.: pretend a read is in flight.
+        end subroutine parquet_debug_table_set_inflight
         !> Aborts if another thread is inside %append on this store.
         !!
         !! The cheap half of the append/read contract, and the one every read entry point takes:

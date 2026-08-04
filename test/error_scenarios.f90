@@ -1301,6 +1301,12 @@ program error_scenarios
         call scenario_table_resolve_width_in_parallel_single()
     case ("table_mutate_shared_in_parallel")
         call scenario_table_mutate_shared_in_parallel()
+    case ("filter_bool_ordering")
+        call scenario_filter_bool_ordering()
+    case ("table_read_during_append")
+        call scenario_table_read_during_append()
+    case ("table_append_during_read")
+        call scenario_table_append_during_read()
     case ("table_add_column_shared_in_parallel")
         call scenario_table_add_column_shared_in_parallel()
     case ("table_set_null_no_validity_in_parallel")
@@ -10370,6 +10376,77 @@ contains
         print '(a,l1)', "unexpectedly nulled a shared column with no validity storage, is_null=", &
             t%is_null("val", 1)
     end subroutine scenario_table_set_null_no_validity_in_parallel
+
+    !> An ordering comparison on a BOOLEAN column is rejected when the filter is parsed.
+    !!
+    !! `>`/`>=`/`<`/`<=` have no meaning on a boolean, and the row-group statistics screen has its
+    !! own arm declining them -- but that arm is unreachable in practice, because this abort fires
+    !! first, at open time, before a single row group is screened. This scenario is what makes the
+    !! REAL behaviour testable (test/test_filter_screen.f90 says so where the missing test would
+    !! otherwise be), and it pins the message, which names the column and the offending operators.
+    subroutine scenario_filter_bool_ordering()
+        type(parquet_writer) :: w
+        type(parquet_reader) :: r
+        type(parquet_filter) :: filt
+        logical :: flag(6)
+        integer(int32) :: u(6)
+        integer :: i
+        character(len=*), parameter :: f = "test_run/es_filter_bool_ordering.parquet"
+        do i = 1, 6
+            flag(i) = i > 3
+            u(i) = i
+        end do
+        call parquet_open_writer(w, f)
+        call parquet_write_column(w, "flag", flag)
+        call parquet_write_column(w, "u", u)
+        call parquet_close_writer(w)
+        call filt%add("flag > false")
+        call parquet_open_reader(r, f, filter=filt)   ! -> aborts
+        print '(a)', "unexpectedly opened a reader with an ordering comparison on a boolean column"
+        call parquet_close_reader(r)
+    end subroutine scenario_filter_bool_ordering
+
+    !> Reading a table while another thread is appending to it is refused.
+    !!
+    !! **No threads here, deliberately.** The guard fires on whatever thread finds the counter
+    !! non-zero, so `parquet_debug_table_set_inflight` -- the test-only hook that exists for exactly
+    !! this (feature_risks.md Risk-6) -- makes the abort deterministic on one thread. Provoking it
+    !! for real would need two threads to overlap on demand, and a timing-dependent scenario is
+    !! worse than none: it passes on a quiet machine, fails on a busy one, and gets disabled.
+    !!
+    !! The successful read BEFORE the hook is set is the negative control, and it is load-bearing: a
+    !! guard that fired unconditionally would produce this same stderr, so without it the scenario
+    !! would pass against a guard that makes every read on every table abort.
+    subroutine scenario_table_read_during_append()
+        type(parquet_table) :: t
+        real(real64), allocatable :: v(:)
+        call write_table_scenario_fixture("test_run/es_table_read_during_append.parquet")
+        call parquet_open_table(t, "test_run/es_table_read_during_append.parquet")
+        call t%materialize_all()
+        call t%get("val", v)        ! negative control: no append in flight, so this must work
+        print '(a,i0)', "control read succeeded with no append in flight, n=", size(v)
+        call parquet_debug_table_set_inflight(t, appending=.true.)
+        call t%get("val", v)        ! -> aborts
+        print '(a,i0)', "unexpectedly read a table while an append was in flight, n=", size(v)
+    end subroutine scenario_table_read_during_append
+
+    !> Appending to a table while another thread is reading it is refused -- the other direction of
+    !! the same contract, and the one that would corrupt the READER: an append reallocates every
+    !! column's storage out from under it. Same hook, same negative control, same reason.
+    subroutine scenario_table_append_during_read()
+        type(parquet_table) :: t, batch
+        call write_table_scenario_fixture("test_run/es_table_append_during_read.parquet")
+        call parquet_open_table(t, "test_run/es_table_append_during_read.parquet")
+        call t%materialize_all()
+        call t%clone_structure(batch)
+        call batch%append_null_rows(1)
+        call parquet_debug_table_set_inflight(t, reading=.false.)
+        call t%append(batch)        ! negative control: no read in flight, so this must work
+        print '(a,i0)', "control append succeeded with no read in flight, nrows=", t%nrows()
+        call parquet_debug_table_set_inflight(t, reading=.true.)
+        call t%append(batch)        ! -> aborts
+        print '(a,i0)', "unexpectedly appended to a table while a read was in flight, nrows=", t%nrows()
+    end subroutine scenario_table_append_during_read
 
     !> A string column's rows share one packed store, so writing any element can move the whole
     !! payload -- "disjoint row ranges" is not a meaningful division of it, and any write to one on

@@ -1,0 +1,30 @@
+# This is a MAML file to generate a code for parquet_table_example type.
+dataset: parquet_table_test # module name (matches filename without extension)
+table: example # table name, e.g. type(parquet_table_example)
+description: Developer description, not used anywhere.
+comments: # add additional comments here, e.g. history of changes.
+- Additional comments can be placed here.
+- Another comment.
+fields:
+- name: uberid
+  info: Object ID field.
+  data_type: int64
+  col_size: 1
+- name: name
+  info: Name of the object.
+  data_type: string
+  array_size: 5
+- name: ra
+  unit: deg
+  info: Right ascension
+  data_type: float64
+- name: dec
+  unit: deg
+  info: Declination
+  data_type: float64
+- name: crd
+  unit: Mpc
+  info: Comoving coordinates
+  data_type: float32
+  col_size: 3
+

@@ -204,8 +204,11 @@ The summary has two parts:
   | `len_str` | For a `string` column only (blank otherwise): the longest string's length in the Parquet file, and, if the column was actually read via a `character(len=...)` array, the allocated output length after a `/` (e.g. `18` if they match, `18 / 24` if the Fortran buffer was allocated longer than necessary). |
   | `nulls` | Number of genuine Parquet Nulls in the column (every element, flattened, for a vector column). |
   | `min` / `max` | Numeric/string columns: the minimum/maximum value (lexicographic for strings). Boolean columns: `T:<count>`/`F:<count>` instead, since a boolean's min/max isn't a meaningful summary. `-`/`-` if every value is Null. |
-  | `prefetc` | `yes` if this column was named in a `parquet_prefetch_columns` call, `no` otherwise. |
+  | `qcmin` / `qcmax` | The quality-control bound declared for this column, written as the operator followed by the raw value exactly as the schema gave it (e.g. `>=0.0`, `<360.0`); blank where the schema declares none. These are what the values in `min`/`max` were checked against. |
+  | `qcmiss` | `Null` if the schema's `qc: miss:` declares that Nulls are permitted in this column; blank otherwise. |
+  | `fetched` | `yes` if this column was named in a `parquet_prefetch_columns` call, `no` otherwise. |
   | `read` | `yes` if this column was actually read via a typed read call, `no` otherwise (e.g. prefetched but never read). |
+  | `filter` | The active row filter's clauses on this column, with the column name stripped and joined with `, ` (e.g. `>=0.0, <360.0`); blank if the filter does not mention this column. A column named only by the filter still appears in this table, because evaluating the filter had to decode it. |
 
 ```fortran
 call parquet_open_reader(reader, "data.parquet")

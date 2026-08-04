@@ -91,6 +91,7 @@ REMOVE_PATHS=(
     tools/benchmark_table.sh
     tools/benchmark_threads.sh
     tools/build_ci_test_image.sh
+    tools/check_arrow_release.sh
     tools/check_bindc_boundary.py
     tools/check_doc_anchors.py
     tools/check_source_conventions.py

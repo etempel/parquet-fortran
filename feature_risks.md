@@ -37,6 +37,14 @@ next unused number — `Risk-31` today — and goes in "1. New risks"** until it
 Numbers of deleted entries are not reused, so a stale reference resolves to nothing rather than to
 the wrong risk.
 
+**Counts today: 26 covered, 0 proposed, 4 not testable.** Section 2 being empty is the healthy
+state rather than a finished one — it means every risk currently identified as testable has its
+test. Seven entries are covered by something other than a unit test, deliberately: Risk-1 by a
+maintainer check under `app/` with a `tools/*.sh` wrapper (it measures memory, so it needs its own
+process per measurement), and Risk-2, Risk-4, Risk-5, Risk-12, Risk-13 and Risk-19 by static checks
+in `tools/check_source_conventions.py`, which is the right tool for an invariant about what the code
+does *not* do.
+
 **Section 4 is pruned, not archived.** A covered entry earns its place only by still forbidding
 something: a rule for the next contributor, a trap that is not visible in the code, a test whose
 *design* has to be copied rather than merely kept passing. An entry that has become "this works and
@@ -57,12 +65,12 @@ something a reader is expected to have.
 
 | risk | what a future change can break | section |
 |---|---|---|
-| [Risk-1](#risk-1--the-release-policy-regresses-silently) | The release policy regresses silently | 2 — proposed |
-| [Risk-2](#risk-2--the-schema-less-write-rests-on-three-properties-that-look-incidental) | The schema-less write rests on three properties that look incidental | 2 — proposed |
-| [Risk-3](#risk-3--the-screen-and-the-evaluator-can-drift-apart) | The screen and the evaluator can drift apart | 2 — proposed |
-| [Risk-4](#risk-4--the-sort-guards-are-one-line-each-from-returning-physically-ordered-data) | The sort guards are one line each from returning physically ordered data | 2 — proposed |
-| [Risk-5](#risk-5--print_stat-format-churn) | `print_stat` format churn | 2 — proposed |
-| [Risk-6](#risk-6--the-concurrency-guards-must-keep-agreeing-and-one-of-them-protects-a-wrong-answer) | The concurrency guards must keep agreeing, and one of them protects a wrong ANSWER | 2 — proposed |
+| [Risk-1](#risk-1--the-release-policy-regresses-silently) | The release policy regresses silently | 4 — covered |
+| [Risk-2](#risk-2--the-schema-less-write-rests-on-three-properties-that-look-incidental) | The schema-less write rests on three properties that look incidental | 4 — covered |
+| [Risk-3](#risk-3--the-screen-and-the-evaluator-can-drift-apart) | The screen and the evaluator can drift apart | 4 — covered |
+| [Risk-4](#risk-4--the-sort-guards-are-one-line-each-from-returning-physically-ordered-data) | The sort guards are one line each from returning physically ordered data | 4 — covered |
+| [Risk-5](#risk-5--print_stat-format-churn) | `print_stat` format churn | 4 — covered |
+| [Risk-6](#risk-6--the-concurrency-guards-must-keep-agreeing-and-one-of-them-protects-a-wrong-answer) | The concurrency guards must keep agreeing, and one of them protects a wrong ANSWER | 4 — covered |
 | [Risk-7](#risk-7--a-half-applied-mutation-is-unrecoverable) | A half-applied mutation is unrecoverable | 3 — not testable |
 | [Risk-8](#risk-8--the-table-write-must-stay-the-same-calls-as-a-hand-written-write) | The table write must stay the same calls as a hand-written write | 3 — not testable |
 | [Risk-9](#risk-9--statistics-that-are-present-but-wrong) | Statistics that are present but wrong | 3 — not testable |
@@ -99,237 +107,10 @@ triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
 
-These are recommendations, not a backlog to work through in order — the right moment to add each
-is when the area it protects is next touched. Risk-1 is deliberately **not** a unit test: it
-measures memory, so it belongs under `app/` with a `tools/*.sh` wrapper, per CLAUDE.md's
-"Manual (never-`fpm test`) large-scale/benchmark tools".
-
-### Risk-1 — The release policy regresses silently
-
-If a materialization path forgets to release the Arrow-side column after copying it into the table,
-nothing fails — the table simply holds two copies of every column it reads, and only the Arrow pool
-counter notices. RSS cannot answer this question at all (see CLAUDE.md, "Measuring whether Arrow
-memory was actually freed"); `parquet_get_arrow_bytes_allocated` can, and each path must be measured
-in its own process.
-
-**Test.** Not testable in-process, and RSS cannot answer it at all — a correct release and a complete
-failure to release look nearly identical in `ps`, because Arrow's pool keeps freed pages.
-
-- **Proposed, as a maintainer tool rather than a test:** `parquet_get_arrow_bytes_allocated` reports
-  the pool counter directly. A small `app/` program that records the counter at baseline, calls
-  `%materialize_all()` on a multi-column file, and asserts the counter has returned to within a small
-  margin of baseline is a genuine regression check — and per CLAUDE.md it belongs under `app/` with a
-  `tools/*.sh` wrapper, never under `test/`, because it must run in **its own process** (a baseline
-  and the path under test in one process report the high-water mark of the pair, which makes whichever
-  ran second look like it leaked).
-- The consumer declares its own local `bind(C)` interface for the counter — it is deliberately not in
-  `src/parquet_bindings.f90`, the same convention the `parquet_debug_*` hooks follow.
-- **When adding a materialization path**, the question is not "did the values arrive?" (any test
-  catches that) but "was the Arrow array released after the copy?" — which only this measurement
-  answers.
-
-### Risk-2 — The schema-less write rests on three properties that look incidental
-
-A schema-less `parquet_write_table` builds a `parquet_schema` from the resident columns' descriptors
-and delegates to the ordinary write path — one write loop, and the sidecar MAML for free. Three
-things hold that up, and each reads like a detail:
-
-- **The generated schema declares `col_size:`/`array_size:` as `auto`, and must keep doing so.** The
-  writer then resolves both from the data exactly as it would with no schema at all, so the
-  generator cannot get a size wrong because it never computes one. A future change that "improves"
-  this by measuring the column here takes on the one job the current shape avoids — and gets it
-  wrong first for strings, whose declared width is a maximum over values it would have to scan.
-  The sidecar still records real numbers rather than `auto`, because it is emitted at **close**,
-  after the writer has resolved them.
-- **The sidecar round-trip depends on the read-in MAML loader IGNORING keys it does not know.**
-  What `write_maml=` emits is a Role A (write) schema; what `parquet_open_table(maml=)` consumes is
-  the Role B (read-in) dialect. They interoperate because `parquet_load_qc_maml_file` never parses
-  `fields:` into `%cinfo` — it scans raw lines for the keys it wants — so Role A's extra keys are
-  inert rather than rejected. **Tightening that loader into a strict validator would silently break
-  the round trip**, which is a feature the guide advertises. `test_write_table_schemaless_sidecar`
-  is the regression test, and it is really a test of the loader's leniency.
-- **A zero-column table cannot go through the generated schema at all**, because MAML requires at
-  least one field, so it takes a dedicated bare-writer path. Removing that path does not fail
-  visibly — it falls through to reading an unparsed schema's `%cinfo`, which segfaults. Note the
-  test consequence: `run_error_scenarios.sh` alone would still report PASS there, since a segfault
-  is a nonzero exit; only the stderr assertion in `test_errors.f90` distinguishes it from the clean
-  abort that is meant to happen.
-
-**Test.** The load-bearing one exists and is worth labelling as such; one property is untested.
-
-- **Covered:** `a schema-less write's sidecar MAML carries units and reopens the file`
-  (`test/test_table.f90`) is really a test of the **read-in MAML loader's leniency** — it passes only
-  because `parquet_load_qc_maml_file` ignores the Role-A keys it does not know. Anyone tightening
-  that loader into a strict validator will see this test fail, which is the intended alarm.
-  `a schema-less write writes the resident columns and nothing else` covers the column selection, and
-  `table_write_schemaless_empty_maml` the zero-column path.
-- **Proposed:** assert the generated schema declares `col_size:`/`array_size:` as **`auto`**. The
-  property being protected is that the generator never computes a size — the writer resolves both
-  from the data, exactly as it would with no schema. A future change that "improves" this by
-  measuring the column here gets string widths wrong first (a declared width is a maximum over
-  values it would have to scan), and the sidecar still looks right because it is emitted at close,
-  after the writer resolved them. Asserting on the intermediate schema text is the only place the
-  difference is visible.
-- **Note for the zero-column path:** `run_error_scenarios.sh` alone would report PASS there even if
-  it segfaulted, since a segfault is a nonzero exit. Only the stderr assertion in `test_errors.f90`
-  distinguishes the clean abort from the crash — so that scenario must keep its stderr check.
-
-### Risk-3 — The screen and the evaluator can drift apart
-
-They answer the same question through two code paths — the screen from footer bounds, the evaluator
-from decoded values — and a divergence is invisible until some specific value lands on a boundary.
-The mitigations are structural and worth preserving as structure: the screen walks the *same* postfix
-node list with the same stack shape as `evaluate_nodes`, takes each leaf's type family from the same
-Arrow schema expression the evaluator dispatches on, and reuses the same literal parsers rather than
-re-implementing them. An operator × type equality matrix is what actually catches drift.
-
-The same hazard applies to the **NaN/Null asymmetry**: a Null is `kUnknown` and a NaN is an ordinary
-`kTrue`/`kFalse`, so they behave oppositely under `not` and `/=`. A later change that "harmonizes"
-the two — or makes `is_nan`/`is_not_nan` two-valued on Null — is a silent wrong answer, not a
-simplification.
-
-**Test.** The right test exists — `every operator agrees with an unpruned read` and
-`and/or/not and a nested expression agree with an unpruned read` (`test/test_filter_screen.f90`) —
-and its value is entirely in how complete the matrix is.
-
-- **Proposed:** treat it explicitly as an **operator x type-family** matrix and check it covers every
-  supported leaf family (signed integer, unsigned, float, double, string, boolean, date, time,
-  timestamp, decimal) against every operator, rather than the union of whatever cases were added one
-  at a time. A gap in the matrix is invisible: the missing combination simply has no test, and the
-  drift it would catch only appears when a value lands on a boundary.
-- **Proposed:** the **NaN/Null asymmetry** deserves its own row in that matrix rather than being
-  spread across cases — a Null is `kUnknown` and a NaN is an ordinary `kTrue`/`kFalse`, so they
-  behave oppositely under `not` and `/=`. `a float column under not never prunes` and
-  `float /= never prunes` cover the screen side; the evaluator side wants the same pair asserted
-  against a decoded read, so that a change "harmonizing" the two fails on both sides at once.
-- The structural mitigations (same postfix walk, same stack shape, same literal parsers) are not
-  testable directly; keeping the two walks adjacent in `parquet_wrapper.cpp` is what makes a
-  divergence visible in review.
-
-### Risk-4 — The sort guards are one line each from returning physically ordered data
-
-A sort permutation destroys row-group locality — sorted row 5 may come from row group 47 — so every
-row-group-scoped operation must refuse while one is active. There are 19+ such sites (chunked reads
-across the numeric/temporal/string families, `parquet_get_chunk_size`, row mode, element mode, list
-width measurement). Every one of them is a single omission away from silently handing back rows in
-file order.
-
-Three rules keep this manageable:
-
-- **All of them route through one predicate** (`reader_has_sort_permutation` in C++,
-  `check_reader_no_sort` in Fortran). A new guard must go through it rather than testing the handle.
-- **That predicate keys on the permutation only, never on the mask.** A mask only ever *removes*
-  rows, so row groups stay contiguous and everything row-group-scoped works under one; widening the
-  predicate to "any row transform" would silently re-ban everything filtering supports.
-- **A new guard site is not necessarily the outermost call a user can make.** `%row_group_bounds`
-  reaches `parquet_get_chunk_size`, and its refusal used to surface naming a reader-level procedure
-  the caller never opened; it now has a table-level guard of its own. Before adding guard number 20,
-  check whether a sibling module reaches it and prefer a guard at that layer.
-
-The test that actually catches a missed guard is a **sorted row-mode read asserting the value**, not
-the row count.
-
-**Test.** Covered where it matters most; the completeness of the guard set is not checkable by any
-single test.
-
-- **Covered:** `row mode returns the SORTED row` (`test/test_sort.f90`) is the test that actually
-  catches a missed guard — asserting the **value**, not the row count, because a physically-ordered
-  read returns the right *number* of rows and the wrong ones. `element mode spans the sorted rows`
-  and the `table_row_group_bounds_sorted` scenario cover their own sites.
-- **Proposed:** a **static** cross-check, since there are 19+ guard sites and the risk is one
-  omission. A script listing every call of `check_reader_no_sort` (Fortran) and
-  `reader_has_sort_permutation` (C++) alongside every row-group-scoped entry point would make an
-  unguarded site visible; without it, "did we guard all of them?" can only be answered by reading.
-- **When adding guard number 20**, two rules from this risk are worth re-reading first: route it
-  through the shared predicate rather than testing the handle, and check whether a *sibling module*
-  reaches the site — `%row_group_bounds` did, and its refusal used to surface naming a reader-level
-  procedure the caller never opened. The test for that is a table-level call asserting the message
-  names the table-level procedure.
-
-### Risk-5 — `print_stat` format churn
-
-`parquet_reader_print_stat`'s output is asserted across several test suites and by error scenarios, so
-any format change breaks assertions far from the change. It carries a `filter:` line, a `sort:` line
-and a `screened:` line on top of the per-column table. Additive-only changes (a new line, no column
-changes) keep the blast radius small; anything else does not. The table's own `%print_stat` was
-deliberately *not* modelled on it, so it does not inherit this fragility — keep it that way, and note
-its test asserts behaviour (a lazy table stays lazy, `all=.true.` still reads nothing) rather than
-text.
-
-**Test.** The assertions exist; their *shape* is the risk.
-
-- **Covered:** `parquet_reader_print_stat`'s output is asserted across several suites and by error
-  scenarios — which is exactly why a format change breaks assertions far from the change.
-- **Proposed:** factor the expected format into **one** shared helper (or one set of expected-line
-  constants) so that a deliberate format change touches one place instead of a dozen. That is not a
-  new test; it is a refactor of the existing ones that converts a scattered break into a single
-  intentional edit.
-- **Additive-only changes** (a new line, no column changes) keep the blast radius small; anything
-  that reorders or renames a column does not. Prefer adding a line.
-- **Keep the table's own `%print_stat` out of this.** It was deliberately not modelled on the
-  reader's, and its test asserts *behaviour* (a lazy table stays lazy, `all=.true.` still reads
-  nothing) rather than text — which is why it does not inherit the fragility. A future change that
-  starts asserting its exact output would import the problem.
-
-### Risk-6 — The concurrency guards must keep agreeing, and one of them protects a wrong ANSWER
-
-Three predicates decide whether an operation on a `parquet_table` is refused, and **all three
-implement the same ownership test**: *a table this very thread opened inside the current parallel
-region is thread-private and exempt; anything else may be shared.* `unsafe_first_touch` and
-`record_open_thread` live in `src/parquet_tables_read.f90` next to the materialization path they
-guard; `unsafe_shared_mutation` and everything else lives in `src/parquet_tables_parallel.f90`, which
-exists so the `#ifdef _OPENMP` plumbing sits in exactly one file. If the three ever disagree, the
-symptom is a guard that fires on the per-thread slice pattern (loud, and immediately obvious) or one
-that does not fire when it should (silent, and not).
-
-CLAUDE.md's "`parquet_table` concurrency" entry is the full rule set. Four properties are worth
-repeating here, because each fails quietly:
-
-- **The parallel `%prefetch` gate is a correctness boundary, not a tuning knob.**
-  `parallel_prefetch_ok` refuses to parallelize when the table carries any read-time transform, and
-  the sharpest clause is that an **unseeded `sample_fraction=` would make each per-thread reader draw
-  a different subset** — columns read by different threads would then hold different rows, with no
-  error anywhere. A sort or a filter would merely duplicate work per thread; the sample is a wrong
-  answer.
-- **The read path must stay free of atomics.** The cheap `append_active` check sits in
-  `table_resolve` — the single choke point every value accessor passes through — and the
-  `readers_active` counter is taken only around the long windows (a lazy first touch, and
-  `materialize_marked`). Two atomics per cell would dominate a `%get_element` loop over a large
-  column. That asymmetry is deliberate and is documented on the cache fields; do not "fix" it.
-- **The append/read checks are best-effort by construction.** A read starting fractionally before an
-  append publishes itself is not seen. They are a safety net over the documented append-only rule,
-  not its mechanism, and a change that treats them as a mechanism will be wrong at the margin.
-- **Every guard needs a NEGATIVE control, not just an error scenario.** A guard that fires
-  unconditionally passes every abort test ever written for it while making the per-thread slice
-  regime unusable. `test_table_private_mutation_allowed` (`test/test_openmp.f90`) is the pattern.
-
-**One known testing gap, deliberately left:** there is no error scenario for the read-during-append
-and append-during-read aborts, because triggering either deterministically needs two threads to
-overlap on demand — a timing-dependent test this project's rules forbid adding. A deterministic test
-would need a debug hook that holds `append_active` open, in the style of the C++ `parquet_debug_*`
-hooks. Worth adding if this area is changed again.
-
-**Test.** The guards are covered, including the negative direction; one pair is deliberately not.
-
-- **Covered:** four error scenarios (`table_mutate_shared_in_parallel`,
-  `table_add_column_shared_in_parallel`, `table_set_null_no_validity_in_parallel`,
-  `table_string_write_shared_in_parallel`) assert the aborts, each using `!$omp single` so exactly one
-  thread runs the abort and the scenario is deterministic. Four in-process tests in
-  `test/test_openmp.f90` cover the permitted directions: a shared table read from many threads, the
-  per-thread-slice → shared-append pattern, an A/B equality for the internally-parallel
-  `%materialize_all`, and the negative control.
-- **The negative control is the load-bearing one.** `a thread-private table may still be mutated
-  inside a parallel region` is what stops an over-broad guard passing every abort scenario while
-  breaking the slice regime entirely. **Any new guard needs one**, and it is the half most likely to
-  be skipped, because writing the abort test feels like finishing the job.
-- **Deliberately untested:** the read-during-append and append-during-read aborts. Triggering either
-  deterministically needs two threads to overlap on demand, and a timing-dependent test is worse than
-  no test — it fails on a busy machine and gets disabled. **How to test them if this area is changed
-  again:** add a debug hook that holds `append_active` open (or blocks inside the append) on demand,
-  in the style of the C++ `parquet_debug_*` hooks, so one thread can be parked inside the append while
-  another reads. That converts both into ordinary deterministic scenarios.
-- **Not testable at all**, and documented as such: a read through a pointer already held, and any
-  threading the library cannot identify (pthreads through C interop, coarrays).
+*Nothing here.* Every entry this section held has been implemented and moved to section 4 — which is
+where a proposal goes once its test exists, carrying its number with it. A risk belongs here when
+someone has decided it is testable and said what to assert, but has not written the test yet, and
+only for as long as that is true.
 
 ## 3. Risks not testable
 
@@ -461,6 +242,265 @@ in question (iterate the set bits, not all 64 positions of a word) is *correct* 
 differs only in cost, which no unit test can see. That does not move the entry into section 2: the
 correctness is covered, and the suggestion improves how it is covered rather than filling a gap in
 whether it is.
+
+### Risk-1 — The release policy regresses silently
+
+If a materialization path forgets to release the Arrow-side column after copying it into the table,
+nothing fails — the table simply holds two copies of every column it reads, and only the Arrow pool
+counter notices. RSS cannot answer this question at all (see CLAUDE.md, "Measuring whether Arrow
+memory was actually freed"); `parquet_get_arrow_bytes_allocated` can, and each path must be measured
+in its own process.
+
+**Test.** Covered, by a maintainer check rather than a unit test — it needs its own process per
+measurement, which a test-drive suite cannot give it.
+
+- **Covered:** `tools/check_arrow_release.sh` drives `app/check_arrow_release.f90` over every
+  materialization path (`%materialize_all`, `%prefetch`, a single lazy `%get`, a slice, and
+  `parquet_write_table(release=.true.)`) and **exits nonzero** if any of them leaves more than a
+  tolerance of one copy of the data it just read in Arrow's pool. Documented in CONTRIBUTING.md's
+  "Other tools/ helpers".
+- **The `control` run is not optional and goes first.** It reads a column through a plain reader —
+  which caches it — and asserts the counter *rose*. Without it a measurement that silently reported
+  zero (a different Arrow build, a pool that is not the default one) would print PASS for every path
+  and mean nothing.
+- **`materialize_all` and `prefetch` are also run under `OMP_NUM_THREADS=1`, and that is
+  load-bearing rather than thorough.** The internally-parallel `%prefetch` gives each thread its own
+  reader and closes it at the end of the region, and closing a reader frees whatever it cached
+  whether or not the release ran — so **the parallel path passes even with every
+  `parquet_release_column` call deleted**. Verified by deleting them: the parallel run reported
+  0.0 of one copy and the serial run 1.0. `omp_get_max_threads() <= 1` is `parallel_prefetch_ok`'s
+  first clause, which is what makes the single-thread run take the serial batch-release path.
+- **When adding a materialization path**, add a mode here. The question is not "did the values
+  arrive?" (any test catches that) but "was the Arrow array released after the copy?" — and RSS
+  cannot answer it, because Arrow's pool keeps freed pages (CLAUDE.md, "Measuring whether Arrow
+  memory was actually freed").
+
+### Risk-2 — The schema-less write rests on three properties that look incidental
+
+A schema-less `parquet_write_table` builds a `parquet_schema` from the resident columns' descriptors
+and delegates to the ordinary write path — one write loop, and the sidecar MAML for free. Three
+things hold that up, and each reads like a detail:
+
+- **The generated schema declares `col_size:`/`array_size:` as `auto`, and must keep doing so.** The
+  writer then resolves both from the data exactly as it would with no schema at all, so the
+  generator cannot get a size wrong because it never computes one. A future change that "improves"
+  this by measuring the column here takes on the one job the current shape avoids — and gets it
+  wrong first for strings, whose declared width is a maximum over values it would have to scan.
+  The sidecar still records real numbers rather than `auto`, because it is emitted at **close**,
+  after the writer has resolved them.
+- **The sidecar round-trip depends on the read-in MAML loader IGNORING keys it does not know.**
+  What `write_maml=` emits is a Role A (write) schema; what `parquet_open_table(maml=)` consumes is
+  the Role B (read-in) dialect. They interoperate because `parquet_load_qc_maml_file` never parses
+  `fields:` into `%cinfo` — it scans raw lines for the keys it wants — so Role A's extra keys are
+  inert rather than rejected. **Tightening that loader into a strict validator would silently break
+  the round trip**, which is a feature the guide advertises. `test_write_table_schemaless_sidecar`
+  is the regression test, and it is really a test of the loader's leniency.
+- **A zero-column table cannot go through the generated schema at all**, because MAML requires at
+  least one field, so it takes a dedicated bare-writer path. Removing that path does not fail
+  visibly — it falls through to reading an unparsed schema's `%cinfo`, which segfaults. Note the
+  test consequence: `run_error_scenarios.sh` alone would still report PASS there, since a segfault
+  is a nonzero exit; only the stderr assertion in `test_errors.f90` distinguishes it from the clean
+  abort that is meant to happen.
+
+**Test.** Covered by a static check, which is the right tool here: the property is about what the
+code *does not do*, and the difference is invisible in the output.
+
+- **Covered:** `tools/check_source_conventions.py` (`the schema-less write declares auto sizes`)
+  asserts that every `col_size`/`array_size` in `build_table_schema` is `parquet_size_auto` and
+  never a measured value. It runs in `tools/run_lint_check.sh` and CI's lint stage, and is
+  mutation-verified (replacing one with `slot%width` fails it).
+- **Why not a runtime test:** the sidecar MAML is emitted at **close**, after the writer has
+  resolved the real numbers, so a generator that measured the column here would produce a sidecar
+  that still looks correct. The intermediate schema text is the only place the difference exists,
+  and it is never handed to a caller.
+- The other two properties are covered as before: `a schema-less write's sidecar MAML carries units
+  and reopens the file` is really a test of the read-in MAML loader's **leniency** (tightening that
+  loader into a strict validator will fail it, which is the intended alarm), and
+  `table_write_schemaless_empty_maml` covers the zero-column path — whose stderr assertion must
+  stay, since `run_error_scenarios.sh` alone would report PASS for a segfault.
+
+### Risk-3 — The screen and the evaluator can drift apart
+
+They answer the same question through two code paths — the screen from footer bounds, the evaluator
+from decoded values — and a divergence is invisible until some specific value lands on a boundary.
+The mitigations are structural and worth preserving as structure: the screen walks the *same* postfix
+node list with the same stack shape as `evaluate_nodes`, takes each leaf's type family from the same
+Arrow schema expression the evaluator dispatches on, and reuses the same literal parsers rather than
+re-implementing them. An operator × type equality matrix is what actually catches drift.
+
+The same hazard applies to the **NaN/Null asymmetry**: a Null is `kUnknown` and a NaN is an ordinary
+`kTrue`/`kFalse`, so they behave oppositely under `not` and `/=`. A later change that "harmonizes"
+the two — or makes `is_nan`/`is_not_nan` two-valued on Null — is a silent wrong answer, not a
+simplification.
+
+**Test.** Covered — the matrix was audited cell by cell and the gaps filled.
+
+- **Covered as before:** `every operator agrees with an unpruned read` and `and/or/not and a nested
+  expression agree with an unpruned read` (`test/test_filter_screen.f90`).
+- **Filled since:** `an int64 column prunes on every ordering operator` (the `Int64Statistics`
+  branch had never been exercised at all — every integer test used `Int32Statistics`);
+  `time and timestamp columns prune on an ISO literal`; `every ordering operator on a float64 and a
+  float32 column` (float32 had been reached by exactly one `>`); `every ordering operator on a
+  string column`; and `the null tests prune on a column type every comparison declines` — the last
+  is the sharpest, because `is_null`/`is_not_null` short-circuit **before** the type switch and so
+  genuinely prune a UINT32/DECIMAL/HALF_FLOAT column whose bounds are declined. It needed a new
+  fixture (`test/fixtures/screen_declined_nulls.parquet`, built by `tools/generate_fixtures.cpp`),
+  since this library's writer cannot produce any of those three types.
+- **The boolean ordering-reject arm is unreachable and now says so.** `screen_compare_from_bounds`
+  declines `>`/`<` on a boolean, but the filter parser rejects `flag > false` at OPEN time, before
+  any row group is screened — so the C++ arm is defensive code behind a Fortran-side pre-check.
+  The observable behaviour is the abort, covered by the `filter_bool_ordering` scenario; a comment
+  in `test/test_filter_screen.f90` records why no in-process test sits there.
+- **What remains uncovered, and why it is not a gap to chase:** INT8/INT16, DATE64,
+  LARGE_STRING/STRING_VIEW and the remaining declined families (UINT64, DECIMAL32/64/256,
+  INT96). Each needs a hand-built Arrow fixture, and each shares its screening path with a family
+  that *is* covered — INT8/16 with INT32, LARGE_STRING with STRING. Add one only if that path stops
+  being shared.
+- The structural mitigations (same postfix walk, same stack shape, same literal parsers) are not
+  testable directly; keeping the two walks adjacent in `parquet_wrapper.cpp` is what makes a
+  divergence visible in review.
+
+### Risk-4 — The sort guards are one line each from returning physically ordered data
+
+A sort permutation destroys row-group locality — sorted row 5 may come from row group 47 — so every
+row-group-scoped operation must refuse while one is active. There are 19+ such sites (chunked reads
+across the numeric/temporal/string families, `parquet_get_chunk_size`, row mode, element mode, list
+width measurement). Every one of them is a single omission away from silently handing back rows in
+file order.
+
+Three rules keep this manageable:
+
+- **All of them route through one predicate** (`reader_has_sort_permutation` in C++,
+  `check_reader_no_sort` in Fortran). A new guard must go through it rather than testing the handle.
+- **That predicate keys on the permutation only, never on the mask.** A mask only ever *removes*
+  rows, so row groups stay contiguous and everything row-group-scoped works under one; widening the
+  predicate to "any row transform" would silently re-ban everything filtering supports.
+- **A new guard site is not necessarily the outermost call a user can make.** `%row_group_bounds`
+  reaches `parquet_get_chunk_size`, and its refusal used to surface naming a reader-level procedure
+  the caller never opened; it now has a table-level guard of its own. Before adding guard number 20,
+  check whether a sibling module reaches it and prefer a guard at that layer.
+
+The test that actually catches a missed guard is a **sorted row-mode read asserting the value**, not
+the row count.
+
+**Test.** Covered in both halves: a behavioural test for what a missed guard does, and a static
+check for whether any is missing.
+
+- **Covered:** `row mode returns the SORTED row` (`test/test_sort.f90`) is the test that actually
+  catches a missed guard — asserting the **value**, not the row count, because a physically-ordered
+  read returns the right *number* of rows and the wrong ones. `element mode spans the sorted rows`
+  and the `table_row_group_bounds_sorted` scenario cover their own sites.
+- **Covered:** `tools/check_source_conventions.py` (`row-group reads guard against a sort`) asserts
+  that **every** procedure body calling `check_row_group_valid` also calls `check_reader_no_sort`.
+  That pairing is what makes "did we guard all ~19 of them?" mechanical, and it extends itself: a
+  new row-group-scoped read validates its row group as a matter of course and is then required to
+  carry the sort guard too. All 19 sites pass today; mutation-verified by deleting one.
+- **When adding guard number 20**, two rules from this risk still apply and neither is checkable:
+  route it through the shared predicate rather than testing the handle, and check whether a
+  *sibling module* reaches the site — `%row_group_bounds` did, and its refusal used to surface
+  naming a reader-level procedure the caller never opened.
+
+### Risk-5 — `print_stat` format churn
+
+`parquet_reader_print_stat`'s output is asserted across several test suites and by error scenarios, so
+any format change breaks assertions far from the change. It carries a `filter:` line, a `sort:` line
+and a `screened:` line on top of the per-column table. Additive-only changes (a new line, no column
+changes) keep the blast radius small; anything else does not. The table's own `%print_stat` was
+deliberately *not* modelled on it, so it does not inherit this fragility — keep it that way, and note
+its test asserts behaviour (a lazy table stays lazy, `all=.true.` still reads nothing) rather than
+text.
+
+**Test.** Covered — but the risk as originally written was **wrong**, and the correction matters
+more than the fix.
+
+- **The premise was false.** This entry claimed `print_stat`'s output was "asserted across several
+  test suites and by error scenarios", so that a format change would break assertions far from the
+  change. An audit found **exactly one** text assertion in the entire repository (a
+  `sample: fraction=0.4 seed=42` substring in `test_print_stat_sampled_rows`); every other
+  `print_stat` scenario asserts only an exit status, and `tools/run_error_scenarios.sh` discards the
+  output entirely. There was no scattered fragility to consolidate — the real exposure was the
+  opposite one: the format was **essentially untested**, so a regression would be caught by nothing.
+- **And it had already drifted.** `doc/pages/reading.md` documented a `prefetc` column the code
+  calls `fetched`, and omitted `qcmin`, `qcmax`, `qcmiss` and `filter` entirely. The documentation
+  is the format's only contract, so this was the whole guard being wrong.
+- **Covered:** the documentation was corrected against the code (including what `qcmin`/`qcmax`
+  actually print — the operator followed by the raw bound, not a `-`), and
+  `tools/check_source_conventions.py` (`print_stat's columns match its documentation`) now compares
+  the C++ `headers` vector against that table in both directions. Mutation-verified by renaming a
+  column: it reports both the undocumented new name and the now-absent old one.
+- **Comparing the two SETS rather than asserting the printed header line is deliberate.** The header
+  is padded to each column's widest cell, so its exact text depends on the data; a test matching it
+  literally would be brittle in a way that teaches people to delete it.
+- **Keep the table's own `%print_stat` out of this.** It was deliberately not modelled on the
+  reader's, and its test asserts *behaviour* (a lazy table stays lazy, `all=.true.` still reads
+  nothing) rather than text. A future change that started asserting its exact output would import
+  the problem this entry describes.
+
+### Risk-6 — The concurrency guards must keep agreeing, and one of them protects a wrong ANSWER
+
+Three predicates decide whether an operation on a `parquet_table` is refused, and **all three
+implement the same ownership test**: *a table this very thread opened inside the current parallel
+region is thread-private and exempt; anything else may be shared.* `unsafe_first_touch` and
+`record_open_thread` live in `src/parquet_tables_read.f90` next to the materialization path they
+guard; `unsafe_shared_mutation` and everything else lives in `src/parquet_tables_parallel.f90`, which
+exists so the `#ifdef _OPENMP` plumbing sits in exactly one file. If the three ever disagree, the
+symptom is a guard that fires on the per-thread slice pattern (loud, and immediately obvious) or one
+that does not fire when it should (silent, and not).
+
+CLAUDE.md's "`parquet_table` concurrency" entry is the full rule set. Four properties are worth
+repeating here, because each fails quietly:
+
+- **The parallel `%prefetch` gate is a correctness boundary, not a tuning knob.**
+  `parallel_prefetch_ok` refuses to parallelize when the table carries any read-time transform, and
+  the sharpest clause is that an **unseeded `sample_fraction=` would make each per-thread reader draw
+  a different subset** — columns read by different threads would then hold different rows, with no
+  error anywhere. A sort or a filter would merely duplicate work per thread; the sample is a wrong
+  answer.
+- **The read path must stay free of atomics.** The cheap `append_active` check sits in
+  `table_resolve` — the single choke point every value accessor passes through — and the
+  `readers_active` counter is taken only around the long windows (a lazy first touch, and
+  `materialize_marked`). Two atomics per cell would dominate a `%get_element` loop over a large
+  column. That asymmetry is deliberate and is documented on the cache fields; do not "fix" it.
+- **The append/read checks are best-effort by construction.** A read starting fractionally before an
+  append publishes itself is not seen. They are a safety net over the documented append-only rule,
+  not its mechanism, and a change that treats them as a mechanism will be wrong at the margin.
+- **Every guard needs a NEGATIVE control, not just an error scenario.** A guard that fires
+  unconditionally passes every abort test ever written for it while making the per-thread slice
+  regime unusable. `test_table_private_mutation_allowed` (`test/test_openmp.f90`) is the pattern.
+
+**One known testing gap, deliberately left:** there is no error scenario for the read-during-append
+and append-during-read aborts, because triggering either deterministically needs two threads to
+overlap on demand — a timing-dependent test this project's rules forbid adding. A deterministic test
+would need a debug hook that holds `append_active` open, in the style of the C++ `parquet_debug_*`
+hooks. Worth adding if this area is changed again.
+
+**Test.** Covered, including the two aborts this entry previously recorded as deliberately
+untested.
+
+- **Covered:** four error scenarios (`table_mutate_shared_in_parallel`,
+  `table_add_column_shared_in_parallel`, `table_set_null_no_validity_in_parallel`,
+  `table_string_write_shared_in_parallel`) assert the ownership aborts, each using `!$omp single` so
+  exactly one thread runs the abort. Four in-process tests in `test/test_openmp.f90` cover the
+  permitted directions.
+- **The negative control is the load-bearing one.** `a thread-private table may still be mutated
+  inside a parallel region` is what stops an over-broad guard passing every abort scenario while
+  breaking the slice regime entirely. **Any new guard needs one**, and it is the half most likely to
+  be skipped, because writing the abort test feels like finishing the job.
+- **Covered since:** the read-during-append and append-during-read aborts, by the
+  `table_read_during_append` and `table_append_during_read` scenarios. Neither uses threads: the
+  guards read a counter and do not care which thread set it, so
+  `parquet_debug_table_set_inflight` — a test-only hook — forces the counter and both aborts become
+  ordinary deterministic scenarios with an asserted stderr message. **Each scenario makes the
+  successful call first, with the hook clear**; that negative control is what stops either passing
+  against a guard that fires on every call.
+- **The hook is public API, deliberately and reluctantly.** Unlike the C++ `parquet_debug_*` hooks,
+  which a test reaches through its own local `bind(C)` interface, a Fortran-side hook has no such
+  escape hatch: the counters live on `parquet_table_cache`, whose components are private to
+  `parquet_tables`. It is excluded from README.md's API overview, no library code calls it, and its
+  doc-comment says all of this. A future Fortran-side debug hook should follow the same shape rather
+  than inventing a second convention.
+- **Not testable at all**, and documented as such: a read through a pointer already held, and any
+  threading the library cannot identify (pthreads through C interop, coarrays).
 
 ### Risk-11 — A `%col` pointer is dangling after a row-structural mutation
 

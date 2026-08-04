@@ -67,14 +67,15 @@ To generate the executables:
 
     fpm install --prefix my_path
 
-`fpm.toml` sets `auto-executables = true`, so **five** executables are built from `app/*.f90` and placed in `my_path/bin`:
+`fpm.toml` sets `auto-executables = true`, so **seven** executables are built from `app/*.f90` and placed in `my_path/bin`:
 
 | Executable | Source | Purpose |
 |---|---|---|
-| `run_parquet_fortran` | `app/program.f90` | Prints the parquet-fortran library version number — a quick sanity check that a build/install actually picked up the version you expect. The only one of the six that ships in the fpm-published package (see `tools/prep_fpm_publish.sh`) — the other five are maintainer/CI-only dev tools kept in this repository but stripped from what a consumer installs. |
+| `run_parquet_fortran` | `app/program.f90` | Prints the parquet-fortran library version number — a quick sanity check that a build/install actually picked up the version you expect. The only one of the seven that ships in the fpm-published package (see `tools/prep_fpm_publish.sh`) — the other six are maintainer/CI-only dev tools kept in this repository but stripped from what a consumer installs. |
 | `benchmark_threads` | `app/benchmark_threads.f90` | Driven by `tools/benchmark_threads.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `benchmark_table` | `app/benchmark_table.f90` | Driven by `tools/benchmark_table.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `test_large_scale` | `app/test_large_scale.f90` | Driven by `tools/test_large_scale.sh` — see [Other tools/ helpers](#other-tools-helpers). |
+| `check_arrow_release` | `app/check_arrow_release.f90` | Driven by `tools/check_arrow_release.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `playground` | `app/playground.f90` | Maintainer scratch file for trying out Fortran code; no fixed purpose. |
 | `demo_print_schema_info` | `app/demo_print_schema_info.f90` | Maintainer demo for reviewing `schema%print_schema_info`'s output. |
 
@@ -272,6 +273,20 @@ NCOLS=32 TOUCH=2 SLICES=8 tools/benchmark_table.sh
 TEST_FILE=/tmp/bench_table.parquet tools/benchmark_table.sh
 ```
 
+`tools/check_arrow_release.sh` is the assertion form of the figure the benchmark above only reports. It drives `app/check_arrow_release.f90` over every `parquet_table` materialization path — `%materialize_all`, `%prefetch`, a single lazy `%get`, a slice, and `parquet_write_table(release=.true.)` — and **exits nonzero** if any of them still holds more than `TOLERANCE` of one copy of the data it just read in Arrow's pool. That failure is otherwise completely silent: a path that forgets to release leaves the values correct and every test passing, with the table quietly holding two copies of every column ([feature_risks.md](feature_risks.md) Risk-1).
+
+Three things about it are load-bearing rather than incidental:
+
+- **Each mode runs in its own process.** A baseline and the path under test measured in one process report the high-water mark of the pair, which makes whichever ran second look like it retained memory it had already released.
+- **The `control` run goes first and asserts the counter MOVES**, by reading a column through a plain reader (which caches it) and checking the pool grew. Without it, a measurement that silently reported zero — a different Arrow build, a pool that is not the default one — would print PASS for every path and mean nothing.
+- **`materialize_all` and `prefetch` run again under `OMP_NUM_THREADS=1`.** The internally-parallel `%prefetch` gives each thread its own reader and closes it at the end of the region, and closing a reader frees whatever it cached whether or not the release ran — so the parallel path passes even with every `parquet_release_column` call deleted. Verified by deleting them: the parallel run reported 0.0 of one copy and the serial run 1.0.
+
+```sh
+tools/check_arrow_release.sh
+# Bigger file, tighter tolerance:
+TARGET_FILE_SIZE_GB=0.5 NCOLS=16 TOLERANCE=0.005 tools/check_arrow_release.sh
+```
+
 `tools/test_large_scale.sh` is a manual, user-runnable check (never run by `fpm test`/CI) that this
 library genuinely reads/writes columns correctly beyond `huge(1_int32)` (2,147,483,647) rows — the
 scale no automated test in this repository ever attempts, since doing so needs a machine with
@@ -306,11 +321,14 @@ tools/check_doc_anchors.py
 tools/check_bindc_boundary.py
 ```
 
-`tools/check_source_conventions.py` enforces three structural invariants of `src/*.f90` that no compiler and no runtime test can see — each one's violation compiles cleanly, passes the whole suite, and fails somewhere else entirely:
+`tools/check_source_conventions.py` enforces six structural invariants that no compiler and no runtime test can see — each one's violation compiles cleanly, passes the whole suite, and fails somewhere else entirely. Each names the [feature_risks.md](feature_risks.md) entry it protects, in its own docstring and in the message it prints:
 
 - **`parquet_table` must gain no allocatable component.** The type is finalizable, and this project has three confirmed compiler bugs in exactly the `intent(out)`/`FINAL` machinery on exactly this type, so new table state goes on `parquet_table_cache` instead (see [New `parquet_table` state goes on the CACHE](CLAUDE.md#new-parquet_table-state-goes-on-the-cache--never-as-an-allocatable-component-of-the-type)).
 - **Every pointer a table accessor hands out must be reached through `self%cache`.** Pointing at `self` directly makes the caller's table need the `target` attribute, and `target` is a requirement on the *caller* — so the library still compiles, every test still passes, and only a user's program corrupts memory.
 - **The generated files must carry the doc-comments and `! GCOVR_EXCL_LINE` markers their generators are supposed to emit.** The generators' own `--check` modes compare the committed file against the generator, so a *template* that drops a convention produces output that matches perfectly and is wrong in every kind it emits at once.
+- **A schema-less `parquet_write_table` must declare `col_size:`/`array_size:` as `auto`, never a measured value.** Declaring `auto` is what makes the generated schema unable to get a size wrong, since the writer resolves both from the data. A round-trip test cannot see a change here: the sidecar MAML is emitted at *close*, after the writer has resolved the real numbers, so it still looks correct.
+- **Every procedure that calls `check_row_group_valid` must also call `check_reader_no_sort`.** A sort permutation destroys row-group locality, so a row-group-scoped read that forgets the guard returns the right *number* of rows and the wrong ones. Pairing the two turns "did we guard all ~19 sites?" into something mechanical, and it extends itself — a new row-group-scoped read validates its row group as a matter of course.
+- **`print_stat`'s columns must match the table documenting them in `doc/pages/reading.md`.** That table is the format's only contract: exactly one assertion in the whole suite touches the output text, so a renamed column breaks no test. The two had already drifted when this check was added.
 
 Run it after touching the table layer or a generator template (it is also part of `tools/run_lint_check.sh` and CI's `lint` stage):
 

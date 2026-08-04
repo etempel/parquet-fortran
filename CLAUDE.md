@@ -80,6 +80,7 @@ working rules).
   - [Fortran gcov attribution artifacts](#fortran-gcov-attribution-artifacts)
   - [`src/parquet_wrapper.cpp`: GCC vs Clang gcov attribution](#srcparquet_wrappercpp-gcc-vs-clang-gcov-attribution)
   - [Regression tests for "sized/typed from the first element" bugs](#regression-tests-for-sizedtyped-from-the-first-element-bugs)
+  - [A Fortran-side debug hook has to be PUBLIC, so prefer a C++ one](#a-fortran-side-debug-hook-has-to-be-public-so-prefer-a-c-one)
   - [Guarding a hard Arrow int32-only ceiling](#guarding-a-hard-arrow-int32-only-ceiling)
 
 ## Workflow & guardrails
@@ -2085,6 +2086,38 @@ i.e. whenever a test needs to provide a string array, deliberately make the *fir
 shortest one, to actively try to trigger this bug rather than merely avoid it by accident.
 A fixture where the first element happens to be the longest (or same-length) can pass even
 if the underlying bug is still present.
+
+### A Fortran-side debug hook has to be PUBLIC, so prefer a C++ one
+
+Every `parquet_debug_*` hook that forces library state for a test is a C++ `extern "C"` function,
+and a test reaches it by declaring its own local `bind(C)` interface (never via
+`src/parquet_bindings.f90`) — which is what keeps debug entry points out of the library's own
+interface entirely. **A hook over state that lives on the Fortran side has no such escape hatch.**
+`parquet_table_cache`'s components are private to `parquet_tables`, so anything forcing them must be
+a public procedure in that module, visible to every `use parquet`.
+
+`parquet_debug_table_set_inflight` (`parquet_tables_parallel.f90`, declared in
+`tools/generate_parquet_tables.py`'s template) is the one instance, and it was accepted deliberately
+rather than by default: it forces the append/read in-flight counters so that the two concurrency
+aborts can be provoked from **one thread**, deterministically. Without it those aborts need two
+threads to overlap on demand, and a timing-dependent test is worse than no test — it passes on a
+quiet machine, fails on a busy one, and gets disabled. See `feature_risks.md` Risk-6.
+
+Rules for a future one:
+
+- **Reach for the C++ side first.** If the state can be forced from `parquet_wrapper.cpp`, do it
+  there and keep the hook invisible to Fortran users. Only when the state is Fortran-side and behind
+  private components does a public procedure become the only option.
+- **A public debug hook is excluded from README.md's API overview**, carries a doc-comment saying it
+  is test-only and why it has to be public, and is called by no library code. Follow
+  `parquet_debug_table_set_inflight`'s shape rather than inventing a second convention.
+- **Do not put a hook in the hot path to avoid making it public.** Having
+  `table_check_no_append` consult a C++ flag would work and would keep the hook private — and would
+  add a `bind(C)` call to the choke point every value accessor passes through. That trade was
+  considered and rejected; see Risk-6's "the read path must stay free of atomics".
+- **Every scenario a hook enables still needs its negative control**: make the guarded call once
+  with the hook clear before setting it, or the scenario passes just as happily against a guard that
+  fires unconditionally.
 
 ### Guarding a hard Arrow int32-only ceiling
 

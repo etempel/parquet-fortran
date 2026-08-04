@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Checks three structural invariants of src/*.f90 that no compiler and no runtime test can see.
+"""Checks six structural invariants of this repository that no compiler and no runtime test can see.
 
 Each one protects a property whose violation compiles cleanly, passes the whole test suite, and
 fails somewhere else entirely -- in a user's program, on another compiler, or in a coverage report.
@@ -29,6 +29,26 @@ That is what makes them worth a static check rather than a test:
      (and it is not run in CI, and is drowned in thousands of expected warnings -- see CLAUDE.md's
      "FORD doc-comment conventions"), and nothing at all reveals the second. A third generator
      inherits this check for free by adding its output to GENERATED_FILES below.
+
+  4. The schema-less write declares `auto` sizes (feature_risks.md Risk-2).
+     `build_table_schema` must never MEASURE a `col_size`/`array_size` -- declaring `auto` is what
+     makes it unable to get one wrong, since the writer then resolves both from the data exactly as
+     it would with no schema at all. A change that measures here gets string widths wrong first, and
+     the sidecar MAML still looks right because it is emitted at close, after the writer resolved
+     them -- so a round-trip test cannot see the difference.
+
+  5. Row-group-scoped reads guard against a sort (feature_risks.md Risk-4).
+     A sort permutation destroys row-group locality, so every row-group-scoped read must refuse
+     while one is installed or it hands back rows in FILE order -- the right row count and the wrong
+     rows. `check_row_group_valid` is what makes a procedure row-group-scoped, so requiring the two
+     calls to travel together makes "did we guard all ~19 of them?" mechanical, and self-extending.
+
+  6. print_stat's columns match its documentation (feature_risks.md Risk-5).
+     `doc/pages/reading.md` documents the reader's stats table column by column, and that table is
+     the only contract the format has -- exactly one assertion in the whole suite touches the output
+     text, so a renamed or added column breaks no test. The two had already drifted when this check
+     was written (the docs named a `prefetc` column the code calls `fetched`, and omitted four
+     others), which is the failure it exists to stop repeating.
 
 Usage:
     tools/check_source_conventions.py            # run every check
@@ -211,10 +231,154 @@ def check_generated_file_conventions():
     return problems
 
 
+#: A procedure header. Matches both the abbreviated `module procedure NAME` form and a full
+#: `[module] subroutine NAME(...)` / `function NAME(...)`, including the prefixes this project uses.
+PROC_START = re.compile(
+    r"^\s*(?:module\s+)?(?:pure\s+|impure\s+|elemental\s+|recursive\s+)*"
+    r"(?:procedure|subroutine|function)\s+(\w+)", re.IGNORECASE)
+PROC_END = re.compile(r"^\s*end\s+(?:procedure|subroutine|function)\s+(\w+)", re.IGNORECASE)
+
+
+def procedure_bodies(path):
+    """Yield (name, first_line_number, body_text) for every procedure in `path`.
+
+    Nested (contained) procedures are yielded too, and their text also appears in the enclosing
+    procedure's body -- which is what the callers below want: a guard is just as good in a helper
+    the procedure calls inline as in the procedure itself.
+    """
+    lines = path.read_text().split("\n")
+    stack = []
+    found = []
+    for lineno, line in enumerate(lines, start=1):
+        match = PROC_START.match(line)
+        if match and not re.match(r"^\s*end\b", line, re.IGNORECASE):
+            stack.append([match.group(1), lineno, []])
+            continue
+        end = PROC_END.match(line)
+        if end and stack and stack[-1][0].lower() == end.group(1).lower():
+            name, start, body = stack.pop()
+            found.append((name, start, "\n".join(body)))
+            continue
+        for frame in stack:
+            frame[2].append(line)
+    return found
+
+
+def check_schemaless_write_declares_auto():
+    """feature_risks.md Risk-2 -- the generated schema must never carry a MEASURED size.
+
+    A schema-less `parquet_write_table` builds a `parquet_schema` from the resident columns'
+    descriptors and declares `col_size:`/`array_size:` as `auto`, so the writer resolves both from
+    the data exactly as it would with no schema at all. That is what makes the generator unable to
+    get a size wrong: it never computes one. A future change that "improves" this by measuring the
+    column here takes on the one job the current shape avoids -- and gets it wrong first for
+    strings, whose declared width is a maximum over values it would have to scan. The sidecar MAML
+    still records real numbers, because it is emitted at CLOSE, after the writer resolved them,
+    which is exactly why the mistake would not show up in a round-trip test.
+    """
+    problems = []
+    path = SRC / "parquet_tables_write.f90"
+    bodies = [b for b in procedure_bodies(path) if b[0] == "build_table_schema"]
+    if not bodies:
+        return ["%s: could not find `build_table_schema` -- this check needs updating"
+                % path.relative_to(REPO_ROOT)]
+    for _name, start, body in bodies:
+        for offset, line in enumerate(body.split("\n")):
+            code = strip_comment(line)
+            for keyword in ("col_size", "array_size"):
+                for value in re.findall(r"%s\s*=\s*([A-Za-z_]\w*|\d+)" % keyword, code):
+                    if value != "parquet_size_auto":
+                        problems.append(
+                            "%s:%d: build_table_schema must declare `%s` as `parquet_size_auto`, "
+                            "never a measured value -- the writer resolves it from the data, and a "
+                            "size computed here is one the generator can get wrong "
+                            "(feature_risks.md Risk-2):\n    %s"
+                            % (path.relative_to(REPO_ROOT), start + offset + 1, keyword,
+                               code.strip())
+                        )
+    return problems
+
+
+def check_row_group_reads_guard_against_sort():
+    """feature_risks.md Risk-4 -- a row-group-scoped read must refuse while a sort is active.
+
+    A sort permutation destroys row-group locality (sorted row 5 may come from row group 47), so
+    every row-group-scoped operation has to refuse while one is installed, or it silently hands back
+    rows in file order -- the right NUMBER of rows and the wrong ones. There are ~19 such sites and
+    the risk is one omission.
+
+    `check_row_group_valid` is what makes a procedure row-group-scoped in the first place: it is
+    called by everything that takes a `row_group` argument, and by nothing else. So requiring the
+    two calls to travel together turns "did we guard all of them?" into something mechanical, and it
+    extends itself -- a new row-group-scoped read validates its row group as a matter of course, and
+    is then required to carry the sort guard too.
+    """
+    problems = []
+    for path in sorted(SRC.glob("parquet_*.f90")):
+        for name, start, body in procedure_bodies(path):
+            if "call check_row_group_valid" not in body:
+                continue
+            if "call check_reader_no_sort" in body:
+                continue
+            problems.append(
+                "%s:%d: `%s` is row-group-scoped (it calls check_row_group_valid) but never calls "
+                "check_reader_no_sort -- under a sort it would hand back rows in FILE order, with "
+                "the right row count and the wrong rows (feature_risks.md Risk-4)"
+                % (path.relative_to(REPO_ROOT), start, name)
+            )
+    return problems
+
+
+def check_print_stat_columns_documented():
+    """feature_risks.md Risk-5 -- print_stat's column set and its documentation must agree.
+
+    `parquet_reader_print_stat`'s output is documented column by column in
+    `doc/pages/reading.md`, and that table is the only contract it has: the format is otherwise
+    asserted in exactly one place in the whole suite (a `sample:` substring), so a renamed or added
+    column breaks no test at all. It had already drifted when this check was written -- the docs
+    named a `prefetc` column that the code calls `fetched`, and omitted `qcmin`, `qcmax`, `qcmiss`
+    and `filter` entirely -- which is the failure this exists to stop repeating.
+
+    Comparing the two SETS rather than asserting the printed header line is deliberate: the header
+    is padded to each column's widest cell, so its exact text depends on the data, and a test that
+    matched it literally would be brittle in a way that teaches people to delete it.
+    """
+    problems = []
+    cpp = SRC / "parquet_wrapper.cpp"
+    doc = REPO_ROOT / "doc" / "pages" / "reading.md"
+    text = cpp.read_text()
+    match = re.search(r"std::vector<std::string>\s+headers\s*=\s*\{(.*?)\}\s*;", text, re.S)
+    if not match:
+        return ["%s: could not find print_stat's `headers` vector -- this check needs updating"
+                % cpp.relative_to(REPO_ROOT)]
+    code_columns = re.findall(r'"([^"]+)"', match.group(1))
+    # The documented set: the first cell of every row of the column table, which spells each name
+    # in backticks and pairs two of them (`min` / `max`) on one row.
+    documented = set()
+    for line in doc.read_text().split("\n"):
+        row = re.match(r"^\s*\|\s*((?:`\w+`\s*/?\s*)+)\|", line)
+        if row:
+            documented.update(re.findall(r"`(\w+)`", row.group(1)))
+    missing = [c for c in code_columns if c not in documented]
+    extra = sorted(documented - set(code_columns))
+    for column in missing:
+        problems.append(
+            "doc/pages/reading.md: print_stat prints a `%s` column that the documentation does not "
+            "describe -- add a row for it (feature_risks.md Risk-5)" % column)
+    for column in extra:
+        problems.append(
+            "doc/pages/reading.md: the documentation describes a `%s` column that print_stat does "
+            "not print -- it was renamed or removed (feature_risks.md Risk-5)" % column)
+    return problems
+
+
 CHECKS = (
     ("parquet_table has no allocatable component", check_no_allocatable_component),
     ("table pointers are reached through %cache", check_pointers_go_through_cache),
     ("generated files carry their conventions", check_generated_file_conventions),
+    ("the schema-less write declares auto sizes", check_schemaless_write_declares_auto),
+    ("row-group reads guard against a sort", check_row_group_reads_guard_against_sort),
+    ("print_stat's columns match its documentation", check_print_stat_columns_documented),
 )
 
 

@@ -95,6 +95,8 @@ something a reader is expected to have.
 | [Risk-28](#risk-28--parquet_reader_set_filter-is-the-most-hardened-path-in-the-reader) | `parquet_reader_set_filter` is the most hardened path in the reader | 4 — covered |
 | [Risk-29](#risk-29--row-group-bookkeeping-invariants-under-a-mask) | Row-group bookkeeping invariants under a mask | 4 — covered |
 | [Risk-30](#risk-30--a-filtered-slice-does-not-address-physical-file-rows) | A filtered slice does NOT address physical file rows | 4 — covered |
+| [Risk-31](#risk-31--an-extending-types-own-state-is-silently-lost-by-clone) | An extending type's own state is silently lost by `%clone` | 4 — covered |
+| [Risk-32](#risk-32--a-hand-edit-inside-a-generated-region-survives-until-the-next-regeneration) | A hand edit inside a generated region survives until the next regeneration | 4 — covered |
 
 ---
 
@@ -102,7 +104,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-31**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-33**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -1168,3 +1170,61 @@ file, so a row range would no longer name the rows the caller chose. The slice f
   forms of `parquet_open_table` simply have no `sort` argument. That is the strongest possible
   enforcement and needs no test; what it needs is for a future overload not to add one. If a slice
   form ever gains a `sort` argument, this entry is the reason it must not.
+
+### Risk-31 — An extending type's own state is silently lost by `%clone`
+
+`parquet_table` is designed to be extended — a [generated table type](generated-tables.md) does
+exactly that, and so may hand-written code. `table_clone` knows only `parquet_table`'s own
+components, so **a component the extension added arrives default-initialized in the clone, with
+nothing to report it**: the clone succeeds, every column is right, and only the table parameter is
+wrong. That is the shape of failure this register exists for — no abort, no failing test, a wrong
+answer far from the cause.
+
+The mechanism is `clone_extra` (`parquet_tables_clone.f90`), an overridable no-op that `%clone`
+and `%clone_structure` each call as their last action, dispatching on `self`. Three things about it
+must not be simplified away:
+
+- **It is called LAST**, so an override sees a copy that is complete in every other respect.
+- **An override must use `class is`, not `type is`**, or a further extension of the extending type
+  silently loses this level's copy — the same bug one level down.
+- **A concrete-typed override of `%clone` itself is not possible** and must not be re-attempted: an
+  overriding procedure has to keep every dummy argument's characteristics, so `out` cannot be
+  narrowed from `class(parquet_table)`. A `%clone_full`-style second spelling was considered and
+  rejected, because it leaves the inherited `%clone` reachable and silently incomplete.
+
+**What still forbids something:** the generator writes the assignments itself, from the
+`components` user window, and **warns by name** for any component it declines to handle (a
+`pointer`, or a derived type with no initializer). That warning is the only thing standing between
+a user and this failure — do not remove it, and do not widen the parser to guess at the cases it
+currently refuses.
+
+**Covered by** `test_ext_clone_carries_components` and
+`test_ext_clone_structure_carries_components` (`test/test_table.f90`, through a hand-written
+extension type) and `test_clone_carries_user_state` (`test/test_table_codegen.f90`, through the
+generated one). Mutation-verified: emptying the override fails both of the first two.
+
+### Risk-32 — A hand edit inside a generated region survives until the next regeneration
+
+`tools/generate_user_table_code.py` emits a module that is **deliberately user-editable**, in six
+marked windows. Everything outside them is rewritten on the next run. So an edit made outside a
+window works perfectly — it compiles, it passes, it ships — right up until someone regenerates,
+at which point it vanishes with no diagnostic and no trace in the diff of the change that removed
+it.
+
+Three properties keep this survivable, and all three are load-bearing:
+
+- **`--check` is a CI lint-stage check, not a convention.** It regenerates in memory and compares
+  byte for byte, so an edit outside a window fails the build at the commit that made it.
+- **It distinguishes the two causes.** The generated header carries a `source-maml-sha256:` digest,
+  so "you edited generated text" and "the MAML changed and this file is stale" are reported
+  differently. Without the digest both look identical and the message would have to guess.
+- **A malformed marker set is refused BEFORE anything is rewritten.** A missing, duplicated or
+  unbalanced marker is the one state in which a regeneration would destroy user code, so the
+  generator errors out rather than deciding for itself where the code belonged.
+
+**What still forbids something:** never make `--check` advisory, and never let a regeneration
+"repair" a broken marker set by inferring window boundaries.
+
+**Covered by** the generator's own `--self-test` (a hand-edited generated line, a deleted end
+marker, a deleted window, a stale MAML, and idempotence), run in the lint stage alongside
+`--check` on this project's own committed `test/parquet_table_test.f90`.

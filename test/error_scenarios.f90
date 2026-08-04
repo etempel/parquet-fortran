@@ -13,6 +13,7 @@ program error_scenarios
     use parquet_maml_base, only: parquet_maml_file, get_parquet_maml
     use parquet_strings, only : parquet_string_column, parquet_string
     use parquet_columns
+    use parquet_table_test, only : parquet_table_example
     use parquet_tables
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp, &
         parquet_unit_seconds, parquet_unit_millis, parquet_unit_nanos
@@ -1313,6 +1314,20 @@ program error_scenarios
         call scenario_table_set_null_no_validity_in_parallel()
     case ("table_string_write_shared_in_parallel")
         call scenario_table_string_write_shared_in_parallel()
+    case ("table_bind_missing_column")
+        call scenario_table_bind_missing_column()
+    case ("table_bind_width_mismatch")
+        call scenario_table_bind_width_mismatch()
+    case ("table_bind_kind_refused")
+        call scenario_table_bind_kind_refused()
+    case ("table_drop_predefined")
+        call scenario_table_drop_predefined()
+    case ("codegen_row_index_out_of_range")
+        call scenario_codegen_row_index_out_of_range()
+    case ("codegen_range_out_of_range")
+        call scenario_codegen_range_out_of_range()
+    case ("codegen_missing_file_column")
+        call scenario_codegen_missing_file_column()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -10468,6 +10483,151 @@ contains
         !$omp end parallel
         print '(a)', "unexpectedly wrote a string element of a shared table inside a region"
     end subroutine scenario_table_string_write_shared_in_parallel
+
+    !> A generated table type declares its columns up front, so one the file does not have is a
+    !! mismatch between schema and data -- not something to discover at the first accessor call.
+    !! The message points at `source: computed`, which is how a column the program fills is
+    !! declared.
+    subroutine scenario_table_bind_missing_column()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_table_bind_missing.parquet")
+        call parquet_open_table(t, "test_run/es_table_bind_missing.parquet")
+        ! "id" and "val" exist; "flux" does not -> aborts
+        call t%bind_predefined([character(len=4) :: "id", "flux"], [PK_INT32, PK_FLOAT64], &
+            [1, 1], [.true., .true.], context="es_bind.maml")
+        print '(a,i0)', "unexpectedly bound a predefined column the file lacks, ncols=", t%ncols()
+    end subroutine scenario_table_bind_missing_column
+
+    !> A declared col_size that disagrees with the file means the schema and the data describe
+    !! different columns. Checked BEFORE the kind conversion, so the message names the real
+    !! problem rather than a conversion that was never the point.
+    subroutine scenario_table_bind_width_mismatch()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_table_bind_width.parquet")
+        call parquet_open_table(t, "test_run/es_table_bind_width.parquet")
+        ! "id" is a scalar column; declaring col_size 3 for it -> aborts
+        call t%bind_predefined([character(len=2) :: "id"], [PK_INT32_VEC], [3], [.true.], &
+            context="es_bind.maml")
+        print '(a,i0)', "unexpectedly bound a predefined column of the wrong width, ncols=", t%ncols()
+    end subroutine scenario_table_bind_width_mismatch
+
+    !> Only the numeric kinds convert into one another. Declaring a numeric kind over a string
+    !! column is a schema mistake, and the message says which schema, since that is the half the
+    !! user can edit.
+    subroutine scenario_table_bind_kind_refused()
+        type(parquet_table) :: t
+        type(parquet_writer) :: w
+        character(len=4) :: names(3)
+        names = ["a   ", "bcd ", "ef  "]
+        call parquet_open_writer(w, "test_run/es_table_bind_kind.parquet")
+        call parquet_write_column(w, "label", names)
+        call parquet_close_writer(w)
+        call parquet_open_table(t, "test_run/es_table_bind_kind.parquet")
+        call t%bind_predefined([character(len=5) :: "label"], [PK_FLOAT64], [1], [.true.], &
+            context="es_bind.maml")
+        print '(a,i0)', "unexpectedly bound a string column as float64, ncols=", t%ncols()
+    end subroutine scenario_table_bind_kind_refused
+
+    !> A predefined column is one a generated accessor exists for, so dropping it silently would
+    !! leave that accessor failing later, far from the cause. It needs force=.true. -- see
+    !! test_table.f90's own negative control, which proves the guard does not simply always fire.
+    subroutine scenario_table_drop_predefined()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_table_drop_predef.parquet")
+        call parquet_open_table(t, "test_run/es_table_drop_predef.parquet")
+        call t%bind_predefined([character(len=2) :: "id"], [PK_INT32], [1], [.true.], &
+            context="es_bind.maml")
+        call t%drop_column("id")   ! predefined, no force= -> aborts
+        print '(a,i0)', "unexpectedly dropped a predefined column, ncols=", t%ncols()
+    end subroutine scenario_table_drop_predefined
+
+    !> Writes the fixture the generated-table scenarios open, matching table_types/maml_example4.maml's
+    !! file columns. Kept minimal: these scenarios are about the guards, not the data.
+    subroutine write_codegen_scenario_fixture(fname)
+        character(len=*), intent(in) :: fname !! file to write.
+        type(parquet_writer) :: w
+        integer(int64) :: uberid(3)
+        integer(int32) :: idx(3), counts(2, 3)
+        logical :: flag(3), passed(2, 3)
+        character(len=5) :: name(3)
+        character(len=4) :: tags(2, 3)
+        real(real64) :: ra(3), dec(3)
+        real(real32) :: crd(3, 3)
+        type(parquet_date) :: obsdate(3)
+        type(parquet_time) :: obstime(3)
+        type(parquet_timestamp) :: obsstamp(3)
+        integer :: i, e
+        do i = 1, 3
+            uberid(i) = int(i, int64)
+            idx(i) = i
+            flag(i) = mod(i, 2) == 1
+            ra(i) = real(i, real64)
+            dec(i) = real(i, real64)
+            obsdate(i) = parquet_date(2026, 3, i)
+            obstime(i) = parquet_time(10, 20, i)
+            obsstamp(i) = parquet_timestamp(2026, 3, i, 1, 2, 3)
+            do e = 1, 3
+                crd(e, i) = real(e, real32)
+            end do
+            do e = 1, 2
+                counts(e, i) = e
+                passed(e, i) = mod(e, 2) == 0
+            end do
+        end do
+        name = ["a    ", "bcd  ", "ef   "]
+        tags(1, :) = "a"
+        tags(2, :) = "bcde"
+        call parquet_open_writer(w, fname)
+        call parquet_write_column(w, "uberid", uberid)
+        call parquet_write_column(w, "idx", idx)
+        call parquet_write_column(w, "flag", flag)
+        call parquet_write_column(w, "name", name)
+        call parquet_write_column(w, "ra", ra)
+        call parquet_write_column(w, "dec", dec)
+        call parquet_write_column(w, "crd", crd)
+        call parquet_write_column(w, "counts", counts)
+        call parquet_write_column(w, "passed", passed)
+        call parquet_write_column(w, "obsdate", obsdate)
+        call parquet_write_column(w, "obstime", obstime)
+        call parquet_write_column(w, "obsstamp", obsstamp)
+        call parquet_write_column(w, "tags", tags)
+        call parquet_close_writer(w)
+    end subroutine write_codegen_scenario_fixture
+
+    !> An indexed accessor returns a POINTER to one element, so an out-of-range index would be
+    !! undefined behaviour rather than a wrong answer. The generated guard must abort first.
+    subroutine scenario_codegen_row_index_out_of_range()
+        type(parquet_table_example) :: t
+        real(real64), pointer :: p
+        call write_codegen_scenario_fixture("test_run/es_codegen_row.parquet")
+        call t%init("test_run/es_codegen_row.parquet")
+        p => t%ra(99)   ! the fixture has 3 rows -> aborts
+        print '(a,f8.3)', "unexpectedly aliased an out-of-range row, value=", p
+    end subroutine scenario_codegen_row_index_out_of_range
+
+    !> The same guard for the range form.
+    subroutine scenario_codegen_range_out_of_range()
+        type(parquet_table_example) :: t
+        real(real64), pointer :: p(:)
+        call write_codegen_scenario_fixture("test_run/es_codegen_range.parquet")
+        call t%init("test_run/es_codegen_range.parquet")
+        p => t%ra(2, 99)   ! the fixture has 3 rows -> aborts
+        print '(a,i0)', "unexpectedly aliased an out-of-range row range, size=", size(p)
+    end subroutine scenario_codegen_range_out_of_range
+
+    !> A generated type declares its columns up front, so opening it on a file that lacks one is a
+    !! mismatch between schema and data -- caught by %init, not by the first accessor call.
+    subroutine scenario_codegen_missing_file_column()
+        type(parquet_table_example) :: t
+        type(parquet_writer) :: w
+        integer(int32) :: idx(3)
+        idx = [1_int32, 2_int32, 3_int32]
+        call parquet_open_writer(w, "test_run/es_codegen_missing.parquet")
+        call parquet_write_column(w, "idx", idx)
+        call parquet_close_writer(w)
+        call t%init("test_run/es_codegen_missing.parquet")   ! no "uberid" column -> aborts
+        print '(a,i0)', "unexpectedly opened a generated table on a file missing a column, ncols=", t%ncols()
+    end subroutine scenario_codegen_missing_file_column
 
     ! ==== stage 3c: mutation, detach, sort, clone ==========================================
 

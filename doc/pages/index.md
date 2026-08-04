@@ -8,6 +8,7 @@ ordered_subpage: building-schema-in-code.md
 ordered_subpage: quality-control.md
 ordered_subpage: string-columns.md
 ordered_subpage: table.md
+ordered_subpage: generated-tables.md
 ordered_subpage: date-time.md
 ordered_subpage: combined-example.md
 ordered_subpage: error-handling.md
@@ -44,6 +45,7 @@ check that they stay in sync, so update both together if you reorder either one.
 - [Quality control](quality-control.html)
 - [Compact string columns with `parquet_string_column`](string-columns.html)
 - [Whole tables in memory with `parquet_table`](table.html)
+- [Generated table types: named accessors from a MAML schema](generated-tables.html)
 - [Date, time and timestamp columns](date-time.html)
 - [Combined example: MAML schema, vector columns and metadata](combined-example.html)
 - [Error handling](error-handling.html)

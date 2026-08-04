@@ -208,20 +208,15 @@ contains
         if (idx == 0) return
         forced = .false.
         if (present(force)) forced = force
-        ! Not reachable yet, and deliberately written now: `predefined` is only ever set by the
-        ! generated table type, which arrives in a later milestone. Writing the guard with the
-        ! feature it protects keeps the rule (R8: a predefined column may be dropped only to
-        ! reclaim memory, and only on purpose) next to the code rather than in a to-do list.
-        ! gcov attribution artifact: the `if` line itself is evaluated on every call and so shows
-        ! hits, while the body below never runs -- see CLAUDE.md's "Fortran gcov attribution
-        ! artifacts", the guard-clause shape.
-        if (self%cache%cols(idx)%predefined .and. .not. forced) then ! GCOVR_EXCL_START
+        ! R8: a predefined column may be dropped only to reclaim memory, and only on purpose.
+        ! `predefined` is set by %bind_predefined, i.e. by a generated table type's %init -- so a
+        ! program using the generated accessors can rely on those columns being there.
+        if (self%cache%cols(idx)%predefined .and. .not. forced) then
             call table_context_suffix(self%cache, name, sfx)
             error stop EP // "drop_column: this is a predefined column, which a program using " // &
                 "the generated accessors expects to be there; pass force=.true. if you really " // &
                 "mean to drop it (to reclaim memory)" // sfx
         end if
-        ! GCOVR_EXCL_STOP
         call self%cache%cols(idx)%values%clear()
         ! Shift the tail down over the dropped slot. The store is name-keyed, so the order of the
         ! remaining slots is not itself meaningful -- but %column_names reports it, and keeping it

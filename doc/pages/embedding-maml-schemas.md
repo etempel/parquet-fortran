@@ -10,3 +10,5 @@ title: Embedding your own MAML schemas in your own project
 4. `use parquet_maml` (the module the script just generated for you) alongside `use parquet` in your code, to call `get_parquet_maml("your_schema.maml")` or `set_maml(...)` the same way this library's own tests do internally.
 
 The generated `parquet_maml` module depends on `parquet` (`parquet_maml_file`, `parquet_validate_maml`, etc.) but not on `parquet_maml_base` directly — `parquet_maml_base` is this library's own internal module and isn't meant to be `use`d directly by consuming projects. (If you're contributing to `parquet-fortran` itself and need to regenerate its own built-in schema module, see [CONTRIBUTING.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CONTRIBUTING.md).)
+
+A second, related generator ships alongside it: [`tools/generate_user_table_code.py`](generated-tables.html) turns a MAML schema into a named `parquet_table` extension type with one accessor per column, for programs that always read the same columns. It follows the same copy-it-into-your-project, commit-the-output convention as this one.

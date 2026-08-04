@@ -80,7 +80,6 @@ module parquet_maml_base
     public :: parquet_maml_maml_example
     public :: parquet_maml_maml_example2
     public :: parquet_maml_maml_example3
-    public :: parquet_maml_maml_example4
 
 contains
 
@@ -104,10 +103,6 @@ contains
             maml = parquet_maml_maml_example3()
         case ("maml_example3")
             maml = parquet_maml_maml_example3()
-        case ("maml_example4.maml")
-            maml = parquet_maml_maml_example4()
-        case ("maml_example4")
-            maml = parquet_maml_maml_example4()
         case default
             error stop "get_parquet_maml: unknown internal MAML file: " // trim(name)
         end select
@@ -360,42 +355,5 @@ contains
         maml%lines(47) = "    max: 90"
         maml%lines(48) = "    miss: 'Null'"
     end function parquet_maml_maml_example3
-    !> Returns the embedded maml_example4.maml MAML fixture, unparsed (raw lines only).
-    function parquet_maml_maml_example4() result(maml)
-        type(parquet_maml_file) :: maml !! the maml_example4.maml MAML, unparsed.
-
-        maml%name = "maml_example4.maml"
-        allocate(character(len=78) :: maml%lines(30))
-        maml%lines(1) = "# This is a MAML file to generate a code for parquet_table_example type."
-        maml%lines(2) = "dataset: parquet_table_test # module name (matches filename without extension)"
-        maml%lines(3) = "table: example # table name, e.g. type(parquet_table_example)"
-        maml%lines(4) = "description: Developer description, not used anywhere."
-        maml%lines(5) = "comments: # add additional comments here, e.g. history of changes."
-        maml%lines(6) = "- Additional comments can be placed here."
-        maml%lines(7) = "- Another comment."
-        maml%lines(8) = "fields:"
-        maml%lines(9) = "- name: uberid"
-        maml%lines(10) = "  info: Object ID field."
-        maml%lines(11) = "  data_type: int64"
-        maml%lines(12) = "  col_size: 1"
-        maml%lines(13) = "- name: name"
-        maml%lines(14) = "  info: Name of the object."
-        maml%lines(15) = "  data_type: string"
-        maml%lines(16) = "  array_size: 5"
-        maml%lines(17) = "- name: ra"
-        maml%lines(18) = "  unit: deg"
-        maml%lines(19) = "  info: Right ascension"
-        maml%lines(20) = "  data_type: float64"
-        maml%lines(21) = "- name: dec"
-        maml%lines(22) = "  unit: deg"
-        maml%lines(23) = "  info: Declination"
-        maml%lines(24) = "  data_type: float64"
-        maml%lines(25) = "- name: crd"
-        maml%lines(26) = "  unit: Mpc"
-        maml%lines(27) = "  info: Comoving coordinates"
-        maml%lines(28) = "  data_type: float32"
-        maml%lines(29) = "  col_size: 3"
-        maml%lines(30) = ""
-    end function parquet_maml_maml_example4
 
 end module parquet_maml_base ! GCOVR_EXCL_LINE

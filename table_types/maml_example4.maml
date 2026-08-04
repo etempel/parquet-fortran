@@ -1,6 +1,14 @@
 # This is a MAML file to generate a code for parquet_table_example type.
+#
+# A Role-A MAML: the input to tools/generate_user_table_code.py, which turns it into a named
+# parquet_table extension type. See doc/pages/generated-tables.md.
+#
+# It is deliberately also a perfectly ordinary MAML -- parquet_parse_maml accepts it as a write
+# schema, which is what lets the tests use one file both to generate the type and to write the
+# fixture that type is opened on.
 dataset: parquet_table_test # module name (matches filename without extension)
 table: example # table name, e.g. type(parquet_table_example)
+author: Elmo Tempel (elmo.tempel@ut.ee)
 description: Developer description, not used anywhere.
 comments: # add additional comments here, e.g. history of changes.
 - Additional comments can be placed here.
@@ -10,6 +18,12 @@ fields:
   info: Object ID field.
   data_type: int64
   col_size: 1
+- name: idx
+  info: A plain int32 scalar column.
+  data_type: int32
+- name: flag
+  info: A boolean scalar column.
+  data_type: boolean
 - name: name
   info: Name of the object.
   data_type: string
@@ -27,4 +41,30 @@ fields:
   info: Comoving coordinates
   data_type: float32
   col_size: 3
-
+- name: counts
+  info: An int32 vector column.
+  data_type: int32
+  col_size: 2
+- name: passed
+  info: A boolean vector column.
+  data_type: boolean
+  col_size: 2
+- name: obsdate
+  info: A date column.
+  data_type: date
+- name: obstime
+  info: A millisecond time column.
+  data_type: time[ms]
+- name: obsstamp
+  info: A UTC microsecond timestamp column.
+  data_type: timestamp[us,utc]
+- name: tags
+  info: A string vector column, which has only the character copy-out form.
+  data_type: string
+  array_size: 4
+  col_size: 2
+- name: flux
+  unit: Jy
+  info: Filled in by the program, never read from the file.
+  data_type: float64
+  source: computed

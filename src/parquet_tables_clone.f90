@@ -91,6 +91,9 @@ contains
         ! A detached source has no file left to reopen, and an in-memory one never had one, so
         ! both produce a clone with no reader. Only a live file-backed table opens its own.
         if (self%cache%file_backed .and. .not. self%detached) call clone_reopen_reader(self, out)
+        ! LAST, so an override sees a copy that is complete in every other respect. Dispatches on
+        ! self, so an extending type's own components come across too; the default does nothing.
+        call self%clone_extra(out, .false.)
     end procedure table_clone
     !
     module procedure table_clone_structure
@@ -128,7 +131,21 @@ contains
         out%row_lo = 1_int64
         out%row_hi = 0_int64
         out%row_count = 0_int64
+        ! Same hook as %clone, told that this copy has the columns but none of the rows. A table
+        ! parameter is a property of the table rather than of its rows, so it travels either way --
+        ! it is the override's business to treat the two differently if it needs to.
+        call self%clone_extra(out, .true.)
     end procedure table_clone_structure
+    !
+    module procedure table_clone_extra
+        ! Deliberately does nothing. `parquet_table` itself has no components an extension could
+        ! have added, so the base case really is a no-op -- see this procedure's interface in
+        ! parquet_tables.f90 for what an override is expected to do, and why the hook exists rather
+        ! than an override of %clone itself (which Fortran does not permit to narrow `out`).
+        !
+        ! Empty on purpose, so the three dummy arguments are unused here; an override uses all
+        ! three. The project does not build with -Wextra, so this raises no warning.
+    end procedure table_clone_extra
     !
     !> error stops unless source and destination have the same dynamic type.
     !!

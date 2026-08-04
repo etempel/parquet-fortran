@@ -32,7 +32,7 @@ submodule (parquet_core:parquet_metadata) parquet_metadata_maml
     ! Sub-keys are only checked one level into a list item (e.g. fields:'s
     ! "qc:"); anything nested deeper than that (e.g. qc:'s own min/max/miss)
     ! is not descended into or validated, the same as extra:.
-    integer, parameter :: maml_max_subkeys = 8 !! Declared subkeys(:) capacity per maml_section_schema entry.
+    integer, parameter :: maml_max_subkeys = 9 !! Declared subkeys(:) capacity per maml_section_schema entry.
 
     !> One allowed top-level MAML section: its name, whether its contents are
     !> opaque/unvalidated (extra:), and (for map-list sections) its allowed
@@ -67,30 +67,36 @@ submodule (parquet_core:parquet_metadata) parquet_metadata_maml
     !> The full set of allowed top-level MAML sections; see each entry's
     !> inline comments above for the rationale behind opaque/subkeys choices.
     type(maml_section_schema), parameter :: allowed_maml_sections(17) = [ &
-        maml_section_schema("survey",      .false., [character(len=32) :: "", "", "", "", "", "", "", ""]), &
-        maml_section_schema("dataset",     .false., [character(len=32) :: "", "", "", "", "", "", "", ""]), &
-        maml_section_schema("table",       .false., [character(len=32) :: "", "", "", "", "", "", "", ""]), &
-        maml_section_schema("version",     .false., [character(len=32) :: "", "", "", "", "", "", "", ""]), &
-        maml_section_schema("date",        .false., [character(len=32) :: "", "", "", "", "", "", "", ""]), &
-        maml_section_schema("author",      .false., [character(len=32) :: "", "", "", "", "", "", "", ""]), &
-        maml_section_schema("coauthors",   .false., [character(len=32) :: "", "", "", "", "", "", "", ""]), &
-        maml_section_schema("dois",        .false., [character(len=32) :: "doi", "type", "", "", "", "", "", ""]), &
+        maml_section_schema("survey",      .false., [character(len=32) :: "", "", "", "", "", "", "", "", ""]), &
+        maml_section_schema("dataset",     .false., [character(len=32) :: "", "", "", "", "", "", "", "", ""]), &
+        maml_section_schema("table",       .false., [character(len=32) :: "", "", "", "", "", "", "", "", ""]), &
+        maml_section_schema("version",     .false., [character(len=32) :: "", "", "", "", "", "", "", "", ""]), &
+        maml_section_schema("date",        .false., [character(len=32) :: "", "", "", "", "", "", "", "", ""]), &
+        maml_section_schema("author",      .false., [character(len=32) :: "", "", "", "", "", "", "", "", ""]), &
+        maml_section_schema("coauthors",   .false., [character(len=32) :: "", "", "", "", "", "", "", "", ""]), &
+        maml_section_schema("dois",        .false., [character(len=32) :: "doi", "type", "", "", "", "", "", "", ""]), &
         maml_section_schema("depends",     .false., &
-            [character(len=32) :: "survey", "dataset", "table", "version", "", "", "", ""]), &
-        maml_section_schema("description", .false., [character(len=32) :: "", "", "", "", "", "", "", ""]), &
-        maml_section_schema("comments",    .false., [character(len=32) :: "", "", "", "", "", "", "", ""]), &
-        maml_section_schema("license",     .false., [character(len=32) :: "", "", "", "", "", "", "", ""]), &
-        maml_section_schema("keywords",    .false., [character(len=32) :: "", "", "", "", "", "", "", ""]), &
-        maml_section_schema("maml_version", .false., [character(len=32) :: "", "", "", "", "", "", "", ""]), &
+            [character(len=32) :: "survey", "dataset", "table", "version", "", "", "", "", ""]), &
+        maml_section_schema("description", .false., [character(len=32) :: "", "", "", "", "", "", "", "", ""]), &
+        maml_section_schema("comments",    .false., [character(len=32) :: "", "", "", "", "", "", "", "", ""]), &
+        maml_section_schema("license",     .false., [character(len=32) :: "", "", "", "", "", "", "", "", ""]), &
+        maml_section_schema("keywords",    .false., [character(len=32) :: "", "", "", "", "", "", "", "", ""]), &
+        maml_section_schema("maml_version", .false., [character(len=32) :: "", "", "", "", "", "", "", "", ""]), &
         maml_section_schema("keyarray",    .false., &
-            [character(len=32) :: "key", "value", "comment", "", "", "", "", ""]), &
-        maml_section_schema("extra",       .true.,  [character(len=32) :: "", "", "", "", "", "", "", ""]), &
+            [character(len=32) :: "key", "value", "comment", "", "", "", "", "", ""]), &
+        maml_section_schema("extra",       .true.,  [character(len=32) :: "", "", "", "", "", "", "", "", ""]), &
         ! col_map: is deliberately NOT a top-level section: it is only valid
         ! nested inside extra: (see parquet_parse_col_map), which is already
         ! opaque/unvalidated here. A stray top-level "col_map:" is therefore
         ! correctly flagged as an unknown top-level section.
+        ! "source" is read only by tools/generate_user_table_code.py, which turns a MAML into a
+        ! generated parquet_table extension: it says whether a predefined column comes from the
+        ! file ("file", the default) or is filled in by the program ("computed"). It is declared
+        ! here so that such a MAML still passes parquet_validate_maml and stays usable as an
+        ! ordinary write schema; nothing on the Fortran side reads it.
         maml_section_schema("fields",      .false., &
-            [character(len=32) :: "name", "unit", "info", "ucd", "data_type", "array_size", "col_size", "qc"]) &
+            [character(len=32) :: "name", "unit", "info", "ucd", "data_type", "array_size", "col_size", "qc", &
+            "source"]) &
         ]
 
 contains

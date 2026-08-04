@@ -29,6 +29,7 @@ NOT emitted (hand-written, and never touched by this script):
   src/parquet_tables_query.f90        nrows/ncols/column_names/kind/width/unit/is_null/...
   src/parquet_tables_read.f90         kind resolution + materialize-all orchestration + release
   src/parquet_tables_write.f90        parquet_write_table
+  src/parquet_tables_predefined.f90   %bind_predefined, for generated table types
 
 Usage:  tools/generate_parquet_tables.py [--check]
 
@@ -739,7 +740,10 @@ def gen_table_type():
         generic :: append_null_rows => table_append_null_rows_i32, table_append_null_rows_i64
         ! --- copying ---
         procedure :: clone => table_clone                     !! Independent deep copy of this table.
-        procedure :: clone_structure => table_clone_structure !! Empty table with the same columns.""")
+        procedure :: clone_structure => table_clone_structure !! Empty table with the same columns.
+        procedure :: clone_extra => table_clone_extra !! Hook: copies an EXTENDING type's own components.
+        ! --- generated table types (see doc/pages/generated-tables.md) ---
+        procedure :: bind_predefined => table_bind_predefined !! Binds a generated type's predefined columns.""")
     w("""        ! --- lifecycle ---
         !> Blocks intrinsic assignment: the store lives behind a pointer, so a default `b = a`
         !! would leave two tables sharing one store and double-freeing it.
@@ -971,9 +975,15 @@ def gen_spec_interfaces():
             integer(int64), allocatable, intent(out) :: bounds(:,:)      !! (2, num_row_groups).
         end subroutine reader_row_group_bounds
         !> Always error stops: see the `assignment(=)` binding.
+        !!
+        !! `rhs` is `class`, not `type`, so that an EXTENDING type's own `b = a` reaches this guard
+        !! too. With a `type(parquet_table)` dummy the match relies on generic resolution against a
+        !! non-polymorphic dummy for an actual of an extended type; gfortran 15.2 and flang 22.1
+        !! both resolve it, but the polymorphic form removes the question -- and the failure it
+        !! would hide is the worst kind, two tables sharing one store and double-freeing it.
         module subroutine table_assign_guard(lhs, rhs)
             class(parquet_table), intent(out) :: lhs !! unused -- this procedure never returns.
-            type(parquet_table), intent(in) :: rhs   !! unused -- this procedure never returns.
+            class(parquet_table), intent(in) :: rhs  !! unused -- this procedure never returns.
         end subroutine table_assign_guard
         !> Frees the column store and abandons the reader. Runs at scope exit and on an
         !! intent(out) reopen, so it must always succeed silently -- it validates nothing.
@@ -1877,7 +1887,7 @@ def gen_spec_interfaces():
         module subroutine parquet_write_table(table, filename, schema, row_mask, copy_metadata,   &
                 metadata_keys, write_maml, qc, compression, compression_level, chunk_size,        &
                 use_threads, overwrite, release)
-            type(parquet_table), intent(in) :: table   !! the table to write.
+            class(parquet_table), intent(in) :: table  !! the table to write (any extending type too).
             character(len=*), intent(in) :: filename   !! output parquet file.
             type(parquet_schema), intent(inout), optional :: schema !! output schema; absent = schema-less write.
             logical, intent(in), optional :: row_mask(:)  !! per-row write mask.
@@ -2242,6 +2252,78 @@ def gen_spec_interfaces():
             class(parquet_table), intent(out) :: out  !! receives the empty table.
             logical, intent(in), optional :: resident_only !! .true.: only columns already read.
         end subroutine table_clone_structure
+        !> Copies the components an EXTENDING type added, which `%clone` cannot know about.
+        !!
+        !! `parquet_table` is designed to be extended -- a generated table type
+        !! (`doc/pages/generated-tables.md`) does exactly that, and so may hand-written code. But
+        !! `table_clone` only knows `parquet_table`'s own components, so anything the extension
+        !! declared would arrive default-initialized and nothing would report it. Overriding this
+        !! hook is how an extension copies its own state; `%clone` and `%clone_structure` each call
+        !! it as their LAST action, dispatching on `self`, so the override runs for free wherever
+        !! either is used.
+        !!
+        !! **A concrete-typed override of `%clone` itself is not possible** -- an overriding
+        !! procedure must keep every dummy argument's characteristics, so `out` cannot be narrowed
+        !! from `class(parquet_table)`. This hook is the supported substitute, and it keeps one name
+        !! for one operation rather than adding a second spelling of "clone" that the first one
+        !! silently gets wrong.
+        !!
+        !! The default implementation does nothing, which is correct for `parquet_table` itself.
+        !! An override reaches `out`'s own components through `select type` -- use `class is`, not
+        !! `type is`, so that a further extension still gets this level's copy. `%clone` has already
+        !! checked that `self` and `out` have the same dynamic type, so the guarded branch always
+        !! matches.
+        module subroutine table_clone_extra(self, out, structure_only)
+            class(parquet_table), intent(in) :: self    !! the table being copied.
+            class(parquet_table), intent(inout) :: out  !! the copy, already holding the base state.
+            logical, intent(in) :: structure_only       !! .true. when called from %clone_structure.
+        end subroutine table_clone_extra
+    end interface""")
+    w("    !")
+    w("""    ! ---- Predefined columns, for generated table types (parquet_tables_predefined) ----
+    interface
+        !> Binds the predefined columns a GENERATED table type declares: checks each one, converts
+        !! it to the kind the schema declared, reads it, and marks the slot `predefined`.
+        !!
+        !! This is the one library call a generated type's `%init` makes
+        !! (`doc/pages/generated-tables.md`); it is public only because a generated module is a
+        !! DIFFERENT module and `parquet_table`'s components are private, so there is no other way
+        !! in. Hand-written code rarely needs it -- a table opened with `parquet_open_table` already
+        !! reaches every column by name.
+        !!
+        !! Per column, in `names` order:
+        !!
+        !! * a `from_file` column must exist (after any `remap:`), or this aborts naming it;
+        !! * its width must equal the declared `widths` entry, or this aborts;
+        !! * if its kind differs from the declared one, `%cast` converts it -- and a conversion that
+        !!   can lose information (a narrowing, or an integer wider than the target real's mantissa)
+        !!   emits a warning naming the table and column, since the declaration is a contract the
+        !!   file does not have to honour exactly;
+        !! * every `from_file` column is then read in ONE `%prefetch`, after the casts, so a
+        !!   converted column decodes straight into its declared kind rather than being read twice;
+        !! * a column with `from_file` `.false.` -- a `source: computed` field, or any column of a
+        !!   from-scratch table -- is created with `%nrows()` all-null rows instead of being looked
+        !!   for in the file.
+        !!
+        !! Passing `from_file` all `.false.` is exactly what an in-memory generated table does, so
+        !! the same procedure serves a file-backed and a from-scratch construction.
+        !!
+        !! `units` FILLS IN a unit the column does not already have; it never overwrites one. A
+        !! read-in MAML describes the physical file and is authoritative about what a file column
+        !! holds, so a declaration must not override it -- but a computed column has no other
+        !! source of a unit at all, and a file opened without a MAML has none either, which is
+        !! where the declared one belongs.
+        module subroutine table_bind_predefined(self, names, kinds, widths, from_file, context, exact, units)
+            class(parquet_table), intent(inout) :: self   !! the table, already opened or created.
+            character(len=*), intent(in) :: names(:)      !! internal column names, in declaration order.
+            integer, intent(in) :: kinds(:)               !! declared PK_* kind per name.
+            integer, intent(in) :: widths(:)              !! declared col_size per name (1 if scalar).
+            logical, intent(in) :: from_file(:)           !! .false. for a computed/from-scratch column.
+            character(len=*), intent(in), optional :: context !! schema name, for error messages.
+            logical, intent(in), optional :: exact !! refuse a lossy kind conversion; forwarded
+            !! verbatim to %cast, whose own default applies when this is absent.
+            character(len=*), intent(in), optional :: units(:) !! declared unit per name ("" for none).
+        end subroutine table_bind_predefined
     end interface""")
     w("    !")
     w("""    ! ---- Sort key extraction (parquet_tables_sort) ----

@@ -44,7 +44,39 @@ module test_table
     !> Vector width every vector fixture in this suite uses.
     integer, parameter :: NVEC = 3
     !
+    !> The value `ext_table`'s own component holds when nothing has set it.
+    real(real64), parameter :: ZP_DEFAULT = -1.0_real64
+    !
+    !> A hand-written extension of `parquet_table`, standing in for a generated table type.
+    !!
+    !! Milestone 3e's library half -- `%bind_predefined` and the `clone_extra` hook -- is
+    !! deliberately testable WITHOUT running the generator, which is the whole point of keeping the
+    !! rules in the library rather than in emitted text. This type is what the tests below drive
+    !! them through, and it is also the worked example of what a user extending `parquet_table` by
+    !! hand has to write: one component, one `clone_extra` override.
+    type, extends(parquet_table) :: ext_table
+        real(real64) :: zeropoint = ZP_DEFAULT !! a table parameter %clone must carry across.
+    contains
+        procedure :: clone_extra => ext_clone_extra !! Copies `zeropoint` into a clone.
+    end type ext_table
+    !
 contains
+    !
+    !> `clone_extra` override: copies this type's own component into the clone.
+    !!
+    !! `class is`, not `type is`, so that a further extension of `ext_table` would still get this
+    !! level's copy. `%clone` has already checked that `out` has the same dynamic type as `self`,
+    !! so the branch always matches.
+    subroutine ext_clone_extra(self, out, structure_only)
+        class(ext_table), intent(in) :: self       !! the table being copied.
+        class(parquet_table), intent(inout) :: out !! the copy, already holding the base state.
+        logical, intent(in) :: structure_only      !! .true. when called from %clone_structure.
+        !
+        select type (out)
+        class is (ext_table)
+            out%zeropoint = self%zeropoint
+        end select
+    end subroutine ext_clone_extra
     !
     subroutine collect_tests_parquet_table(testsuite)
         type(unittest_type), allocatable, intent(out) :: testsuite(:)
@@ -237,7 +269,21 @@ contains
             new_unittest("a materialized row index survives the in-memory mutations", &
                 test_row_index_recovery), &
             new_unittest("an in-memory table is never detached, however it is mutated", &
-                test_in_memory_never_detaches) &
+                test_in_memory_never_detaches), &
+            new_unittest("clone carries an extending type's own components via clone_extra", &
+                test_ext_clone_carries_components), &
+            new_unittest("clone_structure carries an extending type's own components too", &
+                test_ext_clone_structure_carries_components), &
+            new_unittest("bind_predefined binds, widens to the declared kind and materializes", &
+                test_bind_predefined_binds_and_widens), &
+            new_unittest("bind_predefined creates a computed column with every row null", &
+                test_bind_predefined_computed_column), &
+            new_unittest("bind_predefined with no declared fields is a clean no-op", &
+                test_bind_predefined_empty), &
+            new_unittest("parquet_write_table accepts a type extending parquet_table", &
+                test_write_table_accepts_extension), &
+            new_unittest("a predefined column drops with force=, and a plain one without it", &
+                test_drop_predefined_with_force) &
             ]
     end subroutine collect_tests_parquet_table
     !
@@ -6768,5 +6814,212 @@ contains
         call check(error, .not. t%is_detached(), &
             "removing rows from an in-memory table must not report it as detached")
     end subroutine test_in_memory_never_detaches
+    !
+    !> `%clone` carries an extending type's own components, through the `clone_extra` hook.
+    !!
+    !! This is the test the whole hook exists for. Without the override, `zeropoint` would arrive
+    !! default-initialized and NOTHING would report it -- `%clone` would succeed, the columns would
+    !! be right, and only the table parameter would be silently wrong. Mutation-test it by emptying
+    !! `ext_clone_extra`: this must fail.
+    subroutine test_ext_clone_carries_components(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(ext_table) :: t, c
+        integer(int32), allocatable :: got(:)
+        integer :: i
+        character(len=*), parameter :: f = "test_run/table_ext_clone.parquet"
+        !
+        call write_basic_fixture(f)
+        ! Through the parent component, which is how a generated %init opens a file: the dummy of
+        ! parquet_open_table is `type(parquet_table)`, deliberately, so that an extension cannot be
+        ! opened without going through its own constructor.
+        call parquet_open_table(t%parquet_table, f)
+        t%zeropoint = 25.5_real64
+        call t%clone(c)
+        call check(error, c%nrows() == NROW, "the clone should hold the source's rows")
+        if (allocated(error)) return
+        call c%get("i32", got)
+        call check(error, all(got == [(int(i32_seq(i), int32), i = 1, NROW)]), &
+            "the clone's column values should match the source's")
+        if (allocated(error)) return
+        call check(error, abs(c%zeropoint - 25.5_real64) < 1.0e-12_real64, &
+            "clone_extra should have carried the extending type's own component across")
+    end subroutine test_ext_clone_carries_components
+    !
+    !> `%clone_structure` runs the same hook, with `structure_only` true.
+    !!
+    !! A table parameter is a property of the TABLE, not of its rows, so an empty batch cloned from
+    !! a configured table must still carry it -- otherwise the bulk-append idiom (clone_structure,
+    !! fill, append) would quietly lose it every time.
+    subroutine test_ext_clone_structure_carries_components(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(ext_table) :: t, batch
+        character(len=*), parameter :: f = "test_run/table_ext_clone_structure.parquet"
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t%parquet_table, f)
+        t%zeropoint = 7.25_real64
+        call t%materialize_all()
+        call t%clone_structure(batch)
+        call check(error, batch%nrows() == 0, "a structure clone should have no rows")
+        if (allocated(error)) return
+        call check(error, batch%ncols() == t%ncols(), "a structure clone should have every column")
+        if (allocated(error)) return
+        call check(error, abs(batch%zeropoint - 7.25_real64) < 1.0e-12_real64, &
+            "clone_structure should carry the extending type's own component too")
+    end subroutine test_ext_clone_structure_carries_components
+    !
+    !> `%bind_predefined` checks, converts and reads every declared column in one call.
+    !!
+    !! The fixture's `i32` column is declared as PK_INT64 and its `f32` as PK_FLOAT64, so this also
+    !! pins the widening half of the contract: both must arrive at the DECLARED kind, ready for an
+    !! exact-kind `%col`, and resident without any further call.
+    subroutine test_bind_predefined_binds_and_widens(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(ext_table) :: t
+        integer(int64), pointer :: p64(:)
+        real(real64), pointer :: pf64(:)
+        integer :: i
+        character(len=*), parameter :: f = "test_run/table_bind_widen.parquet"
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t%parquet_table, f)
+        call t%bind_predefined( &
+            [character(len=3) :: "i32", "f32", "s"], &
+            [PK_INT64, PK_FLOAT64, PK_STRING], &
+            [1, 1, 1], &
+            [.true., .true., .true.], &
+            context="test_bind.maml")
+        call check(error, t%kind("i32") == PK_INT64, &
+            "a column declared int64 over an int32 file column should arrive widened")
+        if (allocated(error)) return
+        call check(error, t%kind("f32") == PK_FLOAT64, &
+            "a column declared float64 over a float32 file column should arrive widened")
+        if (allocated(error)) return
+        call check(error, t%residency("i32") == RES_FULL .and. t%residency("s") == RES_FULL, &
+            "bind_predefined should leave every predefined column materialized")
+        if (allocated(error)) return
+        ! The pointer path is exact-kind, so this only compiles-and-runs if the cast really landed.
+        call t%col("i32", p64)
+        call check(error, all(p64 == [(int(i32_seq(i), int64), i = 1, NROW)]), &
+            "the widened column should hold the file's own values")
+        if (allocated(error)) return
+        call t%col("f32", pf64)
+        call check(error, all(abs(pf64 - [(real(i32_seq(i), real64) * 0.5_real64, i = 1, NROW)]) &
+            < 1.0e-6_real64), "the widened float column should hold the file's own values")
+    end subroutine test_bind_predefined_binds_and_widens
+    !
+    !> A `from_file=.false.` column is created rather than looked for, with every row null.
+    !!
+    !! This is the `source: computed` case, and the same path an in-memory generated table takes
+    !! for every one of its columns. The rows have to EXIST -- an accessor is generated for the
+    !! column, so it must work from the moment the constructor returns -- and they have to be null,
+    !! since nothing has filled them.
+    subroutine test_bind_predefined_computed_column(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(ext_table) :: t
+        real(real64), pointer :: p(:)
+        character(len=*), parameter :: f = "test_run/table_bind_computed.parquet"
+        integer :: i
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t%parquet_table, f)
+        call t%bind_predefined( &
+            [character(len=4) :: "i32", "flux"], &
+            [PK_INT32, PK_FLOAT64], &
+            [1, 1], &
+            [.true., .false.], &
+            context="test_bind.maml")
+        call check(error, t%has_column("flux"), "a computed column should have been created")
+        if (allocated(error)) return
+        call check(error, t%kind("flux") == PK_FLOAT64, "the computed column should have its declared kind")
+        if (allocated(error)) return
+        call t%col("flux", p)
+        call check(error, size(p) == NROW, "the computed column should have one row per table row")
+        if (allocated(error)) return
+        do i = 1, NROW
+            call check(error, t%is_null("flux", i), "every row of an unfilled computed column should be null")
+            if (allocated(error)) return
+        end do
+        ! And it is an ordinary column afterwards: writing a value clears its null.
+        p(2) = 3.5_real64
+        call t%clear_null("flux", 2)
+        call check(error, .not. t%is_null("flux", 2), "a computed column should be writable like any other")
+    end subroutine test_bind_predefined_computed_column
+    !
+    !> A schema declaring no fields at all binds nothing and is not an error.
+    !!
+    !! The generator accepts an empty `fields:` and emits a bare `parquet_table` extension -- a
+    !! template for a project that wants its own named table type without predefining any columns.
+    !! That reaches here as zero-size arrays, which must be a clean no-op rather than a guard
+    !! failure.
+    subroutine test_bind_predefined_empty(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(ext_table) :: t
+        character(len=*), parameter :: f = "test_run/table_bind_empty.parquet"
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t%parquet_table, f)
+        call t%bind_predefined([character(len=1) ::], [integer ::], [integer ::], [logical ::], &
+            context="test_bind_empty.maml")
+        call check(error, t%ncols() == 6, "binding no columns should leave the table as it was")
+        if (allocated(error)) return
+        call check(error, t%residency("i32") == RES_EMPTY, &
+            "binding no columns should read nothing")
+    end subroutine test_bind_predefined_empty
+    !
+    !> `parquet_write_table` accepts an extending type directly, not only a plain `parquet_table`.
+    !!
+    !! Its `table` dummy is `class`, so a generated table writes itself without the caller having
+    !! to reach through `%parquet_table` -- which would be a wart with no upside, since the dummy
+    !! is `intent(in)` and has no reset semantics to protect.
+    subroutine test_write_table_accepts_extension(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(ext_table) :: t
+        type(parquet_table) :: back
+        integer(int32), allocatable :: got(:)
+        integer :: i
+        character(len=*), parameter :: f = "test_run/table_ext_write_src.parquet"
+        character(len=*), parameter :: g = "test_run/table_ext_write_out.parquet"
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t%parquet_table, f)
+        call t%materialize_all()
+        call parquet_write_table(t, g, overwrite=.true.)
+        call parquet_open_table(back, g)
+        call back%get("i32", got)
+        call check(error, all(got == [(int(i32_seq(i), int32), i = 1, NROW)]), &
+            "a table written from an extending type should round-trip its values")
+    end subroutine test_write_table_accepts_extension
+    !
+    !> A predefined column can still be dropped on purpose, with `force=.true.`.
+    !!
+    !! The refusal without `force=` kills the process, so it lives in error_scenarios.f90; this is
+    !! its negative control -- a guard that fired unconditionally would pass that scenario while
+    !! breaking the permitted case.
+    subroutine test_drop_predefined_with_force(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(ext_table) :: t
+        character(len=*), parameter :: f = "test_run/table_drop_predefined.parquet"
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t%parquet_table, f)
+        call t%bind_predefined([character(len=3) :: "i32"], [PK_INT32], [1], [.true.], &
+            context="test_bind.maml")
+        call t%drop_column("i32", force=.true.)
+        call check(error, .not. t%has_column("i32"), &
+            "force=.true. should drop a predefined column")
+        if (allocated(error)) return
+        ! A column that was never bound is not predefined, so it needs no force at all.
+        call t%drop_column("f32")
+        call check(error, .not. t%has_column("f32"), &
+            "a column that is not predefined should drop without force=")
+    end subroutine test_drop_predefined_with_force
+    !
+    !> The i-th value `write_basic_fixture` puts in its `i32` column.
+    pure integer function i32_seq(i) result(v)
+        integer, intent(in) :: i !! 1-based row index.
+        !
+        v = i
+    end function i32_seq
     !
 end module test_table

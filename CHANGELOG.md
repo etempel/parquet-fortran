@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Generated table types.** `tools/generate_user_table_code.py` turns a MAML schema into a named
+  `parquet_table` extension with one accessor per declared column, so a program that always reads
+  the same columns can write `t%ra()` instead of naming strings everywhere. Each accessor comes in
+  three zero-copy forms — `%ra()` for the whole column, `%ra(i)` for one row and `%ra(lo, hi)` for a
+  row range, in both integer index kinds — where the index always means a ROW; a `string` column
+  additionally gets a `%name_chr(arr)` character copy-out, and a string vector column gets only
+  that. The type is opened with `%init`, `%init_slice` (a contiguous row range) or `%init_empty`
+  (in memory, no file), each of which checks every declared column against the file, converts it to
+  the declared kind (widening silently, warning when a conversion can lose information, and taking
+  an optional `exact=`), and reads them all in one pass. A field declared `source: computed` — a new
+  `fields:` sub-key, accepted and ignored elsewhere — gets its accessor and a slot of null rows but
+  is never looked for in the file. The generated module is **user-editable in six marked windows**,
+  preserved across regeneration, and `--check` fails the build if a generated region was hand-edited
+  or the file is stale; the generator also reads the components window and writes the matching
+  `%clone` and reset statements itself. Two public entry points on `parquet_table` support this and
+  are usable from hand-written extensions too: `clone_extra`, the hook `%clone`/`%clone_structure`
+  call so an extending type's own components are copied rather than silently default-initialized,
+  and `%bind_predefined`, which performs the column binding. `parquet_write_table` now accepts any
+  type extending `parquet_table`. See
+  [Generated table types](doc/pages/generated-tables.md).
 - Row filters are now boolean **expressions** over the file's columns, not just AND-combined
   clauses: `filt%add("(ra > 180 and dec <= 0) or id is_null")`, with `and`/`or`/`not` (any
   casing), parentheses and `not` > `and` > `or` precedence. Several `%add` calls are still

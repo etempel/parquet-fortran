@@ -27,6 +27,7 @@ program tester
     use test_sort, only : collect_tests_sort
     use test_temporal, only : collect_tests_parquet_temporal
     use test_table, only : collect_tests_parquet_table
+    use test_table_codegen, only : collect_tests_table_codegen
     use parquet_bindings, only : parquet_warmup_memory_pool
     !
     implicit none
@@ -73,7 +74,8 @@ program tester
         new_testsuite("filter", collect_tests_filter), &
         new_testsuite("filter_screen", collect_tests_filter_screen), &
         new_testsuite("sort", collect_tests_sort), &
-        new_testsuite("table", collect_tests_parquet_table) &
+        new_testsuite("table", collect_tests_parquet_table), &
+        new_testsuite("table_codegen", collect_tests_table_codegen) &
         ]
     !
     ! command line argument for a specific testsuite and test

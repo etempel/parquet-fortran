@@ -761,6 +761,20 @@ contains
                 test_table_add_column_duplicate_force_false_aborts), &
             new_unittest("row_group_bounds on an in-memory table aborts", &
                 test_table_row_group_bounds_in_memory_aborts), &
+            new_unittest("binding a predefined column the file lacks aborts", &
+                test_table_bind_missing_column_aborts), &
+            new_unittest("binding a predefined column of the wrong width aborts", &
+                test_table_bind_width_mismatch_aborts), &
+            new_unittest("binding a string column as a numeric kind aborts", &
+                test_table_bind_kind_refused_aborts), &
+            new_unittest("dropping a predefined column without force= aborts", &
+                test_table_drop_predefined_aborts), &
+            new_unittest("a generated accessor's out-of-range row index aborts", &
+                test_codegen_row_index_out_of_range_aborts), &
+            new_unittest("a generated accessor's out-of-range row range aborts", &
+                test_codegen_range_out_of_range_aborts), &
+            new_unittest("opening a generated table on a file missing a column aborts", &
+                test_codegen_missing_file_column_aborts), &
             new_unittest("set into an incompatible column kind aborts", &
                 test_table_set_kind_mismatch_aborts), &
             new_unittest("get_file_metadata on an in-memory table aborts", &
@@ -1350,6 +1364,55 @@ contains
             failure_message="row_group_bounds on an in-memory table was expected to abort", &
             required_stderr="this table was not opened from a file")
     end subroutine test_table_row_group_bounds_in_memory_aborts
+
+    subroutine test_table_bind_missing_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_bind_missing_column", expect_abort=.true., &
+            failure_message="binding a predefined column the file lacks was expected to abort", &
+            required_stderr="but this file has no such column")
+    end subroutine test_table_bind_missing_column_aborts
+
+    subroutine test_table_bind_width_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_bind_width_mismatch", expect_abort=.true., &
+            failure_message="binding a predefined column of the wrong width was expected to abort", &
+            required_stderr="but the file holds 1 value(s) per row")
+    end subroutine test_table_bind_width_mismatch_aborts
+
+    subroutine test_table_bind_kind_refused_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_bind_kind_refused", expect_abort=.true., &
+            failure_message="binding a string column as float64 was expected to abort", &
+            required_stderr="only the numeric kinds convert into one another")
+    end subroutine test_table_bind_kind_refused_aborts
+
+    subroutine test_table_drop_predefined_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_drop_predefined", expect_abort=.true., &
+            failure_message="dropping a predefined column without force= was expected to abort", &
+            required_stderr="this is a predefined column")
+    end subroutine test_table_drop_predefined_aborts
+
+    subroutine test_codegen_row_index_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "codegen_row_index_out_of_range", expect_abort=.true., &
+            failure_message="an out-of-range row index on a generated accessor was expected to abort", &
+            required_stderr="row index out of range for column 'ra'")
+    end subroutine test_codegen_row_index_out_of_range_aborts
+
+    subroutine test_codegen_range_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "codegen_range_out_of_range", expect_abort=.true., &
+            failure_message="an out-of-range row range on a generated accessor was expected to abort", &
+            required_stderr="row range out of range for column 'ra'")
+    end subroutine test_codegen_range_out_of_range_aborts
+
+    subroutine test_codegen_missing_file_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "codegen_missing_file_column", expect_abort=.true., &
+            failure_message="opening a generated table on a file missing a declared column was expected to abort", &
+            required_stderr="but this file has no such column")
+    end subroutine test_codegen_missing_file_column_aborts
 
     subroutine test_table_set_kind_mismatch_aborts(error)
         type(error_type), allocatable, intent(out) :: error

@@ -1461,6 +1461,58 @@ columns *this call* made resident are released afterwards — a column the progr
 stays exactly as it was. A violation is reported the way it would be on an ordinary read (an
 abort, or a warning under `qc_soft=`), and a table with no qc declared is a no-op.
 
+## Extending `parquet_table` with your own type
+
+`parquet_table` is designed to be extended, and two public entry points exist for that. Most
+programs meet them through a [generated table type](generated-tables.html), which is the intended
+way in — but both are ordinary API and work just as well on a type you write by hand.
+
+**`clone_extra` is the hook `%clone` calls for an extension's own components.** `%clone` and
+`%clone_structure` copy everything `parquet_table` itself holds, and cannot know about components
+an extending type added; overriding this hook is how those come across. Both call it as their last
+action, dispatching on the source's dynamic type, so an override runs wherever either is used:
+
+```fortran
+type, extends(parquet_table) :: my_table
+    real(real64) :: zeropoint = 0.0_real64
+contains
+    procedure :: clone_extra => my_clone_extra
+end type my_table
+...
+subroutine my_clone_extra(self, out, structure_only)
+    class(my_table), intent(in) :: self
+    class(parquet_table), intent(inout) :: out
+    logical, intent(in) :: structure_only   ! .true. when called from %clone_structure
+    select type (out)
+    class is (my_table)                     ! `class is`, so a further extension still gets this
+        out%zeropoint = self%zeropoint
+    end select
+end subroutine my_clone_extra
+```
+
+`%clone` has already checked that source and destination have the same dynamic type, so the
+guarded branch always matches. **Without an override, an added component arrives
+default-initialized and nothing reports it** — which is why the generator writes these assignments
+for you.
+
+A concrete-typed override of `%clone` itself is not possible: an overriding procedure has to keep
+every dummy argument's characteristics, so `out` cannot be narrowed from `class(parquet_table)`.
+This hook is the supported substitute, and it keeps one name for one operation.
+
+**`%bind_predefined` is what a generated type's `%init` calls.** It takes a column's declared name,
+kind, width and whether it comes from the file, then checks each one against the file, converts it
+to the declared kind, reads them all in one pass, and marks the slot *predefined* — which is what
+makes `%drop_column` refuse it without `force=.true.`. It is public because a generated module is
+a different module and `parquet_table`'s components are private; hand-written code that opened a
+table with `parquet_open_table` already reaches every column by name and rarely needs it. See
+[Generated table types](generated-tables.html) for the full contract.
+
+**Opening an extension** goes through the parent component:
+`call parquet_open_table(t%parquet_table, filename)`. `parquet_open_table`'s dummy is
+non-polymorphic on purpose, so an extension that needs a binding step cannot be opened without it.
+`parquet_write_table`, by contrast, takes `class(parquet_table)` and accepts an extending type
+directly.
+
 ## Current limitations
 
 This is still a deliberately narrow version of the table layer.

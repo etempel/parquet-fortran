@@ -43,6 +43,7 @@ working rules).
   - [A module procedure cannot implement its own submodule's spec-declared interface](#a-module-procedure-cannot-implement-its-own-submodules-spec-declared-interface)
   - [Naming conventions](#naming-conventions)
   - [Public numeric arguments: provide both int32 and int64 kinds](#public-numeric-arguments-provide-both-int32-and-int64-kinds)
+  - [Role-A MAMLs live in `table_types/`, not `schemas/`](#role-a-mamls-live-in-table_types-not-schemas)
   - [MAML fixture directory: `schemas/`](#maml-fixture-directory-schemas)
   - [Reading MAML source files: shared helper, line-length limit, CRLF handling](#reading-maml-source-files-shared-helper-line-length-limit-crlf-handling)
   - [Error stop messages: include file/schema context](#error-stop-messages-include-fileschema-context)
@@ -542,7 +543,10 @@ template inside the script — and re-run it. Currently generated: `src/parquet_
 `tools/generate_parquet_columns.py`, whose kind table is the single place a supported column kind is
 declared), and `src/parquet_tables.f90`, `src/parquet_tables_access.f90`,
 `src/parquet_tables_addcol.f90`, `src/parquet_tables_materialize.f90` (from
-`tools/generate_parquet_tables.py`, which imports that same kind table). **`src/parquet_tables.f90` is
+`tools/generate_parquet_tables.py`, which imports that same kind table). **A generated file can also
+live outside `src/`**: `test/parquet_table_test.f90` is emitted by `tools/generate_user_table_code.py`
+from `table_types/maml_example4.maml` (see "Role-A MAMLs live in `table_types/`" below), and is
+committed and `--check`ed exactly like the rest. **`src/parquet_tables.f90` is
 the one most likely to be edited by mistake**, because it is the table layer's module spec — every
 type-bound binding and every interface body lives there, so adding a `parquet_table` procedure means
 editing the generator's literal template text, not the file it emits. Treat this list as a snapshot —
@@ -762,6 +766,19 @@ sharing one private `_impl` worker between the two (mirrors `add_col_qc_impl`'s 
 shared-worker pattern) — see `parquet_read_array_row_mode`'s `row_index` (12 specifics: 6 data
 types x `integer(int32)`/`integer(int64)` row_index, each pair delegating to one
 `parquet_read_<type>_array_row_mode_impl`).
+
+### Role-A MAMLs live in `table_types/`, not `schemas/`
+
+Two directories hold `.maml` files, and they are read for opposite purposes. `schemas/` describes
+files the library **writes** (and is globbed wholesale into `src/parquet_maml_base.f90` by
+`tools/generate_parquet_maml.sh base`, so anything dropped in there becomes a compiled-in fixture).
+`table_types/` holds **Role-A** schemas — the input to `tools/generate_user_table_code.py`, which
+turns each one into a named `parquet_table` extension type. A Role-A MAML put in `schemas/` by
+mistake is not an error and does not fail anything; it just silently becomes an embedded base
+fixture it was never meant to be, and shows up in `parquet_maml_base`'s generated accessor list.
+
+Both generators take `--dir=` with those names as defaults, so a downstream project gets the same
+split without being forced into it.
 
 ### MAML fixture directory: `schemas/`
 

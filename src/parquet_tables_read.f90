@@ -506,6 +506,27 @@ contains
         integer :: ngroups
         !
         parallel_prefetch_ok = .false.
+#ifdef __INTEL_COMPILER
+        ! ifx (confirmed on 2026.1) miscompiles the `!$omp parallel do` region in
+        ! materialize_marked_parallel below: every thread that actually enters the region
+        ! segfaults inside a compiler-generated `PARQUET_READER.omp.mold_ctor` ->
+        ! `for_alloc_private` -> `do_alloc_copy` -> `copy_src_xdesc_to_dest_xdesc` chain, confirmed
+        ! by a gdb backtrace on every crashing thread, reproducible with as few as 2 OpenMP
+        ! threads and 100% of the time -- this is not a race, a stack-size issue, or dependent on
+        ! team size. It reproduces identically whether the per-thread `parquet_reader` is declared
+        ! in a `block` inside the loop body (the gfortran-safe pattern documented in CLAUDE.md's
+        ! "Never give a FINALIZABLE derived type to OpenMP's private()") or moved to a plain shared
+        ! array indexed by thread number outside the region entirely -- so this is not the same
+        ! failure mode CLAUDE.md already documents for gfortran, and the gfortran-safe workaround
+        ! does not fix it. Root cause not narrowed further than "ifx's OpenMP outlining generates
+        ! broken privatization scaffolding for a finalizable derived type (parquet_reader has a
+        ! `final ::` binding) referenced inside a parallel construct" -- disabling this one
+        ! optimization is the only confirmed-safe fix found so far, and %materialize_all/%prefetch
+        ! fall back to the ordinary serial path here, which is unaffected and fully correct, just
+        ! not internally multi-threaded under ifx. Re-test against a newer ifx release before
+        ! re-enabling.
+        return
+#endif
 #ifdef _OPENMP
         if (omp_get_max_threads() <= 1) return
         if (omp_in_parallel()) return
@@ -554,13 +575,30 @@ contains
     !! cache-level scalar the materialize path sets, and it is set here, once, before the region.
     !! `parallel_prefetch_ok` has already established that a freshly opened reader sees the same
     !! rows as the table's own -- do not relax that without re-reading its own comment.
+    !!
+    !! **Every thread's own `parquet_reader` lives in a SHARED array, indexed by thread number, and
+    !! is allocated BEFORE the region -- never as a block-local variable inside it.** CLAUDE.md's
+    !! rule against giving a finalizable type to OpenMP's `private()` covers gfortran's failure mode
+    !! (an uninitialized private copy); ifx has a DIFFERENT, sharper failure mode for the very
+    !! `block`-local workaround that fixes gfortran: ifx still generates OpenMP privatization
+    !! machinery for a finalizable type declared inside a `block` lexically nested in a parallel
+    !! region (its own compiler-generated `<type>.omp.mold_ctor`), and that machinery segfaults
+    !! inside `copy_src_xdesc_to_dest_xdesc` on this toolchain (confirmed via gdb backtrace,
+    !! ifx 2026.1 / libiomp5) -- reliably, on every thread, the instant more than one OpenMP thread
+    !! actually runs the region, independent of team size. Indexing into a pre-allocated array
+    !! sidesteps the whole mechanism: no derived-type instance is constructed inside the parallel
+    !! construct at all, only a reference to an already-existing element of a shared array, which is
+    !! the same "distinct slot per thread" shape `cache%cols(i)` already relies on above.
     subroutine materialize_marked_parallel(cache, sc, want)
+        use omp_lib, only : omp_get_thread_num, omp_get_max_threads
         type(parquet_table_cache), intent(inout) :: cache !! the column store.
         type(table_scope), intent(in) :: sc               !! rows this table covers.
         logical, intent(in) :: want(:)                    !! .true. for each slot to read.
-        integer :: i, g, ngroups
+        integer :: i, g, ngroups, t, nslots
         integer, allocatable :: g_lo(:), g_hi(:)
         character(len=:), allocatable :: top, prev_top
+        type(parquet_reader), allocatable :: readers(:)
+        logical, allocatable :: reader_open(:)
         !
         call count_top_level_groups(cache, want, ngroups)
         allocate(g_lo(ngroups), g_hi(ngroups))
@@ -577,34 +615,44 @@ contains
             prev_top = top
         end do
         cache%reads_started = .true.
-        !$omp parallel do default(shared) private(g) schedule(dynamic)
+        ! One slot per thread the team could possibly use, allocated up front so the region below
+        ! only ever indexes an existing element -- see this subroutine's own doc-comment.
+        nslots = omp_get_max_threads()
+        allocate(readers(nslots))
+        allocate(reader_open(nslots))
+        reader_open = .false.
+        !$omp parallel do default(shared) private(g, t) schedule(dynamic)
         do g = 1, ngroups
             block
-                ! Declared HERE, not in a private() clause: parquet_reader is finalizable, and
-                ! gfortran does not reliably default-initialise a private copy of such a type --
-                ! the first finalization then frees an undefined pointer (see CLAUDE.md). Block
-                ! scope gives ordinary initialization and finalization instead.
-                type(parquet_reader) :: rdr
                 integer :: k
                 !
-                ! Arrow's own per-column threading is deliberately left ENABLED here rather than
-                ! disabled to avoid oversubscription: measured both ways on a 24-column x 900k-row
-                ! file, 8 OpenMP threads -- 0.037-0.040 s with Arrow threading on, 0.046-0.047 s
-                ! with use_threads=.false. Nesting the two is faster, not slower, so the obvious
-                ! "one level of parallelism only" instinct is wrong here. Re-measure before
-                ! changing it.
-                call parquet_open_reader(rdr, cache%source_file)
+                t = omp_get_thread_num() + 1
+                ! Opened once per thread, on that thread's own slot, and reused across every group
+                ! the scheduler hands to this thread -- reopening per group would pay Arrow's
+                ! reader-construction cost once per top-level name instead of once per thread.
+                if (.not. reader_open(t)) then
+                    ! Arrow's own per-column threading is deliberately left ENABLED here rather
+                    ! than disabled to avoid oversubscription: measured both ways on a
+                    ! 24-column x 900k-row file, 8 OpenMP threads -- 0.037-0.040 s with Arrow
+                    ! threading on, 0.046-0.047 s with use_threads=.false. Nesting the two is
+                    ! faster, not slower, so the obvious "one level of parallelism only" instinct
+                    ! is wrong here. Re-measure before changing it.
+                    call parquet_open_reader(readers(t), cache%source_file)
+                    reader_open(t) = .true.
+                end if
                 do k = g_lo(g), g_hi(g)
                     if (.not. materialize_wanted(cache, want, k)) cycle
-                    call table_materialize(cache, sc, k, rdr)
+                    call table_materialize(cache, sc, k, readers(t))
                 end do
                 ! One release per group, on this thread's own reader, exactly as the serial loop
                 ! releases one top-level name once.
-                call table_release_one(cache, cache%cols(g_lo(g))%file_name, rdr)
-                call parquet_close_reader(rdr)
+                call table_release_one(cache, cache%cols(g_lo(g))%file_name, readers(t))
             end block
         end do
         !$omp end parallel do
+        do t = 1, nslots
+            if (reader_open(t)) call parquet_close_reader(readers(t))
+        end do
     end subroutine materialize_marked_parallel
     !
     module procedure table_materialize_every

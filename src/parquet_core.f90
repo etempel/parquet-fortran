@@ -22,7 +22,8 @@ module parquet_core
     ! What this import is for is the limit aliases a few lines below.
     use parquet_settings, only: parquet_max_filter_rule_len, parquet_max_filter_depth, &
         parquet_max_filter_nodes, parquet_max_sort_keys, parquet_max_sort_key_len, &
-        parquet_max_maml_line_len
+        parquet_max_maml_line_len, parquet_valid_compressions, &
+        parquet_resolve_writer_compression, parquet_get_default_use_threads
     use parquet_maml_base, only: parquet_maml_file, parquet_maml_missing_column, parquet_maml_col_map_entry
     use parquet_strings, only: parquet_string_column, parquet_string
     use parquet_temporal, only: parquet_date, parquet_time, parquet_timestamp, &

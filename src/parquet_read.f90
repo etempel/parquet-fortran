@@ -717,7 +717,7 @@ contains
         logical :: use_threads_value, qc_effective, qc_soft_value, filter_will_apply
         character(len=:), allocatable :: name_suffix !! scratch (reader_filename_suffix).
 
-        use_threads_value = .true.
+        use_threads_value = parquet_get_default_use_threads()
         if (present(use_threads)) use_threads_value = use_threads
 
         reader%handle = create_parquet_reader(trim(filename)//char(0), merge(1_c_int, 0_c_int, use_threads_value))

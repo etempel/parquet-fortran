@@ -65,6 +65,68 @@ threads it wants while keeping parquet reads and writes to a smaller share.
 `n` must be at least 1; anything lower aborts. There is no "auto" value — Arrow's own starting
 capacity is hardware-derived, and `parquet_reset_settings` is how you get it back.
 
+## Threads for sorting
+
+`parquet_set_sort_threads(n)` caps how many threads a sort uses when it is not given an explicit
+`threads=`. It covers every sort in the library at once — `pf_sort`/`pf_argsort` and friends, a
+read-time `parquet_open_reader(..., sort_by=)`, and `parquet_table%sort_by` — because all three run
+on one engine and ask one question.
+
+```fortran
+call parquet_set_sort_threads(4)     ! sorting uses at most 4 threads
+n = pf_sort_threads()                ! what a sort would actually use right here
+```
+
+Read per sort call, so it takes effect immediately. `0` restores automatic behaviour. Three
+properties are worth knowing, because each surprises someone:
+
+- **It is a cap, never a request.** Setting it above `OMP_NUM_THREADS` changes nothing; the library
+  never asks for threads OpenMP has not been given.
+- **It does not override an explicit `threads=`.** A caller who names a thread count means it.
+- **It does not lift the serial answer inside an OpenMP parallel region.** An unqualified sort
+  called from inside your own parallel region stays serial, whatever this is set to — otherwise
+  eight threads would each spawn eight more, which is slower than not threading at all. Pass
+  `threads=` explicitly if you really want a threaded sort in there.
+
+`pf_sort_threads()` reports the resolved answer for the current context; `parquet_get_sort_threads()`
+reports the raw setting (`0` when automatic).
+
+## Threads for reading a table
+
+`parquet_set_prefetch_threads(n)` caps the threads `parquet_table%prefetch` and `%materialize_all`
+use to read several columns at once, each on its own reader. Like the sort cap it is a cap rather
+than a request, read per call, with `0` meaning automatic.
+
+`1` makes the prefetch serial. That is not a special case in the library — a one-thread cap simply
+fails the same applicability test that a single-threaded OpenMP environment already fails, and the
+ordinary serial path takes over.
+
+## Writer defaults
+
+`parquet_set_default_compression(name)` and `parquet_set_default_compression_level(n)` supply what
+`parquet_open_writer` uses when the caller passes no `compression=`/`compression_level=`, and
+`parquet_set_default_use_threads(flag)` does the same for `use_threads=` on both writers and
+readers. All three are captured **at open**: a reader or writer already open keeps what it was
+opened with.
+
+```fortran
+call parquet_set_default_compression("gzip")
+call parquet_set_default_compression_level(6)
+! every parquet_open_writer from here on defaults to gzip level 6
+```
+
+The codec must be one of `uncompressed`, `snappy`, `gzip`, `zstd`, `brotli`, `lz4`
+(case-insensitive); anything else aborts, against the same list the `compression=` argument itself is
+checked against. The *level* is not validated here, because the valid range belongs to the codec —
+zstd, gzip and brotli each accept a different one, and snappy and lz4 have no levels at all — so an
+out-of-range level is reported by the codec when a writer is actually opened with it.
+
+**One rule that is easy to trip over.** The library's default level of 3 is tuned for its own default
+codec, so it applies only when the codec was left alone **both** as an argument and as a setting.
+Choose a codec by either route and the level falls back to that codec's own default unless you set a
+level too. That is deliberate: it stops a zstd-tuned level being attached to, say, snappy just
+because you changed the codec.
+
 ## Restoring and inspecting
 
 `parquet_reset_settings()` restores every setting to what it was before your program changed it. For
@@ -84,6 +146,11 @@ call parquet_print_settings()
 ```
 parquet-fortran settings
   arrow_threads                    8
+  sort_threads                     0
+  prefetch_threads                 0
+  default_compression              zstd
+  default_compression_level        3
+  default_use_threads              true
 limits (read-only)
   parquet_max_filter_rule_len      8192
   parquet_max_filter_depth         32

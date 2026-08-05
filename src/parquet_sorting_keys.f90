@@ -1032,9 +1032,11 @@ contains
     end procedure check_permutation
     !
     module procedure pf_sort_threads
+        use parquet_settings, only : parquet_get_sort_threads
 #ifdef _OPENMP
         use omp_lib, only : omp_get_max_threads, omp_in_parallel
 #endif
+        integer :: cap
         !
         n = 1
 #ifdef _OPENMP
@@ -1047,6 +1049,15 @@ contains
         ! resolve_thread_count, which only consults this when the caller said nothing.
         if (.not. omp_in_parallel()) n = omp_get_max_threads()
 #endif
+        ! parquet_set_sort_threads CAPS the automatic answer; it never raises it, and it never
+        ! overrides the parallel-region rule above -- a caller who capped sorting at 8 said nothing
+        ! about what should happen inside someone else's parallel region, and lifting the serial
+        ! answer back to 8 there is exactly the T*T oversubscription that rule exists to prevent.
+        ! This is the ONE place the setting is read: Risk-40 records that pf_sort_threads is public
+        ! precisely so a read-time sort_by= and a raw-array sort ask the same question, and a second
+        ! reader is how the two would come to disagree.
+        cap = parquet_get_sort_threads()
+        if (cap > 0 .and. cap < n) n = cap
     end procedure pf_sort_threads
     !
     module procedure resolve_thread_count

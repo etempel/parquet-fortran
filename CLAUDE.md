@@ -373,7 +373,7 @@ instead — expect it to be very noisy (several thousand warnings), dominated by
 
 **The one category that is genuinely load-bearing is `Unknown entity`,** which is the
 use-association accessibility limitation documented under "FORD config gotchas" and sits at a
-stable **17** (14 `public ::` re-exports in `parquet_core.f90` plus 3 `private ::` statements in
+stable **19** (14 `public ::` re-exports in `parquet_core.f90` plus 5 `private ::` statements in
 the `parquet` facade). Compare *that*
 number across a change, not the total: it is the only one that moves for a real reason. When a
 before/after total does move, break the delta down by category
@@ -471,14 +471,18 @@ Keep new code to the same standard:
   (https://github.com/Fortran-FOSS-Programmers/ford/issues/738).
 - **FORD 7.0.13 cannot resolve a `use`-association accessibility statement** — an
   `Unknown entity '<name>' with attribute '<public|private>' in module '<m>'` warning, currently
-  **17** of them and the one FORD number worth tracking across a change. Two independent groups:
+  **19** of them and the one FORD number worth tracking across a change. Two independent groups:
   **14 `public ::`** re-exports in `parquet_core.f90` (`parquet_date`/`parquet_time`/
   `parquet_timestamp` and the eight `parquet_unit_*`/`parquet_ns_*` constants from
   `parquet_temporal`; `parquet_string`/`parquet_string_column` from `parquet_strings`;
   `parquet_maml_file` from `parquet_maml_base`), which FORD silently drops from that module's
-  generated page; and **3 `private ::`** statements in the `parquet` facade (`c_int` and the two
-  `parquet_get_*_version` bindings), which are the facade's only way to keep those names out of the
-  namespace `use parquet` hands a user, so they cannot be removed. **Confirmed not fixable from
+  generated page; and **5 `private ::`** statements in the `parquet` facade (`c_int`, the two
+  `parquet_get_*_version` bindings, and `parquet_valid_compressions`/
+  `parquet_resolve_writer_compression` from `parquet_settings`), which are the facade's only way to
+  keep those names out of the namespace `use parquet` hands a user, so they cannot be removed.
+  **This number rises by one for each name a future `private ::` in the facade hides**, which is
+  the expected cost of keeping a sibling module's internal plumbing out of the public namespace —
+  a rise of exactly that size is not a regression. **Confirmed not fixable from
   source**: for the `public ::` group, neither adding a `!>` doc-comment directly on the line, nor
   an explicit `use ..., only: name1, name2` import list (already how these modules are imported),
   nor a bare unrestricted `use` with no `only:` at all changes anything — all three were tried

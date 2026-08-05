@@ -436,11 +436,11 @@ contains
         character(len=:), allocatable :: compression_name, col_out_name
         integer :: level_value, chunk_size_value
         logical :: comp_ok
-        logical :: compression_defaulted
         logical :: use_threads_value
         logical :: overwrite_value, file_exists
-        character(len=12), parameter :: valid_compressions(6) = [character(len=12) :: &
-            "uncompressed", "snappy", "gzip", "zstd", "brotli", "lz4"]
+        !> An alias derived from parquet_settings' own list, never a second copy of it: the setter
+        !! and this argument check must accept exactly the same set of codecs.
+        character(len=12), parameter :: valid_compressions(6) = parquet_valid_compressions
 
         overwrite_value = .true.
         if (present(overwrite)) overwrite_value = overwrite
@@ -464,12 +464,12 @@ contains
         ! library intentionally goes one step further: zstd at a moderate level gives a
         ! meaningfully better compression ratio than snappy for a modest write-time cost,
         ! with no read-time penalty (see the compression benchmark backing this decision).
-        ! The default level (3) only applies when compression itself is left absent --
-        ! an explicit compression="zstd" with no compression_level still falls through to
-        ! Arrow's own codec default (level 1) a few lines down, unchanged from before.
-        compression_defaulted = .not. present(compression)
-        compression_name = "zstd"
-        if (present(compression)) call parquet_to_lower(trim(compression), compression_name)
+        ! Both defaults are overridable process-wide (parquet_set_default_compression /
+        ! ..._level), and the whole resolution -- including the rule that level 3 applies only
+        ! when the codec was defaulted all the way -- lives in one place rather than here; see
+        ! parquet_resolve_writer_compression (src/parquet_settings.f90) for why that condition
+        ! is load-bearing.
+        call parquet_resolve_writer_compression(compression, compression_level, compression_name, level_value)
 
         comp_ok = .false.
         do jc = 1, size(valid_compressions)
@@ -483,15 +483,10 @@ contains
                 "' (expected one of: uncompressed, snappy, gzip, zstd, brotli, lz4) (file: " // trim(filename) // ")"
         end if
 
-        level_value = -huge(level_value) - 1 ! Arrow's kUseDefaultCompressionLevel sentinel (INT_MIN):
-                                              ! "use the codec's own default".
-        if (compression_defaulted) level_value = 3 ! This library's own default level for the default "zstd" codec.
-        if (present(compression_level)) level_value = compression_level
-
         chunk_size_value = -1 ! <= 0 tells the C++ side "not set": auto-size from the final row count at close time.
         if (present(chunk_size)) chunk_size_value = chunk_size
 
-        use_threads_value = .true.
+        use_threads_value = parquet_get_default_use_threads()
         if (present(use_threads)) use_threads_value = use_threads
 
         call parquet_set_writer_options(writer%handle, trim(compression_name)//char(0), &

@@ -528,7 +528,7 @@ contains
         return
 #endif
 #ifdef _OPENMP
-        if (omp_get_max_threads() <= 1) return
+        if (prefetch_thread_count() <= 1) return
         if (omp_in_parallel()) return
         if (sc%detached) return
         if (.not. cache%file_backed) return
@@ -543,6 +543,55 @@ contains
 #endif
     end function parallel_prefetch_ok
     !
+    !> How many threads a parallel prefetch may use: as many as OpenMP offers, capped by
+    !> parquet_set_prefetch_threads when that was set. A CAP only -- the setting can never ask for
+    !> more threads than OpenMP has been given, so setting it above OMP_NUM_THREADS changes nothing.
+    !>
+    !> `1` needs no special case anywhere: it makes parallel_prefetch_ok decline through the same
+    !> test that already handles a single-threaded OpenMP environment, and the serial path takes
+    !> over. The one thing this must stay is the SINGLE source of that number -- it sizes the
+    !> per-thread reader array AND limits the team, and those two disagreeing is an out-of-bounds
+    !> index rather than a slowdown.
+    integer function prefetch_thread_count() result(n)
+        use parquet_settings, only : parquet_get_prefetch_threads
+#ifdef _OPENMP
+        use omp_lib, only : omp_get_max_threads
+#endif
+        integer :: cap
+        !
+        n = 1
+#ifdef _OPENMP
+        n = omp_get_max_threads()
+#endif
+        cap = parquet_get_prefetch_threads()
+        if (cap > 0 .and. cap < n) n = cap
+    end function prefetch_thread_count
+
+    !> Records, for the test suite only, how many threads the last parallel prefetch was given.
+    !>
+    !> The count is Fortran-side state with no other way out: parquet_table's components are private
+    !> and the number is a local of the region below, so nothing outside could observe whether
+    !> parquet_set_prefetch_threads had any effect -- and a knob that is stored but never acted on
+    !> passes every set/get test ever written for it (feature_risks.md Risk-41). Pushing it to a C++
+    !> global keeps the hook out of the library's own Fortran interface, which CLAUDE.md's
+    !> "A Fortran-side debug hook has to be PUBLIC, so prefer a C++ one" asks for.
+    !>
+    !> Called once per prefetch, on a path that has just opened parquet readers and is about to
+    !> decode whole columns, so the cost is unmeasurable. **That ratio is the rule**: a debug hook
+    !> may sit on a coarse operation like this one, never on a per-row or per-element path.
+    subroutine parquet_debug_note_prefetch_threads(n)
+        use iso_c_binding, only : c_int64_t
+        integer(int64), intent(in) :: n !! threads the region was given.
+        interface
+            subroutine set_used(k) bind(C, name="parquet_debug_set_prefetch_threads_used")
+                import :: c_int64_t
+                integer(c_int64_t), value :: k
+            end subroutine set_used
+        end interface
+        !
+        call set_used(int(n, c_int64_t))
+    end subroutine parquet_debug_note_prefetch_threads
+
     !> Counts the distinct top-level names this pass will read. Slots are in file schema order, so
     !! a struct's leaves are adjacent and a change of top-level name starts a new group.
     subroutine count_top_level_groups(cache, want, ngroups)
@@ -616,12 +665,14 @@ contains
         end do
         cache%reads_started = .true.
         ! One slot per thread the team could possibly use, allocated up front so the region below
-        ! only ever indexes an existing element -- see this subroutine's own doc-comment.
-        nslots = omp_get_max_threads()
+        ! only ever indexes an existing element -- see this subroutine's own doc-comment. This must
+        ! be the SAME number the region is limited to below, or a thread indexes past the end.
+        nslots = prefetch_thread_count()
         allocate(readers(nslots))
         allocate(reader_open(nslots))
         reader_open = .false.
-        !$omp parallel do default(shared) private(g, t) schedule(dynamic)
+        call parquet_debug_note_prefetch_threads(int(min(nslots, ngroups), int64))
+        !$omp parallel do default(shared) private(g, t) schedule(dynamic) num_threads(nslots)
         do g = 1, ngroups
             block
                 integer :: k

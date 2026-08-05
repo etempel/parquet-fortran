@@ -318,6 +318,12 @@ program error_scenarios
         call scenario_sortkey_remap_name_too_long()
     case ("set_max_threads_zero")
         call scenario_set_max_threads_zero()
+    case ("settings_bad_codec")
+        call scenario_settings_bad_codec()
+    case ("settings_negative_sort_threads")
+        call scenario_settings_negative_sort_threads()
+    case ("settings_negative_prefetch_threads")
+        call scenario_settings_negative_prefetch_threads()
     case ("read_qc_entry_too_long")
         call scenario_read_qc_entry_too_long()
     case ("read_qc_remap_size_mismatch")
@@ -3710,6 +3716,29 @@ contains
         call parquet_set_max_threads(0)   ! -> aborts (capacity must be >= 1)
         print '(a)', "unexpectedly accepted a thread-pool capacity of 0"
     end subroutine scenario_set_max_threads_zero
+
+    !> A codec name outside the supported set. Validated against the same list parquet_open_writer
+    !> checks its own compression= argument against, so a codec cannot be settable as a default and
+    !> rejected as an argument, or the reverse.
+    subroutine scenario_settings_bad_codec()
+
+        call parquet_set_default_compression("lzma")   ! -> aborts (unknown codec)
+        print '(a)', "unexpectedly accepted an unknown default compression codec"
+    end subroutine scenario_settings_bad_codec
+
+    !> A negative thread cap. 0 is legal and means "automatic"; below that is meaningless.
+    subroutine scenario_settings_negative_sort_threads()
+
+        call parquet_set_sort_threads(-1)   ! -> aborts (must be >= 0)
+        print '(a)', "unexpectedly accepted a negative sort thread cap"
+    end subroutine scenario_settings_negative_sort_threads
+
+    !> The prefetch cap's own version of the same guard.
+    subroutine scenario_settings_negative_prefetch_threads()
+
+        call parquet_set_prefetch_threads(-4)   ! -> aborts (must be >= 0)
+        print '(a)', "unexpectedly accepted a negative prefetch thread cap"
+    end subroutine scenario_settings_negative_prefetch_threads
 
     !> An empty key names no column.
     subroutine scenario_sort_empty_key()

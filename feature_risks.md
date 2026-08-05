@@ -33,11 +33,11 @@ Four sections, and **a risk keeps its number when it moves between them**:
 the whole document; moving one between sections (a proposal getting written, a covered property
 regressing) **never** renumbers it, so a reference from `CLAUDE.md`, `feature_table.md`,
 `tools/check_source_conventions.py` or a code comment stays valid for good. **A new risk takes the
-next unused number — `Risk-31` today — and goes in "1. New risks"** until it has been triaged.
+next unused number — `Risk-42` today — and goes in "1. New risks"** until it has been triaged.
 Numbers of deleted entries are not reused, so a stale reference resolves to nothing rather than to
 the wrong risk.
 
-**Counts today: 26 covered, 0 proposed, 4 not testable.** Section 2 being empty is the healthy
+**Counts today: 36 covered, 0 proposed, 5 not testable.** Section 2 being empty is the healthy
 state rather than a finished one — it means every risk currently identified as testable has its
 test. Seven entries are covered by something other than a unit test, deliberately: Risk-1 by a
 maintainer check under `app/` with a `tools/*.sh` wrapper (it measures memory, so it needs its own
@@ -105,6 +105,7 @@ something a reader is expected to have.
 | [Risk-38](#risk-38--pf_argminmaxs-two-ends-must-ask-the-same-question) | `pf_argminmax`'s two ends must ask the same question | 4 — covered |
 | [Risk-39](#risk-39--a-silently-serial-threads-passes-every-correctness-test) | A silently serial `threads=` passes every correctness test | 4 — covered |
 | [Risk-40](#risk-40--auto-threading-must-stay-serial-inside-a-parallel-region) | Auto threading must stay serial inside a parallel region | 4 — covered |
+| [Risk-41](#risk-41--a-setting-that-is-never-read-passes-every-test-written-for-it) | A setting that is never read passes every test written for it | 4 — covered |
 
 ---
 
@@ -112,7 +113,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-41**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-42**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -1498,3 +1499,52 @@ three cases from one test: auto outside a region resolves, auto inside resolves 
 
 **What this still forbids:** do not "simplify" `pf_sort_threads` to a bare `omp_get_max_threads()`,
 and do not give the read-time sort its own copy of the rule.
+
+---
+
+### Risk-41 — A setting that is never read passes every test written for it
+
+A `parquet_settings` knob is a module variable that some **other** file has to consult:
+`cfg_sort_threads` is read in `pf_sort_threads` (`src/parquet_sorting_keys.f90`),
+`cfg_prefetch_threads` in `src/parquet_tables_read.f90`, and the compression pair and
+`cfg_default_use_threads` on the writer/reader open paths. If nothing reads one — the read site was
+never added, or was dropped in a later refactor, or the refactor left it reading a different
+variable — then `set` followed by `get` still returns exactly what was set, the factory-default
+assertion still holds, and `parquet_reset_settings` still restores it. **The knob is decorative and
+every obvious test passes.**
+
+This is the same shape as Risk-39 (a `threads=` that is silently ignored returns the correct answer)
+and Risk-35 (a partial sort that never calls the comparator passes a comparison-count test with zero
+invocations). What makes it worse here is that a settings module invites exactly the test that cannot
+detect it: **the set/get round trip is the first thing anyone writes, and it is worth nothing.**
+
+**A second, quieter variant:** the knob is read, but at the wrong moment. A default captured at
+writer *open* behaves completely differently from one consulted per *write*, and a test that sets the
+knob before opening anything cannot tell the two apart. Each knob's documented capture point is part
+of its contract, not an implementation detail.
+
+**Covered by two mechanisms that do not subsume each other**, both required:
+
+- **`check_settings_are_read`** (`tools/check_source_conventions.py`) — every `cfg_*` variable must
+  be read somewhere other than the procedure that writes it. Catches "nothing reads it" statically,
+  for every future knob, without anyone having to remember. Deliberately *not* scoped to "outside the
+  module": `cfg_arrow_threads_initial` is written by `parquet_set_max_threads` and read by
+  `parquet_reset_settings`, a legitimate shape that a file-scoped rule would have to exempt on day
+  one.
+- **A per-knob observed effect with a negative control** (`test/test_settings.f90`). The static check
+  cannot tell whether the read site does the right thing. Nothing generic can observe these, so each
+  knob needed its own instrument: `sort_threads` through `pf_sort_threads`, the compression pair
+  through the SIZE of two files written from identical data, and `prefetch_threads` /
+  `default_use_threads` through two C++ debug hooks added for exactly this purpose
+  (`parquet_debug_get_prefetch_threads_used`, `parquet_debug_get_last_use_threads`), because neither
+  has any observable at all otherwise.
+
+**What this still forbids.** Never add a knob to `parquet_settings` with only a round-trip test —
+that is the test this entry exists to call worthless. And the negative control is not optional: the
+prefetch test asserted only `<= 1` in its first draft, which a counter that is never written
+satisfies at 0, so it passed against a hook that had not been wired up at all. It has to see the
+automatic case report a real thread count **first**.
+
+**One test here is not about any single knob and must not be deleted as redundant:**
+`test_argument_beats_setting`. A resolution written the wrong way round makes the setting beat an
+explicit argument, and every per-knob test still passes.

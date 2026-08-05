@@ -3163,8 +3163,36 @@ extern "C"
 	}
 
 	// Sets compression codec/level, row-group chunk size, and threading on `handle`.
+	// Test-only: the resolved use_threads value the most recently opened reader or writer was
+	// given. parquet_set_default_use_threads' effect is otherwise unobservable -- the value
+	// disappears into a handle with no getter -- so without this the setting could be stored and
+	// never acted on while passing every set/get test (feature_risks.md Risk-41).
+	static int g_debug_last_use_threads = -1;
+
+	int parquet_debug_get_last_use_threads(void)
+	{
+		return g_debug_last_use_threads;
+	}
+
+	// Test-only: how many threads the last parquet_table parallel prefetch was given. Written from
+	// Fortran (parquet_debug_note_prefetch_threads, src/parquet_tables_read.f90) because the number
+	// is Fortran-side state; kept here rather than in a public Fortran procedure so the hook stays
+	// out of the library's own interface.
+	static int64_t g_debug_prefetch_threads_used = 0;
+
+	void parquet_debug_set_prefetch_threads_used(int64_t n)
+	{
+		g_debug_prefetch_threads_used = n;
+	}
+
+	int64_t parquet_debug_get_prefetch_threads_used(void)
+	{
+		return g_debug_prefetch_threads_used;
+	}
+
 	void parquet_set_writer_options(void *handle, const char *compression_name, int compression_level, int64_t chunk_size, int use_threads)
 	{
+		g_debug_last_use_threads = use_threads;
 		auto writer_handle = as_handle(handle);
 		writer_handle->compression_codec = parse_compression_name(compression_name);
 		writer_handle->compression_level = compression_level;
@@ -3942,6 +3970,7 @@ extern "C"
 		// can opt back out via parquet_open_reader(..., use_threads=.false.),
 		// e.g. to avoid oversubscription when many OpenMP threads each hold
 		// their own reader (see "Thread safety" in the README).
+		g_debug_last_use_threads = use_threads;
 		parquet::ArrowReaderProperties reader_properties(/*use_threads=*/use_threads != 0);
 		builder.properties(reader_properties);
 		status = builder.Build(&handle->reader);

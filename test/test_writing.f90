@@ -96,6 +96,8 @@ contains
                 test_compression_uncompressed_larger_than_default), &
             new_unittest("omitting compression defaults to zstd level 3", &
                 test_compression_default_is_zstd3), &
+            new_unittest("defaulted compression differs from explicit zstd with no level", &
+                test_compression_default_level_is_conditional), &
             new_unittest("an unknown compression codec aborts", test_compression_unknown_aborts), &
             new_unittest("overwrite=.false. aborts when the file already exists", &
                 test_overwrite_false_existing_file_aborts), &
@@ -1271,6 +1273,61 @@ contains
         call check(error, default_size /= snappy_size, &
             "expected omitting compression to differ in size from compression=snappy (default should not be snappy)")
     end subroutine test_compression_default_is_zstd3
+
+    !> The level-3 default is CONDITIONAL on the codec having been defaulted: an explicit
+    !> compression="zstd" with no compression_level deliberately falls through to Arrow's own codec
+    !> default (level 1) instead. Nothing asserted that distinction before, so a refactor of
+    !> parquet_open_writer's compression resolution could have collapsed the two cases silently --
+    !> both still write a valid zstd file, and every other compression test would still pass.
+    !>
+    !> Asserted as "the files differ in size", not "the defaulted one is smaller": which of two
+    !> zstd levels wins on a given input is the codec's business, and an ordering assertion would be
+    !> a claim about zstd rather than about this library. The fixture is deliberately only MODERATELY
+    !> compressible (a small rotating vocabulary rather than a run of one repeated character), since
+    !> trivially compressible input can hit the same output size at every level, which would make
+    !> this test vacuous rather than failing.
+    subroutine test_compression_default_level_is_conditional(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        character(len=256) :: values(400)
+        character(len=*), parameter :: defaulted_file = "test_run/test_compression_level_defaulted.parquet"
+        character(len=*), parameter :: explicit_file = "test_run/test_compression_level_explicit.parquet"
+        character(len=8), parameter :: vocab(6) = [character(len=8) :: &
+            "alpha   ", "beta    ", "gamma   ", "delta   ", "epsilon ", "zeta    "]
+        integer(int64) :: defaulted_size, explicit_size
+        logical :: exists
+        integer :: i, j, k
+
+        do i = 1, size(values)
+            values(i) = ""
+            do j = 0, 31
+                k = mod(i*7 + j*j + j/2, size(vocab)) + 1
+                values(i)(j*8+1:j*8+8) = vocab(k)
+            end do
+        end do
+
+        ! Everything defaulted: this library's own zstd level 3.
+        call parquet_open_writer(writer, defaulted_file)
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+
+        ! Codec named explicitly, level left alone: Arrow's own zstd default, NOT level 3.
+        call parquet_open_writer(writer, explicit_file, compression="zstd")
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+
+        inquire(file=defaulted_file, exist=exists, size=defaulted_size)
+        call check(error, exists, "the fully-defaulted output file was not created")
+        if (allocated(error)) return
+
+        inquire(file=explicit_file, exist=exists, size=explicit_size)
+        call check(error, exists, "the explicit compression=zstd output file was not created")
+        if (allocated(error)) return
+
+        call check(error, defaulted_size /= explicit_size, &
+            "expected omitting compression entirely (zstd level 3) to differ in size from an " // &
+            "explicit compression=zstd with no level (Arrow's own codec default)")
+    end subroutine test_compression_default_level_is_conditional
 
     subroutine test_compression_unknown_aborts(error)
         type(error_type), allocatable, intent(out) :: error

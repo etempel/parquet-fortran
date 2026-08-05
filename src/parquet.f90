@@ -58,6 +58,11 @@ module parquet
     private :: c_int
     private :: parquet_get_arrow_version, parquet_get_parquet_version
     private :: cversion
+    ! parquet_settings has to make these two public so the write path (a submodule of parquet_core,
+    ! a different module) can reach them -- Fortran has no package scope. They are plumbing, not
+    ! API, so the facade keeps them out of the namespace `use parquet` hands a user, exactly as it
+    ! does for c_int and the version bindings above.
+    private :: parquet_valid_compressions, parquet_resolve_writer_compression
     !
     character(len=*),parameter:: cversion = "v1.4.0 (2026-08-04)" !! version info
 #ifndef RELEASE_VERSION

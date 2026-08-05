@@ -359,6 +359,12 @@ contains
                 test_sortkey_remap_name_too_long_aborts), &
             new_unittest("settings: a thread-pool capacity below 1 aborts", &
                 test_set_max_threads_zero_aborts), &
+            new_unittest("settings: an unknown default compression codec aborts", &
+                test_settings_bad_codec_aborts), &
+            new_unittest("settings: a negative sort thread cap aborts", &
+                test_settings_negative_sort_threads_aborts), &
+            new_unittest("settings: a negative prefetch thread cap aborts", &
+                test_settings_negative_prefetch_threads_aborts), &
             new_unittest("read_qc: an entry longer than the supported maximum aborts", &
                 test_read_qc_entry_too_long_aborts), &
             new_unittest("read_qc: remap_column_names with mismatched from/to sizes aborts", &
@@ -3335,6 +3341,30 @@ contains
             failure_message="a thread-pool capacity of 0 was expected to abort", &
             required_stderr="parquet_set_max_threads: n must be >= 1")
     end subroutine test_set_max_threads_zero_aborts
+
+    subroutine test_settings_bad_codec_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "settings_bad_codec", expect_abort=.true., &
+            failure_message="an unknown default compression codec was expected to abort", &
+            required_stderr="parquet_set_default_compression: unknown compression codec 'lzma'")
+    end subroutine test_settings_bad_codec_aborts
+
+    subroutine test_settings_negative_sort_threads_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "settings_negative_sort_threads", expect_abort=.true., &
+            failure_message="a negative sort thread cap was expected to abort", &
+            required_stderr="parquet_set_sort_threads: n must be >= 0")
+    end subroutine test_settings_negative_sort_threads_aborts
+
+    subroutine test_settings_negative_prefetch_threads_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "settings_negative_prefetch_threads", expect_abort=.true., &
+            failure_message="a negative prefetch thread cap was expected to abort", &
+            required_stderr="parquet_set_prefetch_threads: n must be >= 0")
+    end subroutine test_settings_negative_prefetch_threads_aborts
 
     subroutine test_read_qc_entry_too_long_aborts(error)
         type(error_type), allocatable, intent(out) :: error

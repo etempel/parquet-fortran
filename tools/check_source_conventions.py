@@ -390,9 +390,12 @@ def check_print_settings_documented():
     problems = []
     src = SRC / "parquet_settings.f90"
     doc = REPO_ROOT / "doc" / "pages" / "settings.md"
-    printed = re.findall(r'call\s+print_one\s*\(\s*u\s*,\s*"([^"]+)"', src.read_text())
+    # Both row helpers, or a knob printed through the one this check does not know about looks
+    # undocumented while being documented perfectly well -- which is exactly what happened when
+    # print_text was added for the non-integer rows.
+    printed = re.findall(r'call\s+print_(?:one|text)\s*\(\s*u\s*,\s*"([^"]+)"', src.read_text())
     if not printed:
-        return ["%s: could not find any print_one call -- this check needs updating"
+        return ["%s: could not find any print_one/print_text call -- this check needs updating"
                 % src.relative_to(REPO_ROOT)]
     doc_text = doc.read_text()
     for name in printed:
@@ -420,6 +423,54 @@ def check_print_settings_documented():
     return problems
 
 
+def check_settings_are_read():
+    """feature_risks.md Risk-41 -- a setting that is stored but never read passes every test.
+
+    A `parquet_settings` knob is a module variable that some *other* procedure has to consult. If
+    nothing ever reads it -- the read site was never added, or was dropped in a later refactor --
+    then `set` followed by `get` still returns what was set, the factory-default assertion still
+    holds, and the knob silently does nothing. That is worse than a knob that visibly fails.
+
+    The rule: every `cfg_*` variable must be READ somewhere other than the procedure that writes it.
+    Deliberately not "read outside the module" -- `cfg_arrow_threads_initial` is written by
+    parquet_set_max_threads and read by parquet_reset_settings, which is a legitimate shape, and a
+    file-scoped rule would need a false exemption for it on day one.
+
+    This catches only "nothing reads it". Whether the read site does the right thing is what the
+    per-knob observed-effect tests in test/test_settings.f90 are for; neither check subsumes the
+    other.
+    """
+    problems = []
+    settings = SRC / "parquet_settings.f90"
+    text = settings.read_text()
+    names = re.findall(r"^\s*(?:integer|logical|character\([^)]*\)|real\([^)]*\))\s*,\s*save\s*::\s*(cfg_\w+)",
+                       text, re.M)
+    if not names:
+        return ["%s: found no `cfg_* ` settings variables -- this check needs updating"
+                % settings.relative_to(REPO_ROOT)]
+    # Where each name is assigned, so an assignment does not count as a read of itself.
+    sources = sorted(SRC.glob("*.f90"))
+    for name in names:
+        read_somewhere = False
+        for path in sources:
+            for line in path.read_text().split("\n"):
+                code = strip_comment(line)
+                if name not in code:
+                    continue
+                # An assignment `name = ...` is a write; anything else mentioning it is a read.
+                if re.match(r"^\s*%s\s*=(?!=)" % re.escape(name), code):
+                    continue
+                read_somewhere = True
+                break
+            if read_somewhere:
+                break
+        if not read_somewhere:
+            problems.append(
+                "src/parquet_settings.f90: `%s` is written but never read -- the setting it backs "
+                "does nothing, and a set/get test would not notice (feature_risks.md Risk-41)" % name)
+    return problems
+
+
 CHECKS = (
     ("parquet_table has no allocatable component", check_no_allocatable_component),
     ("table pointers are reached through %cache", check_pointers_go_through_cache),
@@ -428,6 +479,7 @@ CHECKS = (
     ("row-group reads guard against a sort", check_row_group_reads_guard_against_sort),
     ("print_stat's columns match its documentation", check_print_stat_columns_documented),
     ("print_settings matches its documentation", check_print_settings_documented),
+    ("every setting is actually read", check_settings_are_read),
 )
 
 

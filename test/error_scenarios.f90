@@ -3905,13 +3905,19 @@ contains
 
     !> Provokes a FORTRAN-side warning (a qc violation on write) at a chosen verbosity and message
     !> stream, so the test can assert both whether it appeared and where.
+    !>
+    !> **The fixture path is derived from the arguments, because this helper backs THREE scenario
+    !> names and `tools/run_error_scenarios.sh` runs scenarios concurrently** (`xargs -P`) -- see
+    !> `scenario_settings_cpp_warning` for what a shared path does.
     subroutine scenario_settings_warning(level, stream)
         character(len=*), intent(in) :: level  !! verbosity to set first.
         character(len=*), intent(in) :: stream !! message stream to set first.
         type(parquet_writer) :: writer
         type(parquet_schema) :: schema
-        character(len=*), parameter :: out_file = "test_run/scenario_settings_warning.parquet"
+        character(len=:), allocatable :: out_file
         integer(int32) :: v(4) = [1, 2, 3, 400]
+
+        out_file = "test_run/scenario_settings_warning_" // trim(level) // "_" // trim(stream) // ".parquet"
 
         schema%maml%name = "settings_warn.maml"
         schema%maml%lines = [character(len=40) :: &
@@ -3933,12 +3939,16 @@ contains
 
     !> Calls a SOLICITED printer (%print_stat) at a chosen verbosity, so the test can assert that
     !> "silent" turns an explicitly-requested print into a no-op.
+    !>
+    !> Its fixture path is derived from `level` for the reason given on
+    !> `scenario_settings_cpp_warning`: two scenario names share this helper and run concurrently.
     subroutine scenario_settings_print_stat(level)
         character(len=*), intent(in) :: level !! verbosity to set first.
         type(parquet_table) :: t
-        character(len=*), parameter :: out_file = "test_run/scenario_settings_print_stat.parquet"
+        character(len=:), allocatable :: out_file
         integer(int32) :: v(4) = [1, 2, 3, 4]
 
+        out_file = "test_run/scenario_settings_print_stat_" // trim(level) // ".parquet"
         call parquet_new_table(t)
         call t%add_column("v", v)
         call parquet_write_table(t, out_file)
@@ -3953,14 +3963,25 @@ contains
     !> This is the scenario that catches the Fortran and C++ copies of the verbosity setting
     !> drifting apart: every Fortran-side assertion passes against a C++ half that ignores the
     !> mirror entirely, because the Fortran warnings would still be suppressed correctly.
+    !>
+    !> **The fixture path must stay derived from `level`.** `tools/run_error_scenarios.sh` runs
+    !> scenarios concurrently (`xargs -P`), so the two names backed by this helper are two
+    !> PROCESSES over one file: with a shared path, one writes while the other reads, the reader
+    !> gets a half-written file, and Arrow throws `IOError: Couldn't deserialize thrift` across the
+    !> `extern "C"` boundary -- an uncaught exception, so `std::terminate` and exit 134 rather than
+    !> a clean abort. It is timing-dependent, so it passed locally for a long time and failed only
+    !> on CI. Same rule as CLAUDE.md's "Tests run concurrently: never share a fixture file path
+    !> between two tests", which applies to this runner too and not only to test-drive.
     subroutine scenario_settings_cpp_warning(level)
         character(len=*), intent(in) :: level !! verbosity to set first.
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
         type(parquet_schema) :: schema
-        character(len=*), parameter :: out_file = "test_run/scenario_settings_cpp_warning.parquet"
+        character(len=:), allocatable :: out_file
         integer(int32) :: v(4) = [1, 2, 3, 400]
         integer(int32) :: got(4)
+
+        out_file = "test_run/scenario_settings_cpp_warning_" // trim(level) // ".parquet"
 
         schema%maml%name = "settings_cpp_warn.maml"
         schema%maml%lines = [character(len=40) :: &

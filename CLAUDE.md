@@ -2095,6 +2095,27 @@ under coverage, check for a shared path before looking anywhere else. Where seve
 need the *same* fixture contents, factor the writing into one shared helper that takes the filename
 as an argument, and have each caller pass its own.
 
+**`tools/run_error_scenarios.sh` is concurrent too (`xargs -P`), and there the rule is easiest to
+break by accident, because the collision is between two SCENARIO NAMES rather than two tests.** One
+parameterized helper backing several `case` entries — `scenario_settings_cpp_warning(level=...)`
+and friends — is one *process per name*, all running at once over whatever fixture path the helper
+hardcodes. **So a helper invoked from more than one `case` must derive its fixture path from its
+own arguments** (`"..._" // trim(level) // ".parquet"`), never carry a
+`character(len=*), parameter :: out_file`. Check this whenever a scenario helper gains a second
+call site; `grep -oE "call scenario_[a-z0-9_]+" test/error_scenarios.f90 | sort | uniq -c` lists
+every multi-invoked helper.
+
+**Its failure signature is much more alarming than the test-drive one, and points away from the
+real cause.** The reader gets a half-written file, Arrow throws
+`IOError: Couldn't deserialize thrift`, and — because nothing catches an exception crossing the
+`extern "C"` boundary — the process dies via `std::terminate` with **exit 134**, i.e. an abort in a
+scenario whose expected exit is 0. That reads as a genuine library crash in whatever the scenario
+was exercising, not as a fixture collision. **Reproducing it needs forced interleaving, not more
+parallelism**: on an idle machine the pair finishes too fast to overlap, and 420 runs came back
+clean, while pinning both processes to one core (`taskset -c 0`) took it straight to 69/160. Reach
+for `taskset` before concluding a one-off — and note that a CI re-run going green is exactly what
+this bug does.
+
 **A test that WRITES process-global state needs its suite excluded, and the reasoning is not about
 files.** `parquet_settings`' knobs are saved module variables, the sort comparison counter and the
 pruned-row-group count are C++ statics: any test that sets one is visible to every sibling running

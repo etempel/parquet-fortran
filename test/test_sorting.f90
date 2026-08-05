@@ -636,15 +636,23 @@ contains
         type(error_type), allocatable, intent(out) :: error
         integer(int32) :: v(40)
         integer(int32), allocatable :: fast(:), slow(:)
+        integer(int64) :: cmp_fast, cmp_slow
         integer :: k
 
         do k = 1, 40
             v(k) = int(mod(k * 7, 5), int32)   ! only five distinct values: the counting path's case
         end do
+        call arm_sort_comparisons()
         call pf_argsort(v, fast)
+        cmp_fast = sort_comparisons()
         call parquet_set_sort_counting_path(.false.)
+        call arm_sort_comparisons()
         call pf_argsort(v, slow)
+        cmp_slow = sort_comparisons()
         call parquet_set_sort_counting_path(.true.)
+        call check(error, cmp_fast == 0_int64 .and. cmp_slow > 0_int64, &
+            "the two halves must reach DIFFERENT engines, or the agreement below is vacuous")
+        if (allocated(error)) return
         call check(error, all(fast == slow), &
             "the counting fast path must produce exactly the comparator path's permutation")
         if (allocated(error)) return
@@ -1178,17 +1186,25 @@ contains
         type(error_type), allocatable, intent(out) :: error
         integer(int32) :: v(60)
         integer(int32), allocatable :: fast(:), slow(:)
+        integer(int64) :: cmp_fast, cmp_slow
         integer :: k, c_fast, c_slow
 
         do k = 1, 60
             v(k) = int(mod(k * 7, 6), int32)   ! six distinct values: the counting path's case
         end do
+        call arm_sort_comparisons()
         call pf_unique_count(v, c_fast)
         call pf_unique(v, fast)
+        cmp_fast = sort_comparisons()
         call parquet_set_sort_counting_path(.false.)
+        call arm_sort_comparisons()
         call pf_unique_count(v, c_slow)
         call pf_unique(v, slow)
+        cmp_slow = sort_comparisons()
         call parquet_set_sort_counting_path(.true.)
+        call check(error, cmp_fast == 0_int64 .and. cmp_slow > 0_int64, &
+            "the two halves must reach DIFFERENT engines, or the agreement below is vacuous")
+        if (allocated(error)) return
         call check(error, c_fast == 6 .and. c_slow == 6, &
             "both sort paths must find the same six distinct values")
         if (allocated(error)) return
@@ -1315,15 +1331,23 @@ contains
         type(error_type), allocatable, intent(out) :: error
         integer(int32) :: v(50)
         integer, allocatable :: fast(:), slow(:)
+        integer(int64) :: cmp_fast, cmp_slow
         integer :: k
 
         do k = 1, 50
             v(k) = int(mod(k * 3, 4), int32)   ! four distinct values, heavily tied
         end do
+        call arm_sort_comparisons()
         call pf_rank(v, fast)
+        cmp_fast = sort_comparisons()
         call parquet_set_sort_counting_path(.false.)
+        call arm_sort_comparisons()
         call pf_rank(v, slow)
+        cmp_slow = sort_comparisons()
         call parquet_set_sort_counting_path(.true.)
+        call check(error, cmp_fast == 0_int64 .and. cmp_slow > 0_int64, &
+            "the two halves must reach DIFFERENT engines, or the agreement below is vacuous")
+        if (allocated(error)) return
         call check(error, all(fast == slow), &
             "both sort paths must produce the same competition ranks")
         if (allocated(error)) return
@@ -1507,6 +1531,42 @@ contains
     ! M4: parallel sorting
     ! ==================================================================================
     !
+    !> Arms and zeroes the sort's comparison counter.
+    !>
+    !> **This is what makes every counting-path A/B test in this file non-vacuous.** Those tests run
+    !> one fixture down both sort engines and assert the two agree -- but "both engines" is a claim
+    !> about which code ran, and nothing in an equality assertion can see it. Turn the setting the
+    !> wrong way round, or stop it reaching C++, and both halves take the SAME path: the comparison
+    !> holds trivially and the test passes while testing nothing (feature_risks.md Risk-35).
+    !>
+    !> The counting path performs exactly zero comparisons by construction, so `0` on one half and
+    !> nonzero on the other proves the two halves really diverged.
+    subroutine arm_sort_comparisons()
+        interface
+            subroutine count_cmp(enable) bind(C, name="parquet_debug_set_count_sort_comparisons")
+                use iso_c_binding, only : c_int
+                integer(c_int), value :: enable !! nonzero arms and zeroes the counter.
+            end subroutine count_cmp
+        end interface
+        call count_cmp(1)
+    end subroutine arm_sort_comparisons
+
+    !> Comparisons counted since the last arm_sort_comparisons, then disarms the counter.
+    integer(int64) function sort_comparisons() result(n)
+        interface
+            function got_cmp() bind(C, name="parquet_debug_get_sort_comparisons") result(k)
+                use iso_c_binding, only : c_long_long
+                integer(c_long_long) :: k !! comparisons since the counter was armed.
+            end function got_cmp
+            subroutine count_cmp(enable) bind(C, name="parquet_debug_set_count_sort_comparisons")
+                use iso_c_binding, only : c_int
+                integer(c_int), value :: enable
+            end subroutine count_cmp
+        end interface
+        n = int(got_cmp(), int64)
+        call count_cmp(0)
+    end function sort_comparisons
+
     !> Lowers the row count below which threading is refused, so a test-sized array can reach the
     !> parallel path at all. Every fixture here is orders of magnitude below the real threshold.
     subroutine force_parallel_threshold(rows)

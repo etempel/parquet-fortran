@@ -203,6 +203,7 @@ contains
         real(real64) :: flat_r(n)
         character(len=4) :: flat_s(n)
         integer(int32), allocatable :: ids(:)
+        integer(int64) :: cmp_fast, cmp_slow
         integer :: i
         character(len=*), parameter :: file = "test_run/sort_stable.parquet"
 
@@ -220,18 +221,27 @@ contains
         call parquet_close_writer(writer)
 
         ! 1. integer key, small range -> the counting fast path.
+        call arm_sort_comparisons()
         call sorted_ids(file, "flat asc", ids)
+        cmp_fast = sort_comparisons()
         call check(error, all(ids == id), "counting path: tied rows must keep their file order")
         if (allocated(error)) return
         deallocate(ids)
 
         ! 2. the same key with the fast path forced off -> the comparator and its tiebreaker.
         call parquet_set_sort_counting_path(.false.)
+        call arm_sort_comparisons()
         call sorted_ids(file, "flat asc", ids)
+        cmp_slow = sort_comparisons()
         call parquet_set_sort_counting_path(.true.)
         call check(error, all(ids == id), "comparator path: tied rows must keep their file order")
         if (allocated(error)) return
         deallocate(ids)
+        ! Steps 1 and 2 are the same assertion twice unless they reached different engines -- and
+        ! step 2 is the only one of the four that exercises the comparator's index tiebreaker.
+        call check(error, cmp_fast == 0_int64 .and. cmp_slow > 0_int64, &
+            "steps 1 and 2 must reach DIFFERENT engines, or the comparator tiebreaker goes untested")
+        if (allocated(error)) return
 
         ! 3. and two key types that can never take the fast path at all.
         call sorted_ids(file, "flat_r asc", ids)
@@ -440,6 +450,41 @@ contains
         call check(error, all(ids == [3, 6, 1, 5, 2, 4]), "sorting by a column never read must still order the rows")
     end subroutine test_key_column_not_read
     !
+    !> Arms and zeroes the sort's comparison counter.
+    !>
+    !> **This is what makes the counting-path A/B tests in this file non-vacuous.** They run one
+    !> fixture down both sort engines and assert the two agree -- but "both engines" is a claim about
+    !> which code ran, and an equality assertion cannot see it. Turn parquet_set_sort_counting_path
+    !> the wrong way round, or stop it reaching C++, and both halves take the SAME path: the
+    !> comparison holds trivially and the test passes while testing nothing (feature_risks.md
+    !> Risk-35). The counting path performs exactly zero comparisons by construction, so `0` on one
+    !> half and nonzero on the other proves they really diverged.
+    subroutine arm_sort_comparisons()
+        interface
+            subroutine count_cmp(enable) bind(C, name="parquet_debug_set_count_sort_comparisons")
+                use iso_c_binding, only : c_int
+                integer(c_int), value :: enable !! nonzero arms and zeroes the counter.
+            end subroutine count_cmp
+        end interface
+        call count_cmp(1)
+    end subroutine arm_sort_comparisons
+
+    !> Comparisons counted since the last arm_sort_comparisons, then disarms the counter.
+    integer(int64) function sort_comparisons() result(n)
+        interface
+            function got_cmp() bind(C, name="parquet_debug_get_sort_comparisons") result(k)
+                use iso_c_binding, only : c_long_long
+                integer(c_long_long) :: k !! comparisons since the counter was armed.
+            end function got_cmp
+            subroutine count_cmp(enable) bind(C, name="parquet_debug_set_count_sort_comparisons")
+                use iso_c_binding, only : c_int
+                integer(c_int), value :: enable
+            end subroutine count_cmp
+        end interface
+        n = int(got_cmp(), int64)
+        call count_cmp(0)
+    end function sort_comparisons
+    !
     !> The integer counting fast path and the comparator path must produce the SAME permutation.
     !> The fast path is the one place in the engine where a wrong answer would be fast rather than
     !> slow, so the two are compared directly on one fixture rather than assumed to agree. The
@@ -447,13 +492,21 @@ contains
     subroutine test_counting_path_matches(error)
         type(error_type), allocatable, intent(out) :: error
         integer(int32), allocatable :: fast(:), slow(:)
+        integer(int64) :: cmp_fast, cmp_slow
         character(len=*), parameter :: file = "test_run/sort_counting.parquet"
 
         call write_basic_fixture(file)
+        call arm_sort_comparisons()
         call sorted_ids(file, "v asc", fast)          ! small integer range -> counting path
+        cmp_fast = sort_comparisons()
         call parquet_set_sort_counting_path(.false.)
+        call arm_sort_comparisons()
         call sorted_ids(file, "v asc", slow)          ! same key, comparator path
+        cmp_slow = sort_comparisons()
         call parquet_set_sort_counting_path(.true.)
+        call check(error, cmp_fast == 0_int64 .and. cmp_slow > 0_int64, &
+            "the two halves must reach DIFFERENT engines, or the agreement below is vacuous")
+        if (allocated(error)) return
         call check(error, all(fast == slow), "the counting fast path and the comparator must agree exactly")
         if (allocated(error)) return
         call check(error, all(fast == [2, 4, 1, 6, 3, 5]), "both paths must give the expected order")

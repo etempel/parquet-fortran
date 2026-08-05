@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Checks six structural invariants of this repository that no compiler and no runtime test can see.
+"""Checks eleven structural invariants of this repository that no compiler and no runtime test sees.
 
 Each one protects a property whose violation compiles cleanly, passes the whole test suite, and
 fails somewhere else entirely -- in a user's program, on another compiler, or in a coverage report.
@@ -49,6 +49,30 @@ That is what makes them worth a static check rather than a test:
      text, so a renamed or added column breaks no test. The two had already drifted when this check
      was written (the docs named a `prefetc` column the code calls `fetched`, and omitted four
      others), which is the failure it exists to stop repeating.
+
+  7. print_settings matches its documentation (feature_risks.md Risk-41).
+     Every row parquet_print_settings emits must be named in doc/pages/settings.md. Matched by the
+     SHAPE of a row call rather than by a list of helper names, because the list went blind twice --
+     see check_print_settings_documented.
+
+  8. Every setting is actually read (feature_risks.md Risk-41).
+     A `cfg_*` that nothing consults still round-trips through its own getter, still reports the
+     right factory value, and silently does nothing. This finds the "nothing reads it" half; the
+     observed-effect tests in test/test_settings.f90 find the "reads it wrongly" half.
+
+  9. No direct printing outside the emit channels.
+     Every message goes through parquet_emit_info/_warning/_error_context, which is what makes
+     `verbosity` and `message_stream` apply everywhere. A print written the old way still appears at
+     default settings, so the suite stays green and only users who changed a setting are affected.
+
+ 10. The row-group sizing arithmetic exists once (feature_risks.md Risk-43).
+     Its two callers serve different writers. A re-inlined copy takes the built-in constant instead
+     of the setting, so parquet_set_target_row_group_bytes governs one kind of write and not the
+     other -- every row correct, the row-group count wrong, nothing failing.
+
+ 11. src/ is a single C++ translation unit (CLAUDE.md's TU-split note).
+     Every process-global in parquet_wrapper.cpp is a file-scope `static`, so a second `.cpp` would
+     get its own copy of each. Not a ban on splitting -- the note firing at the moment someone does.
 
 Usage:
     tools/check_source_conventions.py            # run every check
@@ -390,13 +414,16 @@ def check_print_settings_documented():
     problems = []
     src = SRC / "parquet_settings.f90"
     doc = REPO_ROOT / "doc" / "pages" / "settings.md"
-    # Both row helpers, or a knob printed through the one this check does not know about looks
-    # undocumented while being documented perfectly well -- which is exactly what happened when
-    # print_text was added for the non-integer rows.
-    printed = re.findall(r'call\s+print_(?:one|big|text)\s*\(\s*u\s*,\s*"([^"]+)"', src.read_text())
+    # Matched by SHAPE (`call print_<anything>(u, "name"`), not against a list of helper names. An
+    # earlier version named them, and silently went blind twice: once when print_text arrived for
+    # the non-integer rows, and again when print_big arrived for the int64 ones -- on that occasion
+    # it reported two of five new rows as undocumented and passed the other three, which is worse
+    # than failing outright. A new row helper is now picked up with no edit here.
+    printed = re.findall(r'call\s+print_\w+\s*\(\s*u\s*,\s*"([^"]+)"', src.read_text())
     if not printed:
-        return ["%s: could not find any print_one/print_text call -- this check needs updating"
-                % src.relative_to(REPO_ROOT)]
+        return ["%s: could not find any `call print_*(u, \"name\"` row -- either the helpers were "
+                "renamed to a different shape, or parquet_print_settings no longer prints rows this "
+                "way; this check needs updating" % src.relative_to(REPO_ROOT)]
     doc_text = doc.read_text()
     for name in printed:
         if name not in doc_text:
@@ -566,6 +593,47 @@ def check_row_group_sizing_not_duplicated():
     return problems
 
 
+def check_single_cpp_translation_unit():
+    """CLAUDE.md's TU-split note -- splitting parquet_wrapper.cpp silently forks every file-scope
+    `static`, and nothing diagnoses it.
+
+    Splitting the file was considered and deliberately declined (CONTRIBUTING.md's "Features
+    considered but not implemented"). This check exists because the hazard is invisible if it ever
+    IS revisited: every process-global `static` at file scope means one instance PER TRANSLATION
+    UNIT, so a second `.cpp` gets its own copy of every one. It compiles, it links, and there is no
+    warning.
+
+    Two families are affected, and the second is the worse one:
+
+      * the `g_debug_*` test-only overrides -- a `parquet_debug_set_*` setter would write to a
+        different object than the guard reads, so the override stops working and the error scenario
+        that depends on it starts testing nothing while reporting green;
+      * the settings mirrored from parquet_settings (`g_verbosity`, `g_message_stream`,
+        `g_sort_parallel_min_rows`, `g_sort_counting_path`, `g_sort_counting_bucket_limit`,
+        `g_target_row_group_bytes`, `g_statistics_prescreen`) -- a user's setting would apply to
+        some of the library and not the rest, with the Fortran getters still reporting it correctly
+        (feature_risks.md Risk-42).
+
+    So this check is not a ban on splitting the file. It is the note firing at the moment somebody
+    does it: promote both families to `extern` globals with one definition in a shared internal
+    header, re-run the error scenarios and test/test_settings.f90's observed-effect tests, then
+    update this check to match the new layout.
+    """
+    units = sorted(SRC.glob("*.cpp"))
+    if len(units) == 1:
+        return []
+    if not units:
+        return ["src/: no .cpp translation unit found -- this check needs updating"]
+    return [
+        "src/: %d C++ translation units (%s), but every process-global in parquet_wrapper.cpp is a "
+        "file-scope `static`, so each unit now has its OWN copy of the g_debug_* overrides and of "
+        "the settings mirrored from parquet_settings -- read CLAUDE.md's \"If "
+        "src/parquet_wrapper.cpp is ever split into multiple translation units\" before going "
+        "further, then promote both families to extern and update this check"
+        % (len(units), ", ".join(u.name for u in units))
+    ]
+
+
 CHECKS = (
     ("parquet_table has no allocatable component", check_no_allocatable_component),
     ("table pointers are reached through %cache", check_pointers_go_through_cache),
@@ -577,6 +645,7 @@ CHECKS = (
     ("every setting is actually read", check_settings_are_read),
     ("no direct printing outside the emit channels", check_no_direct_printing),
     ("the row-group sizing arithmetic exists once", check_row_group_sizing_not_duplicated),
+    ("src/ is a single C++ translation unit", check_single_cpp_translation_unit),
 )
 
 

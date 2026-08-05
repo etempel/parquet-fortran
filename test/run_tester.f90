@@ -135,6 +135,16 @@ contains
     !> The suite is pure in-memory work and runs in well under a second, so the lost parallelism
     !> costs nothing.
     !>
+    !> "sort" is excluded for the same reason as "sorting", and was ALREADY relying on it before
+    !> anyone noticed: its counting-path tests set parquet_set_sort_counting_path, a process-global
+    !> value, and now also read the process-global comparison counter to prove the two halves really
+    !> reached different engines. The setting half was a latent hazard for as long as those tests
+    !> have existed -- it never bit only because their assertions were path-agnostic, so a sibling
+    !> test stealing the setting mid-run changed no result. The counter half would have been
+    !> immediately and visibly wrong: measured at 11 and 14 comparisons where both should have been
+    !> 0 and nonzero, purely from sibling tests sorting at the same time. The suite is ~25 fast
+    !> file-based tests and the lost parallelism is not measurable.
+    !>
     !> "filter_screen" is excluded for a different reason from the four below: the screen setting
     !> (parquet_set_statistics_prescreen) and the pruned-row-group count
     !> (parquet_debug_get_row_groups_pruned) are both process-global -- the first because every
@@ -172,7 +182,7 @@ contains
     logical function suite_is_safe_to_parallelize(name) result(safe)
         character(len=*), intent(in) :: name
         safe = .not. (name == "writing" .or. name == "errors" .or. name == "metadata" .or. name == "maml" &
-            .or. name == "filter_screen" .or. name == "sorting" .or. name == "settings")
+            .or. name == "filter_screen" .or. name == "sorting" .or. name == "sort" .or. name == "settings")
     end function suite_is_safe_to_parallelize
 
 end program tester

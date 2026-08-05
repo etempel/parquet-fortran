@@ -227,9 +227,9 @@ contains
 
         do i = 1, size(writer_keys)
             if (trim(writer_keys(i)) /= trim(key)) cycle
-            print '(a)', "WARNING: add_metadata: key '" // trim(key) // "' in table '" // table_name // &
+            call parquet_emit_warning("add_metadata: key '" // trim(key) // "' in table '" // table_name // &
                 "' is reserved for the parquet writer's own internal file metadata -- this entry " // &
-                "will be duplicated in the output file"
+                "will be duplicated in the output file")
             return
         end do
 
@@ -237,13 +237,13 @@ contains
 
         do i = 1, size(maml_init_keys)
             if (trim(maml_init_keys(i)) /= trim(key)) cycle
-            print '(a)', "WARNING: add_metadata: key '" // trim(key) // "' in table '" // table_name // &
-                "' already exists from the MAML source -- this entry will be duplicated"
+            call parquet_emit_warning("add_metadata: key '" // trim(key) // "' in table '" // table_name // &
+                "' already exists from the MAML source -- this entry will be duplicated")
             return
         end do
 
-        print '(a)', "WARNING: add_metadata: key '" // trim(key) // "' in table '" // table_name // &
-            "' already exists -- this entry will be duplicated"
+        call parquet_emit_warning("add_metadata: key '" // trim(key) // "' in table '" // table_name // &
+            "' already exists -- this entry will be duplicated")
     end subroutine parquet_metadata_warn_duplicate
 
     !> True if any line of maml%lines equals `target` after trimming leading
@@ -801,6 +801,11 @@ contains
         if (.not. present(unit) .and. .not. present(filename)) then
             error stop "parquet_schema%print_schema_info: either unit or filename must be given" // name_suffix
         end if
+
+        ! Solicited output: verbosity="silent" and below turn this into a no-op. Placed after the
+        ! argument validation above (so a bad call is still reported) but before the file is opened
+        ! below (so a suppressed call does not leave an empty file behind as a side effect).
+        if (parquet_output_is_suppressed()) return
 
         if (present(unit)) then
             inquire(unit=unit, opened=is_open)

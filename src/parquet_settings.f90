@@ -31,9 +31,10 @@
 !>
 !> User guide: `doc/pages/settings.md`.
 module parquet_settings
-    use iso_fortran_env, only: output_unit
+    use iso_fortran_env, only: output_unit, error_unit
     use iso_c_binding, only: c_int
-    use parquet_bindings, only: parquet_set_thread_pool_capacity, parquet_get_thread_pool_capacity
+    use parquet_bindings, only: parquet_set_thread_pool_capacity, parquet_get_thread_pool_capacity, &
+        parquet_push_output_settings
     implicit none
     private
     !
@@ -54,6 +55,14 @@ module parquet_settings
     public :: parquet_set_default_compression, parquet_get_default_compression
     public :: parquet_set_default_compression_level, parquet_get_default_compression_level
     public :: parquet_set_default_use_threads, parquet_get_default_use_threads
+    public :: parquet_set_verbosity, parquet_get_verbosity
+    public :: parquet_set_message_stream, parquet_get_message_stream
+    !
+    !> The three output channels, and the ONLY places `verbosity`/`message_stream` are read. Public
+    !! here so every module that emits can reach them, `private ::` in the facade so no user sees
+    !! them; see parquet_valid_compressions below for the same mechanism and the same reason.
+    public :: parquet_emit_info, parquet_emit_warning, parquet_emit_error_context
+    public :: parquet_output_is_suppressed
     !
     !> Library-internal plumbing, kept out of the `use parquet` namespace by an explicit
     !! `private ::` in the facade (src/parquet.f90) -- the same mechanism that hides `c_int` and the
@@ -85,6 +94,19 @@ module parquet_settings
     !! as a default but rejected as an argument, or the reverse.
     character(len=12), parameter :: parquet_valid_compressions(6) = [character(len=12) :: &
         "uncompressed", "snappy", "gzip", "zstd", "brotli", "lz4"]
+    !
+    !> The verbosity levels, ordered by how much they suppress. Internal codes: the public surface
+    !! spells them as the tokens "normal"/"silent"/"errors_only", following the same convention as
+    !! `compression=` and `pf_rank(..., method=)`.
+    integer, parameter :: verb_normal = 0      !! everything prints (the factory default).
+    integer, parameter :: verb_silent = 1      !! informational and solicited output goes quiet.
+    integer, parameter :: verb_errors_only = 2 !! warnings go quiet too; only errors survive.
+    !
+    !> Where the library's own messages go. `message_stream` accepts exactly these two, because a
+    !! Fortran unit number means nothing on the C++ side of the bind(C) boundary, where three of the
+    !! library's warnings and one of its reports are printed -- see doc/pages/settings.md.
+    integer, parameter :: stream_stdout = 0
+    integer, parameter :: stream_stderr = 1
     !
     !> Arrow's kUseDefaultCompressionLevel sentinel (INT_MIN): "use the codec's own default level".
     integer, parameter :: level_codec_default = -huge(0) - 1
@@ -119,6 +141,11 @@ module parquet_settings
     integer, save :: cfg_default_compression_level = level_codec_default
     !> Default for parquet_open_writer/parquet_open_reader's `use_threads=`.
     logical, save :: cfg_default_use_threads = .true.
+    !> How much the library prints. Read only by the three emit channels below and by
+    !! parquet_output_is_suppressed, which is what the solicited printers ask.
+    integer, save :: cfg_verbosity = verb_normal
+    !> Which stream the library's own messages go to. Read only by the emit channels.
+    integer, save :: cfg_message_stream = stream_stdout
     !
 contains
 
@@ -303,6 +330,174 @@ contains
         if (present(compression_level)) level = compression_level
     end subroutine parquet_resolve_writer_compression
 
+    !> Sets how much the library prints. One of "normal" (everything, the factory default),
+    !> "silent" (the library's own remarks and its explicitly-called print procedures go quiet;
+    !> warnings and errors still appear) or "errors_only" (warnings go quiet too). Case-insensitive;
+    !> anything else aborts.
+    !>
+    !> Read per message, so it takes effect immediately.
+    !>
+    !> **Errors are never suppressed, at any level.** An `error stop`, the C++ side's fatal-error
+    !> report, and the context lines a failing close prints before aborting all appear whatever this
+    !> is set to -- a program's control flow depends on that output being findable.
+    !>
+    !> **"silent" turns the explicitly-called print procedures into no-ops** -- `%print_stat`,
+    !> `%print_schema_info` and `parquet_string_column`'s printers included. That is deliberate (it
+    !> is what a global output control means) and it is a debugging trap worth knowing about: add a
+    !> print, see nothing, and the table is not at fault. `parquet_print_settings` is the one
+    !> exemption, so a silenced program can always be asked why it is silent.
+    subroutine parquet_set_verbosity(level)
+        character(len=*), intent(in) :: level !! "normal" | "silent" | "errors_only".
+        character(len=:), allocatable :: tok
+
+        call fold_ascii_lower(trim(level), tok)
+        select case (tok)
+        case ("normal")
+            cfg_verbosity = verb_normal
+        case ("silent")
+            cfg_verbosity = verb_silent
+        case ("errors_only")
+            cfg_verbosity = verb_errors_only
+        case default
+            error stop "parquet_set_verbosity: unknown level '" // tok // &
+                "' (expected one of: normal, silent, errors_only)"
+        end select
+        call push_output_settings()
+    end subroutine parquet_set_verbosity
+
+    !> Reports the current verbosity as the same token parquet_set_verbosity accepts.
+    subroutine parquet_get_verbosity(level)
+        character(len=:), allocatable, intent(out) :: level !! "normal" | "silent" | "errors_only".
+
+        select case (cfg_verbosity)
+        case (verb_silent)
+            level = "silent"
+        case (verb_errors_only)
+            level = "errors_only"
+        case default
+            level = "normal"
+        end select
+    end subroutine parquet_get_verbosity
+
+    !> Sets which stream the library's own messages go to: "stdout" (the factory default) or
+    !> "stderr". Case-insensitive; anything else aborts.
+    !>
+    !> Read per message, so it takes effect immediately. The usual reason to change it is a program
+    !> that pipes its own stdout to a data consumer and does not want the library's warnings mixed
+    !> into that stream.
+    !>
+    !> **Only these two values are accepted, and that is a constraint rather than a preference.** A
+    !> Fortran unit number means nothing to the C++ half of this library, which prints three of the
+    !> warnings and one of the reports itself -- so a knob holding an arbitrary unit could be
+    !> honoured by the Fortran sites and silently ignored by the C++ ones. Sending messages to a log
+    !> file is therefore not supported; a shell redirect or the program's own logging covers it.
+    !>
+    !> **Errors always go to stderr regardless**, and the explicitly-called print procedures are
+    !> unaffected -- they keep their own `unit=` argument and its `output_unit` default.
+    subroutine parquet_set_message_stream(stream)
+        character(len=*), intent(in) :: stream !! "stdout" | "stderr".
+        character(len=:), allocatable :: tok
+
+        call fold_ascii_lower(trim(stream), tok)
+        select case (tok)
+        case ("stdout")
+            cfg_message_stream = stream_stdout
+        case ("stderr")
+            cfg_message_stream = stream_stderr
+        case default
+            error stop "parquet_set_message_stream: unknown stream '" // tok // &
+                "' (expected one of: stdout, stderr)"
+        end select
+        call push_output_settings()
+    end subroutine parquet_set_message_stream
+
+    !> Reports the current message stream as the same token parquet_set_message_stream accepts.
+    subroutine parquet_get_message_stream(stream)
+        character(len=:), allocatable, intent(out) :: stream !! "stdout" | "stderr".
+
+        if (cfg_message_stream == stream_stderr) then
+            stream = "stderr"
+        else
+            stream = "stdout"
+        end if
+    end subroutine parquet_get_message_stream
+
+    !> Whether output a caller explicitly asked for should be skipped -- what every solicited print
+    !> procedure (`%print_stat`, `%print_schema_info`, `parquet_string_column`'s printers) asks
+    !> before writing anything.
+    !>
+    !> Kept separate from the emit channels below because those procedures format their own output
+    !> over many lines and to a caller-chosen unit; all they need from this module is the yes/no.
+    logical function parquet_output_is_suppressed() result(quiet)
+
+        quiet = cfg_verbosity >= verb_silent
+    end function parquet_output_is_suppressed
+
+    !> Emits one informational remark -- something worth mentioning that is not a warning about the
+    !> data. Suppressed from "silent" downward.
+    !>
+    !> The library has exactly one of these today (the development-build notice in
+    !> parquet_get_version). It has its own channel rather than a special case inside
+    !> parquet_emit_warning because it is the one message whose suppression level differs, and a
+    !> hard-coded exception there would have to be re-explained every time someone read the
+    !> suppression logic.
+    subroutine parquet_emit_info(text)
+        character(len=*), intent(in) :: text !! the message, with no prefix.
+
+        if (cfg_verbosity >= verb_silent) return
+        write (message_unit(), '(a)') text
+    end subroutine parquet_emit_info
+
+    !> Emits one warning about the data or the schema. Suppressed only at "errors_only".
+    !>
+    !> **This is the single place a Fortran-side warning is printed**, which is what makes both
+    !> output settings apply everywhere without each call site testing them -- see
+    !> tools/check_source_conventions.py's `no direct printing` check, which is what keeps that true.
+    !> It supplies the "WARNING: " prefix, so twelve call sites no longer repeat it and it cannot
+    !> drift between them.
+    subroutine parquet_emit_warning(text)
+        character(len=*), intent(in) :: text !! the message, without the "WARNING: " prefix.
+
+        if (cfg_verbosity >= verb_errors_only) return
+        write (message_unit(), '(a)') "WARNING: " // text
+    end subroutine parquet_emit_warning
+
+    !> Emits one line of context belonging to an error that is about to abort.
+    !>
+    !> **Never suppressed and never redirected.** These lines carry what the abort message
+    !> deliberately leaves out -- the output filename, the schema name -- so silencing them would
+    !> turn a diagnosable failure into one that names nothing. They stay on standard output, where
+    !> they are today, rather than following `message_stream`: they belong to the error path, and
+    !> moving them would change what an existing program sees for no gain.
+    subroutine parquet_emit_error_context(text)
+        character(len=*), intent(in) :: text !! the context line, printed verbatim.
+
+        write (output_unit, '(a)') text
+    end subroutine parquet_emit_error_context
+
+    !> The unit the emit channels write to. One function so the three cannot disagree.
+    integer function message_unit() result(u)
+
+        if (cfg_message_stream == stream_stderr) then
+            u = error_unit
+        else
+            u = output_unit
+        end if
+    end function message_unit
+
+    !> Mirrors both output settings to the C++ side, which prints three warnings and one report of
+    !> its own and cannot see Fortran module variables.
+    !>
+    !> **Resolved integers cross the boundary, never tokens.** The fold and the validation happen
+    !> once, here in Fortran; a second string parser in parquet_wrapper.cpp is exactly the drift this
+    !> arrangement exists to avoid. And the C++ side gets no setter of its own, so this is the single
+    !> writer and the mirror is derived rather than an independent copy that could diverge.
+    subroutine push_output_settings()
+
+        call parquet_push_output_settings(int(cfg_verbosity, kind=c_int), &
+            int(cfg_message_stream, kind=c_int))
+    end subroutine push_output_settings
+
     !> Lowercases ASCII letters. A local copy rather than parquet_to_lower, because that one lives
     !> in parquet_core, which uses THIS module -- importing it back would be a circular dependency.
     subroutine fold_ascii_lower(text, out)
@@ -338,6 +533,9 @@ contains
         cfg_default_compression = ""
         cfg_default_compression_level = level_codec_default
         cfg_default_use_threads = .true.
+        cfg_verbosity = verb_normal
+        cfg_message_stream = stream_stdout
+        call push_output_settings()
     end subroutine parquet_reset_settings
 
     !> Writes every setting's current value, and every read-only limit, to `unit`.
@@ -352,7 +550,7 @@ contains
     subroutine parquet_print_settings(unit)
         integer, intent(in), optional :: unit !! output unit (default output_unit).
         integer :: u
-        character(len=:), allocatable :: codec
+        character(len=:), allocatable :: codec, token
 
         u = output_unit
         if (present(unit)) u = unit
@@ -364,6 +562,10 @@ contains
         call print_text(u, "default_compression", codec)
         call print_one(u, "default_compression_level", parquet_get_default_compression_level())
         call print_text(u, "default_use_threads", merge("true ", "false", cfg_default_use_threads))
+        call parquet_get_verbosity(token)
+        call print_text(u, "verbosity", token)
+        call parquet_get_message_stream(token)
+        call print_text(u, "message_stream", token)
         write (u, '(a)') "limits (read-only)"
         call print_one(u, "parquet_max_filter_rule_len", parquet_max_filter_rule_len)
         call print_one(u, "parquet_max_filter_depth", parquet_max_filter_depth)

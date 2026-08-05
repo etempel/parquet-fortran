@@ -91,9 +91,9 @@ contains
 
         call parquet_qc_format_int(n_violate, fmt_int)
         call parquet_qc_format_int(n_valid, fmt_int2)
-        print '(a)', "WARNING: qc violation for column '" // trim(name) // "': declared " // bounds_desc // &
+        call parquet_emit_warning("qc violation for column '" // trim(name) // "': declared " // bounds_desc // &
             ", data range ['" // data_min // "', '" // data_max // "'], " // &
-            fmt_int // " of " // fmt_int2 // " valid element(s) out of range"
+            fmt_int // " of " // fmt_int2 // " valid element(s) out of range")
     end subroutine parquet_check_qc_string
     !> Same as parquet_check_qc_string but reading from a parquet_string_column source directly
     !> (the compact write path, parquet_write_string_column_compact/_chunk_compact) instead of
@@ -161,9 +161,9 @@ contains
 
         call parquet_qc_format_int(n_violate, fmt_int)
         call parquet_qc_format_int(n_valid, fmt_int2)
-        print '(a)', "WARNING: qc violation for column '" // trim(name) // "': declared " // bounds_desc // &
+        call parquet_emit_warning("qc violation for column '" // trim(name) // "': declared " // bounds_desc // &
             ", data range ['" // data_min // "', '" // data_max // "'], " // &
-            fmt_int // " of " // fmt_int2 // " valid element(s) out of range"
+            fmt_int // " of " // fmt_int2 // " valid element(s) out of range")
     end subroutine parquet_check_qc_string_compact
     module procedure parquet_write_string_column
         character(kind=c_char), allocatable :: packed(:)

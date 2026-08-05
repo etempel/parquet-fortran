@@ -373,7 +373,7 @@ instead — expect it to be very noisy (several thousand warnings), dominated by
 
 **The one category that is genuinely load-bearing is `Unknown entity`,** which is the
 use-association accessibility limitation documented under "FORD config gotchas" and sits at a
-stable **19** (14 `public ::` re-exports in `parquet_core.f90` plus 5 `private ::` statements in
+stable **23** (14 `public ::` re-exports in `parquet_core.f90` plus 9 `private ::` statements in
 the `parquet` facade). Compare *that*
 number across a change, not the total: it is the only one that moves for a real reason. When a
 before/after total does move, break the delta down by category
@@ -471,15 +471,16 @@ Keep new code to the same standard:
   (https://github.com/Fortran-FOSS-Programmers/ford/issues/738).
 - **FORD 7.0.13 cannot resolve a `use`-association accessibility statement** — an
   `Unknown entity '<name>' with attribute '<public|private>' in module '<m>'` warning, currently
-  **19** of them and the one FORD number worth tracking across a change. Two independent groups:
+  **23** of them and the one FORD number worth tracking across a change. Two independent groups:
   **14 `public ::`** re-exports in `parquet_core.f90` (`parquet_date`/`parquet_time`/
   `parquet_timestamp` and the eight `parquet_unit_*`/`parquet_ns_*` constants from
   `parquet_temporal`; `parquet_string`/`parquet_string_column` from `parquet_strings`;
   `parquet_maml_file` from `parquet_maml_base`), which FORD silently drops from that module's
-  generated page; and **5 `private ::`** statements in the `parquet` facade (`c_int`, the two
-  `parquet_get_*_version` bindings, and `parquet_valid_compressions`/
-  `parquet_resolve_writer_compression` from `parquet_settings`), which are the facade's only way to
-  keep those names out of the namespace `use parquet` hands a user, so they cannot be removed.
+  generated page; and **9 `private ::`** statements in the `parquet` facade (`c_int`, the two
+  `parquet_get_*_version` bindings, and six names from `parquet_settings` —
+  `parquet_valid_compressions`, `parquet_resolve_writer_compression`, the three `parquet_emit_*`
+  output channels and `parquet_output_is_suppressed`), which are the facade's only way to keep those
+  names out of the namespace `use parquet` hands a user, so they cannot be removed.
   **This number rises by one for each name a future `private ::` in the facade hides**, which is
   the expected cost of keeping a sibling module's internal plumbing out of the public namespace —
   a rise of exactly that size is not a regression. **Confirmed not fixable from
@@ -1223,8 +1224,10 @@ unparsed from-scratch schema this guard exists to catch.
 
 ### The `parquet_strings` module
 
-`src/parquet_strings.f90` is an independent module (`use parquet_strings`; depends only on
-`iso_fortran_env`/`iso_c_binding`) providing `parquet_string_column` (Arrow-LargeUtf8-style
+`src/parquet_strings.f90` is an independent module (`use parquet_strings`; depends on
+`iso_fortran_env`/`iso_c_binding`, plus `parquet_settings` for one thing only — its two `print`
+procedures ask `parquet_output_is_suppressed`, because `verbosity="silent"` governs solicited output
+wherever it lives) providing `parquet_string_column` (Arrow-LargeUtf8-style
 offsets+data+bit-packed-validity string storage) and `parquet_string` (a non-owning handle to
 one element). User guide: `doc/pages/string-columns.md`.
 

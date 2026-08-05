@@ -324,6 +324,26 @@ program error_scenarios
         call scenario_settings_negative_sort_threads()
     case ("settings_negative_prefetch_threads")
         call scenario_settings_negative_prefetch_threads()
+    case ("settings_warning_normal")
+        call scenario_settings_warning(level="normal", stream="stdout")
+    case ("settings_warning_errors_only")
+        call scenario_settings_warning(level="errors_only", stream="stdout")
+    case ("settings_warning_on_stderr")
+        call scenario_settings_warning(level="normal", stream="stderr")
+    case ("settings_print_stat_normal")
+        call scenario_settings_print_stat(level="normal")
+    case ("settings_print_stat_silent")
+        call scenario_settings_print_stat(level="silent")
+    case ("settings_cpp_warning_normal")
+        call scenario_settings_cpp_warning(level="normal")
+    case ("settings_cpp_warning_errors_only")
+        call scenario_settings_cpp_warning(level="errors_only")
+    case ("settings_bad_verbosity")
+        call scenario_settings_bad_verbosity()
+    case ("settings_bad_stream")
+        call scenario_settings_bad_stream()
+    case ("settings_error_survives_silence")
+        call scenario_settings_error_survives_silence()
     case ("read_qc_entry_too_long")
         call scenario_read_qc_entry_too_long()
     case ("read_qc_remap_size_mismatch")
@@ -3739,6 +3759,113 @@ contains
         call parquet_set_prefetch_threads(-4)   ! -> aborts (must be >= 0)
         print '(a)', "unexpectedly accepted a negative prefetch thread cap"
     end subroutine scenario_settings_negative_prefetch_threads
+
+    !> Provokes a FORTRAN-side warning (a qc violation on write) at a chosen verbosity and message
+    !> stream, so the test can assert both whether it appeared and where.
+    subroutine scenario_settings_warning(level, stream)
+        character(len=*), intent(in) :: level  !! verbosity to set first.
+        character(len=*), intent(in) :: stream !! message stream to set first.
+        type(parquet_writer) :: writer
+        type(parquet_schema) :: schema
+        character(len=*), parameter :: out_file = "test_run/scenario_settings_warning.parquet"
+        integer(int32) :: v(4) = [1, 2, 3, 400]
+
+        schema%maml%name = "settings_warn.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: warn_demo", &
+            "fields:", &
+            "- name: v", &
+            "  data_type: int32", &
+            "  qc:", &
+            "    max: 10" ]
+        call parquet_parse_maml(schema)
+
+        call parquet_set_verbosity(level)
+        call parquet_set_message_stream(stream)
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "v", v)   ! -> qc violation warning
+        call parquet_close_writer(writer)
+        call parquet_reset_settings()
+    end subroutine scenario_settings_warning
+
+    !> Calls a SOLICITED printer (%print_stat) at a chosen verbosity, so the test can assert that
+    !> "silent" turns an explicitly-requested print into a no-op.
+    subroutine scenario_settings_print_stat(level)
+        character(len=*), intent(in) :: level !! verbosity to set first.
+        type(parquet_table) :: t
+        character(len=*), parameter :: out_file = "test_run/scenario_settings_print_stat.parquet"
+        integer(int32) :: v(4) = [1, 2, 3, 4]
+
+        call parquet_new_table(t)
+        call t%add_column("v", v)
+        call parquet_write_table(t, out_file)
+
+        call parquet_set_verbosity(level)
+        call t%print_stat()
+        call parquet_reset_settings()
+    end subroutine scenario_settings_print_stat
+
+    !> Provokes a C++-side warning (qc soft mode on read) at a chosen verbosity.
+    !>
+    !> This is the scenario that catches the Fortran and C++ copies of the verbosity setting
+    !> drifting apart: every Fortran-side assertion passes against a C++ half that ignores the
+    !> mirror entirely, because the Fortran warnings would still be suppressed correctly.
+    subroutine scenario_settings_cpp_warning(level)
+        character(len=*), intent(in) :: level !! verbosity to set first.
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_schema) :: schema
+        character(len=*), parameter :: out_file = "test_run/scenario_settings_cpp_warning.parquet"
+        integer(int32) :: v(4) = [1, 2, 3, 400]
+        integer(int32) :: got(4)
+
+        schema%maml%name = "settings_cpp_warn.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: cpp_warn_demo", &
+            "fields:", &
+            "- name: v", &
+            "  data_type: int32", &
+            "  qc:", &
+            "    max: 10" ]
+        call parquet_parse_maml(schema)
+
+        ! Written with qc off, so the file exists and only the READ complains -- which is the C++
+        ! side's own warning path rather than the writer's Fortran one.
+        call parquet_open_writer(writer, out_file, schema, qc=.false.)
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+
+        call parquet_set_verbosity(level)
+        call parquet_open_reader(reader, out_file, schema=schema, qc=.true., qc_soft=.true.)
+        call parquet_read_column(reader, "v", got)   ! -> qc soft warning, printed from C++
+        call parquet_close_reader(reader)
+        call parquet_reset_settings()
+    end subroutine scenario_settings_cpp_warning
+
+    !> An unknown verbosity token.
+    subroutine scenario_settings_bad_verbosity()
+
+        call parquet_set_verbosity("quiet")   ! -> aborts (unknown level)
+        print '(a)', "unexpectedly accepted an unknown verbosity level"
+    end subroutine scenario_settings_bad_verbosity
+
+    !> An unknown message-stream token. A Fortran unit number is deliberately not accepted.
+    subroutine scenario_settings_bad_stream()
+
+        call parquet_set_message_stream("logfile")   ! -> aborts (unknown stream)
+        print '(a)', "unexpectedly accepted an unknown message stream"
+    end subroutine scenario_settings_bad_stream
+
+    !> The one guarantee neither output setting may break: with everything silenced and messages
+    !> redirected, an abort still reports itself on stderr.
+    subroutine scenario_settings_error_survives_silence()
+        type(parquet_reader) :: reader
+
+        call parquet_set_verbosity("errors_only")
+        call parquet_set_message_stream("stderr")
+        call parquet_open_reader(reader, "test_run/definitely_not_a_file.parquet")
+        print '(a)', "unexpectedly opened a nonexistent file"
+    end subroutine scenario_settings_error_survives_silence
 
     !> An empty key names no column.
     subroutine scenario_sort_empty_key()

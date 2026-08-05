@@ -471,6 +471,58 @@ def check_settings_are_read():
     return problems
 
 
+#: Procedures allowed to write to a unit directly: the emit channels themselves, and the solicited
+#: printers, which format many lines to a caller-chosen unit and ask parquet_output_is_suppressed
+#: rather than routing through a channel. Every other write in src/ has to go through a channel, or
+#: the two output settings silently do not apply to it.
+DIRECT_PRINT_ALLOWED = {
+    "parquet_emit_info", "parquet_emit_warning", "parquet_emit_error_context",
+    "parquet_print_settings", "print_one", "print_text",
+    "table_print_stat", "schema_print_schema_info", "col_print", "psv_print",
+}
+
+
+def check_no_direct_printing():
+    """A warning printed directly ignores both output settings, and nothing else would notice.
+
+    After S3 every message the library emits goes through one of three channels in
+    parquet_settings, which is what makes `verbosity` and `message_stream` apply everywhere without
+    each call site testing them. A new warning written the old way -- `print '(a)', "WARNING: ..."`
+    -- still appears at default settings, so the test suite stays green; it is only wrong for the
+    users who changed a setting, and only in a way nobody runs into until they do.
+
+    That makes it a static-check problem rather than a test problem: the property is "no site does
+    this", which a test cannot express.
+
+    The allow-list is the solicited printers plus the channels themselves. It is small and changes
+    about as often as the library gains a printer; adding to it should be a deliberate act, which is
+    why it lives here next to the reason rather than as a marker comment at the site.
+    """
+    problems = []
+    pattern = re.compile(r"^\s*(?:print\s*[\'\"(]|write\s*\(\s*(?:\*|output_unit|error_unit)\s*,)")
+    proc_start = re.compile(
+        r"^\s*(?:module\s+procedure\s+(\w+)|(?:recursive\s+|pure\s+|impure\s+|elemental\s+)*"
+        r"(?:module\s+)?(?:subroutine|function)\s+(\w+)"
+        r"|(?:integer|logical|real|character)[^:]*::\s*(\w+)\s*\()")
+    for path in sorted(SRC.glob("*.f90")):
+        current = ""
+        for lineno, line in enumerate(path.read_text().split("\n"), start=1):
+            m = proc_start.match(line)
+            if m:
+                current = next(g for g in m.groups() if g) if any(m.groups()) else current
+            code = strip_comment(line)
+            if not pattern.match(code):
+                continue
+            if current in DIRECT_PRINT_ALLOWED:
+                continue
+            problems.append(
+                "%s:%d: writes to a unit directly inside `%s` -- route it through "
+                "parquet_emit_warning/_info/_error_context, or both output settings silently will "
+                "not apply to it:\n    %s"
+                % (path.relative_to(REPO_ROOT), lineno, current or "<file scope>", line.strip()))
+    return problems
+
+
 CHECKS = (
     ("parquet_table has no allocatable component", check_no_allocatable_component),
     ("table pointers are reached through %cache", check_pointers_go_through_cache),
@@ -480,6 +532,7 @@ CHECKS = (
     ("print_stat's columns match its documentation", check_print_stat_columns_documented),
     ("print_settings matches its documentation", check_print_settings_documented),
     ("every setting is actually read", check_settings_are_read),
+    ("no direct printing outside the emit channels", check_no_direct_printing),
 )
 
 

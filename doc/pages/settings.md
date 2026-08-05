@@ -127,6 +127,49 @@ Choose a codec by either route and the level falls back to that codec's own defa
 level too. That is deliberate: it stops a zstd-tuned level being attached to, say, snappy just
 because you changed the codec.
 
+## Terminal output
+
+Two settings control what the library prints and where. Both are read per message, so they take
+effect immediately.
+
+`parquet_set_verbosity(level)` takes one of three levels, in increasing order of quiet:
+
+| level | what still prints |
+|---|---|
+| `"normal"` (default) | everything |
+| `"silent"` | warnings and errors. Remarks and **explicitly-called print procedures** go quiet |
+| `"errors_only"` | errors only |
+
+```fortran
+call parquet_set_verbosity("errors_only")   ! a clean run in a batch pipeline
+```
+
+**Errors are never suppressed, at any level** — an `error stop`, the C++ layer's fatal-error report,
+and the context lines a failing writer close prints before aborting all survive. Your program's
+control flow depends on that output being findable, so no setting may hide it.
+
+**One consequence to know before you use `"silent"`:** it turns `%print_stat`, `%print_schema_info`
+and `parquet_string_column`'s printers into no-ops, along with
+`parquet_open_reader(..., print_stat=.true.)`. That is what a global output control means, and it is
+a debugging trap worth naming — add a print, see nothing, and the table is not at fault.
+`parquet_print_settings` is the one exemption: it prints at every level, so a silenced program can
+always be asked why it is silent.
+
+`parquet_set_message_stream(stream)` takes `"stdout"` (default) or `"stderr"` and decides where the
+library's own messages go. The reason to change it is a program that pipes its own standard output
+to a data consumer and does not want warnings mixed into that stream.
+
+```fortran
+call parquet_set_message_stream("stderr")   ! keep stdout clean for piped data
+```
+
+**Only those two values are accepted, and that is a constraint rather than a preference.** A Fortran
+unit number means nothing to this library's C++ half, which prints several of the warnings and one
+of the reports itself — so a setting holding an arbitrary unit could be honoured by the Fortran half
+and silently ignored by the other. Sending messages to a log file is therefore not supported; a
+shell redirect covers it. The explicitly-called print procedures are unaffected either way: they
+keep their own `unit=` argument.
+
 ## Restoring and inspecting
 
 `parquet_reset_settings()` restores every setting to what it was before your program changed it. For
@@ -151,6 +194,8 @@ parquet-fortran settings
   default_compression              zstd
   default_compression_level        3
   default_use_threads              true
+  verbosity                        normal
+  message_stream                   stdout
 limits (read-only)
   parquet_max_filter_rule_len      8192
   parquet_max_filter_depth         32

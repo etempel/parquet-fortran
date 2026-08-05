@@ -224,10 +224,10 @@ contains
         do i = 1, cache%ncols
             if (cache%cols(i)%name /= PARQUET_ROW_INDEX) cycle
             cache%row_index_shadowed = .true.
-            print "(a)", "WARNING: parquet_open_table: this file has a column called '" // &
+            call parquet_emit_warning("parquet_open_table: this file has a column called '" // &
                 PARQUET_ROW_INDEX // "', which is the reserved name of the automatic row-index " // &
                 "column; the file's own column is unreachable unless a read-in MAML remaps it " // &
-                "(file '" // trim(filename) // "')"
+                "(file '" // trim(filename) // "')")
             do k = i, cache%ncols - 1
                 call move_table_column(cache%cols(k), cache%cols(k + 1))
             end do

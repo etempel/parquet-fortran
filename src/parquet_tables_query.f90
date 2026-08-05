@@ -429,6 +429,10 @@ contains
         character(len=32) :: rows_s, nulls_s, wdt_s
         !
         call table_check_open(self, "print_stat")
+        ! Solicited output: verbosity="silent" and below turn this into a no-op. The open check
+        ! stays ABOVE it, so a print_stat on an unopened table still reports that mistake rather
+        ! than silently doing nothing for the wrong reason.
+        if (parquet_output_is_suppressed()) return
         want_all = .false.
         if (present(all)) want_all = all
         !

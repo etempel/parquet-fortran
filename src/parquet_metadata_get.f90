@@ -134,8 +134,8 @@ contains
     subroutine parquet_metadata_warn_default_used(key, filename)
         character(len=*), intent(in) :: key !! metadata key that was missing.
         character(len=*), intent(in) :: filename !! file the key was looked up in.
-        print '(a)', "WARNING: parquet_get_metadata: metadata key '" // trim(key) // "' not found in file '" // &
-            trim(filename) // "', using default value"
+        call parquet_emit_warning("parquet_get_metadata: metadata key '" // trim(key) // "' not found in file '" // &
+            trim(filename) // "', using default value")
     end subroutine parquet_metadata_warn_default_used
 
     !> Prints a "cannot be converted" WARNING before falling back to a default
@@ -145,8 +145,8 @@ contains
         character(len=*), intent(in) :: filename !! file the key was looked up in.
         character(len=*), intent(in) :: raw !! stored value text that failed to convert.
         character(len=*), intent(in) :: target_desc !! human-readable target type description.
-        print '(a)', "WARNING: parquet_get_metadata: metadata key '" // trim(key) // "' in file '" // trim(filename) // &
-            "' has value '" // trim(raw) // "' that cannot be converted to " // trim(target_desc)
+        call parquet_emit_warning("parquet_get_metadata: metadata key '" // trim(key) // "' in file '" // &
+            trim(filename) // "' has value '" // trim(raw) // "' that cannot be converted to " // trim(target_desc))
     end subroutine parquet_metadata_warn_conversion_failed
 
     !> Error stops for a missing metadata key with no default given.

@@ -320,8 +320,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `parquet_set_default_compression`, `parquet_set_default_compression_level` and
   `parquet_set_default_use_threads` set what `parquet_open_writer`/`parquet_open_reader` use when the
   corresponding argument is omitted — so a project standardising on a codec no longer has to pass it
-  at every call site. `parquet_reset_settings` restores what a program changed, and
-  `parquet_print_settings` dumps every setting and limit to a unit. The caps the library enforces on filter rules, sort keys and MAML
+  at every call site. **Terminal output is controllable too**: `parquet_set_verbosity` takes
+  `"normal"`/`"silent"`/`"errors_only"`, and `parquet_set_message_stream` moves the library's own
+  messages between `"stdout"` and `"stderr"` — useful when a program pipes its own standard output
+  to a data consumer. Errors are never suppressed at any level, but note that `"silent"` does turn
+  explicitly-called printers (`%print_stat`, `%print_schema_info`, `parquet_string_column`'s
+  printers, `parquet_open_reader(..., print_stat=.true.)`) into no-ops, which is what a global
+  output control means. The development-build notice is now an ordinary remark rather than a
+  `WARNING`. `parquet_reset_settings` restores what a program changed, and `parquet_print_settings`
+  dumps every setting and limit to a unit. The caps the library enforces on filter rules, sort keys and MAML
   lines are published as read-only constants (`parquet_max_filter_rule_len`,
   `parquet_max_filter_depth`, `parquet_max_filter_nodes`, `parquet_max_sort_keys`,
   `parquet_max_sort_key_len`, `parquet_max_maml_line_len`), so code assembling any of those from

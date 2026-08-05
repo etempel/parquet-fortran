@@ -145,9 +145,9 @@ contains
         ! single-pass decode the deferred cast above exists for.
         if (.not. bind_conversion_is_lossless(cur_kind, want_kind)) then
             call table_context_suffix(self%cache, name, sfx)
-            print "(a)", "WARNING: parquet_table: bind_predefined: column '" // trim(name) // &
+            call parquet_emit_warning("parquet_table: bind_predefined: column '" // trim(name) // &
                 "' is declared " // to_txt // " but the file holds " // from_txt // &
-                "; values may lose precision or range" // ctx // sfx
+                "; values may lose precision or range" // ctx // sfx)
         end if
         call self%cast(name, want_kind, exact=exact)
     end subroutine bind_one_file_column

@@ -360,9 +360,9 @@ contains
         call parquet_qc_format_real(data_max, fmt_num2)
         call parquet_qc_format_int(n_violate, fmt_int)
         call parquet_qc_format_int(n_valid, fmt_int2)
-        print '(a)', "WARNING: qc violation for column '" // trim(name) // "': declared " // bounds_desc // &
+        call parquet_emit_warning("qc violation for column '" // trim(name) // "': declared " // bounds_desc // &
             ", data range [" // fmt_num // ", " // fmt_num2 // "], " // &
-            fmt_int // " of " // fmt_int2 // " valid element(s) out of range"
+            fmt_int // " of " // fmt_int2 // " valid element(s) out of range")
     end subroutine parquet_check_qc_numeric
     module procedure parquet_write_int32_column
         integer :: idx

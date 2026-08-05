@@ -906,8 +906,8 @@ contains
 
         call parquet_qc_format_int(n_null, fmt_int)
         call parquet_qc_format_int(n_total, fmt_int2)
-        print '(a)', "WARNING: qc violation for column '" // trim(name) // "': " // fmt_int // " of " // &
-            fmt_int2 // " element(s) are Null (qc: miss: not declared)"
+        call parquet_emit_warning("qc violation for column '" // trim(name) // "': " // fmt_int // " of " // &
+            fmt_int2 // " element(s) are Null (qc: miss: not declared)")
     end subroutine parquet_check_qc_miss
     !> Builds the int8 validity buffer and c_ptr passed down to the C++
     !> append_* functions from a caller's flattened `is_valid` mask (1 =
@@ -1165,13 +1165,17 @@ contains
         if (writer%is_schema_enforced .and. allocated(writer%enabled_columns)) then
             do i = 1, size(writer%enabled_columns)
                 if (writer%write_counts(i) == 0) then
-                    ! Filename/schema name go on their own print lines rather
-                    ! than into the error stop text, to keep that text short.
-                    if (allocated(writer%filename)) print '(a)', "parquet_close_writer: output file: " // trim(writer%filename)
+                    ! Filename/schema name go on their own lines rather than into the error stop
+                    ! text, to keep that text short -- so they are ERROR CONTEXT, not warnings, and
+                    ! go through the channel that is never suppressed and never redirected. Routing
+                    ! them through parquet_emit_warning instead would let verbosity="errors_only"
+                    ! produce an abort that names no file at all.
+                    if (allocated(writer%filename)) call parquet_emit_error_context( &
+                        "parquet_close_writer: output file: " // trim(writer%filename))
                     if (allocated(writer%maml_name)) then
-                        print '(a)', "parquet_close_writer: schema: " // trim(writer%maml_name)
+                        call parquet_emit_error_context("parquet_close_writer: schema: " // trim(writer%maml_name))
                     else
-                        print '(a)', "parquet_close_writer: schema: (unnamed, built in-memory)"
+                        call parquet_emit_error_context("parquet_close_writer: schema: (unnamed, built in-memory)")
                     end if
                     error stop "parquet_close_writer: missing write for enabled column: " // trim(writer%enabled_columns(i)%name)
                 end if

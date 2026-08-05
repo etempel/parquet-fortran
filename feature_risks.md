@@ -33,11 +33,11 @@ Four sections, and **a risk keeps its number when it moves between them**:
 the whole document; moving one between sections (a proposal getting written, a covered property
 regressing) **never** renumbers it, so a reference from `CLAUDE.md`, `feature_table.md`,
 `tools/check_source_conventions.py` or a code comment stays valid for good. **A new risk takes the
-next unused number — `Risk-42` today — and goes in "1. New risks"** until it has been triaged.
+next unused number — `Risk-43` today — and goes in "1. New risks"** until it has been triaged.
 Numbers of deleted entries are not reused, so a stale reference resolves to nothing rather than to
 the wrong risk.
 
-**Counts today: 36 covered, 0 proposed, 5 not testable.** Section 2 being empty is the healthy
+**Counts today: 37 covered, 0 proposed, 5 not testable.** Section 2 being empty is the healthy
 state rather than a finished one — it means every risk currently identified as testable has its
 test. Seven entries are covered by something other than a unit test, deliberately: Risk-1 by a
 maintainer check under `app/` with a `tools/*.sh` wrapper (it measures memory, so it needs its own
@@ -106,6 +106,7 @@ something a reader is expected to have.
 | [Risk-39](#risk-39--a-silently-serial-threads-passes-every-correctness-test) | A silently serial `threads=` passes every correctness test | 4 — covered |
 | [Risk-40](#risk-40--auto-threading-must-stay-serial-inside-a-parallel-region) | Auto threading must stay serial inside a parallel region | 4 — covered |
 | [Risk-41](#risk-41--a-setting-that-is-never-read-passes-every-test-written-for-it) | A setting that is never read passes every test written for it | 4 — covered |
+| [Risk-42](#risk-42--the-fortran-and-c-copies-of-an-output-setting-can-drift-apart) | The Fortran and C++ copies of an output setting can drift apart | 4 — covered |
 
 ---
 
@@ -113,7 +114,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-42**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-43**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -1548,3 +1549,41 @@ automatic case report a real thread count **first**.
 **One test here is not about any single knob and must not be deleted as redundant:**
 `test_argument_beats_setting`. A resolution written the wrong way round makes the setting beat an
 explicit argument, and every per-knob test still passes.
+
+---
+
+### Risk-42 — The Fortran and C++ copies of an output setting can drift apart
+
+`verbosity` and `message_stream` are stored **twice**: in `parquet_settings` and, mirrored across the
+`bind(C)` boundary by `parquet_push_output_settings`, in `parquet_wrapper.cpp`. The C++ copy exists
+because that side prints on its own — three warnings (two qc soft-mode, one incomplete chunked read)
+plus the whole `parquet_reader_print_stat` report — and cannot see a Fortran module variable.
+
+**If the mirror stops being pushed, or the C++ side stops consulting it, the two halves disagree and
+almost nothing notices.** Every Fortran warning is suppressed and redirected exactly as asked, every
+Fortran-side assertion passes, `parquet_get_verbosity` returns the right token — and a qc-checking
+read still prints to stdout at `errors_only`. The user sees a setting that works for most messages
+and not for some, which reads as a mystery rather than as a bug with a location.
+
+**Two properties keep the copy honest, and both are load-bearing:**
+
+- **One writer.** The C++ side has no setter of its own; `parquet_push_output_settings` is called
+  only from `parquet_settings`' two setters and from `parquet_reset_settings`. The copy is derived,
+  never independently assigned. **A future knob that C++ also needs must follow this** — a second
+  writer makes the two genuinely independent and the drift becomes unfixable by inspection.
+- **Resolved integers cross the boundary, never tokens.** The fold and the vocabulary check happen
+  once, in Fortran. A second string parser on the C++ side would be a second place for
+  `"errors_only"` to be spelled, and the drift would then be in the *parsing* rather than in the
+  value.
+
+**Covered by** `settings: the C++ half honours the mirrored verbosity` (`test/test_errors.f90`),
+which drives `settings_cpp_warning_normal`/`_errors_only` — a qc soft-mode read whose warning is
+printed **from C++** — and asserts it appears at `"normal"` and is absent at `"errors_only"`. It is
+the only test in the suite that would fail if the mirror broke.
+
+**What this still forbids.** Do not test an output setting through a Fortran-side message alone: that
+assertion passes against a C++ half that ignores the mirror completely. Any new C++-side print needs
+either the shared `emit_warning_cpp` helper (for a warning) or the `output_is_suppressed()` query
+(for solicited output), and a scenario that provokes it — a print site added straight to
+`std::fprintf` is invisible to both this test and the `no direct printing` lint check, which can only
+see Fortran.

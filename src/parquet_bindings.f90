@@ -21,6 +21,7 @@ module parquet_bindings
     public :: parquet_reader_print_stat
     public :: parquet_set_writer_options
     public :: parquet_set_thread_pool_capacity, parquet_get_thread_pool_capacity
+    public :: parquet_push_output_settings
     public :: parquet_get_arrow_version, parquet_get_parquet_version
     public :: parquet_maml_lock, parquet_maml_unlock
     public :: parquet_warmup_memory_pool
@@ -129,6 +130,16 @@ module parquet_bindings
                 bind(C, name="parquet_set_max_threads")
             import
             integer(c_int), value :: n
+        end subroutine
+
+        !> Mirrors parquet_settings' verbosity and message-stream choices to the C++ side, which
+        !> prints warnings and the reader stats report itself. Both are already-resolved integer
+        !> codes: 0/1/2 for normal/silent/errors_only, and 0/1 for stdout/stderr.
+        subroutine parquet_push_output_settings(verbosity, message_stream) &
+                bind(C, name="parquet_push_output_settings")
+            import
+            integer(c_int), value :: verbosity
+            integer(c_int), value :: message_stream
         end subroutine
 
         !> Reports Arrow's current global CPU thread-pool capacity. Named differently from its

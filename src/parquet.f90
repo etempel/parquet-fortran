@@ -18,9 +18,9 @@
 !>                          and the `parquet_unit_*`/`parquet_ns_*` constants.
 !>   * `parquet_sorting` -- `pf_sort`/`pf_argsort`/`pf_permute`/`pf_is_sorted`
 !>                          and the `pf_sort_keys` multi-key builder.
-!>   * `parquet_settings`-- process-global settings (`parquet_set_max_threads`/
-!>                          `parquet_get_max_threads`, `parquet_print_settings`)
-!>                          and the read-only `parquet_max_*` limits.
+!>   * `parquet_settings`-- process-global settings: thread caps, writer
+!>                          defaults, terminal verbosity and message stream,
+!>                          plus the read-only `parquet_max_*` limits.
 !>   * `parquet_maml_base` -- `parquet_maml_file`, for embedded MAML schemas.
 !>
 !> Those modules remain individually usable (`use parquet_temporal` still works
@@ -63,6 +63,10 @@ module parquet
     ! API, so the facade keeps them out of the namespace `use parquet` hands a user, exactly as it
     ! does for c_int and the version bindings above.
     private :: parquet_valid_compressions, parquet_resolve_writer_compression
+    ! The three output channels and the suppression query are the same case: every module that
+    ! emits has to reach them, so parquet_settings makes them public, and the facade hides them.
+    private :: parquet_emit_info, parquet_emit_warning, parquet_emit_error_context
+    private :: parquet_output_is_suppressed
     !
     character(len=*),parameter:: cversion = "v1.4.0 (2026-08-04)" !! version info
 #ifndef RELEASE_VERSION
@@ -72,7 +76,7 @@ module parquet
 contains
 
     !> Returns a version string. Default (mode absent): the RELEASE_VERSION build
-    !> macro's bare release number; prints a WARNING to stdout first if that
+    !> macro's bare release number; emits an informational remark first if that
     !> disagrees with cversion (a hand-maintained "vX.Y.Z (date)" string), which
     !> signals a build that skipped fpm's macro substitution or a version bump
     !> missed on one side. mode="internal" instead returns cversion verbatim.
@@ -107,9 +111,12 @@ contains
         i = index(cversion, " ")
         !
         if (cversion(2:i-1) /= ver_string) then ! GCOVR_EXCL_START -- gcov attribution artifact
-            write(*,*) "WARNING: using development parquet-fortran library!"
-            write(*,*) "         library version: ", trim(cversion)
-            write(*,*) "         RELEASE_VERSION: ", trim(ver_string)
+            ! A remark rather than a warning: it says something about how this copy of the library
+            ! was BUILT, not about the caller's data, and it fires on every call in a build whose
+            ! macro substitution did not happen. So it goes through the informational channel, which
+            ! `verbosity="silent"` quiets while leaving real warnings alone.
+            call parquet_emit_info("note: this is a development build of parquet-fortran " // &
+                "(library version " // trim(cversion) // ", RELEASE_VERSION " // trim(ver_string) // ")")
         end if ! GCOVR_EXCL_STOP
         !
         if (present(mode)) then

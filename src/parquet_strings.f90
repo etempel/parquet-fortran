@@ -20,6 +20,10 @@
 !! Parquet read/write path consumes.
 module parquet_strings
     use, intrinsic :: iso_fortran_env, only : int8, int32, int64, output_unit
+    ! The ONLY reason this otherwise self-contained module imports anything of the
+    ! library's: its two print procedures are solicited output, and verbosity="silent"
+    ! governs those exactly as it governs %print_stat.
+    use parquet_settings, only : parquet_output_is_suppressed
     use, intrinsic :: iso_c_binding, only : c_ptr, c_loc, c_f_pointer, c_null_ptr, c_associated
     !
     implicit none
@@ -1619,6 +1623,7 @@ contains
         integer :: u
         integer(int64) :: i, lim
         character(len=:), allocatable :: s
+        if (parquet_output_is_suppressed()) return
         u = output_unit
         if (present(unit)) u = unit
         lim = 20_int64
@@ -1917,6 +1922,7 @@ contains
         integer, intent(in), optional :: unit      !! output unit (default output_unit).
         integer :: u
         character(len=:), allocatable :: s
+        if (parquet_output_is_suppressed()) return
         u = output_unit
         if (present(unit)) u = unit
         call check_handle(self, "print")

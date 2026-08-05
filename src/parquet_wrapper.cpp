@@ -718,6 +718,41 @@ extern "C"
 	}
 	// GCOVR_EXCL_STOP
 
+	// ==== Output settings, mirrored from parquet_settings.f90 ====
+	//
+	// This side prints three warnings of its own (qc soft-mode on read, twice, and an incomplete
+	// chunked read under check_hard=.false.) plus the whole parquet_reader_print_stat report, so it
+	// needs its own copy of what Fortran decided. Both arrive as already-resolved integers: the
+	// tokens are folded and validated once, in Fortran, and a second string parser here is exactly
+	// the drift the arrangement avoids.
+	//
+	// There is deliberately no C++-side setter beyond this one entry point, so Fortran is the single
+	// writer and this copy is derived rather than independent.
+	static int g_verbosity = 0;      // 0 = normal, 1 = silent, 2 = errors_only
+	static int g_message_stream = 0; // 0 = stdout, 1 = stderr
+
+	void parquet_push_output_settings(int verbosity, int message_stream)
+	{
+		g_verbosity = verbosity;
+		g_message_stream = message_stream;
+	}
+
+	// True when output the caller explicitly asked for should be skipped -- the C++ counterpart of
+	// parquet_settings' parquet_output_is_suppressed, asked by parquet_reader_print_stat.
+	static bool output_is_suppressed(void)
+	{
+		return g_verbosity >= 1;
+	}
+
+	// The one place a C++-side warning is printed, so the three call sites cannot disagree about
+	// either setting. Mirrors parquet_emit_warning: suppressed only at errors_only, prefixed here
+	// rather than at each site, and routed by the shared stream selector.
+	static void emit_warning_cpp(const std::string &msg)
+	{
+		if (g_verbosity >= 2) return;
+		std::fprintf(g_message_stream == 1 ? stderr : stdout, "WARNING: %s\n", msg.c_str());
+	}
+
 	// Returns the schema field index of `name`, or throws if it isn't a column.
 	static int64_t get_column_index(const ParquetReaderHandle *reader_handle, const char *name)
 	{
@@ -2319,7 +2354,7 @@ extern "C"
 				{
 					report_fatal_error("qc hard check", msg);
 				}
-				std::fprintf(stdout, "WARNING: %s\n", msg.c_str());
+				emit_warning_cpp(msg);
 				reader_handle->qc_null_warned.insert(qc_key);
 			}
 		}
@@ -2333,7 +2368,7 @@ extern "C"
 				{
 					report_fatal_error("qc hard check", msg);
 				}
-				std::fprintf(stdout, "WARNING: %s\n", msg.c_str());
+				emit_warning_cpp(msg);
 				reader_handle->qc_range_warned.insert(qc_key);
 			}
 		}
@@ -6999,6 +7034,10 @@ extern "C"
 	// before the underlying reader is closed/deleted.
 	void parquet_reader_print_stat(void *handle)
 	{
+		// Solicited output: the caller asked for this report, so it is governed by verbosity exactly
+		// as %print_stat and %print_schema_info are on the Fortran side. The rule is about who
+		// asked, not about which language the printer happens to be written in.
+		if (output_is_suppressed()) return;
 		auto reader_handle = as_reader_handle(handle);
 
 		std::vector<int> touched;
@@ -9404,7 +9443,7 @@ extern "C"
 			{
 				report_fatal_error("parquet_close_reader", msg);
 			}
-			std::fprintf(stdout, "WARNING: %s\n", msg.c_str());
+			emit_warning_cpp(msg);
 		}
 	}
 

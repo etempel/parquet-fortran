@@ -24,6 +24,7 @@ module test_errors
     ! subprocess-driving helper -- see check_scenario_exit_status below).
     public :: check_scenario_exit_status
     public :: check_scenario_exit_status_and_stderr
+    public :: check_scenario_streams
     public :: check_scenario_exit_status_and_no_output
     ! Exposed for test_writing.f90's own qc-warning scenario helpers -- see
     ! run_error_scenario below.
@@ -365,6 +366,20 @@ contains
                 test_settings_negative_sort_threads_aborts), &
             new_unittest("settings: a negative prefetch thread cap aborts", &
                 test_settings_negative_prefetch_threads_aborts), &
+            new_unittest("settings: an unknown verbosity level aborts", &
+                test_settings_bad_verbosity_aborts), &
+            new_unittest("settings: an unknown message stream aborts", &
+                test_settings_bad_stream_aborts), &
+            new_unittest("settings: errors_only prints a warning at normal and not at errors_only", &
+                test_settings_verbosity_gates_warning), &
+            new_unittest("settings: silent turns %print_stat into a no-op", &
+                test_settings_silent_gates_print_stat), &
+            new_unittest("settings: the C++ half honours the mirrored verbosity", &
+                test_settings_verbosity_reaches_cpp), &
+            new_unittest("settings: message_stream moves a warning off stdout", &
+                test_settings_message_stream_moves_warning), &
+            new_unittest("settings: an abort still reports itself when everything is silenced", &
+                test_settings_error_survives_silence), &
             new_unittest("read_qc: an entry longer than the supported maximum aborts", &
                 test_read_qc_entry_too_long_aborts), &
             new_unittest("read_qc: remap_column_names with mismatched from/to sizes aborts", &
@@ -3366,6 +3381,85 @@ contains
             required_stderr="parquet_set_prefetch_threads: n must be >= 0")
     end subroutine test_settings_negative_prefetch_threads_aborts
 
+    subroutine test_settings_bad_verbosity_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "settings_bad_verbosity", expect_abort=.true., &
+            failure_message="an unknown verbosity level was expected to abort", &
+            required_stderr="parquet_set_verbosity: unknown level 'quiet'")
+    end subroutine test_settings_bad_verbosity_aborts
+
+    subroutine test_settings_bad_stream_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "settings_bad_stream", expect_abort=.true., &
+            failure_message="an unknown message stream was expected to abort", &
+            required_stderr="parquet_set_message_stream: unknown stream 'logfile'")
+    end subroutine test_settings_bad_stream_aborts
+
+    !> Both directions. The "normal" half is the positive control: without it, a helper that
+    !> suppressed unconditionally would pass the "errors_only" half perfectly.
+    subroutine test_settings_verbosity_gates_warning(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "settings_warning_normal", expect_abort=.false., &
+            failure_message="the qc warning scenario was not expected to abort", &
+            required_stderr="WARNING: qc violation for column 'v'")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_no_output(error, "settings_warning_errors_only", expect_abort=.false., &
+            failure_message="the qc warning scenario was not expected to abort", &
+            forbidden_text="qc violation for column 'v'")
+    end subroutine test_settings_verbosity_gates_warning
+
+    !> Decision 7: "silent" silences even a print the caller explicitly asked for.
+    subroutine test_settings_silent_gates_print_stat(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "settings_print_stat_normal", expect_abort=.false., &
+            failure_message="the print_stat scenario was not expected to abort", &
+            required_stderr="parquet_table:")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_no_output(error, "settings_print_stat_silent", expect_abort=.false., &
+            failure_message="the print_stat scenario was not expected to abort", &
+            forbidden_text="parquet_table:")
+    end subroutine test_settings_silent_gates_print_stat
+
+    !> The mirror. Every Fortran-side assertion above passes against a C++ half that ignores the
+    !> pushed verbosity entirely, so this is the only test that would catch the two drifting apart
+    !> (feature_risks.md Risk-42). The warning provoked here is printed from parquet_wrapper.cpp.
+    subroutine test_settings_verbosity_reaches_cpp(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "settings_cpp_warning_normal", expect_abort=.false., &
+            failure_message="the qc soft-mode read scenario was not expected to abort", &
+            required_stderr="WARNING:")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_no_output(error, "settings_cpp_warning_errors_only", expect_abort=.false., &
+            failure_message="the qc soft-mode read scenario was not expected to abort", &
+            forbidden_text="WARNING:")
+    end subroutine test_settings_verbosity_reaches_cpp
+
+    !> Needs SEPARATED streams: with the merged capture every other helper uses, a message that
+    !> moved from stdout to stderr looks identical and this would assert nothing.
+    subroutine test_settings_message_stream_moves_warning(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_streams(error, "settings_warning_normal", "WARNING: qc violation", "stdout", &
+            "the default message stream should put a warning on stdout")
+        if (allocated(error)) return
+        call check_scenario_streams(error, "settings_warning_on_stderr", "WARNING: qc violation", "stderr", &
+            "message_stream='stderr' should move the warning off stdout")
+    end subroutine test_settings_message_stream_moves_warning
+
+    !> The one guarantee neither output setting may break.
+    subroutine test_settings_error_survives_silence(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "settings_error_survives_silence", expect_abort=.true., &
+            failure_message="opening a nonexistent file was expected to abort", &
+            required_stderr="parquet-fortran")
+    end subroutine test_settings_error_survives_silence
+
     subroutine test_read_qc_entry_too_long_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
@@ -4564,6 +4658,11 @@ contains
 
         out_file = "test_run/" // trim(scenario) // "_stderr.txt"
 
+        ! `2>&1` MERGES stdout into stderr and the assertion below runs over the combined capture,
+        ! despite this procedure's name. That is deliberate and is what ~390 call sites want ("this
+        ! text appeared somewhere"), but it means this helper cannot tell the two streams apart --
+        ! a message moved from one to the other looks identical to it. Anything asserting about a
+        ! specific stream needs check_scenario_streams below instead.
         call run_error_scenario(scenario, "> " // out_file // " 2>&1", exitstat, cmdstat)
         call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
         if (allocated(error)) return
@@ -4592,6 +4691,68 @@ contains
         call check(error, found, &
             "expected stderr to contain '" // trim(required_stderr) // "' for scenario '" // trim(scenario) // "'")
     end subroutine check_scenario_exit_status_and_stderr
+
+    !> Runs `scenario` capturing stdout and stderr SEPARATELY, and asserts `text` appears on the
+    !> stream named by `expect_on` and is absent from the other.
+    !>
+    !> The absence half is the entire point. Every other helper here redirects with `2>&1`, so a
+    !> message that moved from stdout to stderr produces a byte-identical capture -- a
+    !> `message_stream` test written against those helpers passes whether the setting works or is
+    !> ignored completely, which is the decorative-knob failure feature_risks.md Risk-41 exists to
+    !> forbid. Asserting presence alone here would have the same hole, since the message is present
+    !> either way; it is asserting it is *gone from the other stream* that has teeth.
+    subroutine check_scenario_streams(error, scenario, text, expect_on, failure_message)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), intent(in) :: scenario, text, expect_on, failure_message
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: on_out, on_err, wanted, unwanted
+
+        out_file = "test_run/" // trim(scenario) // "_o.txt"
+        err_file = "test_run/" // trim(scenario) // "_e.txt"
+
+        call run_error_scenario(scenario, "> " // out_file // " 2> " // err_file, exitstat, cmdstat)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 97, &
+            "scenario name not recognized by error_scenarios.f90 (typo?): "//trim(scenario))
+        if (allocated(error)) return
+
+        call file_contains(out_file, text, on_out)
+        call file_contains(err_file, text, on_err)
+
+        if (trim(expect_on) == "stdout") then
+            wanted = on_out
+            unwanted = on_err
+        else
+            wanted = on_err
+            unwanted = on_out
+        end if
+
+        call check(error, wanted, failure_message // " (expected on " // trim(expect_on) // ")")
+        if (allocated(error)) return
+        call check(error, .not. unwanted, &
+            failure_message // " (must NOT also appear on the other stream)")
+    end subroutine check_scenario_streams
+
+    !> Whether `text` occurs on any line of `path`. A missing file counts as "not present", so a
+    !> scenario that wrote nothing to one stream reads as absent rather than as a test error.
+    subroutine file_contains(path, text, found)
+        character(len=*), intent(in) :: path, text
+        logical, intent(out) :: found
+        character(len=1024) :: line
+        integer :: unit, ios
+
+        found = .false.
+        open(newunit=unit, file=path, status="old", action="read", iostat=ios)
+        if (ios /= 0) return
+        do
+            read(unit, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            if (index(line, text) > 0) found = .true.
+        end do
+        close(unit)
+    end subroutine file_contains
 
     !> Like check_scenario_exit_status_and_stderr, but asserts `forbidden_text`
     !> is ABSENT from the captured (combined stdout+stderr) output instead of

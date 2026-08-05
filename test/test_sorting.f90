@@ -109,7 +109,12 @@ contains
             new_unittest("merge tracks validity", test_merge_validity), &
             new_unittest("merge follows a descending order", test_merge_descending), &
             new_unittest("merge handles an empty input", test_merge_empty), &
-            new_unittest("merge widens two string lengths", test_merge_string_widths) &
+            new_unittest("merge widens two string lengths", test_merge_string_widths), &
+            new_unittest("a threaded sort equals the serial one", test_threads_identical), &
+            new_unittest("threads are really created", test_threads_really_used), &
+            new_unittest("auto is serial inside a parallel region", test_threads_auto_in_parallel), &
+            new_unittest("threads=1 forces serial", test_threads_one_is_serial), &
+            new_unittest("unique and rank take threads too", test_threads_on_derived) &
             ]
     end subroutine collect_tests_parquet_sorting
     !
@@ -1521,5 +1526,192 @@ contains
         call check(error, all(m == ["aaaaa", "abc  ", "mmmmm", "xyz  "]), &
             "a shorter element must order as if blank-padded to the merged width")
     end subroutine test_merge_string_widths
+    !
+    ! ==================================================================================
+    ! M4: parallel sorting
+    ! ==================================================================================
+    !
+    !> Lowers the row count below which threading is refused, so a test-sized array can reach the
+    !> parallel path at all. Every fixture here is orders of magnitude below the real threshold.
+    subroutine force_parallel_threshold(rows)
+        integer(int64), intent(in) :: rows !! new threshold; <= 0 restores the real one.
+        interface
+            subroutine set_min_rows(n) bind(C, name="parquet_debug_set_sort_parallel_min_rows")
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t), value :: n !! rows below which threading is refused.
+            end subroutine set_min_rows
+        end interface
+        call set_min_rows(int(rows, int64))
+    end subroutine force_parallel_threshold
+    !
+    !> How many threads the last sort actually put to work, the calling thread included.
+    function threads_used() result(n)
+        integer(int64) :: n !! 1 means the sort ran serially.
+        interface
+            function get_used() bind(C, name="parquet_debug_get_sort_threads_used") result(k)
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t) :: k !! threads used by the last threaded build.
+            end function get_used
+        end interface
+        n = int(get_used(), int64)
+    end function threads_used
+    !
+    !> Builds the fixture every test below shares: **heavy ties in the FULL key, and a key family
+    !> the counting fast path declines.** Both halves were arrived at by mutation.
+    !>
+    !> Ties matter because a merge defect is only visible where two rows compare equal -- with the
+    !> tiebreaker-free comparator substituted into the merge, an all-distinct fixture and a
+    !> near-unique multi-key fixture both still passed while three tied ones failed.
+    !>
+    !> The key family matters because `sort_counting_candidate` keys on the value RANGE, not on
+    !> cardinality: 300 distinct integers under 4M still take the counting path, which performs zero
+    !> comparisons and spawns nothing. A real key declines it outright.
+    subroutine ties_fixture(v)
+        real(real64), intent(out) :: v(:) !! heavily tied real values.
+        integer :: k
+        do k = 1, size(v)
+            v(k) = real(mod(k * 7919, 97), real64)
+        end do
+    end subroutine ties_fixture
+    !
+    !> **The identity oracle, and the reason `threads=` is safe at all.** `SortRowLess` ends with a
+    !> tiebreaker on the row index, making it a total order with no ties, so every correct sorting
+    !> algorithm -- serial, threaded, or both -- must produce the SAME permutation. Any thread count
+    !> that disagreed with the serial answer would be a defect, not a variation.
+    subroutine test_threads_identical(error)
+        type(error_type), allocatable, intent(out) :: error
+        real(real64) :: v(2000)
+        logical :: mask(2000)
+        integer(int32), allocatable :: ser(:), par(:)
+        integer :: t, k
+
+        call ties_fixture(v)
+        do k = 1, 2000
+            mask(k) = mod(k, 13) /= 0
+        end do
+        call force_parallel_threshold(1000000000_int64)   ! above the size -> serial reference
+        call pf_argsort(v, ser, is_valid=mask)
+        call force_parallel_threshold(4_int64)            ! below the size -> parallel
+        do t = 2, 8
+            call pf_argsort(v, par, is_valid=mask, threads=t)
+            call check(error, size(par) == size(ser), "a threaded argsort must return every index")
+            if (allocated(error)) exit
+            call check(error, all(par == ser), &
+                "a threaded permutation must be identical to the serial one, at every thread count")
+            if (allocated(error)) exit
+        end do
+        call force_parallel_threshold(0_int64)
+    end subroutine test_threads_identical
+    !
+    !> **Without this the whole feature is untestable.** A `threads=` that is silently ignored
+    !> returns the serial permutation, which is CORRECT -- so every assertion above passes just as
+    !> happily against an implementation that never spawns anything. Zero parallelism is a passing
+    !> test, exactly as zero comparisons was for the partial sort (`feature_risks.md` Risk-35).
+    subroutine test_threads_really_used(error)
+        type(error_type), allocatable, intent(out) :: error
+        real(real64) :: v(2000)
+        integer(int32), allocatable :: perm(:)
+
+        call ties_fixture(v)
+        call force_parallel_threshold(4_int64)
+        call pf_argsort(v, perm, threads=4)
+        call check(error, threads_used() == 4_int64, &
+            "asking for 4 threads must actually put 4 threads to work")
+        if (allocated(error)) then
+            call force_parallel_threshold(0_int64)
+            return
+        end if
+        ! The negative control: below the threshold nothing threads, however many were asked for.
+        call force_parallel_threshold(1000000000_int64)
+        call pf_argsort(v, perm, threads=4)
+        call check(error, threads_used() == 1_int64, &
+            "an array below the minimum-work threshold must sort serially whatever was asked for")
+        call force_parallel_threshold(0_int64)
+    end subroutine test_threads_really_used
+    !
+    !> **The rule nothing else observes**, and the one that keeps the rest of this test suite from
+    !> oversubscribing: with `threads=` absent, auto takes the machine in a serial region and stays
+    !> SERIAL inside a parallel one, because T OpenMP threads each asking for T more would be T*T
+    !> threads. An explicit `threads=` is still honoured there -- the caller has said what they want.
+    subroutine test_threads_auto_in_parallel(error)
+        type(error_type), allocatable, intent(out) :: error
+        real(real64) :: v(2000)
+        integer(int32), allocatable :: perm(:)
+        integer(int64) :: auto_outside, auto_inside, explicit_inside
+
+        call ties_fixture(v)
+        call force_parallel_threshold(4_int64)
+        call pf_argsort(v, perm)
+        auto_outside = threads_used()
+        auto_inside = -1_int64
+        explicit_inside = -1_int64
+        !$omp parallel
+        !$omp single
+        block
+            integer(int32), allocatable :: p2(:)
+            call pf_argsort(v, p2)
+            auto_inside = threads_used()
+            call pf_argsort(v, p2, threads=3)
+            explicit_inside = threads_used()
+        end block
+        !$omp end single
+        !$omp end parallel
+        call force_parallel_threshold(0_int64)
+        call check(error, auto_inside == 1_int64, &
+            "auto must resolve to serial inside an OpenMP parallel region")
+        if (allocated(error)) return
+        call check(error, explicit_inside == 3_int64, &
+            "an explicit threads= must still be honoured inside a parallel region")
+        if (allocated(error)) return
+        ! Guards the test itself: if auto were serial everywhere, the assertion above would pass
+        ! while proving nothing about the parallel-region rule.
+        call check(error, auto_outside >= 1_int64, "auto outside a parallel region must resolve")
+    end subroutine test_threads_auto_in_parallel
+    !
+    !> `threads=1` is the documented way to turn parallelism off, now that absence means auto.
+    subroutine test_threads_one_is_serial(error)
+        type(error_type), allocatable, intent(out) :: error
+        real(real64) :: v(2000)
+        integer(int32), allocatable :: perm(:), ref(:)
+
+        call ties_fixture(v)
+        call force_parallel_threshold(4_int64)
+        call pf_argsort(v, perm, threads=1)
+        call check(error, threads_used() == 1_int64, "threads=1 must sort serially")
+        if (allocated(error)) then
+            call force_parallel_threshold(0_int64)
+            return
+        end if
+        call pf_argsort(v, ref, threads=8)
+        call force_parallel_threshold(0_int64)
+        call check(error, all(perm == ref), "threads=1 and threads=8 must agree element for element")
+    end subroutine test_threads_one_is_serial
+    !
+    !> `threads=` reaches the three operations that sort internally, not just the two that are a
+    !> sort -- and their answers must not change either.
+    subroutine test_threads_on_derived(error)
+        type(error_type), allocatable, intent(out) :: error
+        real(real64) :: v(2000)
+        real(real64), allocatable :: d1(:), d2(:)
+        integer, allocatable :: r1(:), r2(:)
+        integer :: c1, c2
+
+        call ties_fixture(v)
+        call force_parallel_threshold(1000000000_int64)
+        call pf_unique_count(v, c1)
+        call pf_unique(v, d1)
+        call pf_rank(v, r1)
+        call force_parallel_threshold(4_int64)
+        call pf_unique_count(v, c2, threads=8)
+        call pf_unique(v, d2, threads=8)
+        call pf_rank(v, r2, threads=8)
+        call force_parallel_threshold(0_int64)
+        call check(error, c1 == c2 .and. c1 == 97, "a threaded pf_unique_count must count the same")
+        if (allocated(error)) return
+        call check(error, size(d1) == size(d2) .and. all(d1 == d2), &
+            "a threaded pf_unique must return the same distinct values")
+        if (allocated(error)) return
+        call check(error, all(r1 == r2), "a threaded pf_rank must produce the same ranks")
+    end subroutine test_threads_on_derived
     !
 end module test_sorting

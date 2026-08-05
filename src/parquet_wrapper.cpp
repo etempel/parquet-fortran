@@ -55,6 +55,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -3483,6 +3484,16 @@ extern "C"
 		}
 	}
 
+	// The plain comparison sort, factored out so the parallel builder below can fall back to it
+	// without re-running sort_counting_candidate's O(n) range scan a second time.
+	static std::vector<int64_t> sort_comparison_permutation(const std::vector<SortKeyData> &keys, int64_t n)
+	{
+		std::vector<int64_t> perm(static_cast<size_t>(n));
+		std::iota(perm.begin(), perm.end(), static_cast<int64_t>(0));
+		std::sort(perm.begin(), perm.end(), SortRowLess{&keys});
+		return perm;
+	}
+
 	// The engine's entry point: 0-based permutation of [0, n) putting the rows in key order.
 	static std::vector<int64_t> sort_build_permutation(const std::vector<SortKeyData> &keys, int64_t n)
 	{
@@ -3492,10 +3503,185 @@ extern "C"
 		{
 			return sort_counting_permutation(keys[0], n, lo, hi);
 		}
+		return sort_comparison_permutation(keys, n);
+	}
+
+	// ---- Parallel sorting (feature_sort.md M4) ----
+	//
+	// A task-parallel merge sort over the PERMUTATION: each thread std::sorts one contiguous chunk
+	// of it, then the chunks are merged pairwise in log(T) rounds. Route chosen in feature_sort.md
+	// section 8 on build cost -- std::execution::par needs TBB, and OpenMP tasks would need -fopenmp
+	// on the C++ compile, which this project's CI deliberately does not set.
+	//
+	// **The answer is bit-identical to the serial sort, and that is structural rather than lucky.**
+	// SortRowLess ends with a tiebreaker on the row index, so it is a TOTAL order under which no two
+	// rows compare equal; every correct sorting algorithm therefore produces the same permutation.
+	// The merge below uses that same object, taking from the left run when neither side is strictly
+	// less, which is std::merge's own stability rule.
+	//
+	// **Nothing here decides HOW MANY threads to use.** The count arrives already resolved from the
+	// Fortran side, which is the only side compiled with OpenMP and so the only one that can ask
+	// omp_get_max_threads()/omp_in_parallel(). This function only declines a count it cannot use.
+
+	//! Rows below which threading is refused outright: spawning threads to sort a small array costs
+	//! more than the sort saves.
+	//!
+	//! MEASURED, not guessed -- an 8-thread argsort of random real64 against the serial one, best of
+	//! 15 rounds each, on an 8-core arm64 laptop: 2k rows 0.86x (threading LOSES), 8k 1.48x, 16k
+	//! 2.18x, 32k 2.50x, 65k 2.60x, 1M 3.23x. Break-even sits between 2k and 8k, so 8192 is the
+	//! first power of two that is reliably a win. An earlier provisional 65536 was four times too
+	//! conservative and left most real sorts serial for no reason.
+	//!
+	//! Re-measure before changing it. This is a correctness-adjacent constant rather than a tuning
+	//! knob: set it too low and every trivial sort pays for threads it cannot use.
+	static constexpr int64_t kSortParallelMinRows = 1 << 13;
+
+	// Test-only: lowers the threshold above so a small fixture can actually reach the parallel path.
+	// Without it every test array in the suite is orders of magnitude too small to thread, and a
+	// test asserting "parallel matches serial" would be asserting "serial matches serial" -- the
+	// vacuous shape feature_risks.md Risk-35 exists to warn about. <= 0 restores the real value.
+	static int64_t g_debug_sort_parallel_min_rows = -1;
+
+	// Test-only: how many threads the last threaded build actually put to work, counting the
+	// calling thread. 1 means the sort ran serially, whatever was asked for.
+	static int64_t g_debug_sort_threads_used = 1;
+
+	static inline int64_t sort_parallel_min_rows()
+	{
+		return g_debug_sort_parallel_min_rows > 0 ? g_debug_sort_parallel_min_rows : kSortParallelMinRows;
+	}
+
+	// Spawns f(k) for k in [lo, hi), returning the first index it could NOT spawn so the caller runs
+	// the remainder on its own thread.
+	//
+	// A refused thread is a slowdown, never a failure. std::thread's constructor throws
+	// std::system_error when the OS declines, and an exception reaching the extern "C" boundary
+	// would call std::terminate and take the process down with it -- so this catches and reports
+	// through the return value instead. `reserve` up front means a vector reallocation can never
+	// drop an already-created thread on the floor.
+	//
+	// `extern "C++"` because everything in this file sits inside one big `extern "C"` block, and a
+	// template cannot have C linkage ("templates must have C++ linkage"). The alternative -- taking
+	// a std::function instead of a template parameter -- would work equally well here (the call
+	// happens once per chunk, not once per comparison), but this keeps the lambda inlined.
+	extern "C++" {
+	template <typename F>
+	static int64_t sort_spawn(std::vector<std::thread> &workers, int64_t lo, int64_t hi, F f)
+	{
+		int64_t k = lo;
+		try
+		{
+			workers.reserve(static_cast<size_t>(hi - lo));
+			for (; k < hi; ++k) workers.emplace_back(f, k);
+		}
+		catch (const std::system_error &) {}  // GCOVR_EXCL_LINE -- the OS refused a thread
+		catch (const std::bad_alloc &) {}     // GCOVR_EXCL_LINE -- no room for the thread list
+		return k;
+	}
+	}
+
+	// 0-based permutation of [0, n), using up to `threads` threads. Identical to
+	// sort_build_permutation's result in every case.
+	static std::vector<int64_t> sort_build_permutation_threaded(const std::vector<SortKeyData> &keys,
+		int64_t n, int64_t threads)
+	{
+		sort_check_keys_finalized(keys, n, "sort_build_permutation_threaded");
+		g_debug_sort_threads_used = 1;
+		// The counting path is already O(n) and already produces this exact permutation, so it wins
+		// over any number of threads: `threads` is a hint, not a command.
+		int64_t lo = 0, hi = 0;
+		if (!g_debug_disable_sort_counting_path && sort_counting_candidate(keys, n, lo, hi))
+		{
+			return sort_counting_permutation(keys[0], n, lo, hi);
+		}
+		int64_t min_rows = sort_parallel_min_rows();
+		int64_t min_chunk = min_rows / 4;
+		if (min_chunk < 1) min_chunk = 1;
+		int64_t nchunks = threads;
+		if (nchunks > n / min_chunk) nchunks = n / min_chunk;
+		// g_debug_count_sort_comparisons disqualifies threading deliberately: that counter is NOT
+		// atomic (by design -- an atomic increment in the engine's hottest loop would cost more than
+		// the feature is worth), so counting across threads would be both a data race and a
+		// meaningless number. The one test that enables it therefore always measures a serial sort.
+		if (threads < 2 || n < min_rows || nchunks < 2 || g_debug_count_sort_comparisons)
+		{
+			return sort_comparison_permutation(keys, n);
+		}
+
 		std::vector<int64_t> perm(static_cast<size_t>(n));
 		std::iota(perm.begin(), perm.end(), static_cast<int64_t>(0));
-		std::sort(perm.begin(), perm.end(), SortRowLess{&keys});
-		return perm;
+		std::vector<int64_t> bounds(static_cast<size_t>(nchunks) + 1);
+		for (int64_t k = 0; k <= nchunks; ++k) bounds[static_cast<size_t>(k)] = n * k / nchunks;
+		SortRowLess less{&keys};
+
+		// Phase 1: one std::sort per chunk, on disjoint ranges of `perm`.
+		//
+		// A worker body must not throw: an exception escaping a std::thread's callable calls
+		// std::terminate immediately rather than propagating to the joining thread. std::sort does
+		// not allocate, and SortRowLess/sort_compare_key do no allocation and no I/O on any of the
+		// three key families (std::string_view::compare cannot throw), so nothing here can. A future
+		// key family whose comparison allocates would break that and must add its own guard.
+		{
+			auto sort_chunk = [&perm, &bounds, less](int64_t k) {
+				std::sort(perm.begin() + static_cast<ptrdiff_t>(bounds[static_cast<size_t>(k)]),
+					perm.begin() + static_cast<ptrdiff_t>(bounds[static_cast<size_t>(k) + 1]), less);
+			};
+			std::vector<std::thread> workers;
+			int64_t unspawned = sort_spawn(workers, 1, nchunks, sort_chunk);
+			sort_chunk(0);
+			for (int64_t k = unspawned; k < nchunks; ++k) sort_chunk(k); // GCOVR_EXCL_LINE -- only after a refusal
+			for (auto &w : workers) w.join();
+			g_debug_sort_threads_used = static_cast<int64_t>(workers.size()) + 1;
+		}
+
+		// Phase 2: merge the runs pairwise, ping-ponging between `perm` and one scratch buffer. This
+		// is the 8n bytes of extra peak memory a threaded sort costs over a serial one, and it is
+		// explicit rather than std::inplace_merge's internal allocation, whose failure mode is a
+		// silent O(n log n) degradation.
+		//
+		// The last round merges two runs on ONE thread, which is the O(n) serial tail that caps the
+		// achievable speedup. Replacing it with a co-ranked parallel merge is the documented
+		// follow-up if measurement justifies it.
+		std::vector<int64_t> scratch(static_cast<size_t>(n));
+		std::vector<int64_t> *from = &perm, *to = &scratch;
+		while (bounds.size() > 2)
+		{
+			size_t nruns = bounds.size() - 1;
+			int64_t npairs = static_cast<int64_t>(nruns / 2);
+			auto merge_pair = [&from, &to, &bounds, less](int64_t p) {
+				size_t pi = static_cast<size_t>(p);
+				int64_t a = bounds[2 * pi], m = bounds[2 * pi + 1], b = bounds[2 * pi + 2];
+				const std::vector<int64_t> &f = *from;
+				std::vector<int64_t> &t = *to;
+				int64_t i = a, j = m, k = a;
+				// `less(f[j], f[i]) ? right : left` takes from the LEFT run unless the right is
+				// strictly smaller -- std::merge's stability rule, under a total order.
+				while (i < m && j < b) t[static_cast<size_t>(k++)] = less(f[static_cast<size_t>(j)], f[static_cast<size_t>(i)])
+					? f[static_cast<size_t>(j++)] : f[static_cast<size_t>(i++)];
+				while (i < m) t[static_cast<size_t>(k++)] = f[static_cast<size_t>(i++)];
+				while (j < b) t[static_cast<size_t>(k++)] = f[static_cast<size_t>(j++)];
+			};
+			std::vector<std::thread> workers;
+			int64_t unspawned = sort_spawn(workers, 1, npairs, merge_pair);
+			merge_pair(0);
+			for (int64_t p = unspawned; p < npairs; ++p) merge_pair(p); // GCOVR_EXCL_LINE -- only after a refusal
+			for (auto &w : workers) w.join();
+			// An odd run count leaves one run unpaired; it is copied through so the next round sees
+			// every element in `to`.
+			if (nruns % 2 == 1)
+			{
+				int64_t a = bounds[nruns - 1], b = bounds[nruns];
+				std::copy(from->begin() + static_cast<ptrdiff_t>(a), from->begin() + static_cast<ptrdiff_t>(b),
+					to->begin() + static_cast<ptrdiff_t>(a));
+			}
+			std::vector<int64_t> next;
+			next.reserve(static_cast<size_t>(npairs) + 2);
+			for (int64_t p = 0; p <= npairs; ++p) next.push_back(bounds[static_cast<size_t>(2 * p)]);
+			if (nruns % 2 == 1) next.push_back(bounds[nruns]);
+			bounds.swap(next);
+			std::swap(from, to);
+		}
+		return std::move(*from);
 	}
 
 	// ---- Selection (parquet_sorting's M2 operations) ----
@@ -5673,6 +5859,7 @@ extern "C"
 		const int8_t *descending, const int8_t *nulls_first,
 		int64_t n,
 		const char *key_text,
+		int64_t threads,
 		char *err_out, int64_t err_cap)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -5738,7 +5925,7 @@ extern "C"
 		}
 
 		int64_t nrows = reader_handle->nrows;
-		auto perm = sort_build_permutation(keys, nrows);
+		auto perm = sort_build_permutation_threaded(keys, nrows, threads);
 
 		arrow::Int64Builder perm_builder;
 		auto append_status = perm_builder.AppendValues(perm.data(), static_cast<int64_t>(perm.size()));
@@ -5860,11 +6047,11 @@ extern "C"
 	// Writes the 1-BASED permutation into `perm_out` (which the caller sized to nrows), ready to
 	// feed parquet_column%reindex. The engine works 0-based, so the +1 happens here rather than
 	// being repeated at every Fortran call site.
-	int64_t parquet_sort_builder_build(void *handle, int64_t *perm_out)
+	int64_t parquet_sort_builder_build(void *handle, int64_t threads, int64_t *perm_out)
 	{
 		auto *h = static_cast<SortBuilderHandle *>(handle);
 		if (h->keys.empty()) return 1;
-		auto perm = sort_build_permutation(h->keys, h->nrows);
+		auto perm = sort_build_permutation_threaded(h->keys, h->nrows, threads);
 		for (int64_t i = 0; i < h->nrows; ++i) perm_out[i] = perm[static_cast<size_t>(i)] + 1;
 		return 0;
 	}
@@ -5935,11 +6122,11 @@ extern "C"
 	// One call rather than a sort followed by a separate comparison pass, because the caller
 	// (pf_unique, pf_rank) needs both and building the permutation twice would double the cost of
 	// the operation. tie_out[0] is always 0 -- the first row starts a run by definition.
-	int64_t parquet_sort_builder_build_runs(void *handle, int64_t *perm_out, int8_t *tie_out)
+	int64_t parquet_sort_builder_build_runs(void *handle, int64_t threads, int64_t *perm_out, int8_t *tie_out)
 	{
 		auto *h = static_cast<SortBuilderHandle *>(handle);
 		if (h->keys.empty()) return 1;
-		auto perm = sort_build_permutation(h->keys, h->nrows);
+		auto perm = sort_build_permutation_threaded(h->keys, h->nrows, threads);
 		for (int64_t i = 0; i < h->nrows; ++i) perm_out[i] = perm[static_cast<size_t>(i)] + 1;
 		if (h->nrows > 0) tie_out[0] = 0;
 		for (int64_t i = 1; i < h->nrows; ++i)
@@ -6044,23 +6231,23 @@ extern "C"
 	// Writes the 1-BASED permutation of a single integer key into `perm_out` (sized n by the
 	// caller). Boolean and every temporal kind arrive here too, reduced to their stored integers.
 	void parquet_sort_argsort_int64(int64_t n, const int64_t *values, const int8_t *valid,
-		int8_t descending, int8_t nulls_first, int64_t *perm_out)
+		int8_t descending, int8_t nulls_first, int64_t threads, int64_t *perm_out)
 	{
 		if (n <= 0) return;
 		std::vector<SortKeyData> keys;
 		keys.push_back(sort_borrowed_key(SortValueKind::Integer, values, nullptr, valid, n, descending, nulls_first));
-		auto perm = sort_build_permutation(keys, n);
+		auto perm = sort_build_permutation_threaded(keys, n, threads);
 		for (int64_t i = 0; i < n; ++i) perm_out[i] = perm[static_cast<size_t>(i)] + 1;
 	}
 
 	// The floating-point counterpart. NaNs are ordinary values and are tiered by sort_tier_of.
 	void parquet_sort_argsort_double(int64_t n, const double *values, const int8_t *valid,
-		int8_t descending, int8_t nulls_first, int64_t *perm_out)
+		int8_t descending, int8_t nulls_first, int64_t threads, int64_t *perm_out)
 	{
 		if (n <= 0) return;
 		std::vector<SortKeyData> keys;
 		keys.push_back(sort_borrowed_key(SortValueKind::Real, nullptr, values, valid, n, descending, nulls_first));
-		auto perm = sort_build_permutation(keys, n);
+		auto perm = sort_build_permutation_threaded(keys, n, threads);
 		for (int64_t i = 0; i < n; ++i) perm_out[i] = perm[static_cast<size_t>(i)] + 1;
 	}
 
@@ -6069,7 +6256,7 @@ extern "C"
 	// caller's `data` -- the bytes are never copied, unlike the builder's own string adder, which
 	// has to copy because its key outlives the call.
 	void parquet_sort_argsort_string(int64_t n, const int64_t *offsets, const char *data,
-		const int8_t *valid, int8_t descending, int8_t nulls_first, int64_t *perm_out)
+		const int8_t *valid, int8_t descending, int8_t nulls_first, int64_t threads, int64_t *perm_out)
 	{
 		if (n <= 0) return;
 		SortKeyData key;
@@ -6086,7 +6273,7 @@ extern "C"
 		sort_key_finalize(key);
 		std::vector<SortKeyData> keys;
 		keys.push_back(std::move(key));
-		auto perm = sort_build_permutation(keys, n);
+		auto perm = sort_build_permutation_threaded(keys, n, threads);
 		for (int64_t i = 0; i < n; ++i) perm_out[i] = perm[static_cast<size_t>(i)] + 1;
 	}
 
@@ -10123,6 +10310,28 @@ extern "C"
 	int64_t parquet_debug_get_sort_comparisons(void)
 	{
 		return g_debug_sort_comparison_count;
+	}
+
+	// Test-only: how many threads the last threaded sort actually put to work, the calling thread
+	// included. 1 means it ran serially, whatever `threads=` asked for.
+	//
+	// **This is the whole reason a `threads=` argument is testable at all.** A parallel sort produces
+	// a permutation IDENTICAL to the serial one -- that identity is what makes the feature safe, and
+	// it is also what makes a `threads=` that is silently ignored pass every correctness test ever
+	// written for it. Zero parallelism is a passing test, exactly as zero comparisons was for the
+	// partial sort above (feature_risks.md Risk-35).
+	int64_t parquet_debug_get_sort_threads_used(void)
+	{
+		return g_debug_sort_threads_used;
+	}
+
+	// Test-only: lowers the row count below which threading is refused, so a small fixture can reach
+	// the parallel path at all. Every array in the test suite is orders of magnitude below the real
+	// threshold, so without this a "parallel matches serial" test would be comparing serial with
+	// serial. <= 0 restores the real value.
+	void parquet_debug_set_sort_parallel_min_rows(int64_t rows)
+	{
+		g_debug_sort_parallel_min_rows = rows;
 	}
 
 	// Test-only: forces the row-group statistics pre-screen (screen_row_groups) to keep every row

@@ -9,6 +9,11 @@
 !> the whole-column-read-avoidance row-group helpers.
 submodule (parquet_core) parquet_read
     use ieee_arithmetic, only: ieee_is_nan
+    ! The read-time sort threads automatically, on the same rule pf_argsort follows -- see
+    ! pf_sort_threads' own doc-comment for why that rule lives in parquet_sorting and is asked
+    ! for here rather than reimplemented. parquet_sorting does not use parquet_core, so this
+    ! import is acyclic.
+    use parquet_sorting, only: pf_sort_threads
     implicit none
 
     !> Expression-node kinds in the postfix (RPN) node list a parsed filter becomes: one LEAF per
@@ -517,7 +522,8 @@ contains
         c_err = ""
         status = c_reader_set_sort(reader%handle, names_packed, int(sort_key_name_len, kind=c_long_long), &
             descending(1:sort_by%n), nulls_first(1:sort_by%n), int(sort_by%n, kind=c_long_long), &
-            key_text//char(0), c_err, int(len(c_err), kind=c_long_long))
+            key_text//char(0), int(pf_sort_threads(), kind=c_long_long), c_err, &
+            int(len(c_err), kind=c_long_long))
 
         call reader_filename_suffix(reader, name_suffix)
         if (status /= 0) error stop trim(context) // ": " // trim(c_err) // name_suffix

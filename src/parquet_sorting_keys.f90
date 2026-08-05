@@ -667,7 +667,7 @@ contains
     !
     module procedure drive_engine
         type(c_ptr) :: builder
-        integer(int64) :: status
+        integer(int64) :: status, nthreads
         integer :: ik
         !
         if (size(keys) < 1) then
@@ -682,18 +682,19 @@ contains
             perm(ik) = ik
         end do
         if (nrows < 2_int64) return
+        call resolve_thread_count(threads, nrows, nthreads)
         if (size(keys) == 1) then
             ! One key needs no builder at all: the one-shot entry points BORROW the buffer that
             ! was just extracted, so this saves a handle allocation and a second copy of every
             ! value. Multi-key has to go through the builder, which owns its keys.
-            call engine_one_shot(keys(1), nrows, perm)
+            call engine_one_shot(keys(1), nrows, nthreads, perm)
             return
         end if
         builder = parquet_sort_builder_new(nrows)
         do ik = 1, size(keys)
             call engine_add_key(builder, keys(ik), nrows)
         end do
-        status = parquet_sort_builder_build(builder, perm)
+        status = parquet_sort_builder_build(builder, nthreads, perm)
         call parquet_sort_builder_free(builder)
         if (status /= 0_int64) then
             ! Only reachable with an empty key list, which the guard above already rejects -- kept
@@ -835,9 +836,10 @@ contains
     end procedure engine_is_sorted
     !
     !> Argsorts one already-extracted key through the matching one-shot entry point.
-    subroutine engine_one_shot(key, nrows, perm)
+    subroutine engine_one_shot(key, nrows, nthreads, perm)
         type(sort_key_buf), intent(in), target :: key !! the key.
         integer(int64), intent(in) :: nrows           !! its row count.
+        integer(int64), intent(in) :: nthreads        !! resolved thread count; 1 sorts serially.
         integer(int64), intent(inout) :: perm(:)      !! receives the 1-based permutation.
         type(c_ptr) :: vp
         integer(c_int8_t) :: df, nf
@@ -845,11 +847,11 @@ contains
         call key_flags(key, vp, df, nf)
         select case (key%family)
         case (SK_REAL)
-            call parquet_sort_argsort_double(nrows, key%reals, vp, df, nf, perm)
+            call parquet_sort_argsort_double(nrows, key%reals, vp, df, nf, nthreads, perm)
         case (SK_STR)
-            call parquet_sort_argsort_string(nrows, key%offsets, key%data, vp, df, nf, perm)
+            call parquet_sort_argsort_string(nrows, key%offsets, key%data, vp, df, nf, nthreads, perm)
         case default
-            call parquet_sort_argsort_int64(nrows, key%ints, vp, df, nf, perm)
+            call parquet_sort_argsort_int64(nrows, key%ints, vp, df, nf, nthreads, perm)
         end select
     end subroutine engine_one_shot
     !
@@ -1028,6 +1030,38 @@ contains
             seen(word) = ibset(seen(word), int(mod(v - 1_int64, 8_int64)))
         end do
     end procedure check_permutation
+    !
+    module procedure pf_sort_threads
+#ifdef _OPENMP
+        use omp_lib, only : omp_get_max_threads, omp_in_parallel
+#endif
+        !
+        n = 1
+#ifdef _OPENMP
+        ! Serial inside a parallel region, deliberately. This is not a refusal and not a
+        ! correctness guard -- it picks a DEFAULT, exactly as parallel_prefetch_ok
+        ! (parquet_tables_read.f90) does for the table's own internally-parallel read, whose
+        ! comment states the reason: nested regions are the caller's business. Without it, T
+        ! OpenMP threads would each ask for T more, and T*T oversubscription is slower than not
+        ! threading at all. An EXPLICIT threads= is still honoured there -- see
+        ! resolve_thread_count, which only consults this when the caller said nothing.
+        if (.not. omp_in_parallel()) n = omp_get_max_threads()
+#endif
+    end procedure pf_sort_threads
+    !
+    module procedure resolve_thread_count
+        !
+        if (present(threads)) then
+            ! An explicit request is honoured wherever it is made, including inside a parallel
+            ! region: the caller has said what they want, and refusing it there would leave no way
+            ! to thread a sort at all from code that is itself parallel.
+            count = max(1_int64, int(threads, int64))
+        else
+            count = int(pf_sort_threads(), int64)
+        end if
+        ! Never more threads than rows; the C++ side clamps again by its own minimum chunk size.
+        if (count > nrows) count = max(nrows, 1_int64)
+    end procedure resolve_thread_count
     !
     module procedure narrow_perm
         integer(int64) :: n
@@ -1209,7 +1243,7 @@ contains
     !
     module procedure engine_build_runs
         type(c_ptr) :: builder
-        integer(int64) :: status, k
+        integer(int64) :: status, k, nthreads
         integer :: ik
         !
         if (size(keys) < 1) then
@@ -1222,11 +1256,12 @@ contains
             perm(k) = k
         end do
         if (nrows < 2_int64) return
+        call resolve_thread_count(threads, nrows, nthreads)
         builder = parquet_sort_builder_new(nrows)
         do ik = 1, size(keys)
             call engine_add_key(builder, keys(ik), nrows)
         end do
-        status = parquet_sort_builder_build_runs(builder, perm, tie)
+        status = parquet_sort_builder_build_runs(builder, nthreads, perm, tie)
         call parquet_sort_builder_free(builder)
         if (status /= 0_int64) then
             ! Only reachable with an empty key list, which the guard above already rejects.

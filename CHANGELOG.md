@@ -42,7 +42,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `method=`"competition"/"dense"/"ordinal" and rank 0 for a null; `pf_minmax`/`pf_argminmax` give
   the smallest and largest value, and where they are, skipping nulls and NaNs and aborting when
   nothing is left; and `pf_merge` merges two sorted arrays in linear time, taking each input's
-  validity mask and producing a merged one. See
+  validity mask and producing a merged one. **Sorting is parallel by default**: `pf_argsort`,
+  `pf_sort`, `pf_unique_count`, `pf_unique` and `pf_rank`, along with the read-time
+  `parquet_open_reader(..., sort_by=)` and `parquet_table%sort_by`, use `omp_get_max_threads()`
+  automatically — and stay serial inside an OpenMP parallel region, since a nested region is the
+  caller's business. An optional `threads=` turns that down (`threads=1` forces serial) and is
+  honoured wherever it is given; `pf_sort_threads()` reports what an automatic sort would do. The
+  answer is bit-identical at every thread count, because the comparator is a total order under
+  which no two rows compare equal, so `threads=` is purely a performance control; expect roughly
+  2-3x rather than a full thread-count speedup, since the chunk merge ends in one serial pass, and
+  note that a threaded sort's peak memory is about twice a serial one's. See
   [Sorting arrays and columns](doc/pages/sorting.md).
 - **Generated table types.** `tools/generate_user_table_code.py` turns a MAML schema into a named
   `parquet_table` extension with one accessor per declared column, so a program that always reads

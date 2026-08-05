@@ -473,9 +473,83 @@ Two `character` arrays of different declared lengths merge into the wider one, s
 declared `character(len=:), allocatable` rather than at a fixed width — the one output in this
 module whose length comes from two inputs rather than one.
 
+## Sorting in parallel
+
+**Sorting is parallel by default.** `pf_argsort`, `pf_sort`, `pf_unique_count`, `pf_unique` and
+`pf_rank` all use the machine automatically, as do the read-time
+`parquet_open_reader(..., sort_by=)` and `parquet_table%sort_by`. There is nothing to switch on.
+
+`threads=` is therefore how you turn parallelism **down**, not up:
+
+```fortran
+call pf_argsort(v, perm)             ! auto -- all available cores
+call pf_argsort(v, perm, threads=4)  ! at most four
+call pf_argsort(v, perm, threads=1)  ! serial
+```
+
+**The answer never changes.** A parallel sort returns a permutation *bit-identical* to the serial
+one, on every input, at every thread count. That is structural rather than lucky: the comparator
+ends with a tiebreaker on the row index, making it a total order under which no two rows compare
+equal, so every correct sorting algorithm — serial, threaded, stable or not — must produce the same
+answer. `threads=` is a performance control and nothing else.
+
+### What "auto" means
+
+| situation | threads used |
+|---|---|
+| ordinary serial code | `omp_get_max_threads()` |
+| inside an `!$omp parallel` region | **1** — serial |
+| explicit `threads=n` | `n`, wherever it is called from |
+| array below the minimum-work threshold | 1 |
+| a low-cardinality integer key | 1 (see below) |
+
+The second row is the one worth knowing. Inside a parallel region, auto stays serial because
+*nested regions are the caller's business* — eight OpenMP threads each asking for eight more would
+be sixty-four threads, slower than not threading at all. If you genuinely want a threaded sort from
+inside your own parallel region, say so with an explicit `threads=`; it is always honoured.
+
+`pf_sort_threads()` reports what auto would do right now, if you want to log it or size something
+against it.
+
+### Two reasons a sort may decline to thread
+
+**A small array.** Spawning threads to sort a few thousand elements costs more than the sort, so
+there is a minimum below which `threads=` is ignored.
+
+**The integer fast path.** A single integer key with no nulls and a value range under about 4
+million is counting-sorted, which is already O(n) and already produces this exact permutation — so
+it wins over any number of threads. `threads=` is a *hint*, not a command, and a sort that reports
+one thread on such a key is behaving correctly. Note that this keys on the value **range**, not on
+how many distinct values there are.
+
+### What it actually buys
+
+Measured on an 8-core arm64 laptop, `pf_argsort` over random `real(real64)`, best of several rounds:
+
+| rows | serial | 8 threads | speedup |
+|---|---|---|---|
+| 2 000 | 0.18 ms | 0.20 ms | 0.86x — threading *loses* |
+| 8 000 | 0.85 ms | 0.57 ms | 1.48x |
+| 32 000 | 3.9 ms | 1.6 ms | 2.50x |
+| 1 000 000 | 180 ms | 56 ms | 3.23x |
+| 20 000 000 | 5.63 s | 2.10 s | 2.68x |
+
+**The speedup is capped well below the thread count, and that is a property of the algorithm, not a
+tuning failure.** The chunks are merged pairwise, so the last merge is always a single-threaded pass
+over the whole array — Amdahl's law with a serial fraction that grows as threads are added. Expect
+roughly 2–3x, not 8x. Thread counts that are powers of two merge more evenly than others.
+
+The 2 000-row row is why the minimum-work threshold exists: below it, `threads=` is ignored.
+
+### Cost
+
+A threaded sort allocates one extra scratch buffer the size of the permutation, so peak memory is
+roughly **twice** a serial sort's — 16 bytes per row instead of 8. On a billion-row argsort that is
+16 GB instead of 8. Pass `threads=1` where that matters more than the time.
+
 ## What is not here yet
 
-Threaded sorting (a `threads=` argument) is planned but not implemented.
+A co-ranked parallel merge, which would remove the serial-final-merge cap described above.
 
 `pf_partial_sort` and `pf_partial_argsort` are not defined for `parquet_string_column` or
 `parquet_column`, for the same reason `pf_sort` is not. `pf_nth_element` and `pf_nth_quantile` are

@@ -583,7 +583,7 @@ module parquet_bindings
         !> procedure parquet_reader_set_sort (parquet_core.f90) owns that name; the
         !> bind(C) symbol, and so parquet_wrapper.cpp, is unchanged.
         function c_reader_set_sort(reader, names_packed, name_len, descending, nulls_first, &
-                n, key_text, err_out, err_cap) &
+                n, key_text, threads, err_out, err_cap) &
                 bind(C, name="parquet_reader_set_sort") result(status)
             import
             type(c_ptr), value :: reader !! open reader handle.
@@ -593,6 +593,7 @@ module parquet_bindings
             integer(c_int8_t) :: nulls_first(*) !! per key: nonzero to place nulls before values.
             integer(c_long_long), value :: n !! number of sort keys.
             character(kind=c_char) :: key_text(*) !! whole key list, for print_stat only.
+            integer(c_long_long), value :: threads !! resolved thread count; <= 1 sorts serially.
             character(kind=c_char) :: err_out(*) !! receives the failure message, if any.
             integer(c_long_long), value :: err_cap !! capacity of err_out, in characters.
             integer(c_long_long) :: status !! 0 on success, 1 on failure.
@@ -665,10 +666,11 @@ module parquet_bindings
         !> Builds the permutation over every key added so far, writing it
         !> 1-based into `perm` (which the caller sized to nrows) so it can be
         !> handed straight to `parquet_column%reindex`.
-        function parquet_sort_builder_build(builder, perm) &
+        function parquet_sort_builder_build(builder, threads, perm) &
                 bind(C, name="parquet_sort_builder_build") result(status)
             import
             type(c_ptr), value :: builder !! builder handle.
+            integer(c_long_long), value :: threads !! resolved thread count; <= 1 sorts serially.
             integer(c_long_long) :: perm(*) !! receives the 1-based permutation.
             integer(c_long_long) :: status !! 0 on success, 1 when no key was added.
         end function
@@ -716,10 +718,11 @@ module parquet_bindings
         !> position k compares equal to the one before it (`tie(1)` is always 0).
         !> One call rather than a sort plus a separate comparison pass, since
         !> `pf_unique`/`pf_rank` need both and would otherwise sort twice.
-        function parquet_sort_builder_build_runs(builder, perm, tie) &
+        function parquet_sort_builder_build_runs(builder, threads, perm, tie) &
                 bind(C, name="parquet_sort_builder_build_runs") result(status)
             import
             type(c_ptr), value :: builder !! builder handle.
+            integer(c_long_long), value :: threads !! resolved thread count; <= 1 sorts serially.
             integer(c_long_long) :: perm(*) !! receives the 1-based permutation.
             integer(c_int8_t) :: tie(*) !! receives 1 where a row ties the previous one.
             integer(c_long_long) :: status !! 0 on success, 1 when no key was added.
@@ -858,7 +861,7 @@ module parquet_bindings
         !> argument must therefore be contiguous -- a non-contiguous section
         !> would be passed as a compiler temporary, which is fine here (the
         !> temporary lives for the call) but would not be on the builder.
-        subroutine parquet_sort_argsort_int64(n, values, valid, descending, nulls_first, perm) &
+        subroutine parquet_sort_argsort_int64(n, values, valid, descending, nulls_first, threads, perm) &
                 bind(C, name="parquet_sort_argsort_int64")
             import
             integer(c_long_long), value :: n !! number of rows.
@@ -866,12 +869,13 @@ module parquet_bindings
             type(c_ptr), value :: valid !! int8 per row (1 = valid), or C_NULL_PTR.
             integer(c_int8_t), value :: descending !! nonzero for descending order.
             integer(c_int8_t), value :: nulls_first !! nonzero to place nulls before values.
+            integer(c_long_long), value :: threads !! resolved thread count; <= 1 sorts serially.
             integer(c_long_long) :: perm(*) !! receives the 1-based permutation.
         end subroutine
 
         !> One-shot single-key argsort over a floating-point key. NaNs are
         !> ordinary values and are placed by the engine's own tier rule.
-        subroutine parquet_sort_argsort_double(n, values, valid, descending, nulls_first, perm) &
+        subroutine parquet_sort_argsort_double(n, values, valid, descending, nulls_first, threads, perm) &
                 bind(C, name="parquet_sort_argsort_double")
             import
             integer(c_long_long), value :: n !! number of rows.
@@ -879,6 +883,7 @@ module parquet_bindings
             type(c_ptr), value :: valid !! int8 per row (1 = valid), or C_NULL_PTR.
             integer(c_int8_t), value :: descending !! nonzero for descending order.
             integer(c_int8_t), value :: nulls_first !! nonzero to place nulls before values.
+            integer(c_long_long), value :: threads !! resolved thread count; <= 1 sorts serially.
             integer(c_long_long) :: perm(*) !! receives the 1-based permutation.
         end subroutine
 
@@ -887,7 +892,7 @@ module parquet_bindings
         !> `offsets` has n+1 entries and both are 0-based on the C side. The
         !> bytes are NOT copied -- they are read in place for the duration of
         !> the call.
-        subroutine parquet_sort_argsort_string(n, offsets, data, valid, descending, nulls_first, perm) &
+        subroutine parquet_sort_argsort_string(n, offsets, data, valid, descending, nulls_first, threads, perm) &
                 bind(C, name="parquet_sort_argsort_string")
             import
             integer(c_long_long), value :: n !! number of rows.
@@ -896,6 +901,7 @@ module parquet_bindings
             type(c_ptr), value :: valid !! int8 per row (1 = valid), or C_NULL_PTR.
             integer(c_int8_t), value :: descending !! nonzero for descending order.
             integer(c_int8_t), value :: nulls_first !! nonzero to place nulls before values.
+            integer(c_long_long), value :: threads !! resolved thread count; <= 1 sorts serially.
             integer(c_long_long) :: perm(*) !! receives the 1-based permutation.
         end subroutine
 

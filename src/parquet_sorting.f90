@@ -79,6 +79,7 @@ module parquet_sorting
     public :: pf_minmax
     public :: pf_argminmax
     public :: pf_merge
+    public :: pf_sort_threads
     !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_sorting: "
@@ -916,12 +917,34 @@ module parquet_sorting
             character(len=*), intent(in) :: proc                !! calling procedure, for messages.
         end subroutine keys_append
         !> Runs the C++ engine over `keys`, returning a 1-based permutation.
-        module subroutine drive_engine(keys, nrows, proc, perm)
+        module subroutine drive_engine(keys, nrows, proc, perm, threads)
             type(sort_key_buf), intent(in), target :: keys(:)   !! the keys, primary first.
             integer(int64), intent(in) :: nrows                 !! rows each key describes.
             character(len=*), intent(in) :: proc                !! calling procedure, for messages.
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
+            integer, intent(in), optional :: threads            !! thread request; absent = auto.
         end subroutine drive_engine
+        !> Resolves how many threads a sort should use. **This is the only place the auto rule
+        !! lives**, and the only place in this module carrying OpenMP plumbing at all -- the
+        !! same arrangement parquet_tables_parallel.f90 keeps for the table layer, and worth
+        !! more here, since the alternative is that plumbing repeated in 65 generated bodies.
+        !> How many threads an AUTOMATIC sort -- one where `threads=` is absent -- would use
+        !! right now: `omp_get_max_threads()` when the caller is not inside an OpenMP parallel
+        !! region, and 1 when they are, because a nested region is the caller's business.
+        !!
+        !! Public because the read-time `parquet_open_reader(..., sort_by=)` has to ask the
+        !! same question from a different module, and one implementation of this rule is worth
+        !! more than a private copy in each -- two copies drifting would mean a raw-array sort
+        !! and a read-time sort silently disagreeing about when to thread. Useful in its own
+        !! right for reporting or logging what an automatic sort is about to do.
+        module function pf_sort_threads() result(n)
+            integer :: n !! threads an automatic sort would use; 1 means serial.
+        end function pf_sort_threads
+        module subroutine resolve_thread_count(threads, nrows, count)
+            integer, intent(in), optional :: threads !! caller's request; absent means auto.
+            integer(int64), intent(in) :: nrows      !! rows to be sorted.
+            integer(int64), intent(out) :: count     !! resolved count; 1 sorts serially.
+        end subroutine resolve_thread_count
         !> Runs the engine over `keys` but orders only the first `count` entries -- `perm`
         !! comes back with exactly `count` elements.
         module subroutine drive_engine_partial(keys, nrows, count, proc, perm)
@@ -998,12 +1021,13 @@ module parquet_sorting
         !> Sorts, and reports where the runs of EQUAL rows are: `tie(k)` is 1 when output
         !! position k holds a row comparing equal to the one before it. One call, because
         !! `pf_unique`/`pf_rank` need both and would otherwise build the permutation twice.
-        module subroutine engine_build_runs(keys, nrows, proc, perm, tie)
+        module subroutine engine_build_runs(keys, nrows, proc, perm, tie, threads)
             type(sort_key_buf), intent(in), target :: keys(:)   !! the keys, primary first.
             integer(int64), intent(in) :: nrows                 !! rows each key describes.
             character(len=*), intent(in) :: proc                !! calling procedure, for messages.
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             integer(c_int8_t), allocatable, intent(out) :: tie(:) !! 1 where a row ties the previous.
+            integer, intent(in), optional :: threads            !! thread request; absent = auto.
         end subroutine engine_build_runs
         !> Binary-searches `keys`, whose LAST row is the target the caller appended.
         module subroutine engine_search(keys, nrows, n_search, upper, proc, pos)
@@ -1091,183 +1115,327 @@ module parquet_sorting
     ! ---- pf_argsort and pf_sort (parquet_sorting_argsort) ----
     interface
         !> pf_argsort over a 32-bit integer array, returning an int32 permutation.
-        module subroutine argsort_i32_i32(values, perm, descending, nulls_first, is_valid)
+        module subroutine argsort_i32_i32(values, perm, descending, nulls_first, is_valid, threads)
         integer(int32), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine argsort_i32_i32
         !> pf_argsort over a 32-bit integer array, returning an int64 permutation.
-        module subroutine argsort_i32_i64(values, perm, descending, nulls_first, is_valid)
+        module subroutine argsort_i32_i64(values, perm, descending, nulls_first, is_valid, threads)
         integer(int32), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine argsort_i32_i64
         !> pf_argsort over a 64-bit integer array, returning an int32 permutation.
-        module subroutine argsort_i64_i32(values, perm, descending, nulls_first, is_valid)
+        module subroutine argsort_i64_i32(values, perm, descending, nulls_first, is_valid, threads)
         integer(int64), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine argsort_i64_i32
         !> pf_argsort over a 64-bit integer array, returning an int64 permutation.
-        module subroutine argsort_i64_i64(values, perm, descending, nulls_first, is_valid)
+        module subroutine argsort_i64_i64(values, perm, descending, nulls_first, is_valid, threads)
         integer(int64), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine argsort_i64_i64
         !> pf_argsort over a 32-bit real array, returning an int32 permutation.
-        module subroutine argsort_f32_i32(values, perm, descending, nulls_first, is_valid)
+        module subroutine argsort_f32_i32(values, perm, descending, nulls_first, is_valid, threads)
         real(real32), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine argsort_f32_i32
         !> pf_argsort over a 32-bit real array, returning an int64 permutation.
-        module subroutine argsort_f32_i64(values, perm, descending, nulls_first, is_valid)
+        module subroutine argsort_f32_i64(values, perm, descending, nulls_first, is_valid, threads)
         real(real32), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine argsort_f32_i64
         !> pf_argsort over a 64-bit real array, returning an int32 permutation.
-        module subroutine argsort_f64_i32(values, perm, descending, nulls_first, is_valid)
+        module subroutine argsort_f64_i32(values, perm, descending, nulls_first, is_valid, threads)
         real(real64), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine argsort_f64_i32
         !> pf_argsort over a 64-bit real array, returning an int64 permutation.
-        module subroutine argsort_f64_i64(values, perm, descending, nulls_first, is_valid)
+        module subroutine argsort_f64_i64(values, perm, descending, nulls_first, is_valid, threads)
         real(real64), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine argsort_f64_i64
         !> pf_argsort over a logical array, returning an int32 permutation.
-        module subroutine argsort_bool_i32(values, perm, descending, nulls_first, is_valid)
+        module subroutine argsort_bool_i32(values, perm, descending, nulls_first, is_valid, threads)
         logical, intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine argsort_bool_i32
         !> pf_argsort over a logical array, returning an int64 permutation.
-        module subroutine argsort_bool_i64(values, perm, descending, nulls_first, is_valid)
+        module subroutine argsort_bool_i64(values, perm, descending, nulls_first, is_valid, threads)
         logical, intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine argsort_bool_i64
         !> pf_argsort over a string array, returning an int32 permutation.
-        module subroutine argsort_chr_i32(values, perm, descending, nulls_first, is_valid)
+        module subroutine argsort_chr_i32(values, perm, descending, nulls_first, is_valid, threads)
         character(len=*), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine argsort_chr_i32
         !> pf_argsort over a string array, returning an int64 permutation.
-        module subroutine argsort_chr_i64(values, perm, descending, nulls_first, is_valid)
+        module subroutine argsort_chr_i64(values, perm, descending, nulls_first, is_valid, threads)
         character(len=*), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine argsort_chr_i64
         !> pf_argsort over a date array, returning an int32 permutation.
-        module subroutine argsort_date_i32(values, perm, descending, nulls_first)
+        module subroutine argsort_date_i32(values, perm, descending, nulls_first, threads)
         type(parquet_date), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine argsort_date_i32
         !> pf_argsort over a date array, returning an int64 permutation.
-        module subroutine argsort_date_i64(values, perm, descending, nulls_first)
+        module subroutine argsort_date_i64(values, perm, descending, nulls_first, threads)
         type(parquet_date), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine argsort_date_i64
         !> pf_argsort over a time array, returning an int32 permutation.
-        module subroutine argsort_time_i32(values, perm, descending, nulls_first)
+        module subroutine argsort_time_i32(values, perm, descending, nulls_first, threads)
         type(parquet_time), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine argsort_time_i32
         !> pf_argsort over a time array, returning an int64 permutation.
-        module subroutine argsort_time_i64(values, perm, descending, nulls_first)
+        module subroutine argsort_time_i64(values, perm, descending, nulls_first, threads)
         type(parquet_time), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine argsort_time_i64
         !> pf_argsort over a timestamp array, returning an int32 permutation.
-        module subroutine argsort_ts_i32(values, perm, descending, nulls_first)
+        module subroutine argsort_ts_i32(values, perm, descending, nulls_first, threads)
         type(parquet_timestamp), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine argsort_ts_i32
         !> pf_argsort over a timestamp array, returning an int64 permutation.
-        module subroutine argsort_ts_i64(values, perm, descending, nulls_first)
+        module subroutine argsort_ts_i64(values, perm, descending, nulls_first, threads)
         type(parquet_timestamp), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine argsort_ts_i64
         !> pf_argsort over a packed string column array, returning an int32 permutation.
-        module subroutine argsort_strcol_i32(values, perm, descending, nulls_first)
+        module subroutine argsort_strcol_i32(values, perm, descending, nulls_first, threads)
         type(parquet_string_column), intent(in) :: values
             integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine argsort_strcol_i32
         !> pf_argsort over a packed string column array, returning an int64 permutation.
-        module subroutine argsort_strcol_i64(values, perm, descending, nulls_first)
+        module subroutine argsort_strcol_i64(values, perm, descending, nulls_first, threads)
         type(parquet_string_column), intent(in) :: values
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine argsort_strcol_i64
         !> pf_argsort over a type-erased column array, returning an int32 permutation.
-        module subroutine argsort_col_i32(values, perm, descending, nulls_first)
+        module subroutine argsort_col_i32(values, perm, descending, nulls_first, threads)
         type(parquet_column), intent(in) :: values
             integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine argsort_col_i32
         !> pf_argsort over a type-erased column array, returning an int64 permutation.
-        module subroutine argsort_col_i64(values, perm, descending, nulls_first)
+        module subroutine argsort_col_i64(values, perm, descending, nulls_first, threads)
         type(parquet_column), intent(in) :: values
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine argsort_col_i64
         !> pf_argsort over a multi-key `pf_sort_keys`, returning an int32 permutation.
-        module subroutine argsort_keys_i32(keys, perm)
+        module subroutine argsort_keys_i32(keys, perm, threads)
             class(pf_sort_keys), intent(in) :: keys !! the keys, primary first.
             integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine argsort_keys_i32
         !> pf_argsort over a multi-key `pf_sort_keys`, returning an int64 permutation.
-        module subroutine argsort_keys_i64(keys, perm)
+        module subroutine argsort_keys_i64(keys, perm, threads)
             class(pf_sort_keys), intent(in) :: keys !! the keys, primary first.
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine argsort_keys_i64
         !> pf_sort over a 32-bit integer array: an independent sorted copy.
-        module subroutine sort_i32(values, sorted, descending, nulls_first, is_valid, sorted_valid)
+        module subroutine sort_i32(values, sorted, descending, nulls_first, is_valid, sorted_valid, threads)
         integer(int32), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: sorted(:) !! the sorted copy.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1276,9 +1444,15 @@ module parquet_sorting
             logical, allocatable, intent(out), optional :: sorted_valid(:)
             !! validity of `sorted`, in its order. ALWAYS ALLOCATED when asked for -- all .true.
             !! when `is_valid` was absent, since the caller asked a direct question.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine sort_i32
         !> pf_sort over a 64-bit integer array: an independent sorted copy.
-        module subroutine sort_i64(values, sorted, descending, nulls_first, is_valid, sorted_valid)
+        module subroutine sort_i64(values, sorted, descending, nulls_first, is_valid, sorted_valid, threads)
         integer(int64), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: sorted(:) !! the sorted copy.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1287,9 +1461,15 @@ module parquet_sorting
             logical, allocatable, intent(out), optional :: sorted_valid(:)
             !! validity of `sorted`, in its order. ALWAYS ALLOCATED when asked for -- all .true.
             !! when `is_valid` was absent, since the caller asked a direct question.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine sort_i64
         !> pf_sort over a 32-bit real array: an independent sorted copy.
-        module subroutine sort_f32(values, sorted, descending, nulls_first, is_valid, sorted_valid)
+        module subroutine sort_f32(values, sorted, descending, nulls_first, is_valid, sorted_valid, threads)
         real(real32), intent(in) :: values(:)
             real(real32), allocatable, intent(out) :: sorted(:) !! the sorted copy.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1298,9 +1478,15 @@ module parquet_sorting
             logical, allocatable, intent(out), optional :: sorted_valid(:)
             !! validity of `sorted`, in its order. ALWAYS ALLOCATED when asked for -- all .true.
             !! when `is_valid` was absent, since the caller asked a direct question.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine sort_f32
         !> pf_sort over a 64-bit real array: an independent sorted copy.
-        module subroutine sort_f64(values, sorted, descending, nulls_first, is_valid, sorted_valid)
+        module subroutine sort_f64(values, sorted, descending, nulls_first, is_valid, sorted_valid, threads)
         real(real64), intent(in) :: values(:)
             real(real64), allocatable, intent(out) :: sorted(:) !! the sorted copy.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1309,9 +1495,15 @@ module parquet_sorting
             logical, allocatable, intent(out), optional :: sorted_valid(:)
             !! validity of `sorted`, in its order. ALWAYS ALLOCATED when asked for -- all .true.
             !! when `is_valid` was absent, since the caller asked a direct question.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine sort_f64
         !> pf_sort over a logical array: an independent sorted copy.
-        module subroutine sort_bool(values, sorted, descending, nulls_first, is_valid, sorted_valid)
+        module subroutine sort_bool(values, sorted, descending, nulls_first, is_valid, sorted_valid, threads)
         logical, intent(in) :: values(:)
             logical, allocatable, intent(out) :: sorted(:) !! the sorted copy.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1320,9 +1512,15 @@ module parquet_sorting
             logical, allocatable, intent(out), optional :: sorted_valid(:)
             !! validity of `sorted`, in its order. ALWAYS ALLOCATED when asked for -- all .true.
             !! when `is_valid` was absent, since the caller asked a direct question.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine sort_bool
         !> pf_sort over a string array: an independent sorted copy.
-        module subroutine sort_chr(values, sorted, descending, nulls_first, is_valid, sorted_valid)
+        module subroutine sort_chr(values, sorted, descending, nulls_first, is_valid, sorted_valid, threads)
         character(len=*), intent(in) :: values(:)
             character(len=len(values)), allocatable, intent(out) :: sorted(:) !! the sorted copy.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1331,27 +1529,51 @@ module parquet_sorting
             logical, allocatable, intent(out), optional :: sorted_valid(:)
             !! validity of `sorted`, in its order. ALWAYS ALLOCATED when asked for -- all .true.
             !! when `is_valid` was absent, since the caller asked a direct question.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine sort_chr
         !> pf_sort over a date array: an independent sorted copy.
-        module subroutine sort_date(values, sorted, descending, nulls_first)
+        module subroutine sort_date(values, sorted, descending, nulls_first, threads)
         type(parquet_date), intent(in) :: values(:)
             type(parquet_date), allocatable, intent(out) :: sorted(:) !! the sorted copy.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine sort_date
         !> pf_sort over a time array: an independent sorted copy.
-        module subroutine sort_time(values, sorted, descending, nulls_first)
+        module subroutine sort_time(values, sorted, descending, nulls_first, threads)
         type(parquet_time), intent(in) :: values(:)
             type(parquet_time), allocatable, intent(out) :: sorted(:) !! the sorted copy.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine sort_time
         !> pf_sort over a timestamp array: an independent sorted copy.
-        module subroutine sort_ts(values, sorted, descending, nulls_first)
+        module subroutine sort_ts(values, sorted, descending, nulls_first, threads)
         type(parquet_timestamp), intent(in) :: values(:)
             type(parquet_timestamp), allocatable, intent(out) :: sorted(:) !! the sorted copy.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine sort_ts
     end interface
     !
@@ -3593,412 +3815,736 @@ module parquet_sorting
     ! ---- Distinct values and ranks (parquet_sorting_unique) ----
     interface
         !> pf_unique_count over a 32-bit integer array, with an int32 count.
-        module subroutine unique_count_i32_i32(values, count, is_valid, n_null)
+        module subroutine unique_count_i32_i32(values, count, is_valid, n_null, threads)
         integer(int32), intent(in) :: values(:)
             integer(int32), intent(out) :: count !! how many distinct non-null values.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_count_i32_i32
         !> pf_unique_count over a 32-bit integer array, with an int64 count.
-        module subroutine unique_count_i32_i64(values, count, is_valid, n_null)
+        module subroutine unique_count_i32_i64(values, count, is_valid, n_null, threads)
         integer(int32), intent(in) :: values(:)
             integer(int64), intent(out) :: count !! how many distinct non-null values.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_count_i32_i64
         !> pf_unique_count over a 64-bit integer array, with an int32 count.
-        module subroutine unique_count_i64_i32(values, count, is_valid, n_null)
+        module subroutine unique_count_i64_i32(values, count, is_valid, n_null, threads)
         integer(int64), intent(in) :: values(:)
             integer(int32), intent(out) :: count !! how many distinct non-null values.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_count_i64_i32
         !> pf_unique_count over a 64-bit integer array, with an int64 count.
-        module subroutine unique_count_i64_i64(values, count, is_valid, n_null)
+        module subroutine unique_count_i64_i64(values, count, is_valid, n_null, threads)
         integer(int64), intent(in) :: values(:)
             integer(int64), intent(out) :: count !! how many distinct non-null values.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_count_i64_i64
         !> pf_unique_count over a 32-bit real array, with an int32 count.
-        module subroutine unique_count_f32_i32(values, count, is_valid, n_null)
+        module subroutine unique_count_f32_i32(values, count, is_valid, n_null, threads)
         real(real32), intent(in) :: values(:)
             integer(int32), intent(out) :: count !! how many distinct non-null values.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_count_f32_i32
         !> pf_unique_count over a 32-bit real array, with an int64 count.
-        module subroutine unique_count_f32_i64(values, count, is_valid, n_null)
+        module subroutine unique_count_f32_i64(values, count, is_valid, n_null, threads)
         real(real32), intent(in) :: values(:)
             integer(int64), intent(out) :: count !! how many distinct non-null values.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_count_f32_i64
         !> pf_unique_count over a 64-bit real array, with an int32 count.
-        module subroutine unique_count_f64_i32(values, count, is_valid, n_null)
+        module subroutine unique_count_f64_i32(values, count, is_valid, n_null, threads)
         real(real64), intent(in) :: values(:)
             integer(int32), intent(out) :: count !! how many distinct non-null values.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_count_f64_i32
         !> pf_unique_count over a 64-bit real array, with an int64 count.
-        module subroutine unique_count_f64_i64(values, count, is_valid, n_null)
+        module subroutine unique_count_f64_i64(values, count, is_valid, n_null, threads)
         real(real64), intent(in) :: values(:)
             integer(int64), intent(out) :: count !! how many distinct non-null values.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_count_f64_i64
         !> pf_unique_count over a logical array, with an int32 count.
-        module subroutine unique_count_bool_i32(values, count, is_valid, n_null)
+        module subroutine unique_count_bool_i32(values, count, is_valid, n_null, threads)
         logical, intent(in) :: values(:)
             integer(int32), intent(out) :: count !! how many distinct non-null values.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_count_bool_i32
         !> pf_unique_count over a logical array, with an int64 count.
-        module subroutine unique_count_bool_i64(values, count, is_valid, n_null)
+        module subroutine unique_count_bool_i64(values, count, is_valid, n_null, threads)
         logical, intent(in) :: values(:)
             integer(int64), intent(out) :: count !! how many distinct non-null values.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_count_bool_i64
         !> pf_unique_count over a string array, with an int32 count.
-        module subroutine unique_count_chr_i32(values, count, is_valid, n_null)
+        module subroutine unique_count_chr_i32(values, count, is_valid, n_null, threads)
         character(len=*), intent(in) :: values(:)
             integer(int32), intent(out) :: count !! how many distinct non-null values.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_count_chr_i32
         !> pf_unique_count over a string array, with an int64 count.
-        module subroutine unique_count_chr_i64(values, count, is_valid, n_null)
+        module subroutine unique_count_chr_i64(values, count, is_valid, n_null, threads)
         character(len=*), intent(in) :: values(:)
             integer(int64), intent(out) :: count !! how many distinct non-null values.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_count_chr_i64
         !> pf_unique_count over a date array, with an int32 count.
-        module subroutine unique_count_date_i32(values, count, n_null)
+        module subroutine unique_count_date_i32(values, count, n_null, threads)
         type(parquet_date), intent(in) :: values(:)
             integer(int32), intent(out) :: count !! how many distinct non-null values.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_count_date_i32
         !> pf_unique_count over a date array, with an int64 count.
-        module subroutine unique_count_date_i64(values, count, n_null)
+        module subroutine unique_count_date_i64(values, count, n_null, threads)
         type(parquet_date), intent(in) :: values(:)
             integer(int64), intent(out) :: count !! how many distinct non-null values.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_count_date_i64
         !> pf_unique_count over a time array, with an int32 count.
-        module subroutine unique_count_time_i32(values, count, n_null)
+        module subroutine unique_count_time_i32(values, count, n_null, threads)
         type(parquet_time), intent(in) :: values(:)
             integer(int32), intent(out) :: count !! how many distinct non-null values.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_count_time_i32
         !> pf_unique_count over a time array, with an int64 count.
-        module subroutine unique_count_time_i64(values, count, n_null)
+        module subroutine unique_count_time_i64(values, count, n_null, threads)
         type(parquet_time), intent(in) :: values(:)
             integer(int64), intent(out) :: count !! how many distinct non-null values.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_count_time_i64
         !> pf_unique_count over a timestamp array, with an int32 count.
-        module subroutine unique_count_ts_i32(values, count, n_null)
+        module subroutine unique_count_ts_i32(values, count, n_null, threads)
         type(parquet_timestamp), intent(in) :: values(:)
             integer(int32), intent(out) :: count !! how many distinct non-null values.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_count_ts_i32
         !> pf_unique_count over a timestamp array, with an int64 count.
-        module subroutine unique_count_ts_i64(values, count, n_null)
+        module subroutine unique_count_ts_i64(values, count, n_null, threads)
         type(parquet_timestamp), intent(in) :: values(:)
             integer(int64), intent(out) :: count !! how many distinct non-null values.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_count_ts_i64
         !> pf_unique_count over a packed string column array, with an int32 count.
-        module subroutine unique_count_strcol_i32(values, count, n_null)
+        module subroutine unique_count_strcol_i32(values, count, n_null, threads)
         type(parquet_string_column), intent(in) :: values
             integer(int32), intent(out) :: count !! how many distinct non-null values.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_count_strcol_i32
         !> pf_unique_count over a packed string column array, with an int64 count.
-        module subroutine unique_count_strcol_i64(values, count, n_null)
+        module subroutine unique_count_strcol_i64(values, count, n_null, threads)
         type(parquet_string_column), intent(in) :: values
             integer(int64), intent(out) :: count !! how many distinct non-null values.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_count_strcol_i64
         !> pf_unique_count over a type-erased column array, with an int32 count.
-        module subroutine unique_count_col_i32(values, count, n_null)
+        module subroutine unique_count_col_i32(values, count, n_null, threads)
         type(parquet_column), intent(in) :: values
             integer(int32), intent(out) :: count !! how many distinct non-null values.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_count_col_i32
         !> pf_unique_count over a type-erased column array, with an int64 count.
-        module subroutine unique_count_col_i64(values, count, n_null)
+        module subroutine unique_count_col_i64(values, count, n_null, threads)
         type(parquet_column), intent(in) :: values
             integer(int64), intent(out) :: count !! how many distinct non-null values.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_count_col_i64
         !> pf_unique over a 32-bit integer array: its distinct non-null values, in order.
-        module subroutine unique_i32(values, distinct, descending, is_valid, n_null)
+        module subroutine unique_i32(values, distinct, descending, is_valid, n_null, threads)
         integer(int32), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_i32
         !> pf_unique over a 64-bit integer array: its distinct non-null values, in order.
-        module subroutine unique_i64(values, distinct, descending, is_valid, n_null)
+        module subroutine unique_i64(values, distinct, descending, is_valid, n_null, threads)
         integer(int64), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_i64
         !> pf_unique over a 32-bit real array: its distinct non-null values, in order.
-        module subroutine unique_f32(values, distinct, descending, is_valid, n_null)
+        module subroutine unique_f32(values, distinct, descending, is_valid, n_null, threads)
         real(real32), intent(in) :: values(:)
             real(real32), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_f32
         !> pf_unique over a 64-bit real array: its distinct non-null values, in order.
-        module subroutine unique_f64(values, distinct, descending, is_valid, n_null)
+        module subroutine unique_f64(values, distinct, descending, is_valid, n_null, threads)
         real(real64), intent(in) :: values(:)
             real(real64), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_f64
         !> pf_unique over a logical array: its distinct non-null values, in order.
-        module subroutine unique_bool(values, distinct, descending, is_valid, n_null)
+        module subroutine unique_bool(values, distinct, descending, is_valid, n_null, threads)
         logical, intent(in) :: values(:)
             logical, allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_bool
         !> pf_unique over a string array: its distinct non-null values, in order.
-        module subroutine unique_chr(values, distinct, descending, is_valid, n_null)
+        module subroutine unique_chr(values, distinct, descending, is_valid, n_null, threads)
         character(len=*), intent(in) :: values(:)
             character(len=len(values)), allocatable, intent(out) :: distinct(:) !! the distinct values.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_chr
         !> pf_unique over a date array: its distinct non-null values, in order.
-        module subroutine unique_date(values, distinct, descending, n_null)
+        module subroutine unique_date(values, distinct, descending, n_null, threads)
         type(parquet_date), intent(in) :: values(:)
             type(parquet_date), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_date
         !> pf_unique over a time array: its distinct non-null values, in order.
-        module subroutine unique_time(values, distinct, descending, n_null)
+        module subroutine unique_time(values, distinct, descending, n_null, threads)
         type(parquet_time), intent(in) :: values(:)
             type(parquet_time), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_time
         !> pf_unique over a timestamp array: its distinct non-null values, in order.
-        module subroutine unique_ts(values, distinct, descending, n_null)
+        module subroutine unique_ts(values, distinct, descending, n_null, threads)
         type(parquet_timestamp), intent(in) :: values(:)
             type(parquet_timestamp), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_ts
         !> pf_unique over a packed string column array: its distinct non-null values, in order.
-        module subroutine unique_strcol(values, distinct, descending, n_null)
+        module subroutine unique_strcol(values, distinct, descending, n_null, threads)
         type(parquet_string_column), intent(in) :: values
             type(parquet_string_column), intent(out) :: distinct !! the distinct values.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine unique_strcol
         !> pf_rank over a 32-bit integer array, with int32 ranks.
-        module subroutine rank_i32_i32(values, ranks, method, descending, is_valid)
+        module subroutine rank_i32_i32(values, ranks, method, descending, is_valid, threads)
         integer(int32), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
             character(len=*), intent(in), optional :: method
             !! "competition" (the default), "dense" or "ordinal", case-insensitive.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine rank_i32_i32
         !> pf_rank over a 32-bit integer array, with int64 ranks.
-        module subroutine rank_i32_i64(values, ranks, method, descending, is_valid)
+        module subroutine rank_i32_i64(values, ranks, method, descending, is_valid, threads)
         integer(int32), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
             character(len=*), intent(in), optional :: method
             !! "competition" (the default), "dense" or "ordinal", case-insensitive.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine rank_i32_i64
         !> pf_rank over a 64-bit integer array, with int32 ranks.
-        module subroutine rank_i64_i32(values, ranks, method, descending, is_valid)
+        module subroutine rank_i64_i32(values, ranks, method, descending, is_valid, threads)
         integer(int64), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
             character(len=*), intent(in), optional :: method
             !! "competition" (the default), "dense" or "ordinal", case-insensitive.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine rank_i64_i32
         !> pf_rank over a 64-bit integer array, with int64 ranks.
-        module subroutine rank_i64_i64(values, ranks, method, descending, is_valid)
+        module subroutine rank_i64_i64(values, ranks, method, descending, is_valid, threads)
         integer(int64), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
             character(len=*), intent(in), optional :: method
             !! "competition" (the default), "dense" or "ordinal", case-insensitive.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine rank_i64_i64
         !> pf_rank over a 32-bit real array, with int32 ranks.
-        module subroutine rank_f32_i32(values, ranks, method, descending, is_valid)
+        module subroutine rank_f32_i32(values, ranks, method, descending, is_valid, threads)
         real(real32), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
             character(len=*), intent(in), optional :: method
             !! "competition" (the default), "dense" or "ordinal", case-insensitive.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine rank_f32_i32
         !> pf_rank over a 32-bit real array, with int64 ranks.
-        module subroutine rank_f32_i64(values, ranks, method, descending, is_valid)
+        module subroutine rank_f32_i64(values, ranks, method, descending, is_valid, threads)
         real(real32), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
             character(len=*), intent(in), optional :: method
             !! "competition" (the default), "dense" or "ordinal", case-insensitive.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine rank_f32_i64
         !> pf_rank over a 64-bit real array, with int32 ranks.
-        module subroutine rank_f64_i32(values, ranks, method, descending, is_valid)
+        module subroutine rank_f64_i32(values, ranks, method, descending, is_valid, threads)
         real(real64), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
             character(len=*), intent(in), optional :: method
             !! "competition" (the default), "dense" or "ordinal", case-insensitive.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine rank_f64_i32
         !> pf_rank over a 64-bit real array, with int64 ranks.
-        module subroutine rank_f64_i64(values, ranks, method, descending, is_valid)
+        module subroutine rank_f64_i64(values, ranks, method, descending, is_valid, threads)
         real(real64), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
             character(len=*), intent(in), optional :: method
             !! "competition" (the default), "dense" or "ordinal", case-insensitive.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine rank_f64_i64
         !> pf_rank over a logical array, with int32 ranks.
-        module subroutine rank_bool_i32(values, ranks, method, descending, is_valid)
+        module subroutine rank_bool_i32(values, ranks, method, descending, is_valid, threads)
         logical, intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
             character(len=*), intent(in), optional :: method
             !! "competition" (the default), "dense" or "ordinal", case-insensitive.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine rank_bool_i32
         !> pf_rank over a logical array, with int64 ranks.
-        module subroutine rank_bool_i64(values, ranks, method, descending, is_valid)
+        module subroutine rank_bool_i64(values, ranks, method, descending, is_valid, threads)
         logical, intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
             character(len=*), intent(in), optional :: method
             !! "competition" (the default), "dense" or "ordinal", case-insensitive.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine rank_bool_i64
         !> pf_rank over a string array, with int32 ranks.
-        module subroutine rank_chr_i32(values, ranks, method, descending, is_valid)
+        module subroutine rank_chr_i32(values, ranks, method, descending, is_valid, threads)
         character(len=*), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
             character(len=*), intent(in), optional :: method
             !! "competition" (the default), "dense" or "ordinal", case-insensitive.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine rank_chr_i32
         !> pf_rank over a string array, with int64 ranks.
-        module subroutine rank_chr_i64(values, ranks, method, descending, is_valid)
+        module subroutine rank_chr_i64(values, ranks, method, descending, is_valid, threads)
         character(len=*), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
             character(len=*), intent(in), optional :: method
             !! "competition" (the default), "dense" or "ordinal", case-insensitive.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine rank_chr_i64
         !> pf_rank over a date array, with int32 ranks.
-        module subroutine rank_date_i32(values, ranks, method, descending)
+        module subroutine rank_date_i32(values, ranks, method, descending, threads)
         type(parquet_date), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
             character(len=*), intent(in), optional :: method
             !! "competition" (the default), "dense" or "ordinal", case-insensitive.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine rank_date_i32
         !> pf_rank over a date array, with int64 ranks.
-        module subroutine rank_date_i64(values, ranks, method, descending)
+        module subroutine rank_date_i64(values, ranks, method, descending, threads)
         type(parquet_date), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
             character(len=*), intent(in), optional :: method
             !! "competition" (the default), "dense" or "ordinal", case-insensitive.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine rank_date_i64
         !> pf_rank over a time array, with int32 ranks.
-        module subroutine rank_time_i32(values, ranks, method, descending)
+        module subroutine rank_time_i32(values, ranks, method, descending, threads)
         type(parquet_time), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
             character(len=*), intent(in), optional :: method
             !! "competition" (the default), "dense" or "ordinal", case-insensitive.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine rank_time_i32
         !> pf_rank over a time array, with int64 ranks.
-        module subroutine rank_time_i64(values, ranks, method, descending)
+        module subroutine rank_time_i64(values, ranks, method, descending, threads)
         type(parquet_time), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
             character(len=*), intent(in), optional :: method
             !! "competition" (the default), "dense" or "ordinal", case-insensitive.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine rank_time_i64
         !> pf_rank over a timestamp array, with int32 ranks.
-        module subroutine rank_ts_i32(values, ranks, method, descending)
+        module subroutine rank_ts_i32(values, ranks, method, descending, threads)
         type(parquet_timestamp), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
             character(len=*), intent(in), optional :: method
             !! "competition" (the default), "dense" or "ordinal", case-insensitive.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine rank_ts_i32
         !> pf_rank over a timestamp array, with int64 ranks.
-        module subroutine rank_ts_i64(values, ranks, method, descending)
+        module subroutine rank_ts_i64(values, ranks, method, descending, threads)
         type(parquet_timestamp), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
             character(len=*), intent(in), optional :: method
             !! "competition" (the default), "dense" or "ordinal", case-insensitive.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine rank_ts_i64
         !> pf_rank over a packed string column array, with int32 ranks.
-        module subroutine rank_strcol_i32(values, ranks, method, descending)
+        module subroutine rank_strcol_i32(values, ranks, method, descending, threads)
         type(parquet_string_column), intent(in) :: values
             integer(int32), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
             character(len=*), intent(in), optional :: method
             !! "competition" (the default), "dense" or "ordinal", case-insensitive.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine rank_strcol_i32
         !> pf_rank over a packed string column array, with int64 ranks.
-        module subroutine rank_strcol_i64(values, ranks, method, descending)
+        module subroutine rank_strcol_i64(values, ranks, method, descending, threads)
         type(parquet_string_column), intent(in) :: values
             integer(int64), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
             character(len=*), intent(in), optional :: method
             !! "competition" (the default), "dense" or "ordinal", case-insensitive.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine rank_strcol_i64
         !> pf_rank over a type-erased column array, with int32 ranks.
-        module subroutine rank_col_i32(values, ranks, method, descending)
+        module subroutine rank_col_i32(values, ranks, method, descending, threads)
         type(parquet_column), intent(in) :: values
             integer(int32), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
             character(len=*), intent(in), optional :: method
             !! "competition" (the default), "dense" or "ordinal", case-insensitive.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine rank_col_i32
         !> pf_rank over a type-erased column array, with int64 ranks.
-        module subroutine rank_col_i64(values, ranks, method, descending)
+        module subroutine rank_col_i64(values, ranks, method, descending, threads)
         type(parquet_column), intent(in) :: values
             integer(int64), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.
             character(len=*), intent(in), optional :: method
             !! "competition" (the default), "dense" or "ordinal", case-insensitive.
             logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
         end subroutine rank_col_i64
     end interface
     !

@@ -31,7 +31,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_i32(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
-        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64, threads=threads)
         call narrow_perm(perm64, "pf_argsort", perm)
     end procedure argsort_i32_i32
     !
@@ -44,7 +44,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_i32(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
-        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm, threads=threads)
     end procedure argsort_i32_i64
     !
     module procedure argsort_i64_i32
@@ -57,7 +57,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_i64(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
-        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64, threads=threads)
         call narrow_perm(perm64, "pf_argsort", perm)
     end procedure argsort_i64_i32
     !
@@ -70,7 +70,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_i64(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
-        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm, threads=threads)
     end procedure argsort_i64_i64
     !
     module procedure argsort_f32_i32
@@ -83,7 +83,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_f32(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
-        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64, threads=threads)
         call narrow_perm(perm64, "pf_argsort", perm)
     end procedure argsort_f32_i32
     !
@@ -96,7 +96,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_f32(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
-        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm, threads=threads)
     end procedure argsort_f32_i64
     !
     module procedure argsort_f64_i32
@@ -109,7 +109,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_f64(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
-        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64, threads=threads)
         call narrow_perm(perm64, "pf_argsort", perm)
     end procedure argsort_f64_i32
     !
@@ -122,7 +122,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_f64(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
-        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm, threads=threads)
     end procedure argsort_f64_i64
     !
     module procedure argsort_bool_i32
@@ -135,7 +135,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_bool(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
-        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64, threads=threads)
         call narrow_perm(perm64, "pf_argsort", perm)
     end procedure argsort_bool_i32
     !
@@ -148,7 +148,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_bool(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
-        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm, threads=threads)
     end procedure argsort_bool_i64
     !
     module procedure argsort_chr_i32
@@ -161,7 +161,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_chr(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
-        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64, threads=threads)
         call narrow_perm(perm64, "pf_argsort", perm)
     end procedure argsort_chr_i32
     !
@@ -174,7 +174,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_chr(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
-        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm, threads=threads)
     end procedure argsort_chr_i64
     !
     module procedure argsort_date_i32
@@ -187,7 +187,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_date(values, buf, desc, nlo, "pf_argsort")
-        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64, threads=threads)
         call narrow_perm(perm64, "pf_argsort", perm)
     end procedure argsort_date_i32
     !
@@ -200,7 +200,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_date(values, buf, desc, nlo, "pf_argsort")
-        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm, threads=threads)
     end procedure argsort_date_i64
     !
     module procedure argsort_time_i32
@@ -213,7 +213,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_time(values, buf, desc, nlo, "pf_argsort")
-        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64, threads=threads)
         call narrow_perm(perm64, "pf_argsort", perm)
     end procedure argsort_time_i32
     !
@@ -226,7 +226,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_time(values, buf, desc, nlo, "pf_argsort")
-        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm, threads=threads)
     end procedure argsort_time_i64
     !
     module procedure argsort_ts_i32
@@ -239,7 +239,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_ts(values, buf, desc, nlo, "pf_argsort")
-        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm64, threads=threads)
         call narrow_perm(perm64, "pf_argsort", perm)
     end procedure argsort_ts_i32
     !
@@ -252,7 +252,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_ts(values, buf, desc, nlo, "pf_argsort")
-        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm)
+        call drive_engine(buf, size(values, kind=int64), "pf_argsort", perm, threads=threads)
     end procedure argsort_ts_i64
     !
     module procedure argsort_strcol_i32
@@ -265,7 +265,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_strcol(values, buf, desc, nlo, "pf_argsort")
-        call drive_engine(buf, values%size(), "pf_argsort", perm64)
+        call drive_engine(buf, values%size(), "pf_argsort", perm64, threads=threads)
         call narrow_perm(perm64, "pf_argsort", perm)
     end procedure argsort_strcol_i32
     !
@@ -278,7 +278,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_strcol(values, buf, desc, nlo, "pf_argsort")
-        call drive_engine(buf, values%size(), "pf_argsort", perm)
+        call drive_engine(buf, values%size(), "pf_argsort", perm, threads=threads)
     end procedure argsort_strcol_i64
     !
     module procedure argsort_col_i32
@@ -291,7 +291,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_col(values, buf, desc, nlo, "pf_argsort")
-        call drive_engine(buf, values%length(), "pf_argsort", perm64)
+        call drive_engine(buf, values%length(), "pf_argsort", perm64, threads=threads)
         call narrow_perm(perm64, "pf_argsort", perm)
     end procedure argsort_col_i32
     !
@@ -304,7 +304,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_col(values, buf, desc, nlo, "pf_argsort")
-        call drive_engine(buf, values%length(), "pf_argsort", perm)
+        call drive_engine(buf, values%length(), "pf_argsort", perm, threads=threads)
     end procedure argsort_col_i64
     !
     module procedure argsort_keys_i32
@@ -314,7 +314,8 @@ contains
             error stop EP // "pf_argsort: this pf_sort_keys has no key; " // &
                 "call keys%add(...) at least once before sorting"
         end if
-        call drive_engine(keys%keys(1:keys%nkeys), keys%nrows, "pf_argsort", perm64)
+        call drive_engine(keys%keys(1:keys%nkeys), keys%nrows, "pf_argsort", perm64, &
+            threads=threads)
         call narrow_perm(perm64, "pf_argsort", perm)
     end procedure argsort_keys_i32
     !
@@ -324,7 +325,8 @@ contains
             error stop EP // "pf_argsort: this pf_sort_keys has no key; " // &
                 "call keys%add(...) at least once before sorting"
         end if
-        call drive_engine(keys%keys(1:keys%nkeys), keys%nrows, "pf_argsort", perm)
+        call drive_engine(keys%keys(1:keys%nkeys), keys%nrows, "pf_argsort", perm, &
+            threads=threads)
     end procedure argsort_keys_i64
     !
     module procedure sort_i32
@@ -339,7 +341,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         n = size(values, kind=int64)
         call extract_i32(values, buf, desc, nlo, "pf_sort", is_valid=is_valid)
-        call drive_engine(buf, n, "pf_sort", perm)
+        call drive_engine(buf, n, "pf_sort", perm, threads=threads)
         allocate(sorted(n))
         do k = 1_int64, n
             sorted(k) = values(perm(k))
@@ -372,7 +374,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         n = size(values, kind=int64)
         call extract_i64(values, buf, desc, nlo, "pf_sort", is_valid=is_valid)
-        call drive_engine(buf, n, "pf_sort", perm)
+        call drive_engine(buf, n, "pf_sort", perm, threads=threads)
         allocate(sorted(n))
         do k = 1_int64, n
             sorted(k) = values(perm(k))
@@ -405,7 +407,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         n = size(values, kind=int64)
         call extract_f32(values, buf, desc, nlo, "pf_sort", is_valid=is_valid)
-        call drive_engine(buf, n, "pf_sort", perm)
+        call drive_engine(buf, n, "pf_sort", perm, threads=threads)
         allocate(sorted(n))
         do k = 1_int64, n
             sorted(k) = values(perm(k))
@@ -438,7 +440,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         n = size(values, kind=int64)
         call extract_f64(values, buf, desc, nlo, "pf_sort", is_valid=is_valid)
-        call drive_engine(buf, n, "pf_sort", perm)
+        call drive_engine(buf, n, "pf_sort", perm, threads=threads)
         allocate(sorted(n))
         do k = 1_int64, n
             sorted(k) = values(perm(k))
@@ -471,7 +473,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         n = size(values, kind=int64)
         call extract_bool(values, buf, desc, nlo, "pf_sort", is_valid=is_valid)
-        call drive_engine(buf, n, "pf_sort", perm)
+        call drive_engine(buf, n, "pf_sort", perm, threads=threads)
         allocate(sorted(n))
         do k = 1_int64, n
             sorted(k) = values(perm(k))
@@ -504,7 +506,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         n = size(values, kind=int64)
         call extract_chr(values, buf, desc, nlo, "pf_sort", is_valid=is_valid)
-        call drive_engine(buf, n, "pf_sort", perm)
+        call drive_engine(buf, n, "pf_sort", perm, threads=threads)
         allocate(character(len=len(values)) :: sorted(n))
         do k = 1_int64, n
             sorted(k) = values(perm(k))
@@ -537,7 +539,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         n = size(values, kind=int64)
         call extract_date(values, buf, desc, nlo, "pf_sort")
-        call drive_engine(buf, n, "pf_sort", perm)
+        call drive_engine(buf, n, "pf_sort", perm, threads=threads)
         allocate(sorted(n))
         do k = 1_int64, n
             sorted(k) = values(perm(k))
@@ -556,7 +558,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         n = size(values, kind=int64)
         call extract_time(values, buf, desc, nlo, "pf_sort")
-        call drive_engine(buf, n, "pf_sort", perm)
+        call drive_engine(buf, n, "pf_sort", perm, threads=threads)
         allocate(sorted(n))
         do k = 1_int64, n
             sorted(k) = values(perm(k))
@@ -575,7 +577,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         n = size(values, kind=int64)
         call extract_ts(values, buf, desc, nlo, "pf_sort")
-        call drive_engine(buf, n, "pf_sort", perm)
+        call drive_engine(buf, n, "pf_sort", perm, threads=threads)
         allocate(sorted(n))
         do k = 1_int64, n
             sorted(k) = values(perm(k))

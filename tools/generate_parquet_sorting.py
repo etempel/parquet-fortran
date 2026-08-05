@@ -190,6 +190,18 @@ def opt_valid(t):
     return ["        logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null."]
 
 
+#: The public `threads=` argument, on Open-1's six generics only. A thread count cannot exceed
+#: int32, so CLAUDE.md's dual-kind rule does not apply and the absence of an int64 form is stated
+#: in the doc-comment rather than left to be "fixed" later.
+THREADS_DOC = [
+    "            integer, intent(in), optional :: threads",
+    "            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the",
+    "            !! caller is not already inside an OpenMP parallel region, and serial when they are.",
+    "            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no",
+    "            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that",
+    "            !! governs row counts and indices here does not apply.",
+]
+
 COMMON_OPTS = [
     "        logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.",
     "        logical, intent(in), optional :: nulls_first !! .true. places nulls before values; default .false.",
@@ -276,6 +288,7 @@ module parquet_sorting
     public :: pf_minmax
     public :: pf_argminmax
     public :: pf_merge
+    public :: pf_sort_threads
     !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_sorting: "
@@ -671,12 +684,34 @@ module parquet_sorting
     w("            character(len=*), intent(in) :: proc                !! calling procedure, for messages.")
     w("        end subroutine keys_append")
     w("        !> Runs the C++ engine over `keys`, returning a 1-based permutation.")
-    w("        module subroutine drive_engine(keys, nrows, proc, perm)")
+    w("        module subroutine drive_engine(keys, nrows, proc, perm, threads)")
     w("            type(sort_key_buf), intent(in), target :: keys(:)   !! the keys, primary first.")
     w("            integer(int64), intent(in) :: nrows                 !! rows each key describes.")
     w("            character(len=*), intent(in) :: proc                !! calling procedure, for messages.")
     w("            integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.")
+    w("            integer, intent(in), optional :: threads            !! thread request; absent = auto.")
     w("        end subroutine drive_engine")
+    w("        !> Resolves how many threads a sort should use. **This is the only place the auto rule")
+    w("        !! lives**, and the only place in this module carrying OpenMP plumbing at all -- the")
+    w("        !! same arrangement parquet_tables_parallel.f90 keeps for the table layer, and worth")
+    w("        !! more here, since the alternative is that plumbing repeated in 65 generated bodies.")
+    w("        !> How many threads an AUTOMATIC sort -- one where `threads=` is absent -- would use")
+    w("        !! right now: `omp_get_max_threads()` when the caller is not inside an OpenMP parallel")
+    w("        !! region, and 1 when they are, because a nested region is the caller's business.")
+    w("        !!")
+    w("        !! Public because the read-time `parquet_open_reader(..., sort_by=)` has to ask the")
+    w("        !! same question from a different module, and one implementation of this rule is worth")
+    w("        !! more than a private copy in each -- two copies drifting would mean a raw-array sort")
+    w("        !! and a read-time sort silently disagreeing about when to thread. Useful in its own")
+    w("        !! right for reporting or logging what an automatic sort is about to do.")
+    w("        module function pf_sort_threads() result(n)")
+    w("            integer :: n !! threads an automatic sort would use; 1 means serial.")
+    w("        end function pf_sort_threads")
+    w("        module subroutine resolve_thread_count(threads, nrows, count)")
+    w("            integer, intent(in), optional :: threads !! caller's request; absent means auto.")
+    w("            integer(int64), intent(in) :: nrows      !! rows to be sorted.")
+    w("            integer(int64), intent(out) :: count     !! resolved count; 1 sorts serially.")
+    w("        end subroutine resolve_thread_count")
     w("        !> Runs the engine over `keys` but orders only the first `count` entries -- `perm`")
     w("        !! comes back with exactly `count` elements.")
     w("        module subroutine drive_engine_partial(keys, nrows, count, proc, perm)")
@@ -753,12 +788,13 @@ module parquet_sorting
     w("        !> Sorts, and reports where the runs of EQUAL rows are: `tie(k)` is 1 when output")
     w("        !! position k holds a row comparing equal to the one before it. One call, because")
     w("        !! `pf_unique`/`pf_rank` need both and would otherwise build the permutation twice.")
-    w("        module subroutine engine_build_runs(keys, nrows, proc, perm, tie)")
+    w("        module subroutine engine_build_runs(keys, nrows, proc, perm, tie, threads)")
     w("            type(sort_key_buf), intent(in), target :: keys(:)   !! the keys, primary first.")
     w("            integer(int64), intent(in) :: nrows                 !! rows each key describes.")
     w("            character(len=*), intent(in) :: proc                !! calling procedure, for messages.")
     w("            integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.")
     w("            integer(c_int8_t), allocatable, intent(out) :: tie(:) !! 1 where a row ties the previous.")
+    w("            integer, intent(in), optional :: threads            !! thread request; absent = auto.")
     w("        end subroutine engine_build_runs")
     w("        !> Binary-searches `keys`, whose LAST row is the target the caller appended.")
     w("        module subroutine engine_search(keys, nrows, n_search, upper, proc, pos)")
@@ -849,26 +885,30 @@ module parquet_sorting
         tag, decl, what, family, nulls, has_sort, _ = t
         for ik, idecl, iname in IDX_KINDS:
             w(f"        !> pf_argsort over a {what} array, returning an {iname} permutation.")
-            w(f"        module subroutine argsort_{tag}_{ik}(values, perm, descending, nulls_first{', is_valid' if nulls == 'arg' else ''})")
+            w(f"        module subroutine argsort_{tag}_{ik}(values, perm, descending, nulls_first{', is_valid' if nulls == 'arg' else ''}, threads)")
             w(val_decl(t, "in"))
             w(f"            {idecl}, allocatable, intent(out) :: perm(:) !! the 1-based permutation.")
             w("            logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.")
             w("            logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.")
             if nulls == "arg":
                 w("            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
+            for line in THREADS_DOC:
+                w(line)
             w(f"        end subroutine argsort_{tag}_{ik}")
     for ik, idecl, iname in IDX_KINDS:
         w(f"        !> pf_argsort over a multi-key `pf_sort_keys`, returning an {iname} permutation.")
-        w(f"        module subroutine argsort_keys_{ik}(keys, perm)")
+        w(f"        module subroutine argsort_keys_{ik}(keys, perm, threads)")
         w("            class(pf_sort_keys), intent(in) :: keys !! the keys, primary first.")
         w(f"            {idecl}, allocatable, intent(out) :: perm(:) !! the 1-based permutation.")
+        for line in THREADS_DOC:
+            w(line)
         w(f"        end subroutine argsort_keys_{ik}")
     for t in TYPES:
         tag, decl, what, family, nulls, has_sort, _ = t
         if not has_sort:
             continue
         w(f"        !> pf_sort over a {what} array: an independent sorted copy.")
-        w(f"        module subroutine sort_{tag}(values, sorted, descending, nulls_first{', is_valid, sorted_valid' if nulls == 'arg' else ''})")
+        w(f"        module subroutine sort_{tag}(values, sorted, descending, nulls_first{', is_valid, sorted_valid' if nulls == 'arg' else ''}, threads)")
         w(val_decl(t, "in"))
         if family == "chr":
             w("            character(len=len(values)), allocatable, intent(out) :: sorted(:) !! the sorted copy.")
@@ -881,6 +921,8 @@ module parquet_sorting
             w("            logical, allocatable, intent(out), optional :: sorted_valid(:)")
             w("            !! validity of `sorted`, in its order. ALWAYS ALLOCATED when asked for -- all .true.")
             w("            !! when `is_valid` was absent, since the caller asked a direct question.")
+        for line in THREADS_DOC:
+            w(line)
         w(f"        end subroutine sort_{tag}")
     w("    end interface")
     w("    !")
@@ -1062,12 +1104,14 @@ def emit_m3_interfaces(w):
         for ik, idecl, iname in IDX_KINDS:
             w(f"        !> pf_unique_count over a {what} array, with an {iname} count.")
             w(f"        module subroutine unique_count_{tag}_{ik}(values, count" +
-              f"{', is_valid' if nulls == 'arg' else ''}, n_null)")
+              f"{', is_valid' if nulls == 'arg' else ''}, n_null, threads)")
             w(val_decl(t, "in"))
             w(f"            {idecl}, intent(out) :: count !! how many distinct non-null values.")
             if nulls == "arg":
                 w(VALID_DOC)
             w("            integer(int64), intent(out), optional :: n_null !! how many values were null.")
+            for line in THREADS_DOC:
+                w(line)
             w(f"        end subroutine unique_count_{tag}_{ik}")
     for t in TYPES:
         tag, decl, what, family, nulls, _, _ = t
@@ -1075,20 +1119,22 @@ def emit_m3_interfaces(w):
             continue
         w(f"        !> pf_unique over a {what} array: its distinct non-null values, in order.")
         w(f"        module subroutine unique_{tag}(values, distinct, descending" +
-          f"{', is_valid' if nulls == 'arg' else ''}, n_null)")
+          f"{', is_valid' if nulls == 'arg' else ''}, n_null, threads)")
         w(val_decl(t, "in"))
         w(distinct_decl(t))
         w(DESC_DOC)
         if nulls == "arg":
             w(VALID_DOC)
         w("            integer(int64), intent(out), optional :: n_null !! how many values were null.")
+        for line in THREADS_DOC:
+            w(line)
         w(f"        end subroutine unique_{tag}")
     for t in TYPES:
         tag, decl, what, family, nulls, _, _ = t
         for ik, idecl, iname in IDX_KINDS:
             w(f"        !> pf_rank over a {what} array, with {iname} ranks.")
             w(f"        module subroutine rank_{tag}_{ik}(values, ranks, method, descending" +
-              f"{', is_valid' if nulls == 'arg' else ''})")
+              f"{', is_valid' if nulls == 'arg' else ''}, threads)")
             w(val_decl(t, "in"))
             w(f"            {idecl}, allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.")
             w("            character(len=*), intent(in), optional :: method")
@@ -1096,6 +1142,8 @@ def emit_m3_interfaces(w):
             w(DESC_DOC)
             if nulls == "arg":
                 w(VALID_DOC)
+            for line in THREADS_DOC:
+                w(line)
             w(f"        end subroutine rank_{tag}_{ik}")
     w("    end interface")
     w("    !")
@@ -1635,7 +1683,7 @@ contains
     !
     module procedure drive_engine
         type(c_ptr) :: builder
-        integer(int64) :: status
+        integer(int64) :: status, nthreads
         integer :: ik
         !
         if (size(keys) < 1) then
@@ -1650,18 +1698,19 @@ contains
             perm(ik) = ik
         end do
         if (nrows < 2_int64) return
+        call resolve_thread_count(threads, nrows, nthreads)
         if (size(keys) == 1) then
             ! One key needs no builder at all: the one-shot entry points BORROW the buffer that
             ! was just extracted, so this saves a handle allocation and a second copy of every
             ! value. Multi-key has to go through the builder, which owns its keys.
-            call engine_one_shot(keys(1), nrows, perm)
+            call engine_one_shot(keys(1), nrows, nthreads, perm)
             return
         end if
         builder = parquet_sort_builder_new(nrows)
         do ik = 1, size(keys)
             call engine_add_key(builder, keys(ik), nrows)
         end do
-        status = parquet_sort_builder_build(builder, perm)
+        status = parquet_sort_builder_build(builder, nthreads, perm)
         call parquet_sort_builder_free(builder)
         if (status /= 0_int64) then
             ! Only reachable with an empty key list, which the guard above already rejects -- kept
@@ -1803,9 +1852,10 @@ contains
     end procedure engine_is_sorted
     !
     !> Argsorts one already-extracted key through the matching one-shot entry point.
-    subroutine engine_one_shot(key, nrows, perm)
+    subroutine engine_one_shot(key, nrows, nthreads, perm)
         type(sort_key_buf), intent(in), target :: key !! the key.
         integer(int64), intent(in) :: nrows           !! its row count.
+        integer(int64), intent(in) :: nthreads        !! resolved thread count; 1 sorts serially.
         integer(int64), intent(inout) :: perm(:)      !! receives the 1-based permutation.
         type(c_ptr) :: vp
         integer(c_int8_t) :: df, nf
@@ -1813,11 +1863,11 @@ contains
         call key_flags(key, vp, df, nf)
         select case (key%family)
         case (SK_REAL)
-            call parquet_sort_argsort_double(nrows, key%reals, vp, df, nf, perm)
+            call parquet_sort_argsort_double(nrows, key%reals, vp, df, nf, nthreads, perm)
         case (SK_STR)
-            call parquet_sort_argsort_string(nrows, key%offsets, key%data, vp, df, nf, perm)
+            call parquet_sort_argsort_string(nrows, key%offsets, key%data, vp, df, nf, nthreads, perm)
         case default
-            call parquet_sort_argsort_int64(nrows, key%ints, vp, df, nf, perm)
+            call parquet_sort_argsort_int64(nrows, key%ints, vp, df, nf, nthreads, perm)
         end select
     end subroutine engine_one_shot
     !
@@ -1996,6 +2046,38 @@ contains
             seen(word) = ibset(seen(word), int(mod(v - 1_int64, 8_int64)))
         end do
     end procedure check_permutation
+    !
+    module procedure pf_sort_threads
+#ifdef _OPENMP
+        use omp_lib, only : omp_get_max_threads, omp_in_parallel
+#endif
+        !
+        n = 1
+#ifdef _OPENMP
+        ! Serial inside a parallel region, deliberately. This is not a refusal and not a
+        ! correctness guard -- it picks a DEFAULT, exactly as parallel_prefetch_ok
+        ! (parquet_tables_read.f90) does for the table's own internally-parallel read, whose
+        ! comment states the reason: nested regions are the caller's business. Without it, T
+        ! OpenMP threads would each ask for T more, and T*T oversubscription is slower than not
+        ! threading at all. An EXPLICIT threads= is still honoured there -- see
+        ! resolve_thread_count, which only consults this when the caller said nothing.
+        if (.not. omp_in_parallel()) n = omp_get_max_threads()
+#endif
+    end procedure pf_sort_threads
+    !
+    module procedure resolve_thread_count
+        !
+        if (present(threads)) then
+            ! An explicit request is honoured wherever it is made, including inside a parallel
+            ! region: the caller has said what they want, and refusing it there would leave no way
+            ! to thread a sort at all from code that is itself parallel.
+            count = max(1_int64, int(threads, int64))
+        else
+            count = int(pf_sort_threads(), int64)
+        end if
+        ! Never more threads than rows; the C++ side clamps again by its own minimum chunk size.
+        if (count > nrows) count = max(nrows, 1_int64)
+    end procedure resolve_thread_count
     !
     module procedure narrow_perm
         integer(int64) :: n
@@ -2177,7 +2259,7 @@ contains
     !
     module procedure engine_build_runs
         type(c_ptr) :: builder
-        integer(int64) :: status, k
+        integer(int64) :: status, k, nthreads
         integer :: ik
         !
         if (size(keys) < 1) then
@@ -2190,11 +2272,12 @@ contains
             perm(k) = k
         end do
         if (nrows < 2_int64) return
+        call resolve_thread_count(threads, nrows, nthreads)
         builder = parquet_sort_builder_new(nrows)
         do ik = 1, size(keys)
             call engine_add_key(builder, keys(ik), nrows)
         end do
-        status = parquet_sort_builder_build_runs(builder, perm, tie)
+        status = parquet_sort_builder_build_runs(builder, nthreads, perm, tie)
         call parquet_sort_builder_free(builder)
         if (status /= 0_int64) then
             ! Only reachable with an empty key list, which the guard above already rejects.
@@ -2301,10 +2384,10 @@ contains
             w("        if (present(nulls_first)) nlo = nulls_first")
             w(f"        call extract_{tag}(values, buf, desc, nlo, \"pf_argsort\"{iv})")
             if ik == "i32":
-                w(f"        call drive_engine(buf, {rows_expr(t)}, \"pf_argsort\", perm64)")
+                w(f"        call drive_engine(buf, {rows_expr(t)}, \"pf_argsort\", perm64, threads=threads)")
                 w("        call narrow_perm(perm64, \"pf_argsort\", perm)")
             else:
-                w(f"        call drive_engine(buf, {rows_expr(t)}, \"pf_argsort\", perm)")
+                w(f"        call drive_engine(buf, {rows_expr(t)}, \"pf_argsort\", perm, threads=threads)")
             w(f"    end procedure argsort_{tag}_{ik}")
             w("    !")
 
@@ -2318,10 +2401,12 @@ contains
         w("                \"call keys%add(...) at least once before sorting\"")
         w("        end if")
         if ik == "i32":
-            w("        call drive_engine(keys%keys(1:keys%nkeys), keys%nrows, \"pf_argsort\", perm64)")
+            w("        call drive_engine(keys%keys(1:keys%nkeys), keys%nrows, \"pf_argsort\", perm64, &")
+            w("            threads=threads)")
             w("        call narrow_perm(perm64, \"pf_argsort\", perm)")
         else:
-            w("        call drive_engine(keys%keys(1:keys%nkeys), keys%nrows, \"pf_argsort\", perm)")
+            w("        call drive_engine(keys%keys(1:keys%nkeys), keys%nrows, \"pf_argsort\", perm, &")
+            w("            threads=threads)")
         w(f"    end procedure argsort_keys_{ik}")
         w("    !")
 
@@ -2342,7 +2427,7 @@ contains
         w("        if (present(nulls_first)) nlo = nulls_first")
         w(f"        n = {rows_expr(t)}")
         w(f"        call extract_{tag}(values, buf, desc, nlo, \"pf_sort\"{iv})")
-        w("        call drive_engine(buf, n, \"pf_sort\", perm)")
+        w("        call drive_engine(buf, n, \"pf_sort\", perm, threads=threads)")
         if family == "chr":
             w("        allocate(character(len=len(values)) :: sorted(n))")
         else:
@@ -2830,7 +2915,8 @@ contains
             w("        integer(int64), allocatable :: idxs(:)")
             w("        integer(int64) :: nd, nn")
             w("        !")
-            w(f"        call unique_impl_{tag}(values, .false., \"pf_unique_count\", idxs, nd, nn{iv})")
+            w(f"        call unique_impl_{tag}(values, .false., \"pf_unique_count\", idxs, nd, nn{iv}, &")
+            w("            threads=threads)")
             w("        if (present(n_null)) n_null = nn")
             if ik == "i32":
                 w("        call narrow_i64(nd, \"pf_unique_count\", \"distinct-value count\", count)")
@@ -2853,7 +2939,7 @@ contains
         w("        !")
         w("        desc = .false.")
         w("        if (present(descending)) desc = descending")
-        w(f"        call unique_impl_{tag}(values, desc, \"pf_unique\", idxs, nd, nn{iv})")
+        w(f"        call unique_impl_{tag}(values, desc, \"pf_unique\", idxs, nd, nn{iv}, threads=threads)")
         w("        if (present(n_null)) n_null = nn")
         if family == "chr":
             w("        allocate(character(len=len(values)) :: distinct(nd))")
@@ -2881,7 +2967,7 @@ contains
             w("        !")
             w("        desc = .false.")
             w("        if (present(descending)) desc = descending")
-            w(f"        call rank_impl_{tag}(values, method, desc, \"pf_rank\", r64{iv})")
+            w(f"        call rank_impl_{tag}(values, method, desc, \"pf_rank\", r64{iv}, threads=threads)")
             if ik == "i32":
                 w("        call narrow_i64_array(r64, \"pf_rank\", \"rank\", ranks)")
             else:
@@ -2895,7 +2981,7 @@ contains
         iarg = ", is_valid" if nulls == "arg" else ""
         w(f"    !> Shared worker behind pf_unique_count and pf_unique for a {what} array: the")
         w("    !! 1-based index of the FIRST occurrence of each distinct non-null value, in order.")
-        w(f"    subroutine unique_impl_{tag}(values, descending, proc, first_idx, ndist, nnull{iarg})")
+        w(f"    subroutine unique_impl_{tag}(values, descending, proc, first_idx, ndist, nnull{iarg}, threads)")
         w(val_decl(t, "in"))
         w("        logical, intent(in) :: descending    !! .true. reports the distinct values high to low.")
         w("        character(len=*), intent(in) :: proc !! calling procedure, for messages.")
@@ -2904,6 +2990,7 @@ contains
         w("        integer(int64), intent(out) :: nnull !! how many values were null.")
         if nulls == "arg":
             w("        logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
+        w("        integer, intent(in), optional :: threads !! thread request; absent = auto.")
         w("        type(sort_key_buf), allocatable :: buf(:)")
         w("        integer(int64), allocatable :: perm(:)")
         w("        integer(c_int8_t), allocatable :: tie(:)")
@@ -2912,7 +2999,7 @@ contains
         w("        !")
         w(f"        n = {rows_expr(t)}")
         w(f"        call extract_{tag}(values, buf, descending, .false., proc{iv})")
-        w("        call engine_build_runs(buf, n, proc, perm, tie)")
+        w("        call engine_build_runs(buf, n, proc, perm, tie, threads=threads)")
         w("        call key_null_mask(buf, n, isnull)")
         w("        allocate(first_idx(max(n, 1_int64)))")
         w("        first_idx = 0_int64")
@@ -2933,7 +3020,7 @@ contains
         w(f"    end subroutine unique_impl_{tag}")
         w("    !")
         w(f"    !> Shared worker behind every pf_rank specific for a {what} array.")
-        w(f"    subroutine rank_impl_{tag}(values, method, descending, proc, ranks{iarg})")
+        w(f"    subroutine rank_impl_{tag}(values, method, descending, proc, ranks{iarg}, threads)")
         w(val_decl(t, "in"))
         w("        character(len=*), intent(in), optional :: method !! tie-handling token.")
         w("        logical, intent(in) :: descending    !! .true. ranks high to low.")
@@ -2941,6 +3028,7 @@ contains
         w("        integer(int64), allocatable, intent(out) :: ranks(:) !! rank of each element; 0 for a null.")
         if nulls == "arg":
             w("        logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
+        w("        integer, intent(in), optional :: threads !! thread request; absent = auto.")
         w("        type(sort_key_buf), allocatable :: buf(:)")
         w("        integer(int64), allocatable :: perm(:)")
         w("        integer(c_int8_t), allocatable :: tie(:)")
@@ -2951,7 +3039,7 @@ contains
         w("        call resolve_rank_method(method, proc, mode)")
         w(f"        n = {rows_expr(t)}")
         w(f"        call extract_{tag}(values, buf, descending, .false., proc{iv})")
-        w("        call engine_build_runs(buf, n, proc, perm, tie)")
+        w("        call engine_build_runs(buf, n, proc, perm, tie, threads=threads)")
         w("        call key_null_mask(buf, n, isnull)")
         w("        allocate(ranks(n))")
         w("        if (n < 1_int64) return")

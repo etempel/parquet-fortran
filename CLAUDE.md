@@ -53,6 +53,7 @@ working rules).
   - [Implicit finalizers must never route through a path that can throw/abort](#implicit-finalizers-must-never-route-through-a-path-that-can-throwabort)
   - [Automatic BYTE_STREAM_SPLIT for float columns in the writer](#automatic-byte_stream_split-for-float-columns-in-the-writer)
   - [Validity is per ELEMENT, and a vector row is not one bit](#validity-is-per-element-and-a-vector-row-is-not-one-bit)
+  - [Auto-threading: `omp_in_parallel()` picks a DEFAULT](#auto-threading-omp_in_parallel-picks-a-default-and-that-is-not-the-guard-claudemd-warns-about)
   - [`parquet_table` concurrency: one file owns the OpenMP plumbing](#parquet_table-concurrency-one-file-owns-the-openmp-plumbing-and-guards-key-on-ownership)
   - [A `parquet_table` pointer does not survive a ROW-structural mutation](#a-parquet_table-pointer-does-not-survive-a-row-structural-mutation)
   - [New `parquet_table` state goes on the CACHE](#new-parquet_table-state-goes-on-the-cache--never-as-an-allocatable-component-of-the-type)
@@ -1048,6 +1049,26 @@ setter calls), and a table write hands the element mask straight to the writer. 
 in `test/test_table.f90` (`test_element_null_round_trip`) is what catches a regression, in both
 directions at once.
 
+### Auto-threading: `omp_in_parallel()` picks a DEFAULT, and that is not the guard CLAUDE.md warns about
+
+Two places decide on their own how many threads to use — `parallel_prefetch_ok`
+(`parquet_tables_read.f90`, for the table's internally-parallel read) and `pf_sort_threads`
+(`parquet_sorting_keys.f90`, for every sort). **Both resolve to serial inside an OpenMP parallel
+region**, and both do it with the same two lines:
+
+```fortran
+if (omp_get_max_threads() <= 1) return   ! or: n = 1
+if (omp_in_parallel()) return            ! nested regions are the caller's business
+```
+
+This does **not** contradict "Never key a guard on `omp_in_parallel()` alone" below. That rule is
+about a guard that *refuses* an operation, which under test-drive's own `!$omp parallel do` fires
+across the entire suite. These refuse nothing — they choose a default, and an explicit request
+(`threads=8`) is still honoured inside a parallel region. Keep the distinction when adding a third
+such decision, and reuse `pf_sort_threads` rather than writing a fourth copy of the rule:
+`omp_get_max_threads()` reads an ICV, not the current team size, so inside an 8-thread region it
+answers 8 and a missing check means 8x8 threads.
+
 ### `parquet_table` concurrency: one file owns the OpenMP plumbing, and guards key on OWNERSHIP
 
 `src/parquet_tables_parallel.f90` holds the table's lock, the append/read counters and the shared
@@ -1571,6 +1592,31 @@ counterpart. User guide: `doc/pages/date-time.md`.
   a type that embeds a component from another module's private-component type needs the same
   treatment.
 
+- **A TEMPLATE cannot go in `src/parquet_wrapper.cpp` without its own `extern "C++"` block.** The
+  whole file sits inside one enormous `extern "C" { … }`, and a template declared there fails with
+  `error: templates must have C++ linkage` — a message that points at the template rather than at
+  the linkage specification a thousand lines above it. Linkage specifications nest, so the fix is to
+  wrap just that declaration:
+
+  ```cpp
+  extern "C++" {
+  template <typename F>
+  static int64_t sort_spawn(std::vector<std::thread> &workers, int64_t lo, int64_t hi, F f) { … }
+  }
+  ```
+
+  Taking a `std::function` instead works equally well when the call happens once per chunk rather
+  than once per element; prefer the template plus `extern "C++"` when the callable is on a hot path.
+  `sort_spawn` is the worked example.
+- **`src/parquet_wrapper.cpp` is NOT compiled with `-fopenmp`, so it cannot call any `omp_*`
+  function at all.** `.gitlab-ci.yml` sets `FPM_CXXFLAGS: "-std=c++20 --coverage"` and a dev machine
+  sets whatever Arrow needs — neither adds it, and `fpm.toml`'s `openmp = "*"` metapackage covers the
+  Fortran half. **So anything on the C++ side that needs an OpenMP answer must have it resolved in
+  Fortran and passed across the `bind(C)` boundary as an ordinary value.** M4's threaded sort works
+  exactly that way: `pf_sort_threads` asks `omp_get_max_threads()`/`omp_in_parallel()` in Fortran and
+  hands C++ a plain integer count, so `parquet_wrapper.cpp` receives a number and never a policy.
+  Do not add an "auto" sentinel to a `bind(C)` signature for the C++ side to interpret — it cannot.
+
 ### Arrow's own type singletons have thread-unsafe lazy state on first concurrent use
 
 Every no-argument `arrow::<type>()` factory (`arrow::int32()`, `arrow::utf8()`, `arrow::boolean()`,
@@ -1978,6 +2024,14 @@ Three things about doing it *here* specifically:
   `is_stats_set()`/`HasNullCount()` pair, where removing both segfaults), or by a later check that
   catches the same error anyway (the `col_size` footer screen is masked by the row-group scan that
   follows it). Test the pair, or the tier below, before concluding anything.
+- **A surviving mutation may be semantically a NO-OP, in which case it proves the design rather
+  than exposing a gap.** Check that the mutation actually changes behaviour before concluding the
+  test is weak. The worked example: flipping the parallel merge's tie rule from "take the left run
+  unless the right is strictly less" to "take the left run when it is strictly less" changed
+  nothing on any fixture — because `SortRowLess` is a **total order**, `less(a, b)` and
+  `!less(b, a)` are the same predicate and there are no ties for the merge to break. The realistic
+  defect was a different edit (substituting the tiebreaker-free comparator), and that one was
+  caught. A mutation that is not a behaviour change is not evidence about the tests at all.
 - **If a mutation cannot be caught by any fixture this repository can build, the branch is
   defensive** — say so in a comment and `GCOVR_EXCL` it rather than deleting it or inventing an
   unbuildable fixture. `list_uniform_width`'s `IsNull` check is the worked example: Arrow's own

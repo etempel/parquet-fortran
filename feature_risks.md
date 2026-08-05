@@ -103,6 +103,8 @@ something a reader is expected to have.
 | [Risk-36](#risk-36--a-binary-search-over-unsorted-input-answers-with-no-symptom) | A binary search over unsorted input answers with no symptom | 4 — covered |
 | [Risk-37](#risk-37--the-merge-tie-rule-is-invisible-to-a-value-only-assertion) | The merge tie rule is invisible to a value-only assertion | 4 — covered |
 | [Risk-38](#risk-38--pf_argminmaxs-two-ends-must-ask-the-same-question) | `pf_argminmax`'s two ends must ask the same question | 4 — covered |
+| [Risk-39](#risk-39--a-silently-serial-threads-passes-every-correctness-test) | A silently serial `threads=` passes every correctness test | 4 — covered |
+| [Risk-40](#risk-40--auto-threading-must-stay-serial-inside-a-parallel-region) | Auto threading must stay serial inside a parallel region | 4 — covered |
 
 ---
 
@@ -110,7 +112,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-39**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-41**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -1426,3 +1428,73 @@ at *both* ends; a test checking `values(imax) == maxval(values)` would have pass
 the *index* at both ends over a tied fixture, not the value. A value assertion cannot distinguish
 "first" from "last" and so cannot see the asymmetry at all.
 
+
+---
+
+### Risk-39 — A silently serial `threads=` passes every correctness test
+
+`parquet_sorting`'s parallel sort returns a permutation **bit-identical** to the serial one, at every
+thread count, on every input. That identity is what makes the feature safe — `SortRowLess` ends with
+a tiebreaker on the row index, so it is a total order with no ties, and every correct sorting
+algorithm must therefore agree.
+
+**The same property makes the feature untestable by ordinary means.** A `threads=` that is ignored,
+clamped to 1, or that spawns nothing returns the *correct* answer. Every assertion about values,
+order, nulls, NaNs and stability passes against an implementation that never threads at all. Zero
+parallelism is a passing test, exactly as zero comparisons was for the partial sort (Risk-35).
+
+**Covered by** `threads are really created` (`test/test_sorting.f90`), which asserts
+`parquet_debug_get_sort_threads_used()` directly, plus its negative control: the same call below the
+minimum-work threshold must report **1**, or a hook that always answered "4" would pass too.
+
+**Three things a test here has to get right, all found by mutation or by failing first:**
+
+- **The fixture must reach the parallel path.** `sort_counting_candidate` keys on the value **RANGE**,
+  not on cardinality, so 300 *distinct* integers under 4M still take the counting fast path, which
+  performs zero comparisons and spawns nothing. Use a real or string key. This produced a probe that
+  reported one thread and looked like a broken implementation.
+- **The fixture must be big enough**, which for a test means lowering the threshold with
+  `parquet_debug_set_sort_parallel_min_rows`. Every array in the suite is orders of magnitude below
+  the real 8192.
+- **The fixture needs heavy ties IN THE FULL KEY** for the identity oracle to have teeth. With the
+  tiebreaker-free comparator substituted into the merge, three tied fixtures failed while
+  `int64 over a wide range` (all distinct) and a two-key `pf_sort_keys` (the pair nearly unique) both
+  passed. Distinctness in the composite key hides the entire class of stability defect.
+
+**What this still forbids:** never assert a threaded sort only through its answer. One assertion on
+the threads-used counter, on a fixture proven to reach the parallel path, is what separates a working
+feature from a decorative argument.
+
+---
+
+### Risk-40 — Auto threading must stay serial inside a parallel region
+
+With `threads=` absent, sorting is automatic: `omp_get_max_threads()` in ordinary code, and **1**
+inside an OpenMP parallel region. That second half is the load-bearing one. `omp_get_max_threads()`
+reads an ICV, not the current team size — inside an 8-thread region it returns **8**, not 1 — so
+without the check, eight OpenMP threads would each spawn eight `std::thread`s. Sixty-four threads is
+slower than not threading at all, and nothing about the result would look wrong.
+
+`pf_sort_threads()` (`src/parquet_sorting_keys.f90`) is the single implementation, and it is public
+precisely so the read-time `parquet_open_reader(..., sort_by=)` can ask the same question from
+`parquet_read.f90` rather than keeping a second copy that could drift.
+
+**This is a guard that picks a DEFAULT, not one that refuses an operation**, which is why CLAUDE.md's
+"never key a guard on `omp_in_parallel()` alone" does not apply — that rule exists to stop a
+*refusal* firing across a whole test suite. `parallel_prefetch_ok` (`src/parquet_tables_read.f90`)
+is the standing precedent, with the same two lines and the same reason in its own comment: nested
+regions are the caller's business. An **explicit** `threads=` is still honoured inside a parallel
+region, because there the caller has said what they want.
+
+**It also keeps this project's own test suite stable.** test-drive runs tests inside its own
+`!$omp parallel do`, and since the read-time and table sorts are auto-parallel too, *every* suite
+that sorts would otherwise oversubscribe — not just `sorting`, which is separately excluded from
+that parallelism for Risk-35's comparison counter. Two independent defences; do not let either
+become the stated reason for the other.
+
+**Covered by** `auto is serial inside a parallel region` (`test/test_sorting.f90`), which asserts all
+three cases from one test: auto outside a region resolves, auto inside resolves to 1, and an explicit
+`threads=3` inside is still honoured.
+
+**What this still forbids:** do not "simplify" `pf_sort_threads` to a bare `omp_get_max_threads()`,
+and do not give the read-time sort its own copy of the rule.

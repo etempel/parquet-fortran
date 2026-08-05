@@ -29,6 +29,7 @@ program tester
     use test_temporal, only : collect_tests_parquet_temporal
     use test_table, only : collect_tests_parquet_table
     use test_table_codegen, only : collect_tests_table_codegen
+    use test_settings, only : collect_tests_parquet_settings
     use parquet_bindings, only : parquet_warmup_memory_pool
     !
     implicit none
@@ -77,7 +78,8 @@ program tester
         new_testsuite("sort", collect_tests_sort), &
         new_testsuite("sorting", collect_tests_parquet_sorting), &
         new_testsuite("table", collect_tests_parquet_table), &
-        new_testsuite("table_codegen", collect_tests_table_codegen) &
+        new_testsuite("table_codegen", collect_tests_table_codegen), &
+        new_testsuite("settings", collect_tests_parquet_settings) &
         ]
     !
     ! command line argument for a specific testsuite and test
@@ -144,6 +146,13 @@ contains
     !> __kmp_invoke_microtask). Run those suites' tests sequentially instead
     !> so the fork always happens with no other team threads active.
     !>
+    !> "settings" is excluded for the same reason as those two, one level up: every setting in
+    !> parquet_settings is process-global by definition, and its thread-pool tests resize Arrow's
+    !> single shared CPU pool. Run concurrently, one test would resize the pool out from under
+    !> another's assertion -- and, worse, restore a capacity a sibling had deliberately changed.
+    !> The suite is pure in-memory work and runs in milliseconds, so the lost parallelism costs
+    !> nothing.
+    !>
     !> "parquet_string" no longer needs an entry here: it used to, because of a
     !> gfortran/OpenMP runtime bug (not a bug in parquet_strings.f90's own
     !> logic) that silently corrupted memory when multiple threads
@@ -158,7 +167,7 @@ contains
     logical function suite_is_safe_to_parallelize(name) result(safe)
         character(len=*), intent(in) :: name
         safe = .not. (name == "writing" .or. name == "errors" .or. name == "metadata" .or. name == "maml" &
-            .or. name == "filter_screen" .or. name == "sorting")
+            .or. name == "filter_screen" .or. name == "sorting" .or. name == "settings")
     end function suite_is_safe_to_parallelize
 
 end program tester

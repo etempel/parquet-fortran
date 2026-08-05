@@ -308,6 +308,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the exact instant a violation begins. See
   [Thread safety](doc/pages/thread-safety.md) for the full per-operation table.
 
+- **Process-global settings, in a new `parquet_settings` module** re-exported by `use parquet`, for
+  the parameters that apply to the whole library rather than to one reader, writer or table.
+  `parquet_get_max_threads` is new and answers what `parquet_set_max_threads` (unchanged, and now
+  living here) has set Arrow's shared CPU thread pool to — useful in batch and HPC work, where
+  `OMP_NUM_THREADS` is chosen for the science code and the parquet layer would otherwise inherit it.
+  `parquet_reset_settings` restores what a program changed, and `parquet_print_settings` dumps every
+  setting and limit to a unit. The caps the library enforces on filter rules, sort keys and MAML
+  lines are published as read-only constants (`parquet_max_filter_rule_len`,
+  `parquet_max_filter_depth`, `parquet_max_filter_nodes`, `parquet_max_sort_keys`,
+  `parquet_max_sort_key_len`, `parquet_max_maml_line_len`), so code assembling any of those from
+  user or configuration input can check a length before tripping an `error stop`. A setting may
+  change how fast, how large or how loud the library runs — never what it answers, which is why
+  there is deliberately no global default for null ordering or quality-control enforcement. See
+  [Settings](doc/pages/settings.md).
+
 ### Changed
 
 - **One `use parquet` now covers the whole library.** It brings the `parquet_table` container, the

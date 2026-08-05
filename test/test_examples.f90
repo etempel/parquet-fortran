@@ -51,7 +51,8 @@ contains
     !> Layers touched, one name each: parquet_core (parquet_reader/parquet_schema),
     !> parquet_tables (parquet_table), parquet_columns (PK_FLOAT64/parquet_kind_name),
     !> parquet_strings (parquet_string_column), parquet_temporal (parquet_timestamp),
-    !> parquet_sorting (pf_argsort), parquet_maml_base (parquet_maml_file), and the facade's own
+    !> parquet_sorting (pf_argsort), parquet_settings (parquet_get_max_threads /
+    !> parquet_max_filter_depth), parquet_maml_base (parquet_maml_file), and the facade's own
     !> parquet_get_version.
     subroutine test_facade_covers_every_layer(error)
         type(error_type), allocatable, intent(out) :: error
@@ -108,6 +109,15 @@ contains
         call ts%parse("2026-08-03T12:00:00")
         call check(error, .not. ts%is_null(), &
             "parquet_timestamp must be reachable from use parquet alone and parse a literal")
+        if (allocated(error)) return
+
+        ! parquet_settings: one procedure and one read-only constant, since the module exports
+        ! both kinds and a `public ::` list can lose either independently.
+        call check(error, parquet_get_max_threads() >= 1, &
+            "parquet_get_max_threads must be reachable from use parquet alone")
+        if (allocated(error)) return
+        call check(error, parquet_max_filter_depth > 0, &
+            "parquet_max_filter_depth must be reachable from use parquet alone")
         if (allocated(error)) return
 
         ! parquet_maml_base: the MAML file type a schema is built from.

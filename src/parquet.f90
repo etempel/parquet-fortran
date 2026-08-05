@@ -18,6 +18,9 @@
 !>                          and the `parquet_unit_*`/`parquet_ns_*` constants.
 !>   * `parquet_sorting` -- `pf_sort`/`pf_argsort`/`pf_permute`/`pf_is_sorted`
 !>                          and the `pf_sort_keys` multi-key builder.
+!>   * `parquet_settings`-- process-global settings (`parquet_set_max_threads`/
+!>                          `parquet_get_max_threads`, `parquet_print_settings`)
+!>                          and the read-only `parquet_max_*` limits.
 !>   * `parquet_maml_base` -- `parquet_maml_file`, for embedded MAML schemas.
 !>
 !> Those modules remain individually usable (`use parquet_temporal` still works
@@ -36,6 +39,7 @@ module parquet
     use parquet_strings
     use parquet_temporal
     use parquet_sorting
+    use parquet_settings
     ! parquet_maml_base is the one sibling imported with an `only:` list rather than in full. Its
     ! other public names (get_parquet_maml and the parquet_maml_maml_example* accessors) return
     ! THIS library's own embedded MAML test fixtures -- they were never part of the public surface,

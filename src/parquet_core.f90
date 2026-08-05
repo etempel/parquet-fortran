@@ -17,6 +17,12 @@ module parquet_core
     use iso_c_binding
     use iso_fortran_env, only: int8, int32, int64, real32, real64
     use parquet_bindings
+    ! Default accessibility here is `private`, so the names this brings in are NOT re-exported from
+    ! parquet_core -- a user reaches them through the `parquet` facade's own `use parquet_settings`.
+    ! What this import is for is the limit aliases a few lines below.
+    use parquet_settings, only: parquet_max_filter_rule_len, parquet_max_filter_depth, &
+        parquet_max_filter_nodes, parquet_max_sort_keys, parquet_max_sort_key_len, &
+        parquet_max_maml_line_len
     use parquet_maml_base, only: parquet_maml_file, parquet_maml_missing_column, parquet_maml_col_map_entry
     use parquet_strings, only: parquet_string_column, parquet_string
     use parquet_temporal, only: parquet_date, parquet_time, parquet_timestamp, &
@@ -43,26 +49,17 @@ module parquet_core
     !> schema carrying this value before it becomes usable, so a caller never actually observes it.
     integer, parameter :: size_invalid_sentinel = -2
 
-    !> The three limits on one parquet_filter's rule text, declared here once and reached by
-    !> host association from parquet_read/parquet_read_filter (the same convention
-    !> maml_max_line_len follows in parquet_metadata.f90). All three exist so that adversarial
-    !> or accidentally-huge input fails as a clean error stop rather than as a stack overflow
-    !> (the parser is recursive descent) or an unbounded allocation:
-    !>   filter_max_rule_len   -- characters in one %add rule.
-    !>   filter_max_depth      -- parenthesis/not nesting levels within one rule; also bounds the
-    !>                            C++ evaluator's peak memory, which is (live operands) * nrows bytes.
-    !>   filter_max_nodes      -- expression nodes across every %add call of one filter.
-    integer, parameter :: filter_max_rule_len = 8192
-    integer, parameter :: filter_max_depth = 32
-    integer, parameter :: filter_max_nodes = 1024
-
-    !> The two limits on one parquet_sortkey, in the same spirit as the filter caps above: a
-    !> clean error stop rather than an unbounded allocation on accidentally-huge input. Declared
-    !> here once and reached by host association from parquet_read/parquet_read_sort.
-    !>   sortkey_max_key_len -- characters in one %add key ("<column> [asc|desc]").
-    !>   sortkey_max_keys    -- keys across every %add call of one parquet_sortkey.
-    integer, parameter :: sortkey_max_key_len = 320
-    integer, parameter :: sortkey_max_keys = 16
+    !> The short internal names for the filter and sort-key limits, reached by host association
+    !> from parquet_read/parquet_read_filter/parquet_read_sort. Each is an alias *derived from* the
+    !> public constant of the same meaning in parquet_settings -- where the value and the reasoning
+    !> for it now live -- rather than a second copy of the number, so the two cannot drift. The
+    !> short names are kept because the parser code reads better in its own vocabulary; see
+    !> doc/pages/settings.md for what a user sees.
+    integer, parameter :: filter_max_rule_len = parquet_max_filter_rule_len
+    integer, parameter :: filter_max_depth = parquet_max_filter_depth
+    integer, parameter :: filter_max_nodes = parquet_max_filter_nodes
+    integer, parameter :: sortkey_max_key_len = parquet_max_sort_key_len
+    integer, parameter :: sortkey_max_keys = parquet_max_sort_keys
 
     !> The cap on one parquet_read_qc entry ("col, min, max, miss"), in the same spirit as the
     !> filter and sort caps above. Generous relative to the grammar -- a column name plus three
@@ -1173,7 +1170,6 @@ module parquet_core
     public :: parquet_read_column_chunk
     public :: parquet_read_array_row_mode
     public :: parquet_read_array_element_mode
-    public :: parquet_set_max_threads
 
     ! ---- Schema / column-info / table-metadata plumbing ----
     interface
@@ -3640,21 +3636,6 @@ module parquet_core
     end interface
 
 contains
-
-    !> Resizes Arrow's global CPU thread pool -- the single pool shared by
-    !> every parquet_reader/parquet_writer in this process that has
-    !> use_threads enabled (the default). This is NOT a per-reader/per-writer
-    !> setting: call it once, e.g. near the start of your program, before
-    !> opening readers/writers on other threads -- calling it concurrently
-    !> from multiple threads with different values is a race, since it
-    !> resizes a pool everyone else is also using at that moment.
-    subroutine parquet_set_max_threads(n)
-        implicit none
-        integer, intent(in) :: n !! new thread-pool capacity; must be >= 1.
-
-        if (n < 1) error stop "parquet_set_max_threads: n must be >= 1"
-        call parquet_set_thread_pool_capacity(int(n, kind=c_int))
-    end subroutine parquet_set_max_threads
 
     !> Appends one AND-combined filter expression; see parquet_filter's own doc
     !> comment for the rule grammar. Unvalidated here -- the reader parses and

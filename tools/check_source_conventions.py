@@ -372,6 +372,54 @@ def check_print_stat_columns_documented():
     return problems
 
 
+def check_print_settings_documented():
+    """`parquet_print_settings`'s output and `doc/pages/settings.md` must name the same things.
+
+    Same failure mode as `check_print_stat_columns_documented` above, one module over: the dump is
+    a user's quickest way to see what the library will do, and the guide page is the only contract
+    it has. The test suite asserts that each name *appears* in the output, which catches a dropped
+    row but not an undocumented new one -- so a knob added in a later milestone can print happily
+    while the page never mentions it.
+
+    Both sides are read as SETS of names. The code side is every string literal handed to
+    `print_one`; the doc side is the fenced sample dump plus the read-only limits table, which is
+    where a reader actually looks. Matching sets rather than the literal block is deliberate: the
+    output is column-padded, so its exact text would make this brittle in the way that gets a check
+    deleted rather than fixed.
+    """
+    problems = []
+    src = SRC / "parquet_settings.f90"
+    doc = REPO_ROOT / "doc" / "pages" / "settings.md"
+    printed = re.findall(r'call\s+print_one\s*\(\s*u\s*,\s*"([^"]+)"', src.read_text())
+    if not printed:
+        return ["%s: could not find any print_one call -- this check needs updating"
+                % src.relative_to(REPO_ROOT)]
+    doc_text = doc.read_text()
+    for name in printed:
+        if name not in doc_text:
+            problems.append(
+                "doc/pages/settings.md: parquet_print_settings prints `%s` but the guide page never "
+                "names it -- add it to the sample dump or the limits table" % name)
+    # The reverse direction: a name the page presents as printable that the dump does not print.
+    # Only the fenced sample dump is checked here, since the prose legitimately names procedures
+    # and concepts that are not rows of the output.
+    fenced = re.search(r"```\nparquet-fortran settings\n(.*?)```", doc_text, re.S)
+    if not fenced:
+        return problems + ["doc/pages/settings.md: could not find the sample parquet_print_settings "
+                           "output block -- this check needs updating"]
+    for line in fenced.group(1).split("\n"):
+        # A row is indented and carries a name plus a value; a section header ("limits
+        # (read-only)") sits at column 0, which is the only thing distinguishing the two.
+        if not line.startswith("  "):
+            continue
+        cell = line.split()
+        if len(cell) == 2 and cell[0] not in printed:
+            problems.append(
+                "doc/pages/settings.md: the sample output shows a `%s` row that "
+                "parquet_print_settings does not print -- it was renamed or removed" % cell[0])
+    return problems
+
+
 CHECKS = (
     ("parquet_table has no allocatable component", check_no_allocatable_component),
     ("table pointers are reached through %cache", check_pointers_go_through_cache),
@@ -379,6 +427,7 @@ CHECKS = (
     ("the schema-less write declares auto sizes", check_schemaless_write_declares_auto),
     ("row-group reads guard against a sort", check_row_group_reads_guard_against_sort),
     ("print_stat's columns match its documentation", check_print_stat_columns_documented),
+    ("print_settings matches its documentation", check_print_settings_documented),
 )
 
 

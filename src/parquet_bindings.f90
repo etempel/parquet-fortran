@@ -20,7 +20,7 @@ module parquet_bindings
     public :: abandon_parquet_writer
     public :: parquet_reader_print_stat
     public :: parquet_set_writer_options
-    public :: parquet_set_thread_pool_capacity
+    public :: parquet_set_thread_pool_capacity, parquet_get_thread_pool_capacity
     public :: parquet_get_arrow_version, parquet_get_parquet_version
     public :: parquet_maml_lock, parquet_maml_unlock
     public :: parquet_warmup_memory_pool
@@ -130,6 +130,15 @@ module parquet_bindings
             import
             integer(c_int), value :: n
         end subroutine
+
+        !> Reports Arrow's current global CPU thread-pool capacity. Named differently from its
+        !> linked symbol for the same reason as the setter above: parquet_settings' own public
+        !> procedure is called parquet_get_max_threads, and the two cannot share a name in scope.
+        function parquet_get_thread_pool_capacity() &
+                bind(C, name="parquet_get_max_threads") result(n)
+            import
+            integer(c_int) :: n !! current thread-pool capacity.
+        end function
 
         !> Reports the actually-linked Arrow library's runtime version.
         subroutine parquet_get_arrow_version(major, minor, patch) &

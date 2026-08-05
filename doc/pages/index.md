@@ -15,6 +15,7 @@ ordered_subpage: combined-example.md
 ordered_subpage: error-handling.md
 ordered_subpage: thread-safety.md
 ordered_subpage: performance.md
+ordered_subpage: settings.md
 ordered_subpage: troubleshooting.md
 ordered_subpage: embedding-maml-schemas.md
 ---
@@ -28,7 +29,7 @@ under `use parquet`), see the [modules](../lists/modules.html) and
 `parquet_table` container, the `parquet_column` foundation and its `PK_*` kind constants, compact
 string columns, and the date/time/timestamp types. Every page below assumes that single import.
 The individual modules (`parquet_tables`, `parquet_columns`, `parquet_strings`, `parquet_temporal`,
-`parquet_maml_base`) are still there and can be named directly when you want a narrower import;
+`parquet_sorting`, `parquet_settings`, `parquet_maml_base`) are still there and can be named directly when you want a narrower import;
 `parquet_core` is the one exception — it is internal, and `use parquet` is what the library's API
 stability promise covers. Because `parquet` re-exports rather than defines, the generated
 [procedures](../lists/procedures.html) and [types](../lists/types.html) listings are the reliable
@@ -53,5 +54,6 @@ check that they stay in sync, so update both together if you reorder either one.
 - [Error handling](error-handling.html)
 - [Thread safety](thread-safety.html)
 - [Performance and memory](performance.html)
+- [Settings](settings.html)
 - [Troubleshooting](troubleshooting.html)
 - [Embedding your own MAML schemas in your own project](embedding-maml-schemas.html)

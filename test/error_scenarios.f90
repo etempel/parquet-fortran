@@ -316,6 +316,8 @@ program error_scenarios
         call scenario_sortkey_remap_size_mismatch()
     case ("sortkey_remap_name_too_long")
         call scenario_sortkey_remap_name_too_long()
+    case ("set_max_threads_zero")
+        call scenario_set_max_threads_zero()
     case ("read_qc_entry_too_long")
         call scenario_read_qc_entry_too_long()
     case ("read_qc_remap_size_mismatch")
@@ -3697,6 +3699,17 @@ contains
         call parquet_open_reader(reader, out_file, sort_by=srt)   ! -> aborts (vector column)
         print '(a)', "unexpectedly sorted by a vector column"
     end subroutine scenario_sort_vector_column
+
+    !> ---- Process-global settings (parquet_settings) abort paths ----
+
+    !> A thread-pool capacity below 1 is rejected in Fortran, before the C++ side is called at all
+    !> (which is what makes the C++ side's own identical check dead code -- see the GCOVR_EXCL note
+    !> on parquet_set_max_threads in parquet_wrapper.cpp).
+    subroutine scenario_set_max_threads_zero()
+
+        call parquet_set_max_threads(0)   ! -> aborts (capacity must be >= 1)
+        print '(a)', "unexpectedly accepted a thread-pool capacity of 0"
+    end subroutine scenario_set_max_threads_zero
 
     !> An empty key names no column.
     subroutine scenario_sort_empty_key()

@@ -15,8 +15,10 @@ submodule (parquet_core) parquet_metadata
     !! (parquet_metadata_maml.f90's file loaders and parquet_parse_maml_lines/parquet_parse_qc_maml
     !! below). parquet_load_maml_file/parquet_load_qc_maml_file enforce this at read time
     !! (error stop on a longer line) rather than silently truncating -- see CLAUDE.md's MAML
-    !! parser robustness notes.
-    integer, parameter :: maml_max_line_len = 1024
+    !! parser robustness notes. An alias *derived from* parquet_settings' public
+    !! parquet_max_maml_line_len (reached by host association through parquet_core's own import),
+    !! never a second copy of the number, so the two cannot drift.
+    integer, parameter :: maml_max_line_len = parquet_max_maml_line_len
 
     ! ---- MAML load/parse/validate helpers (metadata-subtree-only private interfaces,
     ! relocated here from parquet_core.f90 -- see CLAUDE.md's private-helper relocation rule) ----

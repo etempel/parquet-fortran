@@ -357,6 +357,8 @@ contains
                 test_sortkey_remap_size_mismatch_aborts), &
             new_unittest("sortkey: remap_column_names to an over-long column name aborts", &
                 test_sortkey_remap_name_too_long_aborts), &
+            new_unittest("settings: a thread-pool capacity below 1 aborts", &
+                test_set_max_threads_zero_aborts), &
             new_unittest("read_qc: an entry longer than the supported maximum aborts", &
                 test_read_qc_entry_too_long_aborts), &
             new_unittest("read_qc: remap_column_names with mismatched from/to sizes aborts", &
@@ -3325,6 +3327,14 @@ contains
             failure_message="a sortkey remap to an over-long column name was expected to abort", &
             required_stderr="parquet_sortkey%remap_column_names: replacement column name")
     end subroutine test_sortkey_remap_name_too_long_aborts
+
+    subroutine test_set_max_threads_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "set_max_threads_zero", expect_abort=.true., &
+            failure_message="a thread-pool capacity of 0 was expected to abort", &
+            required_stderr="parquet_set_max_threads: n must be >= 1")
+    end subroutine test_set_max_threads_zero_aborts
 
     subroutine test_read_qc_entry_too_long_aborts(error)
         type(error_type), allocatable, intent(out) :: error

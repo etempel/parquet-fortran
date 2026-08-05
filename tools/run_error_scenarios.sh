@@ -396,6 +396,7 @@ scenarios=(
     "filter_remap_rule_too_long:1"
     "sortkey_remap_size_mismatch:1"
     "sortkey_remap_name_too_long:1"
+    "set_max_threads_zero:1"
     "read_qc_entry_too_long:1"
     "read_qc_remap_size_mismatch:1"
     "read_qc_remap_entry_too_long:1"

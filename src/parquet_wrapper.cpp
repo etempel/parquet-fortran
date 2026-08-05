@@ -3182,9 +3182,9 @@ extern "C"
 	{
 		if (n < 1)
 		{
-			// Dead: parquet.f90's parquet_set_max_threads already does the identical "n < 1" check
-			// itself (error stop "parquet_set_max_threads: n must be >= 1") before ever calling into
-			// C, so this throw has no reachable caller through the public API.
+			// Dead: parquet_settings.f90's parquet_set_max_threads already does the identical
+			// "n < 1" check itself (error stop "parquet_set_max_threads: n must be >= 1") before
+			// ever calling into C, so this throw has no reachable caller through the public API.
 			throw std::runtime_error("parquet_set_max_threads: n must be >= 1"); // GCOVR_EXCL_LINE
 		}
 		auto status = arrow::SetCpuThreadPoolCapacity(n);
@@ -3197,6 +3197,15 @@ extern "C"
 			throw std::runtime_error(status.ToString());
 		}
 		// GCOVR_EXCL_STOP
+	}
+
+	// Reports Arrow's current global CPU thread-pool capacity -- the counterpart to
+	// parquet_set_max_threads above, exposed as parquet_settings.f90's parquet_get_max_threads.
+	// arrow::GetCpuThreadPoolCapacity() returns a plain int with no Status, so there is no failure
+	// path to report and nothing here can abort.
+	int parquet_get_max_threads(void)
+	{
+		return arrow::GetCpuThreadPoolCapacity();
 	}
 
 	// Reports the actually-linked Arrow library's runtime version (arrow::GetBuildInfo(),

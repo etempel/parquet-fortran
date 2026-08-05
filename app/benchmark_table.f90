@@ -31,7 +31,7 @@
 program benchmark_table
     use parquet
     use parquet_tables
-    use iso_fortran_env, only : int32, int64, real32, real64, error_unit, output_unit
+    use iso_fortran_env, only : int8, int32, int64, real32, real64, error_unit, output_unit
     use iso_c_binding, only : c_int64_t, c_int
     implicit none
 
@@ -72,6 +72,8 @@ program benchmark_table
         call bench_write(file)
     case ("write_nulls")
         call bench_write_nulls(file, nullfrac)
+    case ("sort")
+        call bench_sort(size_gb, ncols)
     case default
         write(error_unit, '(a)') "benchmark_table: unknown --mode '"//mode//"'"
         error stop 1
@@ -81,7 +83,7 @@ contains
 
     subroutine print_usage()
         write(output_unit, '(a)') "Usage: benchmark_table --mode=<write_fixture|read_raw|read_table|" // &
-            "read_lazy|read_slice|access|write|write_nulls>"
+            "read_lazy|read_slice|access|write|write_nulls|sort>"
         write(output_unit, '(a)') "                       [--size=<GB>] [--file=<path>] [--ncols=<n>]"
         write(output_unit, '(a)') ""
         write(output_unit, '(a)') "  --mode=write_fixture  generate the synthetic input file"
@@ -92,6 +94,7 @@ contains
         write(output_unit, '(a)') "  --mode=access         time %get vs. %col, and arithmetic through each"
         write(output_unit, '(a)') "  --mode=write          time parquet_write_table vs. a hand-written loop"
         write(output_unit, '(a)') "  --mode=write_nulls    the same, on a table with nulls (three ways)"
+        write(output_unit, '(a)') "  --mode=sort           what %sort_by spends re-validating one permutation"
         write(output_unit, '(a)') "  --size=<GB>           approximate uncompressed size (write_fixture)"
         write(output_unit, '(a)') "  --ncols=<n>           float64 columns in the fixture (default 8)"
         write(output_unit, '(a)') "  --touch=<n>           columns to read in read_lazy (default 2)"
@@ -839,6 +842,208 @@ contains
         write(output_unit, '(a)') "Compare with --mode=write on the same fixture for the null-free"
         write(output_unit, '(a)') "path, where no mask is built or passed at all."
     end subroutine bench_write_nulls
+
+    !> What `%sort_by` spends re-validating one permutation it produced itself (feature_sort.md
+    !! §12.2): `parquet_column%reindex` validates its permutation unconditionally, and `%sort_by`
+    !! calls it once per column, so an N-column table validates the same permutation N times.
+    !!
+    !! **The table is built in memory rather than read from a file**, which is the maintainer's own
+    !! condition for this measurement -- every column is resident before anything is timed, so no
+    !! timed region can absorb a lazy decode (CLAUDE.md's first benchmarking trap).
+    !!
+    !! **One string column is included deliberately.** A `PK_STRING` column is validated TWICE:
+    !! once by `parquet_column%reindex` over the row permutation, and again by
+    !! `parquet_string_column%reindex` over the expanded element permutation. A measurement over
+    !! float columns alone would understate the real cost of a mixed table.
+    !!
+    !! The validation cost is measured by replicating the two candidate loops EXACTLY -- the
+    !! `logical`-array one `reindex` runs today, and the bit-packed one `check_permutation`
+    !! (`src/parquet_sorting_keys.f90`) already uses -- over the very permutation the sort just
+    !! produced, in the same program and under the same flags. That answers both halves of
+    !! feature_sort.md's Q44 at once: what bit-packing alone would save, and what removing the
+    !! redundant calls would save. Nothing in `src/` is modified to obtain it.
+    !!
+    !! The key column is re-scattered between rounds, outside every timed region, because a second
+    !! sort of an already-sorted column would either return early or measure a reversal
+    !! permutation -- a perfectly regular access pattern, unlike the scattered one a real sort
+    !! walks.
+    subroutine bench_sort(size_gb, ncols)
+        real(real64), intent(in) :: size_gb !! approximate size of the float64 columns, in GB.
+        integer, intent(in) :: ncols        !! float64 columns, the first of which is the sort key.
+        integer, parameter :: nround = 5    !! timed rounds; the best of them is kept.
+        integer, parameter :: slen = 16     !! width of the one character column.
+        type(parquet_table) :: t
+        type(parquet_string_column) :: sc
+        real(real64), allocatable :: v(:)
+        character(len=slen) :: sbuf
+        real(real64), pointer :: kp(:)
+        integer(int64), allocatable :: perm(:)
+        integer(int64) :: nrows, i, sink
+        integer :: c, round, nvalid
+        real(real64) :: t0, t_sort, t_argsort, t_val_log, t_val_bit, dt, acc
+        real(real64) :: total_log, total_bit
+
+        nrows = int(size_gb * 1.0e9_real64 / (8.0_real64 * real(max(ncols, 1), real64)), int64)
+        if (nrows < 2_int64) nrows = 2_int64
+        write(output_unit, '(a,i0,a,i0,a)') "in-memory table: ", nrows, " rows x ", ncols, &
+            " float64 columns + 1 character column"
+
+        allocate(v(nrows))
+        call parquet_new_table(t)
+        call scatter_key(v)
+        call t%add_column("key", v)
+        do c = 2, ncols
+            do i = 1_int64, nrows
+                v(i) = real(i, real64) * real(c, real64)
+            end do
+            call t%add_column("c"//itoa(c), v)
+        end do
+        ! Built with %append_string into a parquet_string_column and handed over whole, NOT with
+        ! %add_column over a character array. The latter goes through parquet_column%set_all, which
+        ! calls parquet_string_column%set once per element, and every such set rewrites the offsets
+        ! of all later elements -- so filling an empty string column that way is O(n^2) and does
+        ! not finish at these row counts. %append_string grows geometrically and is linear.
+        call sc%reserve(nrows, nrows * int(slen, int64))
+        do i = 1_int64, nrows
+            write(sbuf, '(i16.16)') i
+            call sc%append_string(sbuf)
+        end do
+        call t%add_column("s", sc)
+        call sc%clear()
+
+        ! Every column was just written through %add_column, so its pages are already touched;
+        ! this pass is cheap insurance against a first-touch cost landing inside a timed round.
+        acc = 0.0_real64
+        do c = 1, ncols
+            if (c == 1) then
+                call t%col("key", kp)
+            else
+                call t%col("c"//itoa(c), kp)
+            end if
+            acc = acc + sum(kp)
+        end do
+
+        ! The permutation %sort_by is about to build, obtained through public API so the replicas
+        ! below walk exactly the memory-access pattern the real validation walks.
+        call t%col("key", kp)
+        t0 = now()
+        call pf_argsort(kp, perm)
+        t_argsort = now() - t0
+
+        t_sort = huge(1.0_real64)
+        do round = 1, nround
+            ! Outside the timer: re-scatter the key, so every round sorts scattered data. The
+            ! %col pointer is re-fetched each time because the previous round's sort reallocated
+            ! every column's storage (feature_risks.md Risk-11).
+            call t%col("key", kp)
+            call scatter_key(kp)
+            t0 = now()
+            call t%sort_by(["key"])
+            dt = now() - t0
+            if (dt < t_sort) t_sort = dt
+        end do
+
+        ! One validation of the permutation, each way, best of the same number of rounds.
+        sink = 0_int64
+        t_val_log = huge(1.0_real64)
+        t_val_bit = huge(1.0_real64)
+        do round = 1, nround
+            t0 = now()
+            call validate_logical(perm, sink)
+            dt = now() - t0
+            if (dt < t_val_log) t_val_log = dt
+            t0 = now()
+            call validate_bitpacked(perm, sink)
+            dt = now() - t0
+            if (dt < t_val_bit) t_val_bit = dt
+        end do
+
+        ! ncols + 2 validations happen per sort today: one per column from parquet_column%reindex
+        ! (ncols float columns plus the character one), plus the string column's second,
+        ! element-level one inside parquet_string_column%reindex.
+        nvalid = ncols + 2
+        total_log = real(nvalid, real64) * t_val_log
+        total_bit = real(nvalid, real64) * t_val_bit
+
+        write(output_unit, '(a)') ""
+        write(output_unit, '(a,f9.4,a)') "sort_by (best of "//itoa(nround)//")     : ", t_sort, " s"
+        write(output_unit, '(a,f9.4,a)') "  of which pf_argsort      : ", t_argsort, " s"
+        write(output_unit, '(a)') ""
+        write(output_unit, '(a,i0)')     "validations per sort_by    : ", nvalid
+        write(output_unit, '(a,f9.4,a)') "one validation, logical    : ", t_val_log, " s"
+        write(output_unit, '(a,f9.4,a)') "one validation, bit-packed : ", t_val_bit, " s"
+        write(output_unit, '(a,f9.4,a,f6.2,a)') "all validations, logical   : ", total_log, &
+            " s  = ", 100.0_real64 * total_log / t_sort, "% of sort_by"
+        write(output_unit, '(a,f9.4,a,f6.2,a)') "all validations, bit-packed: ", total_bit, &
+            " s  = ", 100.0_real64 * total_bit / t_sort, "% of sort_by"
+        write(output_unit, '(a)') ""
+        write(output_unit, '(a,f6.2,a)') "(i)  bit-pack only, keep all : saves ", &
+            100.0_real64 * (total_log - total_bit) / t_sort, "% of sort_by"
+        write(output_unit, '(a,f6.2,a)') "(ii) validate once, logical  : saves ", &
+            100.0_real64 * (total_log - t_val_log) / t_sort, "% of sort_by"
+        write(output_unit, '(a,f6.2,a)') "(ii) validate once, bit-pack : saves ", &
+            100.0_real64 * (total_log - t_val_bit) / t_sort, "% of sort_by"
+        write(output_unit, '(a)') ""
+        write(output_unit, '(a,i0,a)') "scratch, logical  : ", 4_int64 * nrows / 1048576_int64, &
+            " MiB live at a time (4 bytes per row: gfortran's default LOGICAL is 32 bits)"
+        write(output_unit, '(a,i0,a)') "scratch, bit-packed: ", &
+            max((nrows + 7_int64) / 8_int64 / 1048576_int64, 0_int64), " MiB live at a time"
+        write(output_unit, '(a,i0,a,f0.1)') "(sink ", sink, ", checksum ", acc
+    end subroutine bench_sort
+
+    !> Fills `v` with a scattered, deterministic key: distinct enough that the permutation is
+    !! irregular, which is what the validation's random access into its seen-set actually costs.
+    subroutine scatter_key(v)
+        real(real64), intent(out) :: v(:) !! the key column's values.
+        integer(int64) :: i
+        do i = 1_int64, size(v, kind=int64)
+            v(i) = real(mod(i * 2654435761_int64, 1000000007_int64), real64)
+        end do
+    end subroutine scatter_key
+
+    !> An exact replica of the range/duplicate check `reindex` runs today
+    !! (`src/parquet_columns_structural.f90`), including its `logical` scratch array and its
+    !! allocate/deallocate. `sink` consumes a result so the loop cannot be optimized away.
+    subroutine validate_logical(perm, sink)
+        integer(int64), intent(in) :: perm(:)      !! the permutation to check.
+        integer(int64), intent(inout) :: sink      !! kept-live accumulator.
+        integer(int64) :: n, k, p
+        logical, allocatable :: seen(:)
+        n = size(perm, kind=int64)
+        allocate(seen(n))
+        seen = .false.
+        do k = 1_int64, n
+            p = perm(k)
+            if (p < 1_int64 .or. p > n) error stop "validate_logical: permutation entry out of range"
+            if (seen(p)) error stop "validate_logical: permutation contains a duplicate index"
+            seen(p) = .true.
+        end do
+        if (seen(n)) sink = sink + 1_int64
+        deallocate(seen)
+    end subroutine validate_logical
+
+    !> The same check with the bit-packed seen-set `check_permutation`
+    !! (`src/parquet_sorting_keys.f90`) already uses -- 1 bit per row instead of 32.
+    subroutine validate_bitpacked(perm, sink)
+        integer(int64), intent(in) :: perm(:) !! the permutation to check.
+        integer(int64), intent(inout) :: sink !! kept-live accumulator.
+        integer(int64) :: n, k, val, word
+        integer(int8), allocatable :: seen(:)
+        n = size(perm, kind=int64)
+        allocate(seen((n + 7_int64) / 8_int64))
+        seen = 0_int8
+        do k = 1_int64, n
+            val = perm(k)
+            if (val < 1_int64 .or. val > n) error stop "validate_bitpacked: entry out of range"
+            word = (val - 1_int64) / 8_int64 + 1_int64
+            if (btest(seen(word), int(mod(val - 1_int64, 8_int64)))) then
+                error stop "validate_bitpacked: permutation contains a duplicate index"
+            end if
+            seen(word) = ibset(seen(word), int(mod(val - 1_int64, 8_int64)))
+        end do
+        if (seen(1) /= 0_int8) sink = sink + 1_int64
+        deallocate(seen)
+    end subroutine validate_bitpacked
 
     !> First row the mask marks null; 1 if it marks none (the caller has already rejected that).
     function first_null_row(mask) result(i)

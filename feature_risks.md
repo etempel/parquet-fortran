@@ -33,11 +33,11 @@ Four sections, and **a risk keeps its number when it moves between them**:
 the whole document; moving one between sections (a proposal getting written, a covered property
 regressing) **never** renumbers it, so a reference from `CLAUDE.md`, `feature_table.md`,
 `tools/check_source_conventions.py` or a code comment stays valid for good. **A new risk takes the
-next unused number — `Risk-45` today — and goes in "1. New risks"** until it has been triaged.
+next unused number — `Risk-46` today — and goes in "1. New risks"** until it has been triaged.
 Numbers of deleted entries are not reused, so a stale reference resolves to nothing rather than to
 the wrong risk.
 
-**Counts today: 39 covered, 0 proposed, 5 not testable.** Section 2 being empty is the healthy
+**Counts today: 40 covered, 0 proposed, 5 not testable.** Section 2 being empty is the healthy
 state rather than a finished one — it means every risk currently identified as testable has its
 test. Nine entries are covered by something other than a unit test, deliberately: Risk-1 by a
 maintainer check under `app/` with a `tools/*.sh` wrapper (it measures memory, so it needs its own
@@ -109,6 +109,7 @@ something a reader is expected to have.
 | [Risk-42](#risk-42--the-fortran-and-c-copies-of-a-mirrored-setting-can-drift-apart) | The Fortran and C++ copies of a mirrored setting can drift apart | 4 — covered |
 | [Risk-43](#risk-43--a-second-copy-of-the-row-group-sizing-arithmetic-ignores-target_row_group_bytes) | A second copy of the row-group sizing arithmetic ignores `target_row_group_bytes` | 4 — covered |
 | [Risk-44](#risk-44--a-knob-with-no-environment-variable-or-one-wired-to-the-wrong-knob-is-silent) | A knob with no environment variable, or one wired to the wrong knob, is silent | 4 — covered |
+| [Risk-45](#risk-45--the-two-compilers-rules-for-the-prefetch-region-conflict-and-only-one-shape-satisfies-both) | The two compilers' rules for the prefetch region conflict, and only one shape satisfies both | 4 — covered |
 
 ---
 
@@ -1687,3 +1688,71 @@ instead of needing three separate people to remember three separate lists.
 with `iostat == 0` and yields `4`, so a shell variable that expanded to two words would set the knob
 to the first number and report success. `settings_env_two_numbers`
 (`test/error_scenarios.f90`) is the assertion that stops it coming back.
+
+---
+
+### Risk-45 — The two compilers' rules for the prefetch region conflict, and only one shape satisfies both
+
+`materialize_marked_parallel` (`src/parquet_tables_read.f90`) holds the library's **only** `!$omp
+parallel` region. What may be declared inside its lexical scope is constrained from two directions
+at once, and the two constraints contradict each other:
+
+- **gfortran breaks `private()`**: it does not reliably default-initialize a private copy of a
+  finalizable derived type, so the first finalization frees an undefined pointer. CLAUDE.md's
+  documented workaround is to declare the variable in a `block` inside the loop body instead.
+- **ifx breaks that very workaround, and is perfectly happy with `private()`.** A finalizable type
+  *with allocatable components* declared in a `block` lexically nested in the region makes ifx emit
+  privatization scaffolding for it (`<TYPE>.omp.mold_ctor` → `for_alloc_private` → `do_alloc_copy`
+  → `copy_src_xdesc_to_dest_xdesc`) that segfaults on every thread entering the region — 100%
+  reproducible with as few as 2 threads, independent of team size, so not a race.
+
+The two forbidden shapes are opposites, so only a third one is left, and it is what the file uses:
+**one shared `parquet_reader` array, indexed by thread number, allocated before the region**, so no
+derived-type instance is constructed inside the parallel construct at all. Passing an element of it
+on to an `optional, intent(inout)` dummy (how `table_materialize`/`table_release_one` receive
+`rdr`) does not reintroduce the scaffolding either.
+
+**Four things make the ifx half quiet, and two of them will exonerate the wrong shape if you
+reproduce carelessly.** It needs `-O1`+ — at `-O0` it runs clean, so a `--profile debug` run cannot
+see it. It needs the type to come from a **separately compiled module**: the identical type defined
+in the same file as its user does not crash, so a quick single-file reproducer says the shape is
+fine when it is not. CI builds gfortran only, so the pipeline stays green. And the backtrace names
+no library code — compiler-generated frames bottoming out in libc, which reads like a heap bug
+anywhere in the program.
+
+**This is almost certainly the same bug as the `parquet_schema`-component crash** recorded in
+CLAUDE.md's "New `parquet_table` state goes on the CACHE": hanging a `type(parquet_schema),
+allocatable` off `parquet_table` segfaulted ifx inside its own runtime, in a **block-local table
+opened inside an `!$omp parallel do`**, with a backtrace of unnamed RTL frames bottoming out in
+`free()`. That component is precisely what would have given `parquet_table` its first allocatable
+component, satisfying this trigger. It also explains why the library's own documented per-thread
+pattern (`block` + `type(parquet_table) :: mine`) is safe today: `parquet_table` is five scalars
+and a pointer, with no allocatable components — verified to survive this exact shape.
+
+**The second failure here is the RESPONSE to the crash, and it is the one that actually happened.**
+The region was disabled outright under `#ifdef __INTEL_COMPILER` — in the *same commit* that
+introduced the shared-array shape which had already fixed it, so the fixed region never once ran.
+The claim that the crash "reproduces identically" with the shared array was false, and one command
+settles that class of question in seconds:
+
+```
+nm build/ifx_*/parquet-fortran/src_parquet_tables_read.f90.o | grep -E "for_alloc_private|mold_ctor"
+```
+
+Scaffolding absent ⇒ the source under test **cannot** produce that backtrace, so the binary that
+crashed was stale (CLAUDE.md's "Stale `fpm` build cache" — `fpm clean --skip` before believing any
+result). Reach for that check before reaching for a per-compiler bail-out.
+
+**Covered by** `prefetch_threads caps the parallel prefetch` (`test/test_settings.f90`), whose
+**positive control** — the automatic run must report more than one thread on a multi-thread machine
+— is what reported the path being switched off. The crash half is caught by building the suite with
+ifx at `-O1`+, which CI does not do; use the CI-environment image.
+
+**What this still forbids.** Do not declare a `parquet_reader`, `parquet_writer`, `parquet_schema`
+or any other finalizable type carrying allocatable components inside that region's `block` — plain
+integers only, and the comment saying so must stay. Do not weaken the positive control into
+something that tolerates a compiler taking the serial path; a test written that way passes against
+the parallel path being disabled everywhere. Do not conclude anything about this region from a
+`-O0` run, a `--profile debug` run, or a single-file reproducer. And note the coupling to
+`parquet_table`'s "no allocatable components" rule: the first one added to that type would make
+every block-local per-thread table in user code start crashing under ifx as well.

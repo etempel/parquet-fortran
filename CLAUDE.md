@@ -1443,6 +1443,39 @@ counterpart. User guide: `doc/pages/date-time.md`.
   `parquet_writer`, `parquet_table_row`), and to any future one — so a per-thread instance of any
   of them belongs in a `block`, and any example or guide page showing `private(<that type>)` is
   wrong and should be corrected on sight.
+- **ifx forbids the `block` form the previous bullet prescribes, for any finalizable type that has
+  ALLOCATABLE COMPONENTS — and is perfectly happy with `private()`. The two compilers forbid
+  opposite shapes, so a type in that class can use neither, and needs a shared per-thread array
+  instead.** ifx 2026.1 emits privatization scaffolding (`<TYPE>.omp.mold_ctor` →
+  `for_alloc_private` → `do_alloc_copy` → `copy_src_xdesc_to_dest_xdesc`) for such a type declared
+  in a `block` lexically nested in a parallel region, and it segfaults on every thread entering the
+  region — 100% reproducible with 2 threads, independent of team size, so not a race, with a
+  backtrace naming no library code. The working shape is the one in `materialize_marked_parallel`
+  (`src/parquet_tables_read.f90`): allocate an array of the type **before** the region, one slot per
+  thread, and index it by `omp_get_thread_num() + 1`, so no instance is constructed inside the
+  construct at all. Passing an element on to an `optional, intent(inout)` dummy is fine.
+
+  **Two conditions narrow this, and both will exonerate a broken shape if you reproduce
+  carelessly.** It needs `-O1`+ (at `-O0` it runs clean, so `fpm build --profile debug` cannot see
+  it — the same "only at `-O1`+" signature as the automatic-length-character ICE further down this
+  section). And it needs the type to come from a **separately compiled module**: the identical type
+  defined in the same file as its user does not crash, so a single-file reproducer will say the
+  shape is fine when it is not.
+
+  **A finalizable type with no allocatable components is exempt, which is why `parquet_table` is
+  still safe block-local** — it is five scalars and a pointer by deliberate design (see "New
+  `parquet_table` state goes on the CACHE"), and that design is now load-bearing for ifx too: the
+  first allocatable component added to it would make every block-local per-thread table in user
+  code start crashing. That is very likely what the `parquet_schema`-component segfault recorded
+  in that section actually was. `parquet_reader`, `parquet_writer` and `parquet_schema` are all in
+  the affected class today. See `feature_risks.md` Risk-45.
+
+  **Diagnosing it takes one command**, and it is worth running before concluding a compiler is at
+  fault at all: `nm <object> | grep -E "for_alloc_private|mold_ctor"`. If the scaffolding is absent,
+  the source under test *cannot* produce that backtrace, and the binary that crashed is stale —
+  see "Stale `fpm` build cache" below. A per-compiler `#ifdef` bail-out was once added to
+  `parallel_prefetch_ok` on the strength of a stale-binary result, disabling the internally-parallel
+  prefetch under ifx for a crash the committed code had already fixed.
 - **Every `submodule (parquet) name` file needs its own `implicit none`** (right after the
   `submodule` line, before `contains`) — a submodule's `implicit none` is *not* inherited from
   the ancestor module; confirmed with a minimal repro where gfortran silently accepted an

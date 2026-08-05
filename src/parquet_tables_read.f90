@@ -506,27 +506,6 @@ contains
         integer :: ngroups
         !
         parallel_prefetch_ok = .false.
-#ifdef __INTEL_COMPILER
-        ! ifx (confirmed on 2026.1) miscompiles the `!$omp parallel do` region in
-        ! materialize_marked_parallel below: every thread that actually enters the region
-        ! segfaults inside a compiler-generated `PARQUET_READER.omp.mold_ctor` ->
-        ! `for_alloc_private` -> `do_alloc_copy` -> `copy_src_xdesc_to_dest_xdesc` chain, confirmed
-        ! by a gdb backtrace on every crashing thread, reproducible with as few as 2 OpenMP
-        ! threads and 100% of the time -- this is not a race, a stack-size issue, or dependent on
-        ! team size. It reproduces identically whether the per-thread `parquet_reader` is declared
-        ! in a `block` inside the loop body (the gfortran-safe pattern documented in CLAUDE.md's
-        ! "Never give a FINALIZABLE derived type to OpenMP's private()") or moved to a plain shared
-        ! array indexed by thread number outside the region entirely -- so this is not the same
-        ! failure mode CLAUDE.md already documents for gfortran, and the gfortran-safe workaround
-        ! does not fix it. Root cause not narrowed further than "ifx's OpenMP outlining generates
-        ! broken privatization scaffolding for a finalizable derived type (parquet_reader has a
-        ! `final ::` binding) referenced inside a parallel construct" -- disabling this one
-        ! optimization is the only confirmed-safe fix found so far, and %materialize_all/%prefetch
-        ! fall back to the ordinary serial path here, which is unaffected and fully correct, just
-        ! not internally multi-threaded under ifx. Re-test against a newer ifx release before
-        ! re-enabling.
-        return
-#endif
 #ifdef _OPENMP
         if (prefetch_thread_count() <= 1) return
         if (omp_in_parallel()) return
@@ -625,19 +604,45 @@ contains
     !! `parallel_prefetch_ok` has already established that a freshly opened reader sees the same
     !! rows as the table's own -- do not relax that without re-reading its own comment.
     !!
-    !! **Every thread's own `parquet_reader` lives in a SHARED array, indexed by thread number, and
-    !! is allocated BEFORE the region -- never as a block-local variable inside it.** CLAUDE.md's
-    !! rule against giving a finalizable type to OpenMP's `private()` covers gfortran's failure mode
-    !! (an uninitialized private copy); ifx has a DIFFERENT, sharper failure mode for the very
-    !! `block`-local workaround that fixes gfortran: ifx still generates OpenMP privatization
-    !! machinery for a finalizable type declared inside a `block` lexically nested in a parallel
-    !! region (its own compiler-generated `<type>.omp.mold_ctor`), and that machinery segfaults
-    !! inside `copy_src_xdesc_to_dest_xdesc` on this toolchain (confirmed via gdb backtrace,
-    !! ifx 2026.1 / libiomp5) -- reliably, on every thread, the instant more than one OpenMP thread
-    !! actually runs the region, independent of team size. Indexing into a pre-allocated array
-    !! sidesteps the whole mechanism: no derived-type instance is constructed inside the parallel
-    !! construct at all, only a reference to an already-existing element of a shared array, which is
-    !! the same "distinct slot per thread" shape `cache%cols(i)` already relies on above.
+    !! **A `parquet_reader` may be neither `private()`d nor declared in this region's lexical scope
+    !! -- every thread's own lives in a SHARED array, indexed by thread number and allocated BEFORE
+    !! the region.** The two supported compilers each forbid one of the two obvious shapes, and
+    !! they forbid opposite ones, which is why this third shape is the only one available:
+    !!
+    !!   * **gfortran breaks `private()`**: it does not reliably default-initialize a private copy
+    !!     of a finalizable type, so the first finalization frees an undefined pointer (CLAUDE.md,
+    !!     "Never give a FINALIZABLE derived type to OpenMP's `private()`"). Its documented
+    !!     workaround is to declare the variable in a `block` inside the loop body instead.
+    !!   * **ifx breaks that very workaround, while `private()` works fine there.** A finalizable
+    !!     type *with allocatable components* declared inside a `block` lexically nested in a
+    !!     parallel region makes ifx emit privatization scaffolding for it
+    !!     (`<TYPE>.omp.mold_ctor` -> `for_alloc_private` -> `do_alloc_copy` ->
+    !!     `copy_src_xdesc_to_dest_xdesc`) that segfaults on every thread entering the region --
+    !!     100% reproducible with as few as 2 threads and independent of team size, so not a race.
+    !!     Confirmed on ifx 2026.1 by gdb backtrace and by a standalone bisected probe.
+    !!
+    !! Two conditions narrow that second one, and both are met here, so neither is a way out:
+    !! it needs **`-O1`+** (at `-O0` it runs clean, so a `--profile debug` run cannot see it and a
+    !! green debug build proves nothing), and it needs the type to come from a **separately
+    !! compiled module** -- the identical type defined in the same file as its user does not crash,
+    !! which is why a quick single-file reproducer will wrongly exonerate the shape.
+    !!
+    !! Indexing a pre-allocated shared array satisfies both compilers at once: no derived-type
+    !! instance is constructed inside the parallel construct at all, only a reference to an
+    !! already-existing element -- the same "distinct slot per thread" shape `cache%cols(i)` relies
+    !! on above. Verified rather than assumed: with this shape ifx emits **no** privatization
+    !! scaffolding for `parquet_reader` (`nm` on this file's object finds no `for_alloc_private`
+    !! and no `mold_ctor`), and the region runs correctly at 2, 8 and 16 threads. Passing an
+    !! element of that array on to an `optional, intent(inout)` dummy -- exactly how
+    !! `table_materialize`/`table_release_one` receive `rdr` -- does not reintroduce it either.
+    !!
+    !! So the `block` below is deliberately kept free of anything but plain integers: a
+    !! `parquet_reader`, `parquet_writer` or `parquet_schema` declared there brings the ifx crash
+    !! straight back, at `-O2` only, with a backtrace naming no library code. A `parquet_table` is
+    !! the one finalizable type this library exposes that would be safe, because it deliberately
+    !! has no allocatable components at all -- do not read that as permission, since the next
+    !! component added to it would silently make this region crash too. See `feature_risks.md`
+    !! Risk-45.
     subroutine materialize_marked_parallel(cache, sc, want)
         use omp_lib, only : omp_get_thread_num, omp_get_max_threads
         type(parquet_table_cache), intent(inout) :: cache !! the column store.
@@ -675,6 +680,8 @@ contains
         !$omp parallel do default(shared) private(g, t) schedule(dynamic) num_threads(nslots)
         do g = 1, ngroups
             block
+                ! Plain integers ONLY. A finalizable derived type declared here segfaults ifx at
+                ! -O1+ -- see this subroutine's own doc-comment and feature_risks.md Risk-45.
                 integer :: k
                 !
                 t = omp_get_thread_num() + 1

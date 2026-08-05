@@ -373,6 +373,12 @@ contains
     !> reporting a real thread count before the capped run's 0 means anything. The auto assertion is
     !> conditional on OpenMP actually offering more than one thread, since on a single-threaded
     !> machine the parallel path correctly declines and there is nothing to observe.
+    !>
+    !> **This test is also what catches the internally-parallel prefetch being switched off
+    !> wholesale on one compiler.** It has been: `parallel_prefetch_ok` carried an
+    !> `#ifdef __INTEL_COMPILER` bail-out for a crash that the shared-reader-array shape had
+    !> already fixed, and the positive control below is what reported it -- so keep it a plain
+    !> assertion rather than making it tolerate a compiler taking the serial path.
     subroutine test_prefetch_threads_effect(error)
         type(error_type), allocatable, intent(out) :: error
         character(len=*), parameter :: out_file = "test_run/settings_prefetch_threads.parquet"

@@ -20,7 +20,7 @@
 !> what this module does. In exchange, reading a setting costs nothing on any hot path.
 !>
 !> **Capture points differ per setting, and each one says which it is** in its own doc-comment.
-!> `parquet_set_max_threads` resizes a pool everyone already shares, so it takes effect immediately
+!> `parquet_set_arrow_threads` resizes a pool everyone already shares, so it takes effect immediately
 !> for objects opened before the call as well as after.
 !>
 !> The read-only limits below (`parquet_max_*`) are the caps the library enforces on filter rules,
@@ -38,8 +38,8 @@ module parquet_settings
     implicit none
     private
     !
-    public :: parquet_set_max_threads
-    public :: parquet_get_max_threads
+    public :: parquet_set_arrow_threads
+    public :: parquet_get_arrow_threads
     public :: parquet_reset_settings
     public :: parquet_print_settings
     !
@@ -52,6 +52,7 @@ module parquet_settings
     !
     public :: parquet_set_sort_threads, parquet_get_sort_threads
     public :: parquet_set_prefetch_threads, parquet_get_prefetch_threads
+    public :: parquet_set_threads
     public :: parquet_set_default_compression, parquet_get_default_compression
     public :: parquet_set_default_compression_level, parquet_get_default_compression_level
     public :: parquet_set_default_use_threads, parquet_get_default_use_threads
@@ -62,6 +63,7 @@ module parquet_settings
     public :: parquet_set_sort_counting_bucket_limit, parquet_get_sort_counting_bucket_limit
     public :: parquet_set_target_row_group_bytes, parquet_get_target_row_group_bytes
     public :: parquet_set_statistics_prescreen, parquet_get_statistics_prescreen
+    public :: parquet_settings_from_env
     !
     !> The three output channels, and the ONLY places `verbosity`/`message_stream` are read. Public
     !! here so every module that emits can reach them, `private ::` in the facade so no user sees
@@ -107,6 +109,25 @@ module parquet_settings
     integer, parameter :: verb_silent = 1      !! informational and solicited output goes quiet.
     integer, parameter :: verb_errors_only = 2 !! warnings go quiet too; only errors survive.
     !
+    !> The accepted tokens for the two enum knobs, as DATA rather than as a literal inside each
+    !! error message.
+    !!
+    !! `parquet_settings_from_env` has to reject a bad token itself -- it cannot let the setter do it,
+    !! because the setter's `error stop` cannot name the environment variable the value came from, and
+    !! nothing can inspect a value's validity after the process has aborted. Two validators means two
+    !! chances to disagree about what is accepted, so both read these arrays and both build their
+    !! "expected one of: ..." text with `token_list`. `parquet_valid_compressions` is the same idea
+    !! and already existed; these two are it applied to the knobs that had their vocabulary inline.
+    character(len=11), parameter :: verbosity_tokens(3) = [character(len=11) :: &
+        "normal", "silent", "errors_only"]
+    character(len=6), parameter :: stream_tokens(2) = [character(len=6) :: "stdout", "stderr"]
+    !
+    !> Longest environment-variable value this module will read. A longer one aborts naming the
+    !! variable rather than being silently truncated -- the same failure the MAML line-length cap
+    !! exists to prevent (CLAUDE.md, "Reading MAML source files"), and just as invisible: a truncated
+    !! codec name or verbosity token would simply look like a typo the user did not make.
+    integer, parameter :: env_max_len = 4096
+    !
     !> Where the library's own messages go. `message_stream` accepts exactly these two, because a
     !! Fortran unit number means nothing on the C++ side of the bind(C) boundary, where three of the
     !! library's warnings and one of its reports are printed -- see doc/pages/settings.md.
@@ -129,7 +150,7 @@ module parquet_settings
     !
     ! ---- Mutable settings state ----
     !
-    !> Arrow's CPU thread-pool capacity as it stood before the first `parquet_set_max_threads` call,
+    !> Arrow's CPU thread-pool capacity as it stood before the first `parquet_set_arrow_threads` call,
     !! so `parquet_reset_settings` can put it back. Arrow's own initial capacity is
     !! hardware-dependent, so this module cannot hold it as a constant and has to capture it. `-1`
     !! means "never set, nothing to restore", which is why resetting an untouched program is a
@@ -209,21 +230,21 @@ contains
     !>
     !> Takes effect immediately, for readers/writers opened before the call as well as after.
     !> The first call records the previous capacity so parquet_reset_settings can restore it.
-    subroutine parquet_set_max_threads(n)
+    subroutine parquet_set_arrow_threads(n)
         integer, intent(in) :: n !! new thread-pool capacity; must be >= 1.
 
-        if (n < 1) error stop "parquet_set_max_threads: n must be >= 1"
-        if (cfg_arrow_threads_initial < 1) cfg_arrow_threads_initial = parquet_get_max_threads()
+        if (n < 1) error stop "parquet_set_arrow_threads: n must be >= 1"
+        if (cfg_arrow_threads_initial < 1) cfg_arrow_threads_initial = parquet_get_arrow_threads()
         call parquet_set_thread_pool_capacity(int(n, kind=c_int))
-    end subroutine parquet_set_max_threads
+    end subroutine parquet_set_arrow_threads
 
-    !> Reports Arrow's current global CPU thread-pool capacity -- what parquet_set_max_threads last
+    !> Reports Arrow's current global CPU thread-pool capacity -- what parquet_set_arrow_threads last
     !> set it to, or Arrow's own hardware-derived default if it was never set. The counterpart to
-    !> parquet_set_max_threads, and the answer to "how many threads will Arrow actually use here".
-    integer function parquet_get_max_threads() result(n)
+    !> parquet_set_arrow_threads, and the answer to "how many threads will Arrow actually use here".
+    integer function parquet_get_arrow_threads() result(n)
 
         n = int(parquet_get_thread_pool_capacity())
-    end function parquet_get_max_threads
+    end function parquet_get_arrow_threads
 
     !> Sets the default thread count for every sort that does not pass `threads=` explicitly --
     !> `pf_sort`/`pf_argsort` and friends, a read-time `parquet_open_reader(..., sort_by=)`, and
@@ -269,6 +290,36 @@ contains
         n = cfg_prefetch_threads
     end function parquet_get_prefetch_threads
 
+    !> Sets all three thread counts at once: Arrow's pool, the sort cap and the table prefetch cap.
+    !>
+    !> A convenience for the common case of "give this library N threads and no more", equivalent to
+    !> calling `parquet_set_arrow_threads(n)`, `parquet_set_sort_threads(n)` and
+    !> `parquet_set_prefetch_threads(n)` in turn. It has no state of its own -- read the three back
+    !> individually, or with `parquet_print_settings`, and set any one of them afterwards to override
+    !> just that one.
+    !>
+    !> **`n` must be at least 1; `0` is not accepted here even though two of the three take it.**
+    !> `0` means "automatic" to the sort and prefetch caps, but Arrow's pool has no automatic value
+    !> at all -- its starting capacity is hardware-derived and is not a number this library gets to
+    !> invent. Rather than have one argument mean two different things, this takes a real thread
+    !> count only; use the individual setters when you want automatic behaviour, or
+    !> `parquet_reset_settings` to put everything back.
+    !>
+    !> **The three do not all take effect at the same moment**, which is the one thing worth knowing
+    !> before reaching for this. Arrow's pool is resized immediately and is shared, so readers and
+    !> writers already open are affected too; the sort and prefetch caps are read per call, so they
+    !> apply to work started afterwards. Setting all three together does not make them simultaneous.
+    subroutine parquet_set_threads(n)
+        integer, intent(in) :: n !! thread count for all three; must be >= 1.
+
+        if (n < 1) error stop "parquet_set_threads: n must be >= 1 " // &
+            "(0 means automatic to the sort and prefetch caps, but Arrow's pool has no " // &
+            "automatic value; set the three individually if that is what you want)"
+        call parquet_set_arrow_threads(n)
+        call parquet_set_sort_threads(n)
+        call parquet_set_prefetch_threads(n)
+    end subroutine parquet_set_threads
+
     !> Sets the compression codec `parquet_open_writer` uses when the caller passes no
     !> `compression=`. One of "uncompressed", "snappy", "gzip", "zstd", "brotli", "lz4"
     !> (case-insensitive); anything else aborts, using the same list the writer's own argument is
@@ -283,7 +334,7 @@ contains
     !> stops a zstd-tuned level being attached to, say, snappy.
     subroutine parquet_set_default_compression(name)
         character(len=*), intent(in) :: name !! codec name, case-insensitive.
-        character(len=:), allocatable :: folded
+        character(len=:), allocatable :: folded, expected
         integer :: i
         logical :: ok
 
@@ -295,8 +346,11 @@ contains
                 exit
             end if
         end do
-        if (.not. ok) error stop "parquet_set_default_compression: unknown compression codec '" // &
-            folded // "' (expected one of: uncompressed, snappy, gzip, zstd, brotli, lz4)"
+        if (.not. ok) then
+            call token_list(parquet_valid_compressions, expected)
+            error stop "parquet_set_default_compression: unknown compression codec '" // &
+                folded // "' (expected one of: " // expected // ")"
+        end if
         cfg_default_compression = folded
     end subroutine parquet_set_default_compression
 
@@ -399,7 +453,7 @@ contains
     !> exemption, so a silenced program can always be asked why it is silent.
     subroutine parquet_set_verbosity(level)
         character(len=*), intent(in) :: level !! "normal" | "silent" | "errors_only".
-        character(len=:), allocatable :: tok
+        character(len=:), allocatable :: tok, expected
 
         call fold_ascii_lower(trim(level), tok)
         select case (tok)
@@ -410,8 +464,9 @@ contains
         case ("errors_only")
             cfg_verbosity = verb_errors_only
         case default
+            call token_list(verbosity_tokens, expected)
             error stop "parquet_set_verbosity: unknown level '" // tok // &
-                "' (expected one of: normal, silent, errors_only)"
+                "' (expected one of: " // expected // ")"
         end select
         call push_output_settings()
     end subroutine parquet_set_verbosity
@@ -447,7 +502,7 @@ contains
     !> unaffected -- they keep their own `unit=` argument and its `output_unit` default.
     subroutine parquet_set_message_stream(stream)
         character(len=*), intent(in) :: stream !! "stdout" | "stderr".
-        character(len=:), allocatable :: tok
+        character(len=:), allocatable :: tok, expected
 
         call fold_ascii_lower(trim(stream), tok)
         select case (tok)
@@ -456,8 +511,9 @@ contains
         case ("stderr")
             cfg_message_stream = stream_stderr
         case default
+            call token_list(stream_tokens, expected)
             error stop "parquet_set_message_stream: unknown stream '" // tok // &
-                "' (expected one of: stdout, stderr)"
+                "' (expected one of: " // expected // ")"
         end select
         call push_output_settings()
     end subroutine parquet_set_message_stream
@@ -725,6 +781,295 @@ contains
             int(merge(1, 0, cfg_statistics_prescreen), kind=c_int))
     end subroutine push_performance_settings
 
+    ! ==================================================================================
+    ! Environment variables
+    ! ==================================================================================
+
+    !> Applies every `PARQUET_FORTRAN_*` environment variable that is set, through the knob's own
+    !> setter.
+    !>
+    !> **Called by you, never automatically.** Reading the environment lazily on first access would
+    !> be a data race the first time two threads touched a setting, so there is no hidden call: put
+    !> this near the top of your program, before other threads exist and before any reader, writer or
+    !> table is opened -- the same contract every setting in this module has.
+    !>
+    !> One variable per knob, named `PARQUET_FORTRAN_` plus the knob's own name upper-cased, exactly
+    !> as `parquet_print_settings` prints it (`PARQUET_FORTRAN_SORT_THREADS`,
+    !> `PARQUET_FORTRAN_VERBOSITY`, ...). The one name worth knowing in advance is
+    !> `PARQUET_FORTRAN_ARROW_THREADS`, whose setter is called `parquet_set_arrow_threads` -- the
+    !> variable follows the printed name, not the setter. See `doc/pages/settings.md` for the full
+    !> table.
+    !>
+    !> **It applies over what is already set; it does not reset.** A variable that is absent leaves
+    !> its knob exactly as it was, so calling this after your own `parquet_set_*` calls lets the
+    !> environment override them, and calling it before lets your code win.
+    !>
+    !> **A variable that is set but EMPTY is treated as unset**, not as an error -- so
+    !> `PARQUET_FORTRAN_VERBOSITY=` does nothing at all. Worth knowing when a variable seems to be
+    !> ignored: `export PARQUET_FORTRAN_VERBOSITY=$LEVEL` with `LEVEL` itself unset produces an empty
+    !> value and is silently skipped. `parquet_print_settings` is what answers "did my environment
+    !> actually apply".
+    !>
+    !> Any other bad value **aborts**, naming the variable, the value and what was expected, rather
+    !> than being ignored -- a mistyped setting that silently does nothing is the failure this whole
+    !> module is built to avoid.
+    subroutine parquet_settings_from_env()
+        character(len=:), allocatable :: text
+        logical :: got, flag
+        integer :: n32
+        integer(int64) :: n64
+
+        ! PARQUET_FORTRAN_THREADS first, deliberately: it sets all three thread counts, so the three
+        ! specific variables below must be able to override it. This is the ONE place in this
+        ! sequence where the order is load-bearing -- everywhere else it is presentation only, and a
+        ! comment further down says so.
+        call env_value("PARQUET_FORTRAN_THREADS", text, got)
+        if (got) then
+            call env_int32("PARQUET_FORTRAN_THREADS", text, n32)
+            call parquet_set_threads(n32)
+        end if
+        ! The rest in parquet_print_settings' order, so the sequence and the dump read side by side.
+        ! The order is NOT load-bearing anywhere, including for the compression pair, which looks
+        ! like it should be: parquet_resolve_writer_compression reads cfg_default_compression and
+        ! cfg_default_compression_level together at writer-open time, so neither setter disturbs the
+        ! other and storing them either way round gives the same result. Verified by mutation --
+        ! swapping the two changes no test. Keep the order anyway, for readability, but do not add a
+        ! comment claiming a dependency that is not there.
+        call env_value("PARQUET_FORTRAN_ARROW_THREADS", text, got)
+        if (got) then
+            call env_int32("PARQUET_FORTRAN_ARROW_THREADS", text, n32)
+            call parquet_set_arrow_threads(n32)
+        end if
+        call env_value("PARQUET_FORTRAN_SORT_THREADS", text, got)
+        if (got) then
+            call env_int32("PARQUET_FORTRAN_SORT_THREADS", text, n32)
+            call parquet_set_sort_threads(n32)
+        end if
+        call env_value("PARQUET_FORTRAN_PREFETCH_THREADS", text, got)
+        if (got) then
+            call env_int32("PARQUET_FORTRAN_PREFETCH_THREADS", text, n32)
+            call parquet_set_prefetch_threads(n32)
+        end if
+        call env_value("PARQUET_FORTRAN_SORT_PARALLEL_MIN_ROWS", text, got)
+        if (got) then
+            call env_int64("PARQUET_FORTRAN_SORT_PARALLEL_MIN_ROWS", text, n64)
+            call parquet_set_sort_parallel_min_rows(n64)
+        end if
+        call env_value("PARQUET_FORTRAN_SORT_COUNTING_PATH", text, got)
+        if (got) then
+            call env_logical("PARQUET_FORTRAN_SORT_COUNTING_PATH", text, flag)
+            call parquet_set_sort_counting_path(flag)
+        end if
+        call env_value("PARQUET_FORTRAN_SORT_COUNTING_BUCKET_LIMIT", text, got)
+        if (got) then
+            call env_int64("PARQUET_FORTRAN_SORT_COUNTING_BUCKET_LIMIT", text, n64)
+            call parquet_set_sort_counting_bucket_limit(n64)
+        end if
+        call env_value("PARQUET_FORTRAN_DEFAULT_COMPRESSION", text, got)
+        if (got) then
+            call env_require_token("PARQUET_FORTRAN_DEFAULT_COMPRESSION", text, &
+                parquet_valid_compressions, "compression codec")
+            call parquet_set_default_compression(text)
+        end if
+        call env_value("PARQUET_FORTRAN_DEFAULT_COMPRESSION_LEVEL", text, got)
+        if (got) then
+            call env_int32("PARQUET_FORTRAN_DEFAULT_COMPRESSION_LEVEL", text, n32)
+            call parquet_set_default_compression_level(n32)
+        end if
+        call env_value("PARQUET_FORTRAN_DEFAULT_USE_THREADS", text, got)
+        if (got) then
+            call env_logical("PARQUET_FORTRAN_DEFAULT_USE_THREADS", text, flag)
+            call parquet_set_default_use_threads(flag)
+        end if
+        call env_value("PARQUET_FORTRAN_TARGET_ROW_GROUP_BYTES", text, got)
+        if (got) then
+            call env_int64("PARQUET_FORTRAN_TARGET_ROW_GROUP_BYTES", text, n64)
+            call parquet_set_target_row_group_bytes(n64)
+        end if
+        call env_value("PARQUET_FORTRAN_STATISTICS_PRESCREEN", text, got)
+        if (got) then
+            call env_logical("PARQUET_FORTRAN_STATISTICS_PRESCREEN", text, flag)
+            call parquet_set_statistics_prescreen(flag)
+        end if
+        call env_value("PARQUET_FORTRAN_VERBOSITY", text, got)
+        if (got) then
+            call env_require_token("PARQUET_FORTRAN_VERBOSITY", text, verbosity_tokens, "verbosity level")
+            call parquet_set_verbosity(text)
+        end if
+        call env_value("PARQUET_FORTRAN_MESSAGE_STREAM", text, got)
+        if (got) then
+            call env_require_token("PARQUET_FORTRAN_MESSAGE_STREAM", text, stream_tokens, "message stream")
+            call parquet_set_message_stream(text)
+        end if
+    end subroutine parquet_settings_from_env
+
+    !> Reads one environment variable, reporting whether there is a value to apply.
+    !>
+    !> `got` is `.false.` for an unset variable AND for one set to an empty or all-blank string --
+    !> the deliberate choice recorded in feature_settings_s5.md, and the single place it lives. The
+    !> two ARE distinguishable (`status` is 1 for unset and 0 for empty), so this is a decision
+    !> rather than a limitation.
+    !>
+    !> A value longer than `env_max_len` aborts instead of arriving truncated: silently shortening a
+    !> codec name or a token would produce an error that looks like a typo the user never made.
+    subroutine env_value(name, text, got)
+        character(len=*), intent(in) :: name !! the variable's full name, for the abort message.
+        character(len=:), allocatable, intent(out) :: text !! its trimmed value; "" when `got` is false.
+        logical, intent(out) :: got !! .true. when there is a non-blank value to apply.
+        character(len=env_max_len) :: buf
+        integer :: ln, st
+        character(len=32) :: cap
+
+        got = .false.
+        text = ""
+        call get_environment_variable(name, buf, length=ln, status=st)
+        if (st /= 0 .and. ln == 0) return           ! not set at all
+        if (ln > env_max_len) then
+            write (cap, '(i0)') env_max_len
+            error stop "parquet_settings_from_env: " // name // " is longer than " // trim(cap) // &
+                " characters; refusing to apply a truncated value"
+        end if
+        if (ln == 0) return                          ! set but empty: treated exactly as unset
+        text = trim(adjustl(buf(1:ln)))
+        if (len(text) == 0) return                   ! all blanks: same as empty
+        got = .true.
+    end subroutine env_value
+
+    !> Parses a strictly-formatted integer: optional sign, then digits, then nothing else.
+    !>
+    !> **A list-directed `read(text, *, iostat=)` is NOT strict enough for this** and must not be
+    !> substituted back in. It rejects "5abc" and "3.9" as expected, but accepts **"5 6"** with
+    !> `iostat == 0`, quietly yielding 5 -- so `PARQUET_FORTRAN_SORT_THREADS="4 8"` (a stray
+    !> copy-paste, or a shell variable that expanded to two words) would set the cap to 4 and report
+    !> success. Verified on gfortran 15.2. A wrong value applied silently is precisely the failure
+    !> this module exists to prevent, so the digits are checked by hand and the `read` only runs once
+    !> the shape is known to be sound.
+    !>
+    !> Range is NOT checked here -- the knob's own setter does that, so an out-of-range value
+    !> produces the same message it would from a direct call.
+    subroutine env_int64(name, text, value)
+        character(len=*), intent(in) :: name !! the variable's full name, for the abort message.
+        character(len=*), intent(in) :: text !! its value, already trimmed.
+        integer(int64), intent(out) :: value !! the parsed number.
+        integer :: k, first, ios
+        logical :: ok
+
+        first = 1
+        if (len(text) >= 1) then
+            if (text(1:1) == "+" .or. text(1:1) == "-") first = 2
+        end if
+        ok = len(text) >= first
+        do k = first, len(text)
+            if (text(k:k) < "0" .or. text(k:k) > "9") then
+                ok = .false.
+                exit
+            end if
+        end do
+        ios = 0
+        value = 0_int64
+        if (ok) read (text, *, iostat=ios) value
+        if (.not. ok .or. ios /= 0) then
+            call env_reject(name, text, "is not an integer")
+        end if
+    end subroutine env_int64
+
+    !> `env_int64` for a knob whose setter takes a default-kind integer, with the narrowing checked
+    !> rather than assumed -- an out-of-int32 value would otherwise wrap into a plausible-looking
+    !> small number and be applied.
+    subroutine env_int32(name, text, value)
+        character(len=*), intent(in) :: name !! the variable's full name, for the abort message.
+        character(len=*), intent(in) :: text !! its value, already trimmed.
+        integer, intent(out) :: value !! the parsed number.
+        integer(int64) :: wide
+
+        call env_int64(name, text, wide)
+        if (wide > int(huge(0), int64) .or. wide < -int(huge(0), int64) - 1_int64) then
+            call env_reject(name, text, "does not fit in a default INTEGER")
+        end if
+        value = int(wide)
+    end subroutine env_int32
+
+    !> Parses a boolean. `true`/`false`/`1`/`0`, case-insensitively, and nothing else.
+    !>
+    !> `true`/`false` is what parquet_print_settings prints, so a value copied out of a settings dump
+    !> goes straight back in; `1`/`0` is what a shell naturally produces. `on`/`off` and `yes`/`no`
+    !> are deliberately not accepted -- the message says so, which is more useful than silently
+    !> guessing what "yes" meant.
+    subroutine env_logical(name, text, value)
+        character(len=*), intent(in) :: name !! the variable's full name, for the abort message.
+        character(len=*), intent(in) :: text !! its value, already trimmed.
+        logical, intent(out) :: value !! the parsed flag.
+        character(len=:), allocatable :: tok
+
+        call fold_ascii_lower(text, tok)
+        select case (tok)
+        case ("true", "1")
+            value = .true.
+        case ("false", "0")
+            value = .false.
+        case default
+            value = .false.
+            call env_reject(name, text, "is not a boolean (expected one of: true, false, 1, 0)")
+        end select
+    end subroutine env_logical
+
+    !> Aborts unless `text` is one of `tokens`, case-insensitively.
+    !>
+    !> The value is then handed to its setter unchanged, which validates it again against this same
+    !> array -- deliberately, and it is not a redundancy worth removing. The setter's `error stop`
+    !> cannot name the environment variable a value came from, and after an abort nothing can go back
+    !> and add it, so the only way to report `PARQUET_FORTRAN_VERBOSITY` rather than a bare
+    !> `parquet_set_verbosity` is to check first. Sharing the array is what stops the two checks
+    !> disagreeing about what is accepted.
+    subroutine env_require_token(name, text, tokens, what)
+        character(len=*), intent(in) :: name !! the variable's full name, for the abort message.
+        character(len=*), intent(in) :: text !! its value, already trimmed.
+        character(len=*), intent(in) :: tokens(:) !! the accepted vocabulary.
+        character(len=*), intent(in) :: what !! what the value is, for the abort message.
+        character(len=:), allocatable :: tok, expected
+        integer :: i
+
+        call fold_ascii_lower(text, tok)
+        do i = 1, size(tokens)
+            if (tok == trim(tokens(i))) return
+        end do
+        call token_list(tokens, expected)
+        call env_reject(name, text, "is not a valid " // what // " (expected one of: " // expected // ")")
+    end subroutine env_require_token
+
+    !> The one place an environment variable's abort message is composed, so every one of them names
+    !> the variable and shows the offending value the same way.
+    !>
+    !> **The value is capped to a short preview.** It is caller-controlled text of unbounded length,
+    !> and ifx's ERROR STOP runtime corrupts the heap once the composed message reaches 8192 bytes --
+    !> so a "value too long"-style guard that echoed the whole value would crash on exactly the input
+    !> that triggers it (CLAUDE.md, "Never interpolate unbounded caller-supplied text").
+    subroutine env_reject(name, text, why)
+        character(len=*), intent(in) :: name !! the variable's full name.
+        character(len=*), intent(in) :: text !! its value, shown truncated if long.
+        character(len=*), intent(in) :: why !! what is wrong with it.
+        integer, parameter :: max_preview = 100
+
+        if (len(text) > max_preview) then
+            error stop "parquet_settings_from_env: " // name // "='" // text(1:max_preview) // &
+                "...' " // why
+        end if
+        error stop "parquet_settings_from_env: " // name // "='" // text // "' " // why
+    end subroutine env_reject
+
+    !> Renders a token vocabulary as "a, b, c", for an error message.
+    subroutine token_list(tokens, out)
+        character(len=*), intent(in) :: tokens(:) !! the accepted vocabulary.
+        character(len=:), allocatable, intent(out) :: out !! comma-separated, in array order.
+        integer :: i
+
+        out = ""
+        do i = 1, size(tokens)
+            if (i > 1) out = out // ", "
+            out = out // trim(tokens(i))
+        end do
+    end subroutine token_list
+
     !> Lowercases ASCII letters. A local copy rather than parquet_to_lower, because that one lives
     !> in parquet_core, which uses THIS module -- importing it back would be a circular dependency.
     subroutine fold_ascii_lower(text, out)
@@ -742,7 +1087,7 @@ contains
     !> Restores every setting to the value it had before this program changed it.
     !>
     !> Every knob returns to its factory value. For the Arrow thread pool that means the capacity
-    !> captured on the first parquet_set_max_threads call; if it was never called, that part is a
+    !> captured on the first parquet_set_arrow_threads call; if it was never called, that part is a
     !> no-op rather than a resize to an invented default, since Arrow's own initial capacity is
     !> hardware-dependent and is not a number this library gets to choose.
     !>
@@ -788,7 +1133,7 @@ contains
         u = output_unit
         if (present(unit)) u = unit
         write (u, '(a)') "parquet-fortran settings"
-        call print_one(u, "arrow_threads", parquet_get_max_threads())
+        call print_one(u, "arrow_threads", parquet_get_arrow_threads())
         call print_one(u, "sort_threads", cfg_sort_threads)
         call print_one(u, "prefetch_threads", cfg_prefetch_threads)
         call print_big(u, "sort_parallel_min_rows", parquet_get_sort_parallel_min_rows())

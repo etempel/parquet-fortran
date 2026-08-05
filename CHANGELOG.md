@@ -310,8 +310,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Process-global settings, in a new `parquet_settings` module** re-exported by `use parquet`, for
   the parameters that apply to the whole library rather than to one reader, writer or table.
-  `parquet_get_max_threads` is new and answers what `parquet_set_max_threads` (unchanged, and now
-  living here) has set Arrow's shared CPU thread pool to — useful in batch and HPC work, where
+  `parquet_get_arrow_threads` is new and answers what `parquet_set_arrow_threads` (renamed from
+  `parquet_set_max_threads`, see Changed below, and now living here) has set Arrow's shared CPU
+  thread pool to — useful in batch and HPC work, where
   `OMP_NUM_THREADS` is chosen for the science code and the parquet layer would otherwise inherit it.
   Five more knobs supply a program-wide **default** that an explicit argument still overrides:
   `parquet_set_sort_threads` and `parquet_set_prefetch_threads` cap the threads used by every sort
@@ -334,7 +335,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `parquet_set_target_row_group_bytes` sizes the row groups of a writer opened without an explicit
   `chunk_size=`, and `parquet_set_statistics_prescreen` controls whether a filtered read skips row
   groups its footer statistics rule out. All three numeric knobs take either integer kind and accept
-  `0` for "restore the built-in value". `parquet_reset_settings` restores what a program changed, and `parquet_print_settings`
+  `0` for "restore the built-in value". **Every knob can also be set from the environment**:
+  `parquet_settings_from_env()` applies one `PARQUET_FORTRAN_*` variable per knob
+  (`PARQUET_FORTRAN_VERBOSITY`, `PARQUET_FORTRAN_DEFAULT_COMPRESSION`, …), plus
+  `PARQUET_FORTRAN_THREADS` for all three thread counts at once, through the same
+  validation a direct call uses, so a mistyped value aborts naming the variable rather than being
+  ignored. It is called by your program, never automatically, and applies over whatever is already
+  set rather than resetting. An empty variable counts as unset.
+  **`parquet_set_threads(n)` sets Arrow's pool, the sort cap and the prefetch cap together**, for the
+  common case of "give this library `n` threads and no more"; it takes `n >= 1` (unlike the sort and
+  prefetch caps individually, `0` is not accepted, because Arrow's pool has no automatic value), and
+  any individual setter afterwards overrides just that one knob.
+  `parquet_reset_settings` restores what a program changed, and `parquet_print_settings`
   dumps every setting and limit to a unit. The caps the library enforces on filter rules, sort keys and MAML
   lines are published as read-only constants (`parquet_max_filter_rule_len`,
   `parquet_max_filter_depth`, `parquet_max_filter_nodes`, `parquet_max_sort_keys`,
@@ -345,6 +357,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [Settings](doc/pages/settings.md).
 
 ### Changed
+
+- **BREAKING: `parquet_set_max_threads` is renamed to `parquet_set_arrow_threads`.** The old name is
+  removed rather than kept as an alias, so a call to it no longer compiles; the replacement takes the
+  same argument, does the same thing, and aborts on the same values. The new name says *whose*
+  threads it sizes — Arrow's shared CPU pool, not OpenMP's — which is the distinction that actually
+  matters in a batch or HPC job where `OMP_NUM_THREADS` belongs to the science code. It also brings
+  the setter into line with the name the knob carries everywhere else: `arrow_threads` in
+  `parquet_print_settings`' output, in the settings guide, and in `PARQUET_FORTRAN_ARROW_THREADS`.
+  The C symbol is unchanged, so nothing outside Fortran is affected.
 
 - **One `use parquet` now covers the whole library.** It brings the `parquet_table` container, the
   `parquet_column` foundation and its `PK_*` kind constants into scope alongside the readers,

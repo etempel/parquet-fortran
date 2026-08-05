@@ -316,8 +316,8 @@ program error_scenarios
         call scenario_sortkey_remap_size_mismatch()
     case ("sortkey_remap_name_too_long")
         call scenario_sortkey_remap_name_too_long()
-    case ("set_max_threads_zero")
-        call scenario_set_max_threads_zero()
+    case ("set_arrow_threads_zero")
+        call scenario_set_arrow_threads_zero()
     case ("settings_bad_codec")
         call scenario_settings_bad_codec()
     case ("settings_negative_sort_threads")
@@ -328,6 +328,20 @@ program error_scenarios
         call scenario_settings_negative_bucket_limit()
     case ("settings_negative_row_group_bytes")
         call scenario_settings_negative_row_group_bytes()
+    case ("settings_env_bad_token")
+        call scenario_settings_env_bad_token()
+    case ("settings_env_not_an_integer")
+        call scenario_settings_env_not_an_integer()
+    case ("settings_env_two_numbers")
+        call scenario_settings_env_two_numbers()
+    case ("settings_env_out_of_range")
+        call scenario_settings_env_out_of_range()
+    case ("settings_env_bad_boolean")
+        call scenario_settings_env_bad_boolean()
+    case ("settings_env_clean_run")
+        call scenario_settings_env_clean_run()
+    case ("settings_set_threads_zero")
+        call scenario_settings_set_threads_zero()
     case ("settings_negative_prefetch_threads")
         call scenario_settings_negative_prefetch_threads()
     case ("settings_warning_normal")
@@ -3736,12 +3750,12 @@ contains
 
     !> A thread-pool capacity below 1 is rejected in Fortran, before the C++ side is called at all
     !> (which is what makes the C++ side's own identical check dead code -- see the GCOVR_EXCL note
-    !> on parquet_set_max_threads in parquet_wrapper.cpp).
-    subroutine scenario_set_max_threads_zero()
+    !> on parquet_set_arrow_threads in parquet_wrapper.cpp).
+    subroutine scenario_set_arrow_threads_zero()
 
-        call parquet_set_max_threads(0)   ! -> aborts (capacity must be >= 1)
+        call parquet_set_arrow_threads(0)   ! -> aborts (capacity must be >= 1)
         print '(a)', "unexpectedly accepted a thread-pool capacity of 0"
-    end subroutine scenario_set_max_threads_zero
+    end subroutine scenario_set_arrow_threads_zero
 
     !> A codec name outside the supported set. Validated against the same list parquet_open_writer
     !> checks its own compression= argument against, so a codec cannot be settable as a default and
@@ -3785,6 +3799,102 @@ contains
         call parquet_set_target_row_group_bytes(-1024_int64)   ! -> aborts (must be >= 0)
         print '(a)', "unexpectedly accepted a negative target_row_group_bytes"
     end subroutine scenario_settings_negative_row_group_bytes
+
+    !> Sets an environment variable for this process. Fortran cannot, so this is POSIX `setenv`
+    !> through a local bind(C) interface -- test-only, exactly as every parquet_debug_* hook here is,
+    !> so no src/ file gains a POSIX dependency. Shared by the six env scenarios below.
+    subroutine scenario_setenv(name, value)
+        use iso_c_binding, only : c_int
+        character(len=*), intent(in) :: name !! variable to set.
+        character(len=*), intent(in) :: value !! its value.
+        interface
+            function c_setenv(nm, val, overwrite) bind(C, name="setenv") result(rc)
+                use iso_c_binding, only : c_char, c_int
+                character(kind=c_char), intent(in) :: nm(*) !! NUL-terminated name.
+                character(kind=c_char), intent(in) :: val(*) !! NUL-terminated value.
+                integer(c_int), value :: overwrite !! nonzero replaces an existing value.
+                integer(c_int) :: rc !! 0 on success.
+            end function c_setenv
+        end interface
+        integer :: rc
+
+        rc = int(c_setenv(name // char(0), value // char(0), int(1, kind=c_int)))
+    end subroutine scenario_setenv
+
+    !> An unknown token. The abort must name the VARIABLE, not just the setter -- a config-style
+    !> feature whose error does not say which key was wrong is most of the way to useless.
+    subroutine scenario_settings_env_bad_token()
+
+        call scenario_setenv("PARQUET_FORTRAN_VERBOSITY", "loud")
+        call parquet_settings_from_env()   ! -> aborts naming the variable
+        print '(a)', "unexpectedly accepted an unknown verbosity token from the environment"
+    end subroutine scenario_settings_env_bad_token
+
+    !> A value that is not a number at all.
+    subroutine scenario_settings_env_not_an_integer()
+
+        call scenario_setenv("PARQUET_FORTRAN_SORT_THREADS", "many")
+        call parquet_settings_from_env()   ! -> aborts (not an integer)
+        print '(a)', "unexpectedly accepted a non-numeric integer from the environment"
+    end subroutine scenario_settings_env_not_an_integer
+
+    !> **The trap a list-directed read would fall into.** `read(text, *, iostat=)` accepts "4 8"
+    !> with iostat == 0 and yields 4, so a stray copy-paste or a shell variable that expanded to two
+    !> words would silently set the cap to 4 and report success. The strict parser must reject it.
+    subroutine scenario_settings_env_two_numbers()
+
+        call scenario_setenv("PARQUET_FORTRAN_SORT_THREADS", "4 8")
+        call parquet_settings_from_env()   ! -> aborts (not an integer)
+        print '(a)', "unexpectedly accepted two numbers as one integer from the environment"
+    end subroutine scenario_settings_env_two_numbers
+
+    !> A well-formed number the SETTER rejects. Proves the setter still does the range checking, so
+    !> an environment value and a direct call fail identically rather than through two different
+    !> guards that could drift.
+    subroutine scenario_settings_env_out_of_range()
+
+        call scenario_setenv("PARQUET_FORTRAN_SORT_THREADS", "-1")
+        call parquet_settings_from_env()   ! -> aborts with parquet_set_sort_threads' own message
+        print '(a)', "unexpectedly accepted a negative sort thread cap from the environment"
+    end subroutine scenario_settings_env_out_of_range
+
+    !> A boolean spelling outside the accepted four. The message has to list them, or a user who
+    !> typed "yes" has no way to learn what to type instead.
+    subroutine scenario_settings_env_bad_boolean()
+
+        call scenario_setenv("PARQUET_FORTRAN_STATISTICS_PRESCREEN", "yes")
+        call parquet_settings_from_env()   ! -> aborts (not a boolean)
+        print '(a)', "unexpectedly accepted 'yes' as a boolean from the environment"
+    end subroutine scenario_settings_env_bad_boolean
+
+    !> **The negative control for all five above**, and the assertion that a successful run is
+    !> SILENT. Every one of the aborting scenarios would pass just as happily against a
+    !> parquet_settings_from_env that aborted unconditionally; this one applies three valid values
+    !> and must exit 0 having printed nothing at all.
+    subroutine scenario_settings_env_clean_run()
+        character(len=:), allocatable :: token
+
+        call scenario_setenv("PARQUET_FORTRAN_SORT_THREADS", "4")
+        call scenario_setenv("PARQUET_FORTRAN_VERBOSITY", "normal")
+        call scenario_setenv("PARQUET_FORTRAN_STATISTICS_PRESCREEN", "true")
+        call parquet_settings_from_env()
+        call parquet_get_verbosity(token)
+        if (parquet_get_sort_threads() /= 4 .or. token /= "normal" .or. &
+            .not. parquet_get_statistics_prescreen()) then
+            print '(a)', "valid environment values did not reach their knobs"
+        end if
+    end subroutine scenario_settings_env_clean_run
+
+    !> `parquet_set_threads(0)` aborts, even though parquet_set_sort_threads(0) and
+    !> parquet_set_prefetch_threads(0) are both legal and mean "automatic". Arrow's pool has no
+    !> automatic value, so one argument cannot mean both things -- the valid case is exercised first
+    !> so this cannot pass against a guard that rejects everything.
+    subroutine scenario_settings_set_threads_zero()
+
+        call parquet_set_threads(2)   ! legal
+        call parquet_set_threads(0)   ! -> aborts (must be >= 1)
+        print '(a)', "unexpectedly accepted parquet_set_threads(0)"
+    end subroutine scenario_settings_set_threads_zero
 
     !> The prefetch cap's own version of the same guard.
     subroutine scenario_settings_negative_prefetch_threads()
@@ -7012,8 +7122,8 @@ contains
     !> n < 1 is not a valid thread pool capacity -- must error stop rather
     !> than silently passing an invalid value down to Arrow.
     subroutine scenario_set_max_threads_below_one()
-        call parquet_set_max_threads(0)
-        print '(a)', "unexpectedly accepted parquet_set_max_threads(0) without error"
+        call parquet_set_arrow_threads(0)
+        print '(a)', "unexpectedly accepted parquet_set_arrow_threads(0) without error"
     end subroutine scenario_set_max_threads_below_one
 
     !> A schema-enforced writer (cinfo given) already error stops on this via

@@ -189,7 +189,7 @@ By default it runs every check even after one fails and lists the failures toget
 `tools/count_tests.sh` counts test-drive unit tests per suite directly from source (no build or run required): it reads `test/run_tester.f90`'s `new_testsuite(...)` registrations, locates each suite's `collect_tests_parquet_*` subroutine, and counts the `new_unittest(...)` entries inside it — cross-checked against an actual `fpm test run_tester` run's PASSED/FAILED line count. Maintainer-only (stripped from the fpm-published package, see `tools/prep_fpm_publish.sh`).
 
 `tools/benchmark_threads.sh` measures how write and read throughput scale with Arrow's internal
-thread-pool size (`parquet_set_max_threads`), sweeping a log-spaced set of thread counts and
+thread-pool size (`parquet_set_arrow_threads`), sweeping a log-spaced set of thread counts and
 driving `app/benchmark_threads.f90` (a maintainer-only fpm executable, not part of the public
 library) once per (mode, thread-count) data point. The synthetic file's schema is 5 scalar
 columns (int32/int64/float32/float64/boolean), replicated `NMULT` times (`i32_1`, `i32_2`, ...,

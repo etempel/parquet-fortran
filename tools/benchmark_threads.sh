@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Benchmarks parquet-fortran's write and read performance scaling across Arrow thread-pool
-# sizes (parquet_set_max_threads), on one synthetic multi-type Parquet file. Each thread-count
+# sizes (parquet_set_arrow_threads), on one synthetic multi-type Parquet file. Each thread-count
 # data point is measured by its own `fpm run benchmark_threads` subprocess -- see
 # app/benchmark_threads.f90 for what a single run actually times (open/write.close or
 # open(prefetch)/read/close only, excluding schema build and synthetic-data generation). This

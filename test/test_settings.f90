@@ -49,7 +49,7 @@
 !> suite).
 !>
 !> Abort paths cannot be exercised here because `error stop` kills the process -- they live in
-!> test/error_scenarios.f90 (`set_max_threads_zero`, `settings_bad_codec`,
+!> test/error_scenarios.f90 (`set_arrow_threads_zero`, `settings_bad_codec`,
 !> `settings_negative_sort_threads`), driven from test_errors.f90.
 !>
 !> **Every test restores what it changed.** The suite is excluded from test-drive's per-suite
@@ -58,6 +58,7 @@
 module test_settings
     use parquet
     use iso_fortran_env, only : output_unit, int32, int64, real64
+    use iso_c_binding, only : c_null_char, c_int
 #ifdef _OPENMP
     use omp_lib, only : omp_get_max_threads
 #endif
@@ -101,7 +102,16 @@ contains
                 test_target_row_group_bytes_streaming), &
             new_unittest("statistics_prescreen prunes row groups without changing the answer", &
                 test_statistics_prescreen_effect), &
-            new_unittest("both integer kinds reach the same setting", test_both_integer_kinds) &
+            new_unittest("both integer kinds reach the same setting", test_both_integer_kinds), &
+            new_unittest("every environment variable reaches its own knob", test_env_every_variable), &
+            new_unittest("an absent variable leaves its knob alone", test_env_absent_leaves_knob), &
+            new_unittest("an empty variable is treated as unset", test_env_empty_is_unset), &
+            new_unittest("a variable overrides an earlier explicit set", test_env_overrides_explicit), &
+            new_unittest("integers accept blanks and a sign, booleans fold case", test_env_value_forms), &
+            new_unittest("a codec and its level both arrive", test_env_codec_and_level), &
+            new_unittest("set_threads moves all three thread counts", test_set_threads), &
+            new_unittest("PARQUET_FORTRAN_THREADS is overridden by the specific variables", &
+                test_env_threads_then_specific) &
             ]
     end subroutine collect_tests_parquet_settings
     !
@@ -111,8 +121,8 @@ contains
         type(error_type), allocatable, intent(out) :: error
         integer :: n
         !
-        n = parquet_get_max_threads()
-        call check(error, n >= 1, "parquet_get_max_threads() >= 1")
+        n = parquet_get_arrow_threads()
+        call check(error, n >= 1, "parquet_get_arrow_threads() >= 1")
     end subroutine test_threads_default_sane
     !
     !> The value goes into Arrow and comes back out of Arrow, so this is the test that fails if the
@@ -121,15 +131,15 @@ contains
         type(error_type), allocatable, intent(out) :: error
         integer :: original
         !
-        original = parquet_get_max_threads()
-        call parquet_set_max_threads(3)
-        call check(error, parquet_get_max_threads() == 3, "capacity is 3 after parquet_set_max_threads(3)")
+        original = parquet_get_arrow_threads()
+        call parquet_set_arrow_threads(3)
+        call check(error, parquet_get_arrow_threads() == 3, "capacity is 3 after parquet_set_arrow_threads(3)")
         if (allocated(error)) then
             call restore(original)
             return
         end if
-        call parquet_set_max_threads(5)
-        call check(error, parquet_get_max_threads() == 5, "capacity is 5 after parquet_set_max_threads(5)")
+        call parquet_set_arrow_threads(5)
+        call check(error, parquet_get_arrow_threads() == 5, "capacity is 5 after parquet_set_arrow_threads(5)")
         call restore(original)
     end subroutine test_threads_round_trip
     !
@@ -139,11 +149,11 @@ contains
         type(error_type), allocatable, intent(out) :: error
         integer :: original
         !
-        original = parquet_get_max_threads()
-        call parquet_set_max_threads(2)
-        call parquet_set_max_threads(7)
+        original = parquet_get_arrow_threads()
+        call parquet_set_arrow_threads(2)
+        call parquet_set_arrow_threads(7)
         call parquet_reset_settings()
-        call check(error, parquet_get_max_threads() == original, &
+        call check(error, parquet_get_arrow_threads() == original, &
             "parquet_reset_settings restores the capacity from before the first set")
         call restore(original)
     end subroutine test_reset_restores
@@ -158,9 +168,9 @@ contains
         ! Clears any capture left by an earlier test in this suite, putting the module back into
         ! its never-set state -- which is exactly the state under test.
         call parquet_reset_settings()
-        before = parquet_get_max_threads()
+        before = parquet_get_arrow_threads()
         call parquet_reset_settings()
-        call check(error, parquet_get_max_threads() == before, &
+        call check(error, parquet_get_arrow_threads() == before, &
             "parquet_reset_settings leaves the capacity alone when nothing was ever set")
     end subroutine test_reset_untouched_is_noop
     !
@@ -644,13 +654,314 @@ contains
         call put(0_c_int64_t)
     end subroutine parquet_debug_reset_prefetch_threads
 
+    ! ==================================================================================
+    ! S5: parquet_settings_from_env
+    ! ==================================================================================
+    !
+    !> Sets an environment variable for the rest of this process.
+    !>
+    !> Fortran cannot set one, so this is POSIX `setenv` through a local `bind(C)` interface -- the
+    !> same convention every parquet_debug_* hook here follows, and test-only, so no `src/` file
+    !> gains a POSIX dependency. That a runtime `setenv` is visible to a later
+    !> `get_environment_variable` in the SAME process is what keeps these tests in process; without
+    !> it every one of them would need a subprocess and its own environment plumbing in
+    !> tools/run_error_scenarios.sh.
+    subroutine set_env(name, value)
+        character(len=*), intent(in) :: name !! variable to set.
+        character(len=*), intent(in) :: value !! its new value.
+        interface
+            function c_setenv(nm, val, overwrite) bind(C, name="setenv") result(rc)
+                use iso_c_binding, only : c_char, c_int
+                character(kind=c_char), intent(in) :: nm(*) !! NUL-terminated name.
+                character(kind=c_char), intent(in) :: val(*) !! NUL-terminated value.
+                integer(c_int), value :: overwrite !! nonzero replaces an existing value.
+                integer(c_int) :: rc !! 0 on success.
+            end function c_setenv
+        end interface
+        integer :: rc
+
+        rc = int(c_setenv(name // c_null_char, value // c_null_char, 1_c_int))
+    end subroutine set_env
+
+    !> Removes an environment variable.
+    subroutine unset_env(name)
+        character(len=*), intent(in) :: name !! variable to remove.
+        interface
+            function c_unsetenv(nm) bind(C, name="unsetenv") result(rc)
+                use iso_c_binding, only : c_char, c_int
+                character(kind=c_char), intent(in) :: nm(*) !! NUL-terminated name.
+                integer(c_int) :: rc !! 0 on success.
+            end function c_unsetenv
+        end interface
+        integer :: rc
+
+        rc = int(c_unsetenv(name // c_null_char))
+    end subroutine unset_env
+
+    !> All three thread counts must move, and each is read back through its OWN getter -- a
+    !> convenience that set one of them and forgot the others would pass any single assertion.
+    !>
+    !> `0` is deliberately not accepted here even though the sort and prefetch caps take it; that
+    !> abort lives in test/error_scenarios.f90 (`settings_set_threads_zero`), since it kills the
+    !> process.
+    subroutine test_set_threads(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: original
+        !
+        call parquet_reset_settings()
+        original = parquet_get_arrow_threads()
+        call parquet_set_threads(3)
+        call check(error, parquet_get_arrow_threads() == 3, "set_threads must resize Arrow's pool")
+        if (.not. allocated(error)) call check(error, parquet_get_sort_threads() == 3, &
+            "set_threads must set the sort cap")
+        if (.not. allocated(error)) call check(error, parquet_get_prefetch_threads() == 3, &
+            "set_threads must set the prefetch cap")
+        ! A later individual setter overrides just its own knob, which is what makes the convenience
+        ! composable rather than a mode you have to leave.
+        if (.not. allocated(error)) then
+            call parquet_set_sort_threads(1)
+            call check(error, parquet_get_sort_threads() == 1 .and. parquet_get_prefetch_threads() == 3, &
+                "an individual setter after set_threads must change only its own knob")
+        end if
+        call restore(original)
+    end subroutine test_set_threads
+
+    !> **The one place the environment sequence's ORDER is load-bearing.** PARQUET_FORTRAN_THREADS
+    !> sets all three, so it has to be applied before the three specific variables or they could
+    !> never override it -- and a reversed order would still pass a test that set only the combined
+    !> variable. Both are set here, and the specific one must win.
+    subroutine test_env_threads_then_specific(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: original
+        !
+        call parquet_reset_settings()
+        call unset_all_env()
+        original = parquet_get_arrow_threads()
+        call set_env("PARQUET_FORTRAN_THREADS", "6")
+        call set_env("PARQUET_FORTRAN_SORT_THREADS", "2")
+        call parquet_settings_from_env()
+        call unset_all_env()
+        !
+        call check(error, parquet_get_sort_threads() == 2, &
+            "a specific variable must override the combined one, whatever order they appear in the environment")
+        if (.not. allocated(error)) call check(error, parquet_get_prefetch_threads() == 6, &
+            "a knob the specific variables do not mention must keep the combined value")
+        if (.not. allocated(error)) call check(error, parquet_get_arrow_threads() == 6, &
+            "the combined variable must reach Arrow's pool too")
+        call restore(original)
+    end subroutine test_env_threads_then_specific
+
+    !> Removes all fourteen, so no test can inherit another's environment.
+    !>
+    !> **This matters more than the usual restore-what-you-changed discipline.** The environment
+    !> outlives the test that set it and is read by nothing until the next parquet_settings_from_env
+    !> call -- so a leaked PARQUET_FORTRAN_VERBOSITY=silent would not fail here, it would silence a
+    !> later suite and be attributed to whatever that suite was doing.
+    subroutine unset_all_env()
+
+        call unset_env("PARQUET_FORTRAN_THREADS")
+        call unset_env("PARQUET_FORTRAN_ARROW_THREADS")
+        call unset_env("PARQUET_FORTRAN_SORT_THREADS")
+        call unset_env("PARQUET_FORTRAN_PREFETCH_THREADS")
+        call unset_env("PARQUET_FORTRAN_SORT_PARALLEL_MIN_ROWS")
+        call unset_env("PARQUET_FORTRAN_SORT_COUNTING_PATH")
+        call unset_env("PARQUET_FORTRAN_SORT_COUNTING_BUCKET_LIMIT")
+        call unset_env("PARQUET_FORTRAN_DEFAULT_COMPRESSION")
+        call unset_env("PARQUET_FORTRAN_DEFAULT_COMPRESSION_LEVEL")
+        call unset_env("PARQUET_FORTRAN_DEFAULT_USE_THREADS")
+        call unset_env("PARQUET_FORTRAN_TARGET_ROW_GROUP_BYTES")
+        call unset_env("PARQUET_FORTRAN_STATISTICS_PRESCREEN")
+        call unset_env("PARQUET_FORTRAN_VERBOSITY")
+        call unset_env("PARQUET_FORTRAN_MESSAGE_STREAM")
+    end subroutine unset_all_env
+
+    !> **The bulk test, and the one that catches a crossed pair.** Thirteen variables set to thirteen
+    !> distinguishable values in one call, each read back through its own getter -- so a variable
+    !> wired to the wrong setter fails on both knobs at once, and a variable left out of
+    !> parquet_settings_from_env's sequence fails on its own (feature_risks.md Risk-44).
+    !>
+    !> Every value differs from the factory default, or the assertion would pass against a call that
+    !> did nothing at all.
+    subroutine test_env_every_variable(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: codec, token
+        integer :: original
+        !
+        call parquet_reset_settings()
+        call unset_all_env()
+        original = parquet_get_arrow_threads()
+        call set_env("PARQUET_FORTRAN_ARROW_THREADS", "3")
+        call set_env("PARQUET_FORTRAN_SORT_THREADS", "5")
+        call set_env("PARQUET_FORTRAN_PREFETCH_THREADS", "2")
+        call set_env("PARQUET_FORTRAN_SORT_PARALLEL_MIN_ROWS", "64")
+        call set_env("PARQUET_FORTRAN_SORT_COUNTING_PATH", "false")
+        call set_env("PARQUET_FORTRAN_SORT_COUNTING_BUCKET_LIMIT", "128")
+        call set_env("PARQUET_FORTRAN_DEFAULT_COMPRESSION", "gzip")
+        call set_env("PARQUET_FORTRAN_DEFAULT_COMPRESSION_LEVEL", "6")
+        call set_env("PARQUET_FORTRAN_DEFAULT_USE_THREADS", "false")
+        call set_env("PARQUET_FORTRAN_TARGET_ROW_GROUP_BYTES", "4096")
+        call set_env("PARQUET_FORTRAN_STATISTICS_PRESCREEN", "false")
+        call set_env("PARQUET_FORTRAN_VERBOSITY", "errors_only")
+        call set_env("PARQUET_FORTRAN_MESSAGE_STREAM", "stderr")
+        !
+        call parquet_settings_from_env()
+        call unset_all_env()
+        !
+        call check(error, parquet_get_arrow_threads() == 3, "PARQUET_FORTRAN_ARROW_THREADS reaches arrow_threads")
+        if (.not. allocated(error)) call check(error, parquet_get_sort_threads() == 5, &
+            "PARQUET_FORTRAN_SORT_THREADS reaches sort_threads")
+        if (.not. allocated(error)) call check(error, parquet_get_prefetch_threads() == 2, &
+            "PARQUET_FORTRAN_PREFETCH_THREADS reaches prefetch_threads")
+        if (.not. allocated(error)) call check(error, parquet_get_sort_parallel_min_rows() == 64_int64, &
+            "PARQUET_FORTRAN_SORT_PARALLEL_MIN_ROWS reaches sort_parallel_min_rows")
+        if (.not. allocated(error)) call check(error, .not. parquet_get_sort_counting_path(), &
+            "PARQUET_FORTRAN_SORT_COUNTING_PATH reaches sort_counting_path")
+        if (.not. allocated(error)) call check(error, parquet_get_sort_counting_bucket_limit() == 128_int64, &
+            "PARQUET_FORTRAN_SORT_COUNTING_BUCKET_LIMIT reaches sort_counting_bucket_limit")
+        if (.not. allocated(error)) then
+            call parquet_get_default_compression(codec)
+            call check(error, codec == "gzip", "PARQUET_FORTRAN_DEFAULT_COMPRESSION reaches default_compression")
+        end if
+        if (.not. allocated(error)) call check(error, parquet_get_default_compression_level() == 6, &
+            "PARQUET_FORTRAN_DEFAULT_COMPRESSION_LEVEL reaches default_compression_level")
+        if (.not. allocated(error)) call check(error, .not. parquet_get_default_use_threads(), &
+            "PARQUET_FORTRAN_DEFAULT_USE_THREADS reaches default_use_threads")
+        if (.not. allocated(error)) call check(error, parquet_get_target_row_group_bytes() == 4096_int64, &
+            "PARQUET_FORTRAN_TARGET_ROW_GROUP_BYTES reaches target_row_group_bytes")
+        if (.not. allocated(error)) call check(error, .not. parquet_get_statistics_prescreen(), &
+            "PARQUET_FORTRAN_STATISTICS_PRESCREEN reaches statistics_prescreen")
+        if (.not. allocated(error)) then
+            call parquet_get_verbosity(token)
+            call check(error, token == "errors_only", "PARQUET_FORTRAN_VERBOSITY reaches verbosity")
+        end if
+        if (.not. allocated(error)) then
+            call parquet_get_message_stream(token)
+            call check(error, token == "stderr", "PARQUET_FORTRAN_MESSAGE_STREAM reaches message_stream")
+        end if
+        call restore(original)
+    end subroutine test_env_every_variable
+
+    !> An unset variable must leave its knob exactly as the program left it -- from_env applies over
+    !> what is there, it does not reset.
+    subroutine test_env_absent_leaves_knob(error)
+        type(error_type), allocatable, intent(out) :: error
+        !
+        call parquet_reset_settings()
+        call unset_all_env()
+        call parquet_set_sort_threads(6)
+        call parquet_settings_from_env()
+        call check(error, parquet_get_sort_threads() == 6, &
+            "an unset variable must not disturb a knob the program set itself")
+        call parquet_reset_settings()
+    end subroutine test_env_absent_leaves_knob
+
+    !> **The Q2 decision, asserted rather than assumed.** An empty variable is treated exactly as an
+    !> unset one: it does not apply and it does not abort. Unset and empty ARE distinguishable
+    !> (`status` is 1 versus 0), so without this test a later change could quietly make an empty
+    !> value an error -- or worse, make it apply as an empty token -- and nothing would fail.
+    subroutine test_env_empty_is_unset(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: token
+        !
+        call parquet_reset_settings()
+        call unset_all_env()
+        call parquet_set_verbosity("silent")
+        call set_env("PARQUET_FORTRAN_VERBOSITY", "")
+        call parquet_settings_from_env()
+        call unset_all_env()
+        call parquet_get_verbosity(token)
+        call check(error, token == "silent", "an empty variable must be treated as unset, not applied")
+        if (allocated(error)) then
+            call parquet_reset_settings()
+            return
+        end if
+        ! An all-blank value is the same case, and is what a quoted shell variable often produces.
+        call set_env("PARQUET_FORTRAN_VERBOSITY", "   ")
+        call parquet_settings_from_env()
+        call unset_all_env()
+        call parquet_get_verbosity(token)
+        call check(error, token == "silent", "an all-blank variable must be treated as unset too")
+        call parquet_reset_settings()
+    end subroutine test_env_empty_is_unset
+
+    !> The documented precedence: call from_env after your own setters and the environment wins.
+    subroutine test_env_overrides_explicit(error)
+        type(error_type), allocatable, intent(out) :: error
+        !
+        call parquet_reset_settings()
+        call unset_all_env()
+        call parquet_set_sort_threads(6)
+        call set_env("PARQUET_FORTRAN_SORT_THREADS", "2")
+        call parquet_settings_from_env()
+        call unset_all_env()
+        call check(error, parquet_get_sort_threads() == 2, &
+            "a variable applied after an explicit set must win")
+        call parquet_reset_settings()
+    end subroutine test_env_overrides_explicit
+
+    !> The accepted spellings, on both value shapes that have any.
+    subroutine test_env_value_forms(error)
+        type(error_type), allocatable, intent(out) :: error
+        !
+        call parquet_reset_settings()
+        call unset_all_env()
+        ! Surrounding blanks are ignored, and an explicit + is accepted.
+        call set_env("PARQUET_FORTRAN_SORT_THREADS", "  7  ")
+        call set_env("PARQUET_FORTRAN_PREFETCH_THREADS", "+3")
+        ! Booleans fold case, and 1/0 mean what a shell script expects.
+        call set_env("PARQUET_FORTRAN_SORT_COUNTING_PATH", "FALSE")
+        call set_env("PARQUET_FORTRAN_DEFAULT_USE_THREADS", "0")
+        call set_env("PARQUET_FORTRAN_STATISTICS_PRESCREEN", "True")
+        call parquet_settings_from_env()
+        call unset_all_env()
+        !
+        call check(error, parquet_get_sort_threads() == 7, "surrounding blanks must be ignored")
+        if (.not. allocated(error)) call check(error, parquet_get_prefetch_threads() == 3, &
+            "an explicit + sign must be accepted")
+        if (.not. allocated(error)) call check(error, .not. parquet_get_sort_counting_path(), &
+            "FALSE must fold to false")
+        if (.not. allocated(error)) call check(error, .not. parquet_get_default_use_threads(), &
+            "0 must mean false")
+        if (.not. allocated(error)) call check(error, parquet_get_statistics_prescreen(), &
+            "True must fold to true")
+        call parquet_reset_settings()
+    end subroutine test_env_value_forms
+
+    !> The compression pair, which is the one place in the sequence that LOOKS order-dependent.
+    !>
+    !> It is not, and that is worth recording because the next reader will assume otherwise: naming
+    !> a codec drops the zstd-tuned default level, so applying the level first looks like it would
+    !> discard it. `parquet_resolve_writer_compression` reads `cfg_default_compression` and
+    !> `cfg_default_compression_level` **together, at writer-open time**, so neither setter touches
+    !> the other and either order gives the same answer. Confirmed by mutation: swapping the two
+    !> blocks in `parquet_settings_from_env` changes no test.
+    !>
+    !> What this test does assert is still worth having -- that both values arrive, which is what
+    !> fails if either variable is dropped from the sequence or crossed with a neighbour.
+    subroutine test_env_codec_and_level(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: codec
+        !
+        call parquet_reset_settings()
+        call unset_all_env()
+        call set_env("PARQUET_FORTRAN_DEFAULT_COMPRESSION", "gzip")
+        call set_env("PARQUET_FORTRAN_DEFAULT_COMPRESSION_LEVEL", "6")
+        call parquet_settings_from_env()
+        call unset_all_env()
+        call parquet_get_default_compression(codec)
+        call check(error, codec == "gzip", "the codec must be applied")
+        if (.not. allocated(error)) call check(error, parquet_get_default_compression_level() == 6, &
+            "a level named alongside a codec must arrive too")
+        call parquet_reset_settings()
+    end subroutine test_env_codec_and_level
+
     !> Puts the pool back and clears the module's captured value, so the next test starts from the
-    !> same state whatever this one did. Used instead of a bare parquet_set_max_threads(original)
+    !> same state whatever this one did. Used instead of a bare parquet_set_arrow_threads(original)
     !> because that would itself capture, leaving a stale capture behind for the next test.
     subroutine restore(original)
         integer, intent(in) :: original !! capacity to restore.
         !
-        call parquet_set_max_threads(original)
+        call parquet_set_arrow_threads(original)
         call parquet_reset_settings()
     end subroutine restore
     !

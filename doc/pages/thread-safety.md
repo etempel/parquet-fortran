@@ -97,9 +97,9 @@ When `.true.` (the default), that reader/writer decodes or encodes column data a
 
 The most common reason to pass `use_threads=.false.` is to avoid **oversubscription** when you're already parallelizing at a coarser level — e.g. many OpenMP threads (see "Rules at a glance" above) each opening their own reader/writer: without this, every one of those threads would *also* fan out across Arrow's thread pool, so N OpenMP threads times Arrow's pool size threads end up competing for the same cores. It's also useful for deterministic single-threaded benchmarking/profiling.
 
-`parquet_set_max_threads(n)` caps the size of Arrow's thread pool itself:
+`parquet_set_arrow_threads(n)` caps the size of Arrow's thread pool itself:
 ```fortran
-call parquet_set_max_threads(4)
+call parquet_set_arrow_threads(4)
 ```
 Unlike `use_threads`, this is **not** a per-reader/per-writer setting — Arrow's CPU thread pool is a single, process-global resource shared by every reader/writer (in every thread) that has `use_threads` enabled. Call it once, e.g. near the start of your program, before opening readers/writers on other threads; calling it repeatedly with different values from multiple concurrent threads is a race, since each call resizes a pool everyone else is using at that same moment. `n` must be `>= 1`; values below that fail immediately with `error stop`.
 

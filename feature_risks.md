@@ -33,16 +33,16 @@ Four sections, and **a risk keeps its number when it moves between them**:
 the whole document; moving one between sections (a proposal getting written, a covered property
 regressing) **never** renumbers it, so a reference from `CLAUDE.md`, `feature_table.md`,
 `tools/check_source_conventions.py` or a code comment stays valid for good. **A new risk takes the
-next unused number — `Risk-44` today — and goes in "1. New risks"** until it has been triaged.
+next unused number — `Risk-45` today — and goes in "1. New risks"** until it has been triaged.
 Numbers of deleted entries are not reused, so a stale reference resolves to nothing rather than to
 the wrong risk.
 
-**Counts today: 38 covered, 0 proposed, 5 not testable.** Section 2 being empty is the healthy
+**Counts today: 39 covered, 0 proposed, 5 not testable.** Section 2 being empty is the healthy
 state rather than a finished one — it means every risk currently identified as testable has its
-test. Eight entries are covered by something other than a unit test, deliberately: Risk-1 by a
+test. Nine entries are covered by something other than a unit test, deliberately: Risk-1 by a
 maintainer check under `app/` with a `tools/*.sh` wrapper (it measures memory, so it needs its own
-process per measurement), and Risk-2, Risk-4, Risk-5, Risk-12, Risk-13, Risk-19 and Risk-43 by static checks
-in `tools/check_source_conventions.py`, which is the right tool for an invariant about what the code
+process per measurement), and Risk-2, Risk-4, Risk-5, Risk-12, Risk-13, Risk-19, Risk-43 and Risk-44 by static
+checks in `tools/check_source_conventions.py`, which is the right tool for an invariant about what the code
 does *not* do.
 
 **Section 4 is pruned, not archived.** A covered entry earns its place only by still forbidding
@@ -108,6 +108,7 @@ something a reader is expected to have.
 | [Risk-41](#risk-41--a-setting-that-is-never-read-passes-every-test-written-for-it) | A setting that is never read passes every test written for it | 4 — covered |
 | [Risk-42](#risk-42--the-fortran-and-c-copies-of-a-mirrored-setting-can-drift-apart) | The Fortran and C++ copies of a mirrored setting can drift apart | 4 — covered |
 | [Risk-43](#risk-43--a-second-copy-of-the-row-group-sizing-arithmetic-ignores-target_row_group_bytes) | A second copy of the row-group sizing arithmetic ignores `target_row_group_bytes` | 4 — covered |
+| [Risk-44](#risk-44--a-knob-with-no-environment-variable-or-one-wired-to-the-wrong-knob-is-silent) | A knob with no environment variable, or one wired to the wrong knob, is silent | 4 — covered |
 
 ---
 
@@ -115,7 +116,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-44**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-45**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -1530,7 +1531,7 @@ of its contract, not an implementation detail.
 - **`check_settings_are_read`** (`tools/check_source_conventions.py`) — every `cfg_*` variable must
   be read somewhere other than the procedure that writes it. Catches "nothing reads it" statically,
   for every future knob, without anyone having to remember. Deliberately *not* scoped to "outside the
-  module": `cfg_arrow_threads_initial` is written by `parquet_set_max_threads` and read by
+  module": `cfg_arrow_threads_initial` is written by `parquet_set_arrow_threads` and read by
   `parquet_reset_settings`, a legitimate shape that a file-scoped rule would have to exempt on day
   one.
 - **A per-knob observed effect with a negative control** (`test/test_settings.f90`). The static check
@@ -1651,3 +1652,38 @@ not call sites, so it would say nothing about a third path that computed its own
 (`kMinAutoChunkSizeRows`, `kMaxAutoChunkSizeRows`, `kMaxFloorOvershootFactor`) stay declared beside
 that function rather than moving in with the mirrored settings, precisely so that "what is settable"
 and "what is a fixed bound" remain visibly different things.
+
+
+### Risk-44 — A knob with no environment variable, or one wired to the wrong knob, is silent
+
+`parquet_settings_from_env` applies one `PARQUET_FORTRAN_*` variable per knob, as a flat sequence of
+thirteen near-identical blocks. Two things go wrong there and neither is visible.
+
+**A knob left out of the sequence** makes its variable do nothing. `PARQUET_FORTRAN_TARGET_ROW_GROUP_BYTES=...`
+is simply ignored, the program runs with the built-in value, and from the user's side that is
+indistinguishable from the setting itself being broken — there is nothing to grep for and nothing
+fails.
+
+**A crossed pair** — the variable read into a neighbouring setter, which is exactly the mistake a
+thirteen-entry copy-paste sequence invites — silently changes a knob nobody asked about while
+leaving the named one at its default. That is worse than the first case: the program does something
+the user did not ask for.
+
+**Covered by** `every setting has an environment variable`
+(`tools/check_source_conventions.py`'s `check_env_covers_every_setting`) for the omission, and by
+`every environment variable reaches its own knob` (`test/test_settings.f90`) for the crossing — one
+call setting all thirteen to thirteen distinguishable values, each read back through **its own**
+getter, so a crossed pair fails on both knobs at once.
+
+**What this still forbids.** The bulk test must stay thirteen assertions rather than a spot-check of
+three: a crossed pair is only visible if both halves are asserted, and the sequence's uniformity is
+exactly what makes a spot-check feel sufficient. The lint check deliberately derives the knob list
+from `parquet_print_settings`' own rows rather than carrying its own copy — that is what makes a
+future knob fail three checks together (undocumented, unread, unreachable from the environment)
+instead of needing three separate people to remember three separate lists.
+
+**A related trap that is NOT this risk, and has its own test.** The strict integer parser in
+`env_int64` must not be replaced with a list-directed `read(text, *, iostat=)`: that accepts `"4 8"`
+with `iostat == 0` and yields `4`, so a shell variable that expanded to two words would set the knob
+to the first number and report success. `settings_env_two_numbers`
+(`test/error_scenarios.f90`) is the assertion that stops it coming back.

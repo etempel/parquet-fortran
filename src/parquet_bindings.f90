@@ -164,7 +164,7 @@ module parquet_bindings
 
         !> Reports Arrow's current global CPU thread-pool capacity. Named differently from its
         !> linked symbol for the same reason as the setter above: parquet_settings' own public
-        !> procedure is called parquet_get_max_threads, and the two cannot share a name in scope.
+        !> procedure is called parquet_get_arrow_threads, and the two cannot share a name in scope.
         function parquet_get_thread_pool_capacity() &
                 bind(C, name="parquet_get_max_threads") result(n)
             import

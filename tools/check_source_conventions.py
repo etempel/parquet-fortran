@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Checks eleven structural invariants of this repository that no compiler and no runtime test sees.
+"""Checks twelve structural invariants of this repository that no compiler and no runtime test sees.
 
 Each one protects a property whose violation compiles cleanly, passes the whole test suite, and
 fails somewhere else entirely -- in a user's program, on another compiler, or in a coverage report.
@@ -70,7 +70,13 @@ That is what makes them worth a static check rather than a test:
      of the setting, so parquet_set_target_row_group_bytes governs one kind of write and not the
      other -- every row correct, the row-group count wrong, nothing failing.
 
- 11. src/ is a single C++ translation unit (CLAUDE.md's TU-split note).
+ 11. Every settable knob has an environment variable (feature_risks.md Risk-44).
+     `parquet_settings_from_env` applies one PARQUET_FORTRAN_* variable per knob. A knob left out of
+     that sequence makes its variable silently do nothing -- indistinguishable, from the user's side,
+     from the setting being broken. Reuses parquet_print_settings' rows as the knob list, so a new
+     knob fails this, the documentation check and the is-it-read check together.
+
+ 12. src/ is a single C++ translation unit (CLAUDE.md's TU-split note).
      Every process-global in parquet_wrapper.cpp is a file-scope `static`, so a second `.cpp` would
      get its own copy of each. Not a ban on splitting -- the note firing at the moment someone does.
 
@@ -460,7 +466,7 @@ def check_settings_are_read():
 
     The rule: every `cfg_*` variable must be READ somewhere other than the procedure that writes it.
     Deliberately not "read outside the module" -- `cfg_arrow_threads_initial` is written by
-    parquet_set_max_threads and read by parquet_reset_settings, which is a legitimate shape, and a
+    parquet_set_arrow_threads and read by parquet_reset_settings, which is a legitimate shape, and a
     file-scoped rule would need a false exemption for it on day one.
 
     This catches only "nothing reads it". Whether the read site does the right thing is what the
@@ -593,6 +599,45 @@ def check_row_group_sizing_not_duplicated():
     return problems
 
 
+def check_env_covers_every_setting():
+    """feature_risks.md Risk-44 -- a knob with no environment variable is silently unreachable.
+
+    `parquet_settings_from_env` applies one `PARQUET_FORTRAN_*` variable per knob. A knob left out
+    of that sequence is not a compile error and not a test failure: the variable simply does
+    nothing, which from the user's side is indistinguishable from the setting not working at all.
+
+    The rule reuses `parquet_print_settings`' own rows as the list of knobs -- the same list
+    `check_print_settings_documented` matches against the guide -- so the three checks agree by
+    construction about what a knob is, and a knob added in a future milestone fails all three at
+    once: undocumented, unread, and unreachable from the environment.
+
+    Only the SETTINGS rows count. The read-only `parquet_max_*` limits are printed by the same
+    procedure and are deliberately not settable from anywhere, so they are excluded by name rather
+    than by position (a positional split would break the first time the two sections are reordered).
+    """
+    problems = []
+    src = SRC / "parquet_settings.f90"
+    text = src.read_text()
+    rows = re.findall(r'call\s+print_\w+\s*\(\s*u\s*,\s*"([^"]+)"', text)
+    knobs = [r for r in rows if not r.startswith("parquet_max_")]
+    if not knobs:
+        return ["src/parquet_settings.f90: found no settings rows in parquet_print_settings -- "
+                "this check needs updating"]
+    body = re.search(r"subroutine parquet_settings_from_env\b(.*?)end subroutine parquet_settings_from_env",
+                     text, re.S)
+    if body is None:
+        return ["src/parquet_settings.f90: could not find parquet_settings_from_env -- this check "
+                "needs updating"]
+    for knob in knobs:
+        var = "PARQUET_FORTRAN_" + knob.upper()
+        if var not in body.group(1):
+            problems.append(
+                "src/parquet_settings.f90: `%s` is a settable knob but parquet_settings_from_env "
+                "never reads `%s` -- the variable would silently do nothing, which a user cannot "
+                "tell apart from the setting being broken (feature_risks.md Risk-44)" % (knob, var))
+    return problems
+
+
 def check_single_cpp_translation_unit():
     """CLAUDE.md's TU-split note -- splitting parquet_wrapper.cpp silently forks every file-scope
     `static`, and nothing diagnoses it.
@@ -646,6 +691,7 @@ CHECKS = (
     ("no direct printing outside the emit channels", check_no_direct_printing),
     ("the row-group sizing arithmetic exists once", check_row_group_sizing_not_duplicated),
     ("src/ is a single C++ translation unit", check_single_cpp_translation_unit),
+    ("every setting has an environment variable", check_env_covers_every_setting),
 )
 
 

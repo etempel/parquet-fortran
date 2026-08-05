@@ -23,7 +23,9 @@ regex misses one or both (see CLAUDE.md's "Why the earlier check found only 113 
 Also scans test/error_scenarios.f90 and test/test_temporal.f90: these declare their own local
 `bind(C)` debug-hook interfaces (hand-written per scenario, duplicated across several call sites),
 declared far from parquet_bindings.f90 and so, per CLAUDE.md, the most likely place for a future
-mismatch to slip in unnoticed.
+mismatch to slip in unnoticed. A handful of those bind to the C RUNTIME rather than to this
+project's own C++ (see LIBC_SYMBOLS below); they are allow-listed by name, not by "ignore anything
+unmatched", so a typo'd parquet_* binding still fails.
 
 What this does NOT check (see CLAUDE.md's "What this check does not cover" note): length/ownership
 contracts (does the C++ side write exactly as many elements as Fortran allocated?), array
@@ -78,6 +80,17 @@ CPP_BASE_MAP = {
     "double": "f64",
     "void": "ptr",
 }
+
+
+#: C symbols a scanned file may bind to that are NOT defined in src/parquet_wrapper.cpp, because they
+#: come from the C runtime. Kept as a short explicit allow-list rather than "ignore anything not
+#: found", which would silently excuse a genuine typo in a parquet_* binding -- the failure this
+#: whole script exists to catch.
+#:
+#: `setenv`/`unsetenv` are used only by the settings tests: Fortran cannot set an environment
+#: variable, and parquet_settings_from_env has to be driven with one. They are test-only, so no
+#: src/ file gains a POSIX dependency.
+LIBC_SYMBOLS = {"setenv", "unsetenv"}
 
 
 def strip_fortran_comments(text):
@@ -356,6 +369,8 @@ def compare(fortran_defs, cpp_defs):
     for c_name, decl_list in sorted(fortran_defs.items()):
         cpp = cpp_defs.get(c_name)
         if cpp is None:
+            if c_name in LIBC_SYMBOLS:
+                continue
             problems.append(f"{c_name}: no extern \"C\" definition found in {CPP_FILE.name} "
                              f"(declared at {decl_list[0]['source']})")
             continue

@@ -359,7 +359,7 @@ contains
             new_unittest("sortkey: remap_column_names to an over-long column name aborts", &
                 test_sortkey_remap_name_too_long_aborts), &
             new_unittest("settings: a thread-pool capacity below 1 aborts", &
-                test_set_max_threads_zero_aborts), &
+                test_set_arrow_threads_zero_aborts), &
             new_unittest("settings: an unknown default compression codec aborts", &
                 test_settings_bad_codec_aborts), &
             new_unittest("settings: a negative sort thread cap aborts", &
@@ -370,6 +370,18 @@ contains
                 test_settings_negative_bucket_limit_aborts), &
             new_unittest("a negative target_row_group_bytes aborts", &
                 test_settings_negative_row_group_bytes_aborts), &
+            new_unittest("settings: an unknown token from the environment aborts naming the variable", &
+                test_settings_env_bad_token_aborts), &
+            new_unittest("settings: a non-numeric integer from the environment aborts", &
+                test_settings_env_not_an_integer_aborts), &
+            new_unittest("settings: two numbers in one integer variable aborts", &
+                test_settings_env_two_numbers_aborts), &
+            new_unittest("settings: an out-of-range environment value aborts through its own setter", &
+                test_settings_env_out_of_range_aborts), &
+            new_unittest("settings: an unaccepted boolean spelling aborts listing the accepted ones", &
+                test_settings_env_bad_boolean_aborts), &
+            new_unittest("settings: parquet_set_threads(0) aborts, though two of the three take 0", &
+                test_settings_set_threads_zero_aborts), &
             new_unittest("settings: a negative prefetch thread cap aborts", &
                 test_settings_negative_prefetch_threads_aborts), &
             new_unittest("settings: an unknown verbosity level aborts", &
@@ -594,7 +606,7 @@ contains
                 test_write_float_to_int64_non_integral_aborts), &
             new_unittest("writing an out-of-int64-range float64 value to an int64 schema column aborts", &
                 test_write_float_to_int64_out_of_range_aborts), &
-            new_unittest("parquet_set_max_threads(0) aborts", &
+            new_unittest("parquet_set_arrow_threads(0) aborts", &
                 test_set_max_threads_below_one_aborts), &
             new_unittest("concurrent calls into a shared parquet_reader abort", &
                 test_concurrent_calls_into_shared_reader_aborts), &
@@ -3355,13 +3367,13 @@ contains
             required_stderr="parquet_sortkey%remap_column_names: replacement column name")
     end subroutine test_sortkey_remap_name_too_long_aborts
 
-    subroutine test_set_max_threads_zero_aborts(error)
+    subroutine test_set_arrow_threads_zero_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
-        call check_scenario_exit_status_and_stderr(error, "set_max_threads_zero", expect_abort=.true., &
+        call check_scenario_exit_status_and_stderr(error, "set_arrow_threads_zero", expect_abort=.true., &
             failure_message="a thread-pool capacity of 0 was expected to abort", &
-            required_stderr="parquet_set_max_threads: n must be >= 1")
-    end subroutine test_set_max_threads_zero_aborts
+            required_stderr="parquet_set_arrow_threads: n must be >= 1")
+    end subroutine test_set_arrow_threads_zero_aborts
 
     subroutine test_settings_bad_codec_aborts(error)
         type(error_type), allocatable, intent(out) :: error
@@ -3402,6 +3414,61 @@ contains
             failure_message="a negative target_row_group_bytes was expected to abort", &
             required_stderr="parquet_set_target_row_group_bytes: n must be >= 0")
     end subroutine test_settings_negative_row_group_bytes_aborts
+
+    subroutine test_settings_env_bad_token_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        ! The VARIABLE name is the point: a bare "parquet_set_verbosity: ..." would leave the user
+        ! to work out which of thirteen variables was wrong.
+        call check_scenario_exit_status_and_stderr(error, "settings_env_bad_token", expect_abort=.true., &
+            failure_message="an unknown verbosity token from the environment was expected to abort", &
+            required_stderr="parquet_settings_from_env: PARQUET_FORTRAN_VERBOSITY='loud'")
+    end subroutine test_settings_env_bad_token_aborts
+
+    subroutine test_settings_env_not_an_integer_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "settings_env_not_an_integer", expect_abort=.true., &
+            failure_message="a non-numeric integer from the environment was expected to abort", &
+            required_stderr="PARQUET_FORTRAN_SORT_THREADS='many' is not an integer")
+    end subroutine test_settings_env_not_an_integer_aborts
+
+    subroutine test_settings_env_two_numbers_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        ! A list-directed read accepts "4 8" and yields 4, silently. This is the assertion that
+        ! stops anyone replacing the strict parser with one.
+        call check_scenario_exit_status_and_stderr(error, "settings_env_two_numbers", expect_abort=.true., &
+            failure_message="two numbers in one integer variable were expected to abort, not to apply the first", &
+            required_stderr="PARQUET_FORTRAN_SORT_THREADS='4 8' is not an integer")
+    end subroutine test_settings_env_two_numbers_aborts
+
+    subroutine test_settings_env_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        ! The SETTER's own message, not from_env's -- range checking stays in one place.
+        call check_scenario_exit_status_and_stderr(error, "settings_env_out_of_range", expect_abort=.true., &
+            failure_message="a negative sort thread cap from the environment was expected to abort", &
+            required_stderr="parquet_set_sort_threads: n must be >= 0")
+    end subroutine test_settings_env_out_of_range_aborts
+
+    subroutine test_settings_env_bad_boolean_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "settings_env_bad_boolean", expect_abort=.true., &
+            failure_message="an unaccepted boolean spelling was expected to abort", &
+            required_stderr="is not a boolean (expected one of: true, false, 1, 0)")
+    end subroutine test_settings_env_bad_boolean_aborts
+
+    subroutine test_settings_set_threads_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        ! The message has to explain WHY 0 is refused here when the sort and prefetch caps accept it,
+        ! or it reads as an inconsistency rather than a deliberate rule.
+        call check_scenario_exit_status_and_stderr(error, "settings_set_threads_zero", expect_abort=.true., &
+            failure_message="parquet_set_threads(0) was expected to abort", &
+            required_stderr="parquet_set_threads: n must be >= 1")
+    end subroutine test_settings_set_threads_zero_aborts
 
     subroutine test_settings_negative_prefetch_threads_aborts(error)
         type(error_type), allocatable, intent(out) :: error
@@ -4466,7 +4533,7 @@ contains
         type(error_type), allocatable, intent(out) :: error
 
         call check_scenario_exit_status(error, "set_max_threads_below_one", expect_abort=.true., &
-            failure_message="parquet_set_max_threads(0) was expected to error stop")
+            failure_message="parquet_set_arrow_threads(0) was expected to error stop")
     end subroutine test_set_max_threads_below_one_aborts
 
     !> These two concurrency tests are self-adapting: the race they check can

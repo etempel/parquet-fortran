@@ -43,6 +43,7 @@ working rules).
   - [A module procedure cannot implement its own submodule's spec-declared interface](#a-module-procedure-cannot-implement-its-own-submodules-spec-declared-interface)
   - [Naming conventions](#naming-conventions)
   - [Public numeric arguments: provide both int32 and int64 kinds](#public-numeric-arguments-provide-both-int32-and-int64-kinds)
+  - [A new process-global parameter goes in `parquet_settings`](#a-new-process-global-parameter-goes-in-parquet_settings-and-a-design-doc-must-say-so)
   - [Role-A MAMLs live in `table_types/`, not `schemas/`](#role-a-mamls-live-in-table_types-not-schemas)
   - [MAML fixture directory: `schemas/`](#maml-fixture-directory-schemas)
   - [Reading MAML source files: shared helper, line-length limit, CRLF handling](#reading-maml-source-files-shared-helper-line-length-limit-crlf-handling)
@@ -78,6 +79,7 @@ working rules).
   - [Tests run concurrently: never share a fixture file path between two tests](#tests-run-concurrently-never-share-a-fixture-file-path-between-two-tests)
   - [Every `check()` call needs its own message](#every-check-call-needs-its-own-message)
   - [Verifying a change with mutation testing](#verifying-a-change-with-mutation-testing)
+  - [A static check that enumerates names goes stale silently](#a-static-check-that-enumerates-names-goes-stale-silently)
   - [Measuring test coverage](#measuring-test-coverage)
   - [Fortran gcov attribution artifacts](#fortran-gcov-attribution-artifacts)
   - [`src/parquet_wrapper.cpp`: GCC vs Clang gcov attribution](#srcparquet_wrappercpp-gcc-vs-clang-gcov-attribution)
@@ -124,6 +126,14 @@ contributor who has never seen a planning document at all. See
 [The `feature_risks.md` standing-risks register](#the-feature_risksmd-standing-risks-register) for
 its structure and the rules for editing it. A *new* `feature_*.md` file is scratch by default: adding
 another negation is a deliberate decision to publish that document, not a formatting choice.
+
+**Every `feature_*.md` design or implementation document must carry a settings analysis** — does
+this feature introduce any process-global parameter, does each one pass the admission test, and if
+so what are its knob name, default, validation and environment variable? Answer "none" explicitly
+when the answer is none; a missing section is indistinguishable from the question never having been
+asked. See
+[A new process-global parameter goes in `parquet_settings`](#a-new-process-global-parameter-goes-in-parquet_settings-and-a-design-doc-must-say-so)
+for the admission test and what follows from it.
 
 **Whenever asked to write or update a `feature_*.md` file, write it to be fully self-explaining
 without relying on the current session's conversation for context** — a future session opening
@@ -818,6 +828,65 @@ shared-worker pattern) — see `parquet_read_array_row_mode`'s `row_index` (12 s
 types x `integer(int32)`/`integer(int64)` row_index, each pair delegating to one
 `parquet_read_<type>_array_row_mode_impl`).
 
+### A new process-global parameter goes in `parquet_settings`, and a design doc must say so
+
+**Any parameter that is global to the library and that a user could reasonably want to change belongs
+in `src/parquet_settings.f90`** — not as a `parameter` buried in the module that happens to use it,
+and not as a new argument threaded through a call chain. That module is the single place a program
+looks to find out what the library will do, and the single place `parquet_print_settings`,
+`parquet_reset_settings` and `parquet_settings_from_env` can reach.
+
+**The admission test is one sentence: a setting may change how FAST, how LARGE or how LOUD the
+library runs; it may never change what the library ANSWERS.** A program-wide default for something
+like null ordering, quality-control enforcement or a numeric tolerance is deliberately absent and
+must stay absent — it would make the same call return different results in different programs, with
+nothing at the call site to hint at it. Anything expressible as an argument to a specific call (a
+writer's `compression=`, a sort's `threads=`) belongs there instead, and an explicit argument always
+wins over a setting.
+
+Most internal constants fail that test and should stay where they are. Vocabulary (accepted token
+lists), mathematical facts, format ceilings imposed by Parquet or Arrow, container implementation
+details, and input-sanity bounds are **not** settings. The last of those is worth stating outright:
+the `parquet_max_*` limits are published as read-only constants precisely because making them
+settable would convert a guard against runaway input into a way to overflow a parser's own stack.
+
+**Whenever a `feature_*.md` design or implementation document is written, it must contain a settings
+analysis** — a short, explicit section answering: does this feature introduce any process-global
+parameter, does each one pass the admission test, and if so what is its knob name, its default, its
+validation and its environment variable. Say "none" when the answer is none; an absent section reads
+as "not considered". This is a standing obligation on every future feature document, in the same way
+tests and docs are standing obligations on every feature.
+
+Five rules apply to a knob once it is admitted, and each exists because breaking it fails silently:
+
+- **A round-trip test is not a test of a setting.** Set-then-get passes just as happily against a
+  value that is stored and never read. Every knob needs three assertions: its default, its round
+  trip, and an **observed effect with a negative control** — something measurable that differs
+  between the default and the set value, *and* the same observation at the default showing the other
+  outcome. See `feature_risks.md` Risk-41, and `tools/check_source_conventions.py`'s
+  `check_settings_are_read` for the static half.
+- **Every knob must be resettable, printable, documented and reachable from the environment.** Three
+  of those four are enforced statically: `check_print_settings_documented` and
+  `check_env_covers_every_setting` both take their knob list from `parquet_print_settings`' own
+  printed rows, and `check_settings_are_read` works from the `cfg_*` declarations instead. Resettable
+  is the one a lint check cannot see, so it is asserted by a test (`test_reset_all_knobs`) that sets
+  every knob to a non-factory value first. The point of sharing the printed rows is that a new knob
+  fails several checks at once rather than needing several people to remember several lists.
+- **A knob whose value the C++ side needs is MIRRORED, and the mirror has rules**: values cross the
+  `bind(C)` boundary already **resolved** (no tokens, no "0 means default" sentinels — Fortran
+  decides, C++ obeys), one push function per group rather than one per knob so a reset cannot
+  half-restore, and the C++ globals' initialisers must equal the Fortran defaults because they are
+  what applies before the first push. See `feature_risks.md` Risk-42.
+- **Do not add a second way to set the same thing.** A test-only `parquet_debug_set_*` override for
+  a value that is now a real setting is a second writer, and the two can disagree; three such hooks
+  were retired for exactly this reason. Observation hooks (`parquet_debug_get_*`) are fine and are
+  usually how a knob's effect is asserted at all.
+- **Renaming a public setting is a semantic-versioning event.** The `use parquet` surface is covered
+  by the promise in README.md, so check whether the name appears in a *published* CHANGELOG section
+  before renaming it — and never edit a published section, which records what that release actually
+  shipped. A Fortran-side rename is free on the C++ side: `bind(C, name=...)` decouples the two, and
+  `tools/check_bindc_boundary.py` keys on the bound name.
+
 ### Role-A MAMLs live in `table_types/`, not `schemas/`
 
 Two directories hold `.maml` files, and they are read for opposite purposes. `schemas/` describes
@@ -1410,6 +1479,16 @@ counterpart. User guide: `doc/pages/date-time.md`.
   a deferred-length allocatable *scalar* (`suffix = ""` is the intended idiom and is everywhere in
   `parquet_metadata.f90`), nor to an array assignment whose RHS carries the right length already
   (`values_c = pack(values, mask)` in `parquet_write_string.f90`).
+- **A list-directed `read(text, *, iostat=ios) n` is NOT a strict parse, and silently accepts a
+  wrong value.** Verified on gfortran 15.2: it rejects `"5abc"` and `"3.9"` (`iostat` 5010) and `""`
+  (`iostat` -1) as you would hope — but it accepts **`"5 6"` with `iostat == 0`, yielding 5**. So
+  parsing any caller-supplied text this way (an environment variable, a config line, a command-line
+  argument) turns a typo or a shell variable that expanded to two words into a plausible wrong value
+  applied silently, which is far worse than a clean failure. Parse strictly by hand instead: trim,
+  allow one optional `+`/`-`, require at least one digit and **nothing else** to the end of the
+  string, and only then let `read` do the conversion. `env_int64` (`src/parquet_settings.f90`) is
+  the worked example, and `settings_env_two_numbers` (`test/error_scenarios.f90`) is the regression
+  test that stops the lax form coming back.
 - **`-128_int8` trips gfortran's range check** (it parses `128` then negates). Build the high bit
   with `ibset(0_int8, 7)` in constant expressions. Also: an array-constructor implied-do index
   (`[(f(b), b=0,7)]`) has no implicit type under `implicit none` — list the elements explicitly.
@@ -1983,6 +2062,17 @@ under coverage, check for a shared path before looking anywhere else. Where seve
 need the *same* fixture contents, factor the writing into one shared helper that takes the filename
 as an argument, and have each caller pass its own.
 
+**A test that WRITES process-global state needs its suite excluded, and the reasoning is not about
+files.** `parquet_settings`' knobs are saved module variables, the sort comparison counter and the
+pruned-row-group count are C++ statics: any test that sets one is visible to every sibling running
+at the same time. The failure is usually not a crash but a *vacuous pass* — a sibling flipping a
+setting mid-run can leave an A/B test comparing one code path against itself, which passes while
+testing nothing. `filter_screen`, `sorting`, `sort` and `settings` are all excluded for this reason
+(`test/run_tester.f90`'s `suite_is_safe_to_parallelize`). Note `sort` was excluded only after the
+fact: it had written a process-global setting for a long time without incident, because its
+assertions happened to be path-agnostic — so **"it has always passed" is not evidence that a suite
+writing global state is safe**, only that nothing has yet asserted anything sharp enough to notice.
+
 **Second consequence, for any library code that inspects OpenMP state:** test-drive achieves that
 concurrency with its own `!$omp parallel do`, so under a `-fopenmp` build **`omp_in_parallel()`
 returns `.true.` inside every procedure a test calls**. A guard that refuses to do something "inside
@@ -2057,6 +2147,26 @@ Three things about doing it *here* specifically:
   defensive** — say so in a comment and `GCOVR_EXCL` it rather than deleting it or inventing an
   unbuildable fixture. `list_uniform_width`'s `IsNull` check is the worked example: Arrow's own
   `ListBuilder::AppendNull` already leaves `value_length == 0`, so no Arrow-built array reaches it.
+
+### A static check that enumerates names goes stale silently
+
+A check in `tools/check_source_conventions.py` that works from a *list* of names — helper procedures,
+constants, call sites — stops seeing anything the list does not mention, and says nothing about it.
+It keeps reporting `[ok]`, so there is no moment at which anyone learns it has narrowed.
+
+This has happened twice to one check. `check_print_settings_documented` extracted its rows by
+matching `print_one`, then `print_one|print_text`, and each time a new row helper was added it went
+blind to those rows — the second time reporting two of five new rows as undocumented while passing
+the other three, which is worse than failing outright, because a partial failure looks like a
+complete answer. It now matches by **shape** (`call print_<anything>(u, "name"`), which picks a new
+helper up with no edit.
+
+**Prefer matching a shape over enumerating names**, and where a list is genuinely unavoidable, have
+the check fail when the list comes up empty rather than pass — an empty result almost always means
+the code moved, not that the invariant holds. Where two checks need the same list, derive it from
+one place: the documentation and environment-coverage checks both take their knob list from
+`parquet_print_settings`' own printed rows, so a new knob fails both together instead of needing two
+separate lists updated.
 
 ### Measuring test coverage
 

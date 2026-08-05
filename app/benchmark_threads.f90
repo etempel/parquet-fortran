@@ -20,7 +20,7 @@ program benchmark_threads
 
     call parse_arguments(mode, threads, size_gb, file, nmult)
 
-    call parquet_set_max_threads(threads)
+    call parquet_set_arrow_threads(threads)
 
     select case (mode)
     case ("write")

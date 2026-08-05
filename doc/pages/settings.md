@@ -33,7 +33,7 @@ Set your settings during program initialisation — before other threads exist, 
 reader, writer or table. Reads are unsynchronised, and a concurrent write is a data race that the
 library does not defend against.
 
-This is not a limitation the settings module introduces. `parquet_set_max_threads` resizes the single
+This is not a limitation the settings module introduces. `parquet_set_arrow_threads` resizes the single
 CPU thread pool that every reader and writer in the process is already sharing, so calling it from
 two threads with different values is a race whatever bookkeeping sits in front of it. In exchange,
 reading a setting costs nothing on any hot path.
@@ -41,12 +41,12 @@ reading a setting costs nothing on any hot path.
 ## When a setting takes effect
 
 Each setting documents its own capture point, because they genuinely differ and assuming one gets
-the others wrong. `parquet_set_max_threads` resizes a pool everyone already shares, so it takes
+the others wrong. `parquet_set_arrow_threads` resizes a pool everyone already shares, so it takes
 effect **immediately**, for readers and writers opened before the call as well as after.
 
 ## Thread pool
 
-`parquet_set_max_threads(n)` sets, and `parquet_get_max_threads()` reports, the capacity of Arrow's
+`parquet_set_arrow_threads(n)` sets, and `parquet_get_arrow_threads()` reports, the capacity of Arrow's
 global CPU thread pool — the pool used by every reader and writer opened with `use_threads` enabled,
 which is the default.
 
@@ -54,8 +54,8 @@ which is the default.
 use parquet
 integer :: n
 
-n = parquet_get_max_threads()          ! Arrow's hardware-derived default
-call parquet_set_max_threads(8)        ! cap the parquet layer at 8 threads
+n = parquet_get_arrow_threads()          ! Arrow's hardware-derived default
+call parquet_set_arrow_threads(8)        ! cap the parquet layer at 8 threads
 ```
 
 This is the setting to reach for in batch or HPC work, where `OMP_NUM_THREADS` is chosen for the
@@ -64,6 +64,29 @@ threads it wants while keeping parquet reads and writes to a smaller share.
 
 `n` must be at least 1; anything lower aborts. There is no "auto" value — Arrow's own starting
 capacity is hardware-derived, and `parquet_reset_settings` is how you get it back.
+
+## All three thread counts at once
+
+`parquet_set_threads(n)` sets Arrow's pool, the sort cap and the prefetch cap together — the common
+case of "give this library `n` threads and no more".
+
+```fortran
+call parquet_set_threads(4)          ! all three
+call parquet_set_sort_threads(1)     ! ...then keep sorting serial
+```
+
+It holds no state of its own: read the three back individually or with `parquet_print_settings`, and
+set any one afterwards to override just that one, as above.
+
+**`n` must be at least 1.** `0` means "automatic" to the sort and prefetch caps, but Arrow's pool has
+no automatic value — its starting capacity is hardware-derived — so rather than let one argument mean
+two things, this takes a real thread count only. Use the individual setters for automatic behaviour,
+or `parquet_reset_settings()` to put everything back.
+
+**The three do not take effect at the same moment.** Arrow's pool is resized immediately and is
+shared, so readers and writers you have already opened are affected too; the sort and prefetch caps
+are read per call and so apply to work started afterwards. Setting them together does not make them
+simultaneous.
 
 ## Threads for sorting
 
@@ -247,10 +270,76 @@ and silently ignored by the other. Sending messages to a log file is therefore n
 shell redirect covers it. The explicitly-called print procedures are unaffected either way: they
 keep their own `unit=` argument.
 
+## Setting from the environment
+
+`parquet_settings_from_env()` applies every `PARQUET_FORTRAN_*` variable that is set, through the
+same setter — and the same validation — a direct call would use.
+
+```fortran
+call parquet_settings_from_env()     ! near the top of your program
+```
+
+**You call it; the library never does.** Reading the environment lazily on first access would be a
+data race the first time two threads touched a setting, so there is no hidden call. Put it where
+you would put your own `parquet_set_*` calls: before other threads exist and before any reader,
+writer or table is opened.
+
+**It applies over what is already set — it does not reset.** A variable that is absent leaves its
+knob alone, so calling it *after* your own setters lets the environment override them, and calling
+it *before* lets your code win. That choice is yours to make and the library has no opinion.
+
+One variable per knob, named `PARQUET_FORTRAN_` plus the knob's name in capitals — the same name
+`parquet_print_settings` prints:
+
+| variable | accepts |
+|---|---|
+| `PARQUET_FORTRAN_THREADS` | integer >= 1 — sets the three below at once |
+| `PARQUET_FORTRAN_ARROW_THREADS` | integer >= 1 |
+| `PARQUET_FORTRAN_SORT_THREADS` | integer >= 0 (`0` = automatic) |
+| `PARQUET_FORTRAN_PREFETCH_THREADS` | integer >= 0 (`0` = automatic) |
+| `PARQUET_FORTRAN_SORT_PARALLEL_MIN_ROWS` | integer >= 0 (`0` = built-in) |
+| `PARQUET_FORTRAN_SORT_COUNTING_PATH` | `true`/`false`/`1`/`0` |
+| `PARQUET_FORTRAN_SORT_COUNTING_BUCKET_LIMIT` | integer >= 0 (`0` = built-in) |
+| `PARQUET_FORTRAN_DEFAULT_COMPRESSION` | `uncompressed`/`snappy`/`gzip`/`zstd`/`brotli`/`lz4` |
+| `PARQUET_FORTRAN_DEFAULT_COMPRESSION_LEVEL` | integer |
+| `PARQUET_FORTRAN_DEFAULT_USE_THREADS` | `true`/`false`/`1`/`0` |
+| `PARQUET_FORTRAN_TARGET_ROW_GROUP_BYTES` | integer >= 0 (`0` = built-in) |
+| `PARQUET_FORTRAN_STATISTICS_PRESCREEN` | `true`/`false`/`1`/`0` |
+| `PARQUET_FORTRAN_VERBOSITY` | `normal`/`silent`/`errors_only` |
+| `PARQUET_FORTRAN_MESSAGE_STREAM` | `stdout`/`stderr` |
+
+`PARQUET_FORTRAN_THREADS` is `parquet_set_threads` and is applied **before** the other three, so a
+specific variable always overrides it — `PARQUET_FORTRAN_THREADS=8 PARQUET_FORTRAN_SORT_THREADS=2`
+gives eight threads to Arrow and the prefetch, and two to sorting, whichever order the two appear in
+your shell.
+
+```bash
+export PARQUET_FORTRAN_THREADS=4
+export PARQUET_FORTRAN_SORT_THREADS=1          # ...but keep sorting serial
+export PARQUET_FORTRAN_DEFAULT_COMPRESSION=gzip
+export PARQUET_FORTRAN_DEFAULT_COMPRESSION_LEVEL=6
+export PARQUET_FORTRAN_VERBOSITY=silent
+./my_program
+```
+
+Tokens and booleans are case-insensitive, and surrounding blanks are ignored everywhere.
+
+**A bad value aborts, naming the variable** — `PARQUET_FORTRAN_VERBOSITY=loud` stops the program
+with a message saying so, rather than being ignored. Numbers are parsed strictly: `4` and `+4` and
+` 4 ` are the same thing, while `4.5`, `4x` and `4 8` are all errors. That last one matters more
+than it looks — a shell variable that expands to two words would otherwise apply the first number
+and look like it worked.
+
+**One exception to "a bad value aborts": an empty variable is treated as unset.**
+`PARQUET_FORTRAN_VERBOSITY=` does nothing at all, and neither does a variable set to only spaces.
+This is worth knowing when a variable seems to be ignored — `export PARQUET_FORTRAN_VERBOSITY=$LEVEL`
+with `LEVEL` itself unset produces exactly that, and is skipped silently. `parquet_print_settings()`
+is the quickest way to see what the environment actually did.
+
 ## Restoring and inspecting
 
 `parquet_reset_settings()` restores every setting to what it was before your program changed it. For
-the thread pool that means the capacity captured on the **first** `parquet_set_max_threads` call, so
+the thread pool that means the capacity captured on the **first** `parquet_set_arrow_threads` call, so
 several sets followed by one reset land back where you started. If you never changed a setting,
 resetting it does nothing — the library will not resize a pool to a default it does not get to
 choose.
@@ -318,8 +407,8 @@ second copy of a number that has exactly one correct value. See
 
 ## A note on `parquet_core`
 
-`parquet_set_max_threads` used to live in the internal `parquet_core` module. It moved here without
+`parquet_set_arrow_threads` used to live in the internal `parquet_core` module. It moved here without
 changing its name or behaviour, so `use parquet` code is unaffected. Only code that imported it
-narrowly from the internal module (`use parquet_core, only: parquet_set_max_threads`) would need to
+narrowly from the internal module (`use parquet_core, only: parquet_set_arrow_threads`) would need to
 change — and `parquet_core` is documented as internal and outside the library's API-stability
 promise precisely so that this kind of tidying is possible. `use parquet` is the supported spelling.

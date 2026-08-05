@@ -183,7 +183,7 @@ contains
                 test_reopen_writer_without_closing_finalizes_schema_enforced), &
             new_unittest("use_threads=.false. on writer and reader still round-trips", &
                 test_use_threads_false_still_round_trips), &
-            new_unittest("parquet_set_max_threads with a valid value does not break a round-trip", &
+            new_unittest("parquet_set_arrow_threads with a valid value does not break a round-trip", &
                 test_set_max_threads_valid_value_does_not_break_round_trip), &
             new_unittest("writing a numeric kind that differs from the schema's declared data_type " // &
                 "converts to match it", test_write_cross_type_schema_coercion), &
@@ -2385,7 +2385,7 @@ contains
             "use_threads=.false. on the writer and/or reader broke the round-trip")
     end subroutine test_use_threads_false_still_round_trips
 
-    !> parquet_set_max_threads is a global Arrow thread-pool capacity knob,
+    !> parquet_set_arrow_threads is a global Arrow thread-pool capacity knob,
     !> not something that changes any file's content -- a valid call must be
     !> a no-op as far as write/read correctness goes.
     subroutine test_set_max_threads_valid_value_does_not_break_round_trip(error)
@@ -2398,7 +2398,7 @@ contains
 
         values = [(i, i=1,5)]
 
-        call parquet_set_max_threads(2)
+        call parquet_set_arrow_threads(2)
 
         call parquet_open_writer(writer, out_file)
         call parquet_write_column(writer, "v", values)
@@ -2409,7 +2409,7 @@ contains
         call parquet_close_reader(reader)
 
         call check(error, all(read_back == values), &
-            "parquet_set_max_threads(2) broke a subsequent write/read round-trip")
+            "parquet_set_arrow_threads(2) broke a subsequent write/read round-trip")
     end subroutine test_set_max_threads_valid_value_does_not_break_round_trip
 
     !> parquet_write_column is generic over the *declared kind of the `values`

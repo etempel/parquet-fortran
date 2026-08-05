@@ -327,7 +327,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly-called printers (`%print_stat`, `%print_schema_info`, `parquet_string_column`'s
   printers, `parquet_open_reader(..., print_stat=.true.)`) into no-ops, which is what a global
   output control means. The development-build notice is now an ordinary remark rather than a
-  `WARNING`. `parquet_reset_settings` restores what a program changed, and `parquet_print_settings`
+  `WARNING`. **Five performance knobs** complete the set: `parquet_set_sort_parallel_min_rows` is the
+  row count below which a sort refuses to thread at all, `parquet_set_sort_counting_path` and
+  `parquet_set_sort_counting_bucket_limit` govern the integer counting fast path (the limit bounds a
+  key's value *range*, not its cardinality, and is the memory control — `n` buckets cost `8n` bytes),
+  `parquet_set_target_row_group_bytes` sizes the row groups of a writer opened without an explicit
+  `chunk_size=`, and `parquet_set_statistics_prescreen` controls whether a filtered read skips row
+  groups its footer statistics rule out. All three numeric knobs take either integer kind and accept
+  `0` for "restore the built-in value". `parquet_reset_settings` restores what a program changed, and `parquet_print_settings`
   dumps every setting and limit to a unit. The caps the library enforces on filter rules, sort keys and MAML
   lines are published as read-only constants (`parquet_max_filter_rule_len`,
   `parquet_max_filter_depth`, `parquet_max_filter_nodes`, `parquet_max_sort_keys`,

@@ -11,7 +11,7 @@
 !>
 !> * **Correctness is tested as an EQUALITY, not against hand-written expectations.** Almost every
 !>   test reads the same fixture twice under the same expression -- once normally, once with
-!>   parquet_debug_set_disable_statistics_prescreen(1) -- and asserts the two results are
+!>   parquet_set_statistics_prescreen(.false.) -- and asserts the two results are
 !>   element-wise identical. A hand-written expectation only proves the answer matches what the
 !>   test author believed; the A/B comparison proves pruning changed nothing, which is the actual
 !>   contract.
@@ -22,17 +22,18 @@
 !>   under `not`, ...) assert exactly zero.
 !>
 !> **This suite runs its tests SEQUENTIALLY** (test/run_tester.f90's suite_is_safe_to_parallelize
-!> excludes it). Both debug hooks are process-global -- parquet_reader's components are private, so
-!> a test cannot pass a reader handle to a per-reader query, and a pruned-row-group count does not
-!> belong in the public API just to make one testable. Running concurrently would let one test read
-!> another's count.
+!> excludes it). Both the screen setting and the pruned-row-group count are process-global -- a
+!> `parquet_settings` knob is a saved module variable, and parquet_reader's components are private,
+!> so a test cannot pass a reader handle to a per-reader query and a pruned count does not belong in
+!> the public API just to make one testable. Running concurrently would let one test turn the screen
+!> off under another, or read another's count.
 !>
 !> Every test writes its own fixture under test_run/, with its own filename, for the reason
 !> CLAUDE.md gives: shared fixture paths fail intermittently and a green run does not disprove it.
 module test_filter_screen
     use parquet
     use iso_fortran_env, only : int32, int64, real32, real64
-    use iso_c_binding, only : c_int, c_long_long
+    use iso_c_binding, only : c_long_long
     use ieee_arithmetic, only : ieee_value, ieee_quiet_nan
     use testdrive, only : new_unittest, unittest_type, error_type, check
     !
@@ -40,16 +41,11 @@ module test_filter_screen
     private
     public :: collect_tests_filter_screen
     !
-    !> The two test-only hooks into the screen (parquet_wrapper.cpp). Declared locally here rather
-    !> than in src/parquet_bindings.f90 -- the same convention every other parquet_debug_* hook
-    !> follows, so no debug entry point ever becomes part of the library's own interface.
+    !> The test-only observation hooks (parquet_wrapper.cpp). Declared locally here rather than in
+    !> src/parquet_bindings.f90 -- the same convention every other parquet_debug_* hook follows, so
+    !> no debug entry point ever becomes part of the library's own interface. Turning the screen
+    !> itself off is no longer a hook but an ordinary setting, parquet_set_statistics_prescreen.
     interface
-        !> Forces every row group live, so the same fixture can be read with and without pruning.
-        subroutine parquet_debug_set_disable_statistics_prescreen(enable) &
-            bind(C, name="parquet_debug_set_disable_statistics_prescreen")
-            import :: c_int
-            integer(c_int), value :: enable !! nonzero disables the screen.
-        end subroutine parquet_debug_set_disable_statistics_prescreen
         !> How many row groups the most recent screen in this process ruled out.
         function parquet_debug_get_row_groups_pruned() result(res) &
             bind(C, name="parquet_debug_get_row_groups_pruned")
@@ -158,7 +154,7 @@ contains
         type(parquet_filter) :: filt
         integer(int64) :: nrows
 
-        call parquet_debug_set_disable_statistics_prescreen(merge(0_c_int, 1_c_int, screen_on))
+        call parquet_set_statistics_prescreen(screen_on)
         call filt%add(rule)
         call parquet_open_reader(reader, file, filter=filt)
         pruned = parquet_debug_get_row_groups_pruned()
@@ -166,7 +162,7 @@ contains
         allocate(values(nrows))
         if (nrows > 0) call parquet_read_column(reader, column, values)
         call parquet_close_reader(reader)
-        call parquet_debug_set_disable_statistics_prescreen(0_c_int)
+        call parquet_set_statistics_prescreen(.true.)
     end subroutine read_under_rule
     !
     !> The equality harness itself: reads `column` twice under `rule`, once screened and once not,
@@ -710,7 +706,7 @@ contains
         type(parquet_filter) :: filt
         integer(int64) :: nrows
 
-        call parquet_debug_set_disable_statistics_prescreen(merge(0_c_int, 1_c_int, screen_on))
+        call parquet_set_statistics_prescreen(screen_on)
         call filt%add(rule)
         call parquet_open_reader(reader, file, filter=filt)
         pruned = parquet_debug_get_row_groups_pruned()
@@ -718,7 +714,7 @@ contains
         allocate(values(nrows))
         if (nrows > 0) call parquet_read_column(reader, "main.id", values, null_value=-999_int32)
         call parquet_close_reader(reader)
-        call parquet_debug_set_disable_statistics_prescreen(0_c_int)
+        call parquet_set_statistics_prescreen(.true.)
     end subroutine read_struct_leaf
     !
     !> A file whose column chunks carry no statistics at all must be read exactly as before F4 --
@@ -734,7 +730,7 @@ contains
         ! Column "c" is the null-free companion of "v"; the file is written with statistics
         ! disabled outright, so every gate in the screen has to decline from the first test.
         call filt%add("c > 250.0")
-        call parquet_debug_set_disable_statistics_prescreen(0_c_int)
+        call parquet_set_statistics_prescreen(.true.)
         call parquet_open_reader(reader, file, filter=filt)
         pruned = parquet_debug_get_row_groups_pruned()
         call parquet_get_nrows(reader, n_screened)
@@ -742,14 +738,14 @@ contains
         if (n_screened > 0) call parquet_read_column(reader, "c", screened)
         call parquet_close_reader(reader)
 
-        call parquet_debug_set_disable_statistics_prescreen(1_c_int)
+        call parquet_set_statistics_prescreen(.false.)
         call parquet_open_reader(reader, file, filter=filt)
         pruned_off = parquet_debug_get_row_groups_pruned()
         call parquet_get_nrows(reader, n_plain)
         allocate(plain(n_plain))
         if (n_plain > 0) call parquet_read_column(reader, "c", plain)
         call parquet_close_reader(reader)
-        call parquet_debug_set_disable_statistics_prescreen(0_c_int)
+        call parquet_set_statistics_prescreen(.true.)
 
         call check(error, n_screened == n_plain, "no statistics: pruned and unpruned row counts must agree")
         if (allocated(error)) return
@@ -904,19 +900,19 @@ contains
         call parquet_close_writer(writer)
 
         call filt%add("id > 40")
-        call parquet_debug_set_disable_statistics_prescreen(0_c_int)
+        call parquet_set_statistics_prescreen(.true.)
         call parquet_open_reader(reader, file, filter=filt)
         pruned_screened = parquet_debug_get_row_groups_pruned()
         call parquet_read_array_row_mode(reader, "vec", row_screened, 1)
         call parquet_read_array_element_mode(reader, "vec", elem_screened, 2)
         call parquet_close_reader(reader)
 
-        call parquet_debug_set_disable_statistics_prescreen(1_c_int)
+        call parquet_set_statistics_prescreen(.false.)
         call parquet_open_reader(reader, file, filter=filt)
         call parquet_read_array_row_mode(reader, "vec", row_plain, 1)
         call parquet_read_array_element_mode(reader, "vec", elem_plain, 2)
         call parquet_close_reader(reader)
-        call parquet_debug_set_disable_statistics_prescreen(0_c_int)
+        call parquet_set_statistics_prescreen(.true.)
 
         call check(error, all(row_screened == row_plain), "row mode under pruning must match an unpruned read")
         if (allocated(error)) return
@@ -943,7 +939,7 @@ contains
 
         call write_screen_fixture(file, 100, 10)
         call filt%add("id > 75")
-        call parquet_debug_set_disable_statistics_prescreen(0_c_int)
+        call parquet_set_statistics_prescreen(.true.)
         call parquet_open_reader(reader, file, filter=filt, sample_fraction=0.5_real64, sample_seed=7)
         pruned = parquet_debug_get_row_groups_pruned()
         call parquet_get_nrows(reader, n_screened)
@@ -951,13 +947,13 @@ contains
         if (n_screened > 0) call parquet_read_column(reader, "id", screened)
         call parquet_close_reader(reader)
 
-        call parquet_debug_set_disable_statistics_prescreen(1_c_int)
+        call parquet_set_statistics_prescreen(.false.)
         call parquet_open_reader(reader, file, filter=filt, sample_fraction=0.5_real64, sample_seed=7)
         call parquet_get_nrows(reader, n_plain)
         allocate(plain(n_plain))
         if (n_plain > 0) call parquet_read_column(reader, "id", plain)
         call parquet_close_reader(reader)
-        call parquet_debug_set_disable_statistics_prescreen(0_c_int)
+        call parquet_set_statistics_prescreen(.true.)
 
         call check(error, n_screened == n_plain, "filter + sample under pruning: same row count as unpruned")
         if (allocated(error)) return
@@ -984,18 +980,18 @@ contains
         call write_screen_fixture(file, 100, 10)
         call filt%add("id > 75")
         call srt%add("id desc")
-        call parquet_debug_set_disable_statistics_prescreen(0_c_int)
+        call parquet_set_statistics_prescreen(.true.)
         call parquet_open_reader(reader, file, filter=filt, sort_by=srt)
         pruned = parquet_debug_get_row_groups_pruned()
         call parquet_get_nrows(reader, n)
         call parquet_read_column(reader, "payload", screened)
         call parquet_close_reader(reader)
 
-        call parquet_debug_set_disable_statistics_prescreen(1_c_int)
+        call parquet_set_statistics_prescreen(.false.)
         call parquet_open_reader(reader, file, filter=filt, sort_by=srt)
         call parquet_read_column(reader, "payload", plain)
         call parquet_close_reader(reader)
-        call parquet_debug_set_disable_statistics_prescreen(0_c_int)
+        call parquet_set_statistics_prescreen(.true.)
 
         call check(error, n == 25_int64, "filter + sort under pruning: expected 25 surviving rows")
         if (allocated(error)) return

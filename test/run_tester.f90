@@ -124,18 +124,23 @@ program tester
     !
 contains
 
-    !> "sorting" is excluded for the same reason as "filter_screen": its counting-fast-path test
-    !> drives parquet_debug_set_disable_sort_counting_path, a process-global hook. Run
-    !> concurrently, a sibling test could disable the counting path during that test's own "fast"
-    !> measurement, leaving it comparing the comparator path against itself -- which PASSES while
-    !> testing nothing, the failure mode this project treats as worst. The suite is pure in-memory
-    !> work and runs in well under a second, so the lost parallelism costs nothing.
+    !> "sorting" is excluded for the same reason as "filter_screen": its counting-fast-path and
+    !> parallel-threshold tests drive parquet_set_sort_counting_path and
+    !> parquet_set_sort_parallel_min_rows, which are process-global. **Promoting those from debug
+    !> hooks to real settings did not weaken this** -- a parquet_settings knob is a saved module
+    !> variable, exactly as process-global as the C++ static it replaced, so the exclusion is as
+    !> necessary as it ever was. Run concurrently, a sibling test could turn the counting path off
+    !> during that test's own "fast" measurement, leaving it comparing the comparator path against
+    !> itself -- which PASSES while testing nothing, the failure mode this project treats as worst.
+    !> The suite is pure in-memory work and runs in well under a second, so the lost parallelism
+    !> costs nothing.
     !>
-    !> "filter_screen" is excluded for a different reason from the four below: its two debug hooks
-    !> into the row-group statistics screen (parquet_debug_set_disable_statistics_prescreen /
-    !> parquet_debug_get_row_groups_pruned) are process-global, since parquet_reader's components
-    !> are private and a pruned-row-group count does not belong in the public API. Run concurrently,
-    !> one test would read another's count and disable another's screen mid-run.
+    !> "filter_screen" is excluded for a different reason from the four below: the screen setting
+    !> (parquet_set_statistics_prescreen) and the pruned-row-group count
+    !> (parquet_debug_get_row_groups_pruned) are both process-global -- the first because every
+    !> setting is, the second because parquet_reader's components are private and a pruned-row-group
+    !> count does not belong in the public API. Run concurrently, one test would read another's count
+    !> and turn off another's screen mid-run.
     !>
     !> "writing", "errors", "metadata" and "maml" contain tests that call
     !> execute_command_line (fork()+exec() under the hood) to drive the

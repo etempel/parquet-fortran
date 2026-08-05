@@ -31,10 +31,10 @@
 !>
 !> User guide: `doc/pages/settings.md`.
 module parquet_settings
-    use iso_fortran_env, only: output_unit, error_unit
-    use iso_c_binding, only: c_int
+    use iso_fortran_env, only: output_unit, error_unit, int32, int64
+    use iso_c_binding, only: c_int, c_int64_t
     use parquet_bindings, only: parquet_set_thread_pool_capacity, parquet_get_thread_pool_capacity, &
-        parquet_push_output_settings
+        parquet_push_output_settings, parquet_push_performance_settings
     implicit none
     private
     !
@@ -57,6 +57,11 @@ module parquet_settings
     public :: parquet_set_default_use_threads, parquet_get_default_use_threads
     public :: parquet_set_verbosity, parquet_get_verbosity
     public :: parquet_set_message_stream, parquet_get_message_stream
+    public :: parquet_set_sort_parallel_min_rows, parquet_get_sort_parallel_min_rows
+    public :: parquet_set_sort_counting_path, parquet_get_sort_counting_path
+    public :: parquet_set_sort_counting_bucket_limit, parquet_get_sort_counting_bucket_limit
+    public :: parquet_set_target_row_group_bytes, parquet_get_target_row_group_bytes
+    public :: parquet_set_statistics_prescreen, parquet_get_statistics_prescreen
     !
     !> The three output channels, and the ONLY places `verbosity`/`message_stream` are read. Public
     !! here so every module that emits can reach them, `private ::` in the facade so no user sees
@@ -114,6 +119,14 @@ module parquet_settings
     !! no compression arguments AND no compression setting -- see parquet_resolve_writer_compression.
     integer, parameter :: level_zstd_default = 3
     !
+    !> The built-in values of the three numeric C++-side knobs, i.e. what `0` resolves to and what a
+    !! getter reports after a reset. Each MUST equal the corresponding global's initialiser in
+    !! src/parquet_wrapper.cpp (`kSortParallelMinRows`, `kSortCountingBucketLimit`,
+    !! `kTargetRowGroupBytes`), which is what applies before this module has pushed anything.
+    integer(int64), parameter :: sort_parallel_min_rows_builtin = 8192_int64
+    integer(int64), parameter :: sort_counting_bucket_limit_builtin = 4194304_int64 !! 2**22 buckets.
+    integer(int64), parameter :: target_row_group_bytes_builtin = 268435456_int64   !! 256 MiB.
+    !
     ! ---- Mutable settings state ----
     !
     !> Arrow's CPU thread-pool capacity as it stood before the first `parquet_set_max_threads` call,
@@ -146,6 +159,44 @@ module parquet_settings
     integer, save :: cfg_verbosity = verb_normal
     !> Which stream the library's own messages go to. Read only by the emit channels.
     integer, save :: cfg_message_stream = stream_stdout
+    !
+    !> The five knobs below live on the C++ side, and every one of them stores `0` (numbers) for
+    !! "use the built-in default". The sentinel is resolved HERE, in push_performance_settings, so
+    !! parquet_wrapper.cpp receives a usable number and never has to know a default -- but its own
+    !! globals still need initialisers for the window before anything is pushed, which is why the
+    !! three `*_builtin` parameters below must equal the initialisers of `g_sort_parallel_min_rows`,
+    !! `g_sort_counting_bucket_limit` and `g_target_row_group_bytes` there (feature_risks.md
+    !! Risk-42).
+    integer(int64), save :: cfg_sort_parallel_min_rows = 0
+    !> Whether the sort's integer counting fast path may be taken at all.
+    logical, save :: cfg_sort_counting_path = .true.
+    !> Largest key value RANGE (not cardinality) the counting path will accept. `0` = built-in.
+    integer(int64), save :: cfg_sort_counting_bucket_limit = 0
+    !> Target size in bytes of one auto-sized row group. `0` = built-in.
+    integer(int64), save :: cfg_target_row_group_bytes = 0
+    !> Whether the reader screens row groups against their footer statistics before reading them.
+    logical, save :: cfg_statistics_prescreen = .true.
+    !
+    ! ---- Generic setters over both integer kinds ----
+    !
+    !> Sets the row count below which a sort refuses to use threads at all. See
+    !> parquet_set_sort_parallel_min_rows_int64 for the full description; both kinds share it.
+    interface parquet_set_sort_parallel_min_rows
+        module procedure parquet_set_sort_parallel_min_rows_int32
+        module procedure parquet_set_sort_parallel_min_rows_int64
+    end interface parquet_set_sort_parallel_min_rows
+    !> Sets the largest key value range the sort's counting fast path will accept. See
+    !> parquet_set_sort_counting_bucket_limit_int64 for the full description.
+    interface parquet_set_sort_counting_bucket_limit
+        module procedure parquet_set_sort_counting_bucket_limit_int32
+        module procedure parquet_set_sort_counting_bucket_limit_int64
+    end interface parquet_set_sort_counting_bucket_limit
+    !> Sets the byte size an auto-sized row group aims for. See
+    !> parquet_set_target_row_group_bytes_int64 for the full description.
+    interface parquet_set_target_row_group_bytes
+        module procedure parquet_set_target_row_group_bytes_int32
+        module procedure parquet_set_target_row_group_bytes_int64
+    end interface parquet_set_target_row_group_bytes
     !
 contains
 
@@ -422,6 +473,162 @@ contains
         end if
     end subroutine parquet_get_message_stream
 
+    !> Sets the row count below which a sort refuses to use threads at all, however many `threads=`
+    !> asks for. Pass `0` to restore the built-in 8192.
+    !>
+    !> Threading a small array costs more than the sort saves. The built-in value is measured rather
+    !> than guessed -- an 8-thread argsort of random real64 against the serial one, best of 15 rounds
+    !> each, on an 8-core arm64 laptop: 2k rows 0.86x (threading LOSES), 8k 1.48x, 16k 2.18x, 32k
+    !> 2.50x, 1M 3.23x -- so break-even sits between 2k and 8k. Lower it only against a measurement
+    !> of your own hardware and data; set too low, every trivial sort pays for threads it cannot use.
+    !>
+    !> Available in both integer kinds; a row count can exceed int32.
+    subroutine parquet_set_sort_parallel_min_rows_int64(n)
+        integer(int64), intent(in) :: n !! row threshold, or 0 for the built-in default; must be >= 0.
+
+        if (n < 0) error stop "parquet_set_sort_parallel_min_rows: n must be >= 0 " // &
+            "(0 restores the built-in default)"
+        cfg_sort_parallel_min_rows = n
+        call push_performance_settings()
+    end subroutine parquet_set_sort_parallel_min_rows_int64
+
+    !> int32 form of parquet_set_sort_parallel_min_rows_int64 -- see it for what the value means.
+    subroutine parquet_set_sort_parallel_min_rows_int32(n)
+        integer(int32), intent(in) :: n !! row threshold, or 0 for the built-in default; must be >= 0.
+
+        call parquet_set_sort_parallel_min_rows_int64(int(n, kind=int64))
+    end subroutine parquet_set_sort_parallel_min_rows_int32
+
+    !> Reports the row count below which a sort refuses to thread -- the EFFECTIVE value, so a
+    !> program that never set it (or reset it) is told 8192 rather than the `0` that is stored.
+    integer(int64) function parquet_get_sort_parallel_min_rows() result(n)
+
+        n = cfg_sort_parallel_min_rows
+        if (n <= 0) n = sort_parallel_min_rows_builtin
+    end function parquet_get_sort_parallel_min_rows
+
+    !> Enables or disables the sort's integer counting fast path.
+    !>
+    !> The counting path is a second implementation that must produce exactly the same permutation as
+    !> the comparator path, and it is the one place in the sort engine where a wrong answer would be
+    !> fast rather than slow. Turning it off is how a test compares the two on one fixture; there is
+    !> no performance reason for a program to do so.
+    !>
+    !> The full rule, in this order: the counting path is used when this flag is on **and** the key's
+    !> value range fits `parquet_set_sort_counting_bucket_limit` **and** the key is a single,
+    !> null-free integer key. Turning the flag off overrides the limit; raising the limit does
+    !> nothing while the flag is off.
+    subroutine parquet_set_sort_counting_path(enabled)
+        logical, intent(in) :: enabled !! .true. (the default) allows the fast path.
+
+        cfg_sort_counting_path = enabled
+        call push_performance_settings()
+    end subroutine parquet_set_sort_counting_path
+
+    !> Reports whether the sort's integer counting fast path is allowed.
+    logical function parquet_get_sort_counting_path() result(enabled)
+
+        enabled = cfg_sort_counting_path
+    end function parquet_get_sort_counting_path
+
+    !> Sets the largest key value RANGE for which the sort's counting fast path is taken. Pass `0`
+    !> to restore the built-in 4194304 (2**22).
+    !>
+    !> **Range, not cardinality** -- the bound is `max(key) - min(key)`, so a thousand values spread
+    !> over a billion is far outside a limit that a million densely-packed values sit inside. This
+    !> distinction has already misled one test author here (feature_risks.md Risk-39).
+    !>
+    !> The number IS the memory control: `n` buckets costs `8n` bytes of counters, so the built-in
+    !> value caps the counting path at 32 MB. Raising it trades memory for speed on wide-ranged
+    !> integer keys; it does nothing at all while parquet_set_sort_counting_path is `.false.`.
+    !>
+    !> Available in both integer kinds; an int64 key's range can exceed int32.
+    subroutine parquet_set_sort_counting_bucket_limit_int64(n)
+        integer(int64), intent(in) :: n !! bucket ceiling, or 0 for the built-in default; must be >= 0.
+
+        if (n < 0) error stop "parquet_set_sort_counting_bucket_limit: n must be >= 0 " // &
+            "(0 restores the built-in default)"
+        cfg_sort_counting_bucket_limit = n
+        call push_performance_settings()
+    end subroutine parquet_set_sort_counting_bucket_limit_int64
+
+    !> int32 form of parquet_set_sort_counting_bucket_limit_int64 -- see it for what the value means.
+    subroutine parquet_set_sort_counting_bucket_limit_int32(n)
+        integer(int32), intent(in) :: n !! bucket ceiling, or 0 for the built-in default; must be >= 0.
+
+        call parquet_set_sort_counting_bucket_limit_int64(int(n, kind=int64))
+    end subroutine parquet_set_sort_counting_bucket_limit_int32
+
+    !> Reports the counting path's bucket ceiling -- the EFFECTIVE value, so a program that never set
+    !> it is told 4194304 rather than the `0` that is stored.
+    integer(int64) function parquet_get_sort_counting_bucket_limit() result(n)
+
+        n = cfg_sort_counting_bucket_limit
+        if (n <= 0) n = sort_counting_bucket_limit_builtin
+    end function parquet_get_sort_counting_bucket_limit
+
+    !> Sets the size in BYTES an auto-sized row group aims for. Pass `0` to restore the built-in
+    !> 268435456 (256 MiB).
+    !>
+    !> Applies only when a writer is opened without an explicit `chunk_size=`; a caller-chosen row
+    !> count is never overridden. Sizing by bytes rather than by a flat row count is what makes a
+    !> table of narrow int32 columns and a table of wide vector columns produce row groups of
+    !> comparable size, which is what Parquet's own row-group guidance (roughly 128 MB to 1 GB) is
+    !> about and what drives per-row-group compression efficiency and decode cost.
+    !>
+    !> Three bounds the library applies afterwards are NOT settable: a floor of 1000 rows, a ceiling
+    !> of 10,000,000 rows, and the int32 element-count ceiling a vector column imposes. A target so
+    !> small that even the floor would overshoot it fourfold abandons the floor rather than the
+    !> target, down to a single row per row group.
+    !>
+    !> Available in both integer kinds; a byte target can exceed int32.
+    subroutine parquet_set_target_row_group_bytes_int64(n)
+        integer(int64), intent(in) :: n !! byte target, or 0 for the built-in default; must be >= 0.
+
+        if (n < 0) error stop "parquet_set_target_row_group_bytes: n must be >= 0 " // &
+            "(0 restores the built-in default)"
+        cfg_target_row_group_bytes = n
+        call push_performance_settings()
+    end subroutine parquet_set_target_row_group_bytes_int64
+
+    !> int32 form of parquet_set_target_row_group_bytes_int64 -- see it for what the value means.
+    subroutine parquet_set_target_row_group_bytes_int32(n)
+        integer(int32), intent(in) :: n !! byte target, or 0 for the built-in default; must be >= 0.
+
+        call parquet_set_target_row_group_bytes_int64(int(n, kind=int64))
+    end subroutine parquet_set_target_row_group_bytes_int32
+
+    !> Reports the row-group byte target -- the EFFECTIVE value, so a program that never set it is
+    !> told 268435456 rather than the `0` that is stored.
+    integer(int64) function parquet_get_target_row_group_bytes() result(n)
+
+        n = cfg_target_row_group_bytes
+        if (n <= 0) n = target_row_group_bytes_builtin
+    end function parquet_get_target_row_group_bytes
+
+    !> Enables or disables the reader's row-group statistics screen.
+    !>
+    !> With a filter active, the reader reads each row group's footer statistics first and skips the
+    !> row groups the filter provably cannot match -- no column data is read for those at all. It
+    !> changes how much of the file is read and nothing else: the rows returned are identical either
+    !> way, which is exactly what makes an A/B comparison the right test for it and what turning it
+    !> off is for.
+    !>
+    !> Leaving it on is right for essentially every program. Disable it only to compare the two
+    !> paths, or if a file's statistics are known to be untrustworthy.
+    subroutine parquet_set_statistics_prescreen(enabled)
+        logical, intent(in) :: enabled !! .true. (the default) lets the reader prune row groups.
+
+        cfg_statistics_prescreen = enabled
+        call push_performance_settings()
+    end subroutine parquet_set_statistics_prescreen
+
+    !> Reports whether the reader's row-group statistics screen is enabled.
+    logical function parquet_get_statistics_prescreen() result(enabled)
+
+        enabled = cfg_statistics_prescreen
+    end function parquet_get_statistics_prescreen
+
     !> Whether output a caller explicitly asked for should be skipped -- what every solicited print
     !> procedure (`%print_stat`, `%print_schema_info`, `parquet_string_column`'s printers) asks
     !> before writing anything.
@@ -498,6 +705,26 @@ contains
             int(cfg_message_stream, kind=c_int))
     end subroutine push_output_settings
 
+    !> Mirrors the five performance knobs to the C++ side, which owns the sort engine, the row-group
+    !> sizing and the statistics screen.
+    !>
+    !> **The `0`-means-built-in sentinel is resolved here**, via the getters, so parquet_wrapper.cpp
+    !> receives numbers it can use directly and holds no `x > 0 ? x : default` conditional of its
+    !> own. That is what keeps each default spelled in exactly one place per side, and the C++ side's
+    !> initialisers are only ever what applies before the first push.
+    !>
+    !> One push rather than five, so parquet_reset_settings cannot restore some knobs and leave
+    !> others stale on the far side of the boundary (feature_risks.md Risk-42).
+    subroutine push_performance_settings()
+
+        call parquet_push_performance_settings( &
+            int(parquet_get_sort_parallel_min_rows(), kind=c_int64_t), &
+            int(merge(1, 0, cfg_sort_counting_path), kind=c_int), &
+            int(parquet_get_sort_counting_bucket_limit(), kind=c_int64_t), &
+            int(parquet_get_target_row_group_bytes(), kind=c_int64_t), &
+            int(merge(1, 0, cfg_statistics_prescreen), kind=c_int))
+    end subroutine push_performance_settings
+
     !> Lowercases ASCII letters. A local copy rather than parquet_to_lower, because that one lives
     !> in parquet_core, which uses THIS module -- importing it back would be a circular dependency.
     subroutine fold_ascii_lower(text, out)
@@ -535,7 +762,13 @@ contains
         cfg_default_use_threads = .true.
         cfg_verbosity = verb_normal
         cfg_message_stream = stream_stdout
+        cfg_sort_parallel_min_rows = 0
+        cfg_sort_counting_path = .true.
+        cfg_sort_counting_bucket_limit = 0
+        cfg_target_row_group_bytes = 0
+        cfg_statistics_prescreen = .true.
         call push_output_settings()
+        call push_performance_settings()
     end subroutine parquet_reset_settings
 
     !> Writes every setting's current value, and every read-only limit, to `unit`.
@@ -558,10 +791,15 @@ contains
         call print_one(u, "arrow_threads", parquet_get_max_threads())
         call print_one(u, "sort_threads", cfg_sort_threads)
         call print_one(u, "prefetch_threads", cfg_prefetch_threads)
+        call print_big(u, "sort_parallel_min_rows", parquet_get_sort_parallel_min_rows())
+        call print_text(u, "sort_counting_path", merge("true ", "false", cfg_sort_counting_path))
+        call print_big(u, "sort_counting_bucket_limit", parquet_get_sort_counting_bucket_limit())
         call parquet_get_default_compression(codec)
         call print_text(u, "default_compression", codec)
         call print_one(u, "default_compression_level", parquet_get_default_compression_level())
         call print_text(u, "default_use_threads", merge("true ", "false", cfg_default_use_threads))
+        call print_big(u, "target_row_group_bytes", parquet_get_target_row_group_bytes())
+        call print_text(u, "statistics_prescreen", merge("true ", "false", cfg_statistics_prescreen))
         call parquet_get_verbosity(token)
         call print_text(u, "verbosity", token)
         call parquet_get_message_stream(token)
@@ -590,6 +828,17 @@ contains
 
     !> print_one's counterpart for a value that is not an integer, laid out identically so the two
     !> kinds of row line up in one dump.
+    !> One `name  value` row for a setting whose value is an int64 -- the three C++-side numbers,
+    !> whose byte and range targets are not bounded below huge(int32) and so cannot use print_one.
+    subroutine print_big(u, name, value)
+        integer, intent(in) :: u !! output unit.
+        character(len=*), intent(in) :: name !! setting name, as documented.
+        integer(int64), intent(in) :: value !! its current value.
+        character(len=30) :: padded
+
+        padded = name
+        write (u, '(a,a,1x,i0)') "  ", padded, value
+    end subroutine print_big
     subroutine print_text(u, name, value)
         integer, intent(in) :: u !! output unit.
         character(len=*), intent(in) :: name !! setting name, as documented.

@@ -753,6 +753,63 @@ extern "C"
 		std::fprintf(g_message_stream == 1 ? stderr : stdout, "WARNING: %s\n", msg.c_str());
 	}
 
+	// ==== Performance settings, mirrored from parquet_settings.f90 ====
+	//
+	// Five values this file reads on hot paths: the sort's parallel threshold and its counting
+	// fast-path pair (used by sort_counting_candidate and the four sort entry points), the
+	// row-group byte target (chunk_size_from_bytes_per_row), and the row-group statistics
+	// prescreen (screen_row_groups). Declared here, above every one of those, rather than beside
+	// their push function at the bottom of the file.
+	//
+	// Everything arrives ALREADY RESOLVED, exactly as the output settings above do: Fortran's
+	// "0 means the built-in default" sentinel is resolved on the Fortran side, so there is no
+	// `g_x > 0 ? g_x : kBuiltIn` conditional anywhere below and no second place the default can be
+	// spelled. The initializers here are what applies before Fortran has pushed anything at all,
+	// which is why they MUST equal parquet_settings' own parameters of the same name -- the drift
+	// feature_risks.md Risk-42 is about, and what test/test_settings.f90 asserts by reading each
+	// default back through the C++-observable effect rather than through the Fortran getter alone.
+	//
+	// These replaced three test-only parquet_debug_* override hooks (sort_parallel_min_rows,
+	// disable_sort_counting_path, disable_statistics_prescreen). Do not reintroduce a debug
+	// override for any of them: a real setting already does the job, and two mechanisms for one
+	// behaviour is precisely the drift parquet_settings exists to remove.
+
+	//! Rows below which threading is refused outright: spawning threads to sort a small array costs
+	//! more than the sort saves.
+	//!
+	//! MEASURED, not guessed -- an 8-thread argsort of random real64 against the serial one, best of
+	//! 15 rounds each, on an 8-core arm64 laptop: 2k rows 0.86x (threading LOSES), 8k 1.48x, 16k
+	//! 2.18x, 32k 2.50x, 65k 2.60x, 1M 3.23x. Break-even sits between 2k and 8k, so 8192 is the
+	//! first power of two that is reliably a win. An earlier provisional 65536 was four times too
+	//! conservative and left most real sorts serial for no reason.
+	//!
+	//! Re-measure before changing it. This is a correctness-adjacent default rather than a tuning
+	//! knob: set it too low and every trivial sort pays for threads it cannot use.
+	static constexpr int64_t kSortParallelMinRows = 1 << 13;
+	// Counting-sort ceiling: 4M buckets, i.e. at most 32 MB of int64 counters. Above this the
+	// comparator sort is used instead, which is why the bound is on the key's value RANGE and not
+	// on its row count.
+	static constexpr int64_t kSortCountingBucketLimit = 1 << 22;
+	// Row-group byte target -- see chunk_size_from_bytes_per_row, far below, for what it governs
+	// and for the three bounds that are NOT settings and stay declared beside it.
+	static constexpr int64_t kTargetRowGroupBytes = 256LL * 1024 * 1024; // ~256 MiB
+
+	static int64_t g_sort_parallel_min_rows = kSortParallelMinRows;
+	static bool g_sort_counting_path = true;
+	static int64_t g_sort_counting_bucket_limit = kSortCountingBucketLimit;
+	static int64_t g_target_row_group_bytes = kTargetRowGroupBytes;
+	static bool g_statistics_prescreen = true;
+
+	void parquet_push_performance_settings(int64_t sort_parallel_min_rows, int sort_counting_path,
+		int64_t sort_counting_bucket_limit, int64_t target_row_group_bytes, int statistics_prescreen)
+	{
+		g_sort_parallel_min_rows = sort_parallel_min_rows;
+		g_sort_counting_path = (sort_counting_path != 0);
+		g_sort_counting_bucket_limit = sort_counting_bucket_limit;
+		g_target_row_group_bytes = target_row_group_bytes;
+		g_statistics_prescreen = (statistics_prescreen != 0);
+	}
+
 	// Returns the schema field index of `name`, or throws if it isn't a column.
 	static int64_t get_column_index(const ParquetReaderHandle *reader_handle, const char *name)
 	{
@@ -1703,7 +1760,9 @@ extern "C"
 	// row group either. Callers separately apply any further caps afterward (a known num_rows,
 	// the int32 vector-column ceiling via max_fixed_size_list_col_size/estimate_chunk_size_from_
 	// schema) -- this function only implements the core byte-target arithmetic.
-	static constexpr int64_t kTargetRowGroupBytes = 256LL * 1024 * 1024; // ~256 MiB
+	// The byte target itself is a SETTING (parquet_set_target_row_group_bytes) and so lives with the
+	// other mirrored values near the top of this file, as g_target_row_group_bytes; the three bounds
+	// below are not settable and stay here.
 	static constexpr int64_t kMinAutoChunkSizeRows = 1000;
 	// 10,000,000: high enough that the byte target above governs for any realistically-shaped
 	// table (the row-count cap only starts to bind below ~27 bytes/row -- e.g. a single narrow
@@ -1724,14 +1783,14 @@ extern "C"
 	static int64_t chunk_size_from_bytes_per_row(double bytes_per_row)
 	{
 		auto rows_for_target = static_cast<int64_t>(
-			static_cast<double>(kTargetRowGroupBytes) / std::max(bytes_per_row, 1.0));
+			static_cast<double>(g_target_row_group_bytes) / std::max(bytes_per_row, 1.0));
 
 		if (rows_for_target >= kMinAutoChunkSizeRows)
 		{
 			return std::min<int64_t>(rows_for_target, kMaxAutoChunkSizeRows);
 		}
 		if (static_cast<double>(kMinAutoChunkSizeRows) * bytes_per_row
-			<= static_cast<double>(kTargetRowGroupBytes) * kMaxFloorOvershootFactor)
+			<= static_cast<double>(g_target_row_group_bytes) * kMaxFloorOvershootFactor)
 		{
 			// Floor overshoots the target, but only by a bounded, acceptable amount -- apply it
 			// as usual.
@@ -3402,11 +3461,6 @@ extern "C"
 		return key.descending ? -c : c;
 	}
 
-	// Counting-sort ceiling: 4M buckets, i.e. at most 32 MB of int64 counters. Above this the
-	// comparator sort is used instead, which is why the bound is on the key's value RANGE and not
-	// on its row count.
-	static constexpr int64_t kSortCountingBucketLimit = 1 << 22;
-
 	// True when the single-key integer case can be counting-sorted, filling lo/hi with the key's
 	// value range. Declines a null-bearing key: nulls would need their own tier handling and the
 	// comparator path already does it correctly, so the fast path stays deliberately narrow.
@@ -3425,7 +3479,7 @@ extern "C"
 		}
 		// Unsigned subtraction, so a range spanning both signs cannot overflow the check itself.
 		uint64_t range = static_cast<uint64_t>(hi) - static_cast<uint64_t>(lo);
-		return range < static_cast<uint64_t>(kSortCountingBucketLimit);
+		return range < static_cast<uint64_t>(g_sort_counting_bucket_limit);
 	}
 
 	// The fast path Arrow also takes for small-range integers, and the reason a low-cardinality
@@ -3470,11 +3524,10 @@ extern "C"
 		return perm;
 	}
 
-	// Test-only: forces sort_build_permutation to skip the counting fast path, so a test can prove
-	// the two paths agree on the same fixture rather than trusting that they do. Set via
-	// parquet_debug_set_disable_sort_counting_path; same process-global/subprocess-isolation
-	// reasoning as every other g_debug_* here.
-	static bool g_debug_disable_sort_counting_path = false;
+	// Whether the counting fast path may be taken at all is a SETTING
+	// (parquet_set_sort_counting_path), read as g_sort_counting_path in the four guards below.
+	// Turning it off is how a test proves the two paths agree on the same fixture rather than
+	// trusting that they do.
 
 	// Test-only: counts calls to SortRowLess, so a test can prove a partial sort really is partial.
 	// Returning the first n of a FULL sort is correct and only slower, so every correctness test
@@ -3571,7 +3624,7 @@ extern "C"
 	{
 		sort_check_keys_finalized(keys, n, "sort_build_permutation");
 		int64_t lo = 0, hi = 0;
-		if (!g_debug_disable_sort_counting_path && sort_counting_candidate(keys, n, lo, hi))
+		if (g_sort_counting_path && sort_counting_candidate(keys, n, lo, hi))
 		{
 			return sort_counting_permutation(keys[0], n, lo, hi);
 		}
@@ -3595,33 +3648,16 @@ extern "C"
 	// Fortran side, which is the only side compiled with OpenMP and so the only one that can ask
 	// omp_get_max_threads()/omp_in_parallel(). This function only declines a count it cannot use.
 
-	//! Rows below which threading is refused outright: spawning threads to sort a small array costs
-	//! more than the sort saves.
-	//!
-	//! MEASURED, not guessed -- an 8-thread argsort of random real64 against the serial one, best of
-	//! 15 rounds each, on an 8-core arm64 laptop: 2k rows 0.86x (threading LOSES), 8k 1.48x, 16k
-	//! 2.18x, 32k 2.50x, 65k 2.60x, 1M 3.23x. Break-even sits between 2k and 8k, so 8192 is the
-	//! first power of two that is reliably a win. An earlier provisional 65536 was four times too
-	//! conservative and left most real sorts serial for no reason.
-	//!
-	//! Re-measure before changing it. This is a correctness-adjacent constant rather than a tuning
-	//! knob: set it too low and every trivial sort pays for threads it cannot use.
-	static constexpr int64_t kSortParallelMinRows = 1 << 13;
-
-	// Test-only: lowers the threshold above so a small fixture can actually reach the parallel path.
-	// Without it every test array in the suite is orders of magnitude too small to thread, and a
-	// test asserting "parallel matches serial" would be asserting "serial matches serial" -- the
-	// vacuous shape feature_risks.md Risk-35 exists to warn about. <= 0 restores the real value.
-	static int64_t g_debug_sort_parallel_min_rows = -1;
+	// The row threshold below which threading is refused is a SETTING
+	// (parquet_set_sort_parallel_min_rows) and lives with the other mirrored values near the top of
+	// this file, as g_sort_parallel_min_rows -- read directly below, with no accessor. Lowering it
+	// is how a test small enough to run quickly still reaches the parallel path; without that, a
+	// test asserting "parallel matches serial" would be asserting "serial matches serial", the
+	// vacuous shape feature_risks.md Risk-35 exists to warn about.
 
 	// Test-only: how many threads the last threaded build actually put to work, counting the
 	// calling thread. 1 means the sort ran serially, whatever was asked for.
 	static int64_t g_debug_sort_threads_used = 1;
-
-	static inline int64_t sort_parallel_min_rows()
-	{
-		return g_debug_sort_parallel_min_rows > 0 ? g_debug_sort_parallel_min_rows : kSortParallelMinRows;
-	}
 
 	// Spawns f(k) for k in [lo, hi), returning the first index it could NOT spawn so the caller runs
 	// the remainder on its own thread.
@@ -3662,11 +3698,11 @@ extern "C"
 		// The counting path is already O(n) and already produces this exact permutation, so it wins
 		// over any number of threads: `threads` is a hint, not a command.
 		int64_t lo = 0, hi = 0;
-		if (!g_debug_disable_sort_counting_path && sort_counting_candidate(keys, n, lo, hi))
+		if (g_sort_counting_path && sort_counting_candidate(keys, n, lo, hi))
 		{
 			return sort_counting_permutation(keys[0], n, lo, hi);
 		}
-		int64_t min_rows = sort_parallel_min_rows();
+		int64_t min_rows = g_sort_parallel_min_rows;
 		int64_t min_chunk = min_rows / 4;
 		if (min_chunk < 1) min_chunk = 1;
 		int64_t nchunks = threads;
@@ -3775,7 +3811,7 @@ extern "C"
 		if (count < 0) count = 0;
 		if (count > n) count = n;
 		int64_t lo = 0, hi = 0;
-		if (!g_debug_disable_sort_counting_path && sort_counting_candidate(keys, n, lo, hi))
+		if (g_sort_counting_path && sort_counting_candidate(keys, n, lo, hi))
 		{
 			return sort_counting_permutation(keys[0], n, lo, hi);
 		}
@@ -3794,7 +3830,7 @@ extern "C"
 	{
 		sort_check_keys_finalized(keys, n, "sort_nth_index");
 		int64_t lo = 0, hi = 0;
-		if (!g_debug_disable_sort_counting_path && sort_counting_candidate(keys, n, lo, hi))
+		if (g_sort_counting_path && sort_counting_candidate(keys, n, lo, hi))
 		{
 			auto perm = sort_counting_permutation(keys[0], n, lo, hi);
 			return perm[static_cast<size_t>(nth)];
@@ -5325,12 +5361,12 @@ extern "C"
 		return screen_compare_from_bounds(leaf.op, cmp_lo, cmp_hi, nn, nc, exact, leaf.is_float);
 	}
 
-	// Test-only: forces every row group live, so the same fixture can be read with and without
-	// pruning in one test and the two results compared element for element (the primary F4
-	// correctness test -- equality alone is what proves the optimization changed no answer).
-	// Mirrors parquet_debug_set_disable_sort_counting_path, which exists for exactly the same
-	// reason: a second code path that must produce the same result as the first.
-	static bool g_debug_disable_statistics_prescreen = false;
+	// Whether the screen runs at all is a SETTING (parquet_set_statistics_prescreen), read as
+	// g_statistics_prescreen below. Turning it off forces every row group live, so the same fixture
+	// can be read with and without pruning in one test and the two results compared element for
+	// element -- equality alone is what proves the optimization changed no answer. Mirrors
+	// parquet_set_sort_counting_path, which exists for exactly the same reason: a second code path
+	// that must produce the same result as the first.
 
 	// Test-only: how many row groups the most recent screen_row_groups call ruled out -- see
 	// parquet_debug_get_row_groups_pruned, far below, for why this is process-global rather than
@@ -5352,7 +5388,7 @@ extern "C"
 		reader_handle->row_group_live.assign(static_cast<size_t>(reader_handle->num_row_groups), 1);
 		reader_handle->row_groups_pruned = 0;
 		g_debug_row_groups_pruned = 0;
-		if (g_debug_disable_statistics_prescreen) return;
+		if (!g_statistics_prescreen) return;
 
 		for (int64_t rg = 1; rg <= reader_handle->num_row_groups; ++rg)
 		{
@@ -10358,16 +10394,6 @@ extern "C"
 		g_debug_force_whole_column_read_error = (enable != 0);
 	}
 
-	// Test-only: forces sort_build_permutation to take the comparator path even when the integer
-	// counting fast path would apply (see g_debug_disable_sort_counting_path). The two paths are
-	// meant to produce identical permutations, and this is what lets a test PROVE that on one
-	// fixture instead of assuming it -- the fast path is the only place in the sort engine where a
-	// wrong answer would be fast rather than slow.
-	void parquet_debug_set_disable_sort_counting_path(int enable)
-	{
-		g_debug_disable_sort_counting_path = (enable != 0);
-	}
-
 	// Test-only: arms (and zeroes) the SortRowLess comparison counter. Exists because a partial sort
 	// that is not actually partial is INVISIBLE to every correctness test -- returning the first n of
 	// a full sort is correct and merely slower. A comparison count is what distinguishes them, and it
@@ -10375,8 +10401,8 @@ extern "C"
 	//
 	// Note for anyone writing such a test: the counting fast path performs ZERO comparisons, so a
 	// low-cardinality integer key reports 0 on both the partial and the full path. Use a key the
-	// counting path declines (a real key, or high-cardinality integers), or disable it first with
-	// parquet_debug_set_disable_sort_counting_path.
+	// counting path declines (a real key, or high-cardinality integers), or turn it off first with
+	// parquet_set_sort_counting_path(.false.).
 	void parquet_debug_set_count_sort_comparisons(int enable)
 	{
 		g_debug_count_sort_comparisons = (enable != 0);
@@ -10400,25 +10426,6 @@ extern "C"
 	int64_t parquet_debug_get_sort_threads_used(void)
 	{
 		return g_debug_sort_threads_used;
-	}
-
-	// Test-only: lowers the row count below which threading is refused, so a small fixture can reach
-	// the parallel path at all. Every array in the test suite is orders of magnitude below the real
-	// threshold, so without this a "parallel matches serial" test would be comparing serial with
-	// serial. <= 0 restores the real value.
-	void parquet_debug_set_sort_parallel_min_rows(int64_t rows)
-	{
-		g_debug_sort_parallel_min_rows = rows;
-	}
-
-	// Test-only: forces the row-group statistics pre-screen (screen_row_groups) to keep every row
-	// group live, so the same fixture can be filtered with and without pruning and the two results
-	// compared element for element. That comparison is F4's primary correctness test: pruning must
-	// change how much of the file is read and nothing else, so anything other than element-wise
-	// equality is a bug. Same reason parquet_debug_set_disable_sort_counting_path exists.
-	void parquet_debug_set_disable_statistics_prescreen(int enable)
-	{
-		g_debug_disable_statistics_prescreen = (enable != 0);
 	}
 
 	// Test-only: how many row groups the most recent screen ruled out, in this process. Without it
@@ -10904,74 +10911,29 @@ extern "C"
 		// writer_handle->chunk_size <= 0 means the caller never passed
 		// chunk_size to parquet_open_writer: auto-size it now that the
 		// final table exists, targeting a row group size in BYTES rather
-		// than a flat row count. A flat row-count cap doesn't know how wide
-		// a row is: for a handful of int32 columns, a few hundred thousand
-		// rows might be a few MB, while for a table with several vector
-		// columns (large col_size) the same row count could be gigabytes --
-		// sized this way, both end up with row groups in the same
-		// ballpark of actual bytes, which is what Parquet's own row-group
-		// size guidance (roughly 128MB-1GB) is actually about, and what
-		// drives per-row-group compression efficiency and decode cost.
-		// kMinAutoChunkSizeRows/kMaxAutoChunkSizeRows bound the result so
-		// pathological row widths still produce something reasonable: an
-		// extremely wide row (e.g. a huge vector column) is floored so a
-		// table isn't fragmented into an absurd number of tiny row groups,
-		// and an extremely narrow row is capped so a huge table doesn't
-		// collapse into one single, enormous row group either.
+		// than a flat row count. chunk_size_from_bytes_per_row (far above)
+		// is that arithmetic and the ONLY place it lives -- this path and
+		// estimate_chunk_size_from_schema's are the two callers, and they
+		// serve different writers (the whole-table write here, the
+		// streaming parquet_new_row_group path there). Restating the
+		// arithmetic inline again would silently give one of the two its
+		// own copy of the byte target, so parquet_set_target_row_group_bytes
+		// would govern only one kind of write -- see feature_risks.md
+		// Risk-43 and tools/check_source_conventions.py's
+		// check_row_group_sizing_not_duplicated, which enforces this.
+		//
+		// The two steps below that are NOT part of the shared arithmetic
+		// stay here: a row group can never exceed the table's own row
+		// count, and the result is floored at 1.
 		auto effective_chunk_size = writer_handle->chunk_size;
 		if (effective_chunk_size <= 0)
 		{
-			static constexpr int64_t kTargetRowGroupBytes = 256LL * 1024 * 1024; // ~256 MiB
-			static constexpr int64_t kMinAutoChunkSizeRows = 1000;
-			// 10,000,000: high enough that the byte target above governs for
-			// any realistically-shaped table (the row-count cap only starts
-			// to bind below ~27 bytes/row -- e.g. a single narrow column --
-			// see kTargetRowGroupBytes/kMaxAutoChunkSizeRows), while still
-			// backstopping genuinely pathological cases (a handful of bytes
-			// per row at billions of rows) from collapsing into one giant
-			// row group spanning the whole file.
-			static constexpr int64_t kMaxAutoChunkSizeRows = 10000000;
-			// The kMinAutoChunkSizeRows floor exists to avoid fragmenting a
-			// table into an excessive number of tiny row groups when rows are
-			// moderately wide -- but blindly applying it regardless of row
-			// width defeats the whole point of sizing by bytes: if a single
-			// row is already close to (or bigger than) kTargetRowGroupBytes
-			// (e.g. a vector column with a very large col_size), forcing
-			// kMinAutoChunkSizeRows rows into one row group would produce a
-			// row group many times the intended size. kMaxFloorOvershootFactor
-			// bounds how far the floor is allowed to push things past the
-			// target before it's abandoned in favor of a smaller-than-floor
-			// (down to 1 row) row group instead -- an under-sized row group is
-			// a much smaller problem than one that is unboundedly oversized.
-			static constexpr double kMaxFloorOvershootFactor = 4.0;
-
 			auto num_rows = table->num_rows();
 			auto total_bytes = arrow::util::TotalBufferSize(*table);
 			if (num_rows > 0 && total_bytes > 0)
 			{
 				double bytes_per_row = static_cast<double>(total_bytes) / static_cast<double>(num_rows);
-				auto rows_for_target = static_cast<int64_t>(
-					static_cast<double>(kTargetRowGroupBytes) / std::max(bytes_per_row, 1.0));
-
-				if (rows_for_target >= kMinAutoChunkSizeRows)
-				{
-					effective_chunk_size = std::min<int64_t>(rows_for_target, kMaxAutoChunkSizeRows);
-				}
-				else if (static_cast<double>(kMinAutoChunkSizeRows) * bytes_per_row
-					<= static_cast<double>(kTargetRowGroupBytes) * kMaxFloorOvershootFactor)
-				{
-					// Floor overshoots the target, but only by a bounded,
-					// acceptable amount -- apply it as usual.
-					effective_chunk_size = kMinAutoChunkSizeRows;
-				}
-				else
-				{
-					// Even the floor would blow far past the target (rows
-					// this wide): accept a smaller-than-floor row group
-					// (down to 1 row) instead of a wildly oversized one.
-					effective_chunk_size = std::max<int64_t>(rows_for_target, 1);
-				}
-				effective_chunk_size = std::min(effective_chunk_size, num_rows);
+				effective_chunk_size = std::min(chunk_size_from_bytes_per_row(bytes_per_row), num_rows);
 			}
 			else
 			{

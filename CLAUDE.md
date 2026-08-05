@@ -1783,18 +1783,32 @@ decided against it
 (see CONTRIBUTING.md's "Features considered but not implemented" for the full four-cost writeup,
 and `src/parquet_wrapper.cpp`'s own `// ====`-banner comments, added instead, for a cheaper
 navigability improvement). If that decision is ever revisited, the single most important, least
-obvious hazard is this: **every `g_debug_*` process-global test-only override
-(`g_debug_force_whole_column_read_error`, `g_debug_string_offset_limit`, `g_debug_col_size_limit`,
-`g_debug_list_element_count_limit`, `g_debug_column_count_limit`, `g_debug_force_sample_mask_error`,
-`g_debug_physical_column_read_count`) is currently declared `static` at file scope, meaning exactly
-one instance per translation unit.** Splitting the file without changing this would silently give
-each new `.cpp` its own separate copy of every one of these globals. It would still compile and
+obvious hazard is this: **every process-global `static` at file scope means exactly one instance
+per translation unit**, and this file has two families of them.
+
+The `g_debug_*` test-only overrides (`g_debug_force_whole_column_read_error`,
+`g_debug_string_offset_limit`, `g_debug_col_size_limit`, `g_debug_list_element_count_limit`,
+`g_debug_column_count_limit`, `g_debug_force_sample_mask_error`,
+`g_debug_physical_column_read_count`) are the first. Splitting the file without changing this would
+silently give each new `.cpp` its own separate copy of every one. It would still compile and
 link cleanly — there is no diagnostic for this — but any `parquet_debug_set_*` setter reachable from
 `test/error_scenarios.f90` would then be writing to a *different* object than the guard code reads,
 so the override would silently stop working and the corresponding error scenario would start
-testing nothing at all while still reporting green. Before any split, promote every one of these to
-a genuine `extern` global with exactly one definition in a shared internal header (not `static`),
-and re-run every affected error scenario to confirm the override still takes effect.
+testing nothing at all while still reporting green.
+
+**The settings mirrored from `parquet_settings` are the second family, and they are worse**, because
+they affect production behaviour rather than only tests: `g_verbosity`, `g_message_stream`,
+`g_sort_parallel_min_rows`, `g_sort_counting_path`, `g_sort_counting_bucket_limit`,
+`g_target_row_group_bytes` and `g_statistics_prescreen`. `parquet_push_output_settings` and
+`parquet_push_performance_settings` would write to their own TU's copy, and every read site in
+another TU would keep the built-in initialiser — so a user's `parquet_set_verbosity("silent")` or
+`parquet_set_target_row_group_bytes(...)` would apply to some of the library and not the rest, with
+the Fortran getters still reporting the value correctly (`feature_risks.md` Risk-42).
+
+Before any split, promote every global in both families to a genuine `extern` global with exactly
+one definition in a shared internal header (not `static`), re-run every affected error scenario to
+confirm the override still takes effect, and re-run `test/test_settings.f90`'s observed-effect tests
+to confirm each mirrored setting still reaches the code that reads it.
 
 ### Stale `fpm` build cache
 

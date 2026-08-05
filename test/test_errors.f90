@@ -364,6 +364,12 @@ contains
                 test_settings_bad_codec_aborts), &
             new_unittest("settings: a negative sort thread cap aborts", &
                 test_settings_negative_sort_threads_aborts), &
+            new_unittest("a negative sort_parallel_min_rows aborts", &
+                test_settings_negative_parallel_min_rows_aborts), &
+            new_unittest("a negative sort_counting_bucket_limit aborts", &
+                test_settings_negative_bucket_limit_aborts), &
+            new_unittest("a negative target_row_group_bytes aborts", &
+                test_settings_negative_row_group_bytes_aborts), &
             new_unittest("settings: a negative prefetch thread cap aborts", &
                 test_settings_negative_prefetch_threads_aborts), &
             new_unittest("settings: an unknown verbosity level aborts", &
@@ -3372,6 +3378,30 @@ contains
             failure_message="a negative sort thread cap was expected to abort", &
             required_stderr="parquet_set_sort_threads: n must be >= 0")
     end subroutine test_settings_negative_sort_threads_aborts
+
+    subroutine test_settings_negative_parallel_min_rows_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "settings_negative_parallel_min_rows", expect_abort=.true., &
+            failure_message="a negative sort_parallel_min_rows was expected to abort", &
+            required_stderr="parquet_set_sort_parallel_min_rows: n must be >= 0")
+    end subroutine test_settings_negative_parallel_min_rows_aborts
+
+    subroutine test_settings_negative_bucket_limit_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "settings_negative_bucket_limit", expect_abort=.true., &
+            failure_message="a negative sort_counting_bucket_limit was expected to abort", &
+            required_stderr="parquet_set_sort_counting_bucket_limit: n must be >= 0")
+    end subroutine test_settings_negative_bucket_limit_aborts
+
+    subroutine test_settings_negative_row_group_bytes_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "settings_negative_row_group_bytes", expect_abort=.true., &
+            failure_message="a negative target_row_group_bytes was expected to abort", &
+            required_stderr="parquet_set_target_row_group_bytes: n must be >= 0")
+    end subroutine test_settings_negative_row_group_bytes_aborts
 
     subroutine test_settings_negative_prefetch_threads_aborts(error)
         type(error_type), allocatable, intent(out) :: error

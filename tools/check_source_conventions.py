@@ -393,7 +393,7 @@ def check_print_settings_documented():
     # Both row helpers, or a knob printed through the one this check does not know about looks
     # undocumented while being documented perfectly well -- which is exactly what happened when
     # print_text was added for the non-integer rows.
-    printed = re.findall(r'call\s+print_(?:one|text)\s*\(\s*u\s*,\s*"([^"]+)"', src.read_text())
+    printed = re.findall(r'call\s+print_(?:one|big|text)\s*\(\s*u\s*,\s*"([^"]+)"', src.read_text())
     if not printed:
         return ["%s: could not find any print_one/print_text call -- this check needs updating"
                 % src.relative_to(REPO_ROOT)]
@@ -523,6 +523,49 @@ def check_no_direct_printing():
     return problems
 
 
+#: The four constants that make up the row-group sizing arithmetic in src/parquet_wrapper.cpp. Each
+#: may be DEFINED exactly once, however many times it is read.
+ROW_GROUP_SIZING_CONSTANTS = (
+    "kTargetRowGroupBytes", "kMinAutoChunkSizeRows", "kMaxAutoChunkSizeRows",
+    "kMaxFloorOvershootFactor",
+)
+
+
+def check_row_group_sizing_not_duplicated():
+    """feature_risks.md Risk-43 -- a second copy of the sizing arithmetic ignores the setting.
+
+    Row groups are sized from a byte target by chunk_size_from_bytes_per_row, and it has two callers
+    that serve DIFFERENT writers: close_parquet_writer's whole-table write, and
+    estimate_chunk_size_from_schema's estimate for the streaming parquet_new_row_group path. Until
+    S4 the first of those restated the whole function body inline, four constants included.
+
+    That is a silent failure rather than a visible one. A re-inlined copy takes the built-in
+    constant instead of g_target_row_group_bytes, so parquet_set_target_row_group_bytes governs one
+    kind of write and not the other: the files come out with the wrong number of row groups, every
+    row is present and correct, and nothing fails.
+
+    The rule is therefore about DEFINITIONS, not uses -- reading a constant in ten places is fine,
+    declaring it in two is the bug.
+    """
+    problems = []
+    path = SRC / "parquet_wrapper.cpp"
+    text = path.read_text()
+    for name in ROW_GROUP_SIZING_CONSTANTS:
+        pattern = re.compile(r"^\s*static\s+constexpr\s+\w+(?:\s+\w+)*\s+%s\s*=" % re.escape(name), re.M)
+        hits = pattern.findall(text)
+        if len(hits) > 1:
+            problems.append(
+                "src/parquet_wrapper.cpp: `%s` is defined %d times -- the row-group sizing "
+                "arithmetic must exist once, in chunk_size_from_bytes_per_row, or "
+                "parquet_set_target_row_group_bytes silently governs only some writes "
+                "(feature_risks.md Risk-43)" % (name, len(hits)))
+        elif not hits:
+            problems.append(
+                "src/parquet_wrapper.cpp: `%s` is not defined at all -- if the row-group sizing "
+                "constants were renamed, update ROW_GROUP_SIZING_CONSTANTS in this script" % name)
+    return problems
+
+
 CHECKS = (
     ("parquet_table has no allocatable component", check_no_allocatable_component),
     ("table pointers are reached through %cache", check_pointers_go_through_cache),
@@ -533,6 +576,7 @@ CHECKS = (
     ("print_settings matches its documentation", check_print_settings_documented),
     ("every setting is actually read", check_settings_are_read),
     ("no direct printing outside the emit channels", check_no_direct_printing),
+    ("the row-group sizing arithmetic exists once", check_row_group_sizing_not_duplicated),
 )
 
 

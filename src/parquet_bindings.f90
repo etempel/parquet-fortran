@@ -22,6 +22,7 @@ module parquet_bindings
     public :: parquet_set_writer_options
     public :: parquet_set_thread_pool_capacity, parquet_get_thread_pool_capacity
     public :: parquet_push_output_settings
+    public :: parquet_push_performance_settings
     public :: parquet_get_arrow_version, parquet_get_parquet_version
     public :: parquet_maml_lock, parquet_maml_unlock
     public :: parquet_warmup_memory_pool
@@ -140,6 +141,25 @@ module parquet_bindings
             import
             integer(c_int), value :: verbosity
             integer(c_int), value :: message_stream
+        end subroutine
+
+        !> Mirrors parquet_settings' five C++-side performance knobs in one call. Every value
+        !> arrives already resolved -- the "0 means the built-in default" sentinel is resolved on
+        !> the Fortran side, so the C++ half never has to know a default -- and the two flags cross
+        !> as 0/1 because this boundary has no logical convention.
+        !>
+        !> One push rather than five setters so that parquet_reset_settings cannot restore some
+        !> knobs and forget others: restoring the Fortran variables and calling this once is the
+        !> whole job (feature_risks.md Risk-42).
+        subroutine parquet_push_performance_settings(sort_parallel_min_rows, sort_counting_path, &
+                sort_counting_bucket_limit, target_row_group_bytes, statistics_prescreen) &
+                bind(C, name="parquet_push_performance_settings")
+            import
+            integer(c_int64_t), value :: sort_parallel_min_rows
+            integer(c_int), value :: sort_counting_path
+            integer(c_int64_t), value :: sort_counting_bucket_limit
+            integer(c_int64_t), value :: target_row_group_bytes
+            integer(c_int), value :: statistics_prescreen
         end subroutine
 
         !> Reports Arrow's current global CPU thread-pool capacity. Named differently from its

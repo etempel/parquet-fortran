@@ -33,15 +33,15 @@ Four sections, and **a risk keeps its number when it moves between them**:
 the whole document; moving one between sections (a proposal getting written, a covered property
 regressing) **never** renumbers it, so a reference from `CLAUDE.md`, `feature_table.md`,
 `tools/check_source_conventions.py` or a code comment stays valid for good. **A new risk takes the
-next unused number — `Risk-43` today — and goes in "1. New risks"** until it has been triaged.
+next unused number — `Risk-44` today — and goes in "1. New risks"** until it has been triaged.
 Numbers of deleted entries are not reused, so a stale reference resolves to nothing rather than to
 the wrong risk.
 
-**Counts today: 37 covered, 0 proposed, 5 not testable.** Section 2 being empty is the healthy
+**Counts today: 38 covered, 0 proposed, 5 not testable.** Section 2 being empty is the healthy
 state rather than a finished one — it means every risk currently identified as testable has its
-test. Seven entries are covered by something other than a unit test, deliberately: Risk-1 by a
+test. Eight entries are covered by something other than a unit test, deliberately: Risk-1 by a
 maintainer check under `app/` with a `tools/*.sh` wrapper (it measures memory, so it needs its own
-process per measurement), and Risk-2, Risk-4, Risk-5, Risk-12, Risk-13 and Risk-19 by static checks
+process per measurement), and Risk-2, Risk-4, Risk-5, Risk-12, Risk-13, Risk-19 and Risk-43 by static checks
 in `tools/check_source_conventions.py`, which is the right tool for an invariant about what the code
 does *not* do.
 
@@ -106,7 +106,8 @@ something a reader is expected to have.
 | [Risk-39](#risk-39--a-silently-serial-threads-passes-every-correctness-test) | A silently serial `threads=` passes every correctness test | 4 — covered |
 | [Risk-40](#risk-40--auto-threading-must-stay-serial-inside-a-parallel-region) | Auto threading must stay serial inside a parallel region | 4 — covered |
 | [Risk-41](#risk-41--a-setting-that-is-never-read-passes-every-test-written-for-it) | A setting that is never read passes every test written for it | 4 — covered |
-| [Risk-42](#risk-42--the-fortran-and-c-copies-of-an-output-setting-can-drift-apart) | The Fortran and C++ copies of an output setting can drift apart | 4 — covered |
+| [Risk-42](#risk-42--the-fortran-and-c-copies-of-a-mirrored-setting-can-drift-apart) | The Fortran and C++ copies of a mirrored setting can drift apart | 4 — covered |
+| [Risk-43](#risk-43--a-second-copy-of-the-row-group-sizing-arithmetic-ignores-target_row_group_bytes) | A second copy of the row-group sizing arithmetic ignores `target_row_group_bytes` | 4 — covered |
 
 ---
 
@@ -114,7 +115,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-43**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-44**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -1552,34 +1553,59 @@ explicit argument, and every per-knob test still passes.
 
 ---
 
-### Risk-42 — The Fortran and C++ copies of an output setting can drift apart
+### Risk-42 — The Fortran and C++ copies of a mirrored setting can drift apart
 
-`verbosity` and `message_stream` are stored **twice**: in `parquet_settings` and, mirrored across the
-`bind(C)` boundary by `parquet_push_output_settings`, in `parquet_wrapper.cpp`. The C++ copy exists
-because that side prints on its own — three warnings (two qc soft-mode, one incomplete chunked read)
-plus the whole `parquet_reader_print_stat` report — and cannot see a Fortran module variable.
+**Seven settings are stored twice**: in `parquet_settings` and, mirrored across the `bind(C)`
+boundary, in `parquet_wrapper.cpp`. `verbosity` and `message_stream` go through
+`parquet_push_output_settings`, because that side prints on its own — three warnings (two qc
+soft-mode, one incomplete chunked read) plus the whole `parquet_reader_print_stat` report.
+`sort_parallel_min_rows`, `sort_counting_path`, `sort_counting_bucket_limit`,
+`target_row_group_bytes` and `statistics_prescreen` go through
+`parquet_push_performance_settings`, because the sort engine, the row-group sizing and the row-group
+statistics screen all live there. Neither side can see the other's variables.
 
 **If the mirror stops being pushed, or the C++ side stops consulting it, the two halves disagree and
-almost nothing notices.** Every Fortran warning is suppressed and redirected exactly as asked, every
-Fortran-side assertion passes, `parquet_get_verbosity` returns the right token — and a qc-checking
-read still prints to stdout at `errors_only`. The user sees a setting that works for most messages
-and not for some, which reads as a mystery rather than as a bug with a location.
+almost nothing notices.** Every Fortran-side assertion passes and every getter returns what was set;
+only the behaviour is wrong. For the output pair the symptom is a setting that works for most
+messages and not for some, which reads as a mystery rather than as a bug with a location. For the
+performance five it is quieter still: `parquet_get_target_row_group_bytes()` answers correctly while
+the files come out with the built-in row-group size, and a knob that silently does nothing is
+`Risk-41` arriving by a different route — through the boundary rather than through a missing read
+site, and so invisible to the `every setting is actually read` lint check, which only sees Fortran.
 
 **Two properties keep the copy honest, and both are load-bearing:**
 
-- **One writer.** The C++ side has no setter of its own; `parquet_push_output_settings` is called
-  only from `parquet_settings`' two setters and from `parquet_reset_settings`. The copy is derived,
-  never independently assigned. **A future knob that C++ also needs must follow this** — a second
-  writer makes the two genuinely independent and the drift becomes unfixable by inspection.
-- **Resolved integers cross the boundary, never tokens.** The fold and the vocabulary check happen
-  once, in Fortran. A second string parser on the C++ side would be a second place for
-  `"errors_only"` to be spelled, and the drift would then be in the *parsing* rather than in the
-  value.
+- **One writer.** The C++ side has no setter of its own; each push function is called only from
+  `parquet_settings`' own setters and from `parquet_reset_settings`. The copy is derived, never
+  independently assigned. **A future knob that C++ also needs must follow this** — a second writer
+  makes the two genuinely independent and the drift becomes unfixable by inspection. This is also
+  why S4 retired `parquet_debug_set_sort_parallel_min_rows`,
+  `parquet_debug_set_disable_sort_counting_path` and
+  `parquet_debug_set_disable_statistics_prescreen` rather than keeping them beside the settings:
+  each was a second writer to the same state.
+- **Resolved values cross the boundary, never tokens or sentinels.** The fold and the vocabulary
+  check happen once, in Fortran, and so does the `0`-means-built-in resolution of the three numeric
+  performance knobs — `parquet_wrapper.cpp` holds no `x > 0 ? x : kBuiltIn` conditional. A second
+  string parser or a second default on the C++ side would be a second place for the same value to be
+  spelled, and the drift would then be in the *interpretation* rather than in the value.
+- **One push per group, not one per knob.** `parquet_reset_settings` restores the Fortran variables
+  and calls each push once; with a setter per knob it would make twelve calls and omitting one would
+  be invisible. Adding a knob to an existing group means changing its push signature, which
+  `tools/check_bindc_boundary.py` checks on both sides.
+
+**The C++ initialisers are the one genuinely duplicated value.** Each global's initialiser applies
+until the first push, so `kSortParallelMinRows`/`kSortCountingBucketLimit`/`kTargetRowGroupBytes` and
+`g_verbosity`/`g_message_stream`'s `0`s must equal `parquet_settings`' own `*_builtin` parameters and
+factory values. A program that never touches a setting runs entirely on the C++ initialisers, so a
+mismatch there changes behaviour with every knob still reporting its documented default.
 
 **Covered by** `settings: the C++ half honours the mirrored verbosity` (`test/test_errors.f90`),
 which drives `settings_cpp_warning_normal`/`_errors_only` — a qc soft-mode read whose warning is
-printed **from C++** — and asserts it appears at `"normal"` and is absent at `"errors_only"`. It is
-the only test in the suite that would fail if the mirror broke.
+printed **from C++** — and asserts it appears at `"normal"` and is absent at `"errors_only"`; and,
+for the performance five, by the observed-effect tests in `test/test_settings.f90`, every one of
+which observes something only the C++ side produces (threads used, comparisons counted, row groups
+written, row groups pruned). A Fortran-side round trip would pass against a broken mirror in every
+one of the seven cases.
 
 **What this still forbids.** Do not test an output setting through a Fortran-side message alone: that
 assertion passes against a C++ half that ignores the mirror completely. Any new C++-side print needs
@@ -1587,3 +1613,41 @@ either the shared `emit_warning_cpp` helper (for a warning) or the `output_is_su
 (for solicited output), and a scenario that provokes it — a print site added straight to
 `std::fprintf` is invisible to both this test and the `no direct printing` lint check, which can only
 see Fortran.
+
+
+### Risk-43 — A second copy of the row-group sizing arithmetic ignores `target_row_group_bytes`
+
+Row groups are sized from a byte target by `chunk_size_from_bytes_per_row`
+(`src/parquet_wrapper.cpp`), and it has **two callers serving two different writers**:
+`close_parquet_writer`, for a whole-table write, and `estimate_chunk_size_from_schema`, for the
+estimate the streaming `parquet_new_row_group` path locks in before any data exists.
+
+Until S4 the first of those did not call it at all — it restated the entire function body inline,
+all four constants included, as an `if`/`else if`/`else` chain over a local variable. Two copies of
+one piece of arithmetic is an ordinary tidiness complaint right up until the byte target becomes a
+setting, at which point it is a correctness one: **a re-inlined copy reads the built-in constant
+instead of `g_target_row_group_bytes`**, so `parquet_set_target_row_group_bytes` governs one kind of
+write and not the other.
+
+**The failure is completely silent.** Every row is present, every value is correct, the file is
+valid Parquet, `parquet_get_target_row_group_bytes()` reports exactly what was set — only the number
+of row groups is wrong, in files written one particular way. Nothing aborts and nothing is checked
+at runtime.
+
+**Covered by** `the row-group sizing arithmetic exists once`
+(`tools/check_source_conventions.py`'s `check_row_group_sizing_not_duplicated`), which allows each of
+the four constants to be **defined** exactly once however many times it is read; and by the pair of
+tests `target_row_group_bytes sizes the row groups of a whole-table write` and `target_row_group_bytes
+also sizes the streaming path's estimate` (`test/test_settings.f90`), which exercise the two callers
+through different observables — `parquet_get_num_row_groups` on a written file, and
+`parquet_get_chunk_size(writer)` before any data.
+
+**What this still forbids.** Both halves are needed and neither subsumes the other: the lint check
+cannot see arithmetic that has been re-derived without reusing the constant names, and a test of
+either caller alone passes while the other silently ignores the setting. **A third caller must call
+`chunk_size_from_bytes_per_row` too, and must get its own test** — the lint check counts definitions,
+not call sites, so it would say nothing about a third path that computed its own answer from
+`g_target_row_group_bytes` and got the bounds wrong. The three bounds that are *not* settings
+(`kMinAutoChunkSizeRows`, `kMaxAutoChunkSizeRows`, `kMaxFloorOvershootFactor`) stay declared beside
+that function rather than moving in with the mirrored settings, precisely so that "what is settable"
+and "what is a fixed bound" remain visibly different things.

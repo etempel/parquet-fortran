@@ -27,6 +27,22 @@
 !>   read back through two C++ debug hooks (`parquet_debug_get_prefetch_threads_used`,
 !>   `parquet_debug_get_last_use_threads`) declared locally below, never in parquet_bindings.
 !>
+!> The five C++-side knobs are each observed through something the library already had to expose to
+!> test the behaviour itself, which is why S4 added no new debug hook at all:
+!>
+!> * `sort_parallel_min_rows` through `parquet_debug_get_sort_threads_used` -- the sort's RESULT is
+!>   identical threaded or not, by design, so only the thread count can see this knob;
+!> * `sort_counting_path` and `sort_counting_bucket_limit` through
+!>   `parquet_debug_get_sort_comparisons`, which is exactly 0 on the counting path and nonzero on
+!>   the comparator path -- again, the two produce the same permutation;
+!> * `target_row_group_bytes` through `parquet_get_num_row_groups` on a written file AND through
+!>   `parquet_get_chunk_size(writer)`, because the byte target has two callers serving two different
+!>   writers and a copy re-inlined into either one would be invisible to a test of the other
+!>   (feature_risks.md Risk-43);
+!> * `statistics_prescreen` through `parquet_debug_get_row_groups_pruned` alongside an A/B equality,
+!>   the shape CLAUDE.md prescribes for the screen: equality alone passes just as happily against a
+!>   screen that never prunes.
+!>
 !> Two tests are deliberately not about any single knob: `test_argument_beats_setting` (a resolution
 !> written the wrong way round would make the setting win, and every per-knob test would still pass)
 !> and `test_reset_all_knobs` (a knob that is settable but not resettable leaks into every later
@@ -41,7 +57,7 @@
 !> would silently serialise every later suite's Arrow work.
 module test_settings
     use parquet
-    use iso_fortran_env, only : output_unit, int32, int64
+    use iso_fortran_env, only : output_unit, int32, int64, real64
 #ifdef _OPENMP
     use omp_lib, only : omp_get_max_threads
 #endif
@@ -72,7 +88,20 @@ contains
             new_unittest("naming a codec default drops the zstd-tuned level", test_default_compression_decouples_level), &
             new_unittest("default_use_threads reaches the reader and the writer", test_default_use_threads_effect), &
             new_unittest("an explicit argument always beats the setting", test_argument_beats_setting), &
-            new_unittest("an invalid codec default aborts nothing else", test_bad_codec_leaves_state_intact) &
+            new_unittest("an invalid codec default aborts nothing else", test_bad_codec_leaves_state_intact), &
+            new_unittest("sort_parallel_min_rows decides whether a sort threads at all", &
+                test_sort_parallel_min_rows_effect), &
+            new_unittest("sort_counting_path switches the sort between its two engines", &
+                test_sort_counting_path_effect), &
+            new_unittest("sort_counting_bucket_limit declines a key whose range exceeds it", &
+                test_sort_counting_bucket_limit_effect), &
+            new_unittest("target_row_group_bytes sizes the row groups of a whole-table write", &
+                test_target_row_group_bytes_effect), &
+            new_unittest("target_row_group_bytes also sizes the streaming path's estimate", &
+                test_target_row_group_bytes_streaming), &
+            new_unittest("statistics_prescreen prunes row groups without changing the answer", &
+                test_statistics_prescreen_effect), &
+            new_unittest("both integer kinds reach the same setting", test_both_integer_kinds) &
             ]
     end subroutine collect_tests_parquet_settings
     !
@@ -218,6 +247,19 @@ contains
         call check(error, parquet_get_default_compression_level() == 3, "default_compression_level defaults to 3")
         if (allocated(error)) return
         call check(error, parquet_get_default_use_threads(), "default_use_threads defaults to .true.")
+        if (allocated(error)) return
+        call check(error, parquet_get_sort_parallel_min_rows() == 8192_int64, &
+            "sort_parallel_min_rows defaults to the built-in 8192")
+        if (allocated(error)) return
+        call check(error, parquet_get_sort_counting_path(), "sort_counting_path defaults to .true.")
+        if (allocated(error)) return
+        call check(error, parquet_get_sort_counting_bucket_limit() == 4194304_int64, &
+            "sort_counting_bucket_limit defaults to the built-in 2**22")
+        if (allocated(error)) return
+        call check(error, parquet_get_target_row_group_bytes() == 268435456_int64, &
+            "target_row_group_bytes defaults to the built-in 256 MiB")
+        if (allocated(error)) return
+        call check(error, parquet_get_statistics_prescreen(), "statistics_prescreen defaults to .true.")
     end subroutine test_factory_defaults
 
     !> A knob that is settable but not resettable leaks across the boundary parquet_reset_settings
@@ -232,6 +274,11 @@ contains
         call parquet_set_default_compression("gzip")
         call parquet_set_default_compression_level(9)
         call parquet_set_default_use_threads(.false.)
+        call parquet_set_sort_parallel_min_rows(64_int64)
+        call parquet_set_sort_counting_path(.false.)
+        call parquet_set_sort_counting_bucket_limit(128_int64)
+        call parquet_set_target_row_group_bytes(4096_int64)
+        call parquet_set_statistics_prescreen(.false.)
         call parquet_reset_settings()
         !
         call check(error, parquet_get_sort_threads() == 0, "reset restores sort_threads")
@@ -244,6 +291,19 @@ contains
         call check(error, parquet_get_default_compression_level() == 3, "reset restores default_compression_level")
         if (allocated(error)) return
         call check(error, parquet_get_default_use_threads(), "reset restores default_use_threads")
+        if (allocated(error)) return
+        call check(error, parquet_get_sort_parallel_min_rows() == 8192_int64, &
+            "reset restores sort_parallel_min_rows")
+        if (allocated(error)) return
+        call check(error, parquet_get_sort_counting_path(), "reset restores sort_counting_path")
+        if (allocated(error)) return
+        call check(error, parquet_get_sort_counting_bucket_limit() == 4194304_int64, &
+            "reset restores sort_counting_bucket_limit")
+        if (allocated(error)) return
+        call check(error, parquet_get_target_row_group_bytes() == 268435456_int64, &
+            "reset restores target_row_group_bytes")
+        if (allocated(error)) return
+        call check(error, parquet_get_statistics_prescreen(), "reset restores statistics_prescreen")
     end subroutine test_reset_all_knobs
 
     !> The observed effect, not the round trip: pf_sort_threads is the one place the setting is
@@ -593,5 +653,352 @@ contains
         call parquet_set_max_threads(original)
         call parquet_reset_settings()
     end subroutine restore
+    !
+    ! ==================================================================================
+    ! S4: the five C++-side performance knobs
+    ! ==================================================================================
+    !
+    !> How many threads the last threaded sort actually used. The observation hook that survived
+    !> S4 -- what it observes is a setting now, but the observation itself never was one.
+    integer(int64) function sort_threads_used() result(n)
+        interface
+            function get_used() bind(C, name="parquet_debug_get_sort_threads_used") result(k)
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t) :: k !! threads used by the last threaded build.
+            end function get_used
+        end interface
+        n = int(get_used(), int64)
+    end function sort_threads_used
+
+    !> Arms and zeroes the sort's comparison counter.
+    subroutine arm_comparisons()
+        interface
+            subroutine count_cmp(enable) bind(C, name="parquet_debug_set_count_sort_comparisons")
+                use iso_c_binding, only : c_int
+                integer(c_int), value :: enable !! nonzero arms and zeroes the counter.
+            end subroutine count_cmp
+        end interface
+        call count_cmp(1)
+    end subroutine arm_comparisons
+
+    !> Comparisons counted since the counter was armed, then disarms it.
+    integer(int64) function comparisons_since() result(n)
+        interface
+            function got_cmp() bind(C, name="parquet_debug_get_sort_comparisons") result(k)
+                use iso_c_binding, only : c_long_long
+                integer(c_long_long) :: k !! comparisons since arming.
+            end function got_cmp
+            subroutine count_cmp(enable) bind(C, name="parquet_debug_set_count_sort_comparisons")
+                use iso_c_binding, only : c_int
+                integer(c_int), value :: enable
+            end subroutine count_cmp
+        end interface
+        n = int(got_cmp(), int64)
+        call count_cmp(0)
+    end function comparisons_since
+
+    !> How many row groups the most recent statistics screen ruled out.
+    integer(int64) function row_groups_pruned() result(n)
+        interface
+            function got() bind(C, name="parquet_debug_get_row_groups_pruned") result(k)
+                use iso_c_binding, only : c_long_long
+                integer(c_long_long) :: k !! pruned row groups of the last screen.
+            end function got
+        end interface
+        n = int(got(), int64)
+    end function row_groups_pruned
+
+    !> A key the counting path always declines (real, not integer), so a comparison count is
+    !> nonzero for reasons that have nothing to do with the knob under test. Used as the control
+    !> that the comparison counter is armed and working at all.
+    subroutine ties_real(v)
+        real(real64), intent(out) :: v(:) !! filled with a tie-bearing real key.
+        integer :: k
+        do k = 1, size(v)
+            v(k) = real(mod(k * 37, 991), real64)
+        end do
+    end subroutine ties_real
+
+    !> The threshold decides whether a sort threads AT ALL, so the observation is the thread count
+    !> the sort actually reached -- not its result, which is identical either way by design.
+    !>
+    !> Both directions are asserted on the SAME array with the SAME `threads=4`: only the setting
+    !> differs between them. A threshold that was stored and never pushed to C++ would leave the
+    !> built-in 8192 in force, and this 2000-element array would stay serial in both halves.
+    subroutine test_sort_parallel_min_rows_effect(error)
+        type(error_type), allocatable, intent(out) :: error
+        real(real64) :: v(2000)
+        integer(int32), allocatable :: perm(:)
+        !
+        call parquet_reset_settings()
+        call ties_real(v)
+        ! Negative control FIRST: at the built-in 8192 this array is far too small to thread.
+        call pf_argsort(v, perm, threads=4)
+        call check(error, sort_threads_used() == 1_int64, &
+            "at the built-in threshold a 2000-element array must sort serially whatever threads= asks")
+        if (allocated(error)) return
+        !
+        call parquet_set_sort_parallel_min_rows(4_int64)
+        call pf_argsort(v, perm, threads=4)
+        call check(error, sort_threads_used() == 4_int64, &
+            "lowering sort_parallel_min_rows must let the same array reach the parallel path")
+        if (allocated(error)) then
+            call parquet_reset_settings()
+            return
+        end if
+        !
+        ! And back up again, which also proves the knob is re-readable rather than latched once.
+        call parquet_set_sort_parallel_min_rows(1000000000_int64)
+        call pf_argsort(v, perm, threads=4)
+        call check(error, sort_threads_used() == 1_int64, &
+            "raising sort_parallel_min_rows above the array size must return the sort to serial")
+        call parquet_reset_settings()
+    end subroutine test_sort_parallel_min_rows_effect
+
+    !> The counting path performs ZERO comparisons by construction, so the comparison counter is
+    !> what distinguishes the two engines -- their permutations are identical, which is the whole
+    !> point and also why a result assertion could never see this knob.
+    subroutine test_sort_counting_path_effect(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(500)
+        integer(int32), allocatable :: perm(:)
+        integer(int64) :: cmp_on, cmp_off
+        integer :: k
+        !
+        call parquet_reset_settings()
+        do k = 1, size(v)
+            v(k) = int(mod(k * 7, 50), int32)   ! range 49: comfortably inside the bucket limit
+        end do
+        !
+        call arm_comparisons()
+        call pf_argsort(v, perm)
+        cmp_on = comparisons_since()
+        call check(error, cmp_on == 0_int64, &
+            "with sort_counting_path on, a low-range integer key must take the counting path (0 comparisons)")
+        if (allocated(error)) return
+        !
+        call parquet_set_sort_counting_path(.false.)
+        call arm_comparisons()
+        call pf_argsort(v, perm)
+        cmp_off = comparisons_since()
+        call parquet_reset_settings()
+        call check(error, cmp_off > 0_int64, &
+            "turning sort_counting_path off must force the comparator path (nonzero comparisons)")
+    end subroutine test_sort_counting_path_effect
+
+    !> The bound is on the key's value RANGE, not its cardinality (feature_risks.md Risk-39), so
+    !> both halves here use the SAME 500 values and the same cardinality -- only the spread differs,
+    !> and the limit is what decides. A limit that never reached C++ would leave the built-in 2**22
+    !> in force and both halves would take the counting path.
+    subroutine test_sort_counting_bucket_limit_effect(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(500)
+        integer(int32), allocatable :: perm(:)
+        integer(int64) :: cmp_inside, cmp_outside
+        integer :: k
+        !
+        call parquet_reset_settings()
+        do k = 1, size(v)
+            v(k) = int(mod(k * 7, 50) * 1000, int32)   ! 50 distinct values, range 49000
+        end do
+        !
+        ! Range 49000 sits inside the built-in limit, so this key counting-sorts by default.
+        call arm_comparisons()
+        call pf_argsort(v, perm)
+        cmp_inside = comparisons_since()
+        call check(error, cmp_inside == 0_int64, &
+            "a range-49000 key must be inside the built-in bucket limit and take the counting path")
+        if (allocated(error)) return
+        !
+        call parquet_set_sort_counting_bucket_limit(100)
+        call arm_comparisons()
+        call pf_argsort(v, perm)
+        cmp_outside = comparisons_since()
+        call parquet_reset_settings()
+        call check(error, cmp_outside > 0_int64, &
+            "a bucket limit below the key's value range must make the counting path decline")
+    end subroutine test_sort_counting_bucket_limit_effect
+
+    !> Row groups written by the whole-table path (close_parquet_writer). This is one of the two
+    !> callers of chunk_size_from_bytes_per_row, and the reason the S4 refactor de-duplicated that
+    !> arithmetic: before it, this path had its own copy of the byte target and the setting could
+    !> not have reached it (feature_risks.md Risk-43).
+    subroutine test_target_row_group_bytes_effect(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: default_file = "test_run/settings_rowgroup_default.parquet"
+        character(len=*), parameter :: small_file = "test_run/settings_rowgroup_small.parquet"
+        integer(int64) :: groups_default, groups_small
+        !
+        call parquet_reset_settings()
+        call write_rows_int64(default_file)
+        call count_row_groups(default_file, groups_default)
+        call check(error, groups_default == 1_int64, &
+            "at the built-in 256 MiB target, 5000 int64 rows must fit in one row group")
+        if (allocated(error)) return
+        !
+        call parquet_set_target_row_group_bytes(8000_int64)
+        call write_rows_int64(small_file)
+        call parquet_reset_settings()
+        call count_row_groups(small_file, groups_small)
+        ! Not an exact count: the floor of 1000 rows binds for any per-row width up to 32 bytes, and
+        ! TotalBufferSize includes buffer padding this test should not have to predict.
+        call check(error, groups_small > 1_int64, &
+            "a small target_row_group_bytes must split the same data across several row groups")
+    end subroutine test_target_row_group_bytes_effect
+
+    !> The OTHER caller of the same arithmetic: the schema-only estimate the streaming row-group
+    !> path locks in, observable through parquet_get_chunk_size(writer) before any data exists.
+    !> Both callers are asserted because a re-inlined copy in either one would be invisible here.
+    subroutine test_target_row_group_bytes_streaming(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: default_file = "test_run/settings_rowgroup_est_default.parquet"
+        character(len=*), parameter :: small_file = "test_run/settings_rowgroup_est_small.parquet"
+        integer(int64) :: chunk_default, chunk_small
+        !
+        call parquet_reset_settings()
+        call estimated_chunk_size(default_file, chunk_default)
+        call parquet_set_target_row_group_bytes(8000_int64)
+        call estimated_chunk_size(small_file, chunk_small)
+        call parquet_reset_settings()
+        !
+        call check(error, chunk_default > chunk_small, &
+            "the schema-based row-group estimate must shrink when target_row_group_bytes does")
+        if (allocated(error)) return
+        call check(error, chunk_small > 0_int64, "the shrunken estimate must still be a usable size")
+    end subroutine test_target_row_group_bytes_streaming
+
+    !> The screen changes how much of the file is read and NOTHING else, so the test has to be both
+    !> halves at once: the rows must be identical either way (that is the correctness contract), and
+    !> the pruned count must differ (without which an equality test passes just as happily against a
+    !> screen that never prunes -- the shape CLAUDE.md prescribes for this optimization).
+    subroutine test_statistics_prescreen_effect(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: out_file = "test_run/settings_prescreen.parquet"
+        integer(int64), allocatable :: on_rows(:), off_rows(:)
+        integer(int64) :: pruned_on, pruned_off, n_on, n_off
+        !
+        call parquet_reset_settings()
+        call write_rows_int64(out_file, chunk_size=500)
+        !
+        call filtered_read(out_file, .true., on_rows, n_on, pruned_on)
+        call check(error, pruned_on > 0_int64, &
+            "with statistics_prescreen on, a selective filter must prune at least one row group")
+        if (allocated(error)) then
+            call parquet_reset_settings()
+            return
+        end if
+        !
+        call filtered_read(out_file, .false., off_rows, n_off, pruned_off)
+        call parquet_reset_settings()
+        !
+        call check(error, pruned_off == 0_int64, &
+            "with statistics_prescreen off, no row group may be pruned")
+        if (allocated(error)) return
+        call check(error, n_on == n_off, "pruning must not change how many rows a filter returns")
+        if (allocated(error)) return
+        call check(error, all(on_rows == off_rows), &
+            "pruning must not change WHICH rows a filter returns, element for element")
+    end subroutine test_statistics_prescreen_effect
+
+    !> The three numeric knobs are generic over int32 and int64 because none of them is bounded
+    !> below huge(int32). A missing specific is a COMPILE error, so this test existing is most of
+    !> its own value; it additionally proves the int32 form reaches the same storage rather than a
+    !> separate copy.
+    subroutine test_both_integer_kinds(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: small = 4096
+        integer(int64) :: big = 5000000000_int64
+        !
+        call parquet_reset_settings()
+        call parquet_set_sort_parallel_min_rows(small)
+        call check(error, parquet_get_sort_parallel_min_rows() == 4096_int64, &
+            "the int32 setter must reach the same storage the int64 getter reads")
+        if (allocated(error)) then
+            call parquet_reset_settings()
+            return
+        end if
+        call parquet_set_target_row_group_bytes(big)
+        call check(error, parquet_get_target_row_group_bytes() == big, &
+            "a byte target above huge(int32) must survive intact")
+        if (allocated(error)) then
+            call parquet_reset_settings()
+            return
+        end if
+        call parquet_set_sort_counting_bucket_limit(small)
+        call check(error, parquet_get_sort_counting_bucket_limit() == 4096_int64, &
+            "the int32 bucket-limit setter must reach the same storage")
+        call parquet_reset_settings()
+    end subroutine test_both_integer_kinds
+
+    !> One filtered read, with the screen in the requested state, reporting both what came back and
+    !> how many row groups were skipped. The pruned count is taken right after open, because that is
+    !> when the screen runs.
+    subroutine filtered_read(path, screen_on, values, nrows, pruned)
+        character(len=*), intent(in) :: path !! file to read.
+        logical, intent(in) :: screen_on !! .false. turns the statistics screen off.
+        integer(int64), allocatable, intent(out) :: values(:) !! surviving rows of "v".
+        integer(int64), intent(out) :: nrows !! how many survived.
+        integer(int64), intent(out) :: pruned !! row groups the screen ruled out.
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        !
+        call parquet_set_statistics_prescreen(screen_on)
+        call filt%add("v < 100")
+        call parquet_open_reader(reader, path, filter=filt)
+        pruned = row_groups_pruned()
+        call parquet_get_nrows(reader, nrows)
+        allocate(values(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "v", values)
+        call parquet_close_reader(reader)
+    end subroutine filtered_read
+
+    !> 5000 int64 rows -- enough that a small byte target splits them and the built-in one does not.
+    subroutine write_rows_int64(path, chunk_size)
+        character(len=*), intent(in) :: path !! output file.
+        integer, intent(in), optional :: chunk_size !! explicit row-group size, if any.
+        type(parquet_writer) :: writer
+        integer(int64) :: v(5000)
+        integer :: k
+        !
+        do k = 1, size(v)
+            v(k) = int(k, int64)
+        end do
+        if (present(chunk_size)) then
+            call parquet_open_writer(writer, path, chunk_size=chunk_size)
+        else
+            call parquet_open_writer(writer, path)
+        end if
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+    end subroutine write_rows_int64
+
+    !> Row groups in a written file.
+    subroutine count_row_groups(path, n)
+        character(len=*), intent(in) :: path !! file to inspect.
+        integer(int64), intent(out) :: n !! its row-group count.
+        type(parquet_reader) :: reader
+        !
+        call parquet_open_reader(reader, path)
+        call parquet_get_num_row_groups(reader, n)
+        call parquet_close_reader(reader)
+    end subroutine count_row_groups
+
+    !> The row-group size a schema-opened writer settles on before any data exists -- the streaming
+    !> path's own estimate, which is the second caller of the shared sizing arithmetic.
+    subroutine estimated_chunk_size(path, n)
+        character(len=*), intent(in) :: path !! output file (written and closed empty of data).
+        integer(int64), intent(out) :: n !! the writer's resolved row-group size.
+        type(parquet_writer) :: writer
+        type(parquet_schema) :: schema
+        integer(int32) :: v(4) = [1_int32, 2_int32, 3_int32, 4_int32]
+        !
+        call schema%init(table="rowgroup_estimate")
+        call schema%add_field("v", "int32")
+        call parquet_parse_maml(schema)
+        call parquet_open_writer(writer, path, schema)
+        call parquet_get_chunk_size(writer, n)
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+    end subroutine estimated_chunk_size
     !
 end module test_settings

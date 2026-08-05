@@ -637,20 +637,14 @@ contains
         integer(int32) :: v(40)
         integer(int32), allocatable :: fast(:), slow(:)
         integer :: k
-        interface
-            subroutine disable_counting(enable) bind(C, name="parquet_debug_set_disable_sort_counting_path")
-                use iso_c_binding, only : c_int
-                integer(c_int), value :: enable !! nonzero forces the comparator path.
-            end subroutine disable_counting
-        end interface
 
         do k = 1, 40
             v(k) = int(mod(k * 7, 5), int32)   ! only five distinct values: the counting path's case
         end do
         call pf_argsort(v, fast)
-        call disable_counting(1)
+        call parquet_set_sort_counting_path(.false.)
         call pf_argsort(v, slow)
-        call disable_counting(0)
+        call parquet_set_sort_counting_path(.true.)
         call check(error, all(fast == slow), &
             "the counting fast path must produce exactly the comparator path's permutation")
         if (allocated(error)) return
@@ -827,12 +821,6 @@ contains
         integer(int32) :: val
         integer(int64) :: idx
         integer :: k, g, m, pass
-        interface
-            subroutine disable_counting(enable) bind(C, name="parquet_debug_set_disable_sort_counting_path")
-                use iso_c_binding, only : c_int
-                integer(c_int), value :: enable !! nonzero forces the comparator path.
-            end subroutine disable_counting
-        end interface
 
         ! An INDEPENDENT oracle, not a second call into the engine. v(k) = mod(k-1, ngroup), so the
         ! stable order is: every index with value 0 in increasing order, then every index with
@@ -864,7 +852,7 @@ contains
         ! test the comparator's tiebreaker. An earlier version of this test ran only pass 1 and a
         ! mutation removing that tiebreaker survived it.
         do pass = 1, 2
-            call disable_counting(pass - 1)
+            call parquet_set_sort_counting_path(pass == 1)
             call pf_argsort(v, perm)
             call check(error, all(int(perm, int64) == expect), &
                 "pf_argsort must be stable: equal values must keep their original index order")
@@ -879,7 +867,7 @@ contains
             end do
             if (allocated(error)) exit
         end do
-        call disable_counting(0)
+        call parquet_set_sort_counting_path(.true.)
     end subroutine test_nth_stable_index
     !
     !> `descending` and `nulls_first` mean here exactly what they mean for the sort, and `nth`
@@ -1191,22 +1179,16 @@ contains
         integer(int32) :: v(60)
         integer(int32), allocatable :: fast(:), slow(:)
         integer :: k, c_fast, c_slow
-        interface
-            subroutine disable_counting(enable) bind(C, name="parquet_debug_set_disable_sort_counting_path")
-                use iso_c_binding, only : c_int
-                integer(c_int), value :: enable !! nonzero forces the comparator path.
-            end subroutine disable_counting
-        end interface
 
         do k = 1, 60
             v(k) = int(mod(k * 7, 6), int32)   ! six distinct values: the counting path's case
         end do
         call pf_unique_count(v, c_fast)
         call pf_unique(v, fast)
-        call disable_counting(1)
+        call parquet_set_sort_counting_path(.false.)
         call pf_unique_count(v, c_slow)
         call pf_unique(v, slow)
-        call disable_counting(0)
+        call parquet_set_sort_counting_path(.true.)
         call check(error, c_fast == 6 .and. c_slow == 6, &
             "both sort paths must find the same six distinct values")
         if (allocated(error)) return
@@ -1334,20 +1316,14 @@ contains
         integer(int32) :: v(50)
         integer, allocatable :: fast(:), slow(:)
         integer :: k
-        interface
-            subroutine disable_counting(enable) bind(C, name="parquet_debug_set_disable_sort_counting_path")
-                use iso_c_binding, only : c_int
-                integer(c_int), value :: enable !! nonzero forces the comparator path.
-            end subroutine disable_counting
-        end interface
 
         do k = 1, 50
             v(k) = int(mod(k * 3, 4), int32)   ! four distinct values, heavily tied
         end do
         call pf_rank(v, fast)
-        call disable_counting(1)
+        call parquet_set_sort_counting_path(.false.)
         call pf_rank(v, slow)
-        call disable_counting(0)
+        call parquet_set_sort_counting_path(.true.)
         call check(error, all(fast == slow), &
             "both sort paths must produce the same competition ranks")
         if (allocated(error)) return
@@ -1534,14 +1510,9 @@ contains
     !> Lowers the row count below which threading is refused, so a test-sized array can reach the
     !> parallel path at all. Every fixture here is orders of magnitude below the real threshold.
     subroutine force_parallel_threshold(rows)
-        integer(int64), intent(in) :: rows !! new threshold; <= 0 restores the real one.
-        interface
-            subroutine set_min_rows(n) bind(C, name="parquet_debug_set_sort_parallel_min_rows")
-                use iso_c_binding, only : c_int64_t
-                integer(c_int64_t), value :: n !! rows below which threading is refused.
-            end subroutine set_min_rows
-        end interface
-        call set_min_rows(int(rows, int64))
+        integer(int64), intent(in) :: rows !! new threshold; 0 restores the built-in one.
+
+        call parquet_set_sort_parallel_min_rows(rows)
     end subroutine force_parallel_threshold
     !
     !> How many threads the last sort actually put to work, the calling thread included.

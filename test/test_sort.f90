@@ -205,12 +205,6 @@ contains
         integer(int32), allocatable :: ids(:)
         integer :: i
         character(len=*), parameter :: file = "test_run/sort_stable.parquet"
-        interface
-            subroutine disable_counting(enable) bind(C, name="parquet_debug_set_disable_sort_counting_path")
-                use iso_c_binding, only : c_int
-                integer(c_int), value :: enable !! nonzero forces the comparator path.
-            end subroutine disable_counting
-        end interface
 
         do i = 1, n
             id(i) = i
@@ -232,9 +226,9 @@ contains
         deallocate(ids)
 
         ! 2. the same key with the fast path forced off -> the comparator and its tiebreaker.
-        call disable_counting(1)
+        call parquet_set_sort_counting_path(.false.)
         call sorted_ids(file, "flat asc", ids)
-        call disable_counting(0)
+        call parquet_set_sort_counting_path(.true.)
         call check(error, all(ids == id), "comparator path: tied rows must keep their file order")
         if (allocated(error)) return
         deallocate(ids)
@@ -454,18 +448,12 @@ contains
         type(error_type), allocatable, intent(out) :: error
         integer(int32), allocatable :: fast(:), slow(:)
         character(len=*), parameter :: file = "test_run/sort_counting.parquet"
-        interface
-            subroutine disable_counting(enable) bind(C, name="parquet_debug_set_disable_sort_counting_path")
-                use iso_c_binding, only : c_int
-                integer(c_int), value :: enable !! nonzero forces the comparator path.
-            end subroutine disable_counting
-        end interface
 
         call write_basic_fixture(file)
         call sorted_ids(file, "v asc", fast)          ! small integer range -> counting path
-        call disable_counting(1)
+        call parquet_set_sort_counting_path(.false.)
         call sorted_ids(file, "v asc", slow)          ! same key, comparator path
-        call disable_counting(0)
+        call parquet_set_sort_counting_path(.true.)
         call check(error, all(fast == slow), "the counting fast path and the comparator must agree exactly")
         if (allocated(error)) return
         call check(error, all(fast == [2, 4, 1, 6, 3, 5]), "both paths must give the expected order")

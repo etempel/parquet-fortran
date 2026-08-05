@@ -127,6 +127,83 @@ Choose a codec by either route and the level falls back to that codec's own defa
 level too. That is deliberate: it stops a zstd-tuned level being attached to, say, snappy just
 because you changed the codec.
 
+## Tuning the sort
+
+Three knobs govern the sort engine. All three are read at each sort, so they take effect
+immediately, and all three are process-global — a sort anywhere in your program sees the same
+values.
+
+```fortran
+call parquet_set_sort_parallel_min_rows(20000)   ! don't thread below 20k rows
+call parquet_set_sort_counting_bucket_limit(0)   ! 0 restores the built-in value
+```
+
+`parquet_set_sort_parallel_min_rows(n)` is the row count below which a sort refuses to use threads
+at all, however many `threads=` asks for — threading a small array costs more than the sort saves.
+The built-in 8192 is measured rather than guessed: an 8-thread argsort of random `real64` against
+the serial one came out at 0.86x for 2k rows (threading *loses*), 1.48x at 8k, 2.18x at 16k and
+3.23x at 1M, so break-even sits between 2k and 8k. Lower it only against a measurement of your own
+hardware and data.
+
+`parquet_set_sort_counting_path(flag)` and `parquet_set_sort_counting_bucket_limit(n)` control the
+integer counting fast path — a second sort implementation that a single, null-free integer key with
+a narrow value range can use instead of the comparator. It is what stops a low-cardinality integer
+sort costing many times what it should.
+
+The full rule, in this order: **the counting path is used when the flag is on, *and* the key's value
+range fits the bucket limit, *and* the key is a single null-free integer key.** Turning the flag off
+overrides the limit; raising the limit does nothing while the flag is off.
+
+Two things about the limit specifically:
+
+- **It bounds the value *range*, not the number of distinct values.** A thousand values spread over
+  a billion is far outside a limit that a million densely packed values sit comfortably inside.
+- **The number is the memory control.** `n` buckets costs `8n` bytes of counters, so the built-in
+  4194304 caps the counting path at 32 MB. Raising it trades memory for speed on wider-ranged
+  integer keys.
+
+Turning the counting path off has no performance case — it exists so the two implementations can be
+compared against each other on the same data, which is how the library tests that they agree.
+
+Both numbers accept `0`, meaning "restore the built-in value", and both accept either integer kind.
+
+## Row-group size when writing
+
+`parquet_set_target_row_group_bytes(n)` sets the size in **bytes** a row group aims for when a
+writer is opened without an explicit `chunk_size=`. The built-in target is 268435456 (256 MiB), and
+`0` restores it.
+
+```fortran
+call parquet_set_target_row_group_bytes(64 * 1024 * 1024)   ! ~64 MiB row groups
+```
+
+Sizing by bytes rather than by a flat row count is what makes a table of narrow `int32` columns and
+a table of wide vector columns produce row groups of comparable size — which is what Parquet's own
+guidance (roughly 128 MB to 1 GB) is about, and what drives per-row-group compression efficiency and
+decode cost.
+
+Three bounds the library applies afterwards are **not** settable: a floor of 1000 rows, a ceiling of
+10,000,000 rows, and the `int32` element-count ceiling a vector column imposes. A target so small
+that even the floor would overshoot it fourfold abandons the floor rather than the target, down to a
+single row per row group — so a very small value really does produce very small row groups.
+
+An explicit `chunk_size=` is never overridden by this; a caller who names a row count means it.
+
+## Row-group pruning when reading
+
+`parquet_set_statistics_prescreen(flag)` controls whether a filtered read screens each row group
+against its footer statistics first, and skips the ones the filter provably cannot match — no column
+data is read for those at all.
+
+Leave it on, which is the default. It changes how much of a file is read and **nothing else**: the
+rows returned are identical either way. That property is exactly why turning it off is useful for
+testing (the library's own tests read the same fixture both ways and compare element for element)
+and why there is otherwise no reason to.
+
+The one real-world case for disabling it is a file whose statistics are known to be untrustworthy —
+written by a tool that recorded them incorrectly. The screen declines on its own whenever it is
+merely *uncertain*; it cannot detect statistics that are confidently wrong.
+
 ## Terminal output
 
 Two settings control what the library prints and where. Both are read per message, so they take
@@ -191,9 +268,14 @@ parquet-fortran settings
   arrow_threads                    8
   sort_threads                     0
   prefetch_threads                 0
+  sort_parallel_min_rows           8192
+  sort_counting_path               true
+  sort_counting_bucket_limit       4194304
   default_compression              zstd
   default_compression_level        3
   default_use_threads              true
+  target_row_group_bytes           268435456
+  statistics_prescreen             true
   verbosity                        normal
   message_stream                   stdout
 limits (read-only)

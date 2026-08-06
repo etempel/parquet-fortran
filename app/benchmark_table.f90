@@ -843,8 +843,8 @@ contains
         write(output_unit, '(a)') "path, where no mask is built or passed at all."
     end subroutine bench_write_nulls
 
-    !> What `%sort_by` spends re-validating one permutation it produced itself (feature_sort.md
-    !! §12.2): `parquet_column%reindex` validates its permutation unconditionally, and `%sort_by`
+    !> What `%sort_by` spends re-validating one permutation it produced itself:
+    !! `parquet_column%reindex` validates its permutation unconditionally, and `%sort_by`
     !! calls it once per column, so an N-column table validates the same permutation N times.
     !!
     !! **The table is built in memory rather than read from a file**, which is the maintainer's own
@@ -859,9 +859,9 @@ contains
     !! The validation cost is measured by replicating the two candidate loops EXACTLY -- the
     !! `logical`-array one `reindex` runs today, and the bit-packed one `check_permutation`
     !! (`src/parquet_sorting_keys.f90`) already uses -- over the very permutation the sort just
-    !! produced, in the same program and under the same flags. That answers both halves of
-    !! feature_sort.md's Q44 at once: what bit-packing alone would save, and what removing the
-    !! redundant calls would save. Nothing in `src/` is modified to obtain it.
+    !! produced, in the same program and under the same flags. That separates the two possible
+    !! savings: what bit-packing the seen-set alone would buy, and what removing the redundant
+    !! calls would buy. Nothing in `src/` is modified to obtain it.
     !!
     !! The key column is re-scattered between rounds, outside every timed region, because a second
     !! sort of an already-sorted column would either return early or measure a reversal

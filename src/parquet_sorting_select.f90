@@ -399,6 +399,34 @@ contains
         call move_alloc(perm64, perm)
     end procedure partial_argsort_col_i64
     !
+    module procedure partial_argsort_keys_i32
+        integer(int64), allocatable :: perm64(:)
+        integer(int64) :: count
+        !
+        if (keys%nkeys < 1) then
+            error stop EP // "pf_partial_argsort: this pf_sort_keys has no key; " // &
+                "call keys%add(...) at least once before sorting"
+        end if
+        call resolve_count(n, keys%nrows, "pf_partial_argsort", count)
+        call drive_engine_partial(keys%keys(1:keys%nkeys), keys%nrows, count, &
+            "pf_partial_argsort", perm64)
+        call narrow_perm(perm64, "pf_partial_argsort", perm)
+    end procedure partial_argsort_keys_i32
+    !
+    module procedure partial_argsort_keys_i64
+        integer(int64), allocatable :: perm64(:)
+        integer(int64) :: count
+        !
+        if (keys%nkeys < 1) then
+            error stop EP // "pf_partial_argsort: this pf_sort_keys has no key; " // &
+                "call keys%add(...) at least once before sorting"
+        end if
+        call resolve_count(n, keys%nrows, "pf_partial_argsort", count)
+        call drive_engine_partial(keys%keys(1:keys%nkeys), keys%nrows, count, &
+            "pf_partial_argsort", perm64)
+        call move_alloc(perm64, perm)
+    end procedure partial_argsort_keys_i64
+    !
     module procedure partial_sort_i32
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64), allocatable :: perm(:)

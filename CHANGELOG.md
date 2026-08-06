@@ -16,7 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `logical`, `character(len=*)`, `parquet_date`/`parquet_time`/`parquet_timestamp`,
   `parquet_string_column` and `parquet_column`. Multi-key sorting goes through `pf_sort_keys`
   (`k%add(...)` once per key, keys of any mix of types, each with its own direction), since a
-  Fortran generic cannot offer "an optional second array of any type". These run on the **same C++
+  Fortran generic cannot offer "an optional second array of any type"; the same object also works
+  with `pf_is_sorted` and `pf_partial_argsort`, and `%nkeys_added()` counts the keys you added, one
+  per `%add`, whatever their types. These run on the **same C++
   engine** as a read-time `parquet_open_reader(..., sort_by=)` and `parquet_table%sort_by`, so the
   three can never disagree about null placement, NaN placement or tie order; every sort is stable,
   `descending=` reverses the values without moving the null/NaN tiers, and the six types with no
@@ -24,7 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   permutation really is one before writing anything, since an invalid one silently duplicates some
   elements and drops others; pass `assume_valid=.true.` to skip that for a permutation from
   `pf_argsort`. Public names here carry a `pf_` prefix rather than `parquet_`, because their
-  subject is not a parquet file. **Selection** comes with it: `pf_partial_sort`/`pf_partial_argsort`
+  subject is not a parquet file. **Group boundaries** come out of the same pass as the sort:
+  `pf_argsort(..., group_offsets=go)` reports where each run of rows comparing equal begins, as
+  offsets into the permutation with a trailing sentinel, so group *g* is `perm(go(g):go(g+1)-1)`
+  with no special case for the last one — all nulls form one group and all NaNs form one group,
+  deliberately unlike `pf_unique`, which drops nulls entirely. `group_nkeys=` narrows the grouping
+  to the leading keys **without changing the sort**, and counts the keys you added rather than the
+  engine's own (a `parquet_timestamp` key becomes two internally, and this never exposes that). **Selection** comes with it: `pf_partial_sort`/`pf_partial_argsort`
   order only the first `n` elements (`n` is clamped to the array size, so an `n` derived from a
   row count needs no `min()`; "the last n" is `descending=.true.`), `pf_nth_element` reports the
   value — and optionally the index — a full *stable* sort would place at a given rank without
@@ -155,7 +163,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   line up with the rows on disk, so any column not read by then can never be read, `%is_detached`
   reports it, and every later read from the file is a clear error rather than misaligned data.
   `%sort_by` runs the same C++ sort engine as the read-time `sort_by=`, so sorting a table in
-  memory and reading the same file sorted give the identical row order. A table can also be opened
+  memory and reading the same file sorted give the identical row order, and it reads a key column
+  that has not been read yet rather than refusing. Ordering can also be asked for **without** being
+  applied, which is the only way to read a table's rows in an order and keep the file behind them:
+  `%argsort_by` returns the row order the keys imply (consumed with
+  `%get_slice(name, parquet_slice_list(perm), values)`, and equally applicable to another table or
+  a plain array), `%argsort_partial` returns just the `n` best rows by selection rather than a full
+  sort — the difference that matters when a 100-million-row table is asked for its brightest 100 —
+  and `%is_sorted_by` answers whether the rows are already in that order in O(rows) with an early
+  exit. None of the three detaches. `%argsort_by` optionally reports where each run of equal rows
+  begins (`group_offsets=`, with `group_nkeys=` to group on the first few keys while still sorting
+  by all of them, which is "grouped by field, ordered by magnitude within each group"). A
+  permutation describes the table **as it was**: any row-structural change silently invalidates it,
+  and `%generation()` is how to check before reusing one. A table can also be opened
   against a **read-in MAML** (`parquet_open_table(t, file, maml=...)`) whose `extra: remap:` block
   gives the file's columns table-facing names of the program's own, so code works in one stable
   vocabulary whatever a particular file calls things; an internal name may deliberately shadow a

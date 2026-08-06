@@ -179,9 +179,57 @@ call pf_argsort(k, perm)
 ```
 
 Keys apply in the order added, the first being primary, and each carries its own `descending=` and
-`nulls_first=`. `%nkeys_added()` reports how many there are; `%clear()` drops them all, leaving the
-object reusable for an unrelated sort. Every key must describe the same number of rows, which is
-checked as each one is added rather than at sort time.
+`nulls_first=`. `%nkeys_added()` reports how many there are — one per `%add` call, whatever their
+types; `%clear()` drops them all, leaving the object reusable for an unrelated sort. Every key must
+describe the same number of rows, which is checked as each one is added rather than at sort time.
+
+A `pf_sort_keys` also works with `pf_is_sorted` and `pf_partial_argsort`, so a multi-key order can
+be tested or partially built, not only sorted in full:
+
+```fortran
+call pf_is_sorted(k, ok)              ! already in this order? O(n), no allocation
+call pf_partial_argsort(k, perm, 10)  ! just the ten best rows
+```
+
+## Group boundaries
+
+`pf_argsort` can report, in the same pass, where each run of **equal** rows begins:
+
+```fortran
+integer(int64), allocatable :: perm(:), go(:)
+
+call pf_argsort(k, perm, group_offsets=go)
+do g = 1, size(go) - 1
+    ! rows of group g, in order:  perm(go(g) : go(g+1) - 1)
+end do
+```
+
+`group_offsets` has length `ngroups + 1`, and its last entry is the sentinel `n + 1` — which is what
+lets the loop above slice every group the same way, with no special case for the last one. An empty
+array gives `[1]`, meaning no groups.
+
+Two rows share a group when they compare **equal**, which has one consequence worth stating: **all
+nulls form one group, and all NaNs form one group.** That is deliberately unlike `pf_unique`, which
+drops nulls from its output entirely — a group list has to account for every row.
+
+By default a group is a run equal under *every* key. `group_nkeys=` narrows that to the first few,
+**without changing the sort**:
+
+```fortran
+call k%add(field_id)
+call k%add(mag)
+call pf_argsort(k, perm, group_offsets=go, group_nkeys=1)
+! one group per field_id, and within each group the rows are ordered by mag
+```
+
+`group_nkeys` counts the keys *you* added, one per `%add`. That is not always the engine's own
+count — a `parquet_timestamp` key becomes two keys internally — and this argument never exposes the
+difference. It must be between 1 and `%nkeys_added()`, and it requires `group_offsets`: on its own
+it would change nothing, so passing it alone is an error rather than a silent no-op.
+
+Asking for `group_offsets` costs one extra copy of a single key. Without it a one-key `pf_argsort`
+borrows the key it just extracted; with it the call goes through the builder, which owns its keys.
+That is the price of one engine entry point serving three operations instead of three of them.
 
 `pf_sort_keys` holds no C handle — its keys are ordinary allocatable Fortran arrays, and the C++
 side is created, used and freed entirely inside `pf_argsort`. That keeps the type free of a
@@ -224,7 +272,12 @@ call t%sort_by(["mass"], descending=[.true.])
 ```
 
 That call runs on this same engine, so it orders rows exactly as `pf_argsort` would on the same
-key values.
+key values. A key column that has not been read yet is read for you.
+
+The table has three read-only counterparts that answer the same questions without moving anything —
+`%argsort_by`, `%is_sorted_by` and `%argsort_partial`. Because they do not reorder, they do not
+detach the table from its file, which `%sort_by` does. See
+[Ordering rows without reordering them](table.html#ordering-rows-without-reordering-them).
 
 > **Do not `pf_permute` a pointer obtained from `%col`.** `%col` hands back a *writable pointer
 > into a table's live storage*, so permuting through it reorders that one column and leaves every

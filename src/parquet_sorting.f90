@@ -142,9 +142,15 @@ module parquet_sorting
     !! type must never be given to OpenMP's `private()` -- usable per-thread in the obvious way.
     type :: pf_sort_keys
         private
-        integer :: nkeys = 0                                !! keys added so far.
+        integer :: nkeys = 0                                !! ENGINE keys held; see `add_ekeys`.
         integer(int64) :: nrows = -1                        !! rows every key must have; -1 until the first add.
         type(sort_key_buf), allocatable :: keys(:)          !! the keys, in precedence order.
+        !> engine keys contributed by each `%add` call, one entry per call. Almost always 1, but a
+        !! `parquet_timestamp` key binds as TWO engine keys (a seconds/nanoseconds split), so
+        !! `nkeys` above is not the number of keys the caller added and must never be reported as
+        !! such. This array is what translates between the two, for `%nkeys_added` and for
+        !! `group_nkeys`, and its SIZE -- not `nkeys` -- is the caller's key count.
+        integer, allocatable :: add_ekeys(:)
     contains
         procedure, private :: add_i32 !! %add specific for a 32-bit integer key.
         procedure, private :: add_i64 !! %add specific for a 64-bit integer key.
@@ -160,7 +166,7 @@ module parquet_sorting
         !> Appends one sort key. Keys apply in the order added, the first being primary.
         generic :: add => add_i32, add_i64, add_f32, add_f64, add_bool, add_chr, add_date, add_time, add_ts, add_strcol, &
             add_col
-        procedure :: nkeys_added => keys_count !! Number of keys added so far.
+        procedure :: nkeys_added => keys_count !! Keys added so far, one per %add call.
         procedure :: clear => keys_clear       !! Drops every key, leaving the object reusable.
     end type pf_sort_keys
     !
@@ -269,6 +275,7 @@ module parquet_sorting
         module procedure is_sorted_ts
         module procedure is_sorted_strcol
         module procedure is_sorted_col
+        module procedure is_sorted_keys
     end interface pf_is_sorted
     !
     !> The permutation that would sort the FIRST `n` elements of `values`, without ordering
@@ -302,6 +309,8 @@ module parquet_sorting
         module procedure partial_argsort_strcol_i64
         module procedure partial_argsort_col_i32
         module procedure partial_argsort_col_i64
+        module procedure partial_argsort_keys_i32
+        module procedure partial_argsort_keys_i64
     end interface pf_partial_argsort
     !
     !> The first `n` elements of `values` in order, as an independent copy of length `n`.
@@ -905,7 +914,11 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. sorts this key high to low.
             logical, intent(in), optional :: nulls_first !! .true. places this key's nulls first.
         end subroutine add_col
-        !> Number of keys added so far.
+        !> Number of keys added so far: one per `%add` call, whatever their types.
+        !!
+        !! Counts the keys YOU added, which is not always what the engine holds -- one
+        !! `parquet_timestamp` key becomes two engine keys internally. This reports 1 for it,
+        !! and `group_nkeys` counts in the same units.
         module function keys_count(self) result(n)
             class(pf_sort_keys), intent(in) :: self !! the key list.
             integer :: n                            !! keys added.
@@ -920,6 +933,18 @@ module parquet_sorting
             type(sort_key_buf), allocatable, intent(inout) :: buf(:) !! keys to append; moved from.
             character(len=*), intent(in) :: proc                !! calling procedure, for messages.
         end subroutine keys_append
+        !> Validates a `group_nkeys` request and translates it from CALLER keys to ENGINE keys.
+        !!
+        !! Always sets `group_ekeys`, so a caller can pass it on unconditionally: with
+        !! `group_nkeys` absent it comes back as every engine key, which is what grouping on
+        !! the full key list means.
+        module subroutine resolve_group_nkeys(keys, group_nkeys, want_offsets, proc, group_ekeys)
+            class(pf_sort_keys), intent(in) :: keys       !! the key list.
+            integer, intent(in), optional :: group_nkeys  !! caller keys per group; absent = all.
+            logical, intent(in) :: want_offsets           !! whether group_offsets was asked for.
+            character(len=*), intent(in) :: proc          !! calling procedure, for messages.
+            integer, intent(out) :: group_ekeys           !! the engine-key prefix length.
+        end subroutine resolve_group_nkeys
         !> Runs the C++ engine over `keys`, returning a 1-based permutation.
         module subroutine drive_engine(keys, nrows, proc, perm, threads)
             type(sort_key_buf), intent(in), target :: keys(:)   !! the keys, primary first.
@@ -928,6 +953,30 @@ module parquet_sorting
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             integer, intent(in), optional :: threads            !! thread request; absent = auto.
         end subroutine drive_engine
+        !> `drive_engine`, plus the group boundaries when `group_offsets` is asked for.
+        !!
+        !! Absent `group_offsets` is exactly `drive_engine`, one-shot fast path and all. Present,
+        !! it routes through `engine_build_runs` instead, which always uses the builder -- so
+        !! asking for boundaries costs one extra copy of a single key. That is the documented
+        !! price of one entry point serving three operations rather than three of them.
+        module subroutine drive_engine_grouped(keys, nrows, proc, perm, threads, group_offsets, &
+                group_ekeys)
+            type(sort_key_buf), intent(in), target :: keys(:)   !! the keys, primary first.
+            integer(int64), intent(in) :: nrows                 !! rows each key describes.
+            character(len=*), intent(in) :: proc                !! calling procedure, for messages.
+            integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
+            integer, intent(in), optional :: threads            !! thread request; absent = auto.
+            integer(int64), allocatable, intent(out), optional :: group_offsets(:) !! group bounds.
+            integer, intent(in), optional :: group_ekeys !! ENGINE keys defining a group; absent = all.
+        end subroutine drive_engine_grouped
+        !> Turns `engine_build_runs`' tie flags into the offsets `group_offsets` promises:
+        !! length `ngroups + 1`, last entry `nrows + 1`, so group g is `perm(o(g):o(g+1)-1)`
+        !! for every g with no last-iteration special case.
+        module subroutine runs_to_offsets(tie, nrows, offsets)
+            integer(c_int8_t), intent(in) :: tie(:) !! 1 where a row ties the previous one.
+            integer(int64), intent(in) :: nrows     !! rows sorted; `tie` may be longer.
+            integer(int64), allocatable, intent(out) :: offsets(:) !! the group offsets.
+        end subroutine runs_to_offsets
         !> Resolves how many threads a sort should use. **This is the only place the auto rule
         !! lives**, and the only place in this module carrying OpenMP plumbing at all -- the
         !! same arrangement parquet_tables_parallel.f90 keeps for the table layer, and worth
@@ -1031,13 +1080,18 @@ module parquet_sorting
         !> Sorts, and reports where the runs of EQUAL rows are: `tie(k)` is 1 when output
         !! position k holds a row comparing equal to the one before it. One call, because
         !! `pf_unique`/`pf_rank` need both and would otherwise build the permutation twice.
-        module subroutine engine_build_runs(keys, nrows, proc, perm, tie, threads)
+        module subroutine engine_build_runs(keys, nrows, proc, perm, tie, threads, group_ekeys)
             type(sort_key_buf), intent(in), target :: keys(:)   !! the keys, primary first.
             integer(int64), intent(in) :: nrows                 !! rows each key describes.
             character(len=*), intent(in) :: proc                !! calling procedure, for messages.
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             integer(c_int8_t), allocatable, intent(out) :: tie(:) !! 1 where a row ties the previous.
             integer, intent(in), optional :: threads            !! thread request; absent = auto.
+            !> How many LEADING keys decide whether two rows tie; absent means all of them.
+            !! Counted in ENGINE keys, already resolved from the caller's key count -- the two
+            !! differ because one `%add` of a `parquet_timestamp` contributes two engine keys.
+            !! The sort itself always uses every key; only the tie test is narrowed.
+            integer, intent(in), optional :: group_ekeys
         end subroutine engine_build_runs
         !> Binary-searches `keys`, whose LAST row is the target the caller appended.
         module subroutine engine_search(keys, nrows, n_search, upper, proc, pos)
@@ -1120,12 +1174,26 @@ module parquet_sorting
             character(len=*), intent(in) :: proc                   !! calling procedure, for messages.
             integer(int32), allocatable, intent(out) :: perm32(:)  !! the narrowed copy.
         end subroutine narrow_perm
+        !> Narrows a group-offsets array to int32, aborting rather than truncating.
+        !!
+        !! NOT the same test as `narrow_perm`'s, and the difference is exactly one row: a
+        !! permutation's largest entry is `n`, but this array's is the sentinel `n + 1`. At
+        !! `n == huge(int32)` the permutation narrows cleanly while the sentinel wraps negative,
+        !! and a negative sentinel turns the last group's `o(g+1) - 1` into a huge negative
+        !! bound -- a silently empty or wildly wrong slice instead of an abort. So this checks
+        !! the sentinel itself rather than the length.
+        module subroutine narrow_offsets(offsets64, proc, offsets32)
+            integer(int64), intent(in) :: offsets64(:)                !! the group offsets.
+            character(len=*), intent(in) :: proc                      !! calling procedure.
+            integer(int32), allocatable, intent(out) :: offsets32(:)  !! the narrowed copy.
+        end subroutine narrow_offsets
     end interface
     !
     ! ---- pf_argsort and pf_sort (parquet_sorting_argsort) ----
     interface
         !> pf_argsort over a 32-bit integer array, returning an int32 permutation.
-        module subroutine argsort_i32_i32(values, perm, descending, nulls_first, is_valid, threads)
+        module subroutine argsort_i32_i32(values, perm, descending, nulls_first, is_valid, &
+                threads, group_offsets)
         integer(int32), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1137,9 +1205,25 @@ module parquet_sorting
             !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
+            !> where each run of rows comparing EQUAL under the grouping keys begins, as
+            !! offsets INTO `perm`: length `ngroups + 1`, with the last entry the sentinel
+            !! `n + 1`, so group g is `perm(o(g) : o(g+1) - 1)` for every g and
+            !! `ngroups = size(o) - 1`. No last-iteration special case, which is where an
+            !! off-by-one usually gets written.
+            !!
+            !! Always allocated when asked for: an empty array gives `[1]` (no groups), one
+            !! element gives `[1, 2]`. All nulls form ONE group and all NaNs form ONE group,
+            !! because rows in the same non-value tier compare equal -- deliberately unlike
+            !! `pf_unique`, which drops nulls entirely, since a group list must account for
+            !! every row.
+            !!
+            !! Costs one extra copy of a single key: boundaries come from the builder path,
+            !! so asking for them gives up the one-shot borrow a lone key would otherwise use.
+            integer(int32), allocatable, intent(out), optional :: group_offsets(:)
         end subroutine argsort_i32_i32
         !> pf_argsort over a 32-bit integer array, returning an int64 permutation.
-        module subroutine argsort_i32_i64(values, perm, descending, nulls_first, is_valid, threads)
+        module subroutine argsort_i32_i64(values, perm, descending, nulls_first, is_valid, &
+                threads, group_offsets)
         integer(int32), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1151,9 +1235,25 @@ module parquet_sorting
             !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
+            !> where each run of rows comparing EQUAL under the grouping keys begins, as
+            !! offsets INTO `perm`: length `ngroups + 1`, with the last entry the sentinel
+            !! `n + 1`, so group g is `perm(o(g) : o(g+1) - 1)` for every g and
+            !! `ngroups = size(o) - 1`. No last-iteration special case, which is where an
+            !! off-by-one usually gets written.
+            !!
+            !! Always allocated when asked for: an empty array gives `[1]` (no groups), one
+            !! element gives `[1, 2]`. All nulls form ONE group and all NaNs form ONE group,
+            !! because rows in the same non-value tier compare equal -- deliberately unlike
+            !! `pf_unique`, which drops nulls entirely, since a group list must account for
+            !! every row.
+            !!
+            !! Costs one extra copy of a single key: boundaries come from the builder path,
+            !! so asking for them gives up the one-shot borrow a lone key would otherwise use.
+            integer(int64), allocatable, intent(out), optional :: group_offsets(:)
         end subroutine argsort_i32_i64
         !> pf_argsort over a 64-bit integer array, returning an int32 permutation.
-        module subroutine argsort_i64_i32(values, perm, descending, nulls_first, is_valid, threads)
+        module subroutine argsort_i64_i32(values, perm, descending, nulls_first, is_valid, &
+                threads, group_offsets)
         integer(int64), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1165,9 +1265,25 @@ module parquet_sorting
             !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
+            !> where each run of rows comparing EQUAL under the grouping keys begins, as
+            !! offsets INTO `perm`: length `ngroups + 1`, with the last entry the sentinel
+            !! `n + 1`, so group g is `perm(o(g) : o(g+1) - 1)` for every g and
+            !! `ngroups = size(o) - 1`. No last-iteration special case, which is where an
+            !! off-by-one usually gets written.
+            !!
+            !! Always allocated when asked for: an empty array gives `[1]` (no groups), one
+            !! element gives `[1, 2]`. All nulls form ONE group and all NaNs form ONE group,
+            !! because rows in the same non-value tier compare equal -- deliberately unlike
+            !! `pf_unique`, which drops nulls entirely, since a group list must account for
+            !! every row.
+            !!
+            !! Costs one extra copy of a single key: boundaries come from the builder path,
+            !! so asking for them gives up the one-shot borrow a lone key would otherwise use.
+            integer(int32), allocatable, intent(out), optional :: group_offsets(:)
         end subroutine argsort_i64_i32
         !> pf_argsort over a 64-bit integer array, returning an int64 permutation.
-        module subroutine argsort_i64_i64(values, perm, descending, nulls_first, is_valid, threads)
+        module subroutine argsort_i64_i64(values, perm, descending, nulls_first, is_valid, &
+                threads, group_offsets)
         integer(int64), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1179,9 +1295,25 @@ module parquet_sorting
             !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
+            !> where each run of rows comparing EQUAL under the grouping keys begins, as
+            !! offsets INTO `perm`: length `ngroups + 1`, with the last entry the sentinel
+            !! `n + 1`, so group g is `perm(o(g) : o(g+1) - 1)` for every g and
+            !! `ngroups = size(o) - 1`. No last-iteration special case, which is where an
+            !! off-by-one usually gets written.
+            !!
+            !! Always allocated when asked for: an empty array gives `[1]` (no groups), one
+            !! element gives `[1, 2]`. All nulls form ONE group and all NaNs form ONE group,
+            !! because rows in the same non-value tier compare equal -- deliberately unlike
+            !! `pf_unique`, which drops nulls entirely, since a group list must account for
+            !! every row.
+            !!
+            !! Costs one extra copy of a single key: boundaries come from the builder path,
+            !! so asking for them gives up the one-shot borrow a lone key would otherwise use.
+            integer(int64), allocatable, intent(out), optional :: group_offsets(:)
         end subroutine argsort_i64_i64
         !> pf_argsort over a 32-bit real array, returning an int32 permutation.
-        module subroutine argsort_f32_i32(values, perm, descending, nulls_first, is_valid, threads)
+        module subroutine argsort_f32_i32(values, perm, descending, nulls_first, is_valid, &
+                threads, group_offsets)
         real(real32), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1193,9 +1325,25 @@ module parquet_sorting
             !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
+            !> where each run of rows comparing EQUAL under the grouping keys begins, as
+            !! offsets INTO `perm`: length `ngroups + 1`, with the last entry the sentinel
+            !! `n + 1`, so group g is `perm(o(g) : o(g+1) - 1)` for every g and
+            !! `ngroups = size(o) - 1`. No last-iteration special case, which is where an
+            !! off-by-one usually gets written.
+            !!
+            !! Always allocated when asked for: an empty array gives `[1]` (no groups), one
+            !! element gives `[1, 2]`. All nulls form ONE group and all NaNs form ONE group,
+            !! because rows in the same non-value tier compare equal -- deliberately unlike
+            !! `pf_unique`, which drops nulls entirely, since a group list must account for
+            !! every row.
+            !!
+            !! Costs one extra copy of a single key: boundaries come from the builder path,
+            !! so asking for them gives up the one-shot borrow a lone key would otherwise use.
+            integer(int32), allocatable, intent(out), optional :: group_offsets(:)
         end subroutine argsort_f32_i32
         !> pf_argsort over a 32-bit real array, returning an int64 permutation.
-        module subroutine argsort_f32_i64(values, perm, descending, nulls_first, is_valid, threads)
+        module subroutine argsort_f32_i64(values, perm, descending, nulls_first, is_valid, &
+                threads, group_offsets)
         real(real32), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1207,9 +1355,25 @@ module parquet_sorting
             !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
+            !> where each run of rows comparing EQUAL under the grouping keys begins, as
+            !! offsets INTO `perm`: length `ngroups + 1`, with the last entry the sentinel
+            !! `n + 1`, so group g is `perm(o(g) : o(g+1) - 1)` for every g and
+            !! `ngroups = size(o) - 1`. No last-iteration special case, which is where an
+            !! off-by-one usually gets written.
+            !!
+            !! Always allocated when asked for: an empty array gives `[1]` (no groups), one
+            !! element gives `[1, 2]`. All nulls form ONE group and all NaNs form ONE group,
+            !! because rows in the same non-value tier compare equal -- deliberately unlike
+            !! `pf_unique`, which drops nulls entirely, since a group list must account for
+            !! every row.
+            !!
+            !! Costs one extra copy of a single key: boundaries come from the builder path,
+            !! so asking for them gives up the one-shot borrow a lone key would otherwise use.
+            integer(int64), allocatable, intent(out), optional :: group_offsets(:)
         end subroutine argsort_f32_i64
         !> pf_argsort over a 64-bit real array, returning an int32 permutation.
-        module subroutine argsort_f64_i32(values, perm, descending, nulls_first, is_valid, threads)
+        module subroutine argsort_f64_i32(values, perm, descending, nulls_first, is_valid, &
+                threads, group_offsets)
         real(real64), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1221,9 +1385,25 @@ module parquet_sorting
             !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
+            !> where each run of rows comparing EQUAL under the grouping keys begins, as
+            !! offsets INTO `perm`: length `ngroups + 1`, with the last entry the sentinel
+            !! `n + 1`, so group g is `perm(o(g) : o(g+1) - 1)` for every g and
+            !! `ngroups = size(o) - 1`. No last-iteration special case, which is where an
+            !! off-by-one usually gets written.
+            !!
+            !! Always allocated when asked for: an empty array gives `[1]` (no groups), one
+            !! element gives `[1, 2]`. All nulls form ONE group and all NaNs form ONE group,
+            !! because rows in the same non-value tier compare equal -- deliberately unlike
+            !! `pf_unique`, which drops nulls entirely, since a group list must account for
+            !! every row.
+            !!
+            !! Costs one extra copy of a single key: boundaries come from the builder path,
+            !! so asking for them gives up the one-shot borrow a lone key would otherwise use.
+            integer(int32), allocatable, intent(out), optional :: group_offsets(:)
         end subroutine argsort_f64_i32
         !> pf_argsort over a 64-bit real array, returning an int64 permutation.
-        module subroutine argsort_f64_i64(values, perm, descending, nulls_first, is_valid, threads)
+        module subroutine argsort_f64_i64(values, perm, descending, nulls_first, is_valid, &
+                threads, group_offsets)
         real(real64), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1235,9 +1415,25 @@ module parquet_sorting
             !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
+            !> where each run of rows comparing EQUAL under the grouping keys begins, as
+            !! offsets INTO `perm`: length `ngroups + 1`, with the last entry the sentinel
+            !! `n + 1`, so group g is `perm(o(g) : o(g+1) - 1)` for every g and
+            !! `ngroups = size(o) - 1`. No last-iteration special case, which is where an
+            !! off-by-one usually gets written.
+            !!
+            !! Always allocated when asked for: an empty array gives `[1]` (no groups), one
+            !! element gives `[1, 2]`. All nulls form ONE group and all NaNs form ONE group,
+            !! because rows in the same non-value tier compare equal -- deliberately unlike
+            !! `pf_unique`, which drops nulls entirely, since a group list must account for
+            !! every row.
+            !!
+            !! Costs one extra copy of a single key: boundaries come from the builder path,
+            !! so asking for them gives up the one-shot borrow a lone key would otherwise use.
+            integer(int64), allocatable, intent(out), optional :: group_offsets(:)
         end subroutine argsort_f64_i64
         !> pf_argsort over a logical array, returning an int32 permutation.
-        module subroutine argsort_bool_i32(values, perm, descending, nulls_first, is_valid, threads)
+        module subroutine argsort_bool_i32(values, perm, descending, nulls_first, is_valid, &
+                threads, group_offsets)
         logical, intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1249,9 +1445,25 @@ module parquet_sorting
             !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
+            !> where each run of rows comparing EQUAL under the grouping keys begins, as
+            !! offsets INTO `perm`: length `ngroups + 1`, with the last entry the sentinel
+            !! `n + 1`, so group g is `perm(o(g) : o(g+1) - 1)` for every g and
+            !! `ngroups = size(o) - 1`. No last-iteration special case, which is where an
+            !! off-by-one usually gets written.
+            !!
+            !! Always allocated when asked for: an empty array gives `[1]` (no groups), one
+            !! element gives `[1, 2]`. All nulls form ONE group and all NaNs form ONE group,
+            !! because rows in the same non-value tier compare equal -- deliberately unlike
+            !! `pf_unique`, which drops nulls entirely, since a group list must account for
+            !! every row.
+            !!
+            !! Costs one extra copy of a single key: boundaries come from the builder path,
+            !! so asking for them gives up the one-shot borrow a lone key would otherwise use.
+            integer(int32), allocatable, intent(out), optional :: group_offsets(:)
         end subroutine argsort_bool_i32
         !> pf_argsort over a logical array, returning an int64 permutation.
-        module subroutine argsort_bool_i64(values, perm, descending, nulls_first, is_valid, threads)
+        module subroutine argsort_bool_i64(values, perm, descending, nulls_first, is_valid, &
+                threads, group_offsets)
         logical, intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1263,9 +1475,25 @@ module parquet_sorting
             !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
+            !> where each run of rows comparing EQUAL under the grouping keys begins, as
+            !! offsets INTO `perm`: length `ngroups + 1`, with the last entry the sentinel
+            !! `n + 1`, so group g is `perm(o(g) : o(g+1) - 1)` for every g and
+            !! `ngroups = size(o) - 1`. No last-iteration special case, which is where an
+            !! off-by-one usually gets written.
+            !!
+            !! Always allocated when asked for: an empty array gives `[1]` (no groups), one
+            !! element gives `[1, 2]`. All nulls form ONE group and all NaNs form ONE group,
+            !! because rows in the same non-value tier compare equal -- deliberately unlike
+            !! `pf_unique`, which drops nulls entirely, since a group list must account for
+            !! every row.
+            !!
+            !! Costs one extra copy of a single key: boundaries come from the builder path,
+            !! so asking for them gives up the one-shot borrow a lone key would otherwise use.
+            integer(int64), allocatable, intent(out), optional :: group_offsets(:)
         end subroutine argsort_bool_i64
         !> pf_argsort over a string array, returning an int32 permutation.
-        module subroutine argsort_chr_i32(values, perm, descending, nulls_first, is_valid, threads)
+        module subroutine argsort_chr_i32(values, perm, descending, nulls_first, is_valid, &
+                threads, group_offsets)
         character(len=*), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1277,9 +1505,25 @@ module parquet_sorting
             !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
+            !> where each run of rows comparing EQUAL under the grouping keys begins, as
+            !! offsets INTO `perm`: length `ngroups + 1`, with the last entry the sentinel
+            !! `n + 1`, so group g is `perm(o(g) : o(g+1) - 1)` for every g and
+            !! `ngroups = size(o) - 1`. No last-iteration special case, which is where an
+            !! off-by-one usually gets written.
+            !!
+            !! Always allocated when asked for: an empty array gives `[1]` (no groups), one
+            !! element gives `[1, 2]`. All nulls form ONE group and all NaNs form ONE group,
+            !! because rows in the same non-value tier compare equal -- deliberately unlike
+            !! `pf_unique`, which drops nulls entirely, since a group list must account for
+            !! every row.
+            !!
+            !! Costs one extra copy of a single key: boundaries come from the builder path,
+            !! so asking for them gives up the one-shot borrow a lone key would otherwise use.
+            integer(int32), allocatable, intent(out), optional :: group_offsets(:)
         end subroutine argsort_chr_i32
         !> pf_argsort over a string array, returning an int64 permutation.
-        module subroutine argsort_chr_i64(values, perm, descending, nulls_first, is_valid, threads)
+        module subroutine argsort_chr_i64(values, perm, descending, nulls_first, is_valid, &
+                threads, group_offsets)
         character(len=*), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1291,9 +1535,25 @@ module parquet_sorting
             !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
+            !> where each run of rows comparing EQUAL under the grouping keys begins, as
+            !! offsets INTO `perm`: length `ngroups + 1`, with the last entry the sentinel
+            !! `n + 1`, so group g is `perm(o(g) : o(g+1) - 1)` for every g and
+            !! `ngroups = size(o) - 1`. No last-iteration special case, which is where an
+            !! off-by-one usually gets written.
+            !!
+            !! Always allocated when asked for: an empty array gives `[1]` (no groups), one
+            !! element gives `[1, 2]`. All nulls form ONE group and all NaNs form ONE group,
+            !! because rows in the same non-value tier compare equal -- deliberately unlike
+            !! `pf_unique`, which drops nulls entirely, since a group list must account for
+            !! every row.
+            !!
+            !! Costs one extra copy of a single key: boundaries come from the builder path,
+            !! so asking for them gives up the one-shot borrow a lone key would otherwise use.
+            integer(int64), allocatable, intent(out), optional :: group_offsets(:)
         end subroutine argsort_chr_i64
         !> pf_argsort over a date array, returning an int32 permutation.
-        module subroutine argsort_date_i32(values, perm, descending, nulls_first, threads)
+        module subroutine argsort_date_i32(values, perm, descending, nulls_first, &
+                threads, group_offsets)
         type(parquet_date), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1304,9 +1564,25 @@ module parquet_sorting
             !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
+            !> where each run of rows comparing EQUAL under the grouping keys begins, as
+            !! offsets INTO `perm`: length `ngroups + 1`, with the last entry the sentinel
+            !! `n + 1`, so group g is `perm(o(g) : o(g+1) - 1)` for every g and
+            !! `ngroups = size(o) - 1`. No last-iteration special case, which is where an
+            !! off-by-one usually gets written.
+            !!
+            !! Always allocated when asked for: an empty array gives `[1]` (no groups), one
+            !! element gives `[1, 2]`. All nulls form ONE group and all NaNs form ONE group,
+            !! because rows in the same non-value tier compare equal -- deliberately unlike
+            !! `pf_unique`, which drops nulls entirely, since a group list must account for
+            !! every row.
+            !!
+            !! Costs one extra copy of a single key: boundaries come from the builder path,
+            !! so asking for them gives up the one-shot borrow a lone key would otherwise use.
+            integer(int32), allocatable, intent(out), optional :: group_offsets(:)
         end subroutine argsort_date_i32
         !> pf_argsort over a date array, returning an int64 permutation.
-        module subroutine argsort_date_i64(values, perm, descending, nulls_first, threads)
+        module subroutine argsort_date_i64(values, perm, descending, nulls_first, &
+                threads, group_offsets)
         type(parquet_date), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1317,9 +1593,25 @@ module parquet_sorting
             !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
+            !> where each run of rows comparing EQUAL under the grouping keys begins, as
+            !! offsets INTO `perm`: length `ngroups + 1`, with the last entry the sentinel
+            !! `n + 1`, so group g is `perm(o(g) : o(g+1) - 1)` for every g and
+            !! `ngroups = size(o) - 1`. No last-iteration special case, which is where an
+            !! off-by-one usually gets written.
+            !!
+            !! Always allocated when asked for: an empty array gives `[1]` (no groups), one
+            !! element gives `[1, 2]`. All nulls form ONE group and all NaNs form ONE group,
+            !! because rows in the same non-value tier compare equal -- deliberately unlike
+            !! `pf_unique`, which drops nulls entirely, since a group list must account for
+            !! every row.
+            !!
+            !! Costs one extra copy of a single key: boundaries come from the builder path,
+            !! so asking for them gives up the one-shot borrow a lone key would otherwise use.
+            integer(int64), allocatable, intent(out), optional :: group_offsets(:)
         end subroutine argsort_date_i64
         !> pf_argsort over a time array, returning an int32 permutation.
-        module subroutine argsort_time_i32(values, perm, descending, nulls_first, threads)
+        module subroutine argsort_time_i32(values, perm, descending, nulls_first, &
+                threads, group_offsets)
         type(parquet_time), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1330,9 +1622,25 @@ module parquet_sorting
             !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
+            !> where each run of rows comparing EQUAL under the grouping keys begins, as
+            !! offsets INTO `perm`: length `ngroups + 1`, with the last entry the sentinel
+            !! `n + 1`, so group g is `perm(o(g) : o(g+1) - 1)` for every g and
+            !! `ngroups = size(o) - 1`. No last-iteration special case, which is where an
+            !! off-by-one usually gets written.
+            !!
+            !! Always allocated when asked for: an empty array gives `[1]` (no groups), one
+            !! element gives `[1, 2]`. All nulls form ONE group and all NaNs form ONE group,
+            !! because rows in the same non-value tier compare equal -- deliberately unlike
+            !! `pf_unique`, which drops nulls entirely, since a group list must account for
+            !! every row.
+            !!
+            !! Costs one extra copy of a single key: boundaries come from the builder path,
+            !! so asking for them gives up the one-shot borrow a lone key would otherwise use.
+            integer(int32), allocatable, intent(out), optional :: group_offsets(:)
         end subroutine argsort_time_i32
         !> pf_argsort over a time array, returning an int64 permutation.
-        module subroutine argsort_time_i64(values, perm, descending, nulls_first, threads)
+        module subroutine argsort_time_i64(values, perm, descending, nulls_first, &
+                threads, group_offsets)
         type(parquet_time), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1343,9 +1651,25 @@ module parquet_sorting
             !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
+            !> where each run of rows comparing EQUAL under the grouping keys begins, as
+            !! offsets INTO `perm`: length `ngroups + 1`, with the last entry the sentinel
+            !! `n + 1`, so group g is `perm(o(g) : o(g+1) - 1)` for every g and
+            !! `ngroups = size(o) - 1`. No last-iteration special case, which is where an
+            !! off-by-one usually gets written.
+            !!
+            !! Always allocated when asked for: an empty array gives `[1]` (no groups), one
+            !! element gives `[1, 2]`. All nulls form ONE group and all NaNs form ONE group,
+            !! because rows in the same non-value tier compare equal -- deliberately unlike
+            !! `pf_unique`, which drops nulls entirely, since a group list must account for
+            !! every row.
+            !!
+            !! Costs one extra copy of a single key: boundaries come from the builder path,
+            !! so asking for them gives up the one-shot borrow a lone key would otherwise use.
+            integer(int64), allocatable, intent(out), optional :: group_offsets(:)
         end subroutine argsort_time_i64
         !> pf_argsort over a timestamp array, returning an int32 permutation.
-        module subroutine argsort_ts_i32(values, perm, descending, nulls_first, threads)
+        module subroutine argsort_ts_i32(values, perm, descending, nulls_first, &
+                threads, group_offsets)
         type(parquet_timestamp), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1356,9 +1680,25 @@ module parquet_sorting
             !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
+            !> where each run of rows comparing EQUAL under the grouping keys begins, as
+            !! offsets INTO `perm`: length `ngroups + 1`, with the last entry the sentinel
+            !! `n + 1`, so group g is `perm(o(g) : o(g+1) - 1)` for every g and
+            !! `ngroups = size(o) - 1`. No last-iteration special case, which is where an
+            !! off-by-one usually gets written.
+            !!
+            !! Always allocated when asked for: an empty array gives `[1]` (no groups), one
+            !! element gives `[1, 2]`. All nulls form ONE group and all NaNs form ONE group,
+            !! because rows in the same non-value tier compare equal -- deliberately unlike
+            !! `pf_unique`, which drops nulls entirely, since a group list must account for
+            !! every row.
+            !!
+            !! Costs one extra copy of a single key: boundaries come from the builder path,
+            !! so asking for them gives up the one-shot borrow a lone key would otherwise use.
+            integer(int32), allocatable, intent(out), optional :: group_offsets(:)
         end subroutine argsort_ts_i32
         !> pf_argsort over a timestamp array, returning an int64 permutation.
-        module subroutine argsort_ts_i64(values, perm, descending, nulls_first, threads)
+        module subroutine argsort_ts_i64(values, perm, descending, nulls_first, &
+                threads, group_offsets)
         type(parquet_timestamp), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1369,9 +1709,25 @@ module parquet_sorting
             !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
+            !> where each run of rows comparing EQUAL under the grouping keys begins, as
+            !! offsets INTO `perm`: length `ngroups + 1`, with the last entry the sentinel
+            !! `n + 1`, so group g is `perm(o(g) : o(g+1) - 1)` for every g and
+            !! `ngroups = size(o) - 1`. No last-iteration special case, which is where an
+            !! off-by-one usually gets written.
+            !!
+            !! Always allocated when asked for: an empty array gives `[1]` (no groups), one
+            !! element gives `[1, 2]`. All nulls form ONE group and all NaNs form ONE group,
+            !! because rows in the same non-value tier compare equal -- deliberately unlike
+            !! `pf_unique`, which drops nulls entirely, since a group list must account for
+            !! every row.
+            !!
+            !! Costs one extra copy of a single key: boundaries come from the builder path,
+            !! so asking for them gives up the one-shot borrow a lone key would otherwise use.
+            integer(int64), allocatable, intent(out), optional :: group_offsets(:)
         end subroutine argsort_ts_i64
         !> pf_argsort over a packed string column array, returning an int32 permutation.
-        module subroutine argsort_strcol_i32(values, perm, descending, nulls_first, threads)
+        module subroutine argsort_strcol_i32(values, perm, descending, nulls_first, &
+                threads, group_offsets)
         type(parquet_string_column), intent(in) :: values
             integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1382,9 +1738,25 @@ module parquet_sorting
             !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
+            !> where each run of rows comparing EQUAL under the grouping keys begins, as
+            !! offsets INTO `perm`: length `ngroups + 1`, with the last entry the sentinel
+            !! `n + 1`, so group g is `perm(o(g) : o(g+1) - 1)` for every g and
+            !! `ngroups = size(o) - 1`. No last-iteration special case, which is where an
+            !! off-by-one usually gets written.
+            !!
+            !! Always allocated when asked for: an empty array gives `[1]` (no groups), one
+            !! element gives `[1, 2]`. All nulls form ONE group and all NaNs form ONE group,
+            !! because rows in the same non-value tier compare equal -- deliberately unlike
+            !! `pf_unique`, which drops nulls entirely, since a group list must account for
+            !! every row.
+            !!
+            !! Costs one extra copy of a single key: boundaries come from the builder path,
+            !! so asking for them gives up the one-shot borrow a lone key would otherwise use.
+            integer(int32), allocatable, intent(out), optional :: group_offsets(:)
         end subroutine argsort_strcol_i32
         !> pf_argsort over a packed string column array, returning an int64 permutation.
-        module subroutine argsort_strcol_i64(values, perm, descending, nulls_first, threads)
+        module subroutine argsort_strcol_i64(values, perm, descending, nulls_first, &
+                threads, group_offsets)
         type(parquet_string_column), intent(in) :: values
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1395,9 +1767,25 @@ module parquet_sorting
             !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
+            !> where each run of rows comparing EQUAL under the grouping keys begins, as
+            !! offsets INTO `perm`: length `ngroups + 1`, with the last entry the sentinel
+            !! `n + 1`, so group g is `perm(o(g) : o(g+1) - 1)` for every g and
+            !! `ngroups = size(o) - 1`. No last-iteration special case, which is where an
+            !! off-by-one usually gets written.
+            !!
+            !! Always allocated when asked for: an empty array gives `[1]` (no groups), one
+            !! element gives `[1, 2]`. All nulls form ONE group and all NaNs form ONE group,
+            !! because rows in the same non-value tier compare equal -- deliberately unlike
+            !! `pf_unique`, which drops nulls entirely, since a group list must account for
+            !! every row.
+            !!
+            !! Costs one extra copy of a single key: boundaries come from the builder path,
+            !! so asking for them gives up the one-shot borrow a lone key would otherwise use.
+            integer(int64), allocatable, intent(out), optional :: group_offsets(:)
         end subroutine argsort_strcol_i64
         !> pf_argsort over a type-erased column array, returning an int32 permutation.
-        module subroutine argsort_col_i32(values, perm, descending, nulls_first, threads)
+        module subroutine argsort_col_i32(values, perm, descending, nulls_first, &
+                threads, group_offsets)
         type(parquet_column), intent(in) :: values
             integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1408,9 +1796,25 @@ module parquet_sorting
             !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
+            !> where each run of rows comparing EQUAL under the grouping keys begins, as
+            !! offsets INTO `perm`: length `ngroups + 1`, with the last entry the sentinel
+            !! `n + 1`, so group g is `perm(o(g) : o(g+1) - 1)` for every g and
+            !! `ngroups = size(o) - 1`. No last-iteration special case, which is where an
+            !! off-by-one usually gets written.
+            !!
+            !! Always allocated when asked for: an empty array gives `[1]` (no groups), one
+            !! element gives `[1, 2]`. All nulls form ONE group and all NaNs form ONE group,
+            !! because rows in the same non-value tier compare equal -- deliberately unlike
+            !! `pf_unique`, which drops nulls entirely, since a group list must account for
+            !! every row.
+            !!
+            !! Costs one extra copy of a single key: boundaries come from the builder path,
+            !! so asking for them gives up the one-shot borrow a lone key would otherwise use.
+            integer(int32), allocatable, intent(out), optional :: group_offsets(:)
         end subroutine argsort_col_i32
         !> pf_argsort over a type-erased column array, returning an int64 permutation.
-        module subroutine argsort_col_i64(values, perm, descending, nulls_first, threads)
+        module subroutine argsort_col_i64(values, perm, descending, nulls_first, &
+                threads, group_offsets)
         type(parquet_column), intent(in) :: values
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
@@ -1421,9 +1825,24 @@ module parquet_sorting
             !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
+            !> where each run of rows comparing EQUAL under the grouping keys begins, as
+            !! offsets INTO `perm`: length `ngroups + 1`, with the last entry the sentinel
+            !! `n + 1`, so group g is `perm(o(g) : o(g+1) - 1)` for every g and
+            !! `ngroups = size(o) - 1`. No last-iteration special case, which is where an
+            !! off-by-one usually gets written.
+            !!
+            !! Always allocated when asked for: an empty array gives `[1]` (no groups), one
+            !! element gives `[1, 2]`. All nulls form ONE group and all NaNs form ONE group,
+            !! because rows in the same non-value tier compare equal -- deliberately unlike
+            !! `pf_unique`, which drops nulls entirely, since a group list must account for
+            !! every row.
+            !!
+            !! Costs one extra copy of a single key: boundaries come from the builder path,
+            !! so asking for them gives up the one-shot borrow a lone key would otherwise use.
+            integer(int64), allocatable, intent(out), optional :: group_offsets(:)
         end subroutine argsort_col_i64
         !> pf_argsort over a multi-key `pf_sort_keys`, returning an int32 permutation.
-        module subroutine argsort_keys_i32(keys, perm, threads)
+        module subroutine argsort_keys_i32(keys, perm, threads, group_offsets, group_nkeys)
             class(pf_sort_keys), intent(in) :: keys !! the keys, primary first.
             integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             integer, intent(in), optional :: threads
@@ -1432,9 +1851,38 @@ module parquet_sorting
             !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
+            !> where each run of rows comparing EQUAL under the grouping keys begins, as
+            !! offsets INTO `perm`: length `ngroups + 1`, with the last entry the sentinel
+            !! `n + 1`, so group g is `perm(o(g) : o(g+1) - 1)` for every g and
+            !! `ngroups = size(o) - 1`. No last-iteration special case, which is where an
+            !! off-by-one usually gets written.
+            !!
+            !! Always allocated when asked for: an empty array gives `[1]` (no groups), one
+            !! element gives `[1, 2]`. All nulls form ONE group and all NaNs form ONE group,
+            !! because rows in the same non-value tier compare equal -- deliberately unlike
+            !! `pf_unique`, which drops nulls entirely, since a group list must account for
+            !! every row.
+            !!
+            !! Costs one extra copy of a single key: boundaries come from the builder path,
+            !! so asking for them gives up the one-shot borrow a lone key would otherwise use.
+            integer(int32), allocatable, intent(out), optional :: group_offsets(:)
+            !> how many LEADING keys have to be equal for two rows to share a group. ABSENT
+            !! means all of them. Counts the keys YOU added, one per `%add` call, which is not
+            !! always the engine's own count -- one `parquet_timestamp` key becomes two engine
+            !! keys internally, and this argument never exposes that.
+            !!
+            !! **It does not change the sort.** Every key still orders the rows; only the
+            !! equality test that closes a group is narrowed. That is what gives "group by
+            !! field, ordered by magnitude within each group": sort by both, group on the first.
+            !!
+            !! Must be between 1 and the number of keys, and requires `group_offsets` -- on its
+            !! own it would change nothing, so passing it alone is an error rather than a no-op.
+            !! A single default-kind `integer` with no int64 form: a key count cannot approach
+            !! `huge(int32)`.
+            integer, intent(in), optional :: group_nkeys
         end subroutine argsort_keys_i32
         !> pf_argsort over a multi-key `pf_sort_keys`, returning an int64 permutation.
-        module subroutine argsort_keys_i64(keys, perm, threads)
+        module subroutine argsort_keys_i64(keys, perm, threads, group_offsets, group_nkeys)
             class(pf_sort_keys), intent(in) :: keys !! the keys, primary first.
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
             integer, intent(in), optional :: threads
@@ -1443,6 +1891,35 @@ module parquet_sorting
             !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
+            !> where each run of rows comparing EQUAL under the grouping keys begins, as
+            !! offsets INTO `perm`: length `ngroups + 1`, with the last entry the sentinel
+            !! `n + 1`, so group g is `perm(o(g) : o(g+1) - 1)` for every g and
+            !! `ngroups = size(o) - 1`. No last-iteration special case, which is where an
+            !! off-by-one usually gets written.
+            !!
+            !! Always allocated when asked for: an empty array gives `[1]` (no groups), one
+            !! element gives `[1, 2]`. All nulls form ONE group and all NaNs form ONE group,
+            !! because rows in the same non-value tier compare equal -- deliberately unlike
+            !! `pf_unique`, which drops nulls entirely, since a group list must account for
+            !! every row.
+            !!
+            !! Costs one extra copy of a single key: boundaries come from the builder path,
+            !! so asking for them gives up the one-shot borrow a lone key would otherwise use.
+            integer(int64), allocatable, intent(out), optional :: group_offsets(:)
+            !> how many LEADING keys have to be equal for two rows to share a group. ABSENT
+            !! means all of them. Counts the keys YOU added, one per `%add` call, which is not
+            !! always the engine's own count -- one `parquet_timestamp` key becomes two engine
+            !! keys internally, and this argument never exposes that.
+            !!
+            !! **It does not change the sort.** Every key still orders the rows; only the
+            !! equality test that closes a group is narrowed. That is what gives "group by
+            !! field, ordered by magnitude within each group": sort by both, group on the first.
+            !!
+            !! Must be between 1 and the number of keys, and requires `group_offsets` -- on its
+            !! own it would change nothing, so passing it alone is an error rather than a no-op.
+            !! A single default-kind `integer` with no int64 form: a key count cannot approach
+            !! `huge(int32)`.
+            integer, intent(in), optional :: group_nkeys
         end subroutine argsort_keys_i64
         !> pf_sort over a 32-bit integer array: an independent sorted copy.
         module subroutine sort_i32(values, sorted, descending, nulls_first, is_valid, sorted_valid, threads)
@@ -1777,6 +2254,24 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
         end subroutine partial_argsort_col_i64
+        !> pf_partial_argsort over a multi-key `pf_sort_keys`, returning an int32 permutation.
+        !!
+        !! Each key carries its own `descending`/`nulls_first` from `%add`. No `threads`:
+        !! the partial sort is not threaded, as its per-type specifics already reflect.
+        module subroutine partial_argsort_keys_i32(keys, perm, n)
+            class(pf_sort_keys), intent(in) :: keys !! the keys, primary first.
+            integer(int32), allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.
+            integer, intent(in) :: n !! leading rows to order; clamped to the row count.
+        end subroutine partial_argsort_keys_i32
+        !> pf_partial_argsort over a multi-key `pf_sort_keys`, returning an int64 permutation.
+        !!
+        !! Each key carries its own `descending`/`nulls_first` from `%add`. No `threads`:
+        !! the partial sort is not threaded, as its per-type specifics already reflect.
+        module subroutine partial_argsort_keys_i64(keys, perm, n)
+            class(pf_sort_keys), intent(in) :: keys !! the keys, primary first.
+            integer(int64), allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.
+            integer, intent(in) :: n !! leading rows to order; clamped to the row count.
+        end subroutine partial_argsort_keys_i64
         !> pf_partial_sort over a 32-bit integer array: the first `n` in order, as a copy.
         module subroutine partial_sort_i32(values, sorted, n, descending, nulls_first, is_valid, sorted_valid)
         integer(int32), intent(in) :: values(:)
@@ -2431,7 +2926,7 @@ module parquet_sorting
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2445,7 +2940,7 @@ module parquet_sorting
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2459,7 +2954,7 @@ module parquet_sorting
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2472,7 +2967,7 @@ module parquet_sorting
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2486,7 +2981,7 @@ module parquet_sorting
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2500,7 +2995,7 @@ module parquet_sorting
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2513,7 +3008,7 @@ module parquet_sorting
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2527,7 +3022,7 @@ module parquet_sorting
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2541,7 +3036,7 @@ module parquet_sorting
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2554,7 +3049,7 @@ module parquet_sorting
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2568,7 +3063,7 @@ module parquet_sorting
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2582,7 +3077,7 @@ module parquet_sorting
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2595,7 +3090,7 @@ module parquet_sorting
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2609,7 +3104,7 @@ module parquet_sorting
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2623,7 +3118,7 @@ module parquet_sorting
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2636,7 +3131,7 @@ module parquet_sorting
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2650,7 +3145,7 @@ module parquet_sorting
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2664,7 +3159,7 @@ module parquet_sorting
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2676,7 +3171,7 @@ module parquet_sorting
             type(parquet_date), intent(out) :: p_value !! the value at that quantile.
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2689,7 +3184,7 @@ module parquet_sorting
             integer(int32), intent(out) :: index !! which element of `values` that was.
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2702,7 +3197,7 @@ module parquet_sorting
             integer(int64), intent(out) :: index !! which element of `values` that was.
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2714,7 +3209,7 @@ module parquet_sorting
             type(parquet_time), intent(out) :: p_value !! the value at that quantile.
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2727,7 +3222,7 @@ module parquet_sorting
             integer(int32), intent(out) :: index !! which element of `values` that was.
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2740,7 +3235,7 @@ module parquet_sorting
             integer(int64), intent(out) :: index !! which element of `values` that was.
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2752,7 +3247,7 @@ module parquet_sorting
             type(parquet_timestamp), intent(out) :: p_value !! the value at that quantile.
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2765,7 +3260,7 @@ module parquet_sorting
             integer(int32), intent(out) :: index !! which element of `values` that was.
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2778,7 +3273,7 @@ module parquet_sorting
             integer(int64), intent(out) :: index !! which element of `values` that was.
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2790,7 +3285,7 @@ module parquet_sorting
             character(len=:), allocatable, intent(out) :: p_value !! the value at that quantile.
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2803,7 +3298,7 @@ module parquet_sorting
             integer(int32), intent(out) :: index !! which element of `values` that was.
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -2816,7 +3311,7 @@ module parquet_sorting
             integer(int64), intent(out) :: index !! which element of `values` that was.
             character(len=*), intent(in), optional :: rounding !! "nearest"/"down"/"up".
             integer(int64), intent(out), optional :: n_null !! how many values were null.
-            !! LAST, not next to `index` as feature_sort.md §5 sketched: both are optional
+            !! LAST rather than next to `index`, because both are optional
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
@@ -3106,6 +3601,15 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. tests high-to-low order.
             logical, intent(in), optional :: nulls_first !! .true. expects nulls before values.
         end subroutine is_sorted_col
+        !> pf_is_sorted over a multi-key `pf_sort_keys`.
+        !!
+        !! Takes no `descending`/`nulls_first`/`is_valid`: each key carries its own, given to
+        !! `%add` when it was appended. No `threads` either -- this is an O(n) scan with an
+        !! early exit, which threading would cost more than it saves.
+        module subroutine is_sorted_keys(keys, answer)
+            class(pf_sort_keys), intent(in) :: keys !! the keys, primary first.
+            logical, intent(out) :: answer !! .true. when already in the stated order.
+        end subroutine is_sorted_keys
     end interface
     !
     ! ---- Searching a sorted array (parquet_sorting_search) ----

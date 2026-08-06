@@ -115,7 +115,17 @@ contains
             new_unittest("auto is serial inside a parallel region", test_threads_auto_in_parallel), &
             new_unittest("threads=1 forces serial", test_threads_one_is_serial), &
             new_unittest("unique and rank take threads too", test_threads_on_derived), &
-            new_unittest("assume_valid really skips the scan for a column", test_permute_column_assume_valid) &
+            new_unittest("assume_valid really skips the scan for a column", test_permute_column_assume_valid), &
+            new_unittest("group_offsets marks every run of equal rows", test_group_offsets_basic), &
+            new_unittest("group_offsets handles empty, single and all-tied", test_group_offsets_edges), &
+            new_unittest("all nulls form one group and all NaNs form one", test_group_offsets_tiers), &
+            new_unittest("group_offsets does not change the permutation", test_group_offsets_same_perm), &
+            new_unittest("group_offsets comes back in both kinds", test_group_offsets_kinds), &
+            new_unittest("group_nkeys groups on a prefix of the keys", test_group_nkeys_prefix), &
+            new_unittest("group_nkeys counts caller keys, not engine keys", test_group_nkeys_timestamp), &
+            new_unittest("nkeys_added counts %add calls, not engine keys", test_nkeys_added_counts_adds), &
+            new_unittest("is_sorted accepts a pf_sort_keys", test_is_sorted_keys), &
+            new_unittest("partial_argsort accepts a pf_sort_keys", test_partial_argsort_keys) &
             ]
     end subroutine collect_tests_parquet_sorting
     !
@@ -1787,5 +1797,321 @@ contains
         call sc%get(2_int64, s)
         call check(error, s == "bb", "a trusted string permute must repeat the duplicated index")
     end subroutine test_permute_column_assume_valid
+    !
+    !> Builds the expected group offsets INDEPENDENTLY -- by walking the sorted values and asking
+    !> where the value changes -- rather than by a second call into the sorting module.
+    !>
+    !> That independence is the whole point: comparing `group_offsets` against anything that shares
+    !> the engine's comparator would break identically under a comparator mutation and still pass.
+    subroutine expected_offsets_i32(values, perm, offsets)
+        integer(int32), intent(in) :: values(:)    !! the unsorted values.
+        integer(int64), intent(in) :: perm(:)      !! the permutation sorting them.
+        integer(int64), allocatable, intent(out) :: offsets(:) !! where each run of equal values starts.
+        integer(int64) :: k, n, ngroups, pos
+        !
+        n = size(perm, kind=int64)
+        ngroups = 0_int64
+        do k = 1_int64, n
+            if (k == 1_int64) then
+                ngroups = ngroups + 1_int64
+            else if (values(perm(k)) /= values(perm(k - 1_int64))) then
+                ngroups = ngroups + 1_int64
+            end if
+        end do
+        allocate(offsets(ngroups + 1_int64))
+        pos = 0_int64
+        do k = 1_int64, n
+            if (k == 1_int64) then
+                pos = pos + 1_int64
+                offsets(pos) = k
+            else if (values(perm(k)) /= values(perm(k - 1_int64))) then
+                pos = pos + 1_int64
+                offsets(pos) = k
+            end if
+        end do
+        offsets(ngroups + 1_int64) = n + 1_int64
+    end subroutine expected_offsets_i32
+    !
+    !> Every group must be a maximal run of equal values, and the offsets must slice `perm` with no
+    !> special case for the last group.
+    subroutine test_group_offsets_basic(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(9) = [5, 1, 5, 3, 1, 1, 3, 5, 9]
+        integer(int64), allocatable :: perm(:), go(:), want(:)
+        integer(int64) :: g
+        logical :: uniform
+        !
+        call pf_argsort(v, perm, group_offsets=go)
+        call expected_offsets_i32(v, perm, want)
+        call check(error, size(go) == size(want), "the group count must match the independent oracle")
+        if (allocated(error)) return
+        call check(error, all(go == want), "every group boundary must match the independent oracle")
+        if (allocated(error)) return
+        call check(error, go(size(go)) == 10_int64, "the last entry must be the sentinel n + 1")
+        if (allocated(error)) return
+        call check(error, size(go) - 1 == 4, "1, 3, 5 and 9 must give four groups")
+        if (allocated(error)) return
+        ! Slice every group the documented way -- including the last, which is exactly what the
+        ! sentinel exists to make unremarkable.
+        uniform = .true.
+        do g = 1_int64, size(go, kind=int64) - 1_int64
+            if (any(v(perm(go(g):go(g + 1_int64) - 1_int64)) /= v(perm(go(g))))) uniform = .false.
+        end do
+        call check(error, uniform, "every row inside a group must hold the same value")
+    end subroutine test_group_offsets_basic
+    !
+    !> The three shapes where an off-by-one hides: no rows, one row, and one single group.
+    subroutine test_group_offsets_edges(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: empty(0), one(1) = [7], tied(4) = [2, 2, 2, 2]
+        integer(int64), allocatable :: perm(:), go(:)
+        !
+        call pf_argsort(empty, perm, group_offsets=go)
+        call check(error, allocated(go), "group_offsets must be allocated even for an empty array")
+        if (allocated(error)) return
+        call check(error, size(go) == 1 .and. go(1) == 1_int64, &
+            "an empty array must give the sentinel alone, [1], meaning no groups")
+        if (allocated(error)) return
+        !
+        call pf_argsort(one, perm, group_offsets=go)
+        call check(error, size(go) == 2, "one row must give exactly one group")
+        if (allocated(error)) return
+        call check(error, all(go == [1_int64, 2_int64]), "one row must give [1, 2]")
+        if (allocated(error)) return
+        !
+        call pf_argsort(tied, perm, group_offsets=go)
+        call check(error, all(go == [1_int64, 5_int64]), "four equal rows must give one group, [1, 5]")
+    end subroutine test_group_offsets_edges
+    !
+    !> Nulls form ONE group and NaNs form ONE group, because rows in the same non-value tier
+    !> compare equal. Deliberately unlike `pf_unique`, which drops nulls entirely -- a group list
+    !> has to account for every row, so this difference is a contract rather than an accident.
+    subroutine test_group_offsets_tiers(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(6) = [3, 0, 1, 0, 3, 0]
+        logical :: valid(6) = [.true., .false., .true., .false., .true., .false.]
+        real(real64) :: f(6)
+        integer(int64), allocatable :: perm(:), go(:)
+        !
+        ! 1 | 3, 3 | three nulls -- three groups, and the nulls are one of them however many rows
+        ! carry a null.
+        call pf_argsort(v, perm, is_valid=valid, group_offsets=go)
+        call check(error, size(go) - 1 == 3, "two values plus three nulls must give three groups")
+        if (allocated(error)) return
+        call check(error, all(go == [1_int64, 2_int64, 4_int64, 7_int64]), &
+            "the three nulls must occupy one trailing group")
+        if (allocated(error)) return
+        !
+        f = [2.0_real64, ieee_value(1.0_real64, ieee_quiet_nan), 1.0_real64, &
+            ieee_value(1.0_real64, ieee_quiet_nan), 2.0_real64, &
+            ieee_value(1.0_real64, ieee_quiet_nan)]
+        call pf_argsort(f, perm, group_offsets=go)
+        call check(error, size(go) - 1 == 3, "two values plus three NaNs must give three groups")
+        if (allocated(error)) return
+        call check(error, all(go == [1_int64, 2_int64, 4_int64, 7_int64]), &
+            "the three NaNs must occupy one trailing group")
+    end subroutine test_group_offsets_tiers
+    !
+    !> Asking for boundaries switches the engine from the one-shot borrow to the builder, so the
+    !> permutation is produced by a different code path. It must not differ by a single element --
+    !> and no group-boundary assertion would notice if it did.
+    subroutine test_group_offsets_same_perm(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(11) = [4, 9, 1, 9, 2, 7, 4, 0, 7, 7, 3]
+        integer(int64), allocatable :: plain(:), grouped(:), go(:)
+        type(pf_sort_keys) :: k
+        integer(int64), allocatable :: kplain(:), kgrouped(:)
+        !
+        call pf_argsort(v, plain)
+        call pf_argsort(v, grouped, group_offsets=go)
+        call check(error, all(plain == grouped), &
+            "the builder path must produce the same permutation as the one-shot path")
+        if (allocated(error)) return
+        !
+        call k%add(v)
+        call pf_argsort(k, kplain)
+        call pf_argsort(k, kgrouped, group_offsets=go)
+        call check(error, all(kplain == kgrouped), &
+            "a pf_sort_keys sort must agree with itself whether or not boundaries are asked for")
+    end subroutine test_group_offsets_same_perm
+    !
+    !> `group_offsets` follows `perm`'s kind, so both forms exist and must agree.
+    subroutine test_group_offsets_kinds(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(5) = [2, 1, 2, 3, 1]
+        integer(int32), allocatable :: perm32(:), go32(:)
+        integer(int64), allocatable :: perm64(:), go64(:)
+        !
+        call pf_argsort(v, perm32, group_offsets=go32)
+        call pf_argsort(v, perm64, group_offsets=go64)
+        call check(error, size(go32) == size(go64), "both kinds must report the same group count")
+        if (allocated(error)) return
+        call check(error, all(int(go32, int64) == go64), "both kinds must report the same boundaries")
+        if (allocated(error)) return
+        call check(error, all(go64 == [1_int64, 3_int64, 5_int64, 6_int64]), &
+            "1,1 | 2,2 | 3 must give three groups")
+    end subroutine test_group_offsets_kinds
+    !
+    !> The motivating shape: sort by both keys, group by the first alone. Both halves are asserted,
+    !> because an implementation that dropped the second key from the SORT would still produce the
+    !> right group boundaries.
+    subroutine test_group_nkeys_prefix(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(pf_sort_keys) :: k
+        integer(int32) :: field(6) = [2, 1, 2, 1, 2, 1]
+        integer(int32) :: mag(6) = [30, 60, 10, 40, 20, 50]
+        integer(int64), allocatable :: perm(:), go(:), go_all(:)
+        !
+        call k%add(field)
+        call k%add(mag)
+        call pf_argsort(k, perm, group_offsets=go, group_nkeys=1)
+        call check(error, size(go) - 1 == 2, "grouping on field alone must give two groups")
+        if (allocated(error)) return
+        call check(error, all(go == [1_int64, 4_int64, 7_int64]), &
+            "each field value must own three consecutive rows")
+        if (allocated(error)) return
+        ! The second key still orders: inside field 1 the magnitudes must climb 40, 50, 60.
+        call check(error, all(mag(perm(1:3)) == [40, 50, 60]), &
+            "rows inside a group must still be ordered by the second key")
+        if (allocated(error)) return
+        call check(error, all(mag(perm(4:6)) == [10, 20, 30]), &
+            "the second group must be ordered by the second key too")
+        if (allocated(error)) return
+        ! The default is every key, which here means every row is its own group.
+        call pf_argsort(k, perm, group_offsets=go_all)
+        call check(error, size(go_all) - 1 == 6, &
+            "the default must group on ALL keys, giving six singleton groups here")
+    end subroutine test_group_nkeys_prefix
+    !
+    !> `group_nkeys` counts the keys the CALLER added, and a `parquet_timestamp` is one of those
+    !> while being two engine keys. The fixture is built so a translation that forgot this cannot
+    !> pass: two rows share a second and differ only in nanoseconds, so grouping on engine key 1
+    !> alone (the seconds) would merge them, while grouping on caller key 1 must not.
+    subroutine test_group_nkeys_timestamp(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(pf_sort_keys) :: k
+        type(parquet_timestamp) :: ts(4)
+        integer(int32) :: mag(4) = [10, 20, 30, 40]
+        integer(int64), allocatable :: perm(:), go(:)
+        !
+        ! Two rows at second 100 differing in nanoseconds, and two genuinely equal at second 200.
+        call ts(1)%set_unix(100_int64, parquet_unit_seconds)
+        call ts(1)%set_raw(100_int64, 500_int32)
+        call ts(2)%set_raw(100_int64, 900_int32)
+        call ts(3)%set_raw(200_int64, 0_int32)
+        call ts(4)%set_raw(200_int64, 0_int32)
+        call k%add(ts)
+        call k%add(mag)
+        call check(error, k%nkeys_added() == 2, &
+            "a timestamp key plus an integer key must report TWO keys, not three")
+        if (allocated(error)) return
+        !
+        call pf_argsort(k, perm, group_offsets=go, group_nkeys=1)
+        call check(error, size(go) - 1 == 3, &
+            "grouping on the timestamp alone must give three groups; merging 100.500 with " // &
+            "100.900 would mean the prefix was counted in engine keys")
+        if (allocated(error)) return
+        call check(error, all(go == [1_int64, 2_int64, 3_int64, 5_int64]), &
+            "the two identical timestamps must share a group and the two others must not")
+    end subroutine test_group_nkeys_timestamp
+    !
+    !> `%nkeys_added` reports `%add` calls. It used to report the ENGINE key count, so a lone
+    !> timestamp answered 2 -- which no non-temporal fixture can detect.
+    subroutine test_nkeys_added_counts_adds(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(pf_sort_keys) :: k
+        type(parquet_timestamp) :: ts(3)
+        integer(int32) :: v(3) = [1, 2, 3]
+        integer :: i
+        !
+        do i = 1, 3
+            call ts(i)%set_raw(int(i, int64), 0_int32)
+        end do
+        call check(error, k%nkeys_added() == 0, "a fresh key list must report no keys")
+        if (allocated(error)) return
+        call k%add(ts)
+        call check(error, k%nkeys_added() == 1, &
+            "one timestamp %add must report ONE key, though it binds as two engine keys")
+        if (allocated(error)) return
+        call k%add(v)
+        call check(error, k%nkeys_added() == 2, "a second %add must report two keys")
+        if (allocated(error)) return
+        call k%clear()
+        call check(error, k%nkeys_added() == 0, "%clear must leave no keys")
+    end subroutine test_nkeys_added_counts_adds
+    !
+    !> A multi-key order could be built and nothing else asked about it. Both answers are
+    !> asserted -- a check that always says .true. passes every positive test ever written for it.
+    subroutine test_is_sorted_keys(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(pf_sort_keys) :: k
+        integer(int32) :: field(6) = [1, 1, 1, 2, 2, 2]
+        integer(int32) :: mag(6) = [10, 20, 30, 5, 15, 25]
+        integer(int32) :: jumbled(6) = [10, 20, 30, 5, 15, 24]
+        logical :: ok
+        !
+        call k%add(field)
+        call k%add(mag)
+        call pf_is_sorted(k, ok)
+        call check(error, ok, "a table already ordered by both keys must report sorted")
+        if (allocated(error)) return
+        !
+        ! Ordered by the FIRST key but not within its groups: the second key is what must catch it,
+        ! so this fails if only the primary key is consulted.
+        call k%clear()
+        call k%add(field)
+        call k%add([30, 20, 10, 5, 15, 25])
+        call pf_is_sorted(k, ok)
+        call check(error, .not. ok, "a break in the SECOND key must report unsorted")
+        if (allocated(error)) return
+        !
+        ! Descending is a per-key property carried from %add, not an argument here.
+        call k%clear()
+        call k%add(field, descending=.true.)
+        call pf_is_sorted(k, ok)
+        call check(error, .not. ok, "an ascending array must not report sorted under descending=")
+        if (allocated(error)) return
+        !
+        call k%clear()
+        call k%add(jumbled)
+        call pf_is_sorted(k, ok)
+        call check(error, .not. ok, "an unsorted single key must report unsorted")
+    end subroutine test_is_sorted_keys
+    !
+    !> The multi-key top-N. Its oracle is a full `pf_argsort` of the same keys: the first `n`
+    !> entries must agree exactly, since a partial sort orders that prefix and nothing else.
+    subroutine test_partial_argsort_keys(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(pf_sort_keys) :: k
+        integer(int32) :: field(8) = [2, 1, 2, 1, 2, 1, 3, 3]
+        integer(int32) :: mag(8) = [30, 60, 10, 40, 20, 50, 5, 70]
+        integer(int64), allocatable :: full(:), part(:)
+        integer(int32), allocatable :: part32(:)
+        !
+        call k%add(field)
+        call k%add(mag)
+        call pf_argsort(k, full)
+        call pf_partial_argsort(k, part, 3)
+        call check(error, size(part) == 3, "n = 3 must return exactly three indices")
+        if (allocated(error)) return
+        call check(error, all(part == full(1:3)), &
+            "the first n of a partial sort must equal the first n of a full sort")
+        if (allocated(error)) return
+        !
+        ! Clamped, not checked -- no min(n, nrows) is needed at any call site.
+        call pf_partial_argsort(k, part, 99)
+        call check(error, size(part) == 8, "n above the row count must clamp rather than abort")
+        if (allocated(error)) return
+        call check(error, all(part == full), "a fully clamped partial sort must equal a full sort")
+        if (allocated(error)) return
+        !
+        call pf_partial_argsort(k, part, 0)
+        call check(error, size(part) == 0, "n = 0 must return an empty permutation")
+        if (allocated(error)) return
+        !
+        call pf_partial_argsort(k, part32, 3)
+        call check(error, all(int(part32, int64) == full(1:3)), &
+            "the int32 form must agree with the int64 one")
+    end subroutine test_partial_argsort_keys
     !
 end module test_sorting

@@ -177,24 +177,10 @@ contains
         character(len=32) :: got, want
         !
         call table_check_not_shared(self, "sort_by")
-        call table_check_open(self, "sort_by")
-        if (size(keys) < 1) error stop EP // "sort_by: no sort key was given"
-        if (present(descending)) then
-            if (size(descending) /= size(keys)) then
-                write(got, "(I0)") size(descending)
-                write(want, "(I0)") size(keys)
-                error stop EP // "sort_by: descending= has " // trim(got) // " entries but " // &
-                    trim(want) // " keys were given; it takes one entry per key"
-            end if
-        end if
-        if (present(nulls_first)) then
-            if (size(nulls_first) /= size(keys)) then
-                write(got, "(I0)") size(nulls_first)
-                write(want, "(I0)") size(keys)
-                error stop EP // "sort_by: nulls_first= has " // trim(got) // " entries but " // &
-                    trim(want) // " keys were given; it takes one entry per key"
-            end if
-        end if
+        ! The open check and the key/flag-count validation live in sort_collect_keys
+        ! (parquet_tables_sort.f90), so %sort_by, %argsort_by, %is_sorted_by and %argsort_partial
+        ! all raise the same messages from one place rather than four copies drifting apart.
+        !
         ! Builds (and so validates every key) before a single column is touched.
         call table_build_sort_permutation(self, keys, descending, nulls_first, perm)
         ! A permutation that moves no row leaves the table exactly as it was, so it costs neither

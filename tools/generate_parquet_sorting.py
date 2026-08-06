@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the per-type blocks of the `parquet_sorting` module (feature_sort.md M1).
+"""Generate the per-type blocks of the `parquet_sorting` module.
 
 `parquet_sorting` is this library's public sorting API: `pf_sort`, `pf_argsort`, `pf_permute`
 and `pf_is_sorted` over eleven element types, plus the `pf_sort_keys` multi-key builder. That
@@ -91,7 +91,7 @@ TYPES = [
     ("col",    "type(parquet_column)",       "type-erased column", "col",  "own",  False, "reindex"),
 ]
 
-#: Families whose values are handed to the engine without a copy (feature_sort.md section 8).
+#: Families whose values are handed to the engine without a copy, rather than through the builder.
 BORROWED = ("int64", "real64")
 
 #: Families that need the multi-key builder rather than a one-shot call: a timestamp is two
@@ -128,12 +128,12 @@ def wrap_list(names, indent, width=110):
 
 #: Types `pf_nth_element`/`pf_nth_quantile` apply to: every one except `parquet_column`, whose
 #: element type is a runtime discriminator, so there is no compile-time type for `p_value`
-#: (feature_sort.md §6's first exclusion rule).
+#: (a whole vector row has no defined order, so no *_VEC kind can be a key).
 def has_nth(t):
     return t[0] != "col"
 
 
-#: Types the M3 families apply to. Each exclusion comes from feature_sort.md section 6's own two
+#: Types the M3 families apply to. Each exclusion comes from the same two
 #: rules -- a type is out wherever the answer would need a compile-time element type it does not
 #: have, and it stays in wherever the answer is a permutation, a boolean or an integer -- so these
 #: are derived, not chosen. `pf_argminmax` keeping `parquet_column` while `pf_minmax` drops it is
@@ -201,6 +201,47 @@ THREADS_DOC = [
     "            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that",
     "            !! governs row counts and indices here does not apply.",
 ]
+
+#: `group_nkeys`, on the two `pf_sort_keys` specifics only -- the per-type ones hold a single key,
+#: so a prefix of it could only ever be the whole thing.
+GROUP_NKEYS_DOC = [
+    "            !> how many LEADING keys have to be equal for two rows to share a group. ABSENT",
+    "            !! means all of them. Counts the keys YOU added, one per `%add` call, which is not",
+    "            !! always the engine's own count -- one `parquet_timestamp` key becomes two engine",
+    "            !! keys internally, and this argument never exposes that.",
+    "            !!",
+    "            !! **It does not change the sort.** Every key still orders the rows; only the",
+    "            !! equality test that closes a group is narrowed. That is what gives \"group by",
+    "            !! field, ordered by magnitude within each group\": sort by both, group on the first.",
+    "            !!",
+    "            !! Must be between 1 and the number of keys, and requires `group_offsets` -- on its",
+    "            !! own it would change nothing, so passing it alone is an error rather than a no-op.",
+    "            !! A single default-kind `integer` with no int64 form: a key count cannot approach",
+    "            !! `huge(int32)`.",
+    "            integer, intent(in), optional :: group_nkeys",
+]
+
+
+def group_offsets_doc(idecl):
+    """The `group_offsets` doc block, whose kind always follows `perm`'s (they index the same array)."""
+    return [
+        "            !> where each run of rows comparing EQUAL under the grouping keys begins, as",
+        "            !! offsets INTO `perm`: length `ngroups + 1`, with the last entry the sentinel",
+        "            !! `n + 1`, so group g is `perm(o(g) : o(g+1) - 1)` for every g and",
+        "            !! `ngroups = size(o) - 1`. No last-iteration special case, which is where an",
+        "            !! off-by-one usually gets written.",
+        "            !!",
+        "            !! Always allocated when asked for: an empty array gives `[1]` (no groups), one",
+        "            !! element gives `[1, 2]`. All nulls form ONE group and all NaNs form ONE group,",
+        "            !! because rows in the same non-value tier compare equal -- deliberately unlike",
+        "            !! `pf_unique`, which drops nulls entirely, since a group list must account for",
+        "            !! every row.",
+        "            !!",
+        "            !! Costs one extra copy of a single key: boundaries come from the builder path,",
+        "            !! so asking for them gives up the one-shot borrow a lone key would otherwise use.",
+        f"            {idecl}, allocatable, intent(out), optional :: group_offsets(:)",
+    ]
+
 
 COMMON_OPTS = [
     "        logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.",
@@ -351,15 +392,21 @@ module parquet_sorting
     !! type must never be given to OpenMP's `private()` -- usable per-thread in the obvious way.
     type :: pf_sort_keys
         private
-        integer :: nkeys = 0                                !! keys added so far.
+        integer :: nkeys = 0                                !! ENGINE keys held; see `add_ekeys`.
         integer(int64) :: nrows = -1                        !! rows every key must have; -1 until the first add.
         type(sort_key_buf), allocatable :: keys(:)          !! the keys, in precedence order.
+        !> engine keys contributed by each `%add` call, one entry per call. Almost always 1, but a
+        !! `parquet_timestamp` key binds as TWO engine keys (a seconds/nanoseconds split), so
+        !! `nkeys` above is not the number of keys the caller added and must never be reported as
+        !! such. This array is what translates between the two, for `%nkeys_added` and for
+        !! `group_nkeys`, and its SIZE -- not `nkeys` -- is the caller's key count.
+        integer, allocatable :: add_ekeys(:)
     contains''')
     for t in TYPES:
         w(f"        procedure, private :: add_{t[0]} !! %add specific for a {t[2]} key.")
     w("        !> Appends one sort key. Keys apply in the order added, the first being primary.")
     w("        generic :: add => " + wrap_list([f"add_{t[0]}" for t in TYPES], 12))
-    w("        procedure :: nkeys_added => keys_count !! Number of keys added so far.")
+    w("        procedure :: nkeys_added => keys_count !! Keys added so far, one per %add call.")
     w("        procedure :: clear => keys_clear       !! Drops every key, leaving the object reusable.")
     w("    end type pf_sort_keys")
     w("    !")
@@ -417,6 +464,7 @@ module parquet_sorting
     w("    interface pf_is_sorted")
     for t in TYPES:
         w(f"        module procedure is_sorted_{t[0]}")
+    w("        module procedure is_sorted_keys")
     w("    end interface pf_is_sorted")
     w("    !")
     w("    !> The permutation that would sort the FIRST `n` elements of `values`, without ordering")
@@ -431,6 +479,8 @@ module parquet_sorting
     for t in TYPES:
         for ik, _, _ in IDX_KINDS:
             w(f"        module procedure partial_argsort_{t[0]}_{ik}")
+    for ik, _, _ in IDX_KINDS:
+        w(f"        module procedure partial_argsort_keys_{ik}")
     w("    end interface pf_partial_argsort")
     w("    !")
     w("    !> The first `n` elements of `values` in order, as an independent copy of length `n`.")
@@ -672,7 +722,11 @@ module parquet_sorting
         if nulls == "arg":
             w("            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
         w(f"        end subroutine add_{tag}")
-    w("        !> Number of keys added so far.")
+    w("        !> Number of keys added so far: one per `%add` call, whatever their types.")
+    w("        !!")
+    w("        !! Counts the keys YOU added, which is not always what the engine holds -- one")
+    w("        !! `parquet_timestamp` key becomes two engine keys internally. This reports 1 for it,")
+    w("        !! and `group_nkeys` counts in the same units.")
     w("        module function keys_count(self) result(n)")
     w("            class(pf_sort_keys), intent(in) :: self !! the key list.")
     w("            integer :: n                            !! keys added.")
@@ -687,6 +741,18 @@ module parquet_sorting
     w("            type(sort_key_buf), allocatable, intent(inout) :: buf(:) !! keys to append; moved from.")
     w("            character(len=*), intent(in) :: proc                !! calling procedure, for messages.")
     w("        end subroutine keys_append")
+    w("        !> Validates a `group_nkeys` request and translates it from CALLER keys to ENGINE keys.")
+    w("        !!")
+    w("        !! Always sets `group_ekeys`, so a caller can pass it on unconditionally: with")
+    w("        !! `group_nkeys` absent it comes back as every engine key, which is what grouping on")
+    w("        !! the full key list means.")
+    w("        module subroutine resolve_group_nkeys(keys, group_nkeys, want_offsets, proc, group_ekeys)")
+    w("            class(pf_sort_keys), intent(in) :: keys       !! the key list.")
+    w("            integer, intent(in), optional :: group_nkeys  !! caller keys per group; absent = all.")
+    w("            logical, intent(in) :: want_offsets           !! whether group_offsets was asked for.")
+    w("            character(len=*), intent(in) :: proc          !! calling procedure, for messages.")
+    w("            integer, intent(out) :: group_ekeys           !! the engine-key prefix length.")
+    w("        end subroutine resolve_group_nkeys")
     w("        !> Runs the C++ engine over `keys`, returning a 1-based permutation.")
     w("        module subroutine drive_engine(keys, nrows, proc, perm, threads)")
     w("            type(sort_key_buf), intent(in), target :: keys(:)   !! the keys, primary first.")
@@ -695,6 +761,30 @@ module parquet_sorting
     w("            integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.")
     w("            integer, intent(in), optional :: threads            !! thread request; absent = auto.")
     w("        end subroutine drive_engine")
+    w("        !> `drive_engine`, plus the group boundaries when `group_offsets` is asked for.")
+    w("        !!")
+    w("        !! Absent `group_offsets` is exactly `drive_engine`, one-shot fast path and all. Present,")
+    w("        !! it routes through `engine_build_runs` instead, which always uses the builder -- so")
+    w("        !! asking for boundaries costs one extra copy of a single key. That is the documented")
+    w("        !! price of one entry point serving three operations rather than three of them.")
+    w("        module subroutine drive_engine_grouped(keys, nrows, proc, perm, threads, group_offsets, &")
+    w("                group_ekeys)")
+    w("            type(sort_key_buf), intent(in), target :: keys(:)   !! the keys, primary first.")
+    w("            integer(int64), intent(in) :: nrows                 !! rows each key describes.")
+    w("            character(len=*), intent(in) :: proc                !! calling procedure, for messages.")
+    w("            integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.")
+    w("            integer, intent(in), optional :: threads            !! thread request; absent = auto.")
+    w("            integer(int64), allocatable, intent(out), optional :: group_offsets(:) !! group bounds.")
+    w("            integer, intent(in), optional :: group_ekeys !! ENGINE keys defining a group; absent = all.")
+    w("        end subroutine drive_engine_grouped")
+    w("        !> Turns `engine_build_runs`' tie flags into the offsets `group_offsets` promises:")
+    w("        !! length `ngroups + 1`, last entry `nrows + 1`, so group g is `perm(o(g):o(g+1)-1)`")
+    w("        !! for every g with no last-iteration special case.")
+    w("        module subroutine runs_to_offsets(tie, nrows, offsets)")
+    w("            integer(c_int8_t), intent(in) :: tie(:) !! 1 where a row ties the previous one.")
+    w("            integer(int64), intent(in) :: nrows     !! rows sorted; `tie` may be longer.")
+    w("            integer(int64), allocatable, intent(out) :: offsets(:) !! the group offsets.")
+    w("        end subroutine runs_to_offsets")
     w("        !> Resolves how many threads a sort should use. **This is the only place the auto rule")
     w("        !! lives**, and the only place in this module carrying OpenMP plumbing at all -- the")
     w("        !! same arrangement parquet_tables_parallel.f90 keeps for the table layer, and worth")
@@ -798,13 +888,18 @@ module parquet_sorting
     w("        !> Sorts, and reports where the runs of EQUAL rows are: `tie(k)` is 1 when output")
     w("        !! position k holds a row comparing equal to the one before it. One call, because")
     w("        !! `pf_unique`/`pf_rank` need both and would otherwise build the permutation twice.")
-    w("        module subroutine engine_build_runs(keys, nrows, proc, perm, tie, threads)")
+    w("        module subroutine engine_build_runs(keys, nrows, proc, perm, tie, threads, group_ekeys)")
     w("            type(sort_key_buf), intent(in), target :: keys(:)   !! the keys, primary first.")
     w("            integer(int64), intent(in) :: nrows                 !! rows each key describes.")
     w("            character(len=*), intent(in) :: proc                !! calling procedure, for messages.")
     w("            integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.")
     w("            integer(c_int8_t), allocatable, intent(out) :: tie(:) !! 1 where a row ties the previous.")
     w("            integer, intent(in), optional :: threads            !! thread request; absent = auto.")
+    w("            !> How many LEADING keys decide whether two rows tie; absent means all of them.")
+    w("            !! Counted in ENGINE keys, already resolved from the caller's key count -- the two")
+    w("            !! differ because one `%add` of a `parquet_timestamp` contributes two engine keys.")
+    w("            !! The sort itself always uses every key; only the tie test is narrowed.")
+    w("            integer, intent(in), optional :: group_ekeys")
     w("        end subroutine engine_build_runs")
     w("        !> Binary-searches `keys`, whose LAST row is the target the caller appended.")
     w("        module subroutine engine_search(keys, nrows, n_search, upper, proc, pos)")
@@ -887,6 +982,19 @@ module parquet_sorting
     w("            character(len=*), intent(in) :: proc                   !! calling procedure, for messages.")
     w("            integer(int32), allocatable, intent(out) :: perm32(:)  !! the narrowed copy.")
     w("        end subroutine narrow_perm")
+    w("        !> Narrows a group-offsets array to int32, aborting rather than truncating.")
+    w("        !!")
+    w("        !! NOT the same test as `narrow_perm`'s, and the difference is exactly one row: a")
+    w("        !! permutation's largest entry is `n`, but this array's is the sentinel `n + 1`. At")
+    w("        !! `n == huge(int32)` the permutation narrows cleanly while the sentinel wraps negative,")
+    w("        !! and a negative sentinel turns the last group's `o(g+1) - 1` into a huge negative")
+    w("        !! bound -- a silently empty or wildly wrong slice instead of an abort. So this checks")
+    w("        !! the sentinel itself rather than the length.")
+    w("        module subroutine narrow_offsets(offsets64, proc, offsets32)")
+    w("            integer(int64), intent(in) :: offsets64(:)                !! the group offsets.")
+    w("            character(len=*), intent(in) :: proc                      !! calling procedure.")
+    w("            integer(int32), allocatable, intent(out) :: offsets32(:)  !! the narrowed copy.")
+    w("        end subroutine narrow_offsets")
     w("    end interface")
     w("    !")
     w("    ! ---- pf_argsort and pf_sort (parquet_sorting_argsort) ----")
@@ -895,7 +1003,8 @@ module parquet_sorting
         tag, decl, what, family, nulls, has_sort, _ = t
         for ik, idecl, iname in IDX_KINDS:
             w(f"        !> pf_argsort over a {what} array, returning an {iname} permutation.")
-            w(f"        module subroutine argsort_{tag}_{ik}(values, perm, descending, nulls_first{', is_valid' if nulls == 'arg' else ''}, threads)")
+            w(f"        module subroutine argsort_{tag}_{ik}(values, perm, descending, nulls_first{', is_valid' if nulls == 'arg' else ''}, &")
+            w("                threads, group_offsets)")
             w(val_decl(t, "in"))
             w(f"            {idecl}, allocatable, intent(out) :: perm(:) !! the 1-based permutation.")
             w("            logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.")
@@ -904,13 +1013,19 @@ module parquet_sorting
                 w("            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
             for line in THREADS_DOC:
                 w(line)
+            for line in group_offsets_doc(idecl):
+                w(line)
             w(f"        end subroutine argsort_{tag}_{ik}")
     for ik, idecl, iname in IDX_KINDS:
         w(f"        !> pf_argsort over a multi-key `pf_sort_keys`, returning an {iname} permutation.")
-        w(f"        module subroutine argsort_keys_{ik}(keys, perm, threads)")
+        w(f"        module subroutine argsort_keys_{ik}(keys, perm, threads, group_offsets, group_nkeys)")
         w("            class(pf_sort_keys), intent(in) :: keys !! the keys, primary first.")
         w(f"            {idecl}, allocatable, intent(out) :: perm(:) !! the 1-based permutation.")
         for line in THREADS_DOC:
+            w(line)
+        for line in group_offsets_doc(idecl):
+            w(line)
+        for line in GROUP_NKEYS_DOC:
             w(line)
         w(f"        end subroutine argsort_keys_{ik}")
     for t in TYPES:
@@ -951,6 +1066,16 @@ module parquet_sorting
             if nulls == "arg":
                 w("            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
             w(f"        end subroutine partial_argsort_{tag}_{ik}")
+    for ik, idecl, iname in IDX_KINDS:
+        w(f"        !> pf_partial_argsort over a multi-key `pf_sort_keys`, returning an {iname} permutation.")
+        w("        !!")
+        w("        !! Each key carries its own `descending`/`nulls_first` from `%add`. No `threads`:")
+        w("        !! the partial sort is not threaded, as its per-type specifics already reflect.")
+        w(f"        module subroutine partial_argsort_keys_{ik}(keys, perm, n)")
+        w("            class(pf_sort_keys), intent(in) :: keys !! the keys, primary first.")
+        w(f"            {idecl}, allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.")
+        w("            integer, intent(in) :: n !! leading rows to order; clamped to the row count.")
+        w(f"        end subroutine partial_argsort_keys_{ik}")
     for t in TYPES:
         tag, decl, what, family, nulls, has_sort, _ = t
         if not has_sort:
@@ -1012,7 +1137,7 @@ module parquet_sorting
             if nulls == "arg":
                 w("            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
             w("            integer(int64), intent(out), optional :: n_null !! how many values were null.")
-            w("            !! LAST, not next to `index` as feature_sort.md \u00a75 sketched: both are optional")
+            w("            !! LAST rather than next to `index`, because both are optional")
             w("            !! int64 out-arguments, so with `n_null` at position 4 a positional call could")
             w("            !! not be told apart from the `index` form. Nothing else here is a character,")
             w("            !! so `rounding` at position 4 disambiguates them.")
@@ -1044,6 +1169,15 @@ module parquet_sorting
         if nulls == "arg":
             w("            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
         w(f"        end subroutine is_sorted_{tag}")
+    w("        !> pf_is_sorted over a multi-key `pf_sort_keys`.")
+    w("        !!")
+    w("        !! Takes no `descending`/`nulls_first`/`is_valid`: each key carries its own, given to")
+    w("        !! `%add` when it was appended. No `threads` either -- this is an O(n) scan with an")
+    w("        !! early exit, which threading would cost more than it saves.")
+    w("        module subroutine is_sorted_keys(keys, answer)")
+    w("            class(pf_sort_keys), intent(in) :: keys !! the keys, primary first.")
+    w("            logical, intent(out) :: answer !! .true. when already in the stated order.")
+    w("        end subroutine is_sorted_keys")
     w("    end interface")
     w("    !")
     emit_m3_interfaces(w)
@@ -1605,17 +1739,50 @@ contains
         w("    !")
 
     w('''    module procedure keys_count
-        n = self%nkeys
+        ! The CALLER's count -- one per %add call -- not self%nkeys, which counts engine keys and
+        ! answers 2 for a lone parquet_timestamp. See the add_ekeys component.
+        n = 0
+        if (allocated(self%add_ekeys)) n = size(self%add_ekeys)
     end procedure keys_count
     !
     module procedure keys_clear
         self%nkeys = 0
         self%nrows = -1_int64
         if (allocated(self%keys)) deallocate(self%keys)
+        if (allocated(self%add_ekeys)) deallocate(self%add_ekeys)
     end procedure keys_clear
+    !
+    module procedure resolve_group_nkeys
+        integer :: ncaller, k
+        character(len=32) :: got_str, have_str
+        !
+        ncaller = 0
+        if (allocated(keys%add_ekeys)) ncaller = size(keys%add_ekeys)
+        if (.not. present(group_nkeys)) then
+            group_ekeys = keys%nkeys
+            return
+        end if
+        if (.not. want_offsets) then
+            error stop EP // proc // ": group_nkeys was given without group_offsets; on its own " // &
+                "it changes nothing, so ask for the boundaries too or drop it"
+        end if
+        if (group_nkeys < 1 .or. group_nkeys > ncaller) then
+            write (got_str, "(i0)") group_nkeys
+            write (have_str, "(i0)") ncaller
+            error stop EP // proc // ": group_nkeys is " // trim(got_str) // ", which is not " // &
+                "between 1 and the " // trim(have_str) // " keys given"
+        end if
+        ! Caller keys to engine keys. A prefix of the caller's keys is a prefix of the engine's,
+        ! because %add appends its engine keys contiguously and in order.
+        group_ekeys = 0
+        do k = 1, group_nkeys
+            group_ekeys = group_ekeys + keys%add_ekeys(k)
+        end do
+    end procedure resolve_group_nkeys
     !
     module procedure keys_append
         type(sort_key_buf), allocatable :: bigger(:)
+        integer, allocatable :: more_ekeys(:)
         integer(int64) :: n
         integer :: ik
         character(len=32) :: got_str, want_str
@@ -1639,6 +1806,15 @@ contains
         do ik = 1, size(buf)
             call move_key(buf(ik), bigger(self%nkeys + ik))
         end do
+        ! One entry per %add call, holding how many engine keys THIS call contributed -- the only
+        ! record of the caller-versus-engine key distinction, and what %nkeys_added and group_nkeys
+        ! both read. Recorded here rather than in each %add specific so a new key type cannot
+        ! forget it.
+        if (.not. allocated(self%add_ekeys)) allocate(self%add_ekeys(0))
+        allocate(more_ekeys(size(self%add_ekeys) + 1))
+        more_ekeys(1:size(self%add_ekeys)) = self%add_ekeys
+        more_ekeys(size(more_ekeys)) = size(buf)
+        call move_alloc(more_ekeys, self%add_ekeys)
         self%nkeys = self%nkeys + size(buf)
         call move_alloc(bigger, self%keys)
         deallocate(buf)
@@ -2123,6 +2299,28 @@ contains
         perm32 = int(perm64, int32)
     end procedure narrow_perm
     !
+    module procedure narrow_offsets
+        integer(int64) :: sentinel
+        character(len=32) :: n_str
+        !
+        ! The SENTINEL, not the length -- and the difference is exactly one row. A permutation's
+        ! largest entry is n, but this array's is n + 1, so at n == huge(int32) narrow_perm's own
+        ! test passes while this one must not: a wrapped sentinel makes the last group's
+        ! o(g+1) - 1 a huge negative bound, i.e. a silently wrong slice instead of an abort.
+        sentinel = offsets64(size(offsets64))
+        ! GCOVR_EXCL_START -- unreachable without a >2-billion-row sort; the same reason
+        ! narrow_perm's own guard has no test either. Kept because the failure it prevents is
+        ! silent, which is precisely when an untestable guard earns its place.
+        if (sentinel > int(huge(1_int32), int64)) then
+            write (n_str, "(i0)") sentinel - 1_int64
+            error stop EP // proc // ": this array has " // trim(n_str) // " elements, so the " // &
+                "group offsets do not fit int32; declare group_offsets as integer(int64)"
+        end if
+        ! GCOVR_EXCL_STOP
+        allocate(offsets32(size(offsets64)))
+        offsets32 = int(offsets64, int32)
+    end procedure narrow_offsets
+    !
     module procedure narrow_i64
         character(len=32) :: v_str
         !
@@ -2289,7 +2487,7 @@ contains
     !
     module procedure engine_build_runs
         type(c_ptr) :: builder
-        integer(int64) :: status, k, nthreads
+        integer(int64) :: status, k, nthreads, gek
         integer :: ik
         !
         if (size(keys) < 1) then
@@ -2303,17 +2501,59 @@ contains
         end do
         if (nrows < 2_int64) return
         call resolve_thread_count(threads, nrows, nthreads)
+        ! Resolved HERE, never in C++: the boundary carries a real count, never a "0 means all"
+        ! sentinel, so the C++ side obeys rather than interprets what a prefix of zero would mean.
+        gek = int(size(keys), int64)
+        if (present(group_ekeys)) gek = int(group_ekeys, int64)
         builder = parquet_sort_builder_new(nrows)
         do ik = 1, size(keys)
             call engine_add_key(builder, keys(ik), nrows)
         end do
-        status = parquet_sort_builder_build_runs(builder, nthreads, perm, tie)
+        status = parquet_sort_builder_build_runs(builder, nthreads, gek, perm, tie)
         call parquet_sort_builder_free(builder)
         if (status /= 0_int64) then
             ! Only reachable with an empty key list, which the guard above already rejects.
             error stop EP // proc // ": the sort engine could not build a permutation" ! GCOVR_EXCL_LINE
         end if
     end procedure engine_build_runs
+    !
+    module procedure drive_engine_grouped
+        integer(c_int8_t), allocatable :: tie(:)
+        !
+        if (.not. present(group_offsets)) then
+            ! Nothing to report, so nothing is given up: this is drive_engine exactly, one-shot
+            ! borrow and all. The branch is what keeps asking for boundaries the only thing that
+            ! costs anything.
+            call drive_engine(keys, nrows, proc, perm, threads=threads)
+            return
+        end if
+        call engine_build_runs(keys, nrows, proc, perm, tie, threads=threads, group_ekeys=group_ekeys)
+        call runs_to_offsets(tie, nrows, group_offsets)
+    end procedure drive_engine_grouped
+    !
+    module procedure runs_to_offsets
+        integer(int64) :: k, ngroups, pos
+        !
+        ! Bounded by nrows, NEVER by size(tie): engine_build_runs allocates tie with a
+        ! max(nrows, 1) floor, so a zero-row sort leaves one element in it that describes no row
+        ! and would otherwise be counted as a group.
+        ngroups = 0_int64
+        do k = 1_int64, nrows
+            if (tie(k) == 0_c_int8_t) ngroups = ngroups + 1_int64
+        end do
+        allocate(offsets(ngroups + 1_int64))
+        pos = 0_int64
+        do k = 1_int64, nrows
+            if (tie(k) == 0_c_int8_t) then
+                pos = pos + 1_int64
+                offsets(pos) = k
+            end if
+        end do
+        ! The sentinel. It is what lets group g be perm(o(g) : o(g+1) - 1) for EVERY g including
+        ! the last -- and for a zero-row sort it is the array's only entry, so `[1]` means "no
+        ! groups" rather than an unallocated result every caller would have to test for.
+        offsets(ngroups + 1_int64) = nrows + 1_int64
+    end procedure runs_to_offsets
     !
     module procedure engine_search
         type(c_ptr) :: builder
@@ -2406,7 +2646,7 @@ contains
             w("        type(sort_key_buf), allocatable :: buf(:)")
             w("        logical :: desc, nlo")
             if ik == "i32":
-                w("        integer(int64), allocatable :: perm64(:)")
+                w("        integer(int64), allocatable :: perm64(:), go64(:)")
             w("        !")
             w("        desc = .false.")
             w("        if (present(descending)) desc = descending")
@@ -2414,29 +2654,49 @@ contains
             w("        if (present(nulls_first)) nlo = nulls_first")
             w(f"        call extract_{tag}(values, buf, desc, nlo, \"pf_argsort\"{iv})")
             if ik == "i32":
-                w(f"        call drive_engine(buf, {rows_expr(t)}, \"pf_argsort\", perm64, threads=threads)")
+                # A local cannot be conditionally absent, so the branch has to be here rather
+                # than one level down -- forwarding an unconditional go64 would give up the
+                # one-shot path for every caller who never asked for boundaries.
+                w("        if (present(group_offsets)) then")
+                w(f"            call drive_engine_grouped(buf, {rows_expr(t)}, \"pf_argsort\", perm64, &")
+                w("                threads=threads, group_offsets=go64)")
+                w("            call narrow_offsets(go64, \"pf_argsort\", group_offsets)")
+                w("        else")
+                w(f"            call drive_engine_grouped(buf, {rows_expr(t)}, \"pf_argsort\", perm64, threads=threads)")
+                w("        end if")
                 w("        call narrow_perm(perm64, \"pf_argsort\", perm)")
             else:
-                w(f"        call drive_engine(buf, {rows_expr(t)}, \"pf_argsort\", perm, threads=threads)")
+                # An absent optional dummy passed on as an optional actual stays absent
+                # (F2018 15.5.2.13), so the i64 form needs no branch at all.
+                w(f"        call drive_engine_grouped(buf, {rows_expr(t)}, \"pf_argsort\", perm, threads=threads, &")
+                w("            group_offsets=group_offsets)")
             w(f"    end procedure argsort_{tag}_{ik}")
             w("    !")
 
     for ik, idecl, iname in IDX_KINDS:
         w(f"    module procedure argsort_keys_{ik}")
+        w("        integer :: gek")
         if ik == "i32":
-            w("        integer(int64), allocatable :: perm64(:)")
+            w("        integer(int64), allocatable :: perm64(:), go64(:)")
         w("        !")
         w("        if (keys%nkeys < 1) then")
         w("            error stop EP // \"pf_argsort: this pf_sort_keys has no key; \" // &")
         w("                \"call keys%add(...) at least once before sorting\"")
         w("        end if")
+        w("        call resolve_group_nkeys(keys, group_nkeys, present(group_offsets), \"pf_argsort\", gek)")
         if ik == "i32":
-            w("        call drive_engine(keys%keys(1:keys%nkeys), keys%nrows, \"pf_argsort\", perm64, &")
-            w("            threads=threads)")
+            w("        if (present(group_offsets)) then")
+            w("            call drive_engine_grouped(keys%keys(1:keys%nkeys), keys%nrows, \"pf_argsort\", &")
+            w("                perm64, threads=threads, group_offsets=go64, group_ekeys=gek)")
+            w("            call narrow_offsets(go64, \"pf_argsort\", group_offsets)")
+            w("        else")
+            w("            call drive_engine_grouped(keys%keys(1:keys%nkeys), keys%nrows, \"pf_argsort\", &")
+            w("                perm64, threads=threads)")
+            w("        end if")
             w("        call narrow_perm(perm64, \"pf_argsort\", perm)")
         else:
-            w("        call drive_engine(keys%keys(1:keys%nkeys), keys%nrows, \"pf_argsort\", perm, &")
-            w("            threads=threads)")
+            w("        call drive_engine_grouped(keys%keys(1:keys%nkeys), keys%nrows, \"pf_argsort\", perm, &")
+            w("            threads=threads, group_offsets=group_offsets, group_ekeys=gek)")
         w(f"    end procedure argsort_keys_{ik}")
         w("    !")
 
@@ -2575,6 +2835,16 @@ contains
         w(f"    end procedure is_sorted_{tag}")
         w("    !")
 
+    w("    module procedure is_sorted_keys")
+    w("        !")
+    w("        if (keys%nkeys < 1) then")
+    w("            error stop EP // \"pf_is_sorted: this pf_sort_keys has no key; \" // &")
+    w("                \"call keys%add(...) at least once before asking\"")
+    w("        end if")
+    w("        call engine_is_sorted(keys%keys(1:keys%nkeys), keys%nrows, \"pf_is_sorted\", answer)")
+    w("    end procedure is_sorted_keys")
+    w("    !")
+
     w("end submodule parquet_sorting_permute ! GCOVR_EXCL_LINE")
     return "\n".join(o) + "\n"
 
@@ -2630,6 +2900,25 @@ contains
                 w("        call move_alloc(perm64, perm)")
             w(f"    end procedure partial_argsort_{tag}_{ik}")
             w("    !")
+
+    for ik, idecl, iname in IDX_KINDS:
+        w(f"    module procedure partial_argsort_keys_{ik}")
+        w("        integer(int64), allocatable :: perm64(:)")
+        w("        integer(int64) :: count")
+        w("        !")
+        w("        if (keys%nkeys < 1) then")
+        w("            error stop EP // \"pf_partial_argsort: this pf_sort_keys has no key; \" // &")
+        w("                \"call keys%add(...) at least once before sorting\"")
+        w("        end if")
+        w("        call resolve_count(n, keys%nrows, \"pf_partial_argsort\", count)")
+        w("        call drive_engine_partial(keys%keys(1:keys%nkeys), keys%nrows, count, &")
+        w("            \"pf_partial_argsort\", perm64)")
+        if ik == "i32":
+            w("        call narrow_perm(perm64, \"pf_partial_argsort\", perm)")
+        else:
+            w("        call move_alloc(perm64, perm)")
+        w(f"    end procedure partial_argsort_keys_{ik}")
+        w("    !")
 
     for t in TYPES:
         tag, decl, what, family, nulls, has_sort, _ = t

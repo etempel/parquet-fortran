@@ -3578,11 +3578,18 @@ extern "C"
 	// Keep this beside SortRowLess. The two are one decision expressed twice, and feature_risks.md
 	// Risk-34 is about them never drifting apart: both walk the keys in precedence order and both
 	// delegate every actual comparison to sort_compare_key.
-	static inline int sort_keys_compare(const std::vector<SortKeyData> &keys, int64_t a, int64_t b)
+	// `nkeys` is how many LEADING keys take part. Every caller but the run detection below passes
+	// keys.size(); that one passes a prefix, because grouping and ordering are different questions
+	// -- "sort by field then magnitude, but group by field alone" needs every key to order and only
+	// the first to decide where a group ends. Fortran resolves the count (a caller's key is not
+	// always one engine key) and passes it already resolved, so there is nothing to interpret here.
+	static inline int sort_keys_compare(const std::vector<SortKeyData> &keys, int64_t a, int64_t b,
+		size_t nkeys)
 	{
-		for (const auto &key : keys)
+		if (nkeys > keys.size()) nkeys = keys.size();
+		for (size_t k = 0; k < nkeys; ++k)
 		{
-			int c = sort_compare_key(key, a, b);
+			int c = sort_compare_key(keys[k], a, b);
 			if (c != 0) return c;
 		}
 		return 0;
@@ -3631,12 +3638,12 @@ extern "C"
 		return sort_comparison_permutation(keys, n);
 	}
 
-	// ---- Parallel sorting (feature_sort.md M4) ----
+	// ---- Parallel sorting ----
 	//
 	// A task-parallel merge sort over the PERMUTATION: each thread std::sorts one contiguous chunk
-	// of it, then the chunks are merged pairwise in log(T) rounds. Route chosen in feature_sort.md
-	// section 8 on build cost -- std::execution::par needs TBB, and OpenMP tasks would need -fopenmp
-	// on the C++ compile, which this project's CI deliberately does not set.
+	// of it, then the chunks are merged pairwise in log(T) rounds. Hand-rolled on build cost --
+	// std::execution::par needs TBB, and OpenMP tasks would need -fopenmp on the C++ compile, which
+	// this project's CI deliberately does not set.
 	//
 	// **The answer is bit-identical to the serial sort, and that is structural rather than lucky.**
 	// SortRowLess ends with a tiebreaker on the row index, so it is a TOTAL order under which no two
@@ -6183,7 +6190,7 @@ extern "C"
 		if (h->keys.empty()) return -1;
 		for (int64_t i = 1; i < h->nrows; ++i)
 		{
-			if (sort_keys_compare(h->keys, i - 1, i) > 0) return 0;
+			if (sort_keys_compare(h->keys, i - 1, i, h->keys.size()) > 0) return 0;
 		}
 		return 1;
 	}
@@ -6231,17 +6238,25 @@ extern "C"
 	// One call rather than a sort followed by a separate comparison pass, because the caller
 	// (pf_unique, pf_rank) needs both and building the permutation twice would double the cost of
 	// the operation. tie_out[0] is always 0 -- the first row starts a run by definition.
-	int64_t parquet_sort_builder_build_runs(void *handle, int64_t threads, int64_t *perm_out, int8_t *tie_out)
+	//
+	// `group_keys` is how many LEADING keys decide a tie, and it is the ONLY thing here that does
+	// not use every key: the sort below always orders by all of them. That asymmetry is the whole
+	// point -- it produces "grouped by field, ordered by magnitude within each group" from one pass.
+	// Fortran always sends a real count (never 0 meaning "all"), already translated from the
+	// caller's key count, so this side neither interprets nor defaults it.
+	int64_t parquet_sort_builder_build_runs(void *handle, int64_t threads, int64_t group_keys,
+		int64_t *perm_out, int8_t *tie_out)
 	{
 		auto *h = static_cast<SortBuilderHandle *>(handle);
 		if (h->keys.empty()) return 1;
+		if (group_keys < 1) group_keys = static_cast<int64_t>(h->keys.size());
 		auto perm = sort_build_permutation_threaded(h->keys, h->nrows, threads);
 		for (int64_t i = 0; i < h->nrows; ++i) perm_out[i] = perm[static_cast<size_t>(i)] + 1;
 		if (h->nrows > 0) tie_out[0] = 0;
 		for (int64_t i = 1; i < h->nrows; ++i)
 		{
-			tie_out[i] = sort_keys_compare(h->keys,
-				perm[static_cast<size_t>(i - 1)], perm[static_cast<size_t>(i)]) == 0 ? 1 : 0;
+			tie_out[i] = sort_keys_compare(h->keys, perm[static_cast<size_t>(i - 1)],
+				perm[static_cast<size_t>(i)], static_cast<size_t>(group_keys)) == 0 ? 1 : 0;
 		}
 		return 0;
 	}
@@ -6270,7 +6285,7 @@ extern "C"
 		while (lo < hi)
 		{
 			int64_t mid = lo + (hi - lo) / 2;
-			int c = sort_keys_compare(h->keys, mid, target);
+			int c = sort_keys_compare(h->keys, mid, target, h->keys.size());
 			bool before = (which == 0) ? (c < 0) : (c <= 0);
 			if (before) lo = mid + 1;
 			else hi = mid;
@@ -6295,7 +6310,7 @@ extern "C"
 		int64_t i = 0, j = na, k = 0;
 		while (i < na && j < h->nrows)
 		{
-			if (sort_keys_compare(h->keys, i, j) <= 0) perm_out[k++] = (i++) + 1;
+			if (sort_keys_compare(h->keys, i, j, h->keys.size()) <= 0) perm_out[k++] = (i++) + 1;
 			else perm_out[k++] = (j++) + 1;
 		}
 		while (i < na) perm_out[k++] = (i++) + 1;

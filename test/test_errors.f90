@@ -754,6 +754,18 @@ contains
                 test_table_mutate_unmaterialized_column_aborts), &
             new_unittest("sorting by an unsupported column aborts", &
                 test_table_mutate_unsupported_column_aborts), &
+            new_unittest("argsort_by on a vector column aborts naming argsort_by", &
+                test_table_argsort_by_vector_column_aborts), &
+            new_unittest("argsort_by with no keys aborts", &
+                test_table_argsort_by_no_keys_aborts), &
+            new_unittest("group_nkeys above the key count aborts", &
+                test_table_argsort_by_group_nkeys_too_many_aborts), &
+            new_unittest("group_nkeys of zero aborts", &
+                test_table_argsort_by_group_nkeys_zero_aborts), &
+            new_unittest("group_nkeys without group_offsets aborts", &
+                test_table_argsort_by_group_nkeys_without_offsets_aborts), &
+            new_unittest("argsort_partial with a negative n aborts", &
+                test_table_argsort_partial_negative_n_aborts), &
             new_unittest("filter_rows with a wrong-length mask aborts", &
                 test_table_filter_rows_mask_length_aborts), &
             new_unittest("delete_rows with an out-of-range index aborts", &
@@ -772,8 +784,6 @@ contains
                 test_table_sort_by_unknown_column_aborts), &
             new_unittest("sort_by on a vector column aborts", &
                 test_table_sort_by_vector_column_aborts), &
-            new_unittest("sort_by on an unread key column aborts", &
-                test_table_sort_by_unmaterialized_key_aborts), &
             new_unittest("append with an extra column in the source aborts", &
                 test_table_append_unknown_column_aborts), &
             new_unittest("append with a kind mismatch aborts", &
@@ -5636,8 +5646,59 @@ contains
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "table_mutate_unsupported_column", expect_abort=.true., &
             failure_message="sorting by an unsupported column was expected to abort", &
-            required_stderr="this column's type is not supported by parquet_table, so it cannot be a sort key")
+            ! table_resolve raises this now, not sort_by's own check -- sorting stopped keeping a
+            ! second copy of "which columns can be reached" when it started reading key columns
+            ! implicitly. Same refusal, one wording, and the message still names sort_by.
+            required_stderr="this column's type is not supported by parquet_table, so its values were never read")
     end subroutine test_table_mutate_unsupported_column_aborts
+
+    !> The message must name argsort_by. All four sorting bindings share one key-lookup helper, so
+    !> a dropped `proc` argument would silently make every %argsort_by failure blame %sort_by.
+    subroutine test_table_argsort_by_vector_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_argsort_by_vector_column", expect_abort=.true., &
+            failure_message="argsort_by on a vector column was expected to abort", &
+            required_stderr="argsort_by: a ")
+    end subroutine test_table_argsort_by_vector_column_aborts
+
+    subroutine test_table_argsort_by_no_keys_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_argsort_by_no_keys", expect_abort=.true., &
+            failure_message="argsort_by with no key was expected to abort", &
+            required_stderr="argsort_by: no sort key was given")
+    end subroutine test_table_argsort_by_no_keys_aborts
+
+    subroutine test_table_argsort_by_group_nkeys_too_many_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_argsort_by_group_nkeys_too_many", &
+            expect_abort=.true., &
+            failure_message="group_nkeys above the key count was expected to abort", &
+            required_stderr="group_nkeys is 2, which is not between 1 and the 1 keys given")
+    end subroutine test_table_argsort_by_group_nkeys_too_many_aborts
+
+    subroutine test_table_argsort_by_group_nkeys_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_argsort_by_group_nkeys_zero", &
+            expect_abort=.true., &
+            failure_message="group_nkeys of zero was expected to abort", &
+            required_stderr="group_nkeys is 0, which is not between 1 and the 1 keys given")
+    end subroutine test_table_argsort_by_group_nkeys_zero_aborts
+
+    subroutine test_table_argsort_by_group_nkeys_without_offsets_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_argsort_by_group_nkeys_without_offsets", &
+            expect_abort=.true., &
+            failure_message="group_nkeys without group_offsets was expected to abort", &
+            required_stderr="group_nkeys was given without group_offsets")
+    end subroutine test_table_argsort_by_group_nkeys_without_offsets_aborts
+
+    subroutine test_table_argsort_partial_negative_n_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_argsort_partial_negative_n", &
+            expect_abort=.true., &
+            failure_message="argsort_partial with a negative n was expected to abort", &
+            required_stderr="argsort_partial: n is -1; a negative number of rows cannot be ordered")
+    end subroutine test_table_argsort_partial_negative_n_aborts
 
     subroutine test_table_filter_rows_mask_length_aborts(error)
         type(error_type), allocatable, intent(out) :: error
@@ -5702,13 +5763,6 @@ contains
             failure_message="sorting by a vector column was expected to abort", &
             required_stderr="column cannot be a sort key; there is no defined order on a whole vector row")
     end subroutine test_table_sort_by_vector_column_aborts
-
-    subroutine test_table_sort_by_unmaterialized_key_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-        call check_scenario_exit_status_and_stderr(error, "table_sort_by_unmaterialized_key", expect_abort=.true., &
-            failure_message="sorting by an unread key column was expected to abort", &
-            required_stderr="this column has not been read yet, and sorting will not read it implicitly")
-    end subroutine test_table_sort_by_unmaterialized_key_aborts
 
     subroutine test_table_append_unknown_column_aborts(error)
         type(error_type), allocatable, intent(out) :: error

@@ -744,8 +744,8 @@ Follow these when adding new public API, types, or internal helpers:
   one.** `parquet_` is for the parquet-file-facing modules (the reader/writer/schema/table/element
   domains: everything listed under "Nested submodule tree"). **`pf_`** — for parquet-fortran, the
   library as a whole — is for *library-wide utility* modules whose subject is not a parquet file at
-  all. `parquet_sorting` (a general-purpose sorting API over plain Fortran arrays, see
-  `feature_sort.md`) is the first and currently only `pf_` module: its procedures are `pf_sort`,
+  all. `parquet_sorting` (a general-purpose sorting API over plain Fortran arrays) is the first and
+  currently only `pf_` module: its procedures are `pf_sort`,
   `pf_argsort`, `pf_permute`, …, and its type is `pf_sort_keys`. **Do not "correct" a `pf_` name to
   `parquet_`** — nothing in `tools/check_source_conventions.py` enforces either prefix, so the rule
   lives here and nowhere else. Two things this rule is *not*: it is not a licence to mix prefixes

@@ -576,17 +576,50 @@ contains
     end procedure add_col
     !
     module procedure keys_count
-        n = self%nkeys
+        ! The CALLER's count -- one per %add call -- not self%nkeys, which counts engine keys and
+        ! answers 2 for a lone parquet_timestamp. See the add_ekeys component.
+        n = 0
+        if (allocated(self%add_ekeys)) n = size(self%add_ekeys)
     end procedure keys_count
     !
     module procedure keys_clear
         self%nkeys = 0
         self%nrows = -1_int64
         if (allocated(self%keys)) deallocate(self%keys)
+        if (allocated(self%add_ekeys)) deallocate(self%add_ekeys)
     end procedure keys_clear
+    !
+    module procedure resolve_group_nkeys
+        integer :: ncaller, k
+        character(len=32) :: got_str, have_str
+        !
+        ncaller = 0
+        if (allocated(keys%add_ekeys)) ncaller = size(keys%add_ekeys)
+        if (.not. present(group_nkeys)) then
+            group_ekeys = keys%nkeys
+            return
+        end if
+        if (.not. want_offsets) then
+            error stop EP // proc // ": group_nkeys was given without group_offsets; on its own " // &
+                "it changes nothing, so ask for the boundaries too or drop it"
+        end if
+        if (group_nkeys < 1 .or. group_nkeys > ncaller) then
+            write (got_str, "(i0)") group_nkeys
+            write (have_str, "(i0)") ncaller
+            error stop EP // proc // ": group_nkeys is " // trim(got_str) // ", which is not " // &
+                "between 1 and the " // trim(have_str) // " keys given"
+        end if
+        ! Caller keys to engine keys. A prefix of the caller's keys is a prefix of the engine's,
+        ! because %add appends its engine keys contiguously and in order.
+        group_ekeys = 0
+        do k = 1, group_nkeys
+            group_ekeys = group_ekeys + keys%add_ekeys(k)
+        end do
+    end procedure resolve_group_nkeys
     !
     module procedure keys_append
         type(sort_key_buf), allocatable :: bigger(:)
+        integer, allocatable :: more_ekeys(:)
         integer(int64) :: n
         integer :: ik
         character(len=32) :: got_str, want_str
@@ -610,6 +643,15 @@ contains
         do ik = 1, size(buf)
             call move_key(buf(ik), bigger(self%nkeys + ik))
         end do
+        ! One entry per %add call, holding how many engine keys THIS call contributed -- the only
+        ! record of the caller-versus-engine key distinction, and what %nkeys_added and group_nkeys
+        ! both read. Recorded here rather than in each %add specific so a new key type cannot
+        ! forget it.
+        if (.not. allocated(self%add_ekeys)) allocate(self%add_ekeys(0))
+        allocate(more_ekeys(size(self%add_ekeys) + 1))
+        more_ekeys(1:size(self%add_ekeys)) = self%add_ekeys
+        more_ekeys(size(more_ekeys)) = size(buf)
+        call move_alloc(more_ekeys, self%add_ekeys)
         self%nkeys = self%nkeys + size(buf)
         call move_alloc(bigger, self%keys)
         deallocate(buf)
@@ -1094,6 +1136,28 @@ contains
         perm32 = int(perm64, int32)
     end procedure narrow_perm
     !
+    module procedure narrow_offsets
+        integer(int64) :: sentinel
+        character(len=32) :: n_str
+        !
+        ! The SENTINEL, not the length -- and the difference is exactly one row. A permutation's
+        ! largest entry is n, but this array's is n + 1, so at n == huge(int32) narrow_perm's own
+        ! test passes while this one must not: a wrapped sentinel makes the last group's
+        ! o(g+1) - 1 a huge negative bound, i.e. a silently wrong slice instead of an abort.
+        sentinel = offsets64(size(offsets64))
+        ! GCOVR_EXCL_START -- unreachable without a >2-billion-row sort; the same reason
+        ! narrow_perm's own guard has no test either. Kept because the failure it prevents is
+        ! silent, which is precisely when an untestable guard earns its place.
+        if (sentinel > int(huge(1_int32), int64)) then
+            write (n_str, "(i0)") sentinel - 1_int64
+            error stop EP // proc // ": this array has " // trim(n_str) // " elements, so the " // &
+                "group offsets do not fit int32; declare group_offsets as integer(int64)"
+        end if
+        ! GCOVR_EXCL_STOP
+        allocate(offsets32(size(offsets64)))
+        offsets32 = int(offsets64, int32)
+    end procedure narrow_offsets
+    !
     module procedure narrow_i64
         character(len=32) :: v_str
         !
@@ -1260,7 +1324,7 @@ contains
     !
     module procedure engine_build_runs
         type(c_ptr) :: builder
-        integer(int64) :: status, k, nthreads
+        integer(int64) :: status, k, nthreads, gek
         integer :: ik
         !
         if (size(keys) < 1) then
@@ -1274,17 +1338,59 @@ contains
         end do
         if (nrows < 2_int64) return
         call resolve_thread_count(threads, nrows, nthreads)
+        ! Resolved HERE, never in C++: the boundary carries a real count, never a "0 means all"
+        ! sentinel, so the C++ side obeys rather than interprets what a prefix of zero would mean.
+        gek = int(size(keys), int64)
+        if (present(group_ekeys)) gek = int(group_ekeys, int64)
         builder = parquet_sort_builder_new(nrows)
         do ik = 1, size(keys)
             call engine_add_key(builder, keys(ik), nrows)
         end do
-        status = parquet_sort_builder_build_runs(builder, nthreads, perm, tie)
+        status = parquet_sort_builder_build_runs(builder, nthreads, gek, perm, tie)
         call parquet_sort_builder_free(builder)
         if (status /= 0_int64) then
             ! Only reachable with an empty key list, which the guard above already rejects.
             error stop EP // proc // ": the sort engine could not build a permutation" ! GCOVR_EXCL_LINE
         end if
     end procedure engine_build_runs
+    !
+    module procedure drive_engine_grouped
+        integer(c_int8_t), allocatable :: tie(:)
+        !
+        if (.not. present(group_offsets)) then
+            ! Nothing to report, so nothing is given up: this is drive_engine exactly, one-shot
+            ! borrow and all. The branch is what keeps asking for boundaries the only thing that
+            ! costs anything.
+            call drive_engine(keys, nrows, proc, perm, threads=threads)
+            return
+        end if
+        call engine_build_runs(keys, nrows, proc, perm, tie, threads=threads, group_ekeys=group_ekeys)
+        call runs_to_offsets(tie, nrows, group_offsets)
+    end procedure drive_engine_grouped
+    !
+    module procedure runs_to_offsets
+        integer(int64) :: k, ngroups, pos
+        !
+        ! Bounded by nrows, NEVER by size(tie): engine_build_runs allocates tie with a
+        ! max(nrows, 1) floor, so a zero-row sort leaves one element in it that describes no row
+        ! and would otherwise be counted as a group.
+        ngroups = 0_int64
+        do k = 1_int64, nrows
+            if (tie(k) == 0_c_int8_t) ngroups = ngroups + 1_int64
+        end do
+        allocate(offsets(ngroups + 1_int64))
+        pos = 0_int64
+        do k = 1_int64, nrows
+            if (tie(k) == 0_c_int8_t) then
+                pos = pos + 1_int64
+                offsets(pos) = k
+            end if
+        end do
+        ! The sentinel. It is what lets group g be perm(o(g) : o(g+1) - 1) for EVERY g including
+        ! the last -- and for a zero-row sort it is the array's only entry, so `[1]` means "no
+        ! groups" rather than an unallocated result every caller would have to test for.
+        offsets(ngroups + 1_int64) = nrows + 1_int64
+    end procedure runs_to_offsets
     !
     module procedure engine_search
         type(c_ptr) :: builder

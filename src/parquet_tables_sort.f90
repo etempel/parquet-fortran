@@ -24,54 +24,151 @@
 !! stay here** rather than being left to `pf_argsort`'s own equivalents, because a table can say
 !! which column and which file the problem is in and `pf_argsort`, handed a bare column, cannot.
 submodule (parquet_tables) parquet_tables_sort
-    use parquet_sorting, only : pf_sort_keys, pf_argsort
+    use parquet_sorting, only : pf_sort_keys, pf_argsort, pf_is_sorted, pf_partial_argsort
     implicit none
     !
 contains
     !
     module procedure table_build_sort_permutation
         type(pf_sort_keys) :: skeys
+        !
+        call sort_collect_keys(self, keys, descending, nulls_first, "sort_by", skeys)
+        call pf_argsort(skeys, perm)
+    end procedure table_build_sort_permutation
+    !
+    module procedure table_argsort_by_i64
+        type(pf_sort_keys) :: skeys
+        !
+        call sort_collect_keys(self, keys, descending, nulls_first, "argsort_by", skeys)
+        ! group_offsets and group_nkeys are forwarded whether or not they were given: an absent
+        ! optional dummy passed on as an optional actual stays absent (F2018 15.5.2.13), which is
+        ! what lets pf_argsort keep its one-shot path for callers who asked for no boundaries.
+        call pf_argsort(skeys, perm, group_offsets=group_offsets, group_nkeys=group_nkeys)
+    end procedure table_argsort_by_i64
+    !
+    module procedure table_argsort_by_i32
+        type(pf_sort_keys) :: skeys
+        !
+        call sort_collect_keys(self, keys, descending, nulls_first, "argsort_by", skeys)
+        ! A local cannot be conditionally absent, so the branch has to be here rather than one
+        ! level down -- passing an unconditional group_offsets would give up the one-shot path.
+        if (present(group_offsets)) then
+            call pf_argsort(skeys, perm, group_offsets=group_offsets, group_nkeys=group_nkeys)
+        else
+            call pf_argsort(skeys, perm, group_nkeys=group_nkeys)
+        end if
+    end procedure table_argsort_by_i32
+    !
+    module procedure table_argsort_partial_i64
+        type(pf_sort_keys) :: skeys
+        !
+        call sort_partial_check_n(n, "argsort_partial")
+        call sort_collect_keys(self, keys, descending, nulls_first, "argsort_partial", skeys)
+        call pf_partial_argsort(skeys, perm, n)
+    end procedure table_argsort_partial_i64
+    !
+    module procedure table_argsort_partial_i32
+        type(pf_sort_keys) :: skeys
+        !
+        call sort_partial_check_n(n, "argsort_partial")
+        call sort_collect_keys(self, keys, descending, nulls_first, "argsort_partial", skeys)
+        call pf_partial_argsort(skeys, perm, n)
+    end procedure table_argsort_partial_i32
+    !
+    module procedure table_is_sorted_by
+        type(pf_sort_keys) :: skeys
+        !
+        call sort_collect_keys(self, keys, descending, nulls_first, "is_sorted_by", skeys)
+        call pf_is_sorted(skeys, answer)
+    end procedure table_is_sorted_by
+    !
+    !> Rejects a negative `n` here rather than letting `pf_partial_argsort` do it, so the message
+    !! names the binding the caller actually used. Too LARGE an `n` is not an error -- it clamps.
+    subroutine sort_partial_check_n(n, proc)
+        integer, intent(in) :: n             !! the requested row count.
+        character(len=*), intent(in) :: proc !! calling procedure, for the message.
+        character(len=32) :: n_str
+        !
+        if (n < 0) then
+            write (n_str, "(i0)") n
+            error stop EP // proc // ": n is " // trim(n_str) // "; a negative number of rows " // &
+                "cannot be ordered"
+        end if
+    end subroutine sort_partial_check_n
+    !
+    !> Turns the caller's key NAMES into the `pf_sort_keys` object every sorting binding runs on.
+    !!
+    !! Shared by `%sort_by`, `%argsort_by`, `%is_sorted_by` and `%argsort_partial` so that all four
+    !! refuse exactly the same columns and map `descending`/`nulls_first` exactly the same way. Two
+    !! copies of "which columns can be a sort key" is precisely the drift that would let a table
+    !! answer `%is_sorted_by` for a column `%argsort_by` rejects.
+    !!
+    !! `proc` names the caller in every message, so an `%argsort_by` failure does not blame
+    !! `sort_by`.
+    subroutine sort_collect_keys(self, keys, descending, nulls_first, proc, skeys)
+        class(parquet_table), intent(in) :: self        !! the table.
+        character(len=*), intent(in) :: keys(:)         !! key columns, primary first.
+        logical, intent(in), optional :: descending(:)  !! per key: .true. for descending.
+        logical, intent(in), optional :: nulls_first(:) !! per key: .true. to put nulls first.
+        character(len=*), intent(in) :: proc            !! calling procedure, for messages.
+        type(pf_sort_keys), intent(out) :: skeys        !! the assembled key list.
         integer :: ik, idx
         logical :: desc, nulls_lo
+        character(len=32) :: got, want
         !
+        call table_check_open(self, proc)
+        if (size(keys) < 1) error stop EP // proc // ": no sort key was given"
+        if (present(descending)) then
+            if (size(descending) /= size(keys)) then
+                write(got, "(I0)") size(descending)
+                write(want, "(I0)") size(keys)
+                error stop EP // proc // ": descending= has " // trim(got) // " entries but " // &
+                    trim(want) // " keys were given; it takes one entry per key"
+            end if
+        end if
+        if (present(nulls_first)) then
+            if (size(nulls_first) /= size(keys)) then
+                write(got, "(I0)") size(nulls_first)
+                write(want, "(I0)") size(keys)
+                error stop EP // proc // ": nulls_first= has " // trim(got) // " entries but " // &
+                    trim(want) // " keys were given; it takes one entry per key"
+            end if
+        end if
         do ik = 1, size(keys)
-            call sort_lookup_key(self, keys(ik), idx)
+            call sort_lookup_key(self, keys(ik), proc, idx)
             desc = .false.
             if (present(descending)) desc = descending(ik)
             nulls_lo = .false.
             if (present(nulls_first)) nulls_lo = nulls_first(ik)
             call skeys%add(self%cache%cols(idx)%values, descending=desc, nulls_first=nulls_lo)
         end do
-        call pf_argsort(skeys, perm)
-    end procedure table_build_sort_permutation
+    end subroutine sort_collect_keys
     !
     !> Resolves one key name to its slot, refusing every column that cannot be a sort key.
     !!
-    !! An unmaterialized key column is refused rather than read (Q3c-6). Sorting already forces
-    !! whole-column reads, and letting it ALSO pull columns off disk would make the memory a
-    !! `%sort_by` call costs depend on which columns happen to be resident -- worst of all on a
-    !! slice-regime table over a large file. `%prefetch` is one line and says what it does.
-    subroutine sort_lookup_key(self, name, idx)
+    !! **A key column that has not been read yet is read here**, by the ordinary lazy first touch
+    !! every value accessor already goes through. Sorting used to refuse instead, on the grounds
+    !! that the memory a `%sort_by` costs should not depend on which columns happened to be
+    !! resident -- but that made sorting the one operation on this type that would not fetch what
+    !! it plainly needs, and a caller who asks to sort by a column has said what they want read.
+    !!
+    !! Going through `table_resolve` rather than a bare lookup brings two more things with it, both
+    !! wanted here: the cheap half of the append/read contract (a permutation built while another
+    !! thread reallocates every column's storage is meaningless), and the reserved
+    !! `parquet_row_index` column materialized on demand -- which is what makes
+    !! `%argsort_by([PARQUET_ROW_INDEX], perm)` the way back to file order rather than an abort.
+    subroutine sort_lookup_key(self, name, proc, idx)
         class(parquet_table), intent(in) :: self !! the table.
         character(len=*), intent(in) :: name     !! the key column's name.
+        character(len=*), intent(in) :: proc     !! calling procedure, for messages.
         integer, intent(out) :: idx              !! its slot index.
         character(len=:), allocatable :: sfx, kname
         !
-        call table_lookup_or_fail(self, name, "sort_by", idx)
-        if (.not. self%cache%cols(idx)%supported) then
-            call table_context_suffix(self%cache, name, sfx)
-            error stop EP // "sort_by: this column's type is not supported by parquet_table, " // &
-                "so it cannot be a sort key" // sfx
-        end if
-        if (self%cache%cols(idx)%residency /= RES_FULL) then
-            call table_context_suffix(self%cache, name, sfx)
-            error stop EP // "sort_by: this column has not been read yet, and sorting will not " // &
-                "read it implicitly; call table%prefetch(...) on every key column first" // sfx
-        end if
+        call table_resolve(self, name, proc, idx)
         if (.not. sort_kind_is_orderable(self%cache%cols(idx)%values%kindof())) then
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             call table_context_suffix(self%cache, name, sfx)
-            error stop EP // "sort_by: a " // kname // " column cannot be a sort key; there is " // &
+            error stop EP // proc // ": a " // kname // " column cannot be a sort key; there is " // &
                 "no defined order on a whole vector row" // sfx
         end if
     end subroutine sort_lookup_key

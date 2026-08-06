@@ -1312,8 +1312,18 @@ program error_scenarios
         call scenario_table_sort_by_unknown_column()
     case ("table_sort_by_vector_column")
         call scenario_table_sort_by_vector_column()
-    case ("table_sort_by_unmaterialized_key")
-        call scenario_table_sort_by_unmaterialized_key()
+    case ("table_argsort_by_vector_column")
+        call scenario_table_argsort_by_vector_column()
+    case ("table_argsort_by_no_keys")
+        call scenario_table_argsort_by_no_keys()
+    case ("table_argsort_by_group_nkeys_too_many")
+        call scenario_table_argsort_by_group_nkeys_too_many()
+    case ("table_argsort_by_group_nkeys_zero")
+        call scenario_table_argsort_by_group_nkeys_zero()
+    case ("table_argsort_by_group_nkeys_without_offsets")
+        call scenario_table_argsort_by_group_nkeys_without_offsets()
+    case ("table_argsort_partial_negative_n")
+        call scenario_table_argsort_partial_negative_n()
     case ("table_append_unknown_column")
         call scenario_table_append_unknown_column()
     case ("table_append_kind_mismatch")
@@ -11225,18 +11235,71 @@ contains
         print '(a,i0)', "unexpectedly sorted by a vector column, nrows=", t%nrows()
     end subroutine scenario_table_sort_by_vector_column
 
-    !> A column the appended table has and this one does not is never silently dropped.
-    !> Sorting will not read a key column implicitly (Q3c-6): it would make the memory a
-    !! %sort_by call costs depend on which columns happened to be resident, worst of all on a
-    !! slice of a large file. An explicit %prefetch is one line.
-    subroutine scenario_table_sort_by_unmaterialized_key()
+    !> The refusals %argsort_by shares with %sort_by must name argsort_by, not sort_by -- they go
+    !! through one helper, and a `proc` argument is the only thing keeping the message honest.
+    subroutine scenario_table_argsort_by_vector_column()
         type(parquet_table) :: t
-        call write_mutate_fixture("test_run/es_tbl_sort_unmat.parquet")
-        call parquet_open_table(t, "test_run/es_tbl_sort_unmat.parquet")
-        call t%sort_by(["val"])   ! nothing was read -> aborts
-        print '(a,i0)', "unexpectedly sorted by a column that was never read, nrows=", t%nrows()
-    end subroutine scenario_table_sort_by_unmaterialized_key
+        real(real64) :: v(2, 3)
+        integer(int64), allocatable :: perm(:)
+        v = 1.0_real64
+        call parquet_new_table(t)
+        call t%add_column("vv", v)
+        call t%argsort_by(["vv"], perm)   ! -> aborts
+        print '(a,i0)', "unexpectedly argsorted by a vector column, n=", size(perm)
+    end subroutine scenario_table_argsort_by_vector_column
 
+    subroutine scenario_table_argsort_by_no_keys()
+        type(parquet_table) :: t
+        character(len=4) :: keys(0)
+        integer(int64), allocatable :: perm(:)
+        call parquet_new_table(t)
+        call t%add_column("a", [2_int32, 1_int32])
+        call t%argsort_by(keys, perm)   ! -> aborts
+        print '(a,i0)', "unexpectedly argsorted with no key, n=", size(perm)
+    end subroutine scenario_table_argsort_by_no_keys
+
+    !> group_nkeys counts key NAMES, so more than there are is a caller error rather than a clamp.
+    subroutine scenario_table_argsort_by_group_nkeys_too_many()
+        type(parquet_table) :: t
+        integer(int64), allocatable :: perm(:), go(:)
+        call parquet_new_table(t)
+        call t%add_column("a", [2_int32, 1_int32])
+        call t%argsort_by(["a"], perm, group_offsets=go, group_nkeys=2)   ! -> aborts
+        print '(a,i0)', "unexpectedly grouped on more keys than were given, ngroups=", size(go) - 1
+    end subroutine scenario_table_argsort_by_group_nkeys_too_many
+
+    !> Zero groups nothing, so it is a mistake rather than a synonym for "all the keys".
+    subroutine scenario_table_argsort_by_group_nkeys_zero()
+        type(parquet_table) :: t
+        integer(int64), allocatable :: perm(:), go(:)
+        call parquet_new_table(t)
+        call t%add_column("a", [2_int32, 1_int32])
+        call t%argsort_by(["a"], perm, group_offsets=go, group_nkeys=0)   ! -> aborts
+        print '(a,i0)', "unexpectedly grouped on zero keys, ngroups=", size(go) - 1
+    end subroutine scenario_table_argsort_by_group_nkeys_zero
+
+    !> On its own group_nkeys changes nothing, so passing it alone is an error, not a no-op --
+    !! silently ignoring it would hide a caller who thought they had asked for boundaries.
+    subroutine scenario_table_argsort_by_group_nkeys_without_offsets()
+        type(parquet_table) :: t
+        integer(int64), allocatable :: perm(:)
+        call parquet_new_table(t)
+        call t%add_column("a", [2_int32, 1_int32])
+        call t%argsort_by(["a"], perm, group_nkeys=1)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted group_nkeys with no group_offsets, n=", size(perm)
+    end subroutine scenario_table_argsort_by_group_nkeys_without_offsets
+
+    !> Too LARGE an n clamps; a negative one cannot mean anything and aborts.
+    subroutine scenario_table_argsort_partial_negative_n()
+        type(parquet_table) :: t
+        integer(int64), allocatable :: perm(:)
+        call parquet_new_table(t)
+        call t%add_column("a", [2_int32, 1_int32])
+        call t%argsort_partial(["a"], perm, -1)   ! -> aborts
+        print '(a,i0)', "unexpectedly ordered a negative number of rows, n=", size(perm)
+    end subroutine scenario_table_argsort_partial_negative_n
+
+    !> A column the appended table has and this one does not is never silently dropped.
     subroutine scenario_table_append_unknown_column()
         type(parquet_table) :: a, b
         call parquet_new_table(a)

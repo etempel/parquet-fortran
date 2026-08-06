@@ -758,11 +758,16 @@ module parquet_bindings
         !> position k compares equal to the one before it (`tie(1)` is always 0).
         !> One call rather than a sort plus a separate comparison pass, since
         !> `pf_unique`/`pf_rank` need both and would otherwise sort twice.
-        function parquet_sort_builder_build_runs(builder, threads, perm, tie) &
+        function parquet_sort_builder_build_runs(builder, threads, group_keys, perm, tie) &
                 bind(C, name="parquet_sort_builder_build_runs") result(status)
             import
             type(c_ptr), value :: builder !! builder handle.
             integer(c_long_long), value :: threads !! resolved thread count; <= 1 sorts serially.
+            !> how many LEADING keys decide a tie. The sort itself always uses every key; only
+            !! the tie test is narrowed, which is what yields groups by one key with the rows
+            !! inside each group ordered by the rest. Counted in ENGINE keys and already resolved
+            !! on the Fortran side -- never a sentinel for the C++ side to interpret.
+            integer(c_long_long), value :: group_keys
             integer(c_long_long) :: perm(*) !! receives the 1-based permutation.
             integer(c_int8_t) :: tie(*) !! receives 1 where a row ties the previous one.
             integer(c_long_long) :: status !! 0 on success, 1 when no key was added.

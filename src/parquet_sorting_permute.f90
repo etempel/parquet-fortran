@@ -661,4 +661,13 @@ contains
         call engine_is_sorted(buf, values%length(), "pf_is_sorted", answer)
     end procedure is_sorted_col
     !
+    module procedure is_sorted_keys
+        !
+        if (keys%nkeys < 1) then
+            error stop EP // "pf_is_sorted: this pf_sort_keys has no key; " // &
+                "call keys%add(...) at least once before asking"
+        end if
+        call engine_is_sorted(keys%keys(1:keys%nkeys), keys%nrows, "pf_is_sorted", answer)
+    end procedure is_sorted_keys
+    !
 end submodule parquet_sorting_permute ! GCOVR_EXCL_LINE

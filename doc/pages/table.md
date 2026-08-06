@@ -1318,10 +1318,11 @@ detaching — see [What "detaching" means](#what-detaching-means).
 call t%sort_by(["group", "mass "], descending=[.false., .true.])
 ```
 
-Every key column must already be resident — sorting will not read one implicitly, because that
-would make the memory a sort costs depend on which columns happened to have been read. Nulls and
-NaNs are placed absolutely and are never flipped by `descending`; ascending order gives values,
-then NaNs, then nulls. Ties keep their existing order.
+A key column that has not been read yet is read for you, by the same lazy first touch `%get` and
+`%col` use — so sorting a table you have just opened needs no `%prefetch` first. Only the key
+columns are read; the rest stay exactly as they were. Nulls and NaNs are placed absolutely and are
+never flipped by `descending`; ascending order gives values, then NaNs, then nulls. Ties keep their
+existing order.
 
 **Any scalar column can be a key** — numeric, logical, string, date, time or timestamp. A vector
 column cannot: there is no defined order on a whole vector row, so naming one is an error, as are
@@ -1332,6 +1333,84 @@ nothing and leaves the table attached (see [What "detaching" means](#what-detach
 
 This is the same sort engine `parquet_open_reader(..., sort_by=...)` uses, so sorting a table in
 memory and reading the same file sorted give the identical row order.
+
+### Ordering rows without reordering them
+
+`%sort_by` **detaches** the table, which is the right thing when you meant to reorder it — but it
+also means there is no way to get a sorted *view* of a table and keep the file behind it. That is
+what `%argsort_by` is for: it answers with the row order and moves nothing.
+
+```fortran
+integer(int64), allocatable :: perm(:)
+real(real64), allocatable :: mass(:)
+
+call t%argsort_by(["mass"], perm)                     ! the order, unapplied
+call t%get_slice("mass", parquet_slice_list(perm), mass)   ! read in that order
+```
+
+The table is untouched and still attached, so lazy columns still read, `%reload` still works, and
+nothing has been reallocated. Beyond a sorted read this is also how to apply one table's order to
+another table or to a plain array, which nothing else in the library offers.
+
+Same keys, same engine and same refusals as `%sort_by`, including per-key `descending=` and
+`nulls_first=`. Optional arguments are shown in square brackets below; they are not part of the
+call syntax:
+
+| call | what it gives |
+|---|---|
+| `call t%argsort_by(keys, perm, [descending], [nulls_first], [group_offsets], [group_nkeys])` | the row order the keys imply |
+| `call t%argsort_partial(keys, perm, n, [descending], [nulls_first])` | just the `n` best rows, by selection |
+| `ok = t%is_sorted_by(keys, [descending], [nulls_first])` | whether the rows are already in that order |
+
+`perm` may be declared `integer(int32)` or `integer(int64)`; `group_offsets` follows whichever you
+chose, since its entries are positions in `perm`.
+
+**`%argsort_partial` is the one with an asymptotic argument.** Asking a 100-million-row table for
+its brightest 100 rows through `%sort_by` sorts everything and reallocates every column;
+`%argsort_partial` selects instead, and reorders nothing at all. `n` is *clamped* to the row count
+rather than checked, so a derived `n` needs no `min()` of its own, and "the last `n`" is
+`descending=`, not a separate call.
+
+**`%is_sorted_by` costs O(rows) with an early exit**, where asking `%sort_by` the same question
+costs a full sort:
+
+```fortran
+if (.not. t%is_sorted_by(["ra"])) call t%sort_by(["ra"])
+```
+
+#### Grouping
+
+`group_offsets=` reports where each run of rows equal under the keys begins, in the same pass as
+the sort:
+
+```fortran
+integer(int64), allocatable :: perm(:), go(:)
+
+call t%argsort_by(["field_id"], perm, group_offsets=go)
+do g = 1, size(go) - 1
+    call t%get_slice("mag", parquet_slice_list(perm(go(g):go(g+1) - 1)), mags)
+end do
+```
+
+The array has length `ngroups + 1` and its last entry is the sentinel `nrows + 1`, so every group
+slices the same way and the last one needs no special case. All nulls form one group and all NaNs
+form one group.
+
+`group_nkeys=` groups on the first few keys **without changing the sort**, which is what gives
+"grouped by field, ordered by magnitude within each group":
+
+```fortran
+call t%argsort_by(["field_id", "mag     "], perm, group_offsets=go, group_nkeys=1)
+```
+
+It counts key *names*, must be between 1 and the number of keys, and requires `group_offsets`.
+
+> **A permutation goes stale silently.** It describes the table *as it was*. Any row-structural
+> change — `%sort_by`, `%filter_rows`, `%delete_rows`, `%truncate`, `%append` — invalidates it, and
+> nothing reports that: against a table that has since shrunk, the indices stay in range and name
+> the wrong rows. This is the same hazard as a saved `%col` pointer, except that a stale pointer
+> usually crashes while a stale permutation just answers wrongly. `%generation()` is bumped by every
+> such change — record it beside a permutation you intend to keep, and compare before reusing it.
 
 ### Adding rows
 
@@ -1381,6 +1460,53 @@ of them. `before` must be declared as the same concrete table type as `t`.
 > `%append` and the rest reallocate each column's storage, so a pointer taken before one of them
 > points at freed memory afterwards. Fortran cannot detect this. Take the pointer again after the
 > mutation.
+
+## Looking a value up in a sorted table
+
+There is no table-level binary search, and it is not missing: `%col` hands back a plain pointer to a
+column's storage, and [`parquet_sorting`](sorting.html)'s searches work on that directly.
+
+```fortran
+real(real64), pointer :: ra(:)
+integer(int64) :: lo, hi
+logical :: ok
+
+call t%sort_by(["ra"])
+call t%col("ra", ra)
+
+call pf_is_sorted(ra, ok)                 ! O(n), once
+do i = 1, size(targets)
+    call pf_equal_range(ra, targets(i), lo, hi, assume_sorted=ok)
+    ! rows lo .. hi-1 hold targets(i)
+end do
+```
+
+**Check once, outside the loop.** `assume_sorted` defaults to `.false.`, which is the safe default —
+searching unsorted input returns a plausible index with no symptom — but it makes each search O(n)
+in front of an O(log n) operation. Hoisting one `pf_is_sorted` out of the loop turns *m* searches
+from O(m·n) into O(n + m log n).
+
+**Re-take the pointer after any row-changing operation**, per the warning above, and re-check
+sortedness after anything that could disturb the order. A table does *not* remember that it is
+sorted, deliberately: a stale "still sorted" flag would return wrong rows silently.
+
+## Ranking rows by a column
+
+Likewise there is no `%rank` — adding a rank or percentile column is three lines through `%col`:
+
+```fortran
+real(real64), pointer :: flux(:)
+integer(int64), allocatable :: ranks(:)
+
+call t%col("flux", flux)
+call pf_rank(flux, ranks, descending=.true.)   ! 1 = brightest
+call t%add_column("flux_rank", ranks)
+```
+
+`method=` picks how ties are handled — `"competition"` (1,2,2,4, the default), `"dense"` (1,2,2,3)
+or `"ordinal"` (1,2,3,4) — and **a null gets rank 0**, since a missing value has no rank rather than
+the last one. Dense ranks over a sorted key column are also the cheapest way to label groups: every
+row of a group gets the same number.
 
 ## Which row of the file is this?
 

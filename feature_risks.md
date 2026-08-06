@@ -112,6 +112,7 @@ something a reader is expected to have.
 | [Risk-45](#risk-45--the-two-compilers-rules-for-the-prefetch-region-conflict-and-only-one-shape-satisfies-both) | The two compilers' rules for the prefetch region conflict, and only one shape satisfies both | 4 — covered |
 | [Risk-46](#risk-46--one-validation-stands-between-the-sort-engine-and-silently-duplicated-rows) | One validation stands between the sort engine and silently duplicated rows | 4 — covered |
 | [Risk-47](#risk-47--a-per-element-string-fill-is-quadratic-and-no-test-fails-when-it-comes-back) | A per-element string fill is quadratic, and no test fails when it comes back | 3 — not testable |
+| [Risk-48](#risk-48--a-row-permutation-handed-to-a-caller-goes-stale-with-nothing-to-notice) | A row permutation handed to a caller goes stale, with nothing to notice | 3 — not testable |
 
 ---
 
@@ -119,7 +120,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-48**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-49**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -281,6 +282,65 @@ reorders every column together.
 Note the deliberate asymmetry: permuting a **standalone** `parquet_column` — one built in code, or
 copied out — is entirely safe and is a supported operation. The hazard is the aliasing, not the
 type.
+
+### Risk-47 — A per-element string fill is quadratic, and no test fails when it comes back
+
+`parquet_column%set_all` on a string column, and `%append_values`, must fill the packed store in
+**one linear pass** (`refill_string_store` in `src/parquet_columns_string.f90`). The obvious
+implementation — a loop calling `parquet_string_column%set` once per element — is O(n²), because
+`set` shifts the payload tail and rewrites every later offset whenever an element's length changes,
+which filling an empty column does for every element.
+
+**Why the failure is quiet.** It is not a wrong answer. Every value is correct, every test passes,
+and the only symptom is that the operation stops completing: a 15.6-million-row `character(16)`
+column ran for over ten minutes without finishing, where the linear form takes seconds. Nothing in
+the suite runs at a size where n²/2 offset writes is distinguishable from 2n.
+
+**Not testable in the suite.** A timing assertion at a size that would separate the two is far past
+what `fpm test` should attempt, and a timing test small enough to run would be flaky. The guard is
+the comment on `refill_string_store` saying *why* the shape is what it is, plus
+`tools/benchmark_table.sh`'s `sort` run, which builds a large string column and would simply stop
+finishing.
+
+**What this forbids.** Do not rewrite either `set_all` string specific as a per-element loop over
+`%set`, however much simpler it reads. Do not "simplify" `refill_string_store` by dropping its
+`modify_nulls = .false.` branch — that branch preserves null elements, and rebuilding from the
+caller's array alone would overwrite them with no test noticing. And do not reach for `%set` in a
+new bulk path for the same reason: the primitive is correct, and calling it n times is what is not.
+
+### Risk-48 — A row permutation handed to a caller goes stale, with nothing to notice
+
+`%argsort_by` and `%argsort_partial` hand back plain integer arrays of row indices. Nothing links
+such an array back to the table it describes, so every row-structural change — `%sort_by`,
+`%filter_rows`, `%delete_rows`, `%truncate`, `%append`, `%append_null_rows` — silently invalidates
+every permutation taken before it. **This applies to any future binding that returns row indices**,
+not only to those two; the deferred mutating top-N in `feature_table.md` §2.7 would inherit it the
+day it is written.
+
+**Why the failure is quiet, and why it is worse than the pointer case.** `feature_risks.md`'s
+existing `%col`-pointer risks describe the same staleness with the opposite failure direction: a
+stale pointer points at freed memory and usually crashes, which is at least loud. A stale
+permutation is an ordinary array of ordinary integers. Against a table that has since **shrunk**,
+the indices stay in range and name the wrong rows — `%get_slice(name, parquet_slice_list(perm), v)`
+returns a full-length, plausible answer built from rows the caller never selected. Against one that
+has been **reordered**, the indices name rows that are no longer where the order put them. Neither
+aborts, and neither is visible in the values.
+
+**Not testable.** There is nowhere to put the check. The permutation carries no identity, no
+generation stamp and no back-pointer, so the library cannot tell a fresh one from a stale one — and
+adding any of those would mean returning a derived type where the whole point of the binding is that
+it returns indices a caller can hand to `parquet_slice_list`, to another table, or to their own code.
+A test can only assert that a deliberately stale permutation produces the wrong answer, which is
+asserting the bug rather than guarding against it.
+
+**What this forbids.** The mitigation is documentary and must stay in the doc-comments rather than
+migrating into a code comment: `%argsort_by` and `%argsort_partial` both state that the permutation
+describes the table **as it was**, and both name `%generation()` — already public, already bumped by
+every structural change — as the way to check before reusing a saved order. A new binding that
+returns row indices must carry the same paragraph. Do not add a `sort=`-style convenience that
+applies a caller-supplied permutation to a table: that is the arbitrary-permutation operation
+Risk-33's neighbourhood already rules out, and handing it a stale array is exactly how the silent
+row-correspondence loss described there happens.
 
 ## 4. Risks already covered, kept for what they still forbid
 
@@ -1797,28 +1857,3 @@ length check has its own scenario (`reindex_trusted_length_mismatch`), and
 `assume_valid really skips the scan for a column` (`test/test_sorting.f90`), which passes a
 **duplicate-bearing** index array — the only observation that separates "skips the scan" from "still
 validates", since a valid permutation behaves identically either way.
-
-### Risk-47 — A per-element string fill is quadratic, and no test fails when it comes back
-
-`parquet_column%set_all` on a string column, and `%append_values`, must fill the packed store in
-**one linear pass** (`refill_string_store` in `src/parquet_columns_string.f90`). The obvious
-implementation — a loop calling `parquet_string_column%set` once per element — is O(n²), because
-`set` shifts the payload tail and rewrites every later offset whenever an element's length changes,
-which filling an empty column does for every element.
-
-**Why the failure is quiet.** It is not a wrong answer. Every value is correct, every test passes,
-and the only symptom is that the operation stops completing: a 15.6-million-row `character(16)`
-column ran for over ten minutes without finishing, where the linear form takes seconds. Nothing in
-the suite runs at a size where n²/2 offset writes is distinguishable from 2n.
-
-**Not testable in the suite.** A timing assertion at a size that would separate the two is far past
-what `fpm test` should attempt, and a timing test small enough to run would be flaky. The guard is
-the comment on `refill_string_store` saying *why* the shape is what it is, plus
-`tools/benchmark_table.sh`'s `sort` run, which builds a large string column and would simply stop
-finishing.
-
-**What this forbids.** Do not rewrite either `set_all` string specific as a per-element loop over
-`%set`, however much simpler it reads. Do not "simplify" `refill_string_store` by dropping its
-`modify_nulls = .false.` branch — that branch preserves null elements, and rebuilding from the
-caller's array alone would overwrite them with no test noticing. And do not reach for `%set` in a
-new bulk path for the same reason: the primitive is correct, and calling it n times is what is not.

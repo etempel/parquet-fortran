@@ -732,6 +732,17 @@ def gen_table_type():
         ! --- mutation: the row set itself -- every one of these DETACHES the table ---
         procedure :: filter_rows => table_filter_rows !! Keep only the rows a mask selects.
         procedure :: sort_by => table_sort_by         !! Reorder rows by one or more key columns.
+        ! --- the ORDER, without applying it: read-only, and they do NOT detach ---
+        procedure, private :: table_argsort_by_i32    !! %argsort_by specific, int32 permutation.
+        procedure, private :: table_argsort_by_i64    !! %argsort_by specific, int64 permutation.
+        !> The row order the keys imply, without reordering anything. Unlike %sort_by the table
+        !! stays attached, so this is how to read rows in an order while keeping the file.
+        generic :: argsort_by => table_argsort_by_i32, table_argsort_by_i64
+        procedure, private :: table_argsort_partial_i32 !! %argsort_partial specific, int32 perm.
+        procedure, private :: table_argsort_partial_i64 !! %argsort_partial specific, int64 perm.
+        !> The `n` best rows in order, by selection rather than a full sort. Also non-mutating.
+        generic :: argsort_partial => table_argsort_partial_i32, table_argsort_partial_i64
+        procedure :: is_sorted_by => table_is_sorted_by !! Whether the rows are already in that order.
         procedure, private :: table_delete_rows_i32   !! %delete_rows specific, int32 indices.
         procedure, private :: table_delete_rows_i64   !! %delete_rows specific, int64 indices.
         !> Removes the listed rows. A thin convenience over %filter_rows, and like it, detaching.
@@ -2139,7 +2150,10 @@ def gen_spec_interfaces():
         !! first being the primary. `descending`/`nulls_first`, when given, carry one entry per
         !! key. Nulls and NaNs are placed absolutely and are never flipped by `descending`.
         !!
-        !! Every key column must already be resident: sorting will not read one implicitly.
+        !! A key column that is not resident yet is READ, by the same lazy first touch every value
+        !! accessor uses -- so sorting a freshly opened table needs no `%prefetch` first. Only the
+        !! key columns are read; the rest stay as they were.
+        !!
         !! Row-structural, so it DETACHES -- unless the rows were already in that order, in which
         !! case nothing moves and nothing is detached.
         module subroutine table_sort_by(self, keys, descending, nulls_first)
@@ -2147,7 +2161,67 @@ def gen_spec_interfaces():
             character(len=*), intent(in) :: keys(:)           !! key columns, primary first.
             logical, intent(in), optional :: descending(:)    !! per key: .true. for descending.
             logical, intent(in), optional :: nulls_first(:)   !! per key: .true. to put nulls first.
-        end subroutine table_sort_by
+        end subroutine table_sort_by""")
+
+    for ik, idecl, aname in (("i32", "integer(int32)", "int32"), ("i64", "integer(int64)", "int64")):
+        w(f"""        !> The 1-based row order `keys` implies, WITHOUT applying it, as {aname} indices.
+        !!
+        !! Same keys, same engine and same refusals as `%sort_by`; the difference is that nothing
+        !! moves. That matters because `%sort_by` DETACHES: this is the only way to read a table's
+        !! rows in some order and still have the file behind it. `%get_slice(name,
+        !! parquet_slice_list(perm), values)` is how the permutation is consumed.
+        !!
+        !! **The permutation describes the table AS IT WAS.** Nothing links the two afterwards, so
+        !! any row-structural change (`%sort_by`, `%filter_rows`, `%delete_rows`, `%truncate`,
+        !! `%append`) silently invalidates it -- against a table that has since shrunk the indices
+        !! stay in range and name the wrong rows. `%generation()` is bumped by every such change:
+        !! record it beside a permutation you intend to keep, and compare before reusing.
+        module subroutine table_argsort_by_{ik}(self, keys, perm, descending, nulls_first, &
+                group_offsets, group_nkeys)
+            class(parquet_table), intent(in) :: self          !! the table.
+            character(len=*), intent(in) :: keys(:)           !! key columns, primary first.
+            {idecl}, allocatable, intent(out) :: perm(:) !! the 1-based row order.
+            logical, intent(in), optional :: descending(:)    !! per key: .true. for descending.
+            logical, intent(in), optional :: nulls_first(:)   !! per key: .true. to put nulls first.
+            !> where each run of rows equal under the grouping keys begins, as offsets INTO `perm`:
+            !! length `ngroups + 1`, last entry the sentinel `nrows + 1`, so group g is
+            !! `perm(o(g) : o(g+1) - 1)` for every g. Always allocated when asked for -- an empty
+            !! table gives `[1]`. All nulls form one group and all NaNs form one group.
+            {idecl}, allocatable, intent(out), optional :: group_offsets(:)
+            !> how many LEADING keys must be equal for two rows to share a group; absent means all
+            !! of them. Counts key NAMES, so `group_nkeys=1` over `["field", "mag"]` gives one group
+            !! per field with the rows inside each ordered by mag. Requires `group_offsets`.
+            integer, intent(in), optional :: group_nkeys
+        end subroutine table_argsort_by_{ik}
+        !> The first `n` rows of the order `keys` implies, as {aname} indices, length `n`.
+        !!
+        !! Selection rather than a full sort, which is the point: asking a 100M-row table for its
+        !! best 100 costs O(nrows) instead of O(nrows log nrows), and reorders nothing. `n` is
+        !! CLAMPED to the row count rather than checked, so a derived `n` needs no `min()` of its
+        !! own. "The last n" is `descending=`, not a separate binding.
+        !!
+        !! Hands out row indices, so it carries `%argsort_by`'s staleness rule verbatim.
+        module subroutine table_argsort_partial_{ik}(self, keys, perm, n, descending, nulls_first)
+            class(parquet_table), intent(in) :: self          !! the table.
+            character(len=*), intent(in) :: keys(:)           !! key columns, primary first.
+            {idecl}, allocatable, intent(out) :: perm(:) !! the first `n` 1-based row indices.
+            integer, intent(in) :: n                          !! rows to order; clamped to %nrows().
+            logical, intent(in), optional :: descending(:)    !! per key: .true. for descending.
+            logical, intent(in), optional :: nulls_first(:)   !! per key: .true. to put nulls first.
+        end subroutine table_argsort_partial_{ik}""")
+
+    w("""        !> Whether the rows are ALREADY in the order `keys` describes.
+        !!
+        !! O(nrows) with an early exit and no permutation built, where asking `%sort_by` the same
+        !! question costs a full sort. Same keys, same refusals, same null and NaN placement, so a
+        !! `.true.` here means `%sort_by` with those arguments would move nothing.
+        module function table_is_sorted_by(self, keys, descending, nulls_first) result(answer)
+            class(parquet_table), intent(in) :: self          !! the table.
+            character(len=*), intent(in) :: keys(:)           !! key columns, primary first.
+            logical, intent(in), optional :: descending(:)    !! per key: .true. for descending.
+            logical, intent(in), optional :: nulls_first(:)   !! per key: .true. to put nulls first.
+            logical :: answer                                 !! .true. when already in that order.
+        end function table_is_sorted_by
         !> Removes the listed rows (int32 indices). Repeats are harmless -- a row named twice is
         !! removed once. Row-structural, so it DETACHES; an empty index list removes nothing and
         !! does not.

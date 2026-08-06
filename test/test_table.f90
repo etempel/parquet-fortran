@@ -187,6 +187,12 @@ contains
             new_unittest("sort_by handles int64 and timestamp keys", test_sort_by_key_kinds), &
             new_unittest("sort_by handles logical, date, time and float32 keys", &
                 test_sort_by_more_key_kinds), &
+            new_unittest("sorting reads an unread key column by itself", test_sort_reads_key), &
+            new_unittest("argsort_by orders without moving or detaching", test_argsort_by), &
+            new_unittest("argsort_by reports group boundaries", test_argsort_by_groups), &
+            new_unittest("argsort_by recovers file order via the row index", test_argsort_by_row_index), &
+            new_unittest("is_sorted_by answers both ways", test_is_sorted_by), &
+            new_unittest("argsort_partial returns the n best rows", test_argsort_partial), &
             new_unittest("append concatenates a batch and null-fills the columns it omits", &
                 test_append_table), &
             new_unittest("append_null_rows supports the extend-fill-append workflow", &
@@ -4588,6 +4594,226 @@ contains
         call parquet_write_column(w, "s", s)
         call parquet_close_writer(w)
     end subroutine write_sort_fixture
+    !
+    !> Sorting reads a key column that was never materialized, rather than refusing.
+    !>
+    !> This is the ONLY coverage of that behaviour: it used to abort, and the abort had an error
+    !> scenario asserting its message. That scenario is gone, so without this test the change
+    !> would ship untested in either direction.
+    subroutine test_sort_reads_key(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, t2
+        integer(int32), allocatable :: id(:)
+        integer(int64), allocatable :: perm(:)
+        character(len=*), parameter :: f = "test_run/table_sort_lazy1.parquet"
+        character(len=*), parameter :: f2 = "test_run/table_sort_lazy2.parquet"
+        !
+        call write_sort_fixture(f)
+        call parquet_open_table(t, f)
+        ! Nothing has been read at this point -- no %prefetch, no %materialize_all.
+        call check(error, t%residency("v") /= RES_FULL, "the key column must start unread")
+        if (allocated(error)) return
+        call t%sort_by(["v"])
+        call t%get("id", id)
+        call check(error, all(id == [2_int32, 4_int32, 1_int32, 6_int32, 3_int32, 5_int32]), &
+            "sort_by must read the key column itself and order by it")
+        if (allocated(error)) return
+        !
+        ! Only the KEY is read implicitly. Every other column is fetched by the sort's own reindex
+        ! (which needs every resident column), so what matters is that the result is right rather
+        ! than that some column stayed lazy -- assert the values, which is what a user sees.
+        call write_sort_fixture(f2)
+        call parquet_open_table(t2, f2)
+        call t2%argsort_by(["v"], perm)
+        call check(error, all(perm == [2_int64, 4_int64, 1_int64, 6_int64, 3_int64, 5_int64]), &
+            "argsort_by must read its key column implicitly too")
+    end subroutine test_sort_reads_key
+    !
+    !> The order without the reordering: same permutation `%sort_by` would apply, but the table is
+    !> untouched and, critically, still attached to its file.
+    subroutine test_argsort_by(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, ref
+        integer(int64), allocatable :: perm(:)
+        integer(int32), allocatable :: id(:), ref_id(:), got(:)
+        real(real64), allocatable :: v(:), ref_v(:)
+        character(len=:), allocatable :: s(:), ref_s(:)
+        integer(int32), allocatable :: perm32(:)
+        character(len=*), parameter :: f = "test_run/table_argsort1.parquet"
+        character(len=*), parameter :: f2 = "test_run/table_argsort2.parquet"
+        !
+        call write_sort_fixture(f)
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        call t%argsort_by(["v"], perm)
+        !
+        ! The oracle is %sort_by on an independent table over the same data: reading through the
+        ! permutation must give what actually sorting would have given, column for column.
+        call write_sort_fixture(f2)
+        call parquet_open_table(ref, f2)
+        call ref%materialize_all()
+        call ref%sort_by(["v"])
+        call ref%get("id", ref_id)
+        call ref%get("v", ref_v)
+        call ref%get("s", ref_s)
+        call t%get_slice("id", parquet_slice_list(perm), id)
+        call t%get_slice("v", parquet_slice_list(perm), v)
+        call t%get_slice("s", parquet_slice_list(perm), s)
+        call check(error, all(id == ref_id), "argsort_by must agree with sort_by on an int column")
+        if (allocated(error)) return
+        call check(error, all(v == ref_v), "argsort_by must agree with sort_by on a float column")
+        if (allocated(error)) return
+        call check(error, all(s == ref_s), "argsort_by must agree with sort_by on a string column")
+        if (allocated(error)) return
+        !
+        ! The property the whole binding exists for.
+        call check(error, .not. t%is_detached(), "argsort_by must NOT detach the table")
+        if (allocated(error)) return
+        call t%reload("v")
+        call t%get("v", v)
+        call check(error, all(v == [30.0_real64, 10.0_real64, 50.0_real64, 20.0_real64, &
+            60.0_real64, 40.0_real64]), "the table must still read from its file, unreordered")
+        if (allocated(error)) return
+        !
+        ! Multi-key and descending, and the int32 form.
+        call t%argsort_by(["g", "v"], perm, descending=[.false., .true.])
+        call t%get_slice("id", parquet_slice_list(perm), got)
+        call check(error, all(got == [6_int32, 4_int32, 2_int32, 5_int32, 3_int32, 1_int32]), &
+            "argsort_by must honour per-key descending flags")
+        if (allocated(error)) return
+        call t%argsort_by(["v"], perm32)
+        call check(error, all(int(perm32, int64) == [2_int64, 4_int64, 1_int64, 6_int64, &
+            3_int64, 5_int64]), "the int32 form must agree with the int64 one")
+    end subroutine test_argsort_by
+    !
+    !> Group boundaries over a table, including the prefix form that motivated `group_nkeys`.
+    subroutine test_argsort_by_groups(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer(int64), allocatable :: perm(:), go(:)
+        real(real64), allocatable :: v(:)
+        character(len=*), parameter :: f = "test_run/table_argsort_grp.parquet"
+        integer(int64) :: gi
+        logical :: uniform
+        integer(int32), allocatable :: gvals(:)
+        !
+        call write_sort_fixture(f)
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        !
+        ! g is [2,1,2,1,2,1] -- two values, so two groups.
+        call t%argsort_by(["g"], perm, group_offsets=go)
+        call check(error, size(go) - 1 == 2, "two distinct key values must give two groups")
+        if (allocated(error)) return
+        call check(error, all(go == [1_int64, 4_int64, 7_int64]), &
+            "each g value owns three consecutive rows, and the sentinel is nrows + 1")
+        if (allocated(error)) return
+        uniform = .true.
+        do gi = 1_int64, size(go, kind=int64) - 1_int64
+            call t%get_slice("g", parquet_slice_list(perm(go(gi):go(gi + 1_int64) - 1_int64)), gvals)
+            if (any(gvals /= gvals(1))) uniform = .false.
+        end do
+        call check(error, uniform, "every row inside a group must share the key value")
+        if (allocated(error)) return
+        !
+        ! group_nkeys=1 over ["g", "v"]: group by g, ordered by v inside each group.
+        call t%argsort_by(["g", "v"], perm, group_offsets=go, group_nkeys=1)
+        call check(error, size(go) - 1 == 2, "grouping on the first key alone must give two groups")
+        if (allocated(error)) return
+        call t%get_slice("v", parquet_slice_list(perm(1:3)), v)
+        call check(error, all(v == [10.0_real64, 20.0_real64, 40.0_real64]), &
+            "the second key must still order the rows inside a group")
+        if (allocated(error)) return
+        ! The default groups on BOTH keys, which here makes every row its own group.
+        call t%argsort_by(["g", "v"], perm, group_offsets=go)
+        call check(error, size(go) - 1 == 6, "the default must group on every key")
+    end subroutine test_argsort_by_groups
+    !
+    !> The reserved row-index column is materialized on demand by the key lookup, which is what
+    !> makes it the documented way back to file order after a sort.
+    subroutine test_argsort_by_row_index(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer(int64), allocatable :: perm(:)
+        integer(int64) :: k
+        logical :: identity
+        character(len=*), parameter :: f = "test_run/table_argsort_rowidx.parquet"
+        !
+        call write_sort_fixture(f)
+        call parquet_open_table(t, f)
+        ! No accessor has touched PARQUET_ROW_INDEX, so this is exactly the case that used to
+        ! abort with "no column of this name".
+        call t%argsort_by([PARQUET_ROW_INDEX], perm)
+        identity = .true.
+        do k = 1_int64, size(perm, kind=int64)
+            if (perm(k) /= k) identity = .false.
+        end do
+        call check(error, identity, "argsort_by on the row index must give the identity order")
+    end subroutine test_argsort_by_row_index
+    !
+    !> Both answers, on the same fixture. A check that always says .true. passes every positive
+    !> assertion ever written for it, so the negative control is the load-bearing half.
+    subroutine test_is_sorted_by(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        character(len=*), parameter :: f = "test_run/table_is_sorted.parquet"
+        !
+        call write_sort_fixture(f)
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        call check(error, .not. t%is_sorted_by(["v"]), &
+            "an unordered column must report NOT sorted")
+        if (allocated(error)) return
+        call check(error, t%is_sorted_by(["id"]), "1..6 must report sorted")
+        if (allocated(error)) return
+        call check(error, .not. t%is_sorted_by(["id"], descending=[.true.]), &
+            "an ascending column must not report sorted under descending=")
+        if (allocated(error)) return
+        !
+        call t%sort_by(["v"])
+        call check(error, t%is_sorted_by(["v"]), "after sort_by the table must report sorted")
+    end subroutine test_is_sorted_by
+    !
+    !> Top-N by selection. Its oracle is `%argsort_by`'s first `n`, which a partial sort must
+    !> reproduce exactly -- it orders that prefix and leaves the rest alone.
+    subroutine test_argsort_partial(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer(int64), allocatable :: full(:), part(:)
+        integer(int32), allocatable :: part32(:)
+        real(real64), allocatable :: v(:)
+        character(len=*), parameter :: f = "test_run/table_argsort_partial.parquet"
+        !
+        call write_sort_fixture(f)
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        call t%argsort_by(["v"], full)
+        call t%argsort_partial(["v"], part, 3)
+        call check(error, size(part) == 3, "n = 3 must return three row indices")
+        if (allocated(error)) return
+        call check(error, all(part == full(1:3)), &
+            "the first n of a partial sort must equal the first n of a full one")
+        if (allocated(error)) return
+        !
+        ! "The largest three" is descending=, not a separate binding.
+        call t%argsort_partial(["v"], part, 3, descending=[.true.])
+        call t%get_slice("v", parquet_slice_list(part), v)
+        call check(error, all(v == [60.0_real64, 50.0_real64, 40.0_real64]), &
+            "descending must give the three largest values, in order")
+        if (allocated(error)) return
+        !
+        call t%argsort_partial(["v"], part, 999)
+        call check(error, size(part) == 6, "n past the row count must clamp rather than abort")
+        if (allocated(error)) return
+        call check(error, all(part == full), "a fully clamped partial sort must equal a full one")
+        if (allocated(error)) return
+        !
+        call t%argsort_partial(["v"], part32, 2)
+        call check(error, all(int(part32, int64) == full(1:2)), &
+            "the int32 form must agree with the int64 one")
+        if (allocated(error)) return
+        call check(error, .not. t%is_detached(), "argsort_partial must not detach the table")
+    end subroutine test_argsort_partial
     !
     !> Filtering keeps the selected rows in every column at once, and detaches.
     subroutine test_filter_rows(error)
